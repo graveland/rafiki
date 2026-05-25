@@ -200,6 +200,16 @@ func (c *Child) Status() protocol.Status {
 	return c.sm.Current()
 }
 
+// BeginShutdown transitions the state machine to shutting_down. It is called
+// by the controller before invoking Shutdown() so that status-change events
+// can be emitted before the graceful-shutdown sequence begins. Returns whether
+// the transition occurred and the previous status. Safe to call concurrently.
+func (c *Child) BeginShutdown() (changed bool, prev protocol.Status) {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	return c.sm.OnShutdownStart()
+}
+
 // Metadata returns the most recently sniffed session/model metadata.
 // Safe to call concurrently.
 func (c *Child) Metadata() SnifferMetadata {

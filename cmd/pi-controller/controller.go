@@ -246,6 +246,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		Env:      env,
 	}
 
+	now := time.Now()
+
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
@@ -254,48 +256,18 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		}
 	}
 
-	// Wait for pi to respond to the bootstrap get_state, with a 5-second timeout.
-	stalled := false
-	select {
-	case <-ch.Idle():
-	case <-time.After(5 * time.Second):
-		stalled = true
-		slog.Warn("child stalled (no get_state response)", "childId", childID)
-	}
-
-	meta := ch.Metadata()
-
-	// If a name was requested and pi has a different one, send set_session_name.
-	if !stalled && req.Name != "" && meta.SessionName != req.Name {
-		b, _ := json.Marshal(map[string]string{
-			"type": "set_session_name",
-			"name": req.Name,
-		})
-		_ = ch.Send(b)
-	}
-
-	now := time.Now()
-	provider, model := splitModel(meta.Model)
-	if provider == "" {
-		provider = req.Provider
-	}
-	if model == "" {
-		model = req.Model
-	}
-
-	initialStatus := ch.Status()
-
+	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
+	// process is confirmed running. A crash between exec and Idle() would
+	// otherwise leave an orphan pi process with no persisted record.
 	sess := &store.Session{
 		ChildID:      childID,
 		PID:          ch.PID(),
+		Status:       protocol.StatusSpawning,
 		Name:         req.Name,
 		Cwd:          req.Cwd,
-		Provider:     provider,
-		Model:        model,
+		Provider:     req.Provider,
+		Model:        req.Model,
 		Thinking:     req.Thinking,
-		SessionID:    meta.SessionID,
-		SessionFile:  meta.SessionFile,
-		Status:       initialStatus,
 		StartedAt:    now,
 		LastActivity: now,
 
@@ -322,27 +294,93 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		ExtraArgs:          req.ExtraArgs,
 	}
 	c.st.Insert(sess)
-	c.cm.Add(childID, ch)
 
 	if err := c.writeRecord(childID); err != nil {
-		slog.Warn("write state record", "childId", childID, "error", err)
+		slog.Warn("write state record (spawning)", "childId", childID, "error", err)
 	}
 
-	// Emit ctrl_child_spawned to global subscribers.
+	// Emit ctrl_child_spawned immediately after the process is running and the
+	// state record is persisted (spec §6.3.3).
 	spawnedEvt := protocol.CtrlChildSpawned{
 		Type:    protocol.TypeCtrlChildSpawned,
 		ChildID: childID,
 		Name:    req.Name,
 		Cwd:     req.Cwd,
 		PID:     ch.PID(),
-		Model:   joinModel(provider, model),
+		Model:   joinModel(req.Provider, req.Model),
 		At:      now.UnixMilli(),
 	}
 	if b, err := json.Marshal(spawnedEvt); err == nil {
 		c.cm.DeliverToGlobal(b)
 	}
 
+	// Wait for pi to respond to the bootstrap get_state, with a 5-second timeout.
+	stalled := false
+	select {
+	case <-ch.Idle():
+	case <-time.After(5 * time.Second):
+		stalled = true
+		slog.Warn("child stalled (no get_state response)", "childId", childID)
+	}
+
+	meta := ch.Metadata()
+
+	// FIX 4: If a name was requested and pi has a different one, send
+	// set_session_name and poll until the metadata sniffer confirms the rename
+	// (up to 5s). This ensures Spawn returns only after the rename is applied.
+	if !stalled && req.Name != "" && meta.SessionName != req.Name {
+		renameID := "controller-rename-1"
+		frame := []byte(fmt.Sprintf(`{"type":"set_session_name","id":%q,"name":%q}`, renameID, req.Name))
+		if err := ch.Send(frame); err == nil {
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if ch.Metadata().SessionName == req.Name {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if ch.Metadata().SessionName != req.Name {
+				slog.Warn("set_session_name timed out", "childId", childID, "want", req.Name)
+			}
+		}
+		meta = ch.Metadata()
+	}
+
+	// Determine final provider/model, preferring metadata over request values.
+	provider, model := splitModel(meta.Model)
+	if provider == "" {
+		provider = req.Provider
+	}
+	if model == "" {
+		model = req.Model
+	}
+
+	// FIX 5: Update the store record with session metadata learned after Idle.
+	// Status is updated via handleStatusChange below (which also fixes the index).
+	_ = c.st.Update(childID, func(s *store.Session) {
+		s.SessionID = meta.SessionID
+		s.SessionFile = meta.SessionFile
+		s.Provider = provider
+		s.Model = model
+	})
+	c.cm.Add(childID, ch)
+
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write state record (after idle)", "childId", childID, "error", err)
+	}
+
+	// FIX 3: Emit the spawning→idle ctrl_child_status transition. The SM
+	// transitioned inside child.handleFrame; publishing the event here lets
+	// global subscribers observe it. handleStatusChange also updates the
+	// byStatus index, which Insert left at StatusSpawning.
+	if !stalled {
+		c.handleStatusChange(childID, protocol.StatusIdle, protocol.StatusSpawning)
+	}
+
 	// Start the monitoring goroutine that forwards events and tracks status/exit.
+	// monitorChild initialises lastStatus from ch.Status() which is already
+	// StatusIdle after the explicit transition above, so the transition is not
+	// double-emitted.
 	go c.monitorChild(childID, ch)
 
 	return server.SpawnResult{
@@ -526,10 +564,14 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		}
 	}
 
-	c.st.SetStatus(childID, protocol.StatusShuttingDown)
+	// Drive the SM to shutting_down so ctrl_child_status subscribers see the
+	// transition before the graceful-shutdown sequence begins (spec §6.5).
+	if changed, prev := ch.BeginShutdown(); changed {
+		c.handleStatusChange(childID, protocol.StatusShuttingDown, prev)
+	}
 
-	shutdownTimeout := durOrDefault(shutdownTimeoutMs, 30*time.Second)
-	killTimeout := durOrDefault(killTimeoutMs, 5*time.Second)
+	shutdownTimeout := durOrDefault(shutdownTimeoutMs, 180*time.Second)
+	killTimeout := durOrDefault(killTimeoutMs, 30*time.Second)
 
 	res, err := ch.Shutdown(shutdownTimeout, killTimeout)
 	if err != nil {
