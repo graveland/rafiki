@@ -28,6 +28,9 @@ func TestChild_SpawnAndCleanShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
+	})
 
 	// Wait for the supervise loop to enter the read/write loop.
 	select {
@@ -61,6 +64,10 @@ func TestChild_StuckProcess_Escalates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
+	})
+
 	select {
 	case <-c.Ready():
 	case <-time.After(2 * time.Second):
@@ -102,6 +109,10 @@ func TestChild_ProcessExits_ReadyStillFires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
+	})
+
 	select {
 	case <-c.Done():
 	case <-time.After(2 * time.Second):

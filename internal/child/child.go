@@ -61,8 +61,7 @@ type Child struct {
 	bus  *bus.Bus[[]byte]
 	ring *ring.Ring
 
-	inBuf  [][]byte     // commands sent; populated for future Task 12 log dumps
-	errBuf bytes.Buffer // bounded stderr capture
+	errBuf bytes.Buffer // written by readStderr only; any future reader must hold c.mu
 
 	mu     sync.Mutex
 	closed bool // set by readStdout after cmd.Process.Wait() returns
@@ -85,7 +84,10 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	argv := append([]string{}, spec.Argv...)
 	argv = append(argv, spec.ExtraArgs...)
 
-	cmd := exec.CommandContext(ctx, spec.PiBinary, argv...)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("spawn: %w", err)
+	}
+	cmd := exec.Command(spec.PiBinary, argv...)
 	cmd.Dir = spec.Cwd
 	// Put the child in its own process group so that any subprocesses it spawns
 	// can be killed as a group during shutdown (prevents orphan children from
@@ -180,11 +182,7 @@ func (c *Child) supervise() {
 
 	for {
 		select {
-		case frame, ok := <-c.cmdCh:
-			if !ok {
-				goto cleanup
-			}
-			c.inBuf = append(c.inBuf, append([]byte(nil), frame...))
+		case frame := <-c.cmdCh:
 			if _, err := c.stdin.Write(frame); err != nil {
 				slog.Warn("stdin write failed", "child", c.ID, "error", err)
 				goto cleanup
@@ -278,38 +276,43 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 	c.mu.Lock()
 	alreadyClosed := c.closed
 	c.mu.Unlock()
+
 	if alreadyClosed {
-		// Process already exited; return what we have.
-		c.exit.Duration = time.Since(start)
-		return c.exit, nil
+		// Process already exited; copy the stored result.
+		c.mu.Lock()
+		res := c.exit
+		c.mu.Unlock()
+		res.Duration = time.Since(start)
+		return res, nil
 	}
 
 	_ = c.stdin.Close()
 
+	// escalated is local state; only readStdout writes to c.exit (under c.mu).
+	// We read c.exit once below under the lock, then set Escalated/Duration on
+	// the local copy — no concurrent writes to shared state.
+	escalated := false
 	select {
 	case <-c.done:
-		c.exit.Duration = time.Since(start)
-		return c.exit, nil
 	case <-time.After(shutdownTimeout):
+		// stdin close didn't cause a timely exit; escalate to SIGTERM.
+		// Kill the entire process group so that any subprocesses the child
+		// spawned also receive the signal.
+		escalated = true
+		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+		select {
+		case <-c.done:
+		case <-time.After(killTimeout):
+			// SIGTERM didn't work; force-kill the process group.
+			_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+			<-c.done
+		}
 	}
 
-	// stdin close didn't cause a timely exit; escalate to SIGTERM.
-	// Kill the entire process group so that any subprocesses the child spawned
-	// also receive the signal (otherwise their open pipe FDs block our readers).
-	pid := c.cmd.Process.Pid
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	select {
-	case <-c.done:
-		c.exit.Escalated = true
-		c.exit.Duration = time.Since(start)
-		return c.exit, nil
-	case <-time.After(killTimeout):
-	}
-
-	// SIGTERM didn't work; force-kill the process group.
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	<-c.done
-	c.exit.Escalated = true
-	c.exit.Duration = time.Since(start)
-	return c.exit, nil
+	c.mu.Lock()
+	res := c.exit
+	c.mu.Unlock()
+	res.Escalated = escalated
+	res.Duration = time.Since(start)
+	return res, nil
 }
