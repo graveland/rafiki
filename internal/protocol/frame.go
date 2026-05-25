@@ -14,8 +14,11 @@ import (
 	"io"
 )
 
-// ErrFrameTooLarge is returned when an incoming frame exceeds the configured
-// maximum byte count before a '\n' is seen.
+// ErrFrameTooLarge is returned by ReadFrame when a frame exceeds the
+// reader's configured maxBytes. After this error, the FrameReader's
+// state is undefined — the underlying reader's cursor is left mid-frame
+// and any subsequent ReadFrame would return corrupted data. Callers
+// must discard the FrameReader.
 var ErrFrameTooLarge = errors.New("frame too large")
 
 // FrameReader reads LF-terminated frames from an underlying reader, enforcing
@@ -27,11 +30,16 @@ type FrameReader struct {
 	buf      bytes.Buffer
 }
 
+// internalBufferSize is the initial size of the bufio.Reader backing each
+// FrameReader. bufio.ReadSlice grows the buffer automatically, so this is just
+// the starting allocation.
+const internalBufferSize = 64 * 1024
+
 // NewFrameReader creates a FrameReader that reads from r and rejects any
 // single frame larger than maxBytes.
 func NewFrameReader(r io.Reader, maxBytes int) *FrameReader {
 	return &FrameReader{
-		r:        bufio.NewReaderSize(r, 64*1024),
+		r:        bufio.NewReaderSize(r, internalBufferSize),
 		maxBytes: maxBytes,
 	}
 }
@@ -40,6 +48,8 @@ func NewFrameReader(r io.Reader, maxBytes int) *FrameReader {
 // '\r') removed. It returns (nil, io.EOF) only when the underlying reader is
 // exhausted and no partial data remained. A partial frame at EOF (no trailing
 // newline) is returned as a final frame on one call, then io.EOF on the next.
+// On ErrFrameTooLarge the reader's state is undefined; the FrameReader must
+// be discarded.
 func (f *FrameReader) ReadFrame() ([]byte, error) {
 	f.buf.Reset()
 	for {
