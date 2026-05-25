@@ -124,7 +124,7 @@ func TestBus_CloseClosesAllSubscriberChannels(t *testing.T) {
 }
 
 // TestBus_ConcurrentPublishAndCancel stresses the race between Publish and
-// cancel. Without the done-channel fix this panics with send on closed channel
+// cancel. Without the per-subscriber mutex this panics with send on closed channel
 // within a handful of iterations.
 func TestBus_ConcurrentPublishAndCancel(t *testing.T) {
 	for i := 0; i < 200; i++ {
@@ -150,7 +150,7 @@ func TestBus_ConcurrentPublishAndCancel(t *testing.T) {
 }
 
 // TestBus_ConcurrentPublishAndClose stresses the race between Publish and
-// Close. Without the done-channel fix this panics with send on closed channel
+// Close. Without the per-subscriber mutex this panics with send on closed channel
 // within a handful of iterations.
 func TestBus_ConcurrentPublishAndClose(t *testing.T) {
 	for i := 0; i < 200; i++ {
