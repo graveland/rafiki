@@ -283,11 +283,22 @@ func (c *Child) handleFrame(line []byte) {
 		ID      string          `json:"id,omitempty"`
 		Data    json.RawMessage `json:"data,omitempty"`
 	}
-	_ = json.Unmarshal(line, &hdr)
+	if err := json.Unmarshal(line, &hdr); err != nil {
+		slog.Debug("child: unparseable stdout frame", "child", c.ID, "len", len(line))
+		return
+	}
 
 	kickIdle := false
 
 	c.metaMu.Lock()
+
+	// SM transition: depends only on the response envelope, not on metadata
+	// content. A response.get_state with missing/empty data still releases
+	// spawning — pi just didn't tell us anything to cache.
+	if hdr.Type == "response" && hdr.Command == "get_state" {
+		c.sm.OnFirstResponse()
+		kickIdle = true
+	}
 
 	if md, ok := ExtractMetadata(line); ok {
 		if md.SessionID != "" {
@@ -301,10 +312,6 @@ func (c *Child) handleFrame(line []byte) {
 		}
 		if md.Model != "" {
 			c.meta.Model = md.Model
-		}
-		if hdr.Type == "response" && hdr.Command == "get_state" {
-			c.sm.OnFirstResponse()
-			kickIdle = true
 		}
 	}
 

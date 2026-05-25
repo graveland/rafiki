@@ -39,3 +39,18 @@ func TestSniff_MalformedJson(t *testing.T) {
 		t.Fatal("expected no extraction from invalid JSON")
 	}
 }
+
+func TestSniff_SetModelResponse(t *testing.T) {
+	frame := []byte(`{"type":"response","command":"set_model","success":true,"data":{"model":{"id":"opus","provider":"anthropic"}}}`)
+	md, ok := child.ExtractMetadata(frame)
+	if !ok || md.Model != "anthropic/opus" {
+		t.Fatalf("got %+v ok=%v", md, ok)
+	}
+}
+
+func TestSniff_RejectsSuccessFalse(t *testing.T) {
+	frame := []byte(`{"type":"response","command":"get_state","success":false,"error":{"code":"x"}}`)
+	if _, ok := child.ExtractMetadata(frame); ok {
+		t.Fatal("expected no extraction for success:false response")
+	}
+}

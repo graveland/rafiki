@@ -131,8 +131,12 @@ func TestChild_KickstartAndMetadata(t *testing.T) {
 	if md.SessionName != "initial" {
 		t.Fatalf("sessionName: got %q, want %q", md.SessionName, "initial")
 	}
-
-	_, _ = c.Shutdown(5*time.Second, time.Second)
+	if md.SessionFile == "" {
+		t.Errorf("SessionFile not extracted")
+	}
+	if md.Model == "" {
+		t.Errorf("Model not extracted")
+	}
 }
 
 func TestChild_ProcessExits_ReadyStillFires(t *testing.T) {

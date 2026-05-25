@@ -1,6 +1,7 @@
-// Package child implements per-child state managed by the supervise goroutine.
-// Nothing in this package is thread-safe on its own; the supervise goroutine is
-// the sole caller and serializes all access externally.
+// Package child implements per-child state for pi child processes. The state
+// machine and metadata fields are not internally synchronized; callers must
+// hold the owning Child's c.metaMu before invoking any StateMachine method or
+// reading the metadata fields (handleFrame and Status/Metadata both do this).
 package child
 
 import "graveland.dev/pi-controller/internal/protocol"
@@ -38,8 +39,9 @@ const pendingUICapacity = 64
 // StateMachine tracks the status of one pi child process and enforces the
 // transition rules defined in §10 of the pi-controller protocol spec.
 //
-// All methods must be called from the same goroutine (the supervise loop).
-// Do not add internal locks.
+// Callers must serialize all method calls by holding the owning Child's
+// c.metaMu before invoking any SM method (this is what handleFrame and
+// Status() do). The SM does not provide internal synchronization.
 type StateMachine struct {
 	current     protocol.Status
 	stack       []protocol.Status   // modal stack for compacting / blocked_ui
