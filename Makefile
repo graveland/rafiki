@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet lint fmt clean
+.PHONY: build test test-race vet fmt clean
 
 GO      ?= go
 BIN_DIR := bin
