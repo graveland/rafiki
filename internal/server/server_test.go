@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +43,26 @@ func TestServer_AcceptsAndEchoes(t *testing.T) {
 	}
 	if got != `echo:{"type":"ping"}`+"\n" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestServer_LiveSocketRejected(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test.sock")
+
+	srv1, err := server.Listen(sockPath, func([]byte) []byte { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv1.Close()
+
+	// Second listen on same path should fail (live socket).
+	_, err = server.Listen(sockPath, func([]byte) []byte { return nil })
+	if err == nil {
+		t.Fatal("expected error for live socket, got nil")
+	}
+	if !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("expected 'in use' error, got %v", err)
 	}
 }
 

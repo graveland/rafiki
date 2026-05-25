@@ -84,6 +84,12 @@ func (s *Server) acceptLoop() {
 			slog.Warn("server: accept", "error", err)
 			continue
 		}
+		// Guard against a Close() that ran between Accept returning and wg.Add:
+		// if the context is already cancelled, drop this connection and exit.
+		if s.ctx.Err() != nil {
+			conn.Close()
+			return
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -111,7 +117,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		frame, err := r.ReadFrame()
 		if err != nil {
 			if err != io.EOF && s.ctx.Err() == nil {
-				slog.Warn("server: read frame", "error", err)
+				slog.Warn("server: read frame", "remote", conn.RemoteAddr(), "error", err)
 			}
 			return
 		}
@@ -119,7 +125,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		if len(resp) > 0 {
 			if err := protocol.WriteFrame(conn, resp); err != nil {
 				if s.ctx.Err() == nil {
-					slog.Warn("server: write frame", "error", err)
+					slog.Warn("server: write frame", "remote", conn.RemoteAddr(), "error", err)
 				}
 				return
 			}
