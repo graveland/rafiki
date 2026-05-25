@@ -232,77 +232,86 @@ func TestTypeConstants(t *testing.T) {
 	cases := []struct {
 		name string
 		val  string
+		want string
 	}{
-		{"TypeCtrlList", protocol.TypeCtrlList},
-		{"TypeCtrlGet", protocol.TypeCtrlGet},
-		{"TypeCtrlSpawn", protocol.TypeCtrlSpawn},
-		{"TypeCtrlResume", protocol.TypeCtrlResume},
-		{"TypeCtrlKill", protocol.TypeCtrlKill},
-		{"TypeCtrlAuth", protocol.TypeCtrlAuth},
-		{"TypeCtrlSubscribe", protocol.TypeCtrlSubscribe},
-		{"TypeCtrlUnsubscribe", protocol.TypeCtrlUnsubscribe},
-		{"TypeCtrlGlobalSubscribe", protocol.TypeCtrlGlobalSubscribe},
-		{"TypeCtrlGlobalUnsubscribe", protocol.TypeCtrlGlobalUnsubscribe},
-		{"TypeCtrlGetRecent", protocol.TypeCtrlGetRecent},
-		{"TypeCtrlSend", protocol.TypeCtrlSend},
-		{"TypeCtrlForget", protocol.TypeCtrlForget},
-		{"TypeCtrlForgetAllExited", protocol.TypeCtrlForgetAllExited},
-		{"TypeCtrlSearch", protocol.TypeCtrlSearch},
-		{"TypeCtrlStatus", protocol.TypeCtrlStatus},
-		{"TypeCtrlResponse", protocol.TypeCtrlResponse},
-		{"TypeCtrlEvent", protocol.TypeCtrlEvent},
-		{"TypeCtrlChildSpawned", protocol.TypeCtrlChildSpawned},
-		{"TypeCtrlChildExited", protocol.TypeCtrlChildExited},
-		{"TypeCtrlChildStatus", protocol.TypeCtrlChildStatus},
-		{"TypeCtrlChildRenamed", protocol.TypeCtrlChildRenamed},
+		{"TypeCtrlList", protocol.TypeCtrlList, "ctrl_list"},
+		{"TypeCtrlGet", protocol.TypeCtrlGet, "ctrl_get"},
+		{"TypeCtrlSpawn", protocol.TypeCtrlSpawn, "ctrl_spawn"},
+		{"TypeCtrlResume", protocol.TypeCtrlResume, "ctrl_resume"},
+		{"TypeCtrlKill", protocol.TypeCtrlKill, "ctrl_kill"},
+		{"TypeCtrlAuth", protocol.TypeCtrlAuth, "ctrl_auth"},
+		{"TypeCtrlSubscribe", protocol.TypeCtrlSubscribe, "ctrl_subscribe"},
+		{"TypeCtrlUnsubscribe", protocol.TypeCtrlUnsubscribe, "ctrl_unsubscribe"},
+		{"TypeCtrlGlobalSubscribe", protocol.TypeCtrlGlobalSubscribe, "ctrl_global_subscribe"},
+		{"TypeCtrlGlobalUnsubscribe", protocol.TypeCtrlGlobalUnsubscribe, "ctrl_global_unsubscribe"},
+		{"TypeCtrlGetRecent", protocol.TypeCtrlGetRecent, "ctrl_get_recent"},
+		{"TypeCtrlSend", protocol.TypeCtrlSend, "ctrl_send"},
+		{"TypeCtrlForget", protocol.TypeCtrlForget, "ctrl_forget"},
+		{"TypeCtrlForgetAllExited", protocol.TypeCtrlForgetAllExited, "ctrl_forget_all_exited"},
+		{"TypeCtrlSearch", protocol.TypeCtrlSearch, "ctrl_search"},
+		{"TypeCtrlStatus", protocol.TypeCtrlStatus, "ctrl_status"},
+		{"TypeCtrlResponse", protocol.TypeCtrlResponse, "ctrl_response"},
+		{"TypeCtrlEvent", protocol.TypeCtrlEvent, "ctrl_event"},
+		{"TypeCtrlChildSpawned", protocol.TypeCtrlChildSpawned, "ctrl_child_spawned"},
+		{"TypeCtrlChildExited", protocol.TypeCtrlChildExited, "ctrl_child_exited"},
+		{"TypeCtrlChildStatus", protocol.TypeCtrlChildStatus, "ctrl_child_status"},
+		{"TypeCtrlChildRenamed", protocol.TypeCtrlChildRenamed, "ctrl_child_renamed"},
 	}
 	for _, tc := range cases {
-		if tc.val == "" {
-			t.Errorf("%s is empty", tc.name)
+		if tc.val != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.val, tc.want)
 		}
 	}
 }
 
 // TestStatusConstants verifies all §10 status values are defined.
 func TestStatusConstants(t *testing.T) {
-	statuses := []protocol.Status{
-		protocol.StatusSpawning,
-		protocol.StatusIdle,
-		protocol.StatusStreaming,
-		protocol.StatusToolRunning,
-		protocol.StatusCompacting,
-		protocol.StatusBlockedUI,
-		protocol.StatusShuttingDown,
-		protocol.StatusExited,
+	cases := []struct {
+		name string
+		val  string
+		want string
+	}{
+		{"StatusSpawning", string(protocol.StatusSpawning), "spawning"},
+		{"StatusIdle", string(protocol.StatusIdle), "idle"},
+		{"StatusStreaming", string(protocol.StatusStreaming), "streaming"},
+		{"StatusToolRunning", string(protocol.StatusToolRunning), "tool_running"},
+		{"StatusCompacting", string(protocol.StatusCompacting), "compacting"},
+		{"StatusBlockedUI", string(protocol.StatusBlockedUI), "blocked_ui"},
+		{"StatusShuttingDown", string(protocol.StatusShuttingDown), "shutting_down"},
+		{"StatusExited", string(protocol.StatusExited), "exited"},
 	}
-	for _, s := range statuses {
-		if s == "" {
-			t.Errorf("empty Status constant")
+	for _, tc := range cases {
+		if tc.val != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.val, tc.want)
 		}
 	}
 }
 
 // TestErrorCodeConstants verifies all §8 error codes are defined.
 func TestErrorCodeConstants(t *testing.T) {
-	codes := []string{
-		protocol.ErrChildNotFound,
-		protocol.ErrChildExited,
-		protocol.ErrChildInGrace,
-		protocol.ErrChildShuttingDown,
-		protocol.ErrNotResumable,
-		protocol.ErrNotExited,
-		protocol.ErrSessionFileMissing,
-		protocol.ErrBackpressure,
-		protocol.ErrInvalidArgs,
-		protocol.ErrSpawnFailed,
-		protocol.ErrAuthRequired,
-		protocol.ErrAuthInvalid,
-		protocol.ErrNotFound,
-		protocol.ErrInternal,
+	cases := []struct {
+		name string
+		val  string
+		want string
+	}{
+		{"ErrChildNotFound", protocol.ErrChildNotFound, "child_not_found"},
+		{"ErrChildExited", protocol.ErrChildExited, "child_exited"},
+		{"ErrChildInGrace", protocol.ErrChildInGrace, "child_in_grace"},
+		{"ErrChildShuttingDown", protocol.ErrChildShuttingDown, "child_shutting_down"},
+		{"ErrNotResumable", protocol.ErrNotResumable, "not_resumable"},
+		{"ErrNotExited", protocol.ErrNotExited, "not_exited"},
+		{"ErrSessionFileMissing", protocol.ErrSessionFileMissing, "session_file_missing"},
+		{"ErrBackpressure", protocol.ErrBackpressure, "backpressure"},
+		{"ErrInvalidArgs", protocol.ErrInvalidArgs, "invalid_args"},
+		{"ErrSpawnFailed", protocol.ErrSpawnFailed, "spawn_failed"},
+		{"ErrAuthRequired", protocol.ErrAuthRequired, "auth_required"},
+		{"ErrAuthInvalid", protocol.ErrAuthInvalid, "auth_invalid"},
+		{"ErrNotFound", protocol.ErrNotFound, "not_found"},
+		{"ErrInternal", protocol.ErrInternal, "internal"},
 	}
-	for _, c := range codes {
-		if c == "" {
-			t.Errorf("empty error code constant")
+	for _, tc := range cases {
+		if tc.val != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.val, tc.want)
 		}
 	}
 }
@@ -364,7 +373,7 @@ func TestSubscribeRequest_NilFilter(t *testing.T) {
 	}
 }
 
-// TestChildSummary_NullPID verifies that *int PID serializes as null when nil.
+// TestChildSummary_NullPID verifies that *int PID and ExitCode serialize as null when nil.
 func TestChildSummary_NullPID(t *testing.T) {
 	cs := protocol.ChildSummary{
 		ChildID:      "c_01HX...",
@@ -381,6 +390,9 @@ func TestChildSummary_NullPID(t *testing.T) {
 	raw := string(b)
 	if !strings.Contains(raw, `"pid":null`) {
 		t.Errorf("expected pid:null in %s", raw)
+	}
+	if !strings.Contains(raw, `"exitCode":null`) {
+		t.Errorf("expected exitCode:null in %s", raw)
 	}
 }
 

@@ -313,6 +313,7 @@ type ErrorBody struct {
 
 // ChildSummary is a single entry in ctrl_list / ctrl_get response data (§6.1).
 // PID is nil when status is exited. ExitCode is nil while the child is alive.
+// ExitSignal is absent (not "null") when the child exited via normal exit code rather than a signal.
 type ChildSummary struct {
 	ChildID      string `json:"childId"`
 	PID          *int   `json:"pid"`      // null when exited
@@ -350,6 +351,7 @@ type SpawnResponseData struct {
 
 // KillResponseData is the data payload for ctrl_kill responses (§6.5).
 // ExitCode is nil when the child was killed by signal with no exit code.
+// Signal is absent (not "null") when the child exited via normal exit code rather than a signal.
 // Escalated is true if SIGTERM or SIGKILL was needed.
 type KillResponseData struct {
 	ExitCode   *int   `json:"exitCode"`
