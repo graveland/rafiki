@@ -1,0 +1,464 @@
+// Package protocol defines the typed wire shapes for every ctrl_* command,
+// response, and event in the pi-controller protocol. This is a pure-data
+// package: no logic, no I/O. Field names and JSON tags match the spec exactly.
+//
+// Cross-references:
+//   §6  — client → controller commands (requests)
+//   §7  — controller → client events
+//   §8  — error codes
+//   §10 — status constants
+package protocol
+
+import "encoding/json"
+
+// ─── Type constants ──────────────────────────────────────────────────────────
+
+const (
+	TypeCtrlList              = "ctrl_list"
+	TypeCtrlGet               = "ctrl_get"
+	TypeCtrlSpawn             = "ctrl_spawn"
+	TypeCtrlResume            = "ctrl_resume"
+	TypeCtrlKill              = "ctrl_kill"
+	TypeCtrlAuth              = "ctrl_auth"
+	TypeCtrlSubscribe         = "ctrl_subscribe"
+	TypeCtrlUnsubscribe       = "ctrl_unsubscribe"
+	TypeCtrlGlobalSubscribe   = "ctrl_global_subscribe"
+	TypeCtrlGlobalUnsubscribe = "ctrl_global_unsubscribe"
+	TypeCtrlGetRecent         = "ctrl_get_recent"
+	TypeCtrlSend              = "ctrl_send"
+	TypeCtrlForget            = "ctrl_forget"
+	TypeCtrlForgetAllExited   = "ctrl_forget_all_exited"
+	TypeCtrlSearch            = "ctrl_search"
+	TypeCtrlStatus            = "ctrl_status"
+	TypeCtrlResponse          = "ctrl_response"
+	TypeCtrlEvent             = "ctrl_event"
+	TypeCtrlChildSpawned      = "ctrl_child_spawned"
+	TypeCtrlChildExited       = "ctrl_child_exited"
+	TypeCtrlChildStatus       = "ctrl_child_status"
+	TypeCtrlChildRenamed      = "ctrl_child_renamed"
+)
+
+// ─── Status constants (§10) ──────────────────────────────────────────────────
+
+// Status is the state of a pi child process.
+type Status string
+
+const (
+	StatusSpawning     Status = "spawning"
+	StatusIdle         Status = "idle"
+	StatusStreaming     Status = "streaming"
+	StatusToolRunning  Status = "tool_running"
+	StatusCompacting   Status = "compacting"
+	StatusBlockedUI    Status = "blocked_ui"
+	StatusShuttingDown Status = "shutting_down"
+	StatusExited       Status = "exited"
+)
+
+// ─── Error code constants (§8) ───────────────────────────────────────────────
+
+const (
+	// ErrChildNotFound is returned when no child with the given childId exists.
+	ErrChildNotFound = "child_not_found"
+	// ErrChildExited is returned when the child has already exited.
+	ErrChildExited = "child_exited"
+	// ErrChildInGrace is equivalent to ErrChildExited; explicit for clarity.
+	ErrChildInGrace = "child_in_grace"
+	// ErrChildShuttingDown is returned when stdin is closed during graceful shutdown.
+	ErrChildShuttingDown = "child_shutting_down"
+	// ErrNotResumable is returned by ctrl_resume when the child is not in exited status.
+	ErrNotResumable = "not_resumable"
+	// ErrNotExited is returned by ctrl_forget when the child is still live.
+	ErrNotExited = "not_exited"
+	// ErrSessionFileMissing is returned by ctrl_resume when the session file is gone.
+	ErrSessionFileMissing = "session_file_missing"
+	// ErrBackpressure is returned when the child's command channel is full.
+	ErrBackpressure = "backpressure"
+	// ErrInvalidArgs is returned when request fields fail validation.
+	ErrInvalidArgs = "invalid_args"
+	// ErrSpawnFailed is returned when the pi subprocess fails to start.
+	ErrSpawnFailed = "spawn_failed"
+	// ErrAuthRequired is returned on TCP connections that skip ctrl_auth.
+	ErrAuthRequired = "auth_required"
+	// ErrAuthInvalid is returned when the TCP auth token does not match.
+	ErrAuthInvalid = "auth_invalid"
+	// ErrNotFound is the generic not-found error (e.g., ctrl_resume against unknown id).
+	ErrNotFound = "not_found"
+	// ErrInternal is returned on unexpected controller-side errors.
+	ErrInternal = "internal"
+)
+
+// ─── Shared sub-shapes ───────────────────────────────────────────────────────
+
+// ListFilter narrows ctrl_list results. All fields are optional (§6.1).
+type ListFilter struct {
+	Status       string `json:"status,omitempty"`
+	Name         string `json:"name,omitempty"`
+	NameContains string `json:"nameContains,omitempty"`
+	CwdContains  string `json:"cwdContains,omitempty"`
+	Since        int64  `json:"since,omitempty"`
+}
+
+// SubscribeFilter selects which pi events are forwarded on a subscription (§6.7, §6.8).
+// Filter resolution: (profile members) ∪ include − exclude.
+type SubscribeFilter struct {
+	Profile string   `json:"profile,omitempty"`
+	Include []string `json:"include,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
+}
+
+// SearchSessionFilter narrows which children ctrl_search scans (§6.15).
+type SearchSessionFilter struct {
+	CwdContains  string `json:"cwdContains,omitempty"`
+	NameContains string `json:"nameContains,omitempty"`
+	Since        int64  `json:"since,omitempty"`
+}
+
+// ─── Request types (§6) ──────────────────────────────────────────────────────
+
+// ListRequest lists children known to the controller (§6.1).
+type ListRequest struct {
+	Type   string      `json:"type"`
+	ID     string      `json:"id,omitempty"`
+	Filter *ListFilter `json:"filter,omitempty"`
+}
+
+// GetRequest retrieves a snapshot of one child by id (§6.2).
+type GetRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	ChildID string `json:"childId"`
+}
+
+// SpawnRequest starts a new pi child (§6.3).
+// cwd is required; all other fields are optional and forwarded to pi as flags.
+// apiKey is used at spawn time only and is never written to the state record.
+type SpawnRequest struct {
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+
+	// Identity
+	Name string `json:"name,omitempty"`
+
+	// Working directory (required, absolute).
+	Cwd string `json:"cwd"`
+
+	// Model + auth (pi resolves from its own config when omitted).
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Thinking string `json:"thinking,omitempty"` // off|minimal|low|medium|high|xhigh
+	APIKey   string `json:"apiKey,omitempty"`
+
+	// Session flags.
+	NoSession     bool   `json:"noSession,omitempty"`
+	SessionDir    string `json:"sessionDir,omitempty"`
+	ResumeSession string `json:"resumeSession,omitempty"`
+	ForkSession   string `json:"forkSession,omitempty"`
+
+	// Tool / extension / skill scoping.
+	Tools             string   `json:"tools,omitempty"` // comma-joined
+	NoTools           bool     `json:"noTools,omitempty"`
+	NoBuiltinTools    bool     `json:"noBuiltinTools,omitempty"`
+	Extensions        []string `json:"extensions,omitempty"`
+	NoExtensions      bool     `json:"noExtensions,omitempty"`
+	Skills            []string `json:"skills,omitempty"`
+	NoSkills          bool     `json:"noSkills,omitempty"`
+	PromptTemplates   []string `json:"promptTemplates,omitempty"`
+	NoPromptTemplates bool     `json:"noPromptTemplates,omitempty"`
+	Themes            []string `json:"themes,omitempty"`
+	NoThemes          bool     `json:"noThemes,omitempty"`
+	NoContextFiles    bool     `json:"noContextFiles,omitempty"`
+
+	// System prompt.
+	SystemPrompt       string `json:"systemPrompt,omitempty"`
+	AppendSystemPrompt string `json:"appendSystemPrompt,omitempty"`
+
+	// Verbosity.
+	Verbose bool `json:"verbose,omitempty"`
+
+	// Process control.
+	PiBinary    string            `json:"piBinary,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	EnvOverride bool              `json:"envOverride,omitempty"`
+
+	// Escape hatch: appended last to argv, wins by last-flag-wins.
+	ExtraArgs []string `json:"extraArgs,omitempty"`
+}
+
+// ResumeRequest re-spawns a child against its persisted state record (§6.4).
+// The child must be in exited status. apiKey is optional and not persisted.
+type ResumeRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	ChildID string `json:"childId"`
+	APIKey  string `json:"apiKey,omitempty"`
+}
+
+// KillRequest stops a running child gracefully, escalating to SIGKILL if needed (§6.5).
+type KillRequest struct {
+	Type              string `json:"type"`
+	ID                string `json:"id,omitempty"`
+	ChildID           string `json:"childId"`
+	ShutdownTimeoutMs int64  `json:"shutdownTimeoutMs,omitempty"`
+	KillTimeoutMs     int64  `json:"killTimeoutMs,omitempty"`
+}
+
+// AuthRequest authenticates a TCP connection (§6.6).
+// Must be the first frame on a TCP connection; UDS connections skip this.
+type AuthRequest struct {
+	Type  string `json:"type"`
+	ID    string `json:"id,omitempty"`
+	Token string `json:"token"`
+}
+
+// SubscribeRequest subscribes to events from one child (§6.7).
+// Default profile when filter is omitted: firehose (everything).
+type SubscribeRequest struct {
+	Type    string           `json:"type"`
+	ID      string           `json:"id,omitempty"`
+	ChildID string           `json:"childId"`
+	Filter  *SubscribeFilter `json:"filter,omitempty"`
+}
+
+// UnsubscribeRequest removes the per-child subscription for this connection (§6.9).
+type UnsubscribeRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	ChildID string `json:"childId"`
+}
+
+// GlobalSubscribeRequest subscribes to controller-wide lifecycle events (§6.10).
+// Global subscribers see only ctrl_child_* events, never per-child ctrl_event frames.
+type GlobalSubscribeRequest struct {
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+}
+
+// GlobalUnsubscribeRequest cancels a global subscription (§6.10).
+type GlobalUnsubscribeRequest struct {
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+}
+
+// GetRecentRequest queries the per-child replay buffer (§6.11).
+type GetRecentRequest struct {
+	Type    string   `json:"type"`
+	ID      string   `json:"id,omitempty"`
+	ChildID string   `json:"childId"`
+	Limit   int      `json:"limit,omitempty"`
+	Since   int64    `json:"since,omitempty"`
+	Include []string `json:"include,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
+}
+
+// SendRequest forwards a pi-RPC frame to a child's stdin (§6.12).
+// The frame field is forwarded verbatim; the controller does not inspect it.
+type SendRequest struct {
+	Type    string          `json:"type"`
+	ID      string          `json:"id,omitempty"`
+	ChildID string          `json:"childId"`
+	Frame   json.RawMessage `json:"frame"`
+}
+
+// ForgetRequest drops an exited child from in-memory state (§6.13).
+// Only valid when the child is in exited status.
+type ForgetRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	ChildID string `json:"childId"`
+}
+
+// ForgetAllExitedRequest removes all exited children from in-memory state (§6.14).
+// OlderThanMs filters by age; zero means all exited entries.
+type ForgetAllExitedRequest struct {
+	Type        string `json:"type"`
+	ID          string `json:"id,omitempty"`
+	OlderThanMs int64  `json:"olderThanMs,omitempty"`
+}
+
+// SearchRequest searches in-memory content across children (§6.15).
+type SearchRequest struct {
+	Type          string               `json:"type"`
+	ID            string               `json:"id,omitempty"`
+	Query         string               `json:"query"`
+	Regex         bool                 `json:"regex,omitempty"`
+	Limit         int                  `json:"limit,omitempty"`
+	Context       int                  `json:"context,omitempty"`
+	SessionFilter *SearchSessionFilter `json:"sessionFilter,omitempty"`
+}
+
+// StatusRequest queries daemon health and statistics (§6.16).
+type StatusRequest struct {
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+}
+
+// ─── Response envelope and per-command response data types ───────────────────
+
+// Response is the generic ctrl_response envelope. The Data field is left as
+// json.RawMessage so consumers can decode into the per-command type lazily.
+type Response struct {
+	Type    string          `json:"type"`
+	Command string          `json:"command"`
+	ID      string          `json:"id,omitempty"`
+	Success bool            `json:"success"`
+	Data    json.RawMessage `json:"data,omitempty"`
+	Error   *ErrorBody      `json:"error,omitempty"`
+}
+
+// ErrorBody carries the machine-readable code and human-readable message (§8).
+type ErrorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message,omitempty"`
+}
+
+// ChildSummary is a single entry in ctrl_list / ctrl_get response data (§6.1).
+// PID is nil when status is exited. ExitCode is nil while the child is alive.
+type ChildSummary struct {
+	ChildID      string `json:"childId"`
+	PID          *int   `json:"pid"`      // null when exited
+	Cwd          string `json:"cwd"`
+	Name         string `json:"name,omitempty"`
+	Model        string `json:"model,omitempty"`
+	SessionID    string `json:"sessionId,omitempty"`
+	SessionFile  string `json:"sessionFile,omitempty"`
+	Status       string `json:"status"`
+	StartedAt    int64  `json:"startedAt"`
+	LastActivity int64  `json:"lastActivity"`
+	ExitCode     *int   `json:"exitCode"`  // null while alive
+	ExitSignal   string `json:"exitSignal,omitempty"`
+}
+
+// ListResponseData is the data payload for ctrl_list responses.
+type ListResponseData struct {
+	Children []ChildSummary `json:"children"`
+}
+
+// GetResponseData is the data payload for ctrl_get responses (§6.2).
+// The shape is identical to a single ChildSummary entry in ctrl_list.
+type GetResponseData = ChildSummary
+
+// SpawnResponseData is the data payload for ctrl_spawn and ctrl_resume responses (§6.3).
+// When Stalled is true, the child started but did not respond to the initial get_state;
+// the other fields will be empty in that case.
+type SpawnResponseData struct {
+	ChildID     string `json:"childId"`
+	SessionID   string `json:"sessionId,omitempty"`
+	SessionFile string `json:"sessionFile,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Stalled     bool   `json:"stalled"`
+}
+
+// KillResponseData is the data payload for ctrl_kill responses (§6.5).
+// ExitCode is nil when the child was killed by signal with no exit code.
+// Escalated is true if SIGTERM or SIGKILL was needed.
+type KillResponseData struct {
+	ExitCode   *int   `json:"exitCode"`
+	Signal     string `json:"signal,omitempty"`
+	DurationMs int64  `json:"durationMs"`
+	Escalated  bool   `json:"escalated"`
+}
+
+// GetRecentResponseData is the data payload for ctrl_get_recent responses (§6.11).
+// Each element of Events is a verbatim pi event in publish order.
+type GetRecentResponseData struct {
+	Events           []json.RawMessage `json:"events"`
+	TotalInBuffer    int               `json:"totalInBuffer"`
+	OldestTimestamp  int64             `json:"oldestTimestamp"`
+	TruncatedByLimit bool              `json:"truncatedByLimit"`
+}
+
+// ForgetAllExitedResponseData is the data payload for ctrl_forget_all_exited responses.
+type ForgetAllExitedResponseData struct {
+	Count int `json:"count"`
+}
+
+// SearchHit is one content match in a ctrl_search response (§6.15).
+type SearchHit struct {
+	ChildID     string `json:"childId"`
+	SessionFile string `json:"sessionFile"`
+	SessionID   string `json:"sessionId,omitempty"`
+	SessionName string `json:"sessionName,omitempty"`
+	EntryID     string `json:"entryId,omitempty"`
+	Timestamp   int64  `json:"timestamp"`
+	Role        string `json:"role,omitempty"`
+	Snippet     string `json:"snippet"`
+	MatchStart  int    `json:"matchStart"`
+	MatchEnd    int    `json:"matchEnd"`
+}
+
+// SearchResponseData is the data payload for ctrl_search responses (§6.15).
+type SearchResponseData struct {
+	Hits      []SearchHit `json:"hits"`
+	TotalHits int         `json:"totalHits"`
+	Scanned   int         `json:"scanned"`
+	Elapsed   int64       `json:"elapsed"`
+}
+
+// ChildCounts breaks down live vs exited child totals for StatusResponseData.
+type ChildCounts struct {
+	Live   int `json:"live"`
+	Exited int `json:"exited"`
+}
+
+// StatusResponseData is the data payload for ctrl_status responses (§6.16).
+type StatusResponseData struct {
+	Version     string      `json:"version"`
+	StartedAt   int64       `json:"startedAt"`
+	Children    ChildCounts `json:"children"`
+	MemoryBytes int64       `json:"memoryBytes"`
+	Socket      string      `json:"socket,omitempty"`
+	LogsDir     string      `json:"logsDir,omitempty"`
+}
+
+// ─── Event types (§7) ────────────────────────────────────────────────────────
+
+// CtrlEvent wraps a pi-RPC event from a subscribed child (§7.1).
+// The Event field is forwarded verbatim; the controller never modifies it.
+type CtrlEvent struct {
+	Type    string          `json:"type"`
+	ChildID string          `json:"childId"`
+	Event   json.RawMessage `json:"event"`
+}
+
+// CtrlChildSpawned is emitted when a child process starts (§7.2).
+// Delivered to global subscribers and per-child subscribers of this child.
+type CtrlChildSpawned struct {
+	Type    string `json:"type"`
+	ChildID string `json:"childId"`
+	Name    string `json:"name,omitempty"`
+	Cwd     string `json:"cwd"`
+	PID     int    `json:"pid"`
+	Model   string `json:"model,omitempty"`
+	At      int64  `json:"at"`
+}
+
+// CtrlChildExited is emitted when a child process exits (§7.3).
+// ExitCode is nil when the child was killed by signal.
+// Signal is absent (not "null") when the child exited normally.
+type CtrlChildExited struct {
+	Type       string  `json:"type"`
+	ChildID    string  `json:"childId"`
+	ExitCode   *int    `json:"exitCode"`
+	Signal     string  `json:"signal,omitempty"`
+	LastStatus string  `json:"lastStatus"`
+	Duration   float64 `json:"duration"` // seconds
+	At         int64   `json:"at"`
+}
+
+// CtrlChildStatus is emitted on every state transition (§7.4).
+type CtrlChildStatus struct {
+	Type     string `json:"type"`
+	ChildID  string `json:"childId"`
+	Status   string `json:"status"`
+	Previous string `json:"previous"`
+	At       int64  `json:"at"`
+}
+
+// CtrlChildRenamed is emitted when a child's name changes (§7.5).
+type CtrlChildRenamed struct {
+	Type     string `json:"type"`
+	ChildID  string `json:"childId"`
+	Name     string `json:"name"`
+	Previous string `json:"previous"`
+	At       int64  `json:"at"`
+}
