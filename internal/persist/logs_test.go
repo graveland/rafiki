@@ -96,4 +96,40 @@ func readGzLines(t *testing.T, path string) []string {
 	return parts
 }
 
-var _ = json.Marshal // keep import used
+func TestLogDump_MetaJsonRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	d := persist.NewLogDumper(dir, persist.ModeOnExit)
+	in := persist.Meta{
+		ChildID:     "c_1",
+		Name:        "afk",
+		Cwd:         "/tmp/x",
+		Model:       "claude-sonnet-4",
+		SessionFile: "/tmp/x/session.jsonl",
+		SpawnedAt:   1716636789,
+		ExitedAt:    1716636900,
+		ExitCode:    1,
+		ExitSignal:  "SIGTERM",
+		Argv:        []string{"pi", "--mode", "rpc"},
+	}
+	if err := d.Dump("c_1", nil, nil, nil, in, persist.ExitInfo{ExitCode: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "c_1", "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got persist.Meta
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal meta.json: %v\ncontent: %s", err, b)
+	}
+	if got.ChildID != in.ChildID || got.Name != in.Name || got.Cwd != in.Cwd ||
+		got.Model != in.Model || got.SessionFile != in.SessionFile ||
+		got.SpawnedAt != in.SpawnedAt || got.ExitedAt != in.ExitedAt ||
+		got.ExitCode != in.ExitCode || got.ExitSignal != in.ExitSignal {
+		t.Fatalf("meta round-trip mismatch:\n got %+v\n want %+v", got, in)
+	}
+	if len(got.Argv) != len(in.Argv) || got.Argv[0] != in.Argv[0] {
+		t.Fatalf("argv mismatch: got %v, want %v", got.Argv, in.Argv)
+	}
+}

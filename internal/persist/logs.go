@@ -87,16 +87,18 @@ func (d *LogDumper) Dump(
 		return err
 	}
 
+	// Write meta.json first so the directory is always identifiable even if
+	// a stream write fails partway through.
+	if err := writeMeta(filepath.Join(childDir, "meta.json"), meta); err != nil {
+		return err
+	}
 	if err := writeGzLines(filepath.Join(childDir, "in.jsonl.gz"), in); err != nil {
 		return err
 	}
 	if err := writeGzLines(filepath.Join(childDir, "out.jsonl.gz"), out); err != nil {
 		return err
 	}
-	if err := writeGzBytes(filepath.Join(childDir, "err.log.gz"), errBytes); err != nil {
-		return err
-	}
-	return writeMeta(filepath.Join(childDir, "meta.json"), meta)
+	return writeGzBytes(filepath.Join(childDir, "err.log.gz"), errBytes)
 }
 
 // writeGzLines writes each line to a gzip-compressed file, appending \n after
@@ -107,10 +109,8 @@ func writeGzLines(path string, lines [][]byte) error {
 		return err
 	}
 	defer f.Close()
-	gz, err := gzip.NewWriterLevel(f, gzip.DefaultCompression)
-	if err != nil {
-		return err
-	}
+	// gzip.NewWriter never returns an error for valid built-in levels.
+	gz := gzip.NewWriter(f) // uses DefaultCompression
 	for _, line := range lines {
 		if _, err := gz.Write(line); err != nil {
 			gz.Close()
@@ -131,10 +131,8 @@ func writeGzBytes(path string, b []byte) error {
 		return err
 	}
 	defer f.Close()
-	gz, err := gzip.NewWriterLevel(f, gzip.DefaultCompression)
-	if err != nil {
-		return err
-	}
+	// gzip.NewWriter never returns an error for valid built-in levels.
+	gz := gzip.NewWriter(f) // uses DefaultCompression
 	if len(b) > 0 {
 		if _, err := gz.Write(b); err != nil {
 			gz.Close()
