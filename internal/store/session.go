@@ -13,6 +13,9 @@ import (
 // Holders must use Snapshot() to read; never expose *Session pointers
 // outside this package.
 type Session struct {
+	// mu guards every exported field below. All field reads should go through
+	// Snapshot() (which takes the lock). Writes within the store package must
+	// also hold mu.
 	mu sync.Mutex
 
 	ChildID string
@@ -35,9 +38,19 @@ type Session struct {
 	ExitSignal   string
 
 	// Spawn configuration (subset persisted to state record).
-	NoSession          bool
-	SessionDir         string
-	ResumeSession      string
+
+	// NoSession means the child runs in ephemeral mode with no session.jsonl
+	// (pi's --no-session flag). Not the same as having no SessionID.
+	NoSession bool
+
+	SessionDir string
+
+	// ResumeSession is an absolute path to an existing session.jsonl that the
+	// child should open via pi's --session flag.
+	ResumeSession string
+
+	// ForkSession is an absolute path to an existing session.jsonl that the
+	// child should fork from via pi's --fork flag.
 	ForkSession        string
 	Tools              []string
 	NoTools            bool
@@ -139,18 +152,18 @@ func (s *Session) Snapshot() Snapshot {
 
 		NoSession: s.NoSession, SessionDir: s.SessionDir,
 		ResumeSession: s.ResumeSession, ForkSession: s.ForkSession,
-		Tools:          copyStrings(s.Tools),
-		NoTools:        s.NoTools, NoBuiltinTools: s.NoBuiltinTools,
-		Extensions:    copyStrings(s.Extensions),
-		NoExtensions:  s.NoExtensions,
-		Skills:        copyStrings(s.Skills),
-		NoSkills:      s.NoSkills,
+		Tools:   copyStrings(s.Tools),
+		NoTools: s.NoTools, NoBuiltinTools: s.NoBuiltinTools,
+		Extensions:        copyStrings(s.Extensions),
+		NoExtensions:      s.NoExtensions,
+		Skills:            copyStrings(s.Skills),
+		NoSkills:          s.NoSkills,
 		PromptTemplates:   copyStrings(s.PromptTemplates),
 		NoPromptTemplates: s.NoPromptTemplates,
-		Themes:        copyStrings(s.Themes),
-		NoThemes:      s.NoThemes,
-		NoContextFiles: s.NoContextFiles,
-		SystemPrompt: s.SystemPrompt, AppendSystemPrompt: s.AppendSystemPrompt,
+		Themes:            copyStrings(s.Themes),
+		NoThemes:          s.NoThemes,
+		NoContextFiles:    s.NoContextFiles,
+		SystemPrompt:      s.SystemPrompt, AppendSystemPrompt: s.AppendSystemPrompt,
 		Verbose: s.Verbose, PiBinary: s.PiBinary,
 		ExtraArgs: copyStrings(s.ExtraArgs),
 
@@ -161,6 +174,9 @@ func (s *Session) Snapshot() Snapshot {
 	}
 }
 
+// copyStrings returns a fresh slice with a copy of s's elements.
+// Both nil and empty inputs return nil — callers that need to distinguish
+// "set to empty" from "absent" should handle that at the field level.
 func copyStrings(s []string) []string {
 	if len(s) == 0 {
 		return nil
