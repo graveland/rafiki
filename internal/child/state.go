@@ -48,8 +48,14 @@ type StateMachine struct {
 	pendingUI   map[string]struct{} // dialog request IDs awaiting a response
 }
 
-// NewStateMachine creates a state machine in the spawning state, which is
-// the correct initial state for every newly started child.
+// NewStateMachine creates a fresh state machine in StatusSpawning.
+//
+// Lifecycle note: when a child is resumed via ctrl_resume (per protocol
+// §10.1 row 18), the supervise loop creates a new StateMachine — the
+// state machine is intentionally not designed to transition out of
+// StatusExited. This keeps the lifetime of an SM instance tied 1:1 to
+// the lifetime of an underlying pi process, which simplifies the modal
+// stack and counter invariants.
 func NewStateMachine() *StateMachine {
 	return &StateMachine{
 		current:   protocol.StatusSpawning,
@@ -129,9 +135,6 @@ func (sm *StateMachine) OnPiEvent(eventType string, meta *PiUIRequestMeta) (chan
 
 	case "extension_error":
 		sm.counters.ExtensionErrors++
-
-	case "auto_retry_start":
-		sm.counters.AutoRetries++
 	}
 
 	return sm.current != prev, prev
@@ -151,6 +154,14 @@ func (sm *StateMachine) OnExtensionUIResponse(id string) (changed bool, prev pro
 		return sm.current != prev, prev
 	}
 	return false, sm.current
+}
+
+// OnAutoRetryStart records the start of an auto-retry attempt. This does
+// not change the state — the agent loop is still "streaming" while
+// waiting on the retry timer. Informational only.
+func (sm *StateMachine) OnAutoRetryStart(errorMessage string) {
+	sm.counters.AutoRetries++
+	sm.counters.LastRetryError = errorMessage
 }
 
 // OnAutoRetryFinalFailure records the error string from a non-success

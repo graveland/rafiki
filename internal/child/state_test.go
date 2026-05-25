@@ -135,6 +135,26 @@ func TestStateMachine_ShuttingDown(t *testing.T) {
 	}
 }
 
+func TestStateMachine_AutoRetryStart_SetsCountersAndError(t *testing.T) {
+	sm := child.NewStateMachine()
+	sm.OnFirstResponse()
+	sm.OnPiEvent("agent_start", nil)
+	before := sm.Current()
+
+	sm.OnAutoRetryStart("529 overloaded_error: Overloaded")
+
+	if sm.Current() != before {
+		t.Fatalf("auto_retry_start changed state: %v → %v", before, sm.Current())
+	}
+	c := sm.Counters()
+	if c.AutoRetries != 1 {
+		t.Fatalf("AutoRetries: got %d, want 1", c.AutoRetries)
+	}
+	if c.LastRetryError != "529 overloaded_error: Overloaded" {
+		t.Fatalf("LastRetryError: got %q", c.LastRetryError)
+	}
+}
+
 func TestStateMachine_DefensivePopOnEmptyStack(t *testing.T) {
 	// compaction_end with nothing on the stack must be a no-op.
 	sm := child.NewStateMachine()
