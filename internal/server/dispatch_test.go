@@ -957,6 +957,28 @@ func TestDispatch_GlobalUnsubscribe_Success(t *testing.T) {
 	}
 }
 
+func TestDispatch_GlobalSubscribe_Error(t *testing.T) {
+	c := &fakeController{
+		globalSubscribeFn: func(server.ConnSubscriber) error {
+			return controllerErr(protocol.ErrInternal, "boom")
+		},
+	}
+	d := server.NewDispatch(c)
+	resp := d([]byte(`{"type":"ctrl_global_subscribe","id":"x"}`))
+	mustError(t, resp, protocol.ErrInternal)
+}
+
+func TestDispatch_GlobalUnsubscribe_Error(t *testing.T) {
+	c := &fakeController{
+		globalUnsubscribeFn: func(server.ConnSubscriber) error {
+			return controllerErr(protocol.ErrInternal, "boom")
+		},
+	}
+	d := server.NewDispatch(c)
+	resp := d([]byte(`{"type":"ctrl_global_unsubscribe","id":"x"}`))
+	mustError(t, resp, protocol.ErrInternal)
+}
+
 // ─── ID propagation ───────────────────────────────────────────────────────────
 
 func TestDispatch_IDPropagatedInErrorResponse(t *testing.T) {
