@@ -16,3 +16,7 @@ coverage.txt
 
 # Local config + state (these belong under ~/.pi/run, not in repo)
 /run/
+
+# Override global ignore — tasks/ holds the spec, plan, and todo for this project
+!tasks/
+!tasks/**
