@@ -1,6 +1,7 @@
 package child_test
 
 import (
+	"fmt"
 	"testing"
 
 	"graveland.dev/pi-controller/internal/child"
@@ -152,6 +153,79 @@ func TestStateMachine_AutoRetryStart_SetsCountersAndError(t *testing.T) {
 	}
 	if c.LastRetryError != "529 overloaded_error: Overloaded" {
 		t.Fatalf("LastRetryError: got %q", c.LastRetryError)
+	}
+}
+
+func TestStateMachine_MultipleConcurrentDialogs_ResolveCleanly(t *testing.T) {
+	sm := child.NewStateMachine()
+	sm.OnFirstResponse()
+	sm.OnPiEvent("agent_start", nil)
+	// Now in streaming.
+
+	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
+		ID: "u1", Method: "confirm",
+	})
+	if sm.Current() != protocol.StatusBlockedUI {
+		t.Fatalf("after u1: %v", sm.Current())
+	}
+
+	// Second concurrent dialog while still in blocked_ui.
+	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
+		ID: "u2", Method: "confirm",
+	})
+	if sm.Current() != protocol.StatusBlockedUI {
+		t.Fatalf("after u2: %v", sm.Current())
+	}
+
+	// Resolve in arbitrary order.
+	sm.OnExtensionUIResponse("u2")
+	if sm.Current() != protocol.StatusBlockedUI {
+		t.Fatalf("after u2 resp (u1 still pending): %v", sm.Current())
+	}
+	sm.OnExtensionUIResponse("u1")
+	// Now both resolved; should be back to streaming.
+	if sm.Current() != protocol.StatusStreaming {
+		t.Fatalf("after all resolved: %v, want streaming", sm.Current())
+	}
+}
+
+func TestStateMachine_DialogOverCap_SilentlyDropped(t *testing.T) {
+	sm := child.NewStateMachine()
+	sm.OnFirstResponse()
+	sm.OnPiEvent("agent_start", nil)
+
+	// Fill the pendingUI cap with 64 dialog requests.
+	for i := 0; i < 64; i++ {
+		sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
+			ID:     fmt.Sprintf("u%d", i),
+			Method: "confirm",
+		})
+	}
+	if sm.Current() != protocol.StatusBlockedUI {
+		t.Fatalf("after 64 dialogs: %v", sm.Current())
+	}
+
+	// The 65th request — over cap. Should NOT push.
+	// We can't directly observe "didn't push", but we can verify by
+	// resolving the 64 tracked dialogs and confirming we return to streaming
+	// (rather than getting stuck in blocked_ui with an orphan push).
+	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
+		ID: "overflow", Method: "confirm",
+	})
+
+	for i := 0; i < 64; i++ {
+		sm.OnExtensionUIResponse(fmt.Sprintf("u%d", i))
+	}
+	// After resolving all 64 tracked, should be back to streaming.
+	// If the overflow had pushed, we'd be stuck in blocked_ui.
+	if sm.Current() != protocol.StatusStreaming {
+		t.Fatalf("after resolving all tracked: %v, want streaming (overflow dialog must not have pushed)", sm.Current())
+	}
+
+	// The overflow response should be a no-op.
+	sm.OnExtensionUIResponse("overflow")
+	if sm.Current() != protocol.StatusStreaming {
+		t.Fatalf("overflow response changed state: %v", sm.Current())
 	}
 }
 

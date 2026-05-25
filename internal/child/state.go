@@ -124,11 +124,18 @@ func (sm *StateMachine) OnPiEvent(eventType string, meta *PiUIRequestMeta) (chan
 
 	case "extension_ui_request":
 		if meta != nil && dialogMethods[meta.Method] {
-			// Only track and push when below the cap to avoid unbounded growth.
-			if len(sm.pendingUI) < pendingUICapacity {
-				sm.pendingUI[meta.ID] = struct{}{}
+			// Over-cap dialog requests are silently dropped: not tracked,
+			// not pushed. Pi will eventually time out the dialog.
+			if len(sm.pendingUI) >= pendingUICapacity {
+				break
 			}
-			sm.push(protocol.StatusBlockedUI)
+			sm.pendingUI[meta.ID] = struct{}{}
+			// Only push once when entering blocked_ui — additional concurrent
+			// dialogs increment the pending set but don't stack-push.
+			// The corresponding pop happens only when pendingUI empties.
+			if sm.current != protocol.StatusBlockedUI {
+				sm.push(protocol.StatusBlockedUI)
+			}
 		}
 		// Fire-and-forget methods (notify, setStatus, etc.) are intentionally
 		// not handled here — they do not cause a state transition.
