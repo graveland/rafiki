@@ -1,6 +1,7 @@
 package bus_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -119,5 +120,56 @@ func TestBus_CloseClosesAllSubscriberChannels(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("ch%d: not closed after Close", i+1)
 		}
+	}
+}
+
+// TestBus_ConcurrentPublishAndCancel stresses the race between Publish and
+// cancel. Without the done-channel fix this panics with send on closed channel
+// within a handful of iterations.
+func TestBus_ConcurrentPublishAndCancel(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		b := bus.New[int](bus.Options{PerSubBuffer: 1})
+		_, cancel := b.Subscribe()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				b.Publish(j)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			cancel()
+		}()
+		wg.Wait()
+		b.Close()
+	}
+	// Reaching here without panicking confirms the race is fixed.
+}
+
+// TestBus_ConcurrentPublishAndClose stresses the race between Publish and
+// Close. Without the done-channel fix this panics with send on closed channel
+// within a handful of iterations.
+func TestBus_ConcurrentPublishAndClose(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		b := bus.New[int](bus.Options{PerSubBuffer: 1})
+		_, _ = b.Subscribe()
+		_, _ = b.Subscribe()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				b.Publish(j)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			b.Close()
+		}()
+		wg.Wait()
 	}
 }

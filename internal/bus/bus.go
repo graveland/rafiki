@@ -29,10 +29,23 @@ type Bus[T any] struct {
 	closed     atomic.Bool
 }
 
+// subscriber holds a single subscription's state.
+//
+// Race-safety design:
+//   - mu serialises the send in Publish with the close in cancel/Close.
+//   - closed is set to true under mu before ch is closed, so Publish's guard
+//     (if !s.closed) ensures ch is never sent to after it has been closed.
+//
+// Note: a 3-way select { case <-done: | case ch<-v: | default } does NOT
+// prevent "send on closed channel" because Go's select evaluates cases in
+// random order and panics when it reaches a send on a closed channel, even
+// if another ready case (e.g. <-done) exists. The closed flag + mutex is the
+// correct guard.
 type subscriber[T any] struct {
-	id    uint64
-	ch    chan T
-	drops atomic.Uint64
+	id     uint64
+	ch     chan T
+	mu     sync.Mutex // serialises ch send (Publish) with ch close (cancel/Close)
+	closed bool       // set to true before ch is closed, always under mu
 }
 
 // New creates a Bus with the given options.
@@ -67,20 +80,35 @@ func (b *Bus[T]) Subscribe() (<-chan T, func()) {
 	b.mu.Unlock()
 
 	cancel := func() {
+		// Remove from the live map first so no new Publish snapshot includes s.
 		b.mu.Lock()
-		defer b.mu.Unlock()
-		if _, ok := b.subs[s.id]; ok {
+		_, ok := b.subs[s.id]
+		if ok {
 			delete(b.subs, s.id)
-			close(s.ch)
 		}
+		b.mu.Unlock()
+
+		if !ok {
+			return // idempotent: already cancelled or bus was closed first
+		}
+
+		// Set closed and close ch under s.mu so that Publish's guard
+		// (if !s.closed) and close(s.ch) are never concurrent.
+		s.mu.Lock()
+		s.closed = true
+		close(s.ch)
+		s.mu.Unlock()
 	}
 	return s.ch, cancel
 }
 
 // Publish sends v to every subscriber. If a subscriber's buffer is full, the
-// event is dropped for that subscriber and the drop counters are incremented.
+// event is dropped for that subscriber and the drop counter is incremented.
 // Publish never blocks.
 func (b *Bus[T]) Publish(v T) {
+	// Fast path: skip dispatching when bus is closed. This is a throughput
+	// shortcut, not a correctness guard — the per-subscriber closed flag
+	// + mutex in the dispatch loop is what makes concurrent Close safe.
 	if b.closed.Load() {
 		return
 	}
@@ -92,12 +120,18 @@ func (b *Bus[T]) Publish(v T) {
 	b.mu.Unlock()
 
 	for _, s := range subs {
-		select {
-		case s.ch <- v:
-		default:
-			s.drops.Add(1)
-			b.totalDrops.Add(1)
+		// Hold s.mu for the check-and-send so that close(s.ch) in cancel/Close
+		// cannot execute concurrently with the send. s.closed is set to true
+		// before close(s.ch), so this guard is sufficient.
+		s.mu.Lock()
+		if !s.closed {
+			select {
+			case s.ch <- v:
+			default:
+				b.totalDrops.Add(1)
+			}
 		}
+		s.mu.Unlock()
 	}
 }
 
@@ -117,10 +151,17 @@ func (b *Bus[T]) Close() {
 	if !b.closed.CompareAndSwap(false, true) {
 		return
 	}
+	// Take ownership of the subs map and release b.mu before per-subscriber
+	// work to keep b.mu hold time short and avoid nested lock acquisition.
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, s := range b.subs {
-		close(s.ch)
-	}
+	subs := b.subs
 	b.subs = nil
+	b.mu.Unlock()
+
+	for _, s := range subs {
+		s.mu.Lock()
+		s.closed = true
+		close(s.ch)
+		s.mu.Unlock()
+	}
 }
