@@ -3,10 +3,11 @@
 // package: no logic, no I/O. Field names and JSON tags match the spec exactly.
 //
 // Cross-references:
-//   §6  — client → controller commands (requests)
-//   §7  — controller → client events
-//   §8  — error codes
-//   §10 — status constants
+//
+//	§6  — client → controller commands (requests)
+//	§7  — controller → client events
+//	§8  — error codes
+//	§10 — status constants
 package protocol
 
 import "encoding/json"
@@ -46,7 +47,7 @@ type Status string
 const (
 	StatusSpawning     Status = "spawning"
 	StatusIdle         Status = "idle"
-	StatusStreaming     Status = "streaming"
+	StatusStreaming    Status = "streaming"
 	StatusToolRunning  Status = "tool_running"
 	StatusCompacting   Status = "compacting"
 	StatusBlockedUI    Status = "blocked_ui"
@@ -316,7 +317,7 @@ type ErrorBody struct {
 // ExitSignal is absent (not "null") when the child exited via normal exit code rather than a signal.
 type ChildSummary struct {
 	ChildID      string `json:"childId"`
-	PID          *int   `json:"pid"`      // null when exited
+	PID          *int   `json:"pid"` // null when exited
 	Cwd          string `json:"cwd"`
 	Name         string `json:"name,omitempty"`
 	Model        string `json:"model,omitempty"`
@@ -325,7 +326,7 @@ type ChildSummary struct {
 	Status       string `json:"status"`
 	StartedAt    int64  `json:"startedAt"`
 	LastActivity int64  `json:"lastActivity"`
-	ExitCode     *int   `json:"exitCode"`  // null while alive
+	ExitCode     *int   `json:"exitCode"` // null while alive
 	ExitSignal   string `json:"exitSignal,omitempty"`
 }
 

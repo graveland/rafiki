@@ -17,9 +17,21 @@ import (
 	"graveland.dev/pi-controller/internal/protocol"
 )
 
+// Connection represents the write side of a single client connection. It is
+// passed to every FrameHandler call so that handlers can push unsolicited
+// frames (e.g. event delivery for subscriptions) to the specific client.
+// Interface identity (type + pointer) is used to key per-connection state
+// such as subscription registries, so callers must pass the same object
+// for the lifetime of a connection.
+type Connection interface {
+	// Deliver pushes frame to the client. Errors are silently discarded
+	// (connection may already be closing).
+	Deliver(frame []byte)
+}
+
 // FrameHandler is called once per inbound JSONL frame. It may return a
 // response frame (written back to the client) or nil/empty to send nothing.
-type FrameHandler func(frame []byte) []byte
+type FrameHandler func(conn Connection, frame []byte) []byte
 
 // Server is a running Unix-domain-socket listener. Call Close to stop it.
 type Server struct {
@@ -98,6 +110,15 @@ func (s *Server) acceptLoop() {
 	}
 }
 
+// netConn wraps a net.Conn and implements Connection.
+type netConn struct{ conn net.Conn }
+
+func (c *netConn) Deliver(frame []byte) {
+	// Errors here are silently discarded — the connection may be closing and
+	// the per-frame read loop will detect that on the next read.
+	_ = protocol.WriteFrame(c.conn, frame)
+}
+
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
@@ -112,6 +133,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 	}()
 
+	nc := &netConn{conn: conn}
 	r := protocol.NewFrameReader(conn, 16<<20)
 	for {
 		frame, err := r.ReadFrame()
@@ -121,7 +143,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
-		resp := s.handler(frame)
+		resp := s.handler(nc, frame)
 		if len(resp) > 0 {
 			if err := protocol.WriteFrame(conn, resp); err != nil {
 				if s.ctx.Err() == nil {

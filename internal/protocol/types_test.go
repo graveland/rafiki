@@ -395,5 +395,3 @@ func TestChildSummary_NullPID(t *testing.T) {
 		t.Errorf("expected exitCode:null in %s", raw)
 	}
 }
-
-

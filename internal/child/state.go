@@ -44,8 +44,8 @@ const pendingUICapacity = 64
 // Status() do). The SM does not provide internal synchronization.
 type StateMachine struct {
 	current     protocol.Status
-	stack       []protocol.Status   // modal stack for compacting / blocked_ui
-	activeTools int                 // outstanding tool_execution_start calls
+	stack       []protocol.Status // modal stack for compacting / blocked_ui
+	activeTools int               // outstanding tool_execution_start calls
 	counters    Counters
 	pendingUI   map[string]struct{} // dialog request IDs awaiting a response
 }

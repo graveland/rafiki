@@ -12,14 +12,6 @@ import (
 	"graveland.dev/pi-controller/internal/store"
 )
 
-// ─── Subscriber interface ─────────────────────────────────────────────────────
-
-// ConnSubscriber is implemented by per-connection handlers; the controller
-// calls Deliver to push event frames to the connection.
-type ConnSubscriber interface {
-	Deliver(frame []byte)
-}
-
 // ─── ControllerError ──────────────────────────────────────────────────────────
 
 // ControllerError carries a machine-readable protocol error code from a
@@ -88,11 +80,13 @@ type Controller interface {
 	// Frame forwarding.
 	Send(childID string, frame json.RawMessage) error
 
-	// Per-connection subscriptions (event delivery wired in Task 16).
-	Subscribe(childID string, conn ConnSubscriber, filter protocol.SubscribeFilter) error
-	Unsubscribe(childID string, conn ConnSubscriber) error
-	GlobalSubscribe(conn ConnSubscriber) error
-	GlobalUnsubscribe(conn ConnSubscriber) error
+	// Per-connection subscriptions. conn is the Connection passed to
+	// FrameHandler; it serves as both the event-delivery target and the
+	// identity key for subsequent Unsubscribe calls.
+	Subscribe(childID string, conn Connection, filter protocol.SubscribeFilter) error
+	Unsubscribe(childID string, conn Connection) error
+	GlobalSubscribe(conn Connection) error
+	GlobalUnsubscribe(conn Connection) error
 }
 
 // ─── Dispatch factory ─────────────────────────────────────────────────────────
@@ -106,7 +100,7 @@ func NewDispatch(c Controller) FrameHandler {
 
 type dispatcher struct{ c Controller }
 
-func (d *dispatcher) handle(frame []byte) []byte {
+func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 	var hdr struct {
 		Type string `json:"type"`
 		ID   string `json:"id"`
@@ -138,13 +132,13 @@ func (d *dispatcher) handle(frame []byte) []byte {
 	case protocol.TypeCtrlSend:
 		return d.ctrlSend(frame, hdr.ID)
 	case protocol.TypeCtrlSubscribe:
-		return d.subscribe(frame, hdr.ID)
+		return d.subscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUnsubscribe:
-		return d.unsubscribe(frame, hdr.ID)
+		return d.unsubscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlGlobalSubscribe:
-		return d.globalSubscribe(frame, hdr.ID)
+		return d.globalSubscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlGlobalUnsubscribe:
-		return d.globalUnsubscribe(frame, hdr.ID)
+		return d.globalUnsubscribe(conn, frame, hdr.ID)
 	default:
 		return errResponse(hdr.Type, hdr.ID, protocol.ErrInvalidArgs, "unknown command type: "+hdr.Type)
 	}
@@ -412,15 +406,9 @@ func (d *dispatcher) ctrlSend(frame []byte, id string) []byte {
 	return okResponse(protocol.TypeCtrlSend, id, nil)
 }
 
-// ─── Subscription handlers (stubs; event delivery wired in Task 16) ───────────
+// ─── Subscription handlers ────────────────────────────────────────────────────
 
-// noopSubscriber satisfies ConnSubscriber for the subscription stubs. In Task
-// 16 the real per-connection writer replaces this.
-type noopSubscriber struct{}
-
-func (noopSubscriber) Deliver(_ []byte) {}
-
-func (d *dispatcher) subscribe(frame []byte, id string) []byte {
+func (d *dispatcher) subscribe(conn Connection, frame []byte, id string) []byte {
 	var req protocol.SubscribeRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlSubscribe, id, protocol.ErrInvalidArgs, "malformed request")
@@ -432,13 +420,13 @@ func (d *dispatcher) subscribe(frame []byte, id string) []byte {
 	if req.Filter != nil {
 		filter = *req.Filter
 	}
-	if err := d.c.Subscribe(req.ChildID, noopSubscriber{}, filter); err != nil {
+	if err := d.c.Subscribe(req.ChildID, conn, filter); err != nil {
 		return mapErr(protocol.TypeCtrlSubscribe, id, err, protocol.ErrChildNotFound)
 	}
 	return okResponse(protocol.TypeCtrlSubscribe, id, nil)
 }
 
-func (d *dispatcher) unsubscribe(frame []byte, id string) []byte {
+func (d *dispatcher) unsubscribe(conn Connection, frame []byte, id string) []byte {
 	var req protocol.UnsubscribeRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlUnsubscribe, id, protocol.ErrInvalidArgs, "malformed request")
@@ -446,29 +434,29 @@ func (d *dispatcher) unsubscribe(frame []byte, id string) []byte {
 	if req.ChildID == "" {
 		return errResponse(protocol.TypeCtrlUnsubscribe, id, protocol.ErrInvalidArgs, "childId required")
 	}
-	if err := d.c.Unsubscribe(req.ChildID, noopSubscriber{}); err != nil {
+	if err := d.c.Unsubscribe(req.ChildID, conn); err != nil {
 		return mapErr(protocol.TypeCtrlUnsubscribe, id, err, protocol.ErrChildNotFound)
 	}
 	return okResponse(protocol.TypeCtrlUnsubscribe, id, nil)
 }
 
-func (d *dispatcher) globalSubscribe(frame []byte, id string) []byte {
+func (d *dispatcher) globalSubscribe(conn Connection, frame []byte, id string) []byte {
 	var req protocol.GlobalSubscribeRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlGlobalSubscribe, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	if err := d.c.GlobalSubscribe(noopSubscriber{}); err != nil {
+	if err := d.c.GlobalSubscribe(conn); err != nil {
 		return mapErr(protocol.TypeCtrlGlobalSubscribe, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlGlobalSubscribe, id, nil)
 }
 
-func (d *dispatcher) globalUnsubscribe(frame []byte, id string) []byte {
+func (d *dispatcher) globalUnsubscribe(conn Connection, frame []byte, id string) []byte {
 	var req protocol.GlobalUnsubscribeRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlGlobalUnsubscribe, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	if err := d.c.GlobalUnsubscribe(noopSubscriber{}); err != nil {
+	if err := d.c.GlobalUnsubscribe(conn); err != nil {
 		return mapErr(protocol.TypeCtrlGlobalUnsubscribe, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlGlobalUnsubscribe, id, nil)

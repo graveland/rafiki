@@ -67,7 +67,7 @@ type Child struct {
 	mu     sync.Mutex
 	closed bool // set by readStdout after cmd.Process.Wait() returns
 
-	sm       *StateMachine
+	sm *StateMachine
 	// metaMu protects meta and sm to allow Status()/Metadata() concurrent reads.
 	metaMu   sync.Mutex
 	meta     SnifferMetadata
@@ -141,6 +141,18 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 
 	go c.supervise()
 	return c, nil
+}
+
+// PID returns the operating system process ID of the child. Safe to call
+// after Spawn returns.
+func (c *Child) PID() int { return c.cmd.Process.Pid }
+
+// ExitResult returns the shutdown result recorded after the child exits.
+// Call only after Done() is closed; before that the fields are zero-valued.
+func (c *Child) ExitResult() ShutdownResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.exit
 }
 
 // Ready returns a channel that is closed once the supervise loop is running

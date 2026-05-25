@@ -12,6 +12,12 @@ import (
 	"graveland.dev/pi-controller/internal/store"
 )
 
+// discardConn is a no-op Connection used in dispatch tests where event
+// delivery is not under test.
+type discardConn struct{}
+
+func (discardConn) Deliver(_ []byte) {}
+
 // ─── fakeController ───────────────────────────────────────────────────────────
 
 type fakeController struct {
@@ -26,10 +32,10 @@ type fakeController struct {
 	forgetFn            func(string) error
 	forgetAllExitedFn   func(int64) (int, error)
 	sendFn              func(string, json.RawMessage) error
-	subscribeFn         func(string, server.ConnSubscriber, protocol.SubscribeFilter) error
-	unsubscribeFn       func(string, server.ConnSubscriber) error
-	globalSubscribeFn   func(server.ConnSubscriber) error
-	globalUnsubscribeFn func(server.ConnSubscriber) error
+	subscribeFn         func(string, server.Connection, protocol.SubscribeFilter) error
+	unsubscribeFn       func(string, server.Connection) error
+	globalSubscribeFn   func(server.Connection) error
+	globalUnsubscribeFn func(server.Connection) error
 }
 
 func (f *fakeController) List(filter protocol.ListFilter) []store.Snapshot {
@@ -109,28 +115,28 @@ func (f *fakeController) Send(childID string, frame json.RawMessage) error {
 	return nil
 }
 
-func (f *fakeController) Subscribe(childID string, conn server.ConnSubscriber, filter protocol.SubscribeFilter) error {
+func (f *fakeController) Subscribe(childID string, conn server.Connection, filter protocol.SubscribeFilter) error {
 	if f.subscribeFn != nil {
 		return f.subscribeFn(childID, conn, filter)
 	}
 	return nil
 }
 
-func (f *fakeController) Unsubscribe(childID string, conn server.ConnSubscriber) error {
+func (f *fakeController) Unsubscribe(childID string, conn server.Connection) error {
 	if f.unsubscribeFn != nil {
 		return f.unsubscribeFn(childID, conn)
 	}
 	return nil
 }
 
-func (f *fakeController) GlobalSubscribe(conn server.ConnSubscriber) error {
+func (f *fakeController) GlobalSubscribe(conn server.Connection) error {
 	if f.globalSubscribeFn != nil {
 		return f.globalSubscribeFn(conn)
 	}
 	return nil
 }
 
-func (f *fakeController) GlobalUnsubscribe(conn server.ConnSubscriber) error {
+func (f *fakeController) GlobalUnsubscribe(conn server.Connection) error {
 	if f.globalUnsubscribeFn != nil {
 		return f.globalUnsubscribeFn(conn)
 	}
@@ -202,13 +208,13 @@ func makeSnapshot(childID string, status protocol.Status) store.Snapshot {
 
 func TestDispatch_MalformedJSON(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{not valid json`))
+	resp := d(discardConn{}, []byte(`{not valid json`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
 func TestDispatch_UnknownType(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_nonexistent","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_nonexistent","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -222,7 +228,7 @@ func TestDispatch_List_Success(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_list","id":"1"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_list","id":"1"}`)))
 	if r.Command != protocol.TypeCtrlList || r.ID != "1" {
 		t.Fatalf("command=%s id=%s", r.Command, r.ID)
 	}
@@ -260,7 +266,7 @@ func TestDispatch_List_WithFilter(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_list","id":"2","filter":{"status":"streaming","nameContains":"afk"}}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 
 	var data protocol.ListResponseData
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -281,7 +287,7 @@ func TestDispatch_List_ExitedChildHasNilPID(t *testing.T) {
 		listFn: func(_ protocol.ListFilter) []store.Snapshot { return []store.Snapshot{snap} },
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_list","id":"3"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_list","id":"3"}`)))
 
 	var data protocol.ListResponseData
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -306,7 +312,7 @@ func TestDispatch_Get_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_get","id":"2","childId":"c_001"}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 	if r.Command != protocol.TypeCtrlGet {
 		t.Errorf("command: %s", r.Command)
 	}
@@ -325,13 +331,13 @@ func TestDispatch_Get_NotFound(t *testing.T) {
 		getFn: func(string) (store.Snapshot, bool) { return store.Snapshot{}, false },
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_get","id":"x","childId":"c_missing"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_get","id":"x","childId":"c_missing"}`))
 	mustError(t, resp, protocol.ErrChildNotFound)
 }
 
 func TestDispatch_Get_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_get","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_get","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -348,7 +354,7 @@ func TestDispatch_Status_Success(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_status","id":"15"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_status","id":"15"}`)))
 	if r.Command != protocol.TypeCtrlStatus || r.ID != "15" {
 		t.Fatalf("command=%s id=%s", r.Command, r.ID)
 	}
@@ -384,7 +390,7 @@ func TestDispatch_GetRecent_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_get_recent","id":"10","childId":"c_001","limit":100}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 
 	var data protocol.GetRecentResponseData
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -405,7 +411,7 @@ func TestDispatch_GetRecent_EmptyEventsIsArray(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_get_recent","id":"10","childId":"c_001"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_get_recent","id":"10","childId":"c_001"}`)))
 
 	// "events" must be [] not null.
 	if !json.Valid(r.Data) {
@@ -427,13 +433,13 @@ func TestDispatch_GetRecent_NotFound(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_get_recent","id":"x","childId":"c_missing"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_get_recent","id":"x","childId":"c_missing"}`))
 	mustError(t, resp, protocol.ErrChildNotFound)
 }
 
 func TestDispatch_GetRecent_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_get_recent","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_get_recent","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -457,7 +463,7 @@ func TestDispatch_Search_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_search","id":"14","query":"ublk_register","limit":50}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 
 	var data protocol.SearchResponseData
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -476,7 +482,7 @@ func TestDispatch_Search_Success(t *testing.T) {
 
 func TestDispatch_Search_MissingQuery(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_search","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_search","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -487,7 +493,7 @@ func TestDispatch_Search_EmptyHitsIsArray(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_search","id":"x","query":"needle"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_search","id":"x","query":"needle"}`)))
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(r.Data, &raw); err != nil {
 		t.Fatal(err)
@@ -516,7 +522,7 @@ func TestDispatch_Spawn_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_spawn","id":"req-42","cwd":"/work","name":"afk-impl"}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 	if r.ID != "req-42" {
 		t.Errorf("id: %s", r.ID)
 	}
@@ -535,13 +541,13 @@ func TestDispatch_Spawn_Success(t *testing.T) {
 
 func TestDispatch_Spawn_MissingCwd(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_spawn","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_spawn","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
 func TestDispatch_Spawn_RelativeCwd(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_spawn","id":"x","cwd":"relative/path"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_spawn","id":"x","cwd":"relative/path"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -552,7 +558,7 @@ func TestDispatch_Spawn_Failure(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_spawn","id":"x","cwd":"/work"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_spawn","id":"x","cwd":"/work"}`))
 	mustError(t, resp, protocol.ErrSpawnFailed)
 }
 
@@ -569,7 +575,7 @@ func TestDispatch_Resume_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_resume","id":"r1","childId":"c_001"}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 
 	var data protocol.SpawnResponseData
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -587,7 +593,7 @@ func TestDispatch_Resume_NotFound(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_resume","id":"x","childId":"c_missing"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_resume","id":"x","childId":"c_missing"}`))
 	mustError(t, resp, protocol.ErrNotFound)
 }
 
@@ -598,13 +604,13 @@ func TestDispatch_Resume_NotResumable(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_resume","id":"x","childId":"c_live"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_resume","id":"x","childId":"c_live"}`))
 	mustError(t, resp, protocol.ErrNotResumable)
 }
 
 func TestDispatch_Resume_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_resume","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_resume","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -629,7 +635,7 @@ func TestDispatch_Kill_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_kill","id":"5","childId":"c_001","shutdownTimeoutMs":180000,"killTimeoutMs":30000}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 
 	var data protocol.KillResponseData
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -653,7 +659,7 @@ func TestDispatch_Kill_NotFound(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_kill","id":"x","childId":"c_missing"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_kill","id":"x","childId":"c_missing"}`))
 	mustError(t, resp, protocol.ErrChildNotFound)
 }
 
@@ -664,13 +670,13 @@ func TestDispatch_Kill_AlreadyExited(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_kill","id":"x","childId":"c_dead"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_kill","id":"x","childId":"c_dead"}`))
 	mustError(t, resp, protocol.ErrChildExited)
 }
 
 func TestDispatch_Kill_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_kill","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_kill","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -686,7 +692,7 @@ func TestDispatch_Forget_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_forget","id":"12","childId":"c_001"}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 	if r.Command != protocol.TypeCtrlForget {
 		t.Errorf("command: %s", r.Command)
 	}
@@ -706,7 +712,7 @@ func TestDispatch_Forget_NotFound(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_forget","id":"x","childId":"c_missing"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_forget","id":"x","childId":"c_missing"}`))
 	mustError(t, resp, protocol.ErrNotFound)
 }
 
@@ -717,13 +723,13 @@ func TestDispatch_Forget_NotExited(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_forget","id":"x","childId":"c_live"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_forget","id":"x","childId":"c_live"}`))
 	mustError(t, resp, protocol.ErrNotExited)
 }
 
 func TestDispatch_Forget_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_forget","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_forget","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -740,7 +746,7 @@ func TestDispatch_ForgetAllExited_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_forget_all_exited","id":"13","olderThanMs":3600000}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 
 	var data protocol.ForgetAllExitedResponseData
 	if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -761,7 +767,7 @@ func TestDispatch_ForgetAllExited_ZeroAge(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_forget_all_exited","id":"x"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_forget_all_exited","id":"x"}`)))
 	if captured != 0 {
 		t.Errorf("olderThanMs should be 0, got %d", captured)
 	}
@@ -787,7 +793,7 @@ func TestDispatch_Send_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_send","id":"11","childId":"c_001","frame":{"type":"prompt","message":"hello"}}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 	if r.Command != protocol.TypeCtrlSend {
 		t.Errorf("command: %s", r.Command)
 	}
@@ -812,7 +818,7 @@ func TestDispatch_Send_ChildNotFound(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_send","id":"x","childId":"c_missing","frame":{"type":"prompt"}}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_send","id":"x","childId":"c_missing","frame":{"type":"prompt"}}`))
 	mustError(t, resp, protocol.ErrChildNotFound)
 }
 
@@ -823,7 +829,7 @@ func TestDispatch_Send_Backpressure(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_send","id":"x","childId":"c_001","frame":{"type":"prompt"}}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_send","id":"x","childId":"c_001","frame":{"type":"prompt"}}`))
 	mustError(t, resp, protocol.ErrBackpressure)
 }
 
@@ -834,19 +840,19 @@ func TestDispatch_Send_ShuttingDown(t *testing.T) {
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_send","id":"x","childId":"c_001","frame":{"type":"prompt"}}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_send","id":"x","childId":"c_001","frame":{"type":"prompt"}}`))
 	mustError(t, resp, protocol.ErrChildShuttingDown)
 }
 
 func TestDispatch_Send_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_send","id":"x","frame":{"type":"prompt"}}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_send","id":"x","frame":{"type":"prompt"}}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
 func TestDispatch_Send_MissingFrame(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_send","id":"x","childId":"c_001"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_send","id":"x","childId":"c_001"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -856,7 +862,7 @@ func TestDispatch_Subscribe_Success(t *testing.T) {
 	var capturedChildID string
 	var capturedFilter protocol.SubscribeFilter
 	c := &fakeController{
-		subscribeFn: func(childID string, _ server.ConnSubscriber, filter protocol.SubscribeFilter) error {
+		subscribeFn: func(childID string, _ server.Connection, filter protocol.SubscribeFilter) error {
 			capturedChildID = childID
 			capturedFilter = filter
 			return nil
@@ -864,7 +870,7 @@ func TestDispatch_Subscribe_Success(t *testing.T) {
 	}
 	d := server.NewDispatch(c)
 	frame := `{"type":"ctrl_subscribe","id":"6","childId":"c_001","filter":{"profile":"coarse"}}`
-	r := mustSuccess(t, d([]byte(frame)))
+	r := mustSuccess(t, d(discardConn{}, []byte(frame)))
 	if r.Command != protocol.TypeCtrlSubscribe {
 		t.Errorf("command: %s", r.Command)
 	}
@@ -878,18 +884,18 @@ func TestDispatch_Subscribe_Success(t *testing.T) {
 
 func TestDispatch_Subscribe_NotFound(t *testing.T) {
 	c := &fakeController{
-		subscribeFn: func(string, server.ConnSubscriber, protocol.SubscribeFilter) error {
+		subscribeFn: func(string, server.Connection, protocol.SubscribeFilter) error {
 			return controllerErr(protocol.ErrChildNotFound, "child not found")
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_subscribe","id":"x","childId":"c_missing"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_subscribe","id":"x","childId":"c_missing"}`))
 	mustError(t, resp, protocol.ErrChildNotFound)
 }
 
 func TestDispatch_Subscribe_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_subscribe","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_subscribe","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -898,13 +904,13 @@ func TestDispatch_Subscribe_MissingChildID(t *testing.T) {
 func TestDispatch_Unsubscribe_Success(t *testing.T) {
 	var capturedChildID string
 	c := &fakeController{
-		unsubscribeFn: func(childID string, _ server.ConnSubscriber) error {
+		unsubscribeFn: func(childID string, _ server.Connection) error {
 			capturedChildID = childID
 			return nil
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_unsubscribe","id":"7","childId":"c_001"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_unsubscribe","id":"7","childId":"c_001"}`)))
 	if r.Command != protocol.TypeCtrlUnsubscribe {
 		t.Errorf("command: %s", r.Command)
 	}
@@ -915,7 +921,7 @@ func TestDispatch_Unsubscribe_Success(t *testing.T) {
 
 func TestDispatch_Unsubscribe_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_unsubscribe","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_unsubscribe","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
@@ -924,13 +930,13 @@ func TestDispatch_Unsubscribe_MissingChildID(t *testing.T) {
 func TestDispatch_GlobalSubscribe_Success(t *testing.T) {
 	called := false
 	c := &fakeController{
-		globalSubscribeFn: func(server.ConnSubscriber) error {
+		globalSubscribeFn: func(server.Connection) error {
 			called = true
 			return nil
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_global_subscribe","id":"8"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_global_subscribe","id":"8"}`)))
 	if r.Command != protocol.TypeCtrlGlobalSubscribe {
 		t.Errorf("command: %s", r.Command)
 	}
@@ -942,13 +948,13 @@ func TestDispatch_GlobalSubscribe_Success(t *testing.T) {
 func TestDispatch_GlobalUnsubscribe_Success(t *testing.T) {
 	called := false
 	c := &fakeController{
-		globalUnsubscribeFn: func(server.ConnSubscriber) error {
+		globalUnsubscribeFn: func(server.Connection) error {
 			called = true
 			return nil
 		},
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_global_unsubscribe","id":"9"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_global_unsubscribe","id":"9"}`)))
 	if r.Command != protocol.TypeCtrlGlobalUnsubscribe {
 		t.Errorf("command: %s", r.Command)
 	}
@@ -959,23 +965,23 @@ func TestDispatch_GlobalUnsubscribe_Success(t *testing.T) {
 
 func TestDispatch_GlobalSubscribe_Error(t *testing.T) {
 	c := &fakeController{
-		globalSubscribeFn: func(server.ConnSubscriber) error {
+		globalSubscribeFn: func(server.Connection) error {
 			return controllerErr(protocol.ErrInternal, "boom")
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_global_subscribe","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_global_subscribe","id":"x"}`))
 	mustError(t, resp, protocol.ErrInternal)
 }
 
 func TestDispatch_GlobalUnsubscribe_Error(t *testing.T) {
 	c := &fakeController{
-		globalUnsubscribeFn: func(server.ConnSubscriber) error {
+		globalUnsubscribeFn: func(server.Connection) error {
 			return controllerErr(protocol.ErrInternal, "boom")
 		},
 	}
 	d := server.NewDispatch(c)
-	resp := d([]byte(`{"type":"ctrl_global_unsubscribe","id":"x"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_global_unsubscribe","id":"x"}`))
 	mustError(t, resp, protocol.ErrInternal)
 }
 
@@ -983,7 +989,7 @@ func TestDispatch_GlobalUnsubscribe_Error(t *testing.T) {
 
 func TestDispatch_IDPropagatedInErrorResponse(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
-	resp := d([]byte(`{"type":"ctrl_get","id":"req-99","childId":"c_missing"}`))
+	resp := d(discardConn{}, []byte(`{"type":"ctrl_get","id":"req-99","childId":"c_missing"}`))
 	r := parseResponse(t, resp)
 	if r.ID != "req-99" {
 		t.Errorf("id not propagated in error response: got %s", r.ID)
@@ -995,7 +1001,7 @@ func TestDispatch_IDPropagatedInSuccessResponse(t *testing.T) {
 		statusFn: func() server.ControllerStatus { return server.ControllerStatus{} },
 	}
 	d := server.NewDispatch(c)
-	r := mustSuccess(t, d([]byte(`{"type":"ctrl_status","id":"abc-123"}`)))
+	r := mustSuccess(t, d(discardConn{}, []byte(`{"type":"ctrl_status","id":"abc-123"}`)))
 	if r.ID != "abc-123" {
 		t.Errorf("id not propagated in success response: got %s", r.ID)
 	}
@@ -1020,7 +1026,7 @@ func TestDispatch_ConcurrentSafe(t *testing.T) {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for range 100 {
-				resp := d(f)
+				resp := d(discardConn{}, f)
 				if resp == nil {
 					t.Error("nil response")
 				}

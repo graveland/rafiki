@@ -6,21 +6,21 @@ Mode: subagent-driven-development (sdd-implementer → sdd-spec-reviewer → sdd
 
 ## Tasks
 
-- [ ] **Task 1** — Repo bootstrap and `go.mod` (Makefile, deps)
-- [ ] **Task 2** — Protocol package — types
-- [ ] **Task 3** — Protocol package — JSONL framing
-- [ ] **Task 4** — Bus — generic publish/subscribe
-- [ ] **Task 5** — Ring buffer
-- [ ] **Task 6** — Store — Session struct and Snapshot DTO
-- [ ] **Task 7** — Store — indexed lookups and mutations
-- [ ] **Task 8** — State machine
-- [ ] **Task 9** — Persistence — state records
-- [ ] **Task 10** — Persistence — log dumps
-- [ ] **Task 11** — Child supervise — process lifecycle
-- [ ] **Task 12** — Child supervise — wire to state machine, store, sniffing
-- [ ] **Task 13** — Interception (new_session, switch_session)
-- [ ] **Task 14** — UDS server — listen, accept, framing
-- [ ] **Task 15** — Dispatch — wire ctrl_* commands
+- [x] **Task 1** — Repo bootstrap and `go.mod` (Makefile, deps) — commits `6e5fa26`, `68557c6`
+- [x] **Task 2** — Protocol package — types — commits `1b83d3a`, `e8be707`
+- [x] **Task 3** — Protocol package — JSONL framing — commits `8a5053f`, `d060ce3`
+- [x] **Task 4** — Bus — generic publish/subscribe — commits `61ff8fd`, `d1988fd`, `25d9823`
+- [x] **Task 5** — Ring buffer — commits `7f5602a`, `56da1f2`
+- [x] **Task 6** — Store — Session struct and Snapshot DTO — commits `345eef9`, `a08807c`
+- [x] **Task 7** — Store — indexed lookups and mutations — commits `a3a275f`, `6dfca74`
+- [x] **Task 8** — State machine — commits `35de143`, `08db025`, `e81887a`
+- [x] **Task 9** — Persistence — state records — commit `6249276`
+- [x] **Task 10** — Persistence — log dumps — commits `704af8c`, `44dc92a`
+- [x] **Task 11** — Child supervise — process lifecycle — commits `0776156`, `9457c01`
+- [x] **Task 12** — Child supervise — wire to state machine, store, sniffing — commits `8ae3a38`, `1536d9f`
+- [x] **Task 13** — Interception (new_session, switch_session) — commit `a88d91e`
+- [x] **Task 14** — UDS server — listen, accept, framing — commits `2b99f97`, `4ef4597`
+- [x] **Task 15** — Dispatch — wire ctrl_* commands — commits `b9a80ba`, `536c003`
 - [ ] **Task 16** — Controller glue and main
 - [ ] **Task 17** — Integration tests
 
