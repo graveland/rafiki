@@ -1,0 +1,18 @@
+# Binaries
+/pi-controller
+/pi-ctl
+/bin/
+
+# Go build artifacts
+*.test
+*.out
+coverage.txt
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local config + state (these belong under ~/.pi/run, not in repo)
+/run/
