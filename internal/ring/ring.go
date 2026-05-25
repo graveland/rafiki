@@ -17,7 +17,7 @@ type Options struct {
 // Query describes which events Recent should return.
 type Query struct {
 	Limit int   // 0 means no limit
-	Since int64 // 0 means no time filter; otherwise return events with Timestamp > Since
+	Since int64 // 0 means no time filter; otherwise return events with Timestamp >= Since (inclusive)
 }
 
 // Ring is a bounded LRU event buffer. Oldest events are dropped when either

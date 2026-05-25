@@ -559,7 +559,7 @@ a coarse-subscription notification.
   "id":      "10",
   "childId": "c_01HX...",
   "limit":   100,                                  // optional; default 100
-  "since":   1716636789,                           // optional; ms; events after
+  "since":   1716636789,                           // optional; ms; events with timestamp >= since (inclusive)
   "include": ["turn_end", "tool_execution_end"],   // optional; filter
   "exclude": ["message_update"]                    // optional
 }
