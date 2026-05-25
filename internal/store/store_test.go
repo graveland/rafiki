@@ -88,6 +88,9 @@ func TestStore_Delete_RemovesFromAllIndexes(t *testing.T) {
 	if got := s.FindByCwd("/x"); len(got) != 0 {
 		t.Fatalf("cwd index leak: %v", got)
 	}
+	if got := s.FindByStatus(protocol.StatusIdle); len(got) != 0 {
+		t.Fatalf("status index leak: %v", got)
+	}
 }
 
 func TestStore_VerifyOnRead_FiltersStaleIndex(t *testing.T) {
@@ -119,6 +122,33 @@ func TestStore_SetStatus(t *testing.T) {
 	if snap.Status != protocol.StatusStreaming {
 		t.Fatalf("status: %v", snap.Status)
 	}
+	// Old status should no longer find this child.
+	if got := s.FindByStatus(protocol.StatusIdle); len(got) != 0 {
+		t.Fatalf("old status index not cleared: %v", got)
+	}
+	// New status should find it.
+	if got := s.FindByStatus(protocol.StatusStreaming); len(got) != 1 || got[0].ChildID != "c_1" {
+		t.Fatalf("new status index missing: %v", got)
+	}
+}
+
+func TestStore_NotFoundPaths(t *testing.T) {
+	s := store.New()
+
+	if _, ok := s.Get("missing"); ok {
+		t.Fatal("Get on missing returned ok")
+	}
+	if err := s.Update("missing", func(*store.Session) {}); err != store.ErrNotFound {
+		t.Fatalf("Update on missing: got %v, want ErrNotFound", err)
+	}
+	if err := s.Rename("missing", "new"); err != store.ErrNotFound {
+		t.Fatalf("Rename on missing: got %v, want ErrNotFound", err)
+	}
+	if _, ok := s.SetStatus("missing", protocol.StatusIdle); ok {
+		t.Fatal("SetStatus on missing returned ok")
+	}
+	// Delete on missing is a no-op — confirm it doesn't panic.
+	s.Delete("missing")
 }
 
 func TestStore_ListSortedByStartedAtDesc(t *testing.T) {
