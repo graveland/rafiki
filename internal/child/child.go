@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -65,6 +66,13 @@ type Child struct {
 
 	mu     sync.Mutex
 	closed bool // set by readStdout after cmd.Process.Wait() returns
+
+	sm       *StateMachine
+	// metaMu protects meta and sm to allow Status()/Metadata() concurrent reads.
+	metaMu   sync.Mutex
+	meta     SnifferMetadata
+	idle     chan struct{}
+	idleOnce sync.Once
 }
 
 // Spawn validates the spec, starts the pi binary, and launches the supervise
@@ -127,6 +135,8 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		processDone: make(chan struct{}),
 		bus:         bus.New[[]byte](bus.Options{}),
 		ring:        ring.New(ring.Options{}),
+		sm:          NewStateMachine(),
+		idle:        make(chan struct{}),
 	}
 
 	go c.supervise()
@@ -165,6 +175,27 @@ func (c *Child) Send(frame []byte) error {
 	}
 }
 
+// Idle returns a channel that is closed once the kickstart get_state response
+// has arrived and the state machine has transitioned out of spawning. This is
+// a stronger signal than Ready(), which closes as soon as the write loop is
+// processing (before pi has responded).
+func (c *Child) Idle() <-chan struct{} { return c.idle }
+
+// Status returns the current state-machine status. Safe to call concurrently.
+func (c *Child) Status() protocol.Status {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	return c.sm.Current()
+}
+
+// Metadata returns the most recently sniffed session/model metadata.
+// Safe to call concurrently.
+func (c *Child) Metadata() SnifferMetadata {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	return c.meta
+}
+
 // supervise is the goroutine that owns the child's lifecycle. It launches the
 // stdout and stderr reader goroutines, then drives the stdin write loop until
 // the process exits. defer close(c.done) makes Done() observable to callers.
@@ -176,9 +207,11 @@ func (c *Child) supervise() {
 	go func() { defer wg.Done(); c.readStdout() }()
 	go func() { defer wg.Done(); c.readStderr() }()
 
-	// Signal that the supervise loop is now processing. State-machine wiring
-	// (Task 12) will refine this to close only after the first pi response.
+	// Signal that the write loop is running, then immediately queue the
+	// bootstrap get_state. cmdCh has capacity 16 so this never blocks;
+	// the first select iteration below drains and forwards it to pi's stdin.
 	close(c.ready)
+	c.cmdCh <- []byte(`{"type":"get_state","id":"__bootstrap__"}`)
 
 	for {
 		select {
@@ -217,6 +250,7 @@ func (c *Child) readStdout() {
 		ts := time.Now().UnixMilli()
 		c.ring.Append(line, ts)
 		c.bus.Publish(line)
+		c.handleFrame(line)
 	}
 
 	// Reap the process and record its exit status.
@@ -236,6 +270,66 @@ func (c *Child) readStdout() {
 	c.mu.Unlock()
 
 	close(c.processDone)
+}
+
+// handleFrame decodes a pi stdout frame, updates sniffed metadata, drives the
+// state machine, and (for get_state responses) closes the idle channel once.
+// Called exclusively from the readStdout goroutine.
+func (c *Child) handleFrame(line []byte) {
+	var hdr struct {
+		Type    string          `json:"type"`
+		Command string          `json:"command"`
+		Method  string          `json:"method,omitempty"`
+		ID      string          `json:"id,omitempty"`
+		Data    json.RawMessage `json:"data,omitempty"`
+	}
+	_ = json.Unmarshal(line, &hdr)
+
+	kickIdle := false
+
+	c.metaMu.Lock()
+
+	if md, ok := ExtractMetadata(line); ok {
+		if md.SessionID != "" {
+			c.meta.SessionID = md.SessionID
+		}
+		if md.SessionFile != "" {
+			c.meta.SessionFile = md.SessionFile
+		}
+		if md.SessionName != "" {
+			c.meta.SessionName = md.SessionName
+		}
+		if md.Model != "" {
+			c.meta.Model = md.Model
+		}
+		if hdr.Type == "response" && hdr.Command == "get_state" {
+			c.sm.OnFirstResponse()
+			kickIdle = true
+		}
+	}
+
+	// Route pi events (non-response frames) to the state machine.
+	if hdr.Type != "" && hdr.Type != "response" {
+		switch hdr.Type {
+		case "auto_retry_start":
+			// Dedicated method — not routed through OnPiEvent.
+			var payload struct {
+				ErrorMessage string `json:"errorMessage"`
+			}
+			_ = json.Unmarshal(line, &payload)
+			c.sm.OnAutoRetryStart(payload.ErrorMessage)
+		case "extension_ui_request":
+			c.sm.OnPiEvent(hdr.Type, &PiUIRequestMeta{ID: hdr.ID, Method: hdr.Method})
+		default:
+			c.sm.OnPiEvent(hdr.Type, nil)
+		}
+	}
+
+	c.metaMu.Unlock()
+
+	if kickIdle {
+		c.idleOnce.Do(func() { close(c.idle) })
+	}
 }
 
 // readStderr drains stderr into a bounded in-memory buffer. Oldest bytes are

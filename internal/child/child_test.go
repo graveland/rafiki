@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"graveland.dev/pi-controller/internal/child"
+	"graveland.dev/pi-controller/internal/protocol"
 )
 
 func fakePiPath(t *testing.T) string {
@@ -94,6 +95,44 @@ func TestChild_BinaryMissing_SpawnFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected spawn failure")
 	}
+}
+
+func TestChild_KickstartAndMetadata(t *testing.T) {
+	spec := child.SpawnSpec{
+		ChildID:  "c_test",
+		Cwd:      t.TempDir(),
+		PiBinary: fakePiPath(t),
+		Env:      []string{"FAKE_PI_SESSION_ID=test-sid", "FAKE_PI_SESSION_NAME=initial"},
+	}
+
+	c, err := child.Spawn(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
+	})
+
+	// Wait for the kickstart get_state response to arrive.
+	select {
+	case <-c.Idle():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("did not transition to idle: %v", c.Status())
+	}
+
+	if c.Status() != protocol.StatusIdle {
+		t.Fatalf("status after idle: %v", c.Status())
+	}
+
+	md := c.Metadata()
+	if md.SessionID != "test-sid" {
+		t.Fatalf("sessionId: got %q, want %q", md.SessionID, "test-sid")
+	}
+	if md.SessionName != "initial" {
+		t.Fatalf("sessionName: got %q, want %q", md.SessionName, "initial")
+	}
+
+	_, _ = c.Shutdown(5*time.Second, time.Second)
 }
 
 func TestChild_ProcessExits_ReadyStillFires(t *testing.T) {
