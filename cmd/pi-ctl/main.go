@@ -33,7 +33,11 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().String("output", "auto", "output format: auto|json|table")
 	root.PersistentFlags().String("color", "auto", "color output: auto|always|never")
 
-	// Subcommands wired up in later tasks; nothing yet.
+	root.AddCommand(
+		newListCmd(),
+		newGetCmd(),
+		newStatusCmd(),
+	)
 
 	return root
 }
