@@ -671,9 +671,9 @@ describe("RemoteAgentSession", () => {
         expect(session.hasExtensionHandlers("agent_start")).toBe(false);
     });
 
-    it("stubs: executeBash throws not-implemented", async () => {
+    it("stubs: executeBash throws v1-error with actionable message", async () => {
         await expect(session.executeBash("ls")).rejects.toThrow(
-            "not yet implemented in pic-attach v1"
+            "Bash execution (! prefix) is not supported in pic-attach v1"
         );
     });
 
@@ -731,5 +731,61 @@ describe("RemoteAgentSession", () => {
 
     it("stubs: getUserMessagesForForking returns empty array", () => {
         expect(session.getUserMessagesForForking()).toEqual([]);
+    });
+
+    // ── cycleThinkingLevel / cycleModel graceful stubs ───────────────────────
+
+    it("cycleThinkingLevel: returns undefined (TUI shows 'model does not support thinking')", () => {
+        // The TUI's InteractiveMode.cycleThinkingLevel() does NOT have a
+        // try-catch; returning undefined is the only safe outcome here.
+        expect(session.cycleThinkingLevel()).toBeUndefined();
+    });
+
+    it("cycleModel: returns undefined (TUI shows 'only one model available')", async () => {
+        // The TUI's cycleModel() wraps this in try-catch, but returning
+        // undefined gives a nicer status message than an error dialog.
+        await expect(session.cycleModel("forward")).resolves.toBeUndefined();
+        await expect(session.cycleModel("backward")).resolves.toBeUndefined();
+        await expect(session.cycleModel()).resolves.toBeUndefined();
+    });
+
+    // ── sendCustomMessage v1-error ───────────────────────────────────────
+
+    it("sendCustomMessage: throws with standard v1-error format", async () => {
+        await expect(session.sendCustomMessage({ type: "custom" })).rejects.toThrow(
+            "sendCustomMessage is not supported in pic-attach v1."
+        );
+    });
+
+    // ── agent stub: waitForIdle / signal ───────────────────────────────
+
+    it("agent.waitForIdle: resolves immediately when not streaming", async () => {
+        expect(session.isStreaming).toBe(false);
+        // Should resolve synchronously (or in the next microtask)
+        await expect(session.agent.waitForIdle()).resolves.toBeUndefined();
+    });
+
+    it("agent.waitForIdle: resolves when agent_end arrives while streaming", async () => {
+        // Put the session into streaming state
+        client.push({ type: "ctrl_event", childId: "child-1", event: { type: "agent_start" } });
+        await tick();
+        expect(session.isStreaming).toBe(true);
+
+        // Start waiting for idle
+        const idlePromise = session.agent.waitForIdle();
+
+        // Deliver agent_end
+        client.push({
+            type: "ctrl_event",
+            childId: "child-1",
+            event: { type: "agent_end", messages: [], willRetry: false },
+        });
+        await tick();
+
+        await expect(idlePromise).resolves.toBeUndefined();
+    });
+
+    it("agent.signal: returns undefined (no active run from client side)", () => {
+        expect(session.agent.signal).toBeUndefined();
     });
 });

@@ -14,6 +14,7 @@
  * GETTERS / PUBLIC PROPERTIES  (27 total)
  * ─────────────────────────────────────────────────────────────────────────
  *  [impl]  1. agent: Agent                           — readonly property
+ *                                                      stub: abort() + waitForIdle() + signal
  *  [impl]  2. sessionManager: SessionManager         — readonly property
  *  [impl]  3. settingsManager: SettingsManager       — readonly property
  *  [impl]  4. modelRegistry: ModelRegistry           — getter
@@ -52,16 +53,16 @@
  *  [impl]  7. prompt(text, opts?): Promise<void>
  *  [impl]  8. steer(text, images?): Promise<void>
  *  [impl]  9. followUp(text, images?): Promise<void>
- *  [stub] 10. sendCustomMessage(msg, opts?): Promise<void>
+ *  [v1-err]10. sendCustomMessage(msg, opts?): Promise<void>
  *  [impl] 11. sendUserMessage(content, opts?): Promise<void>
  *  [impl] 12. clearQueue(): { steering: string[]; followUp: string[] }
  *  [impl] 13. getSteeringMessages(): readonly string[]
  *  [impl] 14. getFollowUpMessages(): readonly string[]
  *  [impl] 15. abort(): Promise<void>
  *  [impl] 16. setModel(model): Promise<void>
- *  [stub] 17. cycleModel(dir?): Promise<ModelCycleResult | undefined>
+ *  [stub] 17. cycleModel(dir?): Promise<ModelCycleResult | undefined>  — returns undefined (TUI shows "only one model")
  *  [impl] 18. setThinkingLevel(level): void
- *  [stub] 19. cycleThinkingLevel(): ThinkingLevel | undefined
+ *  [stub] 19. cycleThinkingLevel(): ThinkingLevel | undefined  — returns undefined (TUI shows "model does not support thinking")
  *  [stub] 20. getAvailableThinkingLevels(): ThinkingLevel[]
  *  [stub] 21. supportsThinking(): boolean
  *  [impl] 22. setSteeringMode(mode): void
@@ -74,24 +75,32 @@
  *  [impl] 29. reload(): Promise<void>                             — forwards /reload to daemon
  *  [stub] 30. abortRetry(): void
  *  [stub] 31. setAutoRetryEnabled(enabled): void
- *  [stub] 32. executeBash(cmd, onChunk?, opts?): Promise<BashResult>
+ *  [v1-err]32. executeBash(cmd, onChunk?, opts?): Promise<BashResult>
  *  [stub] 33. recordBashResult(cmd, result, opts?): void
  *  [stub] 34. abortBash(): void
  *  [impl] 35. setSessionName(name): void
- *  [stub] 36. navigateTree(id, opts?): Promise<...>
+ *  [v1-err]36. navigateTree(id, opts?): Promise<...>               — /fork not supported
  *  [stub] 37. getUserMessagesForForking(): Array<...>
  *  [impl] 38. getSessionStats(): SessionStats
  *  [stub] 39. getContextUsage(): ContextUsage | undefined
- *  [stub] 40. exportToHtml(path?): Promise<string>
- *  [stub] 41. exportToJsonl(path?): string
+ *  [v1-err]40. exportToHtml(path?): Promise<string>
+ *  [v1-err]41. exportToJsonl(path?): string
  *  [impl] 42. getLastAssistantText(): string | undefined
- *  [stub] 43. createReplacedSessionContext(): ReplacedSessionContext
+ *  [v1-err]43. createReplacedSessionContext(): ReplacedSessionContext
  *  [stub] 44. hasExtensionHandlers(type): boolean
  *  [stub] 45. setScopedModels(models): void
  *
  * TOTAL: 27 getters/properties, 45 methods = 72 public members
  * IMPLEMENTED: 23 getters + 22 methods = 45
  * STUBBED:      4 getters + 23 methods = 27
+ *
+ * V1-UNSUPPORTED COMMANDS (throw with actionable message, TUI shows showError):
+ *   sendCustomMessage  — no daemon protocol support
+ *   executeBash (!)    — no streaming chunk relay; run bash in daemon session
+ *   navigateTree       — /fork requires session branching not in v1
+ *   exportToHtml       — session data lives in daemon; use daemon export
+ *   exportToJsonl      — session data lives in daemon; use daemon export
+ *   createReplacedSessionContext — session branching not in v1
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
@@ -317,18 +326,49 @@ export class RemoteAgentSession {
 
         // Minimal Agent stub.  The TUI reads most state via AgentSession
         // getters (which we implement), but a few hot paths reach through to
-        // session.agent directly — most notably the Escape-to-abort handler
-        // calling session.agent.abort().  We wire those through to the daemon.
+        // session.agent directly:
+        //   abort()       — Escape handler forwards abort to daemon
+        //   waitForIdle() — extension commandContextActions call site
+        //   signal        — extension shortcut context (reads, doesn't call)
+        //   transport     — settings modal assigns on transport change (JS sets silently)
         const self = this;
         this.agent = {
+            // ── abort ─────────────────────────────────────────────────────────
+            // Fire-and-forget; the TUI's caller is synchronous.  Errors
+            // surface via the unhandled-rejection path which we log.
             abort(): void {
-                // Fire-and-forget; the TUI's caller is synchronous.  Errors
-                // surface via the unhandled-rejection path which we log.
                 void self.abort().catch((err) => {
                     if (process.env.PIC_ATTACH_DEBUG === "1") {
                         console.error("[pic-attach] agent.abort forward failed:", err);
                     }
                 });
+            },
+
+            // ── waitForIdle ───────────────────────────────────────────────────
+            // Waits until the daemon's pi child is no longer actively streaming.
+            // Extension command handlers (commandContextActions.waitForIdle) call
+            // this to defer work until the agent finishes its current turn.
+            waitForIdle(): Promise<void> {
+                if (!self.isStreaming) {
+                    return Promise.resolve();
+                }
+                return new Promise<void>((resolve) => {
+                    const unsub = self.subscribe((ev) => {
+                        if (ev.type === "agent_end") {
+                            unsub();
+                            resolve();
+                        }
+                    });
+                });
+            },
+
+            // ── signal ────────────────────────────────────────────────────────
+            // The active abort signal for the current run, or undefined when
+            // idle. We cannot surface the daemon-side AbortSignal, so callers
+            // always see undefined. Extension shortcuts treat undefined signal
+            // as "no cancellation possible" and work correctly.
+            get signal(): AbortSignal | undefined {
+                return undefined;
             },
         } as unknown as Agent;
 
@@ -897,24 +937,33 @@ export class RemoteAgentSession {
         // no-op: daemon-side concern
     }
 
-    /** Stub: sendCustomMessage requires daemon support not yet wired. */
+    /** sendCustomMessage has no daemon protocol support in v1. */
     async sendCustomMessage(
         _message: unknown,
         _options?: unknown
     ): Promise<void> {
-        throw new Error("sendCustomMessage: not yet implemented in pic-attach v1");
+        throw new Error("sendCustomMessage is not supported in pic-attach v1.");
     }
 
-    /** Stub: model cycling requires full model registry on the client side. */
+    /**
+     * Returns undefined — model cycling requires navigating the local model
+     * registry, which pic-attach v1 does not have.  The TUI handles undefined
+     * by showing "Only one model available" status, which is benign.
+     * Use the model selector (Ctrl+M) or setModel() to change models.
+     */
     async cycleModel(
         _direction?: "forward" | "backward"
     ): Promise<ModelCycleResult | undefined> {
-        throw new Error("cycleModel: not yet implemented in pic-attach v1");
+        return undefined;
     }
 
-    /** Stub: thinking-level cycling requires model metadata. */
+    /**
+     * Returns undefined — thinking-level cycling requires model metadata not
+     * available client-side in v1.  The TUI handles undefined by showing
+     * "Current model does not support thinking" status, which is benign.
+     */
     cycleThinkingLevel(): ThinkingLevel | undefined {
-        throw new Error("cycleThinkingLevel: not yet implemented in pic-attach v1");
+        return undefined;
     }
 
     /** Stub: thinking-level list requires model metadata. */
@@ -1021,13 +1070,21 @@ export class RemoteAgentSession {
         // no-op in v1
     }
 
-    /** Stub: bash execution runs in the daemon-owned pi child. */
+    /**
+     * Bash execution (! prefix) is not supported in pic-attach v1.  The
+     * daemon executes bash in its own session; there is no streaming chunk
+     * relay from daemon to client.  The TUI catches this error and shows it
+     * via showError(), so the user sees an actionable message rather than a
+     * crash.
+     */
     async executeBash(
         _command: string,
         _onChunk?: (chunk: string) => void,
         _options?: unknown
     ): Promise<BashResult> {
-        throw new Error("executeBash: not yet implemented in pic-attach v1");
+        throw new Error(
+            "Bash execution (! prefix) is not supported in pic-attach v1. Run bash commands in the daemon session instead."
+        );
     }
 
     /** Stub: bash result recording is daemon-side. */
