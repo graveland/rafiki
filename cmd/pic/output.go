@@ -87,7 +87,10 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	for _, ch := range children {
 		started := "-"
 		if ch.StartedAt > 0 {
-			started = time.Unix(ch.StartedAt, 0).Format("2006-01-02 15:04")
+			// StartedAt arrives from the daemon as Unix milliseconds (see
+			// dispatch.go: snap.StartedAt.UnixMilli()).  time.UnixMilli ensures
+			// the printed date is in the present millennium.
+			started = time.UnixMilli(ch.StartedAt).Format("2006-01-02 15:04")
 		}
 		tw.AppendRow(table.Row{
 			ch.ChildID,
