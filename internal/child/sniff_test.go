@@ -18,11 +18,27 @@ func TestSniff_GetStateResponse(t *testing.T) {
 	}
 }
 
-func TestSniff_SetSessionNameResponse(t *testing.T) {
-	frame := []byte(`{"type":"response","command":"set_session_name","success":true,"data":{"name":"renamed"}}`)
+// Pi's set_session_name response is `{success:true}` with no payload.
+// The actual name change arrives via the session_info_changed event below.
+func TestSniff_SetSessionNameResponse_NoPayload(t *testing.T) {
+	frame := []byte(`{"type":"response","command":"set_session_name","success":true}`)
+	if _, ok := child.ExtractMetadata(frame); ok {
+		t.Fatal("set_session_name response without data should not yield metadata")
+	}
+}
+
+func TestSniff_SessionInfoChangedEvent(t *testing.T) {
+	frame := []byte(`{"type":"session_info_changed","name":"renamed"}`)
 	md, ok := child.ExtractMetadata(frame)
 	if !ok || md.SessionName != "renamed" {
 		t.Fatalf("got %+v ok=%v", md, ok)
+	}
+}
+
+func TestSniff_SessionInfoChangedEvent_EmptyName(t *testing.T) {
+	frame := []byte(`{"type":"session_info_changed"}`)
+	if _, ok := child.ExtractMetadata(frame); ok {
+		t.Fatal("empty session_info_changed should not yield metadata")
 	}
 }
 

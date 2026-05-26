@@ -12,8 +12,18 @@ type SnifferMetadata struct {
 }
 
 // ExtractMetadata inspects a pi-RPC frame and returns metadata fields found in
-// known response shapes. ok is false when the frame is not a recognised
-// response type, carries no relevant fields, or cannot be decoded.
+// known response and event shapes. ok is false when the frame is not a
+// recognised type, carries no relevant fields, or cannot be decoded.
+//
+// Supported sources:
+//   - response.get_state          → sessionId, sessionFile, sessionName, model
+//   - response.set_model          → model
+//   - response.cycle_model        → model
+//   - event.session_info_changed  → sessionName
+//
+// Note: response.set_session_name carries only {success:true} from pi (no
+// name field), so we learn renames via the session_info_changed event
+// emitted alongside.
 func ExtractMetadata(frame []byte) (md SnifferMetadata, ok bool) {
 	var generic struct {
 		Type    string          `json:"type"`
@@ -24,6 +34,19 @@ func ExtractMetadata(frame []byte) (md SnifferMetadata, ok bool) {
 	if err := json.Unmarshal(frame, &generic); err != nil {
 		return md, false
 	}
+
+	// Event-type frames carry their payload at the top level (not in data).
+	if generic.Type == "session_info_changed" {
+		var d struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(frame, &d); err != nil {
+			return md, false
+		}
+		md.SessionName = d.Name
+		return md, md.SessionName != ""
+	}
+
 	if generic.Type != "response" || !generic.Success {
 		return md, false
 	}
@@ -44,14 +67,6 @@ func ExtractMetadata(frame []byte) (md SnifferMetadata, ok bool) {
 		md.SessionName = d.SessionName
 		md.Model = parseModelField(d.Model)
 		return md, true
-
-	case "set_session_name":
-		var d struct {
-			Name string `json:"name"`
-		}
-		_ = json.Unmarshal(generic.Data, &d)
-		md.SessionName = d.Name
-		return md, md.SessionName != ""
 
 	case "set_model", "cycle_model":
 		// Response may wrap the model in data.model or put fields directly.
