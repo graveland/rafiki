@@ -1,0 +1,70 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"graveland.dev/pi-controller/internal/client"
+	"graveland.dev/pi-controller/internal/protocol"
+)
+
+func newKillCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "kill <id|name>",
+		Short: "Stop a running child gracefully",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runKill,
+	}
+	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
+	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
+	return cmd
+}
+
+func runKill(cmd *cobra.Command, args []string) error {
+	c := mustDial(cmd)
+	defer c.Close()
+
+	ctx := cmdCtx(cmd)
+	childID, err := c.Resolve(ctx, args[0])
+	if err != nil {
+		return err
+	}
+
+	st, _ := cmd.Flags().GetDuration("shutdown-timeout")
+	kt, _ := cmd.Flags().GetDuration("kill-timeout")
+
+	req := protocol.KillRequest{
+		Type:    protocol.TypeCtrlKill,
+		ChildID: childID,
+	}
+	if st > 0 {
+		req.ShutdownTimeoutMs = st.Milliseconds()
+	}
+	if kt > 0 {
+		req.KillTimeoutMs = kt.Milliseconds()
+	}
+
+	// Allow longer than the default 30s context if the user requested it.
+	if st > 30*time.Second {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, st+5*time.Second)
+		defer cancel()
+	}
+
+	resp, err := c.Request(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(json.RawMessage(resp.Data))
+}

@@ -41,3 +41,6 @@ func outputOpts(cmd *cobra.Command) (outputMode, bool) {
 	tty := isStdoutTTY()
 	return resolveOutputMode(outFlag, tty), colorEnabled(colorFlag, tty)
 }
+
+// setActive is a stub until Task 10 implements the active file.
+func setActive(childID string) error { return nil }
