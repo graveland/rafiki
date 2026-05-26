@@ -30,6 +30,12 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<!-- launchd default ExitTimeOut is 20s.  pi-controller's own graceful
+	     shutdown needs longer because pi children may do final LLM calls
+	     (compaction, summarisation) before exiting.  Match the daemon's
+	     internal 180s global shutdown bound. -->
+	<key>ExitTimeOut</key>
+	<integer>200</integer>
 	<key>StandardOutPath</key>
 	<string>{{.HomeEnv}}/.pi/run/controller.log</string>
 	<key>StandardErrorPath</key>

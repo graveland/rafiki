@@ -74,13 +74,22 @@ func main() {
 
 	// Shut down all live children gracefully before closing the server. This
 	// prevents children from dying via pipe-death (broken stdin/SIGPIPE) when
-	// launchd restarts the daemon. The 20-second global bound is intentionally
-	// shorter than pic-kill defaults (180s/30s) because launchd only gives the
-	// daemon ~5-20 seconds before it sends its own SIGKILL.
+	// launchd or systemd stops the daemon.
+	//
+	// pi's own shutdown can involve LLM calls (final compaction, summarisation
+	// on session_before_shutdown extension events, etc.), which can take tens
+	// of seconds.  The per-child timeouts are picked to give that real work a
+	// chance to finish without exceeding the platform-level stop timeouts that
+	// the service plist/unit advertises (ExitTimeOut / TimeoutStopSec).
+	//
+	// The 180s global bound matches the platform stop-timeout we install; if
+	// users have an older plist/unit (default 20s on launchd, 90s on systemd),
+	// the platform will SIGKILL us first — they should re-run `pic service
+	// uninstall && pic service install` to pick up the new timeouts.
 	const (
-		childShutdownTimeout = 10 * time.Second
-		childKillTimeout     = 5 * time.Second
-		globalTimeout        = 20 * time.Second
+		childShutdownTimeout = 120 * time.Second
+		childKillTimeout     = 30 * time.Second
+		globalTimeout        = 180 * time.Second
 	)
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), globalTimeout)
 	defer shutdownCancel()

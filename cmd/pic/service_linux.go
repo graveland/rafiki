@@ -24,6 +24,11 @@ After=default.target
 ExecStart={{.DaemonBinary}}
 Restart=on-failure
 RestartSec=2
+# systemd default TimeoutStopSec is 90s.  pi-controller's own graceful
+# shutdown needs longer because pi children may do final LLM calls
+# (compaction, summarisation) before exiting.  Match the daemon's internal
+# 180s global shutdown bound.
+TimeoutStopSec=200
 StandardOutput=append:{{.HomeEnv}}/.pi/run/controller.log
 StandardError=append:{{.HomeEnv}}/.pi/run/controller.log
 Environment=HOME={{.HomeEnv}}
