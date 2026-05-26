@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"graveland.dev/pi-controller/internal/persist"
 	"graveland.dev/pi-controller/internal/server"
@@ -70,6 +71,23 @@ func main() {
 
 	slog.Info("shutting down", "signal", sig)
 	cancel() // stop the background sweeper
+
+	// Shut down all live children gracefully before closing the server. This
+	// prevents children from dying via pipe-death (broken stdin/SIGPIPE) when
+	// launchd restarts the daemon. The 20-second global bound is intentionally
+	// shorter than pic-kill defaults (180s/30s) because launchd only gives the
+	// daemon ~5-20 seconds before it sends its own SIGKILL.
+	const (
+		childShutdownTimeout = 10 * time.Second
+		childKillTimeout     = 5 * time.Second
+		globalTimeout        = 20 * time.Second
+	)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), globalTimeout)
+	defer shutdownCancel()
+	if err := ctrl.ShutdownAllChildren(shutdownCtx, childShutdownTimeout, childKillTimeout); err != nil {
+		slog.Warn("child shutdown errors", "error", err)
+	}
+
 	ctrl.Stop() // wait for sweeper goroutine to exit
 	if err := srv.Close(); err != nil {
 		slog.Warn("server close", "error", err)

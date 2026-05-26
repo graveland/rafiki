@@ -57,6 +57,17 @@ func (cm *ChildManager) Get(childID string) (*child.Child, bool) {
 	return e.c, true
 }
 
+// LiveIDs returns a snapshot of all currently-live child IDs.
+func (cm *ChildManager) LiveIDs() []string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	ids := make([]string, 0, len(cm.children))
+	for id := range cm.children {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // Remove deletes the childID entry. Called on process exit.
 func (cm *ChildManager) Remove(childID string) {
 	cm.mu.Lock()

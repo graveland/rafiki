@@ -820,6 +820,72 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 	}, nil
 }
 
+// ShutdownAllChildren gracefully shuts down every live child concurrently.
+// For each child it:
+//  1. Calls BeginShutdown to drive the SM to shutting_down and emit the
+//     status-change event to any connected subscribers.
+//  2. Launches a goroutine that calls ch.Shutdown(perChildShutdown, perChildKill).
+//
+// ctx bounds the total wait. If it expires before all children exit the
+// function returns ctx.Err() and logs a warning; the outstanding Shutdown
+// goroutines continue and will SIGKILL the remaining children on their own
+// schedule — they die via pipe-death otherwise.
+//
+// Per-child errors are logged and collected; all of them are returned as a
+// joined error so the caller can decide whether to treat them as fatal.
+func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, perChildKill time.Duration) error {
+	ids := c.cm.LiveIDs()
+	if len(ids) == 0 {
+		return nil
+	}
+
+	slog.Info("shutting down children", "count", len(ids))
+
+	type result struct {
+		id  string
+		err error
+	}
+	done := make(chan result, len(ids))
+
+	for _, id := range ids {
+		id := id
+		ch, ok := c.cm.Get(id)
+		if !ok {
+			// Already removed between LiveIDs() and Get(); count it as done.
+			done <- result{id: id}
+			continue
+		}
+		// Drive SM to shutting_down and emit ctrl_child_status to subscribers
+		// before the Shutdown sequence begins (mirrors what Kill does).
+		if changed, prev := ch.BeginShutdown(); changed {
+			c.handleStatusChange(id, protocol.StatusShuttingDown, prev)
+		}
+		go func() {
+			_, err := ch.Shutdown(perChildShutdown, perChildKill)
+			done <- result{id: id, err: err}
+		}()
+	}
+
+	var errs []error
+	remaining := len(ids)
+	for remaining > 0 {
+		select {
+		case r := <-done:
+			remaining--
+			if r.err != nil {
+				slog.Warn("child shutdown error", "childId", r.id, "error", r.err)
+				errs = append(errs, fmt.Errorf("child %s: %w", r.id, r.err))
+			} else {
+				slog.Info("child shut down", "childId", r.id)
+			}
+		case <-ctx.Done():
+			slog.Warn("graceful shutdown deadline exceeded", "remaining", remaining)
+			return ctx.Err()
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (c *Controller) Forget(childID string) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
