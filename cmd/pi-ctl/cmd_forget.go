@@ -24,6 +24,12 @@ With --all-exited, forgets every exited child (optionally filtered by --older-th
 	}
 	cmd.Flags().Bool("all-exited", false, "Forget all exited children")
 	cmd.Flags().Duration("older-than", 0, "Only forget exited children older than this")
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
 	return cmd
 }
 
@@ -54,13 +60,13 @@ func runForget(cmd *cobra.Command, args []string) error {
 		return enc.Encode(json.RawMessage(resp.Data))
 	}
 
-	if len(args) == 0 {
-		return fmt.Errorf("forget requires <id|name> or --all-exited")
+	var input string
+	if len(args) > 0 {
+		input = args[0]
 	}
-
-	childID, err := c.Resolve(ctx, args[0])
+	childID, err := resolveTarget(ctx, c, input)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w (or use --all-exited)", err)
 	}
 
 	resp, err := c.Request(ctx, protocol.ForgetRequest{

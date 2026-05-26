@@ -13,18 +13,25 @@ import (
 )
 
 func newSendCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "send <id|name> [frame-json]",
+	cmd := &cobra.Command{
+		Use:   "send [id|name] [frame-json]",
 		Short: "Send a raw pi-RPC frame to a child",
 		Long: `Send a raw pi-RPC frame (debugging or scripting).
 
-If frame-json is omitted, read the frame from stdin.
+If id|name is omitted, uses the active marker. If frame-json is omitted, reads from stdin.
 
 Example:
   pi-ctl send afk-impl '{"type":"prompt","message":"Hello!"}'`,
-		Args: cobra.RangeArgs(1, 2),
+		Args: cobra.RangeArgs(0, 2),
 		RunE: runSend,
 	}
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
+	return cmd
 }
 
 func runSend(cmd *cobra.Command, args []string) error {
@@ -32,7 +39,11 @@ func runSend(cmd *cobra.Command, args []string) error {
 	defer c.Close()
 
 	ctx := cmdCtx(cmd)
-	childID, err := c.Resolve(ctx, args[0])
+	var input string
+	if len(args) > 0 {
+		input = args[0]
+	}
+	childID, err := resolveTarget(ctx, c, input)
 	if err != nil {
 		return err
 	}

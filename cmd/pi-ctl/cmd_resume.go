@@ -13,12 +13,18 @@ import (
 
 func newResumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "resume <id|name>",
+		Use:   "resume [id|name]",
 		Short: "Resume an exited child",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE:  runResume,
 	}
 	cmd.Flags().String("api-key", "", "Optional API key override for this resume")
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
 	return cmd
 }
 
@@ -27,7 +33,11 @@ func runResume(cmd *cobra.Command, args []string) error {
 	defer c.Close()
 
 	ctx := cmdCtx(cmd)
-	childID, err := c.Resolve(ctx, args[0])
+	var input string
+	if len(args) > 0 {
+		input = args[0]
+	}
+	childID, err := resolveTarget(ctx, c, input)
 	if err != nil {
 		return err
 	}

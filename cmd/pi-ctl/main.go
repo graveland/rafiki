@@ -44,6 +44,7 @@ func newRootCmd() *cobra.Command {
 		newRecentCmd(),
 		newSearchCmd(),
 		newSendCmd(),
+		newCompletionCmd(),
 	)
 
 	return root

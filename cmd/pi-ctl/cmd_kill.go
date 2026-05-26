@@ -15,13 +15,19 @@ import (
 
 func newKillCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "kill <id|name>",
+		Use:   "kill [id|name]",
 		Short: "Stop a running child gracefully",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE:  runKill,
 	}
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
 	return cmd
 }
 
@@ -30,7 +36,11 @@ func runKill(cmd *cobra.Command, args []string) error {
 	defer c.Close()
 
 	ctx := cmdCtx(cmd)
-	childID, err := c.Resolve(ctx, args[0])
+	var input string
+	if len(args) > 0 {
+		input = args[0]
+	}
+	childID, err := resolveTarget(ctx, c, input)
 	if err != nil {
 		return err
 	}
