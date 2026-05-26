@@ -1,0 +1,207 @@
+//go:build darwin
+
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"text/template"
+)
+
+const launchdLabel = "dev.graveland.pi-controller"
+
+// plistTemplate is the launchd property list for the pi-controller daemon.
+const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{{.Label}}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{.DaemonBinary}}</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>{{.HomeEnv}}/.pi/run/controller.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{.HomeEnv}}/.pi/run/controller.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>{{.HomeEnv}}</string>
+		<key>PATH</key>
+		<string>{{.PathEnv}}</string>
+	</dict>
+</dict>
+</plist>
+`
+
+type plistData struct {
+	serviceSpec
+	Label string
+}
+
+// renderServiceConfig renders the launchd plist content for the given spec.
+func renderServiceConfig(spec serviceSpec) (string, error) {
+	tmpl, err := template.New("plist").Parse(plistTemplate)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, plistData{serviceSpec: spec, Label: launchdLabel}); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+type darwinBackend struct{}
+
+func newServiceBackend() serviceBackend { return &darwinBackend{} }
+
+func (b *darwinBackend) plistPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"), nil
+}
+
+// serviceTarget returns the launchctl service target string (gui/UID/label).
+func (b *darwinBackend) serviceTarget() string {
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+}
+
+// domainTarget returns the launchctl domain target string (gui/UID).
+func (b *darwinBackend) domainTarget() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func (b *darwinBackend) LogPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".pi", "run", "controller.log")
+}
+
+func (b *darwinBackend) Install(spec serviceSpec) error {
+	plistPath, err := b.plistPath()
+	if err != nil {
+		return err
+	}
+
+	// Ensure the log directory exists before the daemon tries to write.
+	logDir := filepath.Join(spec.HomeEnv, ".pi", "run")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return fmt.Errorf("create log directory %s: %w", logDir, err)
+	}
+
+	content, err := renderServiceConfig(spec)
+	if err != nil {
+		return fmt.Errorf("render plist: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		return fmt.Errorf("create LaunchAgents directory: %w", err)
+	}
+	if err := os.WriteFile(plistPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write plist %s: %w", plistPath, err)
+	}
+
+	// Modern macOS: bootstrap. Fall back to legacy load on older versions.
+	_, err = runOSCmd("launchctl", "bootstrap", b.domainTarget(), plistPath)
+	if err != nil {
+		out2, err2 := runOSCmd("launchctl", "load", plistPath)
+		if err2 != nil {
+			return fmt.Errorf("launchctl bootstrap and legacy load both failed: %s", strings.TrimSpace(out2))
+		}
+	}
+	return nil
+}
+
+func (b *darwinBackend) Uninstall() error {
+	plistPath, err := b.plistPath()
+	if err != nil {
+		return err
+	}
+
+	// Modern bootout; fall back to legacy unload. Errors here are best-effort.
+	_, err = runOSCmd("launchctl", "bootout", b.serviceTarget())
+	if err != nil {
+		_, _ = runOSCmd("launchctl", "unload", plistPath)
+	}
+
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove plist %s: %w", plistPath, err)
+	}
+	return nil
+}
+
+func (b *darwinBackend) Start() error {
+	out, err := runOSCmd("launchctl", "kickstart", b.serviceTarget())
+	if err != nil {
+		return fmt.Errorf("launchctl kickstart: %s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+func (b *darwinBackend) Stop() error {
+	out, err := runOSCmd("launchctl", "kill", "SIGTERM", b.serviceTarget())
+	if err != nil {
+		return fmt.Errorf("launchctl kill: %s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+func (b *darwinBackend) Restart() error {
+	// kickstart -k kills any running instance and starts fresh.
+	out, err := runOSCmd("launchctl", "kickstart", "-k", b.serviceTarget())
+	if err != nil {
+		return fmt.Errorf("launchctl kickstart -k: %s", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+var launchdPIDRe = regexp.MustCompile(`\bpid\s*=\s*(\d+)`)
+
+func (b *darwinBackend) Status() (serviceStatus, error) {
+	out, err := runOSCmd("launchctl", "print", b.serviceTarget())
+	if err != nil {
+		outLower := strings.ToLower(out)
+		if strings.Contains(outLower, "could not find service") ||
+			strings.Contains(outLower, "no such process") ||
+			strings.Contains(outLower, "domain does not contain") {
+			return serviceStatus{Installed: false}, nil
+		}
+		// Ambiguous error. Check if the plist file exists to distinguish
+		// "installed but not running" from "not installed".
+		plistPath, _ := b.plistPath()
+		if _, serr := os.Stat(plistPath); serr == nil {
+			return serviceStatus{Installed: true, Running: false, Detail: strings.TrimSpace(out)}, nil
+		}
+		return serviceStatus{}, fmt.Errorf("launchctl print: %w: %s", err, strings.TrimSpace(out))
+	}
+
+	st := serviceStatus{Installed: true}
+	if m := launchdPIDRe.FindStringSubmatch(out); m != nil {
+		pid, _ := strconv.Atoi(m[1])
+		if pid > 0 {
+			st.Running = true
+			st.PID = pid
+		}
+	}
+	// Trim the detail to a single line summary for the status display.
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "state") || strings.HasPrefix(line, "pid") {
+			st.Detail += line + " "
+		}
+	}
+	st.Detail = strings.TrimSpace(st.Detail)
+	return st, nil
+}
