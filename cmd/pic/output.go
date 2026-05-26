@@ -74,7 +74,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	st.Color = table.ColorOptions{}
 	tw.SetStyle(st)
 
-	colNames := []string{"ID", "NAME", "STATUS", "MODEL", "CWD", "STARTED", "LABELS"}
+	colNames := []string{"ID", "NAME", "STATUS", "PROVIDER", "MODEL", "CWD", "STARTED", "LABELS"}
 	headerRow := make(table.Row, len(colNames))
 	for i, name := range colNames {
 		if useColor {
@@ -93,11 +93,13 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 			// the printed date is in the present millennium.
 			started = time.UnixMilli(ch.StartedAt).Format("2006-01-02 15:04")
 		}
+		provider, model := splitProviderModel(ch.Model)
 		tw.AppendRow(table.Row{
 			ch.ChildID,
 			defaultDash(ch.Name),
 			colorStatus(ch.Status, useColor),
-			defaultDash(ch.Model),
+			defaultDash(provider),
+			defaultDash(model),
 			defaultDash(shortenCwd(ch.Cwd)),
 			started,
 			formatLabels(ch.Labels, 40, false),
@@ -113,6 +115,16 @@ func defaultDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// splitProviderModel splits a "provider/model" string into its two halves.
+// When no slash is present, the entire input is treated as the model name and
+// provider is returned empty.  This is the inverse of dispatch.go's join logic.
+func splitProviderModel(combined string) (provider, model string) {
+	if i := strings.Index(combined, "/"); i >= 0 {
+		return combined[:i], combined[i+1:]
+	}
+	return "", combined
 }
 
 // shortenCwd returns a more compact representation of a working directory:
