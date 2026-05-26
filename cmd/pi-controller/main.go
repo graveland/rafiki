@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -44,9 +45,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	st := store.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath)
+	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper)
 	ctrl.loadOrphans(records)
+	ctrl.startSweeper(ctx)
 
 	slog.Info("loaded orphans", "count", len(records))
 
@@ -63,6 +69,7 @@ func main() {
 	sig := <-sigCh
 
 	slog.Info("shutting down", "signal", sig)
+	cancel() // stop the background sweeper
 	if err := srv.Close(); err != nil {
 		slog.Warn("server close", "error", err)
 	}

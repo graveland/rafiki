@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/internal/ring"
 )
 
 // Session is the controller's per-child record. Pure metadata —
@@ -76,6 +77,11 @@ type Session struct {
 	LastRetryError  string
 	LastRetryFinal  string
 
+	// ExitedRing holds a snapshot of the ring buffer captured when the child
+	// exited. It is populated by handleChildExit before the live Child is
+	// removed, so ctrl_get_recent remains queryable after exit (spec §11.4).
+	ExitedRing []ring.Event
+
 	// Handles into the live Child. Set by store.Insert from
 	// Child setup; nil for sessions in "exited" state without an
 	// associated Child.
@@ -130,6 +136,10 @@ type Snapshot struct {
 	AutoRetries     int
 	LastRetryError  string
 	LastRetryFinal  string
+
+	// ExitedRing is a snapshot of the ring buffer taken at exit time.
+	// Populated for exited sessions; nil for live sessions.
+	ExitedRing []ring.Event
 }
 
 // Snapshot returns a deep copy of the session's fields. The caller may freely
@@ -171,7 +181,22 @@ func (s *Session) Snapshot() Snapshot {
 		AutoRetries:     s.AutoRetries,
 		LastRetryError:  s.LastRetryError,
 		LastRetryFinal:  s.LastRetryFinal,
+		ExitedRing:      copyRingEvents(s.ExitedRing),
 	}
+}
+
+// copyRingEvents returns a defensive copy of a ring event slice.
+func copyRingEvents(events []ring.Event) []ring.Event {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]ring.Event, len(events))
+	for i, e := range events {
+		cp := make([]byte, len(e.Bytes))
+		copy(cp, e.Bytes)
+		out[i] = ring.Event{Bytes: cp, Timestamp: e.Timestamp}
+	}
+	return out
 }
 
 // copyStrings returns a fresh slice with a copy of s's elements.

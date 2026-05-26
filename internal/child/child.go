@@ -40,6 +40,46 @@ type ShutdownResult struct {
 	Duration  time.Duration
 }
 
+// inBufMaxFrames / inBufMaxBytes are the eviction caps for the stdin capture.
+const (
+	inBufMaxFrames = 1000
+	inBufMaxBytes  = 16 << 20 // 16 MiB
+)
+
+// inBuffer is a bounded FIFO of raw stdin frames sent to the child. Oldest
+// entries are dropped when either the frame count or the total byte size
+// exceeds the configured caps. Used by log dumps (LogDumper.Dump).
+type inBuffer struct {
+	mu     sync.Mutex
+	frames [][]byte
+	total  int
+}
+
+func (b *inBuffer) append(frame []byte) {
+	cp := make([]byte, len(frame))
+	copy(cp, frame)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for len(b.frames) >= inBufMaxFrames || (len(b.frames) > 0 && b.total+len(cp) > inBufMaxBytes) {
+		b.total -= len(b.frames[0])
+		b.frames = b.frames[1:]
+	}
+	b.frames = append(b.frames, cp)
+	b.total += len(cp)
+}
+
+func (b *inBuffer) snapshot() [][]byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([][]byte, len(b.frames))
+	for i, f := range b.frames {
+		cp := make([]byte, len(f))
+		copy(cp, f)
+		out[i] = cp
+	}
+	return out
+}
+
 // Child manages one pi child process: its I/O pipes, an event bus, a ring
 // buffer, and a graceful-shutdown sequence. All exported methods are safe to
 // call concurrently. The supervise goroutine is the only writer to the child's
@@ -62,8 +102,9 @@ type Child struct {
 
 	bus  *bus.Bus[[]byte]
 	ring *ring.Ring
+	in   inBuffer // bounded stdin frame capture for log dumps
 
-	errBuf bytes.Buffer // written by readStderr only; any future reader must hold c.mu
+	errBuf bytes.Buffer // written by readStderr only; safe to read after Done() is closed
 
 	mu     sync.Mutex
 	closed bool // set by readStdout after cmd.Process.Wait() returns
@@ -215,6 +256,44 @@ func (c *Child) BeginShutdown() (changed bool, prev protocol.Status) {
 	return c.sm.OnShutdownStart()
 }
 
+// InSnapshot returns a defensive copy of all stdin frames captured since spawn.
+// Safe to call at any time; typically called from handleChildExit after Done().
+func (c *Child) InSnapshot() [][]byte {
+	return c.in.snapshot()
+}
+
+// RingSnapshot returns a copy of all events currently in the ring buffer.
+// Safe to call at any time; typically called from handleChildExit after Done().
+func (c *Child) RingSnapshot() [][]byte {
+	events := c.ring.Recent(ring.Query{})
+	out := make([][]byte, len(events))
+	for i, e := range events {
+		out[i] = e.Bytes // ring.Recent already returns defensive copies
+	}
+	return out
+}
+
+// StderrSnapshot returns a defensive copy of buffered stderr bytes.
+// readStderr is guaranteed to have exited before Done() is closed, so this
+// is safe to call without additional locking after Done().
+func (c *Child) StderrSnapshot() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := make([]byte, c.errBuf.Len())
+	copy(b, c.errBuf.Bytes())
+	return b
+}
+
+// NotifyExtensionUIResponse updates the state machine when the controller
+// forwards an extension_ui_response to the child. If this was the last
+// pending dialog, the SM transitions from blocked_ui back to the prior state.
+// The status change is observed by monitorChild on the next bus event.
+func (c *Child) NotifyExtensionUIResponse(id string) {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	c.sm.OnExtensionUIResponse(id)
+}
+
 // Metadata returns the most recently sniffed session/model metadata.
 // Safe to call concurrently.
 func (c *Child) Metadata() SnifferMetadata {
@@ -251,6 +330,7 @@ func (c *Child) supervise() {
 				slog.Warn("stdin newline write failed", "child", c.ID, "error", err)
 				goto cleanup
 			}
+			c.in.append(frame) // capture for log dumps
 		case <-c.processDone:
 			// Process exited; drain nothing, let cleanup wait for readers.
 			goto cleanup

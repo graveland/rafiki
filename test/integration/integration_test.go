@@ -661,3 +661,194 @@ func TestIntegration_GetRecent(t *testing.T) {
 		t.Error("expected agent_start events in filtered ctrl_get_recent result")
 	}
 }
+
+// TestIntegration_PerChildStatusEvents verifies that ctrl_child_status events
+// are delivered to per-child subscribers (Fix 1 / spec §7.4).
+func TestIntegration_PerChildStatusEvents(t *testing.T) {
+	t.Parallel()
+	d := bootDaemon(t)
+
+	childID := d.spawnChild(t)
+
+	// Per-child subscriber.
+	sc := d.dial(t)
+	sc.send(fmt.Sprintf(`{"type":"ctrl_subscribe","id":"sub1","childId":%q}`, childID))
+	subResp := sc.nextResponse(t, 5*time.Second)
+	if !subResp.Success {
+		t.Fatalf("ctrl_subscribe failed: %+v", subResp.Error)
+	}
+
+	// Trigger agent_start → the controller should emit ctrl_child_status
+	// streaming→idle (via monitorChild) and deliver it to sc.
+	emitJSON := fmt.Sprintf(
+		`{"type":"ctrl_send","id":"ev1","childId":%q,"frame":{"type":"__ctrl_test_emit","eventType":"agent_start"}}`,
+		childID,
+	)
+	d.request(t, emitJSON)
+
+	// The per-child subscriber must receive ctrl_child_status with
+	// status="streaming" (delivered directly, not wrapped in ctrl_event).
+	sc.waitForEvent(t, func(f json.RawMessage) bool {
+		var ev struct {
+			Type    string `json:"type"`
+			ChildID string `json:"childId"`
+			Status  string `json:"status"`
+		}
+		if json.Unmarshal(f, &ev) != nil {
+			return false
+		}
+		return ev.Type == protocol.TypeCtrlChildStatus &&
+			ev.ChildID == childID &&
+			ev.Status == string(protocol.StatusStreaming)
+	}, 5*time.Second)
+}
+
+// TestIntegration_LogDumpOnExit verifies that all four log files are written
+// under ~/.pi/run/logs/<childId>/ when a child exits (Fix 3 / spec §11.3).
+func TestIntegration_LogDumpOnExit(t *testing.T) {
+	t.Parallel()
+	d := bootDaemon(t)
+
+	childID := d.spawnChild(t)
+
+	// Kill the child to trigger handleChildExit → LogDumper.Dump.
+	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
+	raw := d.request(t, killJSON)
+	var r protocol.Response
+	mustUnmarshal(t, raw, &r)
+	if !r.Success {
+		t.Fatalf("ctrl_kill failed: %+v", r.Error)
+	}
+
+	// Give the daemon a moment to finish the dump (kill returns after process
+	// exit, but handleChildExit runs in monitorChild which is concurrent).
+	// Poll for err.log.gz — the last file Dump writes — to avoid a race where
+	// meta.json appears before the gz files are flushed.
+	childLogDir := filepath.Join(d.homeDir, ".pi", "run", "logs", childID)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(childLogDir, "err.log.gz")); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	for _, name := range []string{"meta.json", "in.jsonl.gz", "out.jsonl.gz", "err.log.gz"} {
+		path := filepath.Join(childLogDir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("log file missing: %s (%v)", name, err)
+		}
+	}
+}
+
+// TestIntegration_GetRecentExited verifies that ctrl_get_recent returns events
+// for an exited child via the ring snapshot (Fix 4 / spec §11.4).
+func TestIntegration_GetRecentExited(t *testing.T) {
+	t.Parallel()
+	d := bootDaemon(t)
+
+	childID := d.spawnChild(t)
+
+	// Populate the ring with a known event.
+	emitJSON := fmt.Sprintf(
+		`{"type":"ctrl_send","id":"ev1","childId":%q,"frame":{"type":"__ctrl_test_emit","eventType":"agent_start"}}`,
+		childID,
+	)
+	d.request(t, emitJSON)
+
+	// Kill the child.
+	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
+	raw := d.request(t, killJSON)
+	var r protocol.Response
+	mustUnmarshal(t, raw, &r)
+	if !r.Success {
+		t.Fatalf("ctrl_kill failed: %+v", r.Error)
+	}
+
+	// Wait for the child to be exited in the store.
+	getJSON := fmt.Sprintf(`{"type":"ctrl_get","id":"g1","childId":%q}`, childID)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		raw = d.request(t, getJSON)
+		mustUnmarshal(t, raw, &r)
+		var cs protocol.ChildSummary
+		mustUnmarshal(t, r.Data, &cs)
+		if cs.Status == string(protocol.StatusExited) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// ctrl_get_recent on an exited child must return events from the snapshot.
+	recentJSON := fmt.Sprintf(`{"type":"ctrl_get_recent","id":"gr1","childId":%q}`, childID)
+	raw = d.request(t, recentJSON)
+	mustUnmarshal(t, raw, &r)
+	if !r.Success {
+		t.Fatalf("ctrl_get_recent failed: %+v", r.Error)
+	}
+	var recentData protocol.GetRecentResponseData
+	mustUnmarshal(t, r.Data, &recentData)
+	if len(recentData.Events) == 0 {
+		t.Error("expected events in ring snapshot for exited child; got none")
+	}
+
+	// Must contain the bootstrap get_state response at minimum.
+	foundBootstrap := false
+	for _, ev := range recentData.Events {
+		var hdr struct {
+			Type    string `json:"type"`
+			Command string `json:"command"`
+		}
+		json.Unmarshal(ev, &hdr)
+		if hdr.Type == "response" && hdr.Command == "get_state" {
+			foundBootstrap = true
+		}
+	}
+	if !foundBootstrap {
+		t.Error("expected bootstrap get_state response in exited child ring snapshot")
+	}
+}
+
+// TestIntegration_ResumeEmitsSpawned verifies that ctrl_resume emits
+// ctrl_child_spawned (Fix 2 / spec §7.2).
+func TestIntegration_ResumeEmitsSpawned(t *testing.T) {
+	t.Parallel()
+	d := bootDaemon(t)
+
+	childID := d.spawnChild(t)
+
+	// Kill the child.
+	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
+	raw := d.request(t, killJSON)
+	var r protocol.Response
+	mustUnmarshal(t, raw, &r)
+	if !r.Success {
+		t.Fatalf("ctrl_kill failed: %+v", r.Error)
+	}
+
+	// Set up a global subscriber to catch the ctrl_child_spawned event.
+	sc := d.dial(t)
+	sc.send(`{"type":"ctrl_global_subscribe","id":"gsub1"}`)
+	gsubResp := sc.nextResponse(t, 5*time.Second)
+	if !gsubResp.Success {
+		t.Fatalf("ctrl_global_subscribe failed: %+v", gsubResp.Error)
+	}
+
+	// Resume.
+	resumeJSON := fmt.Sprintf(`{"type":"ctrl_resume","id":"re1","childId":%q}`, childID)
+	raw = d.request(t, resumeJSON)
+	mustUnmarshal(t, raw, &r)
+	if !r.Success {
+		t.Fatalf("ctrl_resume failed: %+v", r.Error)
+	}
+
+	// Global subscriber must receive ctrl_child_spawned for the resumed child.
+	sc.waitForEvent(t, func(f json.RawMessage) bool {
+		var ev struct {
+			Type    string `json:"type"`
+			ChildID string `json:"childId"`
+		}
+		json.Unmarshal(f, &ev)
+		return ev.Type == protocol.TypeCtrlChildSpawned && ev.ChildID == childID
+	}, 5*time.Second)
+}

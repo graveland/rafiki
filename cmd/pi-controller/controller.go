@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,26 +30,76 @@ const version = "0.1.0"
 // Controller wires together the store, child lifecycle, persistence and the
 // server.Controller interface. It is safe for concurrent use.
 type Controller struct {
-	st         *store.Store
-	cm         *ChildManager
-	records    *persist.RecordWriter
-	startedAt  time.Time
-	socketPath string
-	logsDir    string
-	stateDir   string
+	st          *store.Store
+	cm          *ChildManager
+	records     *persist.RecordWriter
+	dumper      *persist.LogDumper
+	startedAt   time.Time
+	socketPath  string
+	logsDir     string
+	stateDir    string
+	graceWindow time.Duration
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
 // to pre-populate the store from persisted state.
-func NewController(st *store.Store, stateDir, logsDir, socketPath string) *Controller {
+//
+// dumper may be nil; when nil, no log dumps are written on child exit.
+// The grace window defaults to 7 days but can be overridden with the
+// PI_CONTROLLER_GRACE_HOURS environment variable.
+func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper) *Controller {
+	gw := 7 * 24 * time.Hour
+	if h := os.Getenv("PI_CONTROLLER_GRACE_HOURS"); h != "" {
+		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
+			gw = time.Duration(n * float64(time.Hour))
+		}
+	}
 	return &Controller{
-		st:         st,
-		cm:         newChildManager(),
-		records:    persist.NewRecordWriter(stateDir),
-		startedAt:  time.Now(),
-		socketPath: socketPath,
-		logsDir:    logsDir,
-		stateDir:   stateDir,
+		st:          st,
+		cm:          newChildManager(),
+		records:     persist.NewRecordWriter(stateDir),
+		dumper:      dumper,
+		startedAt:   time.Now(),
+		socketPath:  socketPath,
+		logsDir:     logsDir,
+		stateDir:    stateDir,
+		graceWindow: gw,
+	}
+}
+
+// startSweeper launches a background goroutine that periodically forgets
+// exited children whose age exceeds the configured grace window. It stops
+// when ctx is cancelled.
+func (c *Controller) startSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.sweepExpired()
+			}
+		}
+	}()
+}
+
+// sweepExpired forgets all exited children whose ExitedAt is older than
+// graceWindow. Called periodically by the sweeper goroutine.
+func (c *Controller) sweepExpired() {
+	cutoff := time.Now().Add(-c.graceWindow)
+	var toForget []string
+	for _, s := range c.st.FindByStatus(protocol.StatusExited) {
+		if !s.ExitedAt.IsZero() && s.ExitedAt.Before(cutoff) {
+			toForget = append(toForget, s.ChildID)
+		}
+	}
+	for _, id := range toForget {
+		_ = c.Forget(id)
+	}
+	if len(toForget) > 0 {
+		slog.Info("sweep: forgot expired children", "count", len(toForget))
 	}
 }
 
@@ -105,7 +156,8 @@ func (c *Controller) Get(childID string) (store.Snapshot, bool) {
 }
 
 func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.RecentResult, error) {
-	if _, ok := c.st.Get(childID); !ok {
+	snap, ok := c.st.Get(childID)
+	if !ok {
 		return server.RecentResult{}, &server.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
@@ -113,13 +165,35 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 	}
 
 	ch, alive := c.cm.Get(childID)
-	if !alive {
-		// Exited child has no ring buffer in memory.
-		return server.RecentResult{Events: []json.RawMessage{}}, nil
-	}
+	var events []ring.Event
+	var total int
+	var oldestTS int64
 
-	r := ch.Ring()
-	events := r.Recent(ring.Query{Limit: q.Limit, Since: q.Since})
+	if alive {
+		// Live child: query the in-memory ring buffer.
+		r := ch.Ring()
+		events = r.Recent(ring.Query{Limit: q.Limit, Since: q.Since})
+		total, _, oldestTS = r.Stats()
+	} else {
+		// Exited child: fall back to the ring snapshot taken at exit time
+		// (spec §11.4). Apply Since + Limit filtering manually.
+		all := snap.ExitedRing
+		if q.Since > 0 {
+			i := 0
+			for i < len(all) && all[i].Timestamp < q.Since {
+				i++
+			}
+			all = all[i:]
+		}
+		if q.Limit > 0 && len(all) > q.Limit {
+			all = all[len(all)-q.Limit:]
+		}
+		events = all
+		total = len(snap.ExitedRing)
+		if len(snap.ExitedRing) > 0 {
+			oldestTS = snap.ExitedRing[0].Timestamp
+		}
+	}
 
 	out := make([]json.RawMessage, 0, len(events))
 	for _, ev := range events {
@@ -128,7 +202,6 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 		}
 	}
 
-	total, _, oldestTS := r.Stats()
 	return server.RecentResult{
 		Events:           out,
 		TotalInBuffer:    total,
@@ -310,7 +383,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	}
 
 	// Emit ctrl_child_spawned immediately after the process is running and the
-	// state record is persisted (spec §6.3.3).
+	// state record is persisted (spec §6.3.3, §7.2). Delivered to both global
+	// subscribers and per-child subscribers of this child.
 	spawnedEvt := protocol.CtrlChildSpawned{
 		Type:    protocol.TypeCtrlChildSpawned,
 		ChildID: childID,
@@ -322,6 +396,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	}
 	if b, err := json.Marshal(spawnedEvt); err == nil {
 		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToChild(childID, b)
 	}
 
 	// Wait for pi to respond to the bootstrap get_state, with a 5-second timeout.
@@ -549,6 +624,22 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		slog.Warn("write state record (resume)", "childId", childID, "error", err)
 	}
 
+	// Emit ctrl_child_spawned for the resumed child (spec §7.2 resume case).
+	// Delivered to both global subscribers and per-child subscribers of this child.
+	resumeSpawnedEvt := protocol.CtrlChildSpawned{
+		Type:    protocol.TypeCtrlChildSpawned,
+		ChildID: childID,
+		Name:    snap.Name,
+		Cwd:     snap.Cwd,
+		PID:     ch.PID(),
+		Model:   joinModel(provider, model),
+		At:      now.UnixMilli(),
+	}
+	if b, err := json.Marshal(resumeSpawnedEvt); err == nil {
+		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToChild(childID, b)
+	}
+
 	go c.monitorChild(childID, ch)
 
 	return server.SpawnResult{
@@ -707,6 +798,22 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		slog.Warn("write state record (respawn)", "childId", childID, "error", err)
 	}
 
+	// Emit ctrl_child_spawned for the respawned child (spec §7.2).
+	// Delivered to both global subscribers and per-child subscribers of this child.
+	respawnedSpawnedEvt := protocol.CtrlChildSpawned{
+		Type:    protocol.TypeCtrlChildSpawned,
+		ChildID: childID,
+		Name:    snap.Name,
+		Cwd:     snap.Cwd,
+		PID:     ch.PID(),
+		Model:   joinModel(provider, model),
+		At:      now.UnixMilli(),
+	}
+	if b, err := json.Marshal(respawnedSpawnedEvt); err == nil {
+		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToChild(childID, b)
+	}
+
 	go c.monitorChild(childID, ch)
 
 	return server.SpawnResult{
@@ -816,6 +923,18 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 	ch, ok := c.cm.Get(childID)
 	if !ok {
 		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+	}
+
+	// Detect extension_ui_response frames and update the SM so the blocked_ui
+	// state is cleared when the last pending dialog is resolved (spec §10).
+	var uiResp struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+	}
+	if json.Unmarshal(frame, &uiResp) == nil &&
+		uiResp.Type == "extension_ui_response" &&
+		uiResp.ID != "" {
+		ch.NotifyExtensionUIResponse(uiResp.ID)
 	}
 
 	if err := ch.Send(frame); err != nil {
@@ -929,12 +1048,18 @@ func (c *Controller) OnConnectionClose(conn server.Connection) {
 
 // monitorChild runs as a goroutine for each live child. It forwards bus events
 // to per-child subscribers (wrapped in ctrl_event envelopes per §7.1), tracks
-// status transitions, and handles child exit.
+// status transitions, handles rename detection, and handles child exit.
 func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	busCh, cancel := ch.Bus().Subscribe()
 	defer cancel()
 
 	lastStatus := ch.Status()
+
+	// Initialise last-known name from the store so we can detect renames.
+	lastKnownName := ""
+	if snap, ok := c.st.Get(childID); ok {
+		lastKnownName = snap.Name
+	}
 
 	for {
 		select {
@@ -952,6 +1077,16 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			if newStatus := ch.Status(); newStatus != lastStatus {
 				c.handleStatusChange(childID, newStatus, lastStatus)
 				lastStatus = newStatus
+			}
+
+			// Detect session name changes produced by the sniffer. The sniffer
+			// updates Metadata().SessionName when set_session_name completes.
+			// Polling on each bus event is the right moment because the sniffer
+			// update happens in the same readStdout goroutine that feeds the bus
+			// (spec §7.5).
+			if md := ch.Metadata(); md.SessionName != "" && md.SessionName != lastKnownName {
+				c.handleChildRenamed(childID, md.SessionName, lastKnownName)
+				lastKnownName = md.SessionName
 			}
 
 		case <-ch.Done():
@@ -1003,7 +1138,26 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		At:       now.UnixMilli(),
 	}
 	if b, err := json.Marshal(evt); err == nil {
+		// Deliver to global subscribers AND to per-child subscribers (spec §7.4).
 		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToChild(childID, b)
+	}
+}
+
+// handleChildRenamed updates the store and emits ctrl_child_renamed when the
+// sniffer detects that pi changed the session name (spec §7.5).
+func (c *Controller) handleChildRenamed(childID, newName, previous string) {
+	_ = c.st.Rename(childID, newName)
+	evt := protocol.CtrlChildRenamed{
+		Type:     protocol.TypeCtrlChildRenamed,
+		ChildID:  childID,
+		Name:     newName,
+		Previous: previous,
+		At:       time.Now().UnixMilli(),
+	}
+	if b, err := json.Marshal(evt); err == nil {
+		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToChild(childID, b)
 	}
 }
 
@@ -1015,19 +1169,48 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	snap, _ := c.st.Get(childID)
 	lastStatus := string(snap.Status)
 
+	// Snapshot the ring before removing the child so ctrl_get_recent continues
+	// to work after the child is gone (spec §11.4).
+	ringSnapshot := ch.Ring().Recent(ring.Query{})
+
 	c.st.SetStatus(childID, protocol.StatusExited)
 	_ = c.st.Update(childID, func(sess *store.Session) {
 		sess.ExitedAt = now
 		code := res.ExitCode
 		sess.ExitCode = &code
 		sess.ExitSignal = res.Signal
+		sess.ExitedRing = ringSnapshot
 	})
 
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record on exit", "childId", childID, "error", err)
 	}
 
-	c.cm.Remove(childID)
+	// Dump logs before removing from the manager so per-child subscribers are
+	// still reachable for the exit event delivery below.
+	if c.dumper != nil {
+		dumpSnap, _ := c.st.Get(childID)
+		meta := persist.Meta{
+			ChildID:     childID,
+			Name:        dumpSnap.Name,
+			Cwd:         dumpSnap.Cwd,
+			Model:       joinModel(dumpSnap.Provider, dumpSnap.Model),
+			SessionFile: dumpSnap.SessionFile,
+			SpawnedAt:   dumpSnap.StartedAt.Unix(),
+			ExitedAt:    now.Unix(),
+			ExitCode:    res.ExitCode,
+			ExitSignal:  res.Signal,
+			Argv:        dumpSnap.ExtraArgs,
+		}
+		exitInfo := persist.ExitInfo{
+			ExitCode:   res.ExitCode,
+			Signal:     res.Signal,
+			LastStatus: lastStatus,
+		}
+		if err := c.dumper.Dump(childID, ch.InSnapshot(), ch.RingSnapshot(), ch.StderrSnapshot(), meta, exitInfo); err != nil {
+			slog.Warn("log dump failed", "child", childID, "error", err)
+		}
+	}
 
 	var exitCode *int
 	if res.Signal == "" {
@@ -1044,8 +1227,13 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		At:         now.UnixMilli(),
 	}
 	if b, err := json.Marshal(exitEvt); err == nil {
+		// Deliver to per-child subscribers BEFORE Remove so the subscriber list
+		// is still reachable. Deliver to global subscribers too (spec §7.3).
+		c.cm.DeliverToChild(childID, b)
 		c.cm.DeliverToGlobal(b)
 	}
+
+	c.cm.Remove(childID)
 }
 
 // ─── persistence ─────────────────────────────────────────────────────────────

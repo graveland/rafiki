@@ -37,7 +37,7 @@ func TestIntegration_CtrlStatus(t *testing.T) {
 	logsDir := filepath.Join(dir, "logs")
 
 	st := store.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, nil)
 
 	handler := server.NewDispatch(ctrl)
 	srv, err := server.Listen(socketPath, handler)
@@ -95,7 +95,7 @@ func TestIntegration_CtrlList(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
 
 	handler := server.NewDispatch(ctrl)
 	srv, err := server.Listen(socketPath, handler)
@@ -148,7 +148,7 @@ func TestIntegration_MultipleCommands(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
 
 	handler := server.NewDispatch(ctrl)
 	srv, err := server.Listen(socketPath, handler)
