@@ -13,7 +13,6 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ModelRegistry, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { RemoteAgentSessionRuntime } from "./runtime.ts";
 
 // ─── Server harness (mirrors client.test.ts) ──────────────────────────────────
@@ -94,13 +93,6 @@ const CHILD_SUMMARY = {
     thinking: "medium",
 };
 
-/** Fake local services (not exercised by runtime.ts itself in v1). */
-const fakeServices = {
-    sessionManager: {} as unknown as SessionManager,
-    settingsManager: {} as unknown as SettingsManager,
-    modelRegistry: {} as unknown as ModelRegistry,
-};
-
 /**
  * Build a server handler that:
  *   - Responds to the initial ctrl_get from connect()
@@ -171,7 +163,6 @@ describe("RemoteAgentSessionRuntime", () => {
         const runtime = await RemoteAgentSessionRuntime.connect({
             socket: srv.sockPath,
             childId: CHILD_ID,
-            ...fakeServices,
         });
 
         expect(runtime.cwd).toBe(CHILD_SUMMARY.cwd);
@@ -189,7 +180,6 @@ describe("RemoteAgentSessionRuntime", () => {
         const runtime = await RemoteAgentSessionRuntime.connect({
             socket: srv.sockPath,
             childId: CHILD_ID,
-            ...fakeServices,
         });
 
         await runtime.dispose();
@@ -207,7 +197,6 @@ describe("RemoteAgentSessionRuntime", () => {
             socket: srv.sockPath,
             childId: CHILD_ID,
             killOnExit: true,
-            ...fakeServices,
         });
 
         await runtime.dispose();
@@ -225,7 +214,6 @@ describe("RemoteAgentSessionRuntime", () => {
         const runtime = await RemoteAgentSessionRuntime.connect({
             socket: srv.sockPath,
             childId: CHILD_ID,
-            ...fakeServices,
         });
 
         const result = await runtime.switchSession("/home/user/.pi/sessions/other.jsonl");
@@ -249,7 +237,6 @@ describe("RemoteAgentSessionRuntime", () => {
         const runtime = await RemoteAgentSessionRuntime.connect({
             socket: srv.sockPath,
             childId: CHILD_ID,
-            ...fakeServices,
         });
 
         const result = await runtime.newSession();

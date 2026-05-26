@@ -25,6 +25,11 @@ import type {
     SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
+import {
+    buildLocalModelRegistry,
+    buildLocalSessionManager,
+    buildLocalSettingsManager,
+} from "./local-services.ts";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ReplacedSessionContext } from "./session.ts";
 import { Client } from "./client.ts";
@@ -36,10 +41,6 @@ export interface ConnectOptions {
     socket?: string;
     childId: string;
     killOnExit?: boolean;
-    // Local services — Task 5 produces these; Task 4 takes them as inputs.
-    sessionManager: SessionManager;
-    settingsManager: SettingsManager;
-    modelRegistry: ModelRegistry;
 }
 
 /** Shape returned by ctrl_get for a single child (spec §6.1). */
@@ -87,7 +88,11 @@ export class RemoteAgentSessionRuntime {
             throw err;
         }
 
-        const model = resolveModelFromRegistry(opts.modelRegistry, meta.model);
+        const settingsManager = await buildLocalSettingsManager();
+        const modelRegistry = await buildLocalModelRegistry(settingsManager);
+        const sessionManager = await buildLocalSessionManager(meta.sessionFile);
+
+        const model = resolveModelFromRegistry(modelRegistry, meta.model);
         const thinking = (meta.thinking ?? "medium") as "low" | "medium" | "high";
 
         const session = new RemoteAgentSession({
@@ -99,15 +104,15 @@ export class RemoteAgentSessionRuntime {
             sessionName: meta.sessionName,
             model,
             thinkingLevel: thinking,
-            sessionManager: opts.sessionManager,
-            settingsManager: opts.settingsManager,
-            modelRegistry: opts.modelRegistry,
+            sessionManager,
+            settingsManager,
+            modelRegistry,
         });
 
         const services: AgentSessionServices = makeServicesStub({
             cwd: meta.cwd,
-            settingsManager: opts.settingsManager,
-            modelRegistry: opts.modelRegistry,
+            settingsManager,
+            modelRegistry,
         });
 
         return new RemoteAgentSessionRuntime({
