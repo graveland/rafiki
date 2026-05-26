@@ -49,7 +49,7 @@ scripting / AFK workflows, use --detached.)`,
 // addSpawnFlags registers the shared spawn-related flags on cmd.
 func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
-	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4)")
+	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via PIC_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
 	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")
@@ -58,6 +58,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
+	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see PIC_DEFAULT_LABELS")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -71,8 +72,12 @@ func addSpawnFlags(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
 }
 
-// buildSpawnRequest constructs a SpawnRequest from the spawn flags and
-// positional args. Returns an error if required flags are invalid.
+// buildSpawnRequest constructs a SpawnRequest from the spawn flags, env-var
+// defaults, and positional args. Returns an error if required flags are invalid.
+//
+// Env-var defaults are read lazily here (not at process start) for test isolation:
+//   - PIC_DEFAULT_MODEL: used when --model is not set
+//   - PIC_DEFAULT_LABELS: comma-separated k=v pairs merged before --label flags
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
@@ -85,7 +90,13 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	if !filepath.IsAbs(cwd) {
 		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute (got %q)", cwd)
 	}
+
+	// PIC_DEFAULT_MODEL: fallback when --model not given.
 	model, _ := cmd.Flags().GetString("model")
+	if model == "" {
+		model = os.Getenv("PIC_DEFAULT_MODEL")
+	}
+
 	thinking, _ := cmd.Flags().GetString("thinking")
 	noSession, _ := cmd.Flags().GetBool("no-session")
 	resume, _ := cmd.Flags().GetString("session")
@@ -94,6 +105,21 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	exts, _ := cmd.Flags().GetStringSlice("extension")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	extraArgs, _ := cmd.Flags().GetStringSlice("extra-arg")
+
+	// PIC_DEFAULT_LABELS: parsed lazily and merged before --label flags.
+	envLabels, err := parseEnvLabels(os.Getenv("PIC_DEFAULT_LABELS"))
+	if err != nil {
+		return protocol.SpawnRequest{}, fmt.Errorf("PIC_DEFAULT_LABELS: %w", err)
+	}
+
+	flagLabelPairs, _ := cmd.Flags().GetStringArray("label")
+	flagLabels, err := parseLabelPairs(flagLabelPairs)
+	if err != nil {
+		return protocol.SpawnRequest{}, fmt.Errorf("--label: %w", err)
+	}
+
+	// Merge order: env-var defaults < explicit flags.
+	labels := mergeLabels(envLabels, flagLabels)
 
 	name := ""
 	if len(args) > 0 {
@@ -113,6 +139,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		Extensions:    exts,
 		Verbose:       verbose,
 		ExtraArgs:     extraArgs,
+		Labels:        labels,
 	}, nil
 }
 

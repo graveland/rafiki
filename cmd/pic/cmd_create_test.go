@@ -141,3 +141,122 @@ func TestAttachCmd_KeepOnExitAlone_OK(t *testing.T) {
 		t.Errorf("unexpected error with only --keep-on-exit: %v", err)
 	}
 }
+
+// ─── Label flag tests ─────────────────────────────────────────────────────────
+
+func TestBuildSpawnRequest_LabelFlag(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	// Register the --label flag (added by addSpawnFlags).
+	if err := cmd.Flags().Set("label", "env=prod"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Labels["env"] != "prod" {
+		t.Errorf("Labels[env] = %q, want prod", req.Labels["env"])
+	}
+}
+
+func TestBuildSpawnRequest_PICDefaultModel(t *testing.T) {
+	t.Setenv("PIC_DEFAULT_MODEL", "anthropic/claude-haiku-4-5")
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	// --model not set; should fall back to env var.
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Model != "anthropic/claude-haiku-4-5" {
+		t.Errorf("Model = %q, want anthropic/claude-haiku-4-5", req.Model)
+	}
+}
+
+func TestBuildSpawnRequest_PICDefaultModelOverriddenByFlag(t *testing.T) {
+	t.Setenv("PIC_DEFAULT_MODEL", "env-model")
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("model", "flag-model"); err != nil {
+		t.Fatal(err)
+	}
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Model != "flag-model" {
+		t.Errorf("Model = %q, want flag-model (flag wins over env)", req.Model)
+	}
+}
+
+func TestBuildSpawnRequest_PICDefaultLabels(t *testing.T) {
+	t.Setenv("PIC_DEFAULT_LABELS", "context=work,env=prod")
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Labels["context"] != "work" || req.Labels["env"] != "prod" {
+		t.Errorf("Labels from PIC_DEFAULT_LABELS: %v", req.Labels)
+	}
+}
+
+func TestBuildSpawnRequest_FlagLabelWinsOverEnv(t *testing.T) {
+	// Explicit --label should override PIC_DEFAULT_LABELS on the same key.
+	t.Setenv("PIC_DEFAULT_LABELS", "env=staging")
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("label", "env=prod"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Labels["env"] != "prod" {
+		t.Errorf("Labels[env] = %q, want prod (flag wins over env)", req.Labels["env"])
+	}
+}
+
+func TestBuildSpawnRequest_InvalidLabelKey(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("label", "bad key=val"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildSpawnRequest(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid label key")
+	}
+}
+
+func TestBuildSpawnRequest_ReservedLabelKey(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("label", "pic/model=evil"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildSpawnRequest(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for pic/ prefix")
+	}
+}

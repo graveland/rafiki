@@ -23,6 +23,8 @@ func newSearchCmd() *cobra.Command {
 	cmd.Flags().Int("context", 2, "Context lines around each hit")
 	cmd.Flags().String("cwd-contains", "", "Restrict to children whose cwd contains this")
 	cmd.Flags().String("name-contains", "", "Restrict to children whose name contains this")
+	cmd.Flags().StringArray("label", nil, "AND-match session label k=v (repeatable)")
+	cmd.Flags().StringArray("has-label", nil, "Restrict to sessions that have this label key (repeatable)")
 	return cmd
 }
 
@@ -36,6 +38,17 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	cwd, _ := cmd.Flags().GetString("cwd-contains")
 	name, _ := cmd.Flags().GetString("name-contains")
 
+	// Optional label filters for session scoping.
+	var labelFilter map[string]string
+	if labelPairs, _ := cmd.Flags().GetStringArray("label"); len(labelPairs) > 0 {
+		var err error
+		labelFilter, err = parseLabelPairs(labelPairs)
+		if err != nil {
+			return fmt.Errorf("--label: %w", err)
+		}
+	}
+	hasLabels, _ := cmd.Flags().GetStringArray("has-label")
+
 	req := protocol.SearchRequest{
 		Type:    protocol.TypeCtrlSearch,
 		Query:   args[0],
@@ -43,10 +56,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		Limit:   limit,
 		Context: context,
 	}
-	if cwd != "" || name != "" {
+	if cwd != "" || name != "" || len(labelFilter) > 0 || len(hasLabels) > 0 {
 		req.SessionFilter = &protocol.SearchSessionFilter{
 			CwdContains:  cwd,
 			NameContains: name,
+			Labels:       labelFilter,
+			HasLabel:     hasLabels,
 		}
 	}
 

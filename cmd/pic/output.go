@@ -73,7 +73,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	st.Color = table.ColorOptions{}
 	tw.SetStyle(st)
 
-	colNames := []string{"ID", "NAME", "STATUS", "MODEL", "STARTED"}
+	colNames := []string{"ID", "NAME", "STATUS", "MODEL", "STARTED", "LABELS"}
 	headerRow := make(table.Row, len(colNames))
 	for i, name := range colNames {
 		if useColor {
@@ -98,6 +98,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 			colorStatus(ch.Status, useColor),
 			defaultDash(ch.Model),
 			started,
+			formatLabels(ch.Labels, 40),
 		})
 	}
 

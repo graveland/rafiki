@@ -52,14 +52,15 @@ func (r *tailRenderer) render(frame []byte) error {
 
 	// Decode just the envelope fields we need for routing.
 	var hdr struct {
-		Type     string          `json:"type"`
-		ChildID  string          `json:"childId"`
-		Event    json.RawMessage `json:"event,omitempty"`
-		Status   string          `json:"status,omitempty"`
-		Previous string          `json:"previous,omitempty"`
-		ExitCode *int            `json:"exitCode,omitempty"`
-		Signal   string          `json:"signal,omitempty"`
-		Name     string          `json:"name,omitempty"`
+		Type     string            `json:"type"`
+		ChildID  string            `json:"childId"`
+		Event    json.RawMessage   `json:"event,omitempty"`
+		Status   string            `json:"status,omitempty"`
+		Previous string            `json:"previous,omitempty"`
+		ExitCode *int              `json:"exitCode,omitempty"`
+		Signal   string            `json:"signal,omitempty"`
+		Name     string            `json:"name,omitempty"`
+		Labels   map[string]string `json:"labels,omitempty"`
 	}
 	if err := json.Unmarshal(frame, &hdr); err != nil {
 		fmt.Fprintln(r.w, string(frame))
@@ -91,6 +92,19 @@ func (r *tailRenderer) render(frame []byte) error {
 
 	case protocol.TypeCtrlChildRenamed:
 		r.printDim(fmt.Sprintf("[rename] %s → %s", hdr.Previous, hdr.Name))
+
+	case protocol.TypeCtrlChildLabeled:
+		if r.verbose {
+			var v any
+			if err := json.Unmarshal(frame, &v); err == nil {
+				if b, err := json.MarshalIndent(v, "", "  "); err == nil {
+					r.printDim("[labels]")
+					fmt.Fprintln(r.w, string(b))
+					break
+				}
+			}
+		}
+		r.printDim(fmt.Sprintf("[labels] %s", formatLabels(hdr.Labels, 60)))
 
 	default:
 		fmt.Fprintln(r.w, string(frame))

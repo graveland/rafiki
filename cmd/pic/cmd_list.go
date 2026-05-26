@@ -20,6 +20,8 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().String("status", "", "Filter by status (e.g. idle, streaming, exited)")
 	cmd.Flags().String("name-contains", "", "Filter by substring in name")
 	cmd.Flags().String("cwd-contains", "", "Filter by substring in working directory")
+	cmd.Flags().StringArray("label", nil, "AND-match label k=v (repeatable)")
+	cmd.Flags().StringArray("has-label", nil, "Filter children that have this label key (repeatable)")
 
 	_ = cmd.RegisterFlagCompletionFunc("status", cobra.FixedCompletions(
 		[]string{"spawning", "idle", "streaming", "tool_running", "compacting", "blocked_ui", "shutting_down", "exited"},
@@ -42,6 +44,16 @@ func runList(cmd *cobra.Command, _ []string) error {
 	}
 	if v, _ := cmd.Flags().GetString("cwd-contains"); v != "" {
 		filter.CwdContains = v
+	}
+	if labelPairs, _ := cmd.Flags().GetStringArray("label"); len(labelPairs) > 0 {
+		labels, err := parseLabelPairs(labelPairs)
+		if err != nil {
+			return fmt.Errorf("--label: %w", err)
+		}
+		filter.Labels = labels
+	}
+	if hasLabels, _ := cmd.Flags().GetStringArray("has-label"); len(hasLabels) > 0 {
+		filter.HasLabel = hasLabels
 	}
 
 	children, err := c.List(cmdCtx(cmd), filter)
