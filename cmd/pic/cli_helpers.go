@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -90,6 +92,50 @@ func completeChildren(cmd *cobra.Command, toComplete string) []string {
 func socketFromCmd(cmd *cobra.Command) string {
 	s, _ := cmd.Flags().GetString("socket")
 	return s
+}
+
+// findPicAttach returns the absolute path to the pic-attach binary.
+// Looks first in the same directory as the running pic executable, then on PATH.
+func findPicAttach() (string, error) {
+	self, err := os.Executable()
+	if err == nil {
+		sibling := filepath.Join(filepath.Dir(self), "pic-attach")
+		if _, statErr := os.Stat(sibling); statErr == nil {
+			return sibling, nil
+		}
+	}
+	if path, lookErr := exec.LookPath("pic-attach"); lookErr == nil {
+		return path, nil
+	}
+	return "", fmt.Errorf("pic-attach binary not found (expected sibling of pic or on PATH); install bun and run 'make build-attach'")
+}
+
+// execPicAttach spawns pic-attach <childID> with stdio inherited and waits
+// for it to exit. Returns when pic-attach exits. If pic-attach exits with a
+// non-zero code, os.Exit is called directly so the exit code propagates
+// without extra error noise (pic-attach has already printed to stderr).
+func execPicAttach(childID string, killOnExit bool) error {
+	bin, err := findPicAttach()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(bin, childID)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if killOnExit {
+		cmd.Env = append(cmd.Env, "PIC_KILL_ON_EXIT=1")
+	}
+	if runErr := cmd.Run(); runErr != nil {
+		// pic-attach already wrote to stderr; just propagate the exit code.
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return fmt.Errorf("pic-attach: %w", runErr)
+	}
+	return nil
 }
 
 // knownEventTypes lists pi RPC event types used by --include/--exclude

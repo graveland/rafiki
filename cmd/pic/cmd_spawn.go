@@ -19,6 +19,13 @@ func newSpawnCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runSpawn,
 	}
+	addSpawnFlags(cmd)
+	return cmd
+}
+
+// addSpawnFlags registers the shared spawn-related flags on cmd.
+// Used by both newSpawnCmd and newCreateCmd.
+func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory (required, must be absolute)")
 	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4)")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
@@ -40,20 +47,17 @@ func newSpawnCmd() *cobra.Command {
 		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
 	})
 	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
-
-	return cmd
 }
 
-func runSpawn(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-
+// buildSpawnRequest constructs a SpawnRequest from the spawn flags and
+// positional args. Returns an error if required flags are invalid.
+func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
-		return fmt.Errorf("--cwd is required")
+		return protocol.SpawnRequest{}, fmt.Errorf("--cwd is required")
 	}
 	if !strings.HasPrefix(cwd, "/") {
-		return fmt.Errorf("--cwd must be absolute")
+		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute")
 	}
 	model, _ := cmd.Flags().GetString("model")
 	thinking, _ := cmd.Flags().GetString("thinking")
@@ -70,7 +74,7 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 		name = args[0]
 	}
 
-	req := protocol.SpawnRequest{
+	return protocol.SpawnRequest{
 		Type:          protocol.TypeCtrlSpawn,
 		Name:          name,
 		Cwd:           cwd,
@@ -83,6 +87,16 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 		Extensions:    exts,
 		Verbose:       verbose,
 		ExtraArgs:     extraArgs,
+	}, nil
+}
+
+func runSpawn(cmd *cobra.Command, args []string) error {
+	c := mustDial(cmd)
+	defer c.Close()
+
+	req, err := buildSpawnRequest(cmd, args)
+	if err != nil {
+		return err
 	}
 
 	resp, err := c.Request(cmdCtx(cmd), req)
