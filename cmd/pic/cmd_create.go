@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -25,6 +25,8 @@ running in the daemon. Use --kill-on-exit for native pi exit semantics
 With --detached, pic create spawns the child and exits without attaching.
 The child runs in the background; reattach later with 'pic attach <name>'.
 
+--cwd defaults to the current directory. Specify explicitly to override.
+
 (Note: pic create replaces the earlier ` + "`pic spawn`" + ` subcommand. For
 scripting / AFK workflows, use --detached.)`,
 		Args: cobra.MaximumNArgs(1),
@@ -38,7 +40,7 @@ scripting / AFK workflows, use --detached.)`,
 
 // addSpawnFlags registers the shared spawn-related flags on cmd.
 func addSpawnFlags(cmd *cobra.Command) {
-	cmd.Flags().String("cwd", "", "Working directory (required, must be absolute)")
+	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
 	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4)")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
@@ -66,10 +68,14 @@ func addSpawnFlags(cmd *cobra.Command) {
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
-		return protocol.SpawnRequest{}, fmt.Errorf("--cwd is required")
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return protocol.SpawnRequest{}, fmt.Errorf("cwd: %w", err)
+		}
 	}
-	if !strings.HasPrefix(cwd, "/") {
-		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute")
+	if !filepath.IsAbs(cwd) {
+		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute (got %q)", cwd)
 	}
 	model, _ := cmd.Flags().GetString("model")
 	thinking, _ := cmd.Flags().GetString("thinking")
