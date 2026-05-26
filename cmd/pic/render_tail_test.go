@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -147,6 +150,41 @@ func TestRender_Response_ShownWithVerbose(t *testing.T) {
 	}
 	if !strings.Contains(out, "\n") {
 		t.Fatalf("verbose response should be pretty-printed (multi-line); got:\n%s", out)
+	}
+}
+
+func TestRender_DaemonShutdown(t *testing.T) {
+	// Capture stderr to verify the message content.
+	rp, wp, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = wp
+
+	var w bytes.Buffer
+	r := newTailRenderer(&w, false, outputTable, false)
+	renderErr := r.render([]byte(`{"type":"ctrl_daemon_shutdown","reason":"signal received: terminated"}`))
+
+	// Restore stderr before reading the pipe to avoid a write-side block.
+	wp.Close()
+	os.Stderr = oldStderr
+
+	var stderrBuf bytes.Buffer
+	if _, err := io.Copy(&stderrBuf, rp); err != nil {
+		t.Fatal(err)
+	}
+	rp.Close()
+
+	if !errors.Is(renderErr, errDaemonShutdown) {
+		t.Fatalf("expected errDaemonShutdown, got %v", renderErr)
+	}
+	stderrStr := stderrBuf.String()
+	if !strings.Contains(stderrStr, "daemon shutting down") {
+		t.Errorf("stderr missing 'daemon shutting down': %q", stderrStr)
+	}
+	if !strings.Contains(stderrStr, "signal received: terminated") {
+		t.Errorf("stderr missing reason: %q", stderrStr)
 	}
 }
 

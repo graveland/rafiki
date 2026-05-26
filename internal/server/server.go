@@ -56,6 +56,8 @@ type Server struct {
 	wg      sync.WaitGroup
 	cancel  context.CancelFunc
 	ctx     context.Context
+	conns   map[Connection]struct{}
+	connsMu sync.Mutex
 }
 
 // Listen creates a Unix-domain-socket listener at path. If a stale socket
@@ -86,7 +88,13 @@ func Listen(path string, handler ConnectionLifecycleHandler) (*Server, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{ln: ln, handler: handler, ctx: ctx, cancel: cancel}
+	s := &Server{
+		ln:      ln,
+		handler: handler,
+		ctx:     ctx,
+		cancel:  cancel,
+		conns:   make(map[Connection]struct{}),
+	}
 	go s.acceptLoop()
 	return s, nil
 }
@@ -150,6 +158,17 @@ func (s *Server) handleConn(conn net.Conn) {
 	}()
 
 	nc := &netConn{conn: conn}
+
+	// Register this connection in the broadcast registry.
+	s.connsMu.Lock()
+	s.conns[nc] = struct{}{}
+	s.connsMu.Unlock()
+	defer func() {
+		s.connsMu.Lock()
+		delete(s.conns, nc)
+		s.connsMu.Unlock()
+	}()
+
 	defer s.handler.HandleClose(nc)
 	r := protocol.NewFrameReader(conn, 16<<20)
 	for {
@@ -170,6 +189,25 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// Broadcast delivers frame to every currently-active connection.  Best-effort:
+// delivery errors are ignored (handled by Connection.Deliver's existing
+// semantics).  Returns the number of connections the frame was attempted on.
+//
+// The registry lock is held only while building the snapshot; Deliver is called
+// outside the lock because it may block briefly on slow clients.
+func (s *Server) Broadcast(frame []byte) int {
+	s.connsMu.Lock()
+	conns := make([]Connection, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.connsMu.Unlock()
+	for _, c := range conns {
+		c.Deliver(frame)
+	}
+	return len(conns)
 }
 
 // Close shuts down the server: it cancels the internal context (which closes

@@ -15,6 +15,7 @@ import "encoding/json"
 // ─── Type constants ──────────────────────────────────────────────────────────
 
 const (
+	TypeCtrlDaemonShutdown    = "ctrl_daemon_shutdown"
 	TypeCtrlList              = "ctrl_list"
 	TypeCtrlGet               = "ctrl_get"
 	TypeCtrlSpawn             = "ctrl_spawn"
@@ -422,6 +423,17 @@ type StatusResponseData struct {
 	MemoryBytes int64       `json:"memoryBytes"`
 	Socket      string      `json:"socket,omitempty"`
 	LogsDir     string      `json:"logsDir,omitempty"`
+}
+
+// ─── Daemon-level events ────────────────────────────────────────────────────
+
+// CtrlDaemonShutdown is broadcast to all active connections when the daemon
+// begins its own shutdown sequence (SIGTERM/SIGINT/SIGHUP).  Children are
+// still being gracefully shut down at this point — this is purely advance
+// warning so clients can exit cleanly rather than hanging on broken pipes.
+type CtrlDaemonShutdown struct {
+	Type   string `json:"type"`             // "ctrl_daemon_shutdown"
+	Reason string `json:"reason,omitempty"` // e.g. "signal received: terminated"
 }
 
 // ─── Event types (§7) ────────────────────────────────────────────────────────

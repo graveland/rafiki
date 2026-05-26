@@ -5,7 +5,7 @@
  * run in-process without a real UDS server.
  */
 
-import { describe, expect, it, beforeEach, afterEach } from "bun:test";
+import { describe, expect, it, beforeEach, afterEach, spyOn } from "bun:test";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -211,6 +211,25 @@ describe("RemoteAgentSession", () => {
         await tick();
 
         expect(received).toHaveLength(0);
+    });
+
+    it("ctrl_daemon_shutdown: calls process.exit(0)", async () => {
+        // Mock process.exit so the test process does not actually terminate.
+        const exitSpy = spyOn(process, "exit").mockImplementation(
+            (_code?: number | string) => undefined as never
+        );
+
+        try {
+            client.push({
+                type: "ctrl_daemon_shutdown",
+                reason: "signal received: terminated",
+            });
+            await tick();
+
+            expect(exitSpy).toHaveBeenCalledWith(0);
+        } finally {
+            exitSpy.mockRestore();
+        }
     });
 
     it("subscribe: returns an unsubscribe function that stops delivery", async () => {

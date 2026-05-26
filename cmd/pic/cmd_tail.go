@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -129,6 +130,9 @@ func runTail(cmd *cobra.Command, args []string) error {
 				return nil
 			}
 			if err := renderer.render(frame); err != nil {
+				if errors.Is(err, errDaemonShutdown) {
+					return nil // clean exit — daemon is shutting down
+				}
 				fmt.Fprintln(os.Stderr, "render error:", err)
 			}
 			if isChildExited(frame, childID) {

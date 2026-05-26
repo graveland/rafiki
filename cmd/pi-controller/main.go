@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"graveland.dev/pi-controller/internal/persist"
+	"graveland.dev/pi-controller/internal/protocol"
 	"graveland.dev/pi-controller/internal/server"
 	"graveland.dev/pi-controller/internal/store"
 )
@@ -70,6 +73,18 @@ func main() {
 	sig := <-sigCh
 
 	slog.Info("shutting down", "signal", sig)
+
+	// Notify all connected clients so they can exit cleanly before pipes die.
+	shutdownEvent := protocol.CtrlDaemonShutdown{
+		Type:   protocol.TypeCtrlDaemonShutdown,
+		Reason: fmt.Sprintf("signal received: %s", sig),
+	}
+	if frame, err := json.Marshal(shutdownEvent); err == nil {
+		n := srv.Broadcast(frame)
+		slog.Info("notified clients of shutdown", "count", n)
+		time.Sleep(250 * time.Millisecond) // brief window for frames to land on the wire
+	}
+
 	cancel() // stop the background sweeper
 
 	// Shut down all live children gracefully before closing the server. This

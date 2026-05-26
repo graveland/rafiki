@@ -3,13 +3,19 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
 	"graveland.dev/pi-controller/internal/protocol"
 )
+
+// errDaemonShutdown is returned by render when a ctrl_daemon_shutdown frame
+// is received.  The run loop in cmd_tail.go uses this to exit cleanly.
+var errDaemonShutdown = errors.New("daemon_shutdown")
 
 // tailRenderer formats incoming event frames (raw bytes) onto w.
 // It handles the ctrl_event wrapper (pi events) and ctrl_child_* lifecycle events.
@@ -68,6 +74,12 @@ func (r *tailRenderer) render(frame []byte) error {
 	}
 
 	switch hdr.Type {
+	case protocol.TypeCtrlDaemonShutdown:
+		var ev protocol.CtrlDaemonShutdown
+		_ = json.Unmarshal(frame, &ev)
+		fmt.Fprintf(os.Stderr, "daemon shutting down (reason: %s)\n", ev.Reason)
+		return errDaemonShutdown
+
 	case protocol.TypeCtrlEvent:
 		return r.renderPiEvent(hdr.Event)
 

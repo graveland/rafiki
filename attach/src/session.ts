@@ -385,6 +385,14 @@ export class RemoteAgentSession {
         try {
             for await (const frame of this._eventIter) {
                 try {
+                    // Daemon-level broadcast — not tied to a specific child.
+                    // Check before the per-child filter so it's never skipped.
+                    if (frame["type"] === "ctrl_daemon_shutdown") {
+                        const reason = (frame as { reason?: string }).reason ?? "unknown";
+                        console.error(`[pic-attach] daemon shutting down (reason: ${reason})`);
+                        process.exit(0);
+                    }
+
                     if (frame["type"] !== "ctrl_event") continue;
                     if (frame["childId"] !== this._childId) continue;
                     const inner = frame["event"] as Record<string, unknown>;
