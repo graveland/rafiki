@@ -677,21 +677,55 @@ describe("RemoteAgentSession", () => {
         );
     });
 
-    it("stubs: compact throws not-implemented", async () => {
-        await expect(session.compact()).rejects.toThrow(
-            "not yet implemented in pic-attach v1"
-        );
+    // ── reload ─────────────────────────────────────────────────────────────
+
+    it("reload: forwards /reload as a prompt frame to the daemon", async () => {
+        await session.reload();
+
+        expect(client.requests).toHaveLength(1);
+        const req = client.requests[0]!;
+        expect(req["type"]).toBe("ctrl_send");
+        expect(req["childId"]).toBe("child-1");
+        const frame = req["frame"] as Record<string, unknown>;
+        expect(frame?.["type"]).toBe("prompt");
+        expect(frame?.["message"]).toBe("/reload");
     });
 
-    it("stubs: navigateTree throws not-implemented", async () => {
+    it("reload: throws when daemon returns success:false", async () => {
+        client.nextResponse = { success: false, error: { code: "child_not_found" } };
+        await expect(session.reload()).rejects.toThrow("reload: child_not_found");
+    });
+
+    // ── compact ────────────────────────────────────────────────────────────────
+
+    it("compact: forwards /compact as a prompt frame to the daemon", async () => {
+        await session.compact();
+
+        expect(client.requests).toHaveLength(1);
+        const req = client.requests[0]!;
+        expect(req["type"]).toBe("ctrl_send");
+        expect(req["childId"]).toBe("child-1");
+        const frame = req["frame"] as Record<string, unknown>;
+        expect(frame?.["type"]).toBe("prompt");
+        expect(frame?.["message"]).toBe("/compact");
+    });
+
+    it("compact: includes custom instructions in the forwarded prompt", async () => {
+        await session.compact("focus on removing tool results");
+
+        const frame = (client.requests[0]!["frame"]) as Record<string, unknown>;
+        expect(frame?.["message"]).toBe("/compact focus on removing tool results");
+    });
+
+    it("stubs: navigateTree throws with actionable v1 message", async () => {
         await expect(session.navigateTree("some-id")).rejects.toThrow(
-            "not yet implemented in pic-attach v1"
+            "/tree and /fork navigation are not supported in pic-attach v1"
         );
     });
 
-    it("stubs: exportToHtml throws not-implemented", async () => {
+    it("stubs: exportToHtml throws with actionable v1 message", async () => {
         await expect(session.exportToHtml()).rejects.toThrow(
-            "not yet implemented in pic-attach v1"
+            "/export and /share are not supported in pic-attach v1"
         );
     });
 

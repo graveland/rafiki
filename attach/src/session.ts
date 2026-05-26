@@ -66,12 +66,12 @@
  *  [stub] 21. supportsThinking(): boolean
  *  [impl] 22. setSteeringMode(mode): void
  *  [impl] 23. setFollowUpMode(mode): void
- *  [stub] 24. compact(instructions?): Promise<CompactionResult>
+ *  [impl] 24. compact(instructions?): Promise<CompactionResult>  — forwards /compact to daemon
  *  [stub] 25. abortCompaction(): void
  *  [stub] 26. abortBranchSummary(): void
  *  [stub] 27. setAutoCompactionEnabled(enabled): void
- *  [stub] 28. bindExtensions(bindings): Promise<void>
- *  [stub] 29. reload(): Promise<void>
+ *  [impl] 28. bindExtensions(bindings): Promise<void>
+ *  [impl] 29. reload(): Promise<void>                             — forwards /reload to daemon
  *  [stub] 30. abortRetry(): void
  *  [stub] 31. setAutoRetryEnabled(enabled): void
  *  [stub] 32. executeBash(cmd, onChunk?, opts?): Promise<BashResult>
@@ -90,8 +90,8 @@
  *  [stub] 45. setScopedModels(models): void
  *
  * TOTAL: 27 getters/properties, 45 methods = 72 public members
- * IMPLEMENTED: 23 getters + 19 methods = 42
- * STUBBED:      4 getters + 26 methods = 30
+ * IMPLEMENTED: 23 getters + 22 methods = 45
+ * STUBBED:      4 getters + 23 methods = 27
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
@@ -910,9 +910,24 @@ export class RemoteAgentSession {
         return false;
     }
 
-    /** Stub: compaction is triggered inside the daemon-owned pi child. */
-    async compact(_customInstructions?: string): Promise<CompactionResult> {
-        throw new Error("compact: not yet implemented in pic-attach v1");
+    /**
+     * Forward /compact to the daemon's pi child as a prompt frame.
+     * The child runs its own builtin handler; results flow back as
+     * compaction_start / compaction_end events through the normal pipeline.
+     * The TUI ignores the return value and catches errors, relying on events.
+     */
+    async compact(customInstructions?: string): Promise<CompactionResult> {
+        const message = customInstructions ? `/compact ${customInstructions}` : "/compact";
+        const resp = await this._client.request({
+            type: "ctrl_send",
+            childId: this._childId,
+            frame: { type: "prompt", message },
+        });
+        if (!resp.success) {
+            throw new Error(`compact: ${resp.error?.code ?? "unknown error"}`);
+        }
+        // Return value is ignored by handleCompactCommand; events carry the result.
+        return {} as CompactionResult;
     }
 
     /** Stub: compaction abort is daemon-side. */
@@ -953,9 +968,20 @@ export class RemoteAgentSession {
         }
     }
 
-    /** Stub: reload is a daemon-side operation. */
+    /**
+     * Forward /reload to the daemon's pi child as a prompt frame.
+     * The child runs its own reload handler (extensions, keybindings, etc.);
+     * results flow back through the normal event pipeline.
+     */
     async reload(): Promise<void> {
-        throw new Error("reload: not yet implemented in pic-attach v1");
+        const resp = await this._client.request({
+            type: "ctrl_send",
+            childId: this._childId,
+            frame: { type: "prompt", message: "/reload" },
+        });
+        if (!resp.success) {
+            throw new Error(`reload: ${resp.error?.code ?? "unknown error"}`);
+        }
     }
 
     /** Stub: retry abort is daemon-side. */
@@ -991,7 +1017,11 @@ export class RemoteAgentSession {
         // no-op in v1
     }
 
-    /** Stub: tree navigation requires session JSONL tailing (Task 5). */
+    /**
+     * Not supported in v1: /tree and /fork tree navigation require session
+     * branching support that pic-attach does not yet implement.
+     * Use `pic` shell commands to manage sessions.
+     */
     async navigateTree(
         _targetId: string,
         _options?: unknown
@@ -1001,7 +1031,7 @@ export class RemoteAgentSession {
         aborted?: boolean;
         summaryEntry?: BranchSummaryEntry;
     }> {
-        throw new Error("navigateTree: not yet implemented in pic-attach v1");
+        throw new Error("/tree and /fork navigation are not supported in pic-attach v1. Use `pic` shell commands to manage sessions.");
     }
 
     /** Stub: fork selector requires session JSONL tailing (Task 5). */
@@ -1014,19 +1044,19 @@ export class RemoteAgentSession {
         return undefined;
     }
 
-    /** Stub: HTML export requires full session data. */
+    /** /export and /share are not supported in pic-attach v1 — the session data lives in the daemon. */
     async exportToHtml(_outputPath?: string): Promise<string> {
-        throw new Error("exportToHtml: not yet implemented in pic-attach v1");
+        throw new Error("/export and /share are not supported in pic-attach v1. Export directly from the daemon session.");
     }
 
-    /** Stub: JSONL export requires full session data. */
+    /** /export is not supported in pic-attach v1 — the session data lives in the daemon. */
     exportToJsonl(_outputPath?: string): string {
-        throw new Error("exportToJsonl: not yet implemented in pic-attach v1");
+        throw new Error("/export is not supported in pic-attach v1. Export directly from the daemon session.");
     }
 
-    /** Stub: replaced-session context is a complex daemon operation. */
+    /** Not supported in v1: session branching is managed by the daemon. */
     createReplacedSessionContext(): ReplacedSessionContext {
-        throw new Error("createReplacedSessionContext: not yet implemented in pic-attach v1");
+        throw new Error("createReplacedSessionContext is not supported in pic-attach v1. Use `pic` shell commands to manage sessions.");
     }
 
     /**
