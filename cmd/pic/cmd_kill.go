@@ -17,11 +17,20 @@ func newKillCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kill [id|name]",
 		Short: "Stop a running child gracefully",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  runKill,
+		Long: `Stop a running child gracefully, escalating to SIGKILL only if necessary.
+
+On a clean exit (exit code 0, no signal, no timeout escalation), the child
+is also forgotten from the daemon's in-memory store (removed from pic list).
+Disk artifacts (logs, state record) are not affected.
+
+Use --no-forget to keep the exited child visible in pic list even after a
+clean exit (e.g. for /tree navigation or inspection).`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runKill,
 	}
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
+	cmd.Flags().Bool("no-forget", false, "Keep the child in pic list even after a clean exit")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
@@ -47,6 +56,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 
 	st, _ := cmd.Flags().GetDuration("shutdown-timeout")
 	kt, _ := cmd.Flags().GetDuration("kill-timeout")
+	noForget, _ := cmd.Flags().GetBool("no-forget")
 
 	req := protocol.KillRequest{
 		Type:    protocol.TypeCtrlKill,
@@ -75,7 +85,41 @@ func runKill(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
 	}
 
+	var killData protocol.KillResponseData
+	if err := json.Unmarshal(resp.Data, &killData); err != nil {
+		// Couldn't decode kill response — dump raw and skip forget logic.
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(json.RawMessage(resp.Data))
+	}
+
+	// Auto-forget on clean exit: exitCode 0, no signal, not escalated.
+	cleanExit := killData.ExitCode != nil && *killData.ExitCode == 0 &&
+		killData.Signal == "" && !killData.Escalated
+	didForget := false
+	var forgetErr error
+	if cleanExit && !noForget {
+		fresp, ferr := c.Request(cmdCtx(cmd), protocol.ForgetRequest{
+			Type:    protocol.TypeCtrlForget,
+			ChildID: childID,
+		})
+		if ferr != nil {
+			forgetErr = ferr
+		} else if !fresp.Success {
+			forgetErr = fmt.Errorf("%s", client.FormatError(fresp))
+		} else {
+			didForget = true
+		}
+	}
+
+	out := map[string]any{
+		"kill":   killData,
+		"forgot": didForget,
+	}
+	if forgetErr != nil {
+		out["forgetError"] = forgetErr.Error()
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	return enc.Encode(json.RawMessage(resp.Data))
+	return enc.Encode(out)
 }
