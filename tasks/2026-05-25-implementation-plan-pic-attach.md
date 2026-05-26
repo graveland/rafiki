@@ -2,22 +2,49 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
-**Goal:** Let an interactive `pi` session register itself with the pi-controller daemon, so users get the normal pi TUI experience while the daemon can also observe/steer that session from outside. Two pic subcommands:
+**Goal:** Let users get the native pi TUI experience driving a pi-controller-managed child. Two new pic subcommands:
 
-- **`pic create <name>`** — start a fresh pi TUI locally, registered with the daemon as a controlled child.
-- **`pic attach <name>`** — connect to an existing registered child (open its TUI in this terminal).
+- **`pic create <name> [pi-flags...]`** — spawn a new daemon-managed child via the controller, then attach the local TUI. With `--detached`, skip the attach and just return after spawn.
+- **`pic attach <id|name>`** — open the pi TUI driving an existing daemon-managed child.
 
-**Architecture:** A new pi extension (`pi-controller-register`) bootstraps each pi session, dials the controller's UDS, and tells it "here I am — childId=X, sessionFile=Y, etc." The controller learns about a new kind of child: **registered** (vs the existing **owned** kind). Registered children are managed by the user's terminal — the controller can't kill them or capture their lifecycle, but it can:
+**Architecture:** Reuse pi's existing `InteractiveMode` TUI as-is. Replace only its `AgentSessionRuntime` dependency with a remote implementation (`RemoteAgentSessionRuntime`) that proxies all calls to the pi-controller daemon over UDS. The result: identical to native pi rendering (markdown, model picker, keybindings, extension UI dialogs), but the agent loop runs in the daemon-owned pi child instead of in-process.
 
-- List them alongside owned children.
-- Forward `ctrl_send` frames into the running pi via the extension (extension calls `pi.sendUserMessage` to inject the prompt).
-- Subscribe to their events (extension forwards all pi events via the controller socket → controller fans out to subscribers).
+There is only one kind of child — daemon-spawned. No "registered" concept. The TUI is a thin client; the daemon's pi child is the source of truth.
 
-For `pic attach`, the second-and-later "attacher" doesn't run a TUI at all — only the original `pic create` terminal does. Attachers see a streamed tail-style view (same as `pic tail`). This is the **honest v1 trade-off**: a true second TUI rendering the same session would need a real thin-client TUI implementation (the pi-attach Big Project we deferred). What we *do* offer here is enough for the AFK scenario: kick off an interactive session, walk away, observe/steer from anywhere.
+**Tech Stack:** TypeScript with `bun --compile` for a static binary (mirrors how pi itself ships). Depends on `@earendil-works/pi-coding-agent` for `InteractiveMode` + types. New shared Go code: minimal additions to pic for `create` / `attach`.
 
-**Tech Stack:** TypeScript for the pi extension; Go for the daemon-side and pic changes.
+**Spec impact:** No changes to the wire protocol. All ops use existing verbs (`ctrl_spawn`, `ctrl_get`, `ctrl_subscribe`, `ctrl_send`).
 
-**Spec impact:** Adds `ctrl_register_self` verb and `registered` boolean on child summaries to `tasks/pi-controller-protocol.md`.
+---
+
+## Why this is tractable
+
+From inspecting the installed pi package:
+
+- `cmd/modes/interactive/interactive-mode.d.ts` header literally says: *"Handles TUI rendering and user interaction, delegating business logic to AgentSession."*
+- `InteractiveMode` constructor signature: `constructor(runtimeHost: AgentSessionRuntime, options?: InteractiveModeOptions)`.
+- `AgentSessionRuntime` is documented and publicly exported from `@earendil-works/pi-coding-agent`.
+
+The TUI is designed for runtime injection. We don't fork, vendor, or modify it — we construct it with a runtime that happens to be remote.
+
+## The proxy boundary
+
+`AgentSessionRuntime` exposes ~5 lifecycle methods (switchSession / newSession / fork / importFromJsonl / dispose) plus the underlying `AgentSession` (~30 methods + ~10 events) via the `session` getter.
+
+`AgentSession` does session-management work (message store, queue modes, event firing) on top of the actual `Agent`. The cleanest split: implement the *whole* `AgentSessionRuntime` + `AgentSession` shape as remote shims. They forward operations to the daemon and synthesize the expected events when responses arrive.
+
+What stays local:
+- `SessionManager` (read-only view of the jsonl the daemon's pi child is writing) — for the message list display.
+- `SettingsManager` (local config files).
+- `ModelRegistry` (local config files).
+
+What goes remote:
+- `agent.prompt(...)`, `agent.steer(...)`, `agent.abort()`, etc. → ctrl_send to daemon.
+- All `AgentSession` event emissions (`agent_start`, `agent_end`, `turn_end`, `message_update`, etc.) → translated from incoming ctrl_event frames.
+- `AgentSession.executeBash(...)`, `setModel(...)`, `setThinkingLevel(...)`, etc. → ctrl_send.
+- Extension UI requests come in as ctrl_event frames; responses go out as ctrl_send.
+
+The `SessionManager` instance the remote runtime hands the TUI is constructed locally from the session.jsonl file path the daemon reports. Pi's `SessionManager` already supports being constructed against an existing file; we use that path, read-only, and re-read on changes (file watcher) to pick up new messages the daemon's pi appended.
 
 ---
 
@@ -25,16 +52,15 @@ For `pic attach`, the second-and-later "attacher" doesn't run a TUI at all — o
 
 What this plan does:
 
-- ✅ `pic create <name>` — spawn local `pi` with the register extension preloaded; the session registers itself with the daemon.
-- ✅ `pic attach <name>` — currently equivalent to `pic tail`; documented as the "v1 attach" with a real thin-client TUI deferred.
-- ✅ Daemon learns to handle registered children: list them, route ctrl_send to them, broadcast their events.
-- ✅ pi extension that does the registration + event forwarding + command injection.
+- ✅ Build a `pic-attach` binary (bun-compiled TS) that opens the pi TUI driving a daemon-managed child.
+- ✅ Add `pic create` (spawn + auto-attach with `--detached` flag) and `pic attach` (attach to existing).
+- ✅ Make `pic create --detached` skip the attach step (equivalent to today's `pic spawn`).
+- ✅ Wire pic-attach so that when the user quits the TUI (Ctrl+D / `/quit`), the daemon's child keeps running (the daemon doesn't see this as a kill; it's a detach).
 
 What this plan does NOT do:
 
-- ❌ Full thin-client TUI for multiple attachers (deferred; would need Go-side TUI implementation).
-- ❌ Detach + reattach support beyond "pic tail closes and reopens" — the original `pic create` terminal still owns the session; closing it terminates pi.
-- ❌ Migration of an already-running pi to register itself after the fact (require restart with the extension loaded).
+- ❌ Multi-attach (two terminals attached to the same child simultaneously). The first version supports one TUI at a time per child. A second `pic attach` against an already-attached child either blocks or errors (TBD per Task 4).
+- ❌ Detaching from a TUI that crashed / was killed (reattach works because the daemon doesn't know about TUI lifecycle).
 
 ---
 
@@ -43,231 +69,330 @@ What this plan does NOT do:
 ```
 ~/home/pi-controller/
 ├── cmd/pic/
-│   ├── cmd_create.go            # new
-│   └── cmd_attach.go            # new (thin wrapper around tail for v1)
-├── internal/protocol/
-│   └── types.go                 # add ctrl_register_self request/response, registered flag
-├── cmd/pi-controller/
-│   └── controller.go            # new RegisterSelf method on Controller; registered-children plumbing
-├── extensions/                  # new top-level dir for shipped extensions
-│   └── controller-register/
-│       ├── package.json
-│       ├── index.ts
-│       └── README.md
-└── tasks/
-    └── 2026-05-25-implementation-plan-pic-attach.md   # this file
+│   ├── cmd_create.go            # new — spawn via daemon + exec pic-attach
+│   └── cmd_attach.go            # new — exec pic-attach
+├── attach/                      # new top-level dir for the TS TUI
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── src/
+│   │   ├── main.ts              # entry: parse args, construct runtime, run InteractiveMode
+│   │   ├── client.ts            # UDS JSONL client (TS port of internal/client/)
+│   │   ├── runtime.ts           # RemoteAgentSessionRuntime
+│   │   ├── session.ts           # RemoteAgentSession (the AgentSession shape, proxied)
+│   │   └── local-services.ts    # SessionManager / SettingsManager / ModelRegistry helpers
+│   ├── README.md
+│   └── Makefile or build.sh     # `bun build --compile` → bin/pic-attach
+└── Makefile                     # add `build-attach` target (only if bun is available)
 ```
 
-The extension is a TypeScript package the user can install per-session via `pi -e <path>` or install globally via `pi install <path>`. `pic create` will pass `-e <abs path to extensions/controller-register/index.ts>` automatically.
-
----
-
-## Wire protocol additions
-
-### `ctrl_register_self` (client → controller)
-
-Sent by the extension immediately after pi's `session_start`.
-
-```jsonc
-{
-  "type":        "ctrl_register_self",
-  "id":          "req-1",
-  "pid":         12345,
-  "cwd":         "/Users/brent/some-project",
-  "name":        "afk-impl",          // optional; from pic create --name
-  "sessionId":   "abc123",
-  "sessionFile": "/Users/.../session.jsonl",
-  "model":       "anthropic/claude-sonnet-4",
-  "thinking":    "medium"
-}
-```
-
-Response:
-
-```jsonc
-{
-  "type": "ctrl_response", "command": "ctrl_register_self", "id": "req-1",
-  "success": true,
-  "data": { "childId": "c_01HX..." }
-}
-```
-
-The controller assigns a fresh `childId` (using the same ULID scheme as for owned children).
-
-### Per-child flag: `registered`
-
-`ChildSummary` (in `protocol.types.go`) gains a `registered bool` field. `ctrl_list` / `ctrl_get` responses include it. True for register-self children; false (or absent) for daemon-spawned children.
-
-### Behavior differences for registered children
-
-- **`ctrl_kill`**: refused. Returns `child_not_owned` error code (new). The user kills it by closing their terminal.
-- **`ctrl_resume`**: refused for the same reason.
-- **`ctrl_send`**: the controller writes the frame to the registered child's connection (the extension's UDS connection). The extension parses it; for `prompt`/`steer`/`follow_up`, calls `pi.sendUserMessage(...)`. For others, attempts a best-effort mapping (or returns an error event).
-- **`ctrl_subscribe`**: works exactly as for owned children. The extension forwards every pi event to the controller; the controller's bus fans out.
-- **`ctrl_forget`**: removes from the in-memory store. Doesn't affect the still-running pi session.
-- **State record**: NOT persisted to disk (no crash-recovery for registered children — they're tied to the user's terminal).
-- **Log dumps**: NOT written on exit (no log dumper invoked for registered children).
-- **Grace window**: registered children disappear immediately when their extension's UDS connection drops; no grace.
-
-### New error code
-
-`child_not_owned` — operation requires an owned (daemon-spawned) child; this is a registered one.
+The `attach/` directory is TypeScript inside an otherwise-Go monorepo. The Makefile detects `bun` and only builds `pic-attach` when present.
 
 ---
 
 ## Tasks
 
-### Task 1: Protocol additions
+### Task 1: TS package skeleton + build pipeline
 
 **Files:**
-- Modify: `internal/protocol/types.go` — add `RegisterSelfRequest`, `RegisterSelfResponseData`, `TypeCtrlRegisterSelf`, `Registered bool` field on `ChildSummary`, `ErrChildNotOwned` constant.
-- Modify: `internal/protocol/types_test.go` — round-trip test for `RegisterSelfRequest`.
-- Modify: `tasks/pi-controller-protocol.md` — document the new verb and the registered behavior. New §6.17 for `ctrl_register_self`; add `registered` flag to §6.1 ChildSummary; add `child_not_owned` to §8 error codes; new §11.6 "Registered children" subsection.
+- Create: `attach/package.json`
+- Create: `attach/tsconfig.json`
+- Create: `attach/src/main.ts` (placeholder that prints args)
+- Create: `attach/README.md`
+- Create: `attach/Makefile`
+- Modify: root `Makefile` to add a `build-attach` target gated on `bun` availability.
 
-- [ ] **Step 1**: Add types + constants to `internal/protocol/types.go`.
-- [ ] **Step 2**: Add round-trip test for `RegisterSelfRequest`.
-- [ ] **Step 3**: Document in the spec — new sub-sections in protocol.md.
-- [ ] **Step 4**: `make test -race` clean.
-- [ ] **Step 5**: Commit: `protocol: add ctrl_register_self verb + registered flag for self-registered pi sessions`.
+**Reference:** pi's own build approach. Pi uses `bun build --compile ./dist/bun/cli.js --outfile dist/pi`.
 
-### Task 2: Daemon-side registered-child plumbing
+- [ ] Step 1: `mkdir -p attach/src` and initialize `package.json`:
+
+```json
+{
+    "name": "@graveland/pic-attach",
+    "version": "0.1.0",
+    "type": "module",
+    "private": true,
+    "scripts": {
+        "build": "bun build --compile --target bun-darwin-arm64 ./src/main.ts --outfile ../bin/pic-attach",
+        "dev": "bun ./src/main.ts"
+    },
+    "dependencies": {
+        "@earendil-works/pi-coding-agent": "*"
+    }
+}
+```
+
+Adjust the `--target` per host arch; the Makefile target should compute the right one. (For now, hardcode `bun-darwin-arm64` since that's the dev environment.)
+
+- [ ] Step 2: `tsconfig.json` (strict, ES2022, node module resolution):
+
+```json
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "allowImportingTsExtensions": true,
+        "noEmit": true
+    },
+    "include": ["src/**/*"]
+}
+```
+
+- [ ] Step 3: `src/main.ts` placeholder:
+
+```typescript
+#!/usr/bin/env bun
+console.log("pic-attach v0.1.0 — args:", process.argv.slice(2));
+```
+
+- [ ] Step 4: `attach/Makefile`:
+
+```makefile
+.PHONY: build install-deps clean
+
+BUN ?= bun
+
+install-deps:
+	$(BUN) install
+
+build: install-deps
+	mkdir -p ../bin
+	$(BUN) build --compile --target=$$($(BUN) --print "process.platform + '-' + process.arch" | sed 's/darwin-arm64/bun-darwin-arm64/; s/darwin-x64/bun-darwin-x64/; s/linux-x64/bun-linux-x64/') ./src/main.ts --outfile ../bin/pic-attach
+
+clean:
+	rm -rf node_modules bun.lockb
+```
+
+(If the `sed` mapping is awkward, hardcode for now.)
+
+- [ ] Step 5: Root Makefile addition:
+
+```makefile
+.PHONY: build-attach
+
+build-attach:
+	@if command -v bun >/dev/null 2>&1; then \
+	    $(MAKE) -C attach build; \
+	else \
+	    echo "skipping pic-attach build: bun not installed"; \
+	fi
+
+build: build-controller build-pic build-attach
+```
+
+- [ ] Step 6: Run `cd attach && bun install` and confirm `node_modules/@earendil-works/pi-coding-agent` is present.
+
+- [ ] Step 7: Run `make build-attach` and verify `bin/pic-attach` exists and runs (`./bin/pic-attach hello` prints the args).
+
+- [ ] Step 8: Commit: `attach: bun-compiled TS package skeleton`.
+
+### Task 2: TS UDS client (mirror of internal/client/)
 
 **Files:**
-- Modify: `internal/store/session.go` — add `Registered bool`, `RegisterConn` (a small interface for the connection that registered this child).
-- Modify: `cmd/pi-controller/controller.go` — implement `RegisterSelf` method (creates Session marked registered, inserts to store, sets up event-relay subscription on the conn).
-- Modify: `internal/server/dispatch.go` — handle `ctrl_register_self`; add `RegisterSelf` to the Controller interface.
-- Modify: `cmd/pi-controller/controller.go` — refuse `ctrl_kill`/`ctrl_resume` for registered children with `child_not_owned`; route `ctrl_send` to the conn's writer instead of the child's cmdCh; treat connection-close as the "child exited" signal.
-- Modify: `cmd/pi-controller/controller.go` — `ctrl_list` / `ctrl_get` populate the new `Registered` field.
-- Modify: tests as needed.
+- Create: `attach/src/client.ts`
+- Create: `attach/src/client.test.ts`
 
-This is the biggest task. Key design decision: how does the controller forward events from a registered child to subscribers?
+Implements:
+- `Client` class with `dial(path)`, `request(req)`, `subscribe()`, `close()`.
+- JSONL framing (LF only, no Unicode line breaks, ~16MB cap — same rules as Go side).
+- Request/response correlation by id.
+- Event channel for non-response frames.
 
-The extension's UDS connection is bidirectional. The controller sees:
-- Inbound: `ctrl_register_self` once, then a stream of `ctrl_event`-wrapped frames (the extension wraps each pi event before forwarding) AND `ctrl_response` frames for synchronous extension-handled pi commands.
-- Outbound: `ctrl_send` frames the controller wants the extension to inject as user messages.
+This is the TS analogue of `internal/client/client.go`. About 150-200 LOC.
 
-Actually simpler: the extension's outbound frames are already in `ctrl_event` envelope form (since the daemon expects that). The controller's per-child Bus accepts them as-is.
+- [ ] Step 1: Implement `Client` per the API above using `node:net`.
+- [ ] Step 2: Write tests using bun's built-in test runner (`bun test`).
+- [ ] Step 3: Test exercises dial + roundtrip against a Go test harness OR a local mock TS server.
+- [ ] Step 4: Commit: `attach: TS UDS client with request/response correlation`.
 
-Connection death = registered child exited. The controller's `HandleClose` (added in the daemon's important-fixes) needs to additionally check if this connection was a registration source; if so, mark the child exited and emit `ctrl_child_exited`.
-
-- [ ] Step 1: Add `Registered` field to Session + Snapshot, with deep-copy preservation.
-- [ ] Step 2: Add `RegisterSelf(ctx, conn, req)` method to Controller. Creates Session, inserts, sets up the bus, returns the new childId. Subscribes to the conn's incoming frames as the event source.
-- [ ] Step 3: Add `Controller.RegisterSelf` to the server Controller interface; implement handler in dispatch.
-- [ ] Step 4: Modify `Kill`, `Resume` to return `child_not_owned` for registered.
-- [ ] Step 5: Modify `Send` for registered children: instead of writing to `cmdCh`, write to the registering connection.
-- [ ] Step 6: Connection-close handler now needs to detect registered-child ownership and mark exited.
-- [ ] Step 7: Update `MarkExited` to handle registered (no ring snapshot since there's no Child object).
-- [ ] Step 8: `ctrl_list` and `ctrl_get` data includes the registered flag.
-- [ ] Step 9: Tests — unit tests for the new dispatch handler with a fake conn; integration test where a fake "registration client" calls ctrl_register_self and sends events.
-- [ ] Step 10: Commit: `cmd/pi-controller: support registered (externally-managed) children`.
-
-### Task 3: pi extension (controller-register)
+### Task 3: RemoteAgentSession (the agent-side proxy)
 
 **Files:**
-- Create: `extensions/controller-register/package.json`
-- Create: `extensions/controller-register/index.ts`
-- Create: `extensions/controller-register/README.md`
+- Create: `attach/src/session.ts`
+- Create: `attach/src/session.test.ts`
 
-The extension:
+This implements the `AgentSession` shape (the thing `InteractiveMode` reads from via `runtime.session`).
 
-1. On `session_start`, dial the controller UDS (`~/.pi/run/controller.sock`).
-2. Construct + send `ctrl_register_self` with metadata from `ctx.sessionManager`.
-3. Receive the assigned `childId`.
-4. Subscribe to every pi event via `pi.on("agent_start", ...)` etc.; for each, wrap in `ctrl_event` envelope (with the assigned childId) and write to the UDS.
-5. Read incoming frames from the UDS. For `ctrl_send`-wrapped frames whose inner `type` is `prompt`/`steer`/`follow_up`, call `pi.sendUserMessage(message, options)`. For `abort`, call `ctx.abort()`. For others, ignore (or log).
-6. On `session_shutdown`, close the UDS connection.
+**Critical decision:** AgentSession is a concrete class, not an interface, in pi. We can't implement an interface that doesn't exist. Three approaches:
 
-Pi extension API to reach for:
-- `pi.on("session_start", ...)` — get the initial metadata via `ctx.sessionManager`.
-- `pi.on("agent_start"|"agent_end"|...)` — every pi event the controller wants. Look at the daemon's existing subscription pattern; the extension needs to forward *every* event type the protocol §7 covers.
-- `pi.sendUserMessage(content, options?)` — inject prompts.
-- `ctx.abort()` — abort the agent.
+1. **Inherit from `AgentSession`** and override methods. Requires understanding what state AgentSession holds internally and how it interacts with the Agent.
+2. **Build a wrapper class** that satisfies the *shape* duck-typed and pass it where the TUI expects an AgentSession. Pi's type system might require us to lie (use `as unknown as AgentSession`).
+3. **Construct a real AgentSession with a remote Agent** — replace just the Agent inside. Lets AgentSession do its session/message store work, but means we have two SessionManagers (ours and the daemon's pi's) writing to the same jsonl.
 
-The extension also needs to handle pi's session-replacement events (`session_start` with `reason: "new"|"resume"|"fork"`) by re-registering or updating the metadata on the controller. For v1: simplest path is to re-call `ctrl_register_self` on every session_start — the controller can recognize the conn and update in place (or assign a new childId if simpler).
+(3) is unsafe (concurrent jsonl writers). (1) needs source-level knowledge. (2) is the pragmatic choice.
 
-For v1: each `session_start` registers fresh. The previous registration becomes orphaned and times out. Coordinator-coordinator can deal with the cleanup later.
+Build `RemoteAgentSession` as a fresh class implementing every method/property of `AgentSession` we observed in the d.ts. Each method:
 
-Configuration: extension reads `PI_CONTROLLER_SOCKET` from env (or falls back to default path) — same convention as the Go client.
+- For methods that return a value (queues, settings) — store local state, return synchronously.
+- For methods that mutate the agent (prompt/steer/abort) — send ctrl_send, await response, fire local events synthesized from the daemon's event stream.
+- The `subscribe()` channel emits events translated from incoming ctrl_event frames.
 
-- [ ] Step 1: `package.json` with pi extension metadata.
-- [ ] Step 2: `index.ts` skeleton — dial, register, subscribe to events.
-- [ ] Step 3: Forward all relevant pi events as ctrl_event-wrapped JSONL frames.
-- [ ] Step 4: Read incoming and dispatch to sendUserMessage / abort.
-- [ ] Step 5: On session_shutdown, close cleanly.
-- [ ] Step 6: README documenting install + behavior + caveats.
-- [ ] Step 7: Manual smoke against the daemon.
-- [ ] Step 8: Commit: `extensions/controller-register: pi extension that registers a session with pi-controller`.
+Cast it to `AgentSession` at the boundary (where the TUI consumes it) since the structural compatibility is all that matters at runtime.
 
-### Task 4: pic create + pic attach commands
+- [ ] Step 1: Enumerate the methods/events of AgentSession from the d.ts and write stubs for each.
+- [ ] Step 2: Implement the read-only getters (model, isStreaming, sessionFile, etc.) backed by local cache updated from daemon events.
+- [ ] Step 3: Implement the mutation methods (prompt/steer/etc.) as ctrl_send wrappers.
+- [ ] Step 4: Implement event translation: ctrl_event → fire local `subscribe()` listeners with the right shape.
+- [ ] Step 5: Tests against a mock Go server.
+- [ ] Step 6: Commit: `attach: RemoteAgentSession proxying to daemon over UDS`.
+
+### Task 4: RemoteAgentSessionRuntime
+
+**Files:**
+- Create: `attach/src/runtime.ts`
+- Create: `attach/src/runtime.test.ts`
+
+Same pattern as Task 3, but for `AgentSessionRuntime`. Methods to implement:
+
+- `services` getter (returns the local services bag — SessionManager pointing at the daemon's jsonl, local SettingsManager, local ModelRegistry).
+- `session` getter (returns the `RemoteAgentSession` from Task 3).
+- `cwd` getter (from initial spawn metadata).
+- `switchSession(path, options)` → ctrl_send a new_session frame (which the daemon intercepts and respawns).
+- `newSession(options)` → same.
+- `fork(entryId, options)` → ctrl_send a fork frame; daemon passes through.
+- `importFromJsonl(path)` → daemon doesn't support this directly; either implement client-side (read file, replay events) or return "not supported" for v1.
+- `dispose()` → close UDS connection. **Does NOT kill the daemon's child** — the user is just detaching, not killing.
+
+The runtime is constructed once at attach time. It dials the daemon, calls `ctrl_get <childId>` to fetch initial metadata (cwd, sessionFile, model), constructs local services pointed at the right paths, instantiates `RemoteAgentSession`, returns.
+
+- [ ] Step 1: Constructor performs initial handshake (dial, ctrl_get, build services).
+- [ ] Step 2: Implement getters returning cached metadata.
+- [ ] Step 3: Implement session-replacement methods.
+- [ ] Step 4: dispose() closes the connection cleanly.
+- [ ] Step 5: Tests.
+- [ ] Step 6: Commit: `attach: RemoteAgentSessionRuntime with session-replacement methods`.
+
+### Task 5: Local services (SessionManager, SettingsManager, ModelRegistry)
+
+**Files:**
+- Create: `attach/src/local-services.ts`
+- Create: `attach/src/local-services.test.ts`
+
+**SessionManager:** pi's existing `SessionManager` can be constructed against an existing jsonl file path. We construct it pointed at the daemon's session file. The tricky bit: when the daemon's pi appends new entries, our SessionManager needs to see them. Two approaches:
+
+- **File watcher**: `fs.watch(path)`, re-read on changes.
+- **Polling**: re-stat every N ms, re-read tail on size change.
+
+Or — simpler — don't watch at all. The TUI re-displays the conversation when prompted (via the event stream). The SessionManager is mostly used for context and history queries; if it's stale by milliseconds it's fine. Re-read on each `getEntries()` call (cheap for normal session sizes).
+
+For v1: simple re-read on access. Optimize later if it's slow.
+
+**SettingsManager** and **ModelRegistry**: standard local construction. They read `~/.pi/agent/settings.json` etc. Same as pi does when running locally.
+
+- [ ] Step 1: Sketch the SessionManager wrapper that re-reads on access.
+- [ ] Step 2: Construct SettingsManager + ModelRegistry from local config.
+- [ ] Step 3: Tests verify the SessionManager picks up appended entries.
+- [ ] Step 4: Commit: `attach: local services (SessionManager tail, SettingsManager, ModelRegistry)`.
+
+### Task 6: main.ts — argv parsing + bootstrap
+
+**Files:**
+- Modify: `attach/src/main.ts`
+
+Parse args: `pic-attach <childId>` (or take from env `PIC_CHILD_ID`).
+
+Bootstrap:
+
+```typescript
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
+import { RemoteAgentSessionRuntime } from "./runtime.ts";
+
+const childId = process.argv[2] || process.env.PIC_CHILD_ID;
+if (!childId) {
+    console.error("usage: pic-attach <childId>");
+    process.exit(1);
+}
+
+const runtime = await RemoteAgentSessionRuntime.connect({
+    socket: process.env.PI_CONTROLLER_SOCKET || `${process.env.HOME}/.pi/run/controller.sock`,
+    childId,
+});
+
+const tui = new InteractiveMode(runtime, {});
+await tui.start();   // or whatever the TUI's entry method is — check the .d.ts
+```
+
+The exact method name on InteractiveMode for "start" isn't in the d.ts excerpt I have; need to look it up. Likely `run()` or `start()`.
+
+- [ ] Step 1: Parse args.
+- [ ] Step 2: Construct runtime, instantiate InteractiveMode.
+- [ ] Step 3: Wire signal handling (SIGINT/SIGTERM clean disconnect).
+- [ ] Step 4: Manual smoke: `pic-attach <real-childId>` against a real daemon.
+- [ ] Step 5: Commit: `attach: main.ts entry point bootstrapping the remote runtime`.
+
+### Task 7: pic create + pic attach Go-side commands
 
 **Files:**
 - Create: `cmd/pic/cmd_create.go`
 - Create: `cmd/pic/cmd_attach.go`
-- Modify: `cmd/pic/main.go` — wire them in.
+- Modify: `cmd/pic/main.go`
 
-`pic create <name>`:
-- Determine the extension path (relative to the pic binary's repo? Or via env var `PI_CONTROLLER_EXTENSION_PATH`? Or a config file?).
-- Build the pi argv: `pi --extension <path-to-controller-register> [--cwd ...] [other-flags...]`.
-- Pass `PIC_REGISTER_NAME=<name>` and `PI_CONTROLLER_SOCKET=<path>` in the environment so the extension knows what name to use.
-- `exec.Command(...).Run()` with the current process's stdio inherited — so pi takes over the terminal.
-- After pi exits, pic exits.
+`pic create`:
+1. Build a SpawnRequest from flags (same flags as `pic spawn`).
+2. Add `--detached` boolean flag.
+3. Send ctrl_spawn, get childId.
+4. If `--detached`: print childId, exit.
+5. Else: exec `pic-attach <childId>` with stdio inherited.
 
-`pic attach <name>`:
-- For v1, this is essentially `pic tail <name>`. Document it as such. The tail subcommand already handles identifier resolution and event streaming.
-- Maybe add a small "you are attaching (read-only)" header so the user knows they're in tail mode, not a real interactive session.
+`pic attach <id|name>`:
+1. Resolve id-or-name (existing `resolveTarget`).
+2. exec `pic-attach <childId>`.
 
-Flags for `pic create`:
-- `--cwd PATH` (default: current dir)
-- `--model MODEL`
-- `--thinking LEVEL`
-- `--no-session`
-- (pass-through for any other pi flag via `--`)
+If `bin/pic-attach` is missing (bun not installed during build), print a clear error directing the user to install bun and run `make build-attach`.
 
-- [ ] Step 1: `cmd_create.go` with argv assembly, env injection, exec passthrough.
-- [ ] Step 2: `cmd_attach.go` aliasing to tail's behavior with a clarifying header.
-- [ ] Step 3: Wire both into main.
-- [ ] Step 4: Smoke: `pic create test --cwd /tmp` opens a real pi session that shows up in `pic list` (in a separate terminal).
-- [ ] Step 5: Commit: `pic: create and attach subcommands`.
+- [ ] Step 1: Write cmd_create.go (mostly wraps cmd_spawn with the exec step).
+- [ ] Step 2: Write cmd_attach.go.
+- [ ] Step 3: Helper: locate pic-attach binary. First check `${binDir}/pic-attach` (sibling), then PATH, then error.
+- [ ] Step 4: Wire into main.go.
+- [ ] Step 5: Smoke: `pic create test --cwd /tmp --no-extensions --model anthropic/claude-haiku-4-5` opens the TUI.
+- [ ] Step 6: Commit: `pic: create and attach subcommands`.
 
-### Task 5: Integration tests
+### Task 8: Integration tests
 
 **Files:**
-- Modify: `test/integration/cli_integration_test.go` (or a new file).
+- Modify: `test/integration/cli_integration_test.go`
 
-End-to-end test:
-1. Boot daemon.
-2. Launch a fake "registered child" — a Go test helper that mimics what the extension does (dial, register, send events, accept incoming).
-3. Verify `pic list` shows it with `registered: true`.
-4. Verify `pic kill <name>` returns `child_not_owned`.
-5. Verify `pic send <name> '{...prompt...}'` reaches the fake registration target.
-6. Disconnect; verify `pic list` shows the child gone (or marked exited immediately).
+End-to-end testing the TS TUI from Go is hard — the TUI takes over a TTY. Two pragmatic checks:
 
-Hard part: this test doesn't exercise the actual TS extension. That's only smoke-testable manually. Document the manual smoke procedure in a comment.
+1. **`pic create --detached`** exercises the spawn flow; assert childId returned.
+2. **`pic attach --help`** confirms the binary is wired and the help renders.
 
-- [ ] Step 1: Add a `registerSelf` helper in the test file.
-- [ ] Step 2: 5 integration tests covering the above.
-- [ ] Step 3: Manual smoke instructions documented.
-- [ ] Step 4: Commit: `test/integration: end-to-end tests for registered children`.
+For testing the actual TUI behavior, document a manual smoke procedure in a comment.
+
+- [ ] Step 1: Add 2-3 Go integration tests for the detached / help paths.
+- [ ] Step 2: Document manual smoke procedure.
+- [ ] Step 3: Commit: `test/integration: pic create/attach integration tests`.
 
 ---
 
 ## Verification before declaring done
 
-- [ ] All tests pass with `-race`.
-- [ ] Both binaries build clean.
-- [ ] Manual smoke: launch `pic create demo --cwd /tmp` in one terminal, then in another terminal:
-  - `pic list` shows `demo` with `registered: true`
-  - `pic tail demo` streams pi events
-  - `pic send demo '{"type":"prompt","message":"Hello"}'` makes the prompt appear in the first terminal's pi TUI
-  - `pic kill demo` returns `child_not_owned`
-  - Closing the first terminal makes `demo` disappear from `pic list`
+- [ ] `make build` builds all three binaries: `pi-controller`, `pic`, `pic-attach`.
+- [ ] `pic create demo --cwd /tmp --no-extensions --model anthropic/claude-haiku-4-5`:
+  - Opens a real pi TUI in your terminal.
+  - Typing a prompt and hitting enter shows the assistant streaming response.
+  - `/model` switches the model.
+  - Ctrl+D quits — child stays running in the daemon (verify with `pic list` in another terminal).
+- [ ] `pic attach demo` in another terminal reattaches with full TUI (or errors if already attached, per Task 4 decision).
+- [ ] `pic create demo2 --detached` exits immediately with childId; pic list shows it.
 
 ---
 
-## Known limitations carried into v1+
+## Known risks worth surfacing
 
-- `pic attach` is read-only (tail-style); no real second-terminal TUI.
-- Closing the original `pic create` terminal kills the session — no detach + reattach.
-- Registered children: no log dumps, no state-record persistence, no resume.
-- Per-child subscriber leak when the registering connection dies — should be cleaned up by the existing global-subscriber-close hook, but registered-child-specific cleanup needs verification.
-- Concurrent `pic create` calls with the same name will spawn two separate registered children both named the same — store doesn't enforce name uniqueness (which is correct per the protocol, but worth noting for the UX).
+1. **`AgentSession` is a class, not an interface.** We're duck-typing. If pi's TUI uses any AgentSession field we miss, it'll fail at runtime. Mitigate by exhaustive d.ts coverage and integration testing.
+
+2. **Event timing.** AgentSession emits events synchronously in some paths. The remote proxy is asynchronous (events arrive when the UDS read loop schedules them). If InteractiveMode assumes synchronous emission anywhere, we'll see ordering glitches. May need fine-grained event batching.
+
+3. **Extension UI.** Pi's `extension_ui_request` events expect a response with matching id. The TUI handles them and writes the response back via the AgentSession. We forward those response writes back over UDS. Works if the response shape matches; needs careful testing.
+
+4. **Compaction.** Pi's local compaction runs in-process. If the daemon's pi compacts, our session.jsonl shrinks/changes underneath the local SessionManager. The TUI may be confused. Worth testing once compaction lands.
+
+5. **bun availability.** We're adding a build-time + runtime dep on bun. macOS users will have it (most likely via Homebrew or curl); Linux users may need to install it. Document clearly.
+
+6. **Multi-attach.** Two `pic attach` against the same childId would both subscribe to the bus and both send via ctrl_send. The daemon doesn't reject this. Each TUI would see all events; both could send prompts. May or may not be usable. v1 doesn't try to handle it.
+
+7. **The daemon doesn't surface session changes well.** If pi switches sessions (via /new etc., which the daemon intercepts as respawn), the daemon emits `ctrl_child_exited` for the old child and `ctrl_child_spawned` for the new one — with the same childId. Our TUI sees this and needs to refresh its local SessionManager + metadata. The runtime's `switchSession()` should handle the round-trip.
