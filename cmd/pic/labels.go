@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -79,21 +80,26 @@ func mergeLabels(maps ...map[string]string) map[string]string {
 
 // formatLabels returns a compact "k=v,k2=v2" string for table display.
 // Keys are sorted for deterministic output. Truncates to maxLen if non-zero.
-func formatLabels(labels map[string]string, maxLen int) string {
+//
+// When includePicLabels is false (default for `pic list`), labels whose key
+// starts with the reserved "pic/" prefix are omitted — they're auto-derived
+// from data already shown in adjacent columns (MODEL, etc.) or in `pic get`,
+// and they otherwise dominate the column width and crowd out user labels.
+func formatLabels(labels map[string]string, maxLen int, includePicLabels bool) string {
 	if len(labels) == 0 {
 		return "-"
 	}
-	// Collect sorted keys.
 	keys := make([]string, 0, len(labels))
 	for k := range labels {
+		if !includePicLabels && strings.HasPrefix(k, "pic/") {
+			continue
+		}
 		keys = append(keys, k)
 	}
-	// Simple sort without importing sort — iterate and insert.
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
+	if len(keys) == 0 {
+		return "-"
 	}
+	sort.Strings(keys)
 	var b strings.Builder
 	for i, k := range keys {
 		if i > 0 {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jedib0t/go-pretty/v6/table"
@@ -73,7 +74,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	st.Color = table.ColorOptions{}
 	tw.SetStyle(st)
 
-	colNames := []string{"ID", "NAME", "STATUS", "MODEL", "STARTED", "LABELS"}
+	colNames := []string{"ID", "NAME", "STATUS", "MODEL", "CWD", "STARTED", "LABELS"}
 	headerRow := make(table.Row, len(colNames))
 	for i, name := range colNames {
 		if useColor {
@@ -97,8 +98,9 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 			defaultDash(ch.Name),
 			colorStatus(ch.Status, useColor),
 			defaultDash(ch.Model),
+			defaultDash(shortenCwd(ch.Cwd)),
 			started,
-			formatLabels(ch.Labels, 40),
+			formatLabels(ch.Labels, 40, false),
 		})
 	}
 
@@ -111,6 +113,20 @@ func defaultDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// shortenCwd returns a more compact representation of a working directory:
+// the user's home is replaced with "~".  Useful for table display where
+// full paths blow the row width past the terminal margin.
+func shortenCwd(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" && strings.HasPrefix(cwd, home) {
+		return "~" + cwd[len(home):]
+	}
+	return cwd
 }
 
 func writeJSON(w io.Writer, v any) error {

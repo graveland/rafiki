@@ -162,15 +162,14 @@ func TestMergeLabels_AllNil(t *testing.T) {
 // ─── formatLabels ────────────────────────────────────────────────────────────
 
 func TestFormatLabels_Empty(t *testing.T) {
-	if got := formatLabels(nil, 0); got != "-" {
+	if got := formatLabels(nil, 0, false); got != "-" {
 		t.Errorf("got %q, want -", got)
 	}
 }
 
 func TestFormatLabels_Sorted(t *testing.T) {
 	labels := map[string]string{"z": "last", "a": "first", "m": "mid"}
-	got := formatLabels(labels, 0)
-	// keys should be a,m,z in order
+	got := formatLabels(labels, 0, false)
 	if !strings.HasPrefix(got, "a=first,m=mid,z=last") {
 		t.Errorf("got %q, want sorted a,m,z", got)
 	}
@@ -178,14 +177,47 @@ func TestFormatLabels_Sorted(t *testing.T) {
 
 func TestFormatLabels_Truncation(t *testing.T) {
 	labels := map[string]string{"longkey": "longvalue"}
-	// "longkey=longvalue" = 18 chars; maxLen=10 should truncate.
-	got := formatLabels(labels, 10)
-	// Must end with ellipsis marker.
+	got := formatLabels(labels, 10, false)
 	if !strings.HasSuffix(got, "\u2026") {
 		t.Errorf("expected truncation marker, got %q", got)
 	}
-	// Must be shorter than the untruncated version.
 	if len(got) >= len("longkey=longvalue") {
 		t.Errorf("got %q, should be shorter than untruncated", got)
+	}
+}
+
+func TestFormatLabels_HidesPicPrefixByDefault(t *testing.T) {
+	labels := map[string]string{
+		"pic/cwd":   "/home/foo",
+		"pic/model": "claude-opus-4",
+		"context":   "work",
+	}
+	got := formatLabels(labels, 0, false)
+	if got != "context=work" {
+		t.Errorf("got %q, want only user labels (pic/* hidden)", got)
+	}
+}
+
+func TestFormatLabels_IncludesPicPrefixWhenRequested(t *testing.T) {
+	labels := map[string]string{
+		"pic/cwd": "/home/foo",
+		"context": "work",
+	}
+	got := formatLabels(labels, 0, true)
+	if !strings.Contains(got, "pic/cwd=/home/foo") {
+		t.Errorf("got %q, expected pic/cwd to be included", got)
+	}
+	if !strings.Contains(got, "context=work") {
+		t.Errorf("got %q, expected context=work to be included", got)
+	}
+}
+
+func TestFormatLabels_AllPicHiddenReturnsDash(t *testing.T) {
+	labels := map[string]string{
+		"pic/cwd":   "/home/foo",
+		"pic/model": "claude",
+	}
+	if got := formatLabels(labels, 0, false); got != "-" {
+		t.Errorf("got %q, want - when only pic/* labels present", got)
 	}
 }

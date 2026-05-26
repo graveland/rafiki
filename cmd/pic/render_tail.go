@@ -104,7 +104,9 @@ func (r *tailRenderer) render(frame []byte) error {
 				}
 			}
 		}
-		r.printDim(fmt.Sprintf("[labels] %s", formatLabels(hdr.Labels, 60)))
+		// In a streaming tail, show ALL labels including pic/* — user is
+		// actively observing changes and likely wants the full picture.
+		r.printDim(fmt.Sprintf("[labels] %s", formatLabels(hdr.Labels, 60, true)))
 
 	default:
 		fmt.Fprintln(r.w, string(frame))
