@@ -30,18 +30,25 @@ interface ExtensionAPI {
 }
 
 /**
- * pic-helpers — pic-attach-aware pi extension.
+ * pic-helpers — context-aware pi extension.
  *
- * Two contexts:
- * - Loaded in the daemon's pi child (PIC_ATTACH_TUI unset): currently a
- *   no-op. /reload is a pi builtin, so registering it here would conflict.
- *   Reserved for future daemon-side commands (e.g. /detach, /restart-self).
- * - Loaded in pic-attach's TUI (PIC_ATTACH_TUI=1): the factory is a no-op;
- *   RemoteAgentSession.bindExtensions() calls setupTuiAutocomplete() directly
- *   to register an autocomplete provider that queries the daemon for available
- *   slash commands.
+ * Three contexts, gated on env vars set by the controller / pic-attach:
  *
- * Single source file, two roles. pic-attach relative-imports this file at
+ * - Daemon's pi child (PI_CONTROLLER_CHILD_ID set, PIC_ATTACH_TUI unset):
+ *   registers /reload.  Pi's interactive /reload builtin is TUI-only — in
+ *   --mode rpc there's no builtin handler, so an extension command is the
+ *   only way for pic-attach to trigger ctx.reload() server-side.
+ *
+ * - pic-attach TUI (PIC_ATTACH_TUI=1): factory is a no-op.
+ *   RemoteAgentSession.bindExtensions() calls setupTuiAutocomplete()
+ *   directly to register an autocomplete provider that queries the daemon
+ *   for available slash commands.
+ *
+ * - Anywhere else (e.g. user runs `pi` interactively against the same
+ *   ~/.pi/agent/extensions/ directory): factory is a no-op.  Don't shadow
+ *   pi's interactive /reload builtin.
+ *
+ * Single source file, three roles. pic-attach relative-imports this file at
  * compile time via attach/src/session.ts. `pic install-extension` writes it
  * to disk for the daemon's pi child to auto-discover.
  *
@@ -49,9 +56,23 @@ interface ExtensionAPI {
  * to keep pic-helpers self-contained and avoid module-resolution issues in
  * both the daemon and the pic-attach build contexts.
  */
-export default function (_pi: ExtensionAPI): void {
-    // Both branches are currently no-ops; reserved for future use.
-    // TUI autocomplete is wired separately via setupTuiAutocomplete().
+export default function (pi: ExtensionAPI): void {
+    const inDaemonChild =
+        process.env["PI_CONTROLLER_CHILD_ID"] !== undefined &&
+        process.env["PIC_ATTACH_TUI"] !== "1";
+    if (inDaemonChild) {
+        registerDaemonChildCommands(pi);
+    }
+    // Other contexts: no-op. TUI autocomplete is wired separately.
+}
+
+function registerDaemonChildCommands(pi: ExtensionAPI): void {
+    pi.registerCommand("reload", {
+        description: "Reload extensions, skills, prompts, and themes",
+        handler: async (_args, ctx) => {
+            await ctx.reload();
+        },
+    });
 }
 
 // ─── TUI autocomplete (pic-attach context only) ───────────────────────────────
