@@ -16,11 +16,9 @@ func TestServer_AcceptsAndEchoes(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test.sock")
 
-	handler := func(_ server.Connection, frame []byte) []byte {
+	srv, err := server.Listen(sockPath, server.FuncHandler(func(_ server.Connection, frame []byte) []byte {
 		return append([]byte("echo:"), frame...)
-	}
-
-	srv, err := server.Listen(sockPath, handler)
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +48,7 @@ func TestServer_LiveSocketRejected(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test.sock")
 
-	noHandler := func(server.Connection, []byte) []byte { return nil }
+	noHandler := server.FuncHandler(func(server.Connection, []byte) []byte { return nil })
 
 	srv1, err := server.Listen(sockPath, noHandler)
 	if err != nil {
@@ -72,8 +70,10 @@ func TestServer_StaleSocketUnlinked(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test.sock")
 
+	noopHandler := server.FuncHandler(func(server.Connection, []byte) []byte { return nil })
+
 	// First listener.
-	srv1, err := server.Listen(sockPath, func(server.Connection, []byte) []byte { return nil })
+	srv1, err := server.Listen(sockPath, noopHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestServer_StaleSocketUnlinked(t *testing.T) {
 		_ = err
 	}
 
-	srv2, err := server.Listen(sockPath, func(server.Connection, []byte) []byte { return nil })
+	srv2, err := server.Listen(sockPath, noopHandler)
 	if err != nil {
 		t.Fatalf("recover from stale: %v", err)
 	}

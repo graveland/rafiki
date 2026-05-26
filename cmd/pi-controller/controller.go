@@ -239,11 +239,12 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	env := buildEnv(req, childID, c.socketPath)
 
 	spec := child.SpawnSpec{
-		ChildID:  childID,
-		Cwd:      req.Cwd,
-		PiBinary: piBin,
-		Argv:     argv,
-		Env:      env,
+		ChildID:     childID,
+		Cwd:         req.Cwd,
+		PiBinary:    piBin,
+		Argv:        argv,
+		Env:         env,
+		EnvOverride: req.EnvOverride,
 	}
 
 	now := time.Now()
@@ -255,6 +256,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 			Message: err.Error(),
 		}
 	}
+
+	// Register the child in the ChildManager immediately after spawn so that any
+	// global subscriber that calls ctrl_subscribe in response to
+	// ctrl_child_spawned (below) will find the child ready in the manager.
+	// monitorChild is still started after Idle(), but the Subscribe endpoint
+	// must be non-racy from the moment the spawn event is visible.
+	c.cm.Add(childID, ch)
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
 	// process is confirmed running. A crash between exec and Idle() would
@@ -363,7 +371,6 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		s.Provider = provider
 		s.Model = model
 	})
-	c.cm.Add(childID, ch)
 
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record (after idle)", "childId", childID, "error", err)
@@ -448,9 +455,6 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		ExtraArgs:          snap.ExtraArgs,
 	}
 
-	// Delete the old store entry and spawn under the same childID.
-	c.st.Delete(childID)
-
 	piBin, err := resolvePiBinary(req.PiBinary)
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
@@ -477,6 +481,11 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 			Message: err.Error(),
 		}
 	}
+
+	// Spawn succeeded — only now remove the old exited entry. Deleting before
+	// spawn would lose the session if spawn fails (e.g. bad pi binary path);
+	// the entry would only be recoverable on controller restart via state scan.
+	c.st.Delete(childID)
 
 	stalled := false
 	select {
@@ -677,6 +686,17 @@ func (c *Controller) GlobalSubscribe(conn server.Connection) error {
 func (c *Controller) GlobalUnsubscribe(conn server.Connection) error {
 	c.cm.GlobalUnsubscribe(conn)
 	return nil
+}
+
+// OnConnectionClose is called by the server when a client connection closes.
+// It removes any global subscriptions held by this connection.
+//
+// TODO: per-child subscribers for this connection are not cleaned up here;
+// they accumulate until the child is removed from the ChildManager on exit.
+// This is a known limitation — per-child sub sets are bounded by the child
+// lifetime and the subscriber count is small in practice.
+func (c *Controller) OnConnectionClose(conn server.Connection) {
+	c.cm.GlobalUnsubscribe(conn)
 }
 
 // ─── monitorChild ─────────────────────────────────────────────────────────────
@@ -897,19 +917,16 @@ func buildArgv(req protocol.SpawnRequest) []string {
 	return argv
 }
 
-// buildEnv constructs the environment for a child process.
+// buildEnv assembles the per-process env var additions for a child process.
+// The slice is passed to SpawnSpec.Env. Whether these additions replace or
+// extend the parent environment is controlled by SpawnSpec.EnvOverride
+// (honoured in child.Spawn, not here).
+//
+// The two reserved controller vars are always injected regardless of mode.
 func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 	var env []string
-	if req.EnvOverride && len(req.Env) > 0 {
-		// Override: use only the specified env vars plus controller metadata.
-		for k, v := range req.Env {
-			env = append(env, k+"="+v)
-		}
-	} else {
-		// Default: inherit os env plus the specified additions.
-		for k, v := range req.Env {
-			env = append(env, k+"="+v)
-		}
+	for k, v := range req.Env {
+		env = append(env, k+"="+v)
 	}
 	env = append(env,
 		"PI_CONTROLLER_CHILD_ID="+childID,

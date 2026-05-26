@@ -87,18 +87,34 @@ type Controller interface {
 	Unsubscribe(childID string, conn Connection) error
 	GlobalSubscribe(conn Connection) error
 	GlobalUnsubscribe(conn Connection) error
+
+	// OnConnectionClose is called when a client connection closes. The
+	// controller removes any subscriptions (global and per-child) held by
+	// this connection so they do not leak.
+	OnConnectionClose(conn Connection)
 }
 
 // ─── Dispatch factory ─────────────────────────────────────────────────────────
 
-// NewDispatch returns a FrameHandler that routes ctrl_* frames to typed handlers
-// backed by c. The returned function is safe for concurrent use.
-func NewDispatch(c Controller) FrameHandler {
-	d := &dispatcher{c: c}
-	return d.handle
+// NewDispatch returns a ConnectionLifecycleHandler that routes ctrl_* frames
+// to typed handlers backed by c, and notifies c when connections close.
+// The returned handler is safe for concurrent use.
+func NewDispatch(c Controller) ConnectionLifecycleHandler {
+	return &dispatcher{c: c}
 }
 
 type dispatcher struct{ c Controller }
+
+// HandleFrame implements ConnectionLifecycleHandler.
+func (d *dispatcher) HandleFrame(conn Connection, frame []byte) []byte {
+	return d.handle(conn, frame)
+}
+
+// HandleClose implements ConnectionLifecycleHandler. It notifies the
+// controller so it can release any subscriptions held by this connection.
+func (d *dispatcher) HandleClose(conn Connection) {
+	d.c.OnConnectionClose(conn)
+}
 
 func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 	var hdr struct {

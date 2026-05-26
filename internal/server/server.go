@@ -33,10 +33,26 @@ type Connection interface {
 // response frame (written back to the client) or nil/empty to send nothing.
 type FrameHandler func(conn Connection, frame []byte) []byte
 
+// ConnectionLifecycleHandler extends FrameHandler with a close notification.
+// HandleFrame is called for every inbound frame; HandleClose is called once
+// when the connection's read loop ends (EOF, error, or server shutdown).
+type ConnectionLifecycleHandler interface {
+	HandleFrame(conn Connection, frame []byte) []byte
+	HandleClose(conn Connection)
+}
+
+// FuncHandler wraps a plain FrameHandler function into a
+// ConnectionLifecycleHandler with a no-op HandleClose. Convenient for tests
+// and simple handlers that do not need connection-close notifications.
+type FuncHandler FrameHandler
+
+func (f FuncHandler) HandleFrame(conn Connection, frame []byte) []byte { return f(conn, frame) }
+func (f FuncHandler) HandleClose(_ Connection)                          {}
+
 // Server is a running Unix-domain-socket listener. Call Close to stop it.
 type Server struct {
 	ln      net.Listener
-	handler FrameHandler
+	handler ConnectionLifecycleHandler
 	wg      sync.WaitGroup
 	cancel  context.CancelFunc
 	ctx     context.Context
@@ -48,7 +64,7 @@ type Server struct {
 // error rather than overwriting the socket.
 //
 // The socket is chmod'd to 0600 after binding.
-func Listen(path string, handler FrameHandler) (*Server, error) {
+func Listen(path string, handler ConnectionLifecycleHandler) (*Server, error) {
 	// Stale-socket probe: if the path exists, try to dial. If dial fails the
 	// old listener is gone — safe to unlink. If dial succeeds, a live process
 	// owns the socket and we must not clobber it.
@@ -134,6 +150,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}()
 
 	nc := &netConn{conn: conn}
+	defer s.handler.HandleClose(nc)
 	r := protocol.NewFrameReader(conn, 16<<20)
 	for {
 		frame, err := r.ReadFrame()
@@ -143,7 +160,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
-		resp := s.handler(nc, frame)
+		resp := s.handler.HandleFrame(nc, frame)
 		if len(resp) > 0 {
 			if err := protocol.WriteFrame(conn, resp); err != nil {
 				if s.ctx.Err() == nil {

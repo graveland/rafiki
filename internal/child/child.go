@@ -23,12 +23,13 @@ import (
 
 // SpawnSpec describes how to launch a pi child process.
 type SpawnSpec struct {
-	ChildID   string
-	Cwd       string
-	PiBinary  string
-	Argv      []string // full argv excluding PiBinary itself
-	ExtraArgs []string // appended after Argv; useful in tests
-	Env       []string // additions appended to os.Environ(); nil means inherit
+	ChildID     string
+	Cwd         string
+	PiBinary    string
+	Argv        []string // full argv excluding PiBinary itself
+	ExtraArgs   []string // appended after Argv; useful in tests
+	Env         []string // env vars for the child process; see EnvOverride
+	EnvOverride bool     // if true, Env replaces the parent env entirely; if false, Env is appended to os.Environ()
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -102,7 +103,11 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	// keeping pipe write ends open and blocking our readers).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if len(spec.Env) > 0 {
-		cmd.Env = append(os.Environ(), spec.Env...)
+		if spec.EnvOverride {
+			cmd.Env = append([]string{}, spec.Env...) // override: use only the specified env
+		} else {
+			cmd.Env = append(os.Environ(), spec.Env...) // merge: inherit parent env plus additions
+		}
 	}
 
 	stdin, err := cmd.StdinPipe()
