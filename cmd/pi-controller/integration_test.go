@@ -12,6 +12,7 @@ import (
 	"graveland.dev/pi-controller/internal/protocol"
 	"graveland.dev/pi-controller/internal/server"
 	"graveland.dev/pi-controller/internal/store"
+	"graveland.dev/pi-controller/internal/version"
 )
 
 // testSocketDir returns a temp directory with a short path (macOS UDS paths
@@ -82,8 +83,8 @@ func TestIntegration_CtrlStatus(t *testing.T) {
 	if err := json.Unmarshal(resp.Data, &data); err != nil {
 		t.Fatalf("unmarshal data: %v", err)
 	}
-	if data.Version != version {
-		t.Errorf("version: want %s, got %s", version, data.Version)
+	if data.Version != version.String() {
+		t.Errorf("version: want %s, got %s", version.String(), data.Version)
 	}
 }
 

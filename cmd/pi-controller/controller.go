@@ -24,9 +24,8 @@ import (
 	"graveland.dev/pi-controller/internal/ring"
 	"graveland.dev/pi-controller/internal/server"
 	"graveland.dev/pi-controller/internal/store"
+	"graveland.dev/pi-controller/internal/version"
 )
-
-const version = "0.1.0"
 
 // Controller wires together the store, child lifecycle, persistence and the
 // server.Controller interface. It is safe for concurrent use.
@@ -294,7 +293,7 @@ func (c *Controller) Status() server.ControllerStatus {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	return server.ControllerStatus{
-		Version:     version,
+		Version:     version.String(),
 		StartedAt:   c.startedAt.UnixMilli(),
 		Children:    protocol.ChildCounts{Live: live, Exited: exited},
 		MemoryBytes: int64(ms.Sys),

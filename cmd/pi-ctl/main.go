@@ -5,9 +5,9 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-)
 
-var version = "0.1.0"
+	"graveland.dev/pi-controller/internal/version"
+)
 
 func main() {
 	root := newRootCmd()
@@ -24,7 +24,7 @@ func newRootCmd() *cobra.Command {
 		Use:           "pi-ctl",
 		Short:         "Control the pi-controller daemon",
 		Long:          "pi-ctl is the command-line client for the pi-controller daemon.\nIt speaks the JSONL protocol over the daemon's UDS socket.",
-		Version:       version,
+		Version:       version.String(),
 		SilenceUsage:  true, // don't print usage on RunE errors
 		SilenceErrors: true, // main() prints errors itself
 	}
