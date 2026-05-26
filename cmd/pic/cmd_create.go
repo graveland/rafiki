@@ -157,5 +157,5 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
 	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")
-	return execPicAttach(data.ChildID, killOnExit, keepOnExit)
+	return attachAndDecide(cmd, data.ChildID, killOnExit, keepOnExit)
 }

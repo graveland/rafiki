@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"graveland.dev/pi-controller/internal/client"
 	"graveland.dev/pi-controller/internal/protocol"
@@ -114,11 +119,7 @@ func findPicAttach() (string, error) {
 // for it to exit. Returns when pic-attach exits. If pic-attach exits with a
 // non-zero code, os.Exit is called directly so the exit code propagates
 // without extra error noise (pic-attach has already printed to stderr).
-//
-// Exactly one of killOnExit and keepOnExit should be true, or both false
-// (which triggers the interactive prompt in pic-attach). They are mutually
-// exclusive and callers must enforce that via MarkFlagsMutuallyExclusive.
-func execPicAttach(childID string, killOnExit, keepOnExit bool) error {
+func execPicAttach(childID string) error {
 	bin, err := findPicAttach()
 	if err != nil {
 		return err
@@ -129,12 +130,6 @@ func execPicAttach(childID string, killOnExit, keepOnExit bool) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	if killOnExit {
-		cmd.Env = append(cmd.Env, "PIC_KILL_ON_EXIT=1")
-	}
-	if keepOnExit {
-		cmd.Env = append(cmd.Env, "PIC_KEEP_ON_EXIT=1")
-	}
 	if runErr := cmd.Run(); runErr != nil {
 		// pic-attach already wrote to stderr; just propagate the exit code.
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
@@ -143,6 +138,100 @@ func execPicAttach(childID string, killOnExit, keepOnExit bool) error {
 		return fmt.Errorf("pic-attach: %w", runErr)
 	}
 	return nil
+}
+
+// attachAndDecide runs pic-attach and, after it exits normally, prompts the
+// user to keep or kill the session (unless overridden by flags or non-TTY
+// stdin). SIGINT/SIGTERM during the subprocess skip the prompt — the user
+// is forcibly exiting and the session should keep running (default keep).
+func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit bool) error {
+	// Install handler before spawning so we catch any signal that kills both
+	// pic and pic-attach. Buffer=1 so the send never blocks.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	if err := execPicAttach(childID); err != nil {
+		return err
+	}
+
+	// Stop delivery before the non-blocking drain so there's no race between
+	// signal.Stop and the select.
+	signal.Stop(sigCh)
+	select {
+	case <-sigCh:
+		// Signal-driven exit: skip prompt, keep session.
+		return nil
+	default:
+	}
+
+	shouldKill, err := decideKillOnExit(killOnExit, keepOnExit, childID)
+	if err != nil {
+		return err
+	}
+	if !shouldKill {
+		return nil
+	}
+
+	// Re-dial: pic-attach's connection has already closed when it exited.
+	c := mustDial(cmd)
+	defer c.Close()
+	resp, err := c.Request(cmdCtx(cmd), protocol.KillRequest{
+		Type:    protocol.TypeCtrlKill,
+		ChildID: childID,
+	})
+	if err != nil {
+		return fmt.Errorf("kill: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
+	}
+	return nil
+}
+
+// decideKillOnExit returns true if the session should be killed at exit.
+//
+//   - --kill-on-exit → true (no prompt)
+//   - --keep-on-exit → false (no prompt)
+//   - non-TTY stdin → false (no human present to answer)
+//   - otherwise → prompt the user; default answer (Enter) is keep
+func decideKillOnExit(killOnExit, keepOnExit bool, childLabel string) (bool, error) {
+	if killOnExit {
+		return true, nil
+	}
+	if keepOnExit {
+		return false, nil
+	}
+	if !isStdinTTY() {
+		return false, nil
+	}
+
+	fmt.Println()
+	fmt.Printf("Session %q is still running.\n", childLabel)
+	fmt.Println("  K  Keep running (detach, default)")
+	fmt.Println("  T  Terminate the session")
+	fmt.Print("Choice [K/t]: ")
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	ans := strings.TrimSpace(strings.ToLower(line))
+	switch ans {
+	case "t", "terminate", "kill", "x":
+		return true, nil
+	case "", "k", "keep":
+		return false, nil
+	default:
+		fmt.Println("(treating as keep)")
+		return false, nil
+	}
+}
+
+// isStdinTTY reports whether stdin is connected to a terminal.
+func isStdinTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // knownEventTypes lists pi RPC event types used by --include/--exclude
