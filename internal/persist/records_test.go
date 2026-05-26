@@ -89,6 +89,54 @@ func TestScanRecords_MissingDir(t *testing.T) {
 	}
 }
 
+func TestRecordWriter_LabelsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	w := persist.NewRecordWriter(dir)
+
+	rec := persist.Record{
+		ChildID: "c_label_test",
+		Cwd:     "/tmp",
+		Labels: map[string]string{
+			"env":       "prod",
+			"pic/model": "claude-sonnet-4",
+		},
+	}
+	if err := w.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := persist.ReadRecord(filepath.Join(dir, "c_label_test.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Labels["env"] != "prod" {
+		t.Errorf("env label: got %q, want %q", got.Labels["env"], "prod")
+	}
+	if got.Labels["pic/model"] != "claude-sonnet-4" {
+		t.Errorf("pic/model label: got %q", got.Labels["pic/model"])
+	}
+}
+
+func TestRecordWriter_LabelsNilRoundTrip(t *testing.T) {
+	// Records without labels should deserialise to nil map (not empty map).
+	dir := t.TempDir()
+	w := persist.NewRecordWriter(dir)
+
+	rec := persist.Record{ChildID: "c_no_labels", Cwd: "/tmp"}
+	if err := w.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := persist.ReadRecord(filepath.Join(dir, "c_no_labels.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// omitempty means no "labels" key in JSON, so decoded value is nil.
+	if got.Labels != nil {
+		t.Fatalf("expected nil Labels for record without labels, got %v", got.Labels)
+	}
+}
+
 func TestDeleteRecord(t *testing.T) {
 	dir := t.TempDir()
 	w := persist.NewRecordWriter(dir)

@@ -202,6 +202,31 @@ func (s *Store) SetStatus(id string, newStatus protocol.Status) (prev protocol.S
 	return prev, true
 }
 
+// SetLabels atomically applies a set/remove mutation to the session's label map.
+// Set entries are merged, then Remove entries are deleted. Returns the full
+// post-mutation labels as a defensive copy, or ErrNotFound when id is absent.
+func (s *Store) SetLabels(id string, set map[string]string, remove []string) (map[string]string, error) {
+	sess, ok := s.sessions.Load(id)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.Labels == nil && (len(set) > 0) {
+		sess.Labels = make(map[string]string, len(set))
+	}
+	for _, k := range remove {
+		delete(sess.Labels, k)
+	}
+	for k, v := range set {
+		if sess.Labels == nil {
+			sess.Labels = make(map[string]string)
+		}
+		sess.Labels[k] = v
+	}
+	return copyLabels(sess.Labels), nil
+}
+
 // MarkExited atomically transitions the session to StatusExited and records
 // exit details. The status-index update and field mutations happen under a
 // single sess.mu hold so a concurrent Snapshot() cannot observe Status=Exited

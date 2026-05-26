@@ -82,6 +82,10 @@ type Session struct {
 	// removed, so ctrl_get_recent remains queryable after exit (spec §11.4).
 	ExitedRing []ring.Event
 
+	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
+	// Keys with the "pic/" prefix are reserved for auto-labels set by the daemon.
+	Labels map[string]string
+
 	// Handles into the live Child. Set by store.Insert from
 	// Child setup; nil for sessions in "exited" state without an
 	// associated Child.
@@ -140,6 +144,10 @@ type Snapshot struct {
 	// ExitedRing is a snapshot of the ring buffer taken at exit time.
 	// Populated for exited sessions; nil for live sessions.
 	ExitedRing []ring.Event
+
+	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
+	// This is a defensive copy; callers may mutate it freely.
+	Labels map[string]string
 }
 
 // Snapshot returns a deep copy of the session's fields. The caller may freely
@@ -182,6 +190,7 @@ func (s *Session) Snapshot() Snapshot {
 		LastRetryError:  s.LastRetryError,
 		LastRetryFinal:  s.LastRetryFinal,
 		ExitedRing:      copyRingEvents(s.ExitedRing),
+		Labels:          copyLabels(s.Labels),
 	}
 }
 
@@ -195,6 +204,19 @@ func copyRingEvents(events []ring.Event) []ring.Event {
 		cp := make([]byte, len(e.Bytes))
 		copy(cp, e.Bytes)
 		out[i] = ring.Event{Bytes: cp, Timestamp: e.Timestamp}
+	}
+	return out
+}
+
+// copyLabels returns a defensive copy of a label map. Both nil and empty
+// inputs return nil.
+func copyLabels(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
 	}
 	return out
 }

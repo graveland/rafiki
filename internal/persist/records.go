@@ -48,10 +48,14 @@ type Record struct {
 	PiBinary           string   `json:"piBinary,omitempty"`
 	ExtraArgs          []string `json:"extraArgs,omitempty"`
 
-	SpawnedAt     int64  `json:"spawnedAt"`
-	LastSeenAlive int64  `json:"lastSeenAlive"`
-	PID           int    `json:"pid"`
-	LastStatus    string `json:"lastStatus"`
+	SpawnedAt     int64             `json:"spawnedAt"`
+	LastSeenAlive int64             `json:"lastSeenAlive"`
+	PID           int               `json:"pid"`
+	LastStatus    string            `json:"lastStatus"`
+
+	// Labels stores arbitrary user-defined and auto-derived key=value metadata.
+	// Records without this field deserialise to nil.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // RecordWriter writes child state records to a directory.

@@ -151,6 +151,70 @@ func TestStore_NotFoundPaths(t *testing.T) {
 	s.Delete("missing")
 }
 
+func TestStore_SetLabels_SetAndRemove(t *testing.T) {
+	s := store.New()
+	s.Insert(newSess("c_1", "a", "/x"))
+
+	// Set some labels.
+	merged, err := s.SetLabels("c_1", map[string]string{"env": "prod", "tier": "fast"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged["env"] != "prod" || merged["tier"] != "fast" {
+		t.Fatalf("set: got %v", merged)
+	}
+
+	// Update one, add one, remove one.
+	merged, err = s.SetLabels("c_1", map[string]string{"env": "staging", "owner": "brent"}, []string{"tier"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged["env"] != "staging" {
+		t.Errorf("update: env = %q, want staging", merged["env"])
+	}
+	if merged["owner"] != "brent" {
+		t.Errorf("add: owner = %q, want brent", merged["owner"])
+	}
+	if _, ok := merged["tier"]; ok {
+		t.Errorf("remove: tier still present")
+	}
+
+	// Snapshot reflects latest labels.
+	snap, _ := s.Get("c_1")
+	if snap.Labels["env"] != "staging" || snap.Labels["owner"] != "brent" {
+		t.Fatalf("snapshot labels: %v", snap.Labels)
+	}
+
+	// Returned map is a defensive copy.
+	merged["env"] = "MUTATED"
+	snap2, _ := s.Get("c_1")
+	if snap2.Labels["env"] != "staging" {
+		t.Fatal("returned map was not a defensive copy")
+	}
+}
+
+func TestStore_SetLabels_NotFound(t *testing.T) {
+	s := store.New()
+	_, err := s.SetLabels("missing", map[string]string{"k": "v"}, nil)
+	if err != store.ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestStore_SetLabels_RemoveOnly(t *testing.T) {
+	s := store.New()
+	s.Insert(newSess("c_1", "a", "/x"))
+
+	// Remove on empty labels is a no-op.
+	merged, err := s.SetLabels("c_1", nil, []string{"nonexistent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 0 {
+		t.Fatalf("expected empty, got %v", merged)
+	}
+}
+
 func TestStore_ListSortedByStartedAtDesc(t *testing.T) {
 	s := store.New()
 	now := time.Now()

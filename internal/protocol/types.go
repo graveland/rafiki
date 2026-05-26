@@ -31,12 +31,14 @@ const (
 	TypeCtrlForgetAllExited   = "ctrl_forget_all_exited"
 	TypeCtrlSearch            = "ctrl_search"
 	TypeCtrlStatus            = "ctrl_status"
+	TypeCtrlSetLabels         = "ctrl_set_labels"
 	TypeCtrlResponse          = "ctrl_response"
 	TypeCtrlEvent             = "ctrl_event"
 	TypeCtrlChildSpawned      = "ctrl_child_spawned"
 	TypeCtrlChildExited       = "ctrl_child_exited"
 	TypeCtrlChildStatus       = "ctrl_child_status"
 	TypeCtrlChildRenamed      = "ctrl_child_renamed"
+	TypeCtrlChildLabeled      = "ctrl_child_labeled"
 )
 
 // ─── Status constants (§10) ──────────────────────────────────────────────────
@@ -91,12 +93,16 @@ const (
 // ─── Shared sub-shapes ───────────────────────────────────────────────────────
 
 // ListFilter narrows ctrl_list results. All fields are optional (§6.1).
+// Labels is an AND-match: every key=value pair must be present on the child.
+// HasLabel matches children that have the key present regardless of value.
 type ListFilter struct {
-	Status       string `json:"status,omitempty"`
-	Name         string `json:"name,omitempty"`
-	NameContains string `json:"nameContains,omitempty"`
-	CwdContains  string `json:"cwdContains,omitempty"`
-	Since        int64  `json:"since,omitempty"`
+	Status       string            `json:"status,omitempty"`
+	Name         string            `json:"name,omitempty"`
+	NameContains string            `json:"nameContains,omitempty"`
+	CwdContains  string            `json:"cwdContains,omitempty"`
+	Since        int64             `json:"since,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`   // AND-match: all k=v must match
+	HasLabel     []string          `json:"hasLabel,omitempty"` // key presence only
 }
 
 // SubscribeFilter selects which pi events are forwarded on a subscription (§6.7, §6.8).
@@ -108,10 +114,13 @@ type SubscribeFilter struct {
 }
 
 // SearchSessionFilter narrows which children ctrl_search scans (§6.15).
+// Labels/HasLabel apply the same AND-match semantics as ListFilter.
 type SearchSessionFilter struct {
-	CwdContains  string `json:"cwdContains,omitempty"`
-	NameContains string `json:"nameContains,omitempty"`
-	Since        int64  `json:"since,omitempty"`
+	CwdContains  string            `json:"cwdContains,omitempty"`
+	NameContains string            `json:"nameContains,omitempty"`
+	Since        int64             `json:"since,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	HasLabel     []string          `json:"hasLabel,omitempty"`
 }
 
 // ─── Request types (§6) ──────────────────────────────────────────────────────
@@ -138,7 +147,8 @@ type SpawnRequest struct {
 	ID   string `json:"id,omitempty"`
 
 	// Identity
-	Name string `json:"name,omitempty"`
+	Name   string            `json:"name,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; pic/ prefix rejected
 
 	// Working directory (required, absolute).
 	Cwd string `json:"cwd"`
@@ -316,18 +326,19 @@ type ErrorBody struct {
 // PID is nil when status is exited. ExitCode is nil while the child is alive.
 // ExitSignal is absent (not "null") when the child exited via normal exit code rather than a signal.
 type ChildSummary struct {
-	ChildID      string `json:"childId"`
-	PID          *int   `json:"pid"` // null when exited
-	Cwd          string `json:"cwd"`
-	Name         string `json:"name,omitempty"`
-	Model        string `json:"model,omitempty"`
-	SessionID    string `json:"sessionId,omitempty"`
-	SessionFile  string `json:"sessionFile,omitempty"`
-	Status       string `json:"status"`
-	StartedAt    int64  `json:"startedAt"`
-	LastActivity int64  `json:"lastActivity"`
-	ExitCode     *int   `json:"exitCode"` // null while alive
-	ExitSignal   string `json:"exitSignal,omitempty"`
+	ChildID      string            `json:"childId"`
+	PID          *int              `json:"pid"` // null when exited
+	Cwd          string            `json:"cwd"`
+	Name         string            `json:"name,omitempty"`
+	Model        string            `json:"model,omitempty"`
+	SessionID    string            `json:"sessionId,omitempty"`
+	SessionFile  string            `json:"sessionFile,omitempty"`
+	Status       string            `json:"status"`
+	StartedAt    int64             `json:"startedAt"`
+	LastActivity int64             `json:"lastActivity"`
+	ExitCode     *int              `json:"exitCode"` // null while alive
+	ExitSignal   string            `json:"exitSignal,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
 }
 
 // ListResponseData is the data payload for ctrl_list responses.
@@ -464,4 +475,29 @@ type CtrlChildRenamed struct {
 	Name     string `json:"name"`
 	Previous string `json:"previous"`
 	At       int64  `json:"at"`
+}
+
+// SetLabelsRequest mutates the labels on an existing child (§6.17).
+// Set entries are applied first, then Remove entries are deleted.
+// Keys using the pic/ prefix are reserved and rejected with ErrInvalidArgs.
+type SetLabelsRequest struct {
+	Type    string            `json:"type"`    // "ctrl_set_labels"
+	ID      string            `json:"id,omitempty"`
+	ChildID string            `json:"childId"`
+	Set     map[string]string `json:"set,omitempty"`
+	Remove  []string          `json:"remove,omitempty"`
+}
+
+// SetLabelsResponseData is the data payload for ctrl_set_labels responses.
+// Labels carries the full post-mutation map.
+type SetLabelsResponseData struct {
+	Labels map[string]string `json:"labels"`
+}
+
+// CtrlChildLabeled is broadcast to subscribers when labels change (§7.6).
+// Labels contains the full post-mutation map, not a delta.
+type CtrlChildLabeled struct {
+	Type    string            `json:"type"`    // "ctrl_child_labeled"
+	ChildID string            `json:"childId"`
+	Labels  map[string]string `json:"labels"`  // complete post-mutation label set
 }
