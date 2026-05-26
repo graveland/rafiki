@@ -43,6 +43,7 @@ scripting / AFK workflows, use --detached.)`,
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the pic-helpers pi extension")
+	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/pic-presets.json")
 	return cmd
 }
 
@@ -158,6 +159,29 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	req, err := buildSpawnRequest(cmd, args)
 	if err != nil {
 		return err
+	}
+
+	// Apply preset (lowest priority: preset < env-var defaults < explicit flags).
+	// buildSpawnRequest has already merged env-var defaults and --label flags;
+	// preset fills in any keys/model that weren't set by higher-priority sources.
+	presetName, _ := cmd.Flags().GetString("preset")
+	if presetName != "" {
+		pf, err := loadPresets()
+		if err != nil {
+			return fmt.Errorf("--preset: %w", err)
+		}
+		preset, ok := pf.Presets[presetName]
+		if !ok {
+			return fmt.Errorf("--preset: unknown preset %q (available: %s)", presetName, availablePresets(pf))
+		}
+		// Preset model is the fallback when neither flag nor PIC_DEFAULT_MODEL set it.
+		if req.Model == "" && preset.Model != "" {
+			req.Model = preset.Model
+		}
+		// Merge preset labels under existing req.Labels (existing labels win).
+		if len(preset.Labels) > 0 {
+			req.Labels = mergeLabels(preset.Labels, req.Labels)
+		}
 	}
 
 	resp, err := c.Request(cmdCtx(cmd), req)
