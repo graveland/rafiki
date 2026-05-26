@@ -150,6 +150,10 @@ func (f *fakeController) OnConnectionClose(conn server.Connection) {
 	}
 }
 
+func (f *fakeController) SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error) {
+	return nil, &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 // parseResponse unmarshals a ctrl_response frame into the envelope.

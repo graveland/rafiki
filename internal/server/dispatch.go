@@ -80,6 +80,10 @@ type Controller interface {
 	// Frame forwarding.
 	Send(childID string, frame json.RawMessage) error
 
+	// SetLabels mutates labels on the named child. Returns the full post-mutation
+	// map. Rejects keys with the pic/ prefix and invalid key characters.
+	SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error)
+
 	// Per-connection subscriptions. conn is the Connection passed to
 	// FrameHandler; it serves as both the event-delivery target and the
 	// identity key for subsequent Unsubscribe calls.
@@ -147,6 +151,8 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.ctrlStatus(frame, hdr.ID)
 	case protocol.TypeCtrlSend:
 		return d.ctrlSend(frame, hdr.ID)
+	case protocol.TypeCtrlSetLabels:
+		return d.setLabels(frame, hdr.ID)
 	case protocol.TypeCtrlSubscribe:
 		return d.subscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUnsubscribe:
@@ -221,7 +227,7 @@ func snapshotToSummary(snap store.Snapshot) protocol.ChildSummary {
 	if snap.Status != protocol.StatusExited {
 		pid = &snap.PID
 	}
-	return protocol.ChildSummary{
+	cs := protocol.ChildSummary{
 		ChildID:      snap.ChildID,
 		PID:          pid,
 		Cwd:          snap.Cwd,
@@ -235,6 +241,10 @@ func snapshotToSummary(snap store.Snapshot) protocol.ChildSummary {
 		ExitCode:     snap.ExitCode,
 		ExitSignal:   snap.ExitSignal,
 	}
+	if len(snap.Labels) > 0 {
+		cs.Labels = snap.Labels
+	}
+	return cs
 }
 
 // ─── Read-only handlers ───────────────────────────────────────────────────────
@@ -401,6 +411,26 @@ func (d *dispatcher) forgetAllExited(frame []byte, id string) []byte {
 		return mapErr(protocol.TypeCtrlForgetAllExited, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlForgetAllExited, id, protocol.ForgetAllExitedResponseData{Count: count})
+}
+
+// ─── Labels handler ───────────────────────────────────────────────────────────
+
+func (d *dispatcher) setLabels(frame []byte, id string) []byte {
+	var req protocol.SetLabelsRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlSetLabels, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ChildID == "" {
+		return errResponse(protocol.TypeCtrlSetLabels, id, protocol.ErrInvalidArgs, "childId required")
+	}
+	if len(req.Set) == 0 && len(req.Remove) == 0 {
+		return errResponse(protocol.TypeCtrlSetLabels, id, protocol.ErrInvalidArgs, "at least one of set or remove is required")
+	}
+	merged, err := d.c.SetLabels(req.ChildID, req.Set, req.Remove)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlSetLabels, id, err, protocol.ErrChildNotFound)
+	}
+	return okResponse(protocol.TypeCtrlSetLabels, id, protocol.SetLabelsResponseData{Labels: merged})
 }
 
 // ─── Frame-forwarding handler ─────────────────────────────────────────────────

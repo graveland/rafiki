@@ -141,6 +141,232 @@ func TestIntegration_CtrlList(t *testing.T) {
 	}
 }
 
+// TestIntegration_SetLabels_Success inserts a session, calls ctrl_set_labels,
+// and verifies the labels are updated and returned.
+func TestIntegration_SetLabels_Success(t *testing.T) {
+	t.Parallel()
+
+	dir := testSocketDir(t)
+	socketPath := filepath.Join(dir, "c.sock")
+	st := store.New()
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+
+	// Insert a session manually.
+	now := time.Now()
+	sess := &store.Session{
+		ChildID:   "c_label_integ",
+		Status:    "idle",
+		Cwd:       "/tmp",
+		StartedAt: now,
+	}
+	st.Insert(sess)
+
+	handler := server.NewDispatch(ctrl)
+	srv, err := server.Listen(socketPath, handler)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	frame := `{"type":"ctrl_set_labels","id":"lbl-1","childId":"c_label_integ","set":{"env":"prod","tier":"fast"}}` + "\n"
+	if _, err := conn.Write([]byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	var resp protocol.Response
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal: %v\nframe: %s", err, line)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success, got error=%+v", resp.Error)
+	}
+
+	var data protocol.SetLabelsResponseData
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	if data.Labels["env"] != "prod" || data.Labels["tier"] != "fast" {
+		t.Errorf("unexpected labels: %v", data.Labels)
+	}
+
+	// Verify via ctrl_get that the labels are persisted in the store.
+	snap, ok := st.Get("c_label_integ")
+	if !ok {
+		t.Fatal("session not found after set_labels")
+	}
+	if snap.Labels["env"] != "prod" {
+		t.Errorf("store label env: got %q", snap.Labels["env"])
+	}
+}
+
+// TestIntegration_SetLabels_ReservedPrefix verifies that pic/ keys are rejected.
+func TestIntegration_SetLabels_ReservedPrefix(t *testing.T) {
+	t.Parallel()
+
+	dir := testSocketDir(t)
+	socketPath := filepath.Join(dir, "c.sock")
+	st := store.New()
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+
+	now := time.Now()
+	st.Insert(&store.Session{ChildID: "c_reserved", Status: "idle", Cwd: "/tmp", StartedAt: now})
+
+	handler := server.NewDispatch(ctrl)
+	srv, err := server.Listen(socketPath, handler)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	frame := `{"type":"ctrl_set_labels","id":"lbl-2","childId":"c_reserved","set":{"pic/model":"evil"}}` + "\n"
+	if _, err := conn.Write([]byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp protocol.Response
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("expected error for pic/ prefix, got success")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrInvalidArgs {
+		t.Errorf("expected invalid_args, got %+v", resp.Error)
+	}
+}
+
+// TestIntegration_SetLabels_InvalidKey verifies that malformed keys are rejected.
+func TestIntegration_SetLabels_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	dir := testSocketDir(t)
+	socketPath := filepath.Join(dir, "c.sock")
+	st := store.New()
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+
+	now := time.Now()
+	st.Insert(&store.Session{ChildID: "c_badkey", Status: "idle", Cwd: "/tmp", StartedAt: now})
+
+	handler := server.NewDispatch(ctrl)
+	srv, err := server.Listen(socketPath, handler)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	// Key with space is invalid.
+	frame := `{"type":"ctrl_set_labels","id":"lbl-3","childId":"c_badkey","set":{"bad key":"v"}}` + "\n"
+	if _, err := conn.Write([]byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp protocol.Response
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("expected error for bad key, got success")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrInvalidArgs {
+		t.Errorf("expected invalid_args, got %+v", resp.Error)
+	}
+}
+
+// TestIntegration_List_LabelFilter verifies that ctrl_list honours label filters.
+func TestIntegration_List_LabelFilter(t *testing.T) {
+	t.Parallel()
+
+	dir := testSocketDir(t)
+	socketPath := filepath.Join(dir, "c.sock")
+	st := store.New()
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+
+	now := time.Now()
+	sessA := &store.Session{ChildID: "c_a", Status: "idle", Cwd: "/a", StartedAt: now,
+		Labels: map[string]string{"env": "prod", "tier": "fast"}}
+	sessB := &store.Session{ChildID: "c_b", Status: "idle", Cwd: "/b", StartedAt: now,
+		Labels: map[string]string{"env": "staging"}}
+	st.Insert(sessA)
+	st.Insert(sessB)
+
+	handler := server.NewDispatch(ctrl)
+	srv, err := server.Listen(socketPath, handler)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	// Filter by env=prod: should return only c_a.
+	frame := `{"type":"ctrl_list","id":"lbl-list-1","filter":{"labels":{"env":"prod"}}}` + "\n"
+	if _, err := conn.Write([]byte(frame)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	var resp protocol.Response
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected success: %+v", resp.Error)
+	}
+	var data protocol.ListResponseData
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	if len(data.Children) != 1 || data.Children[0].ChildID != "c_a" {
+		t.Errorf("label filter: got %d children, expected c_a only; got %v", len(data.Children), data.Children)
+	}
+}
+
 // TestIntegration_MultipleCommands verifies that a single connection can send
 // multiple commands and receive matching responses.
 func TestIntegration_MultipleCommands(t *testing.T) {

@@ -136,7 +136,8 @@ func (c *Controller) loadOrphans(records []persist.Record) {
 func (c *Controller) List(filter protocol.ListFilter) []store.Snapshot {
 	snaps := c.st.List()
 	if filter.Status == "" && filter.Name == "" && filter.NameContains == "" &&
-		filter.CwdContains == "" && filter.Since == 0 {
+		filter.CwdContains == "" && filter.Since == 0 &&
+		len(filter.Labels) == 0 && len(filter.HasLabel) == 0 {
 		return snaps
 	}
 	out := snaps[:0]
@@ -154,6 +155,9 @@ func (c *Controller) List(filter protocol.ListFilter) []store.Snapshot {
 			continue
 		}
 		if filter.Since > 0 && s.StartedAt.UnixMilli() < filter.Since {
+			continue
+		}
+		if !matchesLabelFilter(s.Labels, filter.Labels, filter.HasLabel) {
 			continue
 		}
 		out = append(out, s)
@@ -311,6 +315,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		}
 	}
 
+	// Validate user-supplied labels: no invalid keys, no pic/ prefix.
+	if err := validateUserLabelKeys(req.Labels); err != nil {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: err.Error(),
+		}
+	}
+
 	piBin, err := resolvePiBinary(req.PiBinary)
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
@@ -349,6 +361,16 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	// must be non-racy from the moment the spawn event is visible.
 	c.cm.Add(childID, ch)
 
+	// Build initial labels: user-supplied labels (already validated) plus
+	// static auto-labels. Model/provider labels are added after Idle() in
+	// activateLiveChild once pi reports its resolved model.
+	initLabels := copyLabels(req.Labels)
+	if initLabels == nil {
+		initLabels = make(map[string]string)
+	}
+	initLabels["pic/cwd"] = req.Cwd
+	initLabels["pic/pid"] = strconv.Itoa(ch.PID())
+
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
 	// process is confirmed running. A crash between exec and Idle() would
 	// otherwise leave an orphan pi process with no persisted record.
@@ -363,6 +385,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		Thinking:     req.Thinking,
 		StartedAt:    now,
 		LastActivity: now,
+		Labels:       initLabels,
 
 		NoSession:          req.NoSession,
 		SessionDir:         req.SessionDir,
@@ -489,6 +512,20 @@ func (c *Controller) activateLiveChild(
 			s.SessionFile = meta.SessionFile
 			s.Provider = provider
 			s.Model = model
+			// Update model auto-labels now that pi has reported the resolved model.
+			if s.Labels == nil {
+				s.Labels = make(map[string]string)
+			}
+			if provider != "" {
+				s.Labels["pic/provider"] = provider
+			} else {
+				delete(s.Labels, "pic/provider")
+			}
+			if model != "" {
+				s.Labels["pic/model"] = model
+			} else {
+				delete(s.Labels, "pic/model")
+			}
 		})
 		if err := c.writeRecord(childID); err != nil {
 			slog.Warn("write state record (after idle)", "childId", childID, "error", err)
@@ -520,6 +557,24 @@ func (c *Controller) activateLiveChild(
 		model = snap.Model
 	}
 
+	// Recompute auto-labels from the snapshot's user labels with fresh pid/model.
+	resumeLabels := copyLabels(snap.Labels)
+	if resumeLabels == nil {
+		resumeLabels = make(map[string]string)
+	}
+	resumeLabels["pic/cwd"] = snap.Cwd
+	resumeLabels["pic/pid"] = strconv.Itoa(ch.PID())
+	if provider != "" {
+		resumeLabels["pic/provider"] = provider
+	} else {
+		delete(resumeLabels, "pic/provider")
+	}
+	if model != "" {
+		resumeLabels["pic/model"] = model
+	} else {
+		delete(resumeLabels, "pic/model")
+	}
+
 	sess := &store.Session{
 		ChildID:            childID,
 		PID:                ch.PID(),
@@ -537,6 +592,7 @@ func (c *Controller) activateLiveChild(
 		SessionDir:         snap.SessionDir,
 		ResumeSession:      resumeSession,
 		ForkSession:        forkSession,
+		Labels:             resumeLabels,
 		Tools:              snap.Tools,
 		NoTools:            snap.NoTools,
 		NoBuiltinTools:     snap.NoBuiltinTools,
@@ -921,6 +977,46 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 	return count, nil
 }
 
+// SetLabels mutates labels on the named child. Rejects keys with the pic/
+// prefix or invalid characters. Emits ctrl_child_labeled to subscribers.
+func (c *Controller) SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error) {
+	if _, ok := c.st.Get(childID); !ok {
+		return nil, &server.ControllerError{
+			Code:    protocol.ErrChildNotFound,
+			Message: "child not found: " + childID,
+		}
+	}
+	if err := validateUserLabelKeys(set); err != nil {
+		return nil, &server.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+	}
+	if err := validateUserRemoveKeys(remove); err != nil {
+		return nil, &server.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+	}
+	merged, err := c.st.SetLabels(childID, set, remove)
+	if err != nil {
+		return nil, &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+	}
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write state record after set_labels", "childId", childID, "error", err)
+	}
+	c.emitChildLabeled(childID, merged)
+	return merged, nil
+}
+
+// emitChildLabeled broadcasts a ctrl_child_labeled event carrying the full
+// post-mutation label map to both global and per-child subscribers.
+func (c *Controller) emitChildLabeled(childID string, labels map[string]string) {
+	evt := protocol.CtrlChildLabeled{
+		Type:    protocol.TypeCtrlChildLabeled,
+		ChildID: childID,
+		Labels:  labels,
+	}
+	if b, err := json.Marshal(evt); err == nil {
+		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToChild(childID, b)
+	}
+}
+
 func (c *Controller) Send(childID string, frame json.RawMessage) error {
 	// new_session and switch_session are handled via kill+respawn rather than
 	// forwarded to pi (spec §5.1).
@@ -1067,7 +1163,7 @@ func (c *Controller) OnConnectionClose(conn server.Connection) {
 
 // monitorChild runs as a goroutine for each live child. It forwards bus events
 // to per-child subscribers (wrapped in ctrl_event envelopes per §7.1), tracks
-// status transitions, handles rename detection, and handles child exit.
+// status transitions, handles rename detection, model-label updates, and child exit.
 func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	busCh, cancel := ch.Bus().Subscribe()
 	defer cancel()
@@ -1075,9 +1171,12 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	lastStatus := ch.Status()
 
 	// Initialise last-known name from the store so we can detect renames.
+	// Initialise last-known model so we can detect model changes (set_model/cycle_model).
 	lastKnownName := ""
+	lastKnownModel := ""
 	if snap, ok := c.st.Get(childID); ok {
 		lastKnownName = snap.Name
+		lastKnownModel = joinModel(snap.Provider, snap.Model)
 	}
 
 	for {
@@ -1103,9 +1202,17 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			// Polling on each bus event is the right moment because the sniffer
 			// update happens in the same readStdout goroutine that feeds the bus
 			// (spec §7.5).
-			if md := ch.Metadata(); md.SessionName != "" && md.SessionName != lastKnownName {
+			md := ch.Metadata()
+			if md.SessionName != "" && md.SessionName != lastKnownName {
 				c.handleChildRenamed(childID, md.SessionName, lastKnownName)
 				lastKnownName = md.SessionName
+			}
+
+			// Detect model changes from set_model / cycle_model responses.
+			// Update the store, persist, and emit ctrl_child_labeled.
+			if md.Model != "" && md.Model != lastKnownModel {
+				c.handleModelChange(childID, md.Model)
+				lastKnownModel = md.Model
 			}
 
 		case <-ch.Done():
@@ -1157,6 +1264,38 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		c.cm.DeliverToGlobal(b)
 		c.cm.DeliverToChild(childID, b)
 	}
+}
+
+// handleModelChange updates the store's Provider/Model fields and the
+// pic/model + pic/provider auto-labels when the sniffer detects a model change
+// via set_model or cycle_model responses. Emits ctrl_child_labeled.
+func (c *Controller) handleModelChange(childID, modelStr string) {
+	provider, model := splitModel(modelStr)
+	_ = c.st.Update(childID, func(s *store.Session) {
+		s.Provider = provider
+		s.Model = model
+		if s.Labels == nil {
+			s.Labels = make(map[string]string)
+		}
+		if provider != "" {
+			s.Labels["pic/provider"] = provider
+		} else {
+			delete(s.Labels, "pic/provider")
+		}
+		if model != "" {
+			s.Labels["pic/model"] = model
+		} else {
+			delete(s.Labels, "pic/model")
+		}
+	})
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return
+	}
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write state record after model change", "childId", childID, "error", err)
+	}
+	c.emitChildLabeled(childID, snap.Labels)
 }
 
 // handleChildRenamed updates the store and emits ctrl_child_renamed when the
@@ -1454,6 +1593,25 @@ func matchesSessionFilter(snap store.Snapshot, f protocol.SearchSessionFilter) b
 	if f.Since > 0 && snap.StartedAt.UnixMilli() < f.Since {
 		return false
 	}
+	if !matchesLabelFilter(snap.Labels, f.Labels, f.HasLabel) {
+		return false
+	}
+	return true
+}
+
+// matchesLabelFilter returns true when labels satisfies both the AND-match
+// required map and the key-presence hasLabels list.
+func matchesLabelFilter(labels, required map[string]string, hasLabels []string) bool {
+	for k, v := range required {
+		if labels[k] != v {
+			return false
+		}
+	}
+	for _, k := range hasLabels {
+		if _, ok := labels[k]; !ok {
+			return false
+		}
+	}
 	return true
 }
 
@@ -1496,6 +1654,7 @@ func sessionFromRecord(rec persist.Record) *store.Session {
 		ExtraArgs:          rec.ExtraArgs,
 		StartedAt:          time.UnixMilli(rec.SpawnedAt),
 		LastActivity:       time.UnixMilli(rec.LastSeenAlive),
+		Labels:             rec.Labels,
 	}
 }
 
@@ -1533,5 +1692,6 @@ func recordFromSnapshot(snap store.Snapshot) persist.Record {
 		SpawnedAt:          snap.StartedAt.UnixMilli(),
 		LastSeenAlive:      snap.LastActivity.UnixMilli(),
 		LastStatus:         string(snap.Status),
+		Labels:             snap.Labels,
 	}
 }
