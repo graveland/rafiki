@@ -229,6 +229,31 @@ describe("RemoteAgentSessionRuntime", () => {
         await runtime.dispose();
     });
 
+    it("killChild — sends ctrl_kill without closing connection", async () => {
+        const captured: Array<Record<string, unknown>> = [];
+        const srv = await startServer(makeHandler(captured));
+        servers.push(srv);
+
+        const runtime = await RemoteAgentSessionRuntime.connect({
+            socket: srv.sockPath,
+            childId: CHILD_ID,
+        });
+
+        // Call killChild explicitly — the connection must stay open afterwards
+        // so we can still dispose() cleanly.
+        await runtime.killChild();
+
+        // ctrl_kill should have been sent.
+        const killReqs = captured.filter((r) => r["type"] === "ctrl_kill");
+        expect(killReqs).toHaveLength(1);
+        expect(killReqs[0]!["childId"]).toBe(CHILD_ID);
+
+        // dispose() should not send a second ctrl_kill (killOnExit=false by default).
+        await runtime.dispose();
+        const killReqsAfter = captured.filter((r) => r["type"] === "ctrl_kill");
+        expect(killReqsAfter).toHaveLength(1);
+    });
+
     it("newSession — sends ctrl_send with new_session frame", async () => {
         const captured: Array<Record<string, unknown>> = [];
         const srv = await startServer(makeHandler(captured));

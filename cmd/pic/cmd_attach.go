@@ -10,12 +10,15 @@ func newAttachCmd() *cobra.Command {
 		Short: "Attach the pi TUI to an existing child",
 		Long: `Open the pi TUI driving an existing daemon-managed child.
 
-Quitting the TUI (Ctrl+D, /quit) detaches by default — the session keeps
-running. Use --kill-on-exit for native pi exit semantics.`,
+When the TUI quits (Ctrl+D, /quit), pic asks whether to terminate the session
+or leave it running. Use --kill-on-exit or --keep-on-exit to skip the prompt
+and choose explicitly.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runAttach,
 	}
-	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits")
+	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
+	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
+	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.ValidArgsFunction = func(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
@@ -43,5 +46,6 @@ func runAttach(cmd *cobra.Command, args []string) error {
 	}
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
-	return execPicAttach(childID, killOnExit)
+	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")
+	return execPicAttach(childID, killOnExit, keepOnExit)
 }

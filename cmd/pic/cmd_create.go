@@ -23,9 +23,9 @@ The pic-helpers pi extension is auto-installed (or upgraded) into
 like /reload work inside the TUI. Use --no-install-helpers or set
 PIC_NO_AUTO_INSTALL_HELPERS=1 to skip.
 
-By default, quitting the TUI (Ctrl+D, /quit) detaches — the session keeps
-running in the daemon. Use --kill-on-exit for native pi exit semantics
-(quitting terminates the session).
+When the TUI quits (Ctrl+D, /quit), pic asks whether to terminate the session
+or leave it running. Use --kill-on-exit or --keep-on-exit to skip the prompt
+and choose explicitly.
 
 With --detached, pic create spawns the child and exits without attaching.
 The child runs in the background; reattach later with 'pic attach <name>'.
@@ -39,7 +39,9 @@ scripting / AFK workflows, use --detached.)`,
 	}
 	addSpawnFlags(cmd)
 	cmd.Flags().Bool("detached", false, "Spawn without attaching; the child runs in the background")
-	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits")
+	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
+	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
+	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the pic-helpers pi extension")
 	return cmd
 }
@@ -154,5 +156,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
-	return execPicAttach(data.ChildID, killOnExit)
+	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")
+	return execPicAttach(data.ChildID, killOnExit, keepOnExit)
 }

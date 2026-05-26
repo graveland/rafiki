@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
+import { stdin, stdout } from "node:process";
 import { RemoteAgentSessionRuntime } from "./runtime.ts";
 
 const VERSION = "0.1.0";
@@ -16,7 +17,10 @@ function usage(): void {
     console.error("env vars:");
     console.error("  PI_CONTROLLER_SOCKET  override default socket path");
     console.error("  PIC_KILL_ON_EXIT      set to 1 to terminate the daemon's child");
-    console.error("                        on TUI quit (default: detach, leave running)");
+    console.error("                        on TUI quit (skips exit prompt)");
+    console.error("  PIC_KEEP_ON_EXIT      set to 1 to always keep the session running");
+    console.error("                        on TUI quit (skips exit prompt)");
+    console.error("                        (default without either: prompt at exit time)");
 }
 
 const args = process.argv.slice(2);
@@ -31,22 +35,30 @@ if (args[0] === "--version" || args[0] === "-V") {
 
 const childId = args[0];
 const killOnExit = process.env.PIC_KILL_ON_EXIT === "1";
+const keepOnExit = process.env.PIC_KEEP_ON_EXIT === "1";
 const socket = process.env.PI_CONTROLLER_SOCKET;
 
-// Startup banner per the plan's exit-semantics section.
-const childLabel = childId;  // v1 shows childId; a future pass could resolve name via ctrl_get
+// Startup banner.
+const childLabel = childId;
 process.stderr.write(`[pic-attach] Connected to ${childLabel}.\n`);
-process.stderr.write(`[pic-attach] Ctrl+D / /quit detaches; the session keeps running.\n`);
-process.stderr.write(`[pic-attach] To terminate the session, use \`pic kill ${childLabel}\` from another shell\n`);
-process.stderr.write(`[pic-attach] (or relaunch with --kill-on-exit for native pi exit semantics).\n`);
+if (killOnExit) {
+    process.stderr.write(`[pic-attach] Ctrl+D / /quit will terminate the session (--kill-on-exit).\n`);
+} else if (keepOnExit) {
+    process.stderr.write(`[pic-attach] Ctrl+D / /quit will detach; the session keeps running (--keep-on-exit).\n`);
+} else {
+    process.stderr.write(`[pic-attach] Ctrl+D / /quit will prompt to keep or terminate the session.\n`);
+    process.stderr.write(`[pic-attach] Use --keep-on-exit or --kill-on-exit to skip the prompt.\n`);
+}
 process.stderr.write(`[pic-attach] ${"─".repeat(60)}\n`);
 
+// Always construct the runtime with killOnExit=false; we decide kill vs keep
+// after the TUI exits (or honour the env vars directly).
 let runtime: RemoteAgentSessionRuntime;
 try {
     runtime = await RemoteAgentSessionRuntime.connect({
         socket,
         childId,
-        killOnExit,
+        killOnExit: false,
     });
 } catch (err) {
     console.error(`pic-attach: failed to connect: ${err instanceof Error ? err.message : String(err)}`);
@@ -65,13 +77,13 @@ try {
     process.exit(3);
 }
 
-// Clean exit on signals — close the UDS connection (and optionally kill the
-// daemon's child if --kill-on-exit was requested).
+// Signal handlers: no prompt on signal-driven exit — default to keep.
 let shuttingDown = false;
 async function gracefulExit(code: number): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
+        // No prompt on signal-driven exit; just detach.
         await runtime.dispose();
     } catch (err) {
         console.error("pic-attach: error during dispose:", err);
@@ -90,4 +102,73 @@ try {
 }
 
 // Normal exit (TUI quit naturally via Ctrl+D or /quit).
-await gracefulExit(0);
+// Ask what to do unless an explicit flag was given.
+if (!shuttingDown) {
+    shuttingDown = true;
+
+    const shouldKill = await decideKillOnExit(killOnExit, keepOnExit, childLabel);
+
+    if (shouldKill) {
+        await runtime.killChild();
+    }
+    await runtime.dispose();
+    process.exit(0);
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Decide whether to kill the session based on env flags or user prompt.
+ * Returns true → kill, false → keep/detach.
+ */
+async function decideKillOnExit(
+    kill: boolean,
+    keep: boolean,
+    childLabel: string
+): Promise<boolean> {
+    if (kill) return true;
+    if (keep) return false;
+    return await promptKillOrKeep(childLabel);
+}
+
+/**
+ * Prompt the user to keep or terminate the session.
+ * Default answer (Enter / empty input) is keep.
+ */
+async function promptKillOrKeep(childLabel: string): Promise<boolean> {
+    // Restore line mode in case the TUI left stdin in raw mode.
+    if (stdin.isTTY && stdin.setRawMode) {
+        stdin.setRawMode(false);
+    }
+
+    stdout.write("\n");
+    stdout.write(`Session "${childLabel}" is still running.\n`);
+    stdout.write(`  K  Keep running (detach, default)\n`);
+    stdout.write(`  T  Terminate the session\n`);
+    stdout.write(`Choice [K/t]: `);
+
+    return await new Promise<boolean>((resolve) => {
+        const onData = (chunk: Buffer | string) => {
+            const ans = (typeof chunk === "string" ? chunk : chunk.toString("utf8"))
+                .trim()
+                .toLowerCase();
+            stdin.off("data", onData);
+            stdin.off("end", onEnd);
+            if (ans === "t" || ans === "x" || ans === "terminate" || ans === "kill") {
+                resolve(true);
+            } else {
+                if (ans !== "" && ans !== "k" && ans !== "keep") {
+                    stdout.write(`(treating as keep)\n`);
+                }
+                resolve(false);
+            }
+        };
+        const onEnd = () => {
+            stdin.off("data", onData);
+            stdout.write(`\n(stdin closed, treating as keep)\n`);
+            resolve(false);
+        };
+        stdin.on("data", onData);
+        stdin.once("end", onEnd);
+    });
+}

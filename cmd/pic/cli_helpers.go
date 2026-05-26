@@ -114,7 +114,11 @@ func findPicAttach() (string, error) {
 // for it to exit. Returns when pic-attach exits. If pic-attach exits with a
 // non-zero code, os.Exit is called directly so the exit code propagates
 // without extra error noise (pic-attach has already printed to stderr).
-func execPicAttach(childID string, killOnExit bool) error {
+//
+// Exactly one of killOnExit and keepOnExit should be true, or both false
+// (which triggers the interactive prompt in pic-attach). They are mutually
+// exclusive and callers must enforce that via MarkFlagsMutuallyExclusive.
+func execPicAttach(childID string, killOnExit, keepOnExit bool) error {
 	bin, err := findPicAttach()
 	if err != nil {
 		return err
@@ -127,6 +131,9 @@ func execPicAttach(childID string, killOnExit bool) error {
 	cmd.Env = os.Environ()
 	if killOnExit {
 		cmd.Env = append(cmd.Env, "PIC_KILL_ON_EXIT=1")
+	}
+	if keepOnExit {
+		cmd.Env = append(cmd.Env, "PIC_KEEP_ON_EXIT=1")
 	}
 	if runErr := cmd.Run(); runErr != nil {
 		// pic-attach already wrote to stderr; just propagate the exit code.

@@ -265,10 +265,27 @@ export class RemoteAgentSessionRuntime {
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /**
+     * Send ctrl_kill to the daemon for this child. Used by pic-attach when the
+     * user opts to terminate the session at TUI exit. Does NOT close the
+     * connection — call dispose() after.
+     */
+    async killChild(): Promise<void> {
+        try {
+            await this._client.request({
+                type: "ctrl_kill",
+                childId: this._session.childId,
+            });
+        } catch (err) {
+            console.error("[pic-attach] kill-child failed:", err);
+        }
+    }
+
+    /**
      * Tear down the runtime.
      *
-     * Runs beforeSessionInvalidate, sends ctrl_kill if killOnExit is set,
-     * disposes the session, then closes the UDS connection.
+     * Runs beforeSessionInvalidate, sends ctrl_kill if killOnExit is set
+     * (backward-compat path), disposes the session, then closes the UDS
+     * connection.
      */
     async dispose(): Promise<void> {
         if (this.disposed) return;
@@ -285,14 +302,7 @@ export class RemoteAgentSessionRuntime {
         this._session.dispose();
 
         if (this.killOnExit) {
-            try {
-                await this._client.request({
-                    type: "ctrl_kill",
-                    childId: this._session.childId,
-                });
-            } catch (err) {
-                console.error("kill-on-exit: ctrl_kill failed:", err);
-            }
+            await this.killChild();
         }
 
         await this._client.close();
