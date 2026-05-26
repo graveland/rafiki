@@ -31,6 +31,10 @@ type Client struct {
 
 	// readErr stores the first read-loop error for reporting on later requests.
 	readErr atomic.Value
+
+	subMu     sync.Mutex
+	subs      map[uint64]chan []byte
+	nextSubID uint64
 }
 
 // Dial opens a connection to the UDS at path. If path is empty,
@@ -46,6 +50,7 @@ func Dial(path string) (*Client, error) {
 	c := &Client{
 		conn:    conn,
 		closeCh: make(chan struct{}),
+		subs:    make(map[uint64]chan []byte),
 	}
 	go c.readLoop()
 	return c, nil
@@ -171,9 +176,54 @@ func (c *Client) readLoop() {
 	}
 }
 
-// dispatchEvent is a no-op for now; Task 3 replaces this with the
-// subscription dispatcher.
-func (c *Client) dispatchEvent(_ []byte) {}
+// Subscribe returns a channel that receives every non-response frame
+// the client reads. Multiple Subscribe calls return independent channels.
+// The returned cancel func removes this subscriber and closes its channel.
+//
+// The channel is buffered (256 frames). Events are dropped on a full channel
+// so a slow consumer cannot block the read loop.
+func (c *Client) Subscribe() (<-chan []byte, func(), error) {
+	if c.closed.Load() {
+		return nil, nil, errClosedConn(c.readErr.Load())
+	}
+	ch := make(chan []byte, 256)
+	c.subMu.Lock()
+	c.nextSubID++
+	id := c.nextSubID
+	c.subs[id] = ch
+	c.subMu.Unlock()
+
+	cancel := func() {
+		c.subMu.Lock()
+		defer c.subMu.Unlock()
+		if _, ok := c.subs[id]; ok {
+			delete(c.subs, id)
+			close(ch)
+		}
+	}
+	return ch, cancel, nil
+}
+
+// dispatchEvent fans out a frame to all current subscribers.
+// It copies the frame for each subscriber so the reader's buffer can be reused.
+func (c *Client) dispatchEvent(frame []byte) {
+	c.subMu.Lock()
+	chs := make([]chan []byte, 0, len(c.subs))
+	for _, ch := range c.subs {
+		chs = append(chs, ch)
+	}
+	c.subMu.Unlock()
+
+	for _, ch := range chs {
+		cp := make([]byte, len(frame))
+		copy(cp, frame)
+		select {
+		case ch <- cp:
+		default:
+			// Subscriber channel full; drop this event rather than stall the read loop.
+		}
+	}
+}
 
 // Close shuts down the connection. Any in-flight Request returns an
 // error from the closed-channel arm. Close is idempotent.
@@ -181,6 +231,12 @@ func (c *Client) Close() error {
 	if c.closed.Swap(true) {
 		return nil
 	}
+	c.subMu.Lock()
+	for id, ch := range c.subs {
+		close(ch)
+		delete(c.subs, id)
+	}
+	c.subMu.Unlock()
 	return c.conn.Close()
 }
 
