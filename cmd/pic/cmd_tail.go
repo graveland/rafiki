@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -20,7 +21,9 @@ func newTailCmd() *cobra.Command {
 		Long: `Subscribe to a child's event stream and render events as they arrive.
 
 By default, token-by-token message_update deltas are suppressed (--no-deltas=true).
-Use --profile to select a named filter preset, or --include/--exclude to customize.`,
+Use --profile to select a named filter preset, or --include/--exclude to customize.
+
+pic tail exits automatically when the child exits.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runTail,
 	}
@@ -126,8 +129,24 @@ func runTail(cmd *cobra.Command, args []string) error {
 			if err := renderer.render(frame); err != nil {
 				fmt.Fprintln(os.Stderr, "render error:", err)
 			}
+			if isChildExited(frame, childID) {
+				return nil
+			}
 		case <-ctx.Done():
 			return nil
 		}
 	}
+}
+
+// isChildExited returns true if the frame is a ctrl_child_exited event
+// for the given childId.
+func isChildExited(frame []byte, childID string) bool {
+	var hdr struct {
+		Type    string `json:"type"`
+		ChildID string `json:"childId"`
+	}
+	if err := json.Unmarshal(frame, &hdr); err != nil {
+		return false
+	}
+	return hdr.Type == protocol.TypeCtrlChildExited && hdr.ChildID == childID
 }
