@@ -27,7 +27,7 @@ Mode: subagent-driven-development (sdd-implementer → sdd-spec-reviewer → sdd
 ## Final pass
 
 - [x] Manual end-to-end smoke against real pi — daemon spawned haiku-4-5 child, ctrl_status/spawn/list all responded correctly
-- [ ] Final code review across the entire implementation — deferred; per-task spec + quality reviews were thorough
+- [x] Final whole-implementation code review — found 2 critical + 7 important spec violations missed by per-task reviews; all fixed (`e0be75b`, `e7869fb`, `9040153`)
 
 ## Known v1 limitations (carry into v2 backlog)
 
@@ -35,9 +35,15 @@ Mode: subagent-driven-development (sdd-implementer → sdd-spec-reviewer → sdd
 - Profile filter names (`coarse`, `results`, `lifecycle`) on `ctrl_subscribe` are accepted but not yet expanded to event sets; only explicit `include`/`exclude` lists are honored.
 - Per-child subscribers leak until the child is forgotten (global subscribers are cleaned up on connection close).
 - `ctrl_search` only scans live children's ring buffers; no historical session.jsonl scan.
-- Intercept layer wired for `new_session` only via Task 17; `switch_session` interception path is implemented in the intercept package but not yet wired in the controller's `Send`.
 - `controller.go` intercept spin-wait has a silent 2s timeout — logs a warning would help diagnostics.
-- Source field added to subscriber leak documentation: minimum v1 cleanup covers global subs only.
+- SM counter sync: `Counters.ExtensionErrors` and `Counters.AutoRetries` tracked in the StateMachine are not synced to the store, so `ctrl_get` / `ctrl_list` report 0. Need a sync path.
+- `auto_retry_end` (failure) event sets `LastRetryFinal` via `OnAutoRetryFinalFailure` in the SM but no controller code calls it. Same for `queue_update` — spec mentions `pendingSteer` / `pendingFollowUp` counters not present on Session.
+- `ErrChildInGrace` distinct code defined but never returned; `ctrl_send` to an exited child returns `child_exited` even in the grace window.
+- `OnProcessExit` SM method never called in production; SM stays at `shutting_down` after process exit. No external observable impact (store drives client-visible status).
+- `ForgetAllExited` age filter bug: orphan-loaded children have `ExitedAt.IsZero()` and the age filter short-circuits, forgetting them unconditionally.
+- Resume carries forward `ForkSession`, so resume-of-fork re-forks. Clear ForkSession in Resume.
+- `framePassesTypeFilter` (controller.go) and `eventPassesFilter` (child_manager.go) are structurally identical; factor into shared helper.
+- `gofmt -l` reports nits in internal/server and test/integration files.
 
 ## Parallelization note (for revisit)
 
