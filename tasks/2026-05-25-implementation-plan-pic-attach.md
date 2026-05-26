@@ -17,6 +17,30 @@ There is only one kind of child — daemon-spawned. No "registered" concept. The
 
 ---
 
+## Exit semantics
+
+**Detach is the default.** pic-attach is a thin client over a separate daemon-owned pi child. When the TUI quits (Ctrl+D, `/quit`, SIGHUP, normal exit), only the pic-attach process exits. The daemon's pi child keeps running. The user can `pic attach <name>` later to reopen the TUI on the same session.
+
+The mechanism is trivial: `RemoteAgentSessionRuntime.dispose()` closes the UDS connection. The daemon already treats subscriber disconnects as ordinary cleanup (not as a kill signal for the child).
+
+**Opt-in kill via `--kill-on-exit`** flag on `pic create` and `pic attach`. When set, the runtime's `dispose()` sends `ctrl_kill` before closing the connection, matching native pi semantics. Off by default.
+
+Users who want to terminate from outside the TUI use `pic kill <name>` from any shell.
+
+A startup banner makes the semantics obvious:
+
+```
+[pic-attach] Connected to afk (c_01HX...).
+[pic-attach] Ctrl+D / /quit detaches; the session keeps running.
+[pic-attach] To terminate the session, use `pic kill afk` from another shell
+[pic-attach] (or relaunch with --kill-on-exit for native pi exit semantics).
+[pic-attach] ─────────────────────────────────────────────────────────
+```
+
+A future v2 may add a slash command like `/kill-session` via an injected companion extension, giving the kill action a native-pi feel without the flag. Deferred.
+
+---
+
 ## Why this is tractable
 
 From inspecting the installed pi package:
@@ -261,9 +285,9 @@ The runtime is constructed once at attach time. It dials the daemon, calls `ctrl
 - [ ] Step 1: Constructor performs initial handshake (dial, ctrl_get, build services).
 - [ ] Step 2: Implement getters returning cached metadata.
 - [ ] Step 3: Implement session-replacement methods.
-- [ ] Step 4: dispose() closes the connection cleanly.
-- [ ] Step 5: Tests.
-- [ ] Step 6: Commit: `attach: RemoteAgentSessionRuntime with session-replacement methods`.
+- [ ] Step 4: `dispose()` closes the UDS connection. If constructed with `killOnExit: true`, send `ctrl_kill` first.
+- [ ] Step 5: Tests — verify default dispose() doesn't kill; killOnExit dispose() does.
+- [ ] Step 6: Commit: `attach: RemoteAgentSessionRuntime with session-replacement methods + opt-in kill-on-exit`.
 
 ### Task 5: Local services (SessionManager, SettingsManager, ModelRegistry)
 
@@ -332,14 +356,15 @@ The exact method name on InteractiveMode for "start" isn't in the d.ts excerpt I
 
 `pic create`:
 1. Build a SpawnRequest from flags (same flags as `pic spawn`).
-2. Add `--detached` boolean flag.
+2. Add `--detached` and `--kill-on-exit` boolean flags.
 3. Send ctrl_spawn, get childId.
 4. If `--detached`: print childId, exit.
-5. Else: exec `pic-attach <childId>` with stdio inherited.
+5. Else: exec `pic-attach <childId>` with stdio inherited; pass `--kill-on-exit` through if set.
 
 `pic attach <id|name>`:
 1. Resolve id-or-name (existing `resolveTarget`).
-2. exec `pic-attach <childId>`.
+2. Add `--kill-on-exit` flag.
+3. exec `pic-attach <childId>` with stdio inherited; pass `--kill-on-exit` through if set.
 
 If `bin/pic-attach` is missing (bun not installed during build), print a clear error directing the user to install bun and run `make build-attach`.
 
