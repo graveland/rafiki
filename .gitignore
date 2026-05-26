@@ -17,6 +17,11 @@ coverage.txt
 # Local config + state (these belong under ~/.pi/run, not in repo)
 /run/
 
+# TypeScript / bun
+/attach/node_modules/
+/attach/*.bun-build
+/attach/.*.bun-build
+
 # Override global ignore — tasks/ holds the spec, plan, and todo for this project
 !tasks/
 !tasks/**

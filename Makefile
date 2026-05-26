@@ -1,4 +1,4 @@
-.PHONY: build build-controller build-pic test test-race vet fmt clean
+.PHONY: build build-controller build-pic build-attach test test-race vet fmt clean
 
 GO      ?= go
 BIN_DIR := bin
@@ -6,7 +6,7 @@ BIN_DIR := bin
 # Evaluated fresh on each invocation; empty when no .go files exist yet.
 PKGS := $(shell $(GO) list ./... 2>/dev/null)
 
-build: build-controller build-pic
+build: build-controller build-pic build-attach
 
 build-controller:
 	mkdir -p $(BIN_DIR)
@@ -15,6 +15,13 @@ build-controller:
 build-pic:
 	mkdir -p $(BIN_DIR)
 	$(GO) build -o $(BIN_DIR)/pic ./cmd/pic
+
+build-attach:
+	@if command -v bun >/dev/null 2>&1; then \
+	    cd attach && bun install --silent && bun run build; \
+	else \
+	    echo "skipping pic-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
+	fi
 
 test:
 	$(if $(PKGS),$(GO) test $(PKGS),@echo "(no Go packages yet)")
