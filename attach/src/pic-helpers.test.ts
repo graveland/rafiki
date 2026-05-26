@@ -244,17 +244,22 @@ describe("setupTuiAutocomplete", () => {
             const result = filterCommandSuggestions("/r", commands, []);
             expect(result).not.toBeNull();
             expect(result!.prefix).toBe("/r");
+            // value carries the bare command name (no leading slash); pi-tui's
+            // CombinedAutocompleteProvider prepends '/' on apply.
             const values = result!.items.map((i) => i.value);
-            expect(values).toContain("/reload");
-            expect(values).toContain("/restart");
-            expect(values).not.toContain("/new");
+            expect(values).toContain("reload");
+            expect(values).toContain("restart");
+            expect(values).not.toContain("new");
+            const labels = result!.items.map((i) => i.label);
+            expect(labels).toContain("/reload");
         });
 
         it("returns only the exact match for /reload", () => {
             const result = filterCommandSuggestions("/reload", commands, []);
             expect(result).not.toBeNull();
             expect(result!.items).toHaveLength(1);
-            expect(result!.items[0]!.value).toBe("/reload");
+            expect(result!.items[0]!.value).toBe("reload");
+            expect(result!.items[0]!.label).toBe("/reload");
             expect(result!.prefix).toBe("/reload");
         });
 
@@ -270,8 +275,8 @@ describe("setupTuiAutocomplete", () => {
             const result = filterCommandSuggestions("/", commands, [baseItem]);
             expect(result).not.toBeNull();
             expect(result!.items[0]!.value).toBe("/built-in");
-            // daemon items follow
-            expect(result!.items.map((i) => i.value)).toContain("/reload");
+            // daemon items follow (value is bare name; slash added by base provider on apply)
+            expect(result!.items.map((i) => i.value)).toContain("reload");
         });
 
         it("includes description in returned item", () => {
@@ -283,7 +288,7 @@ describe("setupTuiAutocomplete", () => {
             const result = filterCommandSuggestions("some text /re", commands, []);
             expect(result).not.toBeNull();
             expect(result!.prefix).toBe("/re");
-            expect(result!.items.map((i) => i.value)).toContain("/reload");
+            expect(result!.items.map((i) => i.value)).toContain("reload");
         });
 
         it("does not match slash embedded in word", () => {

@@ -141,7 +141,10 @@ export function filterCommandSuggestions(
     const daemonItems: AutocompleteItem[] = cachedCommands
         .filter((c) => c.name.startsWith(cmdName))
         .map((c) => ({
-            value: `/${c.name}`,
+            // pi-tui's CombinedAutocompleteProvider.applyCompletion prepends '/'
+            // when the prefix starts with one (slash-command branch).  Storing
+            // the bare name avoids the resulting double slash.
+            value: c.name,
             label: `/${c.name}`,
             description: c.description,
         }));
