@@ -45,6 +45,7 @@ func newRootCmd() *cobra.Command {
 		newSearchCmd(),
 		newSendCmd(),
 		newTailCmd(),
+		newLogsCmd(),
 		newCompletionCmd(),
 	)
 

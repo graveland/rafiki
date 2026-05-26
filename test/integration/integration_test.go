@@ -29,8 +29,10 @@ import (
 // ─── TestMain: build binary once for all tests ────────────────────────────────
 
 var (
-	binaryPath string
-	fakePiPath string
+	binaryPath  string
+	piCtlPath   string
+	fakePiPath  string
+	repoRoot    string
 )
 
 func TestMain(m *testing.M) {
@@ -38,6 +40,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("find module root: %v", err)
 	}
+	repoRoot = root
 
 	fakePiPath = filepath.Join(root, "test", "integration", "fake-pi.sh")
 
@@ -47,12 +50,23 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(binDir)
 
-	binaryPath = filepath.Join(binDir, "pi-controller")
-	build := exec.Command("go", "build", "-o", binaryPath, "./cmd/pi-controller")
-	build.Dir = root
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		log.Fatalf("build pi-controller: %v", err)
+	for _, cmd := range []struct{ bin, pkg string }{
+		{"pi-controller", "./cmd/pi-controller"},
+		{"pi-ctl", "./cmd/pi-ctl"},
+	} {
+		out := filepath.Join(binDir, cmd.bin)
+		build := exec.Command("go", "build", "-o", out, cmd.pkg)
+		build.Dir = root
+		build.Stderr = os.Stderr
+		if err := build.Run(); err != nil {
+			log.Fatalf("build %s: %v", cmd.bin, err)
+		}
+		switch cmd.bin {
+		case "pi-controller":
+			binaryPath = out
+		case "pi-ctl":
+			piCtlPath = out
+		}
 	}
 
 	os.Exit(m.Run())
