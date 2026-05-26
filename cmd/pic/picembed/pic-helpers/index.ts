@@ -33,7 +33,9 @@ interface ExtensionAPI {
  * pic-helpers — pic-attach-aware pi extension.
  *
  * Two contexts:
- * - Loaded in the daemon's pi child (PIC_ATTACH_TUI unset): registers /reload.
+ * - Loaded in the daemon's pi child (PIC_ATTACH_TUI unset): currently a
+ *   no-op. /reload is a pi builtin, so registering it here would conflict.
+ *   Reserved for future daemon-side commands (e.g. /detach, /restart-self).
  * - Loaded in pic-attach's TUI (PIC_ATTACH_TUI=1): the factory is a no-op;
  *   RemoteAgentSession.bindExtensions() calls setupTuiAutocomplete() directly
  *   to register an autocomplete provider that queries the daemon for available
@@ -47,24 +49,9 @@ interface ExtensionAPI {
  * to keep pic-helpers self-contained and avoid module-resolution issues in
  * both the daemon and the pic-attach build contexts.
  */
-export default function (pi: ExtensionAPI): void {
-    if (process.env["PIC_ATTACH_TUI"] === "1") {
-        // In pic-attach TUI context, setupTuiAutocomplete() handles autocomplete.
-        // The factory is not invoked in this context; this branch is a no-op.
-    } else {
-        registerChildCommands(pi);
-    }
-}
-
-function registerChildCommands(pi: ExtensionAPI): void {
-    pi.registerCommand("reload", {
-        description: "Reload extensions, skills, prompts, and themes",
-        handler: async (_args, ctx) => {
-            await ctx.reload();
-        },
-    });
-
-    // Future: /detach, /restart-self, etc.
+export default function (_pi: ExtensionAPI): void {
+    // Both branches are currently no-ops; reserved for future use.
+    // TUI autocomplete is wired separately via setupTuiAutocomplete().
 }
 
 // ─── TUI autocomplete (pic-attach context only) ───────────────────────────────
@@ -155,11 +142,14 @@ export function filterCommandSuggestions(
  * (both set by main.ts before the TUI starts). Fetches slash commands from
  * the daemon's pi child once at startup and caches them for the session.
  *
+ * Returns a `refresh` function so callers can re-fetch the command list
+ * (e.g. after /reload changes the daemon's set of extensions/skills/prompts).
+ *
  * @param addProvider - uiContext.addAutocompleteProvider (bound to the context)
  */
 export function setupTuiAutocomplete(
     addProvider: (factory: (current: unknown) => unknown) => void
-): void {
+): { refresh: () => Promise<void> } {
     const socketPath =
         process.env["PI_CONTROLLER_SOCKET"] ??
         path.join(os.homedir(), ".pi", "run", "controller.sock");
@@ -167,18 +157,20 @@ export function setupTuiAutocomplete(
 
     let cachedCommands: CommandInfo[] = [];
 
-    if (childId) {
-        fetchCommandsFromDaemon(socketPath, childId)
-            .then((cmds) => {
-                cachedCommands = cmds;
-            })
-            .catch((err: unknown) => {
-                console.error(
-                    "[pic-helpers] failed to fetch daemon commands:",
-                    err instanceof Error ? err.message : String(err)
-                );
-            });
-    }
+    const refresh = async (): Promise<void> => {
+        if (!childId) return;
+        try {
+            cachedCommands = await fetchCommandsFromDaemon(socketPath, childId);
+        } catch (err: unknown) {
+            console.error(
+                "[pic-helpers] failed to refresh daemon commands:",
+                err instanceof Error ? err.message : String(err)
+            );
+        }
+    };
+
+    // Initial fetch — fire-and-forget so we don't block bindExtensions.
+    void refresh();
 
     addProvider((current: unknown) => {
         const base = current as AutocompleteProvider;
@@ -213,6 +205,8 @@ export function setupTuiAutocomplete(
         };
         return provider;
     });
+
+    return { refresh };
 }
 
 // ─── One-shot daemon UDS client ───────────────────────────────────────────────

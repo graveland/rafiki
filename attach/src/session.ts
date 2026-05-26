@@ -296,6 +296,10 @@ export class RemoteAgentSession {
     private readonly _resourceLoader: ResourceLoader;
     private readonly _extensionRunner: ExtensionRunner;
 
+    // Refresh handle from pic-helpers; called after /reload so the autocomplete
+    // cache picks up newly-added skills/extensions/prompts.
+    private _refreshAutocomplete?: () => Promise<void>;
+
     constructor(init: RemoteSessionInit) {
         this._client = init.client;
         this._childId = init.childId;
@@ -970,7 +974,7 @@ export class RemoteAgentSession {
         if (bindings.uiContext) {
             // setupTuiAutocomplete reads PIC_ATTACH_CHILD_ID and PI_CONTROLLER_SOCKET
             // from the environment (set by main.ts before TUI construction).
-            setupTuiAutocomplete(
+            const { refresh } = setupTuiAutocomplete(
                 // Cast to satisfy ExtensionUIContext.addAutocompleteProvider which expects
                 // @earendil-works/pi-tui's AutocompleteProviderFactory. Our locally-typed
                 // factory is structurally identical; runtime behaviour is correct.
@@ -978,6 +982,7 @@ export class RemoteAgentSession {
                     factory: (current: unknown) => unknown
                 ) => void
             );
+            this._refreshAutocomplete = refresh;
         }
     }
 
@@ -994,6 +999,15 @@ export class RemoteAgentSession {
         });
         if (!resp.success) {
             throw new Error(`reload: ${resp.error?.code ?? "unknown error"}`);
+        }
+        // Re-fetch the autocomplete command list after a brief delay so the
+        // daemon has time to finish its reload before we query get_commands.
+        // Best-effort — a failure here only stales the autocomplete cache.
+        if (this._refreshAutocomplete) {
+            const refresh = this._refreshAutocomplete;
+            setTimeout(() => {
+                void refresh();
+            }, 500);
         }
     }
 
