@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestCLI_Status verifies that `pi-ctl status` returns a JSON object containing
+// TestCLI_Status verifies that `pic status` returns a JSON object containing
 // a "version" field.
 func TestCLI_Status(t *testing.T) {
 	t.Parallel()

@@ -52,7 +52,7 @@ func TestMain(m *testing.M) {
 
 	for _, cmd := range []struct{ bin, pkg string }{
 		{"pi-controller", "./cmd/pi-controller"},
-		{"pi-ctl", "./cmd/pi-ctl"},
+		{"pic", "./cmd/pic"},
 	} {
 		out := filepath.Join(binDir, cmd.bin)
 		build := exec.Command("go", "build", "-o", out, cmd.pkg)
@@ -64,7 +64,7 @@ func TestMain(m *testing.M) {
 		switch cmd.bin {
 		case "pi-controller":
 			binaryPath = out
-		case "pi-ctl":
+		case "pic":
 			piCtlPath = out
 		}
 	}

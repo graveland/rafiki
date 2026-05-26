@@ -1,6 +1,6 @@
 # Binaries
 /pi-controller
-/pi-ctl
+/pic
 /bin/
 
 # Go build artifacts

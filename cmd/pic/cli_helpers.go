@@ -51,7 +51,7 @@ func resolveTarget(ctx context.Context, c *client.Client, input string) (string,
 	if input == "" {
 		input = getActive()
 		if input == "" {
-			return "", fmt.Errorf("no child specified and no active marker; run `pi-ctl list` to see options")
+			return "", fmt.Errorf("no child specified and no active marker; run `pic list` to see options")
 		}
 	}
 	return c.Resolve(ctx, input)

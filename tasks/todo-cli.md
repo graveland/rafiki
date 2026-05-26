@@ -1,4 +1,4 @@
-# pi-ctl CLI — task tracker
+# pic CLI — task tracker
 
 Plan: `tasks/2026-05-25-implementation-plan-cli.md`
 Spec: `tasks/pi-controller-protocol.md` (§12 for CLI specifics)

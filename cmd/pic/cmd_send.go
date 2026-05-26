@@ -21,7 +21,7 @@ func newSendCmd() *cobra.Command {
 If id|name is omitted, uses the active marker. If frame-json is omitted, reads from stdin.
 
 Example:
-  pi-ctl send afk-impl '{"type":"prompt","message":"Hello!"}'`,
+  pic send afk-impl '{"type":"prompt","message":"Hello!"}'`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: runSend,
 	}
