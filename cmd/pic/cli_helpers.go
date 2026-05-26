@@ -206,11 +206,7 @@ func decideKillOnExit(killOnExit, keepOnExit bool, childLabel string) (bool, err
 		return false, nil
 	}
 
-	fmt.Println()
-	fmt.Printf("Session %q is still running.\n", childLabel)
-	fmt.Println("  K  Keep running (detach, default)")
-	fmt.Println("  T  Terminate the session")
-	fmt.Print("Choice [K/t]: ")
+	fmt.Printf("\nTerminate session %q? [y/N]: ", childLabel)
 
 	reader := bufio.NewReader(os.Stdin)
 	line, err := reader.ReadString('\n')
@@ -218,14 +214,25 @@ func decideKillOnExit(killOnExit, keepOnExit bool, childLabel string) (bool, err
 		return false, err
 	}
 	ans := strings.TrimSpace(strings.ToLower(line))
+	kill, warned := parseKillAnswer(ans)
+	if warned {
+		fmt.Println("(treating as no)")
+	}
+	return kill, nil
+}
+
+// parseKillAnswer interprets the user's trimmed, lowercased response.
+// Returns (kill=true) only for explicit "y" / "yes".
+// Returns (warned=true) when the input is unrecognised so the caller can
+// print a "(treating as no)" notice.
+func parseKillAnswer(ans string) (kill bool, warned bool) {
 	switch ans {
-	case "t", "terminate", "kill", "x":
-		return true, nil
-	case "", "k", "keep":
-		return false, nil
+	case "y", "yes":
+		return true, false
+	case "", "n", "no":
+		return false, false
 	default:
-		fmt.Println("(treating as keep)")
-		return false, nil
+		return false, true
 	}
 }
 
