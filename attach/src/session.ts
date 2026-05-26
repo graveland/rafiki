@@ -311,9 +311,22 @@ export class RemoteAgentSession {
         this._resourceLoader = makeResourceLoaderStub();
         this._extensionRunner = makeExtensionRunnerStub();
 
-        // Minimal Agent stub.  The TUI reads state via AgentSession getters,
-        // not via agent.state directly — but we provide something non-null.
-        this.agent = {} as unknown as Agent;
+        // Minimal Agent stub.  The TUI reads most state via AgentSession
+        // getters (which we implement), but a few hot paths reach through to
+        // session.agent directly — most notably the Escape-to-abort handler
+        // calling session.agent.abort().  We wire those through to the daemon.
+        const self = this;
+        this.agent = {
+            abort(): void {
+                // Fire-and-forget; the TUI's caller is synchronous.  Errors
+                // surface via the unhandled-rejection path which we log.
+                void self.abort().catch((err) => {
+                    if (process.env.PIC_ATTACH_DEBUG === "1") {
+                        console.error("[pic-attach] agent.abort forward failed:", err);
+                    }
+                });
+            },
+        } as unknown as Agent;
 
         // Start consuming events from the daemon.
         void this.consumeEvents();
