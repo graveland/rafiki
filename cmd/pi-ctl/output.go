@@ -66,7 +66,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		return writeJSON(w, map[string]any{"children": children})
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, headerLine("ID", "NAME", "STATUS", "MODEL", "STARTED", useColor))
+	fmt.Fprintln(tw, headerLine(useColor, "ID", "NAME", "STATUS", "MODEL", "STARTED"))
 	for _, ch := range children {
 		started := "-"
 		if ch.StartedAt > 0 {
@@ -96,13 +96,10 @@ func writeJSON(w io.Writer, v any) error {
 }
 
 // headerLine builds a tab-separated header row from column names.
-// The last argument must be a bool controlling whether to dim the text.
-func headerLine(cols ...any) string {
-	useColor, _ := cols[len(cols)-1].(bool)
-	cols = cols[:len(cols)-1]
+func headerLine(useColor bool, cols ...string) string {
 	parts := make([]string, len(cols))
 	for i, c := range cols {
-		s := fmt.Sprint(c)
+		s := c
 		if useColor {
 			s = dim(s)
 		}

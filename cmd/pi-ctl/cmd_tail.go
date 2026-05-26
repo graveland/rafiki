@@ -47,6 +47,7 @@ func runTail(cmd *cobra.Command, args []string) error {
 	// SIGINT/SIGTERM cancel the context so the render loop exits cleanly.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 	go func() {
 		select {
 		case <-sigs:

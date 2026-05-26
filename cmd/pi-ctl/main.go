@@ -30,7 +30,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	root.PersistentFlags().String("socket", "", "controller socket path (default ~/.pi/run/controller.sock)")
-	root.PersistentFlags().String("output", "auto", "output format: auto|json|table")
+	root.PersistentFlags().String("output", "auto", "output format for list/tail: auto|json|table (other commands always emit JSON)")
 	root.PersistentFlags().String("color", "auto", "color output: auto|always|never")
 
 	root.AddCommand(

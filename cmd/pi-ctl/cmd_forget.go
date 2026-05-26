@@ -79,6 +79,7 @@ func runForget(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_forget: %s", client.FormatError(resp))
 	}
-	fmt.Fprintln(os.Stderr, "forgot", childID)
-	return nil
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(map[string]string{"forgot": childID})
 }

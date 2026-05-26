@@ -1,8 +1,6 @@
 package main
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,9 +31,6 @@ func setActive(childID string) error {
 func getActive() string {
 	b, err := os.ReadFile(activeFilePath())
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return ""
-		}
 		return ""
 	}
 	return strings.TrimSpace(string(b))

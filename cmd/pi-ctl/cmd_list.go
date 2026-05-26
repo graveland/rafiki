@@ -43,8 +43,5 @@ func runList(cmd *cobra.Command, _ []string) error {
 	}
 
 	mode, useColor := outputOpts(cmd)
-	if mode == outputJSON {
-		return writeJSON(os.Stdout, map[string]any{"children": children})
-	}
 	return renderList(os.Stdout, children, mode, useColor)
 }

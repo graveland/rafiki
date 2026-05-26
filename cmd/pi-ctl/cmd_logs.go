@@ -2,8 +2,10 @@ package main
 
 import (
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -47,7 +49,7 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	home, _ := os.UserHomeDir()
 	logsDir := filepath.Join(home, ".pi", "run", "logs", childID)
 
-	if _, err := os.Stat(logsDir); os.IsNotExist(err) {
+	if _, err := os.Stat(logsDir); errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("no logs at %s (child still alive, or persistence mode is `never`)", logsDir)
 	}
 

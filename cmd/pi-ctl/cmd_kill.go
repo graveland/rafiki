@@ -59,10 +59,11 @@ func runKill(cmd *cobra.Command, args []string) error {
 		req.KillTimeoutMs = kt.Milliseconds()
 	}
 
-	// Allow longer than the default 30s context if the user requested it.
-	if st > 30*time.Second {
+	// Allow longer than Go's default RPC timing if both flags push past it.
+	total := st + kt
+	if total > 30*time.Second {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, st+5*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, total+5*time.Second)
 		defer cancel()
 	}
 
