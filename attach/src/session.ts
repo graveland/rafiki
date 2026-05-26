@@ -139,6 +139,7 @@ export type ReplacedSessionContext = ExtensionCommandContext & {
 };
 
 import type { Client } from "./client.ts";
+import { setupTuiAutocomplete } from "../../cmd/pic/picembed/pic-helpers/index.ts";
 
 // ─── Local type definitions (not exported from main package index) ────────────
 
@@ -929,9 +930,27 @@ export class RemoteAgentSession {
         // no-op in v1
     }
 
-    /** Stub: extension bindings belong to the daemon-owned pi child. */
-    async bindExtensions(_bindings: ExtensionBindings): Promise<void> {
-        // no-op in v1 — extensions run in the daemon's pi child
+    /**
+     * Bind TUI-side extensions.
+     *
+     * When uiContext is present (interactive mode), calls setupTuiAutocomplete
+     * from pic-helpers to register the slash-command completion provider. This
+     * is the only local extension we load; all other extension work happens in
+     * the daemon's pi child.
+     */
+    async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+        if (bindings.uiContext) {
+            // setupTuiAutocomplete reads PIC_ATTACH_CHILD_ID and PI_CONTROLLER_SOCKET
+            // from the environment (set by main.ts before TUI construction).
+            setupTuiAutocomplete(
+                // Cast to satisfy ExtensionUIContext.addAutocompleteProvider which expects
+                // @earendil-works/pi-tui's AutocompleteProviderFactory. Our locally-typed
+                // factory is structurally identical; runtime behaviour is correct.
+                bindings.uiContext.addAutocompleteProvider.bind(bindings.uiContext) as (
+                    factory: (current: unknown) => unknown
+                ) => void
+            );
+        }
     }
 
     /** Stub: reload is a daemon-side operation. */

@@ -31,6 +31,13 @@ if (args[0] === "--version" || args[0] === "-V") {
 }
 
 const childId = args[0];
+
+// Signal to extensions that they're running inside pic-attach's TUI process.
+// pic-helpers/index.ts reads these to register the autocomplete provider instead
+// of the daemon-side /reload command.
+process.env.PIC_ATTACH_TUI = "1";
+process.env.PIC_ATTACH_CHILD_ID = childId;
+
 // PIC_KILL_ON_EXIT is a fallback for users invoking pic-attach directly.
 // When launched via `pic create` / `pic attach`, pic handles the kill/keep
 // decision after this process exits; the env var is not set.
