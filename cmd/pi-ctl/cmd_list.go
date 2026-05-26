@@ -19,6 +19,12 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().String("status", "", "Filter by status (e.g. idle, streaming, exited)")
 	cmd.Flags().String("name-contains", "", "Filter by substring in name")
 	cmd.Flags().String("cwd-contains", "", "Filter by substring in working directory")
+
+	_ = cmd.RegisterFlagCompletionFunc("status", cobra.FixedCompletions(
+		[]string{"spawning", "idle", "streaming", "tool_running", "compacting", "blocked_ui", "shutting_down", "exited"},
+		cobra.ShellCompDirectiveNoFileComp,
+	))
+
 	return cmd
 }
 

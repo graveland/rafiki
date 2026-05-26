@@ -23,6 +23,14 @@ func newRecentCmd() *cobra.Command {
 	cmd.Flags().Duration("since", 0, "Only events newer than this (e.g. 5m)")
 	cmd.Flags().StringSlice("include", nil, "Include only these event types (repeatable)")
 	cmd.Flags().StringSlice("exclude", nil, "Exclude these event types (repeatable)")
+
+	_ = cmd.RegisterFlagCompletionFunc("include", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("exclude", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	})
+
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp

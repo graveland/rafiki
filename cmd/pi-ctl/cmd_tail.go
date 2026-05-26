@@ -28,6 +28,18 @@ Use --profile to select a named filter preset, or --include/--exclude to customi
 	cmd.Flags().StringSlice("include", nil, "Add event types to subscription (repeatable)")
 	cmd.Flags().StringSlice("exclude", nil, "Exclude event types from subscription (repeatable)")
 	cmd.Flags().Bool("no-deltas", true, "Suppress token-by-token message_update deltas (default true)")
+
+	_ = cmd.RegisterFlagCompletionFunc("profile", cobra.FixedCompletions(
+		[]string{"firehose", "results", "coarse", "lifecycle"},
+		cobra.ShellCompDirectiveNoFileComp,
+	))
+	_ = cmd.RegisterFlagCompletionFunc("include", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("exclude", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	})
+
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp

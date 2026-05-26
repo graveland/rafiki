@@ -29,6 +29,18 @@ func newSpawnCmd() *cobra.Command {
 	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
+
+	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveFilterDirs
+	})
+	_ = cmd.RegisterFlagCompletionFunc("session", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
+	})
+	_ = cmd.RegisterFlagCompletionFunc("fork", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
+	})
+	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
+
 	return cmd
 }
 

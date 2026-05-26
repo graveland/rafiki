@@ -33,6 +33,15 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().String("output", "auto", "output format for list/tail: auto|json|table (other commands always emit JSON)")
 	root.PersistentFlags().String("color", "auto", "color output: auto|always|never")
 
+	_ = root.RegisterFlagCompletionFunc("output", cobra.FixedCompletions(
+		[]string{"auto", "json", "table"},
+		cobra.ShellCompDirectiveNoFileComp,
+	))
+	_ = root.RegisterFlagCompletionFunc("color", cobra.FixedCompletions(
+		[]string{"auto", "always", "never"},
+		cobra.ShellCompDirectiveNoFileComp,
+	))
+
 	root.AddCommand(
 		newListCmd(),
 		newGetCmd(),

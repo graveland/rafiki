@@ -19,6 +19,7 @@ func newResumeCmd() *cobra.Command {
 		RunE:  runResume,
 	}
 	cmd.Flags().String("api-key", "", "Optional API key override for this resume")
+	_ = cmd.RegisterFlagCompletionFunc("api-key", cobra.NoFileCompletions)
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
