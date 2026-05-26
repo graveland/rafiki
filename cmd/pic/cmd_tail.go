@@ -31,6 +31,7 @@ pic tail exits automatically when the child exits.`,
 	cmd.Flags().StringSlice("include", nil, "Add event types to subscription (repeatable)")
 	cmd.Flags().StringSlice("exclude", nil, "Exclude event types from subscription (repeatable)")
 	cmd.Flags().Bool("no-deltas", true, "Suppress token-by-token message_update deltas (default true)")
+	cmd.Flags().BoolP("verbose", "v", false, "Include internal RPC response frames (autocomplete fetches, get_state, etc.)")
 
 	_ = cmd.RegisterFlagCompletionFunc("profile", cobra.FixedCompletions(
 		[]string{"firehose", "results", "coarse", "lifecycle"},
@@ -118,7 +119,8 @@ func runTail(cmd *cobra.Command, args []string) error {
 	}
 
 	mode, useColor := outputOpts(cmd)
-	renderer := newTailRenderer(os.Stdout, useColor, mode)
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	renderer := newTailRenderer(os.Stdout, useColor, mode, verbose)
 
 	for {
 		select {

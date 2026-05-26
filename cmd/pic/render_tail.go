@@ -13,14 +13,22 @@ import (
 
 // tailRenderer formats incoming event frames (raw bytes) onto w.
 // It handles the ctrl_event wrapper (pi events) and ctrl_child_* lifecycle events.
+//
+// Pi writes responses to its stdout firehose alongside events, and the daemon
+// fans the entire stream to all subscribers — so 'pic tail' sees responses
+// to other connections' RPC calls (e.g. pic-attach's autocomplete
+// get_commands fetch).  These are internal plumbing the user usually does
+// not care about, so we suppress them by default.  `--verbose` (verbose=true)
+// includes them with pretty-printed JSON.
 type tailRenderer struct {
 	w        io.Writer
 	useColor bool
 	mode     outputMode
+	verbose  bool
 }
 
-func newTailRenderer(w io.Writer, useColor bool, mode outputMode) *tailRenderer {
-	return &tailRenderer{w: w, useColor: useColor, mode: mode}
+func newTailRenderer(w io.Writer, useColor bool, mode outputMode, verbose bool) *tailRenderer {
+	return &tailRenderer{w: w, useColor: useColor, mode: mode, verbose: verbose}
 }
 
 // render writes a human-readable (or JSON) representation of frame to w.
@@ -59,6 +67,14 @@ func (r *tailRenderer) render(frame []byte) error {
 	}
 
 	switch hdr.Type {
+	case "response":
+		// RPC responses are internal plumbing.  Hide by default; pretty-print
+		// when --verbose so power users can still observe them when debugging.
+		if !r.verbose {
+			return nil
+		}
+		return r.renderResponseFrame(frame)
+
 	case protocol.TypeCtrlEvent:
 		return r.renderPiEvent(hdr.Event)
 
@@ -87,6 +103,24 @@ func (r *tailRenderer) render(frame []byte) error {
 	default:
 		fmt.Fprintln(r.w, string(frame))
 	}
+	return nil
+}
+
+// renderResponseFrame pretty-prints an RPC response frame in verbose mode.
+// Dims the wrapper for visibility and indents nested data for readability.
+func (r *tailRenderer) renderResponseFrame(frame []byte) error {
+	var v any
+	if err := json.Unmarshal(frame, &v); err != nil {
+		fmt.Fprintln(r.w, string(frame))
+		return nil
+	}
+	indented, err := json.MarshalIndent(v, "  ", "  ")
+	if err != nil {
+		fmt.Fprintln(r.w, string(frame))
+		return nil
+	}
+	r.printDim("[response]")
+	fmt.Fprintln(r.w, "  "+string(indented))
 	return nil
 }
 
