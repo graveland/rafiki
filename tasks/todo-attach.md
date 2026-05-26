@@ -6,13 +6,13 @@ Mode: subagent-driven-development (sdd-implementer → sdd-spec-reviewer → sdd
 
 ## Tasks
 
-- [ ] **Task 1** — TS package skeleton + bun-compile build pipeline
-- [ ] **Task 2** — TS UDS client (mirror of internal/client/)
-- [ ] **Task 3** — RemoteAgentSession (proxies AgentSession shape)
-- [ ] **Task 4** — RemoteAgentSessionRuntime (+ opt-in kill-on-exit)
-- [ ] **Task 5** — Local services (SessionManager tail, SettingsManager, ModelRegistry)
-- [ ] **Task 6** — main.ts entry point
-- [ ] **Task 7** — pic create + pic attach Go-side commands
+- [x] **Task 1** — TS package skeleton + bun-compile build pipeline — commit `e73e62a`
+- [x] **Task 2** — TS UDS client (mirror of internal/client/) — commit `b367cec`
+- [x] **Task 3** — RemoteAgentSession (proxies AgentSession shape) — commit `b19e494` (42 impl, 30 stub)
+- [x] **Task 4** — RemoteAgentSessionRuntime (+ opt-in kill-on-exit) — commit `5277772`
+- [x] **Task 5** — Local services (SessionManager tail, SettingsManager, ModelRegistry) — commit `569e4f2`
+- [x] **Task 6** — main.ts entry point — commit `89f96bb` (TUI renders ✅)
+- [x] **Task 7** — pic create + pic attach Go-side commands — commit `154573c`
 - [ ] **Task 8** — Integration tests
 
 ## Final pass

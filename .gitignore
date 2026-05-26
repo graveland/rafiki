@@ -23,5 +23,4 @@ coverage.txt
 /attach/.*.bun-build
 
 # Override global ignore — tasks/ holds the spec, plan, and todo for this project
-!tasks/
-!tasks/**
+/tasks/

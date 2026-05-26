@@ -251,14 +251,14 @@ export class RemoteAgentSessionRuntime {
     }
 
     /**
-     * Not supported in pic-attach v1.  Use `pic spawn --resume <file>` instead.
+     * Not supported in pic-attach v1.  Use `pic create --resume <file> --detached` instead.
      */
     async importFromJsonl(
         _inputPath: string,
         _cwdOverride?: string
     ): Promise<{ cancelled: boolean }> {
         throw new Error(
-            "importFromJsonl: not supported in pic-attach v1 — use `pic spawn --resume <file>` instead"
+            "importFromJsonl: not supported in pic-attach v1 — use `pic create --resume <file> --detached` instead"
         );
     }
 

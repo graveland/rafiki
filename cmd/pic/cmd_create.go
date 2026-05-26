@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -21,16 +22,84 @@ By default, quitting the TUI (Ctrl+D, /quit) detaches — the session keeps
 running in the daemon. Use --kill-on-exit for native pi exit semantics
 (quitting terminates the session).
 
-With --detached, pic create just spawns the child and exits without
-attaching. The child runs in the background; reattach later with
-'pic attach <name>'.`,
+With --detached, pic create spawns the child and exits without attaching.
+The child runs in the background; reattach later with 'pic attach <name>'.
+
+(Note: pic create replaces the earlier ` + "`pic spawn`" + ` subcommand. For
+scripting / AFK workflows, use --detached.)`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runCreate,
 	}
 	addSpawnFlags(cmd)
-	cmd.Flags().Bool("detached", false, "Spawn without attaching (equivalent to `pic spawn`)")
+	cmd.Flags().Bool("detached", false, "Spawn without attaching; the child runs in the background")
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits")
 	return cmd
+}
+
+// addSpawnFlags registers the shared spawn-related flags on cmd.
+func addSpawnFlags(cmd *cobra.Command) {
+	cmd.Flags().String("cwd", "", "Working directory (required, must be absolute)")
+	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4)")
+	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
+	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
+	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")
+	cmd.Flags().String("fork", "", "Fork from an existing session.jsonl by path")
+	cmd.Flags().Bool("no-extensions", false, "Disable extension discovery")
+	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
+	cmd.Flags().Bool("verbose", false, "Verbose startup")
+	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
+
+	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveFilterDirs
+	})
+	_ = cmd.RegisterFlagCompletionFunc("session", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
+	})
+	_ = cmd.RegisterFlagCompletionFunc("fork", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
+	})
+	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
+}
+
+// buildSpawnRequest constructs a SpawnRequest from the spawn flags and
+// positional args. Returns an error if required flags are invalid.
+func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
+	cwd, _ := cmd.Flags().GetString("cwd")
+	if cwd == "" {
+		return protocol.SpawnRequest{}, fmt.Errorf("--cwd is required")
+	}
+	if !strings.HasPrefix(cwd, "/") {
+		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute")
+	}
+	model, _ := cmd.Flags().GetString("model")
+	thinking, _ := cmd.Flags().GetString("thinking")
+	noSession, _ := cmd.Flags().GetBool("no-session")
+	resume, _ := cmd.Flags().GetString("session")
+	fork, _ := cmd.Flags().GetString("fork")
+	noExt, _ := cmd.Flags().GetBool("no-extensions")
+	exts, _ := cmd.Flags().GetStringSlice("extension")
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	extraArgs, _ := cmd.Flags().GetStringSlice("extra-arg")
+
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+
+	return protocol.SpawnRequest{
+		Type:          protocol.TypeCtrlSpawn,
+		Name:          name,
+		Cwd:           cwd,
+		Model:         model,
+		Thinking:      thinking,
+		NoSession:     noSession,
+		ResumeSession: resume,
+		ForkSession:   fork,
+		NoExtensions:  noExt,
+		Extensions:    exts,
+		Verbose:       verbose,
+		ExtraArgs:     extraArgs,
+	}, nil
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {

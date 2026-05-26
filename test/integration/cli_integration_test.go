@@ -25,36 +25,39 @@ func TestCLI_Status(t *testing.T) {
 	}
 }
 
-// TestCLI_SpawnListKillForget exercises the core child lifecycle via the CLI:
-// spawn → list (child present) → kill → poll for exited → forget.
-func TestCLI_SpawnListKillForget(t *testing.T) {
+// TestCLI_CreateListKillForget exercises the core child lifecycle via the CLI:
+// create --detached → list (child present) → kill → poll for exited → forget.
+func TestCLI_CreateListKillForget(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
 
-	// spawn
-	spawnCmd := exec.Command(piCtlPath,
+	// create --detached
+	var createStderr bytes.Buffer
+	createCmd := exec.Command(piCtlPath,
 		"--socket", d.socketPath,
 		"--output", "json",
-		"spawn", "smoke",
+		"create", "smoke",
 		"--cwd", "/tmp",
 		"--no-session",
 		"--model", "fake/dummy",
 		"--no-extensions",
+		"--detached",
 	)
-	out, err := spawnCmd.CombinedOutput()
+	createCmd.Stderr = &createStderr
+	out, err := createCmd.Output() // stdout only
 	if err != nil {
-		t.Fatalf("spawn failed: %v\n%s", err, out)
+		t.Fatalf("create --detached failed: %v\nstderr: %s", err, createStderr.String())
 	}
 
 	var spawnResp struct {
 		ChildID string `json:"childId"`
 	}
 	if err := json.Unmarshal(out, &spawnResp); err != nil {
-		t.Fatalf("decode spawn response: %v\n%s", err, out)
+		t.Fatalf("decode create response: %v\n%s", err, out)
 	}
 	childID := spawnResp.ChildID
 	if childID == "" {
-		t.Fatalf("spawn returned empty childId; output: %s", out)
+		t.Fatalf("create --detached returned empty childId; output: %s", out)
 	}
 
 	// list — child should be present
@@ -241,18 +244,21 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
 
-	spawnCmd := exec.Command(piCtlPath,
+	var createStderr bytes.Buffer
+	createCmd := exec.Command(piCtlPath,
 		"--socket", d.socketPath,
 		"--output", "json",
-		"spawn", "afk-impl",
+		"create", "afk-impl",
 		"--cwd", "/tmp",
 		"--no-session",
 		"--no-extensions",
 		"--model", "fake/dummy",
+		"--detached",
 	)
-	out, err := spawnCmd.CombinedOutput()
+	createCmd.Stderr = &createStderr
+	out, err := createCmd.Output() // stdout only
 	if err != nil {
-		t.Fatalf("spawn failed: %v\n%s", err, out)
+		t.Fatalf("create --detached failed: %v\nstderr: %s", err, createStderr.String())
 	}
 
 	// resolve by prefix "afk"
