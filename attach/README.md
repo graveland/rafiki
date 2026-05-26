@@ -42,3 +42,15 @@ TUI, or `pic kill <name>` from any shell to terminate the session.
 
 Pass `--kill-on-exit` to pic create / pic attach for native-pi exit
 semantics (quitting the TUI terminates the session).
+
+## Debugging
+
+Set `PIC_ATTACH_DEBUG=1` to log every event the TUI receives to stderr:
+
+```bash
+PIC_ATTACH_DEBUG=1 pic attach my-session
+```
+
+This prints the event type, listener count, and full stack traces for any
+event-processing errors — useful for diagnosing events that appear in
+`pic tail` but don't render in the TUI.

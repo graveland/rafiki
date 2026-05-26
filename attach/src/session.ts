@@ -270,6 +270,7 @@ export class RemoteAgentSession {
     private readonly _childId: string;
     private readonly _listeners = new Set<AgentSessionEventListener>();
     private _eventIter?: AsyncIterableIterator<Record<string, unknown>>;
+    private _disposed = false;
 
     // ── Cached state (updated from incoming events) ──────────────────────────
     private _model: Model<any> | undefined;
@@ -321,20 +322,51 @@ export class RemoteAgentSession {
 
     private async consumeEvents(): Promise<void> {
         this._eventIter = this._client.subscribe();
+        const debug = process.env.PIC_ATTACH_DEBUG === "1";
+
         try {
             for await (const frame of this._eventIter) {
-                if (frame["type"] !== "ctrl_event") continue;
-                if (frame["childId"] !== this._childId) continue;
-                const inner = frame["event"] as Record<string, unknown>;
-                if (!inner || typeof inner !== "object") continue;
-                const ev = this.translate(inner);
-                if (ev !== null) {
+                try {
+                    if (frame["type"] !== "ctrl_event") continue;
+                    if (frame["childId"] !== this._childId) continue;
+                    const inner = frame["event"] as Record<string, unknown>;
+                    if (!inner || typeof inner !== "object") continue;
+
+                    const ev = this.translate(inner);
+                    if (ev === null) continue;
+
+                    if (debug) {
+                        console.error(
+                            `[pic-attach] event: type=${ev.type} listeners=${this._listeners.size}`
+                        );
+                    }
+
                     this.updateCacheFromEvent(ev);
                     this.emit(ev);
+                } catch (err) {
+                    // Per-event error: log and continue. One bad event must not kill the loop.
+                    console.error(
+                        "[pic-attach] event processing error:",
+                        err instanceof Error ? err.message : String(err),
+                        "\n  frame type:", frame["type"],
+                        "\n  childId:", frame["childId"],
+                        "\n  event type:",
+                        (frame["event"] as Record<string, unknown> | undefined)?.["type"],
+                    );
+                    if (debug && err instanceof Error && err.stack) {
+                        console.error(err.stack);
+                    }
                 }
             }
-        } catch {
-            // Silently swallow — connection close during dispose is expected.
+        } catch (err) {
+            // Iterator-level error: fires on connection close, expected during dispose().
+            // Log regardless — even a noisy shutdown log beats silent data loss.
+            if (!this._disposed) {
+                console.error(
+                    "[pic-attach] event iterator terminated unexpectedly:",
+                    err instanceof Error ? err.message : String(err)
+                );
+            }
         }
     }
 
@@ -497,6 +529,7 @@ export class RemoteAgentSession {
      * The UDS connection itself is closed by the runtime (Task 4).
      */
     dispose(): void {
+        this._disposed = true;
         this._listeners.clear();
         void this._eventIter?.return?.();
     }
