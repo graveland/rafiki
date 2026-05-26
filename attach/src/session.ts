@@ -472,6 +472,13 @@ export class RemoteAgentSession {
         }
     }
 
+    // ── Public getter: childId ──────────────────────────────────────────────
+
+    /** Exposes the daemon child-id so RemoteAgentSessionRuntime can compose ctrl_ requests. */
+    get childId(): string {
+        return this._childId;
+    }
+
     // ── Implemented: subscribe / dispose ─────────────────────────────────────
 
     /**
