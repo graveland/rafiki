@@ -40,6 +40,7 @@ func newRootCmd() *cobra.Command {
 		newSpawnCmd(),
 		newResumeCmd(),
 		newKillCmd(),
+		newForgetCmd(),
 	)
 
 	return root
