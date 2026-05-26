@@ -2,6 +2,7 @@
 
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { RemoteAgentSessionRuntime } from "./runtime.ts";
+import { restoreTerminal } from "./session.ts";
 
 const VERSION = "0.1.0";
 
@@ -79,6 +80,10 @@ let shuttingDown = false;
 async function gracefulExit(code: number): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
+    // Restore the terminal before exiting from a signal-driven path — the
+    // TUI is still running here and pi's own teardown may not get a chance
+    // before we process.exit().  See session.ts: restoreTerminal.
+    restoreTerminal();
     try {
         await runtime.dispose();
     } catch (err) {
@@ -93,6 +98,9 @@ process.on("SIGTERM", () => void gracefulExit(143));
 try {
     await tui.run();
 } catch (err) {
+    // TUI crashed mid-run: pi did not finish its cleanup pass, so the
+    // terminal is likely still in raw mode / alt screen.  Restore explicitly.
+    restoreTerminal();
     console.error(`pic-attach: TUI error: ${err instanceof Error ? err.message : String(err)}`);
     await gracefulExit(4);
 }

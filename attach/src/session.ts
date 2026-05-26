@@ -205,8 +205,10 @@ export interface RemoteSessionInit {
  * naked process.exit() leaves the terminal in that state (no cursor, no echo,
  * stty sane needed) which is hostile.  This function writes the standard
  * restore sequences and re-cooks stdin.
+ *
+ * Exported so other entry points (main.ts's signal/error paths) can use it.
  */
-function restoreTerminal(): void {
+export function restoreTerminal(): void {
     try {
         if (process.stdin.isTTY) {
             process.stdin.setRawMode(false);
