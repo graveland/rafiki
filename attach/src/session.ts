@@ -196,6 +196,40 @@ export interface RemoteSessionInit {
  * Minimal ResourceLoader stub.  Returns empty collections for everything.
  * Task 5 will wire up the real loader backed by the daemon's session JSONL.
  */
+/**
+ * Restore the terminal to a sane state on hard exit paths (e.g. when the
+ * daemon broadcasts a shutdown event and we bypass pi's normal TUI teardown).
+ *
+ * Pi's TUI puts stdin into raw mode and switches to the alternate screen
+ * buffer with cursor hidden and bracketed-paste/mouse tracking enabled.  A
+ * naked process.exit() leaves the terminal in that state (no cursor, no echo,
+ * stty sane needed) which is hostile.  This function writes the standard
+ * restore sequences and re-cooks stdin.
+ */
+function restoreTerminal(): void {
+    try {
+        if (process.stdin.isTTY) {
+            process.stdin.setRawMode(false);
+        }
+    } catch {
+        // ignore — stdin may not be a TTY
+    }
+    if (process.stdout.isTTY) {
+        // Show cursor, exit alternate screen, disable bracketed paste, disable
+        // mouse tracking (1000/1002/1003/1006), reset attributes.
+        process.stdout.write(
+            "\x1b[?25h" +    // DECTCEM show cursor
+            "\x1b[?1049l" +  // exit alternate screen buffer
+            "\x1b[?2004l" +  // disable bracketed paste
+            "\x1b[?1000l" +  // disable X11 mouse
+            "\x1b[?1002l" +  // disable cell motion mouse tracking
+            "\x1b[?1003l" +  // disable all-motion mouse tracking
+            "\x1b[?1006l" +  // disable SGR-encoded mouse
+            "\x1b[0m"        // reset SGR attributes
+        );
+    }
+}
+
 function makeResourceLoaderStub(): ResourceLoader {
     // Stub ExtensionRuntime: all action handlers throw until runner binds.
     const stubRuntime = {} as unknown as ExtensionRuntime;
@@ -389,6 +423,7 @@ export class RemoteAgentSession {
                     // Check before the per-child filter so it's never skipped.
                     if (frame["type"] === "ctrl_daemon_shutdown") {
                         const reason = (frame as { reason?: string }).reason ?? "unknown";
+                        restoreTerminal();
                         console.error(`[pic-attach] daemon shutting down (reason: ${reason})`);
                         process.exit(0);
                     }
