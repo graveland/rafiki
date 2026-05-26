@@ -9,4 +9,5 @@ package tools
 import (
 	_ "github.com/oklog/ulid/v2"
 	_ "github.com/puzpuzpuz/xsync/v4"
+	_ "golang.org/x/term"
 )
