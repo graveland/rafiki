@@ -70,6 +70,7 @@ func main() {
 
 	slog.Info("shutting down", "signal", sig)
 	cancel() // stop the background sweeper
+	ctrl.Stop() // wait for sweeper goroutine to exit
 	if err := srv.Close(); err != nil {
 		slog.Warn("server close", "error", err)
 	}

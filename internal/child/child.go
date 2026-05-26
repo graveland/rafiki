@@ -64,6 +64,12 @@ func (b *inBuffer) append(frame []byte) {
 		b.total -= len(b.frames[0])
 		b.frames = b.frames[1:]
 	}
+	// A single frame larger than the cap would bypass the eviction loop above
+	// (len(b.frames)==0 short-circuits the byte check). Drop it instead of
+	// storing an unbounded frame.
+	if len(cp) > inBufMaxBytes {
+		return
+	}
 	b.frames = append(b.frames, cp)
 	b.total += len(cp)
 }
@@ -273,12 +279,10 @@ func (c *Child) RingSnapshot() [][]byte {
 	return out
 }
 
-// StderrSnapshot returns a defensive copy of buffered stderr bytes.
-// readStderr is guaranteed to have exited before Done() is closed, so this
-// is safe to call without additional locking after Done().
+// StderrSnapshot returns a copy of buffered stderr bytes.
+// Must only be called after Done() is closed; otherwise concurrent
+// readStderr writes may race.
 func (c *Child) StderrSnapshot() []byte {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	b := make([]byte, c.errBuf.Len())
 	copy(b, c.errBuf.Bytes())
 	return b

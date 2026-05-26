@@ -3,9 +3,11 @@ package store
 import (
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/internal/ring"
 )
 
 // ErrNotFound is returned when the requested ChildID does not exist.
@@ -198,6 +200,34 @@ func (s *Store) SetStatus(id string, newStatus protocol.Status) (prev protocol.S
 	addToBucket(s.byStatus, newStatus, id)
 
 	return prev, true
+}
+
+// MarkExited atomically transitions the session to StatusExited and records
+// exit details. The status-index update and field mutations happen under a
+// single sess.mu hold so a concurrent Snapshot() cannot observe Status=Exited
+// with ExitedRing still nil — the race that occurs if SetStatus and Update are
+// called as separate operations.
+func (s *Store) MarkExited(id string, exitedAt time.Time, exitCode int, exitSignal string, exitedRing []ring.Event) bool {
+	sess, found := s.sessions.Load(id)
+	if !found {
+		return false
+	}
+
+	sess.mu.Lock()
+	prev := sess.Status
+	sess.Status = protocol.StatusExited
+	sess.ExitedAt = exitedAt
+	code := exitCode
+	sess.ExitCode = &code
+	sess.ExitSignal = exitSignal
+	sess.ExitedRing = exitedRing
+	sess.mu.Unlock()
+
+	if prev != protocol.StatusExited {
+		removeFromBucket(s.byStatus, prev, id)
+		addToBucket(s.byStatus, protocol.StatusExited, id)
+	}
+	return true
 }
 
 // ─── generic bucket helpers ──────────────────────────────────────────────────

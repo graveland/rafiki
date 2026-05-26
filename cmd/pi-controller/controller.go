@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -39,6 +40,7 @@ type Controller struct {
 	logsDir     string
 	stateDir    string
 	graceWindow time.Duration
+	sweeperWg   sync.WaitGroup
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -69,9 +71,11 @@ func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper
 
 // startSweeper launches a background goroutine that periodically forgets
 // exited children whose age exceeds the configured grace window. It stops
-// when ctx is cancelled.
+// when ctx is cancelled. Call Stop() to wait for the goroutine to exit.
 func (c *Controller) startSweeper(ctx context.Context) {
+	c.sweeperWg.Add(1)
 	go func() {
+		defer c.sweeperWg.Done()
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -83,6 +87,13 @@ func (c *Controller) startSweeper(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// Stop waits for background goroutines (currently the sweeper) to exit.
+// The caller is responsible for cancelling the context passed to startSweeper
+// before calling Stop.
+func (c *Controller) Stop() {
+	c.sweeperWg.Wait()
 }
 
 // sweepExpired forgets all exited children whose ExitedAt is older than
@@ -399,72 +410,174 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		c.cm.DeliverToChild(childID, b)
 	}
 
-	// Wait for pi to respond to the bootstrap get_state, with a 5-second timeout.
+	// Post-Idle: name reconciliation, metadata update, status transition,
+	// monitorChild start. Shared with the Resume/RespawnChild paths via
+	// activateLiveChild (baseSnap==nil selects the Spawn-specific branch).
+	// noSession/resumeSession/forkSession are unused by that branch (req is used
+	// instead); pass zero values for clarity.
+	return c.activateLiveChild(childID, ch, piBin, req, nil, false, "", "")
+}
+
+// activateLiveChild handles the post-spawn registration sequence. It waits for
+// the child to become idle, resolves provider/model from metadata, and then
+// takes one of two paths based on whether baseSnap is nil.
+//
+// Fresh Spawn (baseSnap == nil): the caller has already inserted a
+// StatusSpawning session, called cm.Add, and emitted ctrl_child_spawned.
+// This method performs name reconciliation (if req.Name is set), updates the
+// existing session with post-Idle metadata, persists a record, emits the
+// spawning→idle status transition, and starts monitorChild.
+//
+// Resume / RespawnChild (baseSnap != nil): the caller has already deleted the
+// old exited session. noSession/resumeSession/forkSession are the session-
+// continuity fields that differ between the two callers. This method builds
+// the full Session from baseSnap with those overrides, inserts it, calls
+// cm.Add, persists a record, emits ctrl_child_spawned, and starts monitorChild.
+func (c *Controller) activateLiveChild(
+	childID string,
+	ch *child.Child,
+	piBin string,
+	req protocol.SpawnRequest,
+	baseSnap *store.Snapshot,
+	noSession bool,
+	resumeSession string,
+	forkSession string,
+) (server.SpawnResult, error) {
 	stalled := false
 	select {
 	case <-ch.Idle():
 	case <-time.After(5 * time.Second):
 		stalled = true
-		slog.Warn("child stalled (no get_state response)", "childId", childID)
+		slog.Warn("child did not become idle after spawn", "childId", childID)
 	}
 
 	meta := ch.Metadata()
+	now := time.Now()
 
-	// FIX 4: If a name was requested and pi has a different one, send
-	// set_session_name and poll until the metadata sniffer confirms the rename
-	// (up to 5s). This ensures Spawn returns only after the rename is applied.
-	if !stalled && req.Name != "" && meta.SessionName != req.Name {
-		renameID := "controller-rename-1"
-		frame := []byte(fmt.Sprintf(`{"type":"set_session_name","id":%q,"name":%q}`, renameID, req.Name))
-		if err := ch.Send(frame); err == nil {
-			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) {
-				if ch.Metadata().SessionName == req.Name {
-					break
+	if baseSnap == nil {
+		// Fresh Spawn path. Perform name reconciliation before reading final
+		// metadata so the returned SessionName reflects any rename.
+		if !stalled && req.Name != "" && meta.SessionName != req.Name {
+			renameID := "controller-rename-1"
+			frame := []byte(fmt.Sprintf(`{"type":"set_session_name","id":%q,"name":%q}`, renameID, req.Name))
+			if err := ch.Send(frame); err == nil {
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					if ch.Metadata().SessionName == req.Name {
+						break
+					}
+					time.Sleep(20 * time.Millisecond)
 				}
-				time.Sleep(20 * time.Millisecond)
+				if ch.Metadata().SessionName != req.Name {
+					slog.Warn("set_session_name timed out", "childId", childID, "want", req.Name)
+				}
 			}
-			if ch.Metadata().SessionName != req.Name {
-				slog.Warn("set_session_name timed out", "childId", childID, "want", req.Name)
-			}
+			meta = ch.Metadata()
 		}
-		meta = ch.Metadata()
+
+		provider, model := splitModel(meta.Model)
+		if provider == "" {
+			provider = req.Provider
+		}
+		if model == "" {
+			model = req.Model
+		}
+
+		// Update the StatusSpawning session inserted before Idle() with the
+		// session metadata that is only available after pi responds.
+		_ = c.st.Update(childID, func(s *store.Session) {
+			s.SessionID = meta.SessionID
+			s.SessionFile = meta.SessionFile
+			s.Provider = provider
+			s.Model = model
+		})
+		if err := c.writeRecord(childID); err != nil {
+			slog.Warn("write state record (after idle)", "childId", childID, "error", err)
+		}
+		// Emit the spawning→idle transition. handleStatusChange also fixes the
+		// byStatus index that Insert left at StatusSpawning.
+		if !stalled {
+			c.handleStatusChange(childID, protocol.StatusIdle, protocol.StatusSpawning)
+		}
+
+		go c.monitorChild(childID, ch)
+
+		return server.SpawnResult{
+			ChildID:     childID,
+			SessionID:   meta.SessionID,
+			SessionFile: meta.SessionFile,
+			Model:       joinModel(provider, model),
+			Stalled:     stalled,
+		}, nil
 	}
 
-	// Determine final provider/model, preferring metadata over request values.
+	// Resume / RespawnChild path.
+	snap := *baseSnap
 	provider, model := splitModel(meta.Model)
 	if provider == "" {
-		provider = req.Provider
+		provider = snap.Provider
 	}
 	if model == "" {
-		model = req.Model
+		model = snap.Model
 	}
 
-	// FIX 5: Update the store record with session metadata learned after Idle.
-	// Status is updated via handleStatusChange below (which also fixes the index).
-	_ = c.st.Update(childID, func(s *store.Session) {
-		s.SessionID = meta.SessionID
-		s.SessionFile = meta.SessionFile
-		s.Provider = provider
-		s.Model = model
-	})
+	sess := &store.Session{
+		ChildID:            childID,
+		PID:                ch.PID(),
+		Name:               snap.Name,
+		Cwd:                snap.Cwd,
+		Provider:           provider,
+		Model:              model,
+		Thinking:           snap.Thinking,
+		SessionID:          meta.SessionID,
+		SessionFile:        meta.SessionFile,
+		Status:             ch.Status(),
+		StartedAt:          now,
+		LastActivity:       now,
+		NoSession:          noSession,
+		SessionDir:         snap.SessionDir,
+		ResumeSession:      resumeSession,
+		ForkSession:        forkSession,
+		Tools:              snap.Tools,
+		NoTools:            snap.NoTools,
+		NoBuiltinTools:     snap.NoBuiltinTools,
+		Extensions:         snap.Extensions,
+		NoExtensions:       snap.NoExtensions,
+		Skills:             snap.Skills,
+		NoSkills:           snap.NoSkills,
+		PromptTemplates:    snap.PromptTemplates,
+		NoPromptTemplates:  snap.NoPromptTemplates,
+		Themes:             snap.Themes,
+		NoThemes:           snap.NoThemes,
+		NoContextFiles:     snap.NoContextFiles,
+		SystemPrompt:       snap.SystemPrompt,
+		AppendSystemPrompt: snap.AppendSystemPrompt,
+		Verbose:            snap.Verbose,
+		PiBinary:           piBin,
+		ExtraArgs:          snap.ExtraArgs,
+	}
+	c.st.Insert(sess)
+	c.cm.Add(childID, ch)
 
 	if err := c.writeRecord(childID); err != nil {
-		slog.Warn("write state record (after idle)", "childId", childID, "error", err)
+		slog.Warn("write state record", "childId", childID, "error", err)
 	}
 
-	// FIX 3: Emit the spawning→idle ctrl_child_status transition. The SM
-	// transitioned inside child.handleFrame; publishing the event here lets
-	// global subscribers observe it. handleStatusChange also updates the
-	// byStatus index, which Insert left at StatusSpawning.
-	if !stalled {
-		c.handleStatusChange(childID, protocol.StatusIdle, protocol.StatusSpawning)
+	// Emit ctrl_child_spawned for the resumed/respawned child (spec §7.2).
+	spawnedEvt := protocol.CtrlChildSpawned{
+		Type:    protocol.TypeCtrlChildSpawned,
+		ChildID: childID,
+		Name:    snap.Name,
+		Cwd:     snap.Cwd,
+		PID:     ch.PID(),
+		Model:   joinModel(provider, model),
+		At:      now.UnixMilli(),
+	}
+	if b, err := json.Marshal(spawnedEvt); err == nil {
+		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToChild(childID, b)
 	}
 
-	// Start the monitoring goroutine that forwards events and tracks status/exit.
-	// monitorChild initialises lastStatus from ch.Status() which is already
-	// StatusIdle after the explicit transition above, so the transition is not
-	// double-emitted.
 	go c.monitorChild(childID, ch)
 
 	return server.SpawnResult{
@@ -564,91 +677,11 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 	// the entry would only be recoverable on controller restart via state scan.
 	c.st.Delete(childID)
 
-	stalled := false
-	select {
-	case <-ch.Idle():
-	case <-time.After(5 * time.Second):
-		stalled = true
-		slog.Warn("resumed child stalled", "childId", childID)
-	}
-
-	meta := ch.Metadata()
-	now := time.Now()
-	provider, model := splitModel(meta.Model)
-	if provider == "" {
-		provider = snap.Provider
-	}
-	if model == "" {
-		model = snap.Model
-	}
-
-	sess := &store.Session{
-		ChildID:            childID,
-		PID:                ch.PID(),
-		Name:               snap.Name,
-		Cwd:                snap.Cwd,
-		Provider:           provider,
-		Model:              model,
-		Thinking:           snap.Thinking,
-		SessionID:          meta.SessionID,
-		SessionFile:        meta.SessionFile,
-		Status:             ch.Status(),
-		StartedAt:          now,
-		LastActivity:       now,
-		NoSession:          snap.NoSession,
-		SessionDir:         snap.SessionDir,
-		ResumeSession:      snap.SessionFile,
-		ForkSession:        snap.ForkSession,
-		Tools:              snap.Tools,
-		NoTools:            snap.NoTools,
-		NoBuiltinTools:     snap.NoBuiltinTools,
-		Extensions:         snap.Extensions,
-		NoExtensions:       snap.NoExtensions,
-		Skills:             snap.Skills,
-		NoSkills:           snap.NoSkills,
-		PromptTemplates:    snap.PromptTemplates,
-		NoPromptTemplates:  snap.NoPromptTemplates,
-		Themes:             snap.Themes,
-		NoThemes:           snap.NoThemes,
-		NoContextFiles:     snap.NoContextFiles,
-		SystemPrompt:       snap.SystemPrompt,
-		AppendSystemPrompt: snap.AppendSystemPrompt,
-		Verbose:            snap.Verbose,
-		PiBinary:           piBin,
-		ExtraArgs:          snap.ExtraArgs,
-	}
-	c.st.Insert(sess)
-	c.cm.Add(childID, ch)
-
-	if err := c.writeRecord(childID); err != nil {
-		slog.Warn("write state record (resume)", "childId", childID, "error", err)
-	}
-
-	// Emit ctrl_child_spawned for the resumed child (spec §7.2 resume case).
-	// Delivered to both global subscribers and per-child subscribers of this child.
-	resumeSpawnedEvt := protocol.CtrlChildSpawned{
-		Type:    protocol.TypeCtrlChildSpawned,
-		ChildID: childID,
-		Name:    snap.Name,
-		Cwd:     snap.Cwd,
-		PID:     ch.PID(),
-		Model:   joinModel(provider, model),
-		At:      now.UnixMilli(),
-	}
-	if b, err := json.Marshal(resumeSpawnedEvt); err == nil {
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToChild(childID, b)
-	}
-
-	go c.monitorChild(childID, ch)
-
-	return server.SpawnResult{
-		ChildID:     childID,
-		SessionID:   meta.SessionID,
-		SessionFile: meta.SessionFile,
-		Model:       joinModel(provider, model),
-		Stalled:     stalled,
-	}, nil
+	// activateLiveChild (baseSnap != nil path): waits for Idle, builds the full
+	// Session from snap with Resume's session-continuity values, inserts it,
+	// adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
+	return c.activateLiveChild(childID, ch, piBin, protocol.SpawnRequest{}, &snap,
+		snap.NoSession, snap.SessionFile, snap.ForkSession)
 }
 
 // RespawnChild kills the existing child (the caller must have already done so
@@ -738,91 +771,12 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// is confirmed running (so a failed spawn doesn't lose the record).
 	c.st.Delete(childID)
 
-	stalled := false
-	select {
-	case <-ch.Idle():
-	case <-time.After(5 * time.Second):
-		stalled = true
-		slog.Warn("respawned child stalled", "childId", childID)
-	}
-
-	meta := ch.Metadata()
-	now := time.Now()
-	provider, model := splitModel(meta.Model)
-	if provider == "" {
-		provider = snap.Provider
-	}
-	if model == "" {
-		model = snap.Model
-	}
-
-	sess := &store.Session{
-		ChildID:            childID,
-		PID:                ch.PID(),
-		Name:               snap.Name,
-		Cwd:                snap.Cwd,
-		Provider:           provider,
-		Model:              model,
-		Thinking:           snap.Thinking,
-		SessionID:          meta.SessionID,
-		SessionFile:        meta.SessionFile,
-		Status:             ch.Status(),
-		StartedAt:          now,
-		LastActivity:       now,
-		NoSession:          false,
-		SessionDir:         snap.SessionDir,
-		ResumeSession:      sessionPath,
-		ForkSession:        "",
-		Tools:              snap.Tools,
-		NoTools:            snap.NoTools,
-		NoBuiltinTools:     snap.NoBuiltinTools,
-		Extensions:         snap.Extensions,
-		NoExtensions:       snap.NoExtensions,
-		Skills:             snap.Skills,
-		NoSkills:           snap.NoSkills,
-		PromptTemplates:    snap.PromptTemplates,
-		NoPromptTemplates:  snap.NoPromptTemplates,
-		Themes:             snap.Themes,
-		NoThemes:           snap.NoThemes,
-		NoContextFiles:     snap.NoContextFiles,
-		SystemPrompt:       snap.SystemPrompt,
-		AppendSystemPrompt: snap.AppendSystemPrompt,
-		Verbose:            snap.Verbose,
-		PiBinary:           piBin,
-		ExtraArgs:          snap.ExtraArgs,
-	}
-	c.st.Insert(sess)
-	c.cm.Add(childID, ch)
-
-	if err := c.writeRecord(childID); err != nil {
-		slog.Warn("write state record (respawn)", "childId", childID, "error", err)
-	}
-
-	// Emit ctrl_child_spawned for the respawned child (spec §7.2).
-	// Delivered to both global subscribers and per-child subscribers of this child.
-	respawnedSpawnedEvt := protocol.CtrlChildSpawned{
-		Type:    protocol.TypeCtrlChildSpawned,
-		ChildID: childID,
-		Name:    snap.Name,
-		Cwd:     snap.Cwd,
-		PID:     ch.PID(),
-		Model:   joinModel(provider, model),
-		At:      now.UnixMilli(),
-	}
-	if b, err := json.Marshal(respawnedSpawnedEvt); err == nil {
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToChild(childID, b)
-	}
-
-	go c.monitorChild(childID, ch)
-
-	return server.SpawnResult{
-		ChildID:     childID,
-		SessionID:   meta.SessionID,
-		SessionFile: meta.SessionFile,
-		Model:       joinModel(provider, model),
-		Stalled:     stalled,
-	}, nil
+	// activateLiveChild (baseSnap != nil path): waits for Idle, builds the full
+	// Session from snap with RespawnChild's session-continuity values (fresh
+	// start: noSession=false, resumeSession=sessionPath, forkSession=""),
+	// inserts, adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
+	return c.activateLiveChild(childID, ch, piBin, protocol.SpawnRequest{}, &snap,
+		false, sessionPath, "")
 }
 
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (server.KillResult, error) {
@@ -1112,18 +1066,14 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 
 // wrapCtrlEvent wraps a raw pi event in a ctrl_event envelope (spec §7.1).
 // This lets per-child subscribers correlate events to their source child and
-// filter by inner event type. If raw cannot be marshalled (non-JSON input),
-// raw is returned unchanged to keep the delivery stream flowing.
+// filter by inner event type.
 func wrapCtrlEvent(childID string, raw []byte) []byte {
 	env := protocol.CtrlEvent{
 		Type:    protocol.TypeCtrlEvent,
 		ChildID: childID,
 		Event:   json.RawMessage(raw),
 	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		return raw
-	}
+	b, _ := json.Marshal(env)
 	return b
 }
 
@@ -1173,14 +1123,10 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// to work after the child is gone (spec §11.4).
 	ringSnapshot := ch.Ring().Recent(ring.Query{})
 
-	c.st.SetStatus(childID, protocol.StatusExited)
-	_ = c.st.Update(childID, func(sess *store.Session) {
-		sess.ExitedAt = now
-		code := res.ExitCode
-		sess.ExitCode = &code
-		sess.ExitSignal = res.Signal
-		sess.ExitedRing = ringSnapshot
-	})
+	// MarkExited sets Status, ExitedAt, ExitCode, ExitSignal, and ExitedRing
+	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
+	// observe Status=Exited with ExitedRing still nil.
+	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot)
 
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record on exit", "childId", childID, "error", err)
