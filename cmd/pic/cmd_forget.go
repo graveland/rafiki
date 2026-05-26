@@ -13,22 +13,30 @@ import (
 
 func newForgetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "forget [id|name]",
-		Short: "Drop an exited child from the controller",
-		Long: `Drop an exited child from the controller's in-memory store.
+		Use:   "forget [id|name...]",
+		Short: "Drop exited children from the controller",
+		Long: `Drop one or more exited children from the controller's in-memory store.
 Disk artifacts (logs, state record) are NOT removed.
 
 With --all-exited, forgets every exited child (optionally filtered by --older-than).`,
-		Args: cobra.MaximumNArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			allExited, _ := cmd.Flags().GetBool("all-exited")
+			if allExited {
+				return nil // --all-exited ignores positional args
+			}
+			if len(args) == 0 {
+				return fmt.Errorf("at least one id|name required (or use --all-exited)")
+			}
+			return nil
+		},
 		RunE: runForget,
 	}
 	cmd.Flags().Bool("all-exited", false, "Forget all exited children")
 	cmd.Flags().Duration("older-than", 0, "Only forget exited children older than this")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		if len(args) > 0 {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		}
-		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
+			return ch.Status == string(protocol.StatusExited)
+		}), cobra.ShellCompDirectiveNoFileComp
 	}
 	return cmd
 }
@@ -60,26 +68,32 @@ func runForget(cmd *cobra.Command, args []string) error {
 		return enc.Encode(json.RawMessage(resp.Data))
 	}
 
-	var input string
-	if len(args) > 0 {
-		input = args[0]
+	var failures int
+	for _, arg := range args {
+		childID, err := c.Resolve(ctx, arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: resolve %q: %v\n", arg, err)
+			failures++
+			continue
+		}
+		resp, err := c.Request(ctx, protocol.ForgetRequest{
+			Type:    protocol.TypeCtrlForget,
+			ChildID: childID,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: forget %q: %v\n", arg, err)
+			failures++
+			continue
+		}
+		if !resp.Success {
+			fmt.Fprintf(os.Stderr, "error: forget %q: %s\n", arg, client.FormatError(resp))
+			failures++
+			continue
+		}
+		fmt.Printf("forgot %s\n", childID)
 	}
-	childID, err := resolveTarget(ctx, c, input)
-	if err != nil {
-		return fmt.Errorf("%w (or use --all-exited)", err)
+	if failures > 0 {
+		return fmt.Errorf("%d target(s) failed", failures)
 	}
-
-	resp, err := c.Request(ctx, protocol.ForgetRequest{
-		Type:    protocol.TypeCtrlForget,
-		ChildID: childID,
-	})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_forget: %s", client.FormatError(resp))
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(map[string]string{"forgot": childID})
+	return nil
 }

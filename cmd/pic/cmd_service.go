@@ -43,8 +43,9 @@ type serviceStatus struct {
 
 func newServiceCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "service",
-		Short: "Manage the pi-controller daemon as a system service",
+		Use:     "service",
+		Aliases: []string{"svc"},
+		Short:   "Manage the pi-controller daemon as a system service",
 		Long: `Install, start, stop, and inspect the pi-controller daemon as a per-user system service.
 
 On macOS this uses launchd (launchctl); on Linux it uses systemd --user.`,

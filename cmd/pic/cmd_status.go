@@ -13,10 +13,11 @@ import (
 
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
-		Short: "Show daemon status",
-		Args:  cobra.NoArgs,
-		RunE:  runStatus,
+		Use:     "status",
+		Aliases: []string{"st"},
+		Short:   "Show daemon status",
+		Args:    cobra.NoArgs,
+		RunE:    runStatus,
 	}
 }
 

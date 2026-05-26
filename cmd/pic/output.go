@@ -2,13 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
-	"strings"
-	"text/tabwriter"
 	"time"
 
+	"github.com/jedib0t/go-pretty/v6/table"
 	"golang.org/x/term"
 
 	"graveland.dev/pi-controller/internal/protocol"
@@ -65,21 +63,43 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	if mode == outputJSON {
 		return writeJSON(w, map[string]any{"children": children})
 	}
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, headerLine(useColor, "ID", "NAME", "STATUS", "MODEL", "STARTED"))
+
+	tw := table.NewWriter()
+	tw.SetOutputMirror(w)
+
+	// Use StyleLight (single-line Unicode box-drawing) with go-pretty's own
+	// auto-coloring disabled so our hand-rolled ANSI codes take precedence.
+	st := table.StyleLight
+	st.Color = table.ColorOptions{}
+	tw.SetStyle(st)
+
+	colNames := []string{"ID", "NAME", "STATUS", "MODEL", "STARTED"}
+	headerRow := make(table.Row, len(colNames))
+	for i, name := range colNames {
+		if useColor {
+			headerRow[i] = dim(name)
+		} else {
+			headerRow[i] = name
+		}
+	}
+	tw.AppendHeader(headerRow)
+
 	for _, ch := range children {
 		started := "-"
 		if ch.StartedAt > 0 {
 			started = time.Unix(ch.StartedAt, 0).Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		tw.AppendRow(table.Row{
 			ch.ChildID,
 			defaultDash(ch.Name),
 			colorStatus(ch.Status, useColor),
 			defaultDash(ch.Model),
-			started)
+			started,
+		})
 	}
-	return tw.Flush()
+
+	tw.Render()
+	return nil
 }
 
 func defaultDash(s string) string {
@@ -93,19 +113,6 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
-}
-
-// headerLine builds a tab-separated header row from column names.
-func headerLine(useColor bool, cols ...string) string {
-	parts := make([]string, len(cols))
-	for i, c := range cols {
-		s := c
-		if useColor {
-			s = dim(s)
-		}
-		parts[i] = s
-	}
-	return strings.Join(parts, "\t")
 }
 
 func colorStatus(status string, useColor bool) string {

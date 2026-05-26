@@ -2,6 +2,8 @@ package main
 
 import (
 	"github.com/spf13/cobra"
+
+	"graveland.dev/pi-controller/internal/protocol"
 )
 
 func newAttachCmd() *cobra.Command {
@@ -19,11 +21,23 @@ and choose explicitly.`,
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.ValidArgsFunction = func(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	// Attachable: any live state except spawning/shutting_down.
+	attachable := func(ch protocol.ChildSummary) bool {
+		switch ch.Status {
+		case string(protocol.StatusIdle),
+			string(protocol.StatusStreaming),
+			string(protocol.StatusToolRunning),
+			string(protocol.StatusCompacting),
+			string(protocol.StatusBlockedUI):
+			return true
+		}
+		return false
+	}
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+		return completeChildrenByState(cmd, toComplete, attachable), cobra.ShellCompDirectiveNoFileComp
 	}
 	return cmd
 }

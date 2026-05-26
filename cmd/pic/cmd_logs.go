@@ -14,8 +14,9 @@ import (
 
 func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "logs <id|name>",
-		Short: "Show the captured logs for a child",
+		Use:     "logs <id|name>",
+		Aliases: []string{"log"},
+		Short:   "Show the captured logs for a child",
 		Long: `Show the on-disk logs for a child (controller-captured stdin/stdout/stderr).
 
 By default, prints the contents of out.jsonl.gz (events from the pi child).

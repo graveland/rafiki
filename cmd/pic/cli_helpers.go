@@ -68,6 +68,15 @@ func resolveTarget(ctx context.Context, c *client.Client, input string) (string,
 // Used by Cobra dynamic-completion handlers. Swallows all errors so that
 // tab completion gracefully no-ops when the daemon is down.
 func completeChildren(cmd *cobra.Command, toComplete string) []string {
+	return completeChildrenByState(cmd, toComplete, func(_ protocol.ChildSummary) bool {
+		return true
+	})
+}
+
+// completeChildrenByState is like completeChildren but filters candidates by
+// the given predicate. Use it to restrict completions to a relevant subset
+// (e.g. only exited children for `forget`, only live ones for `kill`).
+func completeChildrenByState(cmd *cobra.Command, toComplete string, keep func(protocol.ChildSummary) bool) []string {
 	c, err := client.Dial(socketFromCmd(cmd))
 	if err != nil {
 		return nil
@@ -81,6 +90,9 @@ func completeChildren(cmd *cobra.Command, toComplete string) []string {
 
 	var out []string
 	for _, ch := range children {
+		if !keep(ch) {
+			continue
+		}
 		if strings.HasPrefix(ch.ChildID, toComplete) {
 			out = append(out, ch.ChildID)
 		}

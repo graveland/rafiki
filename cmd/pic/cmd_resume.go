@@ -24,7 +24,9 @@ func newResumeCmd() *cobra.Command {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
+			return ch.Status == string(protocol.StatusExited)
+		}), cobra.ShellCompDirectiveNoFileComp
 	}
 	return cmd
 }

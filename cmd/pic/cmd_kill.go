@@ -15,27 +15,26 @@ import (
 
 func newKillCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "kill [id|name]",
-		Short: "Stop a running child gracefully",
-		Long: `Stop a running child gracefully, escalating to SIGKILL only if necessary.
+		Use:   "kill [id|name...]",
+		Short: "Stop running children gracefully",
+		Long: `Stop one or more running children gracefully, escalating to SIGKILL only if necessary.
 
 On a clean exit (exit code 0, no signal, no timeout escalation), the child
 is also forgotten from the daemon's in-memory store (removed from pic list).
 Disk artifacts (logs, state record) are not affected.
 
-Use --no-forget to keep the exited child visible in pic list even after a
+Use --no-forget to keep exited children visible in pic list even after a
 clean exit (e.g. for /tree navigation or inspection).`,
-		Args: cobra.MaximumNArgs(1),
+		Args: cobra.MinimumNArgs(1),
 		RunE: runKill,
 	}
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
-	cmd.Flags().Bool("no-forget", false, "Keep the child in pic list even after a clean exit")
+	cmd.Flags().Bool("no-forget", false, "Keep children in pic list even after a clean exit")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		if len(args) > 0 {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		}
-		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
+			return ch.Status != string(protocol.StatusExited)
+		}), cobra.ShellCompDirectiveNoFileComp
 	}
 	return cmd
 }
@@ -45,18 +44,39 @@ func runKill(cmd *cobra.Command, args []string) error {
 	defer c.Close()
 
 	ctx := cmdCtx(cmd)
-	var input string
-	if len(args) > 0 {
-		input = args[0]
-	}
-	childID, err := resolveTarget(ctx, c, input)
-	if err != nil {
-		return err
-	}
 
 	st, _ := cmd.Flags().GetDuration("shutdown-timeout")
 	kt, _ := cmd.Flags().GetDuration("kill-timeout")
 	noForget, _ := cmd.Flags().GetBool("no-forget")
+
+	// If custom timeouts push past the default RPC window, extend the context.
+	total := st + kt
+	if total > 30*time.Second {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, total+5*time.Second)
+		defer cancel()
+	}
+
+	var failures int
+	for _, arg := range args {
+		if err := killOne(ctx, cmd, c, arg, st, kt, noForget); err != nil {
+			fmt.Fprintf(os.Stderr, "error: kill %q: %v\n", arg, err)
+			failures++
+		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d target(s) failed", failures)
+	}
+	return nil
+}
+
+// killOne kills and optionally forgets a single target. Errors are returned to
+// the caller for aggregation across multiple targets.
+func killOne(ctx context.Context, cmd *cobra.Command, c *client.Client, arg string, st, kt time.Duration, noForget bool) error {
+	childID, err := c.Resolve(ctx, arg)
+	if err != nil {
+		return err
+	}
 
 	req := protocol.KillRequest{
 		Type:    protocol.TypeCtrlKill,
@@ -67,14 +87,6 @@ func runKill(cmd *cobra.Command, args []string) error {
 	}
 	if kt > 0 {
 		req.KillTimeoutMs = kt.Milliseconds()
-	}
-
-	// Allow longer than Go's default RPC timing if both flags push past it.
-	total := st + kt
-	if total > 30*time.Second {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, total+5*time.Second)
-		defer cancel()
 	}
 
 	resp, err := c.Request(ctx, req)

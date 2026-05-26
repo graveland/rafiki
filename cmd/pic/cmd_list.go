@@ -11,10 +11,11 @@ import (
 
 func newListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List active and recently-exited children",
-		Args:  cobra.NoArgs,
-		RunE:  runList,
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List active and recently-exited children",
+		Args:    cobra.NoArgs,
+		RunE:    runList,
 	}
 	cmd.Flags().String("status", "", "Filter by status (e.g. idle, streaming, exited)")
 	cmd.Flags().String("name-contains", "", "Filter by substring in name")
