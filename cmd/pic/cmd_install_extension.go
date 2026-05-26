@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"graveland.dev/pi-controller/cmd/pic/picembed"
 )
 
 func newInstallExtensionCmd() *cobra.Command {
@@ -18,8 +20,10 @@ func newInstallExtensionCmd() *cobra.Command {
 		Long: `Install the pic-helpers extension into ~/.pi/agent/extensions/pic-helpers/.
 
 This extension registers pic-attach-aware slash commands (currently /reload) so
-they work in daemon-managed pi children. It's harmless when used in native pi
-sessions too — /reload there does the same thing as pi's built-in /reload.
+they work in daemon-managed pi children. It's harmless in native pi sessions too —
+/reload there does the same thing as pi's built-in /reload.
+
+The extension is bundled into the pic binary; no source tree required.
 
 Use --remove to uninstall.`,
 		Args: cobra.NoArgs,
@@ -55,94 +59,57 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 	if _, err := os.Stat(destDir); err == nil && !force {
 		return fmt.Errorf("already installed at %s (use --force to overwrite)", destDir)
 	}
-
-	sourceDir, err := locatePicHelpersSource()
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(destDir), 0o700); err != nil {
-		return fmt.Errorf("create parent dir: %w", err)
-	}
-	// Wipe any previous installation if force.
 	if force {
 		_ = os.RemoveAll(destDir)
 	}
-	if err := copyDir(sourceDir, destDir); err != nil {
-		return fmt.Errorf("copy extension: %w", err)
+	if err := os.MkdirAll(filepath.Dir(destDir), 0o700); err != nil {
+		return fmt.Errorf("create parent dir: %w", err)
+	}
+
+	if err := installFromEmbed(destDir); err != nil {
+		return fmt.Errorf("install: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "installed pic-helpers to", destDir)
 	fmt.Fprintln(os.Stderr, "pi will auto-discover this extension on next run")
 	return nil
 }
 
-// locatePicHelpersSource finds the bundled extensions/pic-helpers directory.
-// Order: PIC_HELPERS_SOURCE env var, then sibling-of-pic-binary at
-// <bindir>/../extensions/pic-helpers, then a few well-known dev paths.
-func locatePicHelpersSource() (string, error) {
-	if env := os.Getenv("PIC_HELPERS_SOURCE"); env != "" {
-		return env, statDir(env)
-	}
-	self, err := os.Executable()
-	if err == nil {
-		// bin/pic -> ../extensions/pic-helpers
-		sibling := filepath.Join(filepath.Dir(self), "..", "extensions", "pic-helpers")
-		if abs, err := filepath.Abs(sibling); err == nil {
-			if statDir(abs) == nil {
-				return abs, nil
-			}
-		}
-	}
-	// Fallback: current working dir
-	if abs, err := filepath.Abs("extensions/pic-helpers"); err == nil {
-		if statDir(abs) == nil {
-			return abs, nil
-		}
-	}
-	return "", fmt.Errorf("could not find extensions/pic-helpers source dir; set PIC_HELPERS_SOURCE")
-}
-
-func statDir(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", path)
-	}
-	return nil
-}
-
-// copyDir copies src to dst recursively (small, no symlink handling, no
-// permissions preservation beyond mode 0o644 for files / 0o755 for dirs).
-func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+// installFromEmbed walks the embedded pic-helpers tree and writes every file
+// into destDir, preserving the relative structure.
+//
+// The embed.FS roots all entries at "pic-helpers/..." — strip that prefix
+// when computing the destination path.
+func installFromEmbed(destDir string) error {
+	return fs.WalkDir(picembed.PicHelpers, "pic-helpers", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(src, path)
-		target := filepath.Join(dst, rel)
+		rel, err := filepath.Rel("pic-helpers", path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destDir, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		return copyFile(path, target)
+		return writeEmbedded(path, target)
 	})
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+func writeEmbedded(srcPath, dstPath string) error {
+	src, err := picembed.PicHelpers.Open(srcPath)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	defer src.Close()
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err
 	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
+	defer dst.Close()
+	_, err = io.Copy(dst, src)
 	return err
 }
