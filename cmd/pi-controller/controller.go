@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"graveland.dev/pi-controller/internal/child"
+	"graveland.dev/pi-controller/internal/intercept"
 	"graveland.dev/pi-controller/internal/persist"
 	"graveland.dev/pi-controller/internal/protocol"
 	"graveland.dev/pi-controller/internal/ring"
@@ -636,6 +638,12 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 }
 
 func (c *Controller) Send(childID string, frame json.RawMessage) error {
+	// new_session and switch_session are handled via kill+respawn rather than
+	// forwarded to pi (spec §5.1).
+	if decision, ok := intercept.Inspect(frame); ok {
+		return c.handleInterceptedSend(childID, decision)
+	}
+
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
@@ -662,6 +670,57 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 		}
 		return err
 	}
+	return nil
+}
+
+// handleInterceptedSend handles new_session and switch_session by killing the
+// current child process and re-spawning it with the same childId (spec §5.1).
+// Per-child subscriptions are preserved across the kill+resume cycle so that
+// clients observe a seamless transition. A synthesized pi-level response is
+// delivered to subscribers after the new process is ready.
+func (c *Controller) handleInterceptedSend(childID string, decision intercept.Decision) error {
+	if _, ok := c.st.Get(childID); !ok {
+		return &server.ControllerError{
+			Code:    protocol.ErrChildNotFound,
+			Message: "child not found: " + childID,
+		}
+	}
+
+	// Save per-child subscribers before Kill. monitorChild.Remove (called by
+	// handleChildExit) will clear the list when the old process exits.
+	savedSubs := c.cm.GetSubscribers(childID)
+
+	// Gracefully shut down the current child.
+	if _, err := c.Kill(context.Background(), childID, 3000, 500); err != nil {
+		var ce *server.ControllerError
+		if !errors.As(err, &ce) ||
+			(ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
+			return fmt.Errorf("intercept kill: %w", err)
+		}
+	}
+
+	// Spin-wait for monitorChild to complete handleChildExit (store status →
+	// exited). Kill returns once the OS process has exited; the goroutine update
+	// follows shortly on the next scheduler turn.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if snap, ok := c.st.Get(childID); ok && snap.Status == protocol.StatusExited {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Respawn the child with the same childId.
+	if _, err := c.Resume(context.Background(), childID, ""); err != nil {
+		return fmt.Errorf("intercept resume: %w", err)
+	}
+
+	// Restore preserved subscriptions on the new child instance and deliver
+	// the synthetic pi-level response so subscribers observe the transition.
+	c.cm.RestoreSubscribers(childID, savedSubs)
+	synthFrame := intercept.SynthesizeResponse(string(decision.Type), decision.PiRequestID)
+	c.cm.DeliverToChild(childID, synthFrame)
+
 	return nil
 }
 

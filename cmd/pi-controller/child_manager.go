@@ -90,6 +90,37 @@ func (cm *ChildManager) Unsubscribe(childID string, conn server.Connection) {
 	}
 }
 
+// GetSubscribers returns a snapshot of the per-child subscriber list for childID.
+// Used by handleInterceptedSend to preserve subscriptions across a kill+resume cycle:
+// monitorChild.Remove (called by handleChildExit after the process exits) clears the
+// subscriber list, so callers must save it before initiating the kill.
+func (cm *ChildManager) GetSubscribers(childID string) []*connSub {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	e, ok := cm.children[childID]
+	if !ok {
+		return nil
+	}
+	out := make([]*connSub, len(e.subs))
+	copy(out, e.subs)
+	return out
+}
+
+// RestoreSubscribers appends subs to the per-child subscriber list for childID.
+// Called after a respawn to reattach connections that survived the kill+resume cycle.
+func (cm *ChildManager) RestoreSubscribers(childID string, subs []*connSub) {
+	if len(subs) == 0 {
+		return
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	e, ok := cm.children[childID]
+	if !ok {
+		return
+	}
+	e.subs = append(e.subs, subs...)
+}
+
 // GlobalSubscribe adds conn as a global subscriber (lifecycle events only).
 func (cm *ChildManager) GlobalSubscribe(conn server.Connection) {
 	cm.globalMu.Lock()

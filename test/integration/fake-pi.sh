@@ -38,6 +38,17 @@ while IFS= read -r line; do
       code="${line#__exit:}"
       exit "$code"
       ;;
+    '{"type":"__ctrl_test_emit"'*)
+      # Emit a test event then ack. Used by integration tests to populate the
+      # ring buffer and trigger per-child subscriber delivery without needing a
+      # real pi agent loop.
+      # Format: {"type":"__ctrl_test_emit","eventType":"<event-type>"}
+      evt=$(printf '%s' "$line" | sed -E 's/.*"eventType":"([^"]+)".*/\1/')
+      if [ -n "$evt" ] && [ "$evt" != "$line" ]; then
+        printf '{"type":"%s"}\n' "$evt"
+      fi
+      printf '{"type":"response","command":"__ctrl_test_emit","success":true}\n'
+      ;;
     *)
       printf '{"type":"response","success":true}\n'
       ;;
