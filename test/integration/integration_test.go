@@ -404,13 +404,22 @@ func TestIntegration_SubscribeEvents(t *testing.T) {
 		t.Fatalf("ctrl_send (__ctrl_test_emit) failed: %+v", r.Error)
 	}
 
-	// Subscriber must receive the agent_start event delivered by the daemon.
-	ev := sc.waitForEvent(t, func(f json.RawMessage) bool {
-		return frameType(f) == "agent_start"
+	// Subscriber must receive the agent_start event wrapped in a ctrl_event
+	// envelope (spec §7.1). The outer type is "ctrl_event" and the inner
+	// event.type is "agent_start".
+	sc.waitForEvent(t, func(f json.RawMessage) bool {
+		var env struct {
+			Type    string          `json:"type"`
+			ChildID string          `json:"childId"`
+			Event   json.RawMessage `json:"event"`
+		}
+		if json.Unmarshal(f, &env) != nil || env.Type != "ctrl_event" || env.ChildID != childID {
+			return false
+		}
+		var inner struct{ Type string `json:"type"` }
+		json.Unmarshal(env.Event, &inner)
+		return inner.Type == "agent_start"
 	}, 5*time.Second)
-	if ev == nil {
-		t.Fatal("expected agent_start event on subscriber connection")
-	}
 }
 
 // TestIntegration_KillResume exercises kill+resume:
@@ -480,19 +489,30 @@ func TestIntegration_KillResume(t *testing.T) {
 
 // TestIntegration_InterceptionNewSession exercises the new_session interception
 // path: spawn → subscribe → ctrl_send {type:new_session} → verify the child
-// was transparently killed and re-spawned (same childId, new PID), and that
-// the subscriber receives the synthesized pi response.
+// was transparently killed and re-spawned (same childId, new PID, fresh
+// sessionId+sessionFile), and that the subscriber receives the synthesized pi
+// response wrapped in a ctrl_event envelope.
 func TestIntegration_InterceptionNewSession(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
 
-	// noSession:true ensures ctrl_resume won't fail with session_file_missing.
-	childID := d.spawnChild(t)
-
-	// Capture initial PID.
-	getJSON := fmt.Sprintf(`{"type":"ctrl_get","id":"g1","childId":%q}`, childID)
-	raw := d.request(t, getJSON)
+	// Spawn WITHOUT noSession:true so we get a real session file. This lets
+	// the test verify that new_session creates a fresh session (not the old one).
+	// fake-pi.sh returns a unique sessionId/sessionFile per invocation unless
+	// --session is passed, which is exactly what the buggy Resume path does.
+	raw := d.request(t, `{"type":"ctrl_spawn","id":"spawn1","cwd":"/tmp"}`)
 	var r protocol.Response
+	mustUnmarshal(t, raw, &r)
+	if !r.Success {
+		t.Fatalf("ctrl_spawn failed: %+v", r.Error)
+	}
+	var spawnData protocol.SpawnResponseData
+	mustUnmarshal(t, r.Data, &spawnData)
+	childID := spawnData.ChildID
+
+	// Capture initial state including sessionId and sessionFile.
+	getJSON := fmt.Sprintf(`{"type":"ctrl_get","id":"g1","childId":%q}`, childID)
+	raw = d.request(t, getJSON)
 	mustUnmarshal(t, raw, &r)
 	var child1 protocol.ChildSummary
 	mustUnmarshal(t, r.Data, &child1)
@@ -506,7 +526,8 @@ func TestIntegration_InterceptionNewSession(t *testing.T) {
 		t.Fatalf("ctrl_subscribe failed: %+v", subResp.Error)
 	}
 
-	// Send new_session — the controller intercepts this and performs kill+resume.
+	// Send new_session — the controller intercepts this and performs kill+respawn.
+	// RespawnChild must NOT pass --session so pi creates a fresh session.
 	interceptJSON := fmt.Sprintf(
 		`{"type":"ctrl_send","id":"int1","childId":%q,"frame":{"type":"new_session","id":"pi-req-1"}}`,
 		childID,
@@ -532,15 +553,34 @@ func TestIntegration_InterceptionNewSession(t *testing.T) {
 	if child1.PID != nil && child2.PID != nil && *child1.PID == *child2.PID {
 		t.Errorf("expected different PID after interception (new process): both are %d", *child1.PID)
 	}
+	// new_session must produce a fresh session (different file and id).
+	// fake-pi.sh returns a --session-path-derived id when --session is passed
+	// (old buggy Resume path), but a PID-based id when no --session is given
+	// (correct RespawnChild path), so these assertions catch the regression.
+	if child1.SessionFile != "" && child2.SessionFile == child1.SessionFile {
+		t.Errorf("new_session should create a fresh session file; still using %s", child1.SessionFile)
+	}
+	if child1.SessionID != "" && child2.SessionID == child1.SessionID {
+		t.Errorf("new_session should have a fresh sessionId; still using %s", child1.SessionID)
+	}
 
-	// The subscriber must receive the synthesized pi response for new_session.
+	// The subscriber must receive the synthesized pi response for new_session,
+	// wrapped in a ctrl_event envelope (spec §7.1).
 	sc.waitForEvent(t, func(f json.RawMessage) bool {
-		var hdr struct {
+		var env struct {
+			Type    string          `json:"type"`
+			ChildID string          `json:"childId"`
+			Event   json.RawMessage `json:"event"`
+		}
+		if json.Unmarshal(f, &env) != nil || env.Type != "ctrl_event" || env.ChildID != childID {
+			return false
+		}
+		var inner struct {
 			Type    string `json:"type"`
 			Command string `json:"command"`
 		}
-		json.Unmarshal(f, &hdr)
-		return hdr.Type == "response" && hdr.Command == "new_session"
+		json.Unmarshal(env.Event, &inner)
+		return inner.Type == "response" && inner.Command == "new_session"
 	}, 5*time.Second)
 }
 

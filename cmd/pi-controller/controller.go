@@ -560,6 +560,164 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 	}, nil
 }
 
+// RespawnChild kills the existing child (the caller must have already done so
+// and waited for StatusExited) and starts a replacement with a session
+// override. sessionPath controls session continuity:
+//
+//   - "" (empty): fresh pi session — no --session flag, pi creates a new one.
+//   - non-empty: pi resumes that specific session file via --session <path>.
+//
+// All other spawn configuration is inherited from the child's persisted
+// snapshot. The childID is preserved across the respawn. This is the
+// implementation path for new_session and switch_session interception (spec §5.1).
+func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath string) (server.SpawnResult, error) {
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrChildNotFound,
+			Message: "child not found: " + childID,
+		}
+	}
+	if snap.Status != protocol.StatusExited {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrNotResumable,
+			Message: "child is not exited (status: " + string(snap.Status) + ")",
+		}
+	}
+
+	req := protocol.SpawnRequest{
+		Name:     snap.Name,
+		Cwd:      snap.Cwd,
+		Provider: snap.Provider,
+		Model:    snap.Model,
+		Thinking: snap.Thinking,
+		// Session: fresh start (no --no-session, no --fork).
+		// sessionPath non-empty adds --session <sessionPath>.
+		NoSession:          false,
+		SessionDir:         snap.SessionDir,
+		ResumeSession:      sessionPath,
+		ForkSession:        "",
+		Tools:              strings.Join(snap.Tools, ","),
+		NoTools:            snap.NoTools,
+		NoBuiltinTools:     snap.NoBuiltinTools,
+		Extensions:         snap.Extensions,
+		NoExtensions:       snap.NoExtensions,
+		Skills:             snap.Skills,
+		NoSkills:           snap.NoSkills,
+		PromptTemplates:    snap.PromptTemplates,
+		NoPromptTemplates:  snap.NoPromptTemplates,
+		Themes:             snap.Themes,
+		NoThemes:           snap.NoThemes,
+		NoContextFiles:     snap.NoContextFiles,
+		SystemPrompt:       snap.SystemPrompt,
+		AppendSystemPrompt: snap.AppendSystemPrompt,
+		Verbose:            snap.Verbose,
+		PiBinary:           snap.PiBinary,
+		ExtraArgs:          snap.ExtraArgs,
+	}
+
+	piBin, err := resolvePiBinary(req.PiBinary)
+	if err != nil {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "pi binary not found: " + err.Error(),
+		}
+	}
+
+	argv := buildArgv(req)
+	env := buildEnv(req, childID, c.socketPath)
+
+	spec := child.SpawnSpec{
+		ChildID:  childID,
+		Cwd:      req.Cwd,
+		PiBinary: piBin,
+		Argv:     argv,
+		Env:      env,
+	}
+
+	ch, err := child.Spawn(ctx, spec)
+	if err != nil {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: err.Error(),
+		}
+	}
+
+	// Spawn succeeded — remove the old exited entry only after the new process
+	// is confirmed running (so a failed spawn doesn't lose the record).
+	c.st.Delete(childID)
+
+	stalled := false
+	select {
+	case <-ch.Idle():
+	case <-time.After(5 * time.Second):
+		stalled = true
+		slog.Warn("respawned child stalled", "childId", childID)
+	}
+
+	meta := ch.Metadata()
+	now := time.Now()
+	provider, model := splitModel(meta.Model)
+	if provider == "" {
+		provider = snap.Provider
+	}
+	if model == "" {
+		model = snap.Model
+	}
+
+	sess := &store.Session{
+		ChildID:            childID,
+		PID:                ch.PID(),
+		Name:               snap.Name,
+		Cwd:                snap.Cwd,
+		Provider:           provider,
+		Model:              model,
+		Thinking:           snap.Thinking,
+		SessionID:          meta.SessionID,
+		SessionFile:        meta.SessionFile,
+		Status:             ch.Status(),
+		StartedAt:          now,
+		LastActivity:       now,
+		NoSession:          false,
+		SessionDir:         snap.SessionDir,
+		ResumeSession:      sessionPath,
+		ForkSession:        "",
+		Tools:              snap.Tools,
+		NoTools:            snap.NoTools,
+		NoBuiltinTools:     snap.NoBuiltinTools,
+		Extensions:         snap.Extensions,
+		NoExtensions:       snap.NoExtensions,
+		Skills:             snap.Skills,
+		NoSkills:           snap.NoSkills,
+		PromptTemplates:    snap.PromptTemplates,
+		NoPromptTemplates:  snap.NoPromptTemplates,
+		Themes:             snap.Themes,
+		NoThemes:           snap.NoThemes,
+		NoContextFiles:     snap.NoContextFiles,
+		SystemPrompt:       snap.SystemPrompt,
+		AppendSystemPrompt: snap.AppendSystemPrompt,
+		Verbose:            snap.Verbose,
+		PiBinary:           piBin,
+		ExtraArgs:          snap.ExtraArgs,
+	}
+	c.st.Insert(sess)
+	c.cm.Add(childID, ch)
+
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write state record (respawn)", "childId", childID, "error", err)
+	}
+
+	go c.monitorChild(childID, ch)
+
+	return server.SpawnResult{
+		ChildID:     childID,
+		SessionID:   meta.SessionID,
+		SessionFile: meta.SessionFile,
+		Model:       joinModel(provider, model),
+		Stalled:     stalled,
+	}, nil
+}
+
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (server.KillResult, error) {
 	ch, ok := c.cm.Get(childID)
 	if !ok {
@@ -699,27 +857,36 @@ func (c *Controller) handleInterceptedSend(childID string, decision intercept.De
 		}
 	}
 
-	// Spin-wait for monitorChild to complete handleChildExit (store status →
-	// exited). Kill returns once the OS process has exited; the goroutine update
-	// follows shortly on the next scheduler turn.
+	// Spin-wait for handleChildExit (running on the monitorChild goroutine) to
+	// call cm.Remove. Kill returns once c.done is closed (process reaped), but
+	// monitorChild runs concurrently and calls handleChildExit shortly after.
+	// We must wait for cm.Remove to complete; otherwise RespawnChild.cm.Add
+	// races with handleChildExit.cm.Remove and the new entry can be deleted
+	// immediately, causing the restored subscribers to be silently dropped.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if snap, ok := c.st.Get(childID); ok && snap.Status == protocol.StatusExited {
+		if _, alive := c.cm.Get(childID); !alive {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Respawn the child with the same childId.
-	if _, err := c.Resume(context.Background(), childID, ""); err != nil {
-		return fmt.Errorf("intercept resume: %w", err)
+	// Respawn the child with the same childId, applying the session override
+	// dictated by the intercepted command (spec §5.1).
+	sessionPath := "" // new_session: let pi create a fresh session
+	if decision.Type == intercept.InterceptSwitchSession {
+		sessionPath = decision.SessionPath
+	}
+	if _, err := c.RespawnChild(context.Background(), childID, sessionPath); err != nil {
+		return fmt.Errorf("intercept respawn: %w", err)
 	}
 
 	// Restore preserved subscriptions on the new child instance and deliver
 	// the synthetic pi-level response so subscribers observe the transition.
+	// Wrap in ctrl_event so subscribers see the correct envelope shape (§7.1).
 	c.cm.RestoreSubscribers(childID, savedSubs)
 	synthFrame := intercept.SynthesizeResponse(string(decision.Type), decision.PiRequestID)
-	c.cm.DeliverToChild(childID, synthFrame)
+	c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, synthFrame))
 
 	return nil
 }
@@ -761,7 +928,8 @@ func (c *Controller) OnConnectionClose(conn server.Connection) {
 // ─── monitorChild ─────────────────────────────────────────────────────────────
 
 // monitorChild runs as a goroutine for each live child. It forwards bus events
-// to per-child subscribers, tracks status transitions, and handles child exit.
+// to per-child subscribers (wrapped in ctrl_event envelopes per §7.1), tracks
+// status transitions, and handles child exit.
 func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	busCh, cancel := ch.Bus().Subscribe()
 	defer cancel()
@@ -776,7 +944,9 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 				c.handleChildExit(childID, ch)
 				return
 			}
-			c.cm.DeliverToChild(childID, frame)
+			// Wrap in ctrl_event envelope so subscribers can correlate events to
+			// their source child (spec §7.1).
+			c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, frame))
 
 			// Check for status change and keep store + global subs in sync.
 			if newStatus := ch.Status(); newStatus != lastStatus {
@@ -793,7 +963,7 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 					if !ok {
 						drained = true
 					} else {
-						c.cm.DeliverToChild(childID, frame)
+						c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, frame))
 					}
 				default:
 					drained = true
@@ -803,6 +973,23 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			return
 		}
 	}
+}
+
+// wrapCtrlEvent wraps a raw pi event in a ctrl_event envelope (spec §7.1).
+// This lets per-child subscribers correlate events to their source child and
+// filter by inner event type. If raw cannot be marshalled (non-JSON input),
+// raw is returned unchanged to keep the delivery stream flowing.
+func wrapCtrlEvent(childID string, raw []byte) []byte {
+	env := protocol.CtrlEvent{
+		Type:    protocol.TypeCtrlEvent,
+		ChildID: childID,
+		Event:   json.RawMessage(raw),
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return raw
+	}
+	return b
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {

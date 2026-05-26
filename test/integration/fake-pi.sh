@@ -5,16 +5,46 @@
 #   - On set_session_name, replies with success.
 #   - On `__emit_event:<json>` command, echoes the JSON to stdout as an event.
 #   - On `__exit:<code>`, exits with that code.
+#   - On `{"type":"__ctrl_test_emit",...}`, emits a test event then acks.
 #   - On EOF, exits 0 after a brief delay (simulating shutdown handlers).
 #
 # Anything else: echoes a generic success response.
+#
+# Session identity:
+#   By default each invocation creates a fresh session using $$ (PID) for
+#   uniqueness. If --session <path> was passed on the command line the script
+#   reports that path as the session file (simulating a resumed session), with
+#   a derived SESSION_ID so integration tests can distinguish resumed vs fresh.
 
 # Allow tests to slow the shutdown.
 SHUTDOWN_DELAY="${FAKE_PI_SHUTDOWN_DELAY:-0}"
 
-# Predefined session info
-SESSION_ID="${FAKE_PI_SESSION_ID:-fake-sid-123}"
-SESSION_FILE="${FAKE_PI_SESSION_FILE:-/tmp/fake/session.jsonl}"
+# Parse --session <path> from argv so integration tests can verify whether
+# RespawnChild correctly omits it for new_session (fresh) vs switch_session.
+SESSION_FILE_ARG=""
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+    if [ "${args[$i]}" = "--session" ]; then
+        i=$((i+1))
+        SESSION_FILE_ARG="${args[$i]}"
+    fi
+    i=$((i+1))
+done
+
+# Session info: unique per process unless --session was passed.
+if [ -n "$SESSION_FILE_ARG" ]; then
+    # Resuming an existing session: report the provided session file so tests
+    # can assert that the session file is unchanged when --session is passed.
+    SESSION_FILE="$SESSION_FILE_ARG"
+    SESSION_ID="${FAKE_PI_SESSION_ID:-fake-sid-resume-$(basename "$SESSION_FILE_ARG" .jsonl)}"
+else
+    # Fresh session: use $$ (PID) for uniqueness so each invocation gets
+    # distinct sessionId and sessionFile values.
+    SESSION_FILE="${FAKE_PI_SESSION_FILE:-/tmp/fake/session-$$.jsonl}"
+    SESSION_ID="${FAKE_PI_SESSION_ID:-fake-sid-$$}"
+fi
+
 SESSION_NAME="${FAKE_PI_SESSION_NAME:-}"
 MODEL="${FAKE_PI_MODEL:-fake/model-1}"
 

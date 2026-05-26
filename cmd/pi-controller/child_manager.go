@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"sync"
 
 	"graveland.dev/pi-controller/internal/child"
@@ -178,26 +179,44 @@ func (cm *ChildManager) DeliverToGlobal(frame []byte) {
 // with the given filter. Empty filter means pass everything. The resolution
 // rule is: (profile members) ∪ include − exclude. For v1, profile is not
 // expanded; only include/exclude lists are applied.
+//
+// For ctrl_event frames the filter is applied to the inner pi event's type
+// (spec §7.1), so that include:["agent_start"] works as expected even though
+// the wire frame type is "ctrl_event". ctrl_child_* lifecycle frames continue
+// to be filtered by their top-level type.
 func eventPassesFilter(frame []byte, f protocol.SubscribeFilter) bool {
 	if len(f.Include) == 0 && len(f.Exclude) == 0 {
 		return true
 	}
-	// Decode just enough to get the event type.
+	// Decode enough to get the top-level type and, for ctrl_event, the inner
+	// event payload.
 	var hdr struct {
-		Type string `json:"type"`
+		Type  string          `json:"type"`
+		Event json.RawMessage `json:"event,omitempty"`
 	}
-	if err := parseEventType(frame, &hdr); err != nil {
-		return true // unknown type; pass through
+	if err := json.Unmarshal(frame, &hdr); err != nil {
+		return true // unparseable frame; pass through
+	}
+
+	// For ctrl_event frames, match on the inner pi event type so that
+	// subscriber filters like include:["agent_start"] continue to work
+	// after the wrapper was applied in monitorChild.
+	effectiveType := hdr.Type
+	if hdr.Type == protocol.TypeCtrlEvent && len(hdr.Event) > 0 {
+		var inner struct{ Type string `json:"type"` }
+		if json.Unmarshal(hdr.Event, &inner) == nil && inner.Type != "" {
+			effectiveType = inner.Type
+		}
 	}
 
 	for _, ex := range f.Exclude {
-		if ex == hdr.Type {
+		if ex == effectiveType {
 			return false
 		}
 	}
 	if len(f.Include) > 0 {
 		for _, inc := range f.Include {
-			if inc == hdr.Type {
+			if inc == effectiveType {
 				return true
 			}
 		}
