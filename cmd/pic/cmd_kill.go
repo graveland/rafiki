@@ -72,11 +72,44 @@ func runKill(cmd *cobra.Command, args []string) error {
 
 // killOne kills and optionally forgets a single target. Errors are returned to
 // the caller for aggregation across multiple targets.
-func killOne(ctx context.Context, cmd *cobra.Command, c *client.Client, arg string, st, kt time.Duration, noForget bool) error {
+func killOne(ctx context.Context, _ *cobra.Command, c *client.Client, arg string, st, kt time.Duration, noForget bool) error {
 	childID, err := c.Resolve(ctx, arg)
 	if err != nil {
 		return err
 	}
+
+	res, err := killAndMaybeForget(ctx, c, childID, st, kt, noForget)
+	if err != nil {
+		return err
+	}
+
+	out := map[string]any{
+		"kill":   res.Kill,
+		"forgot": res.DidForget,
+	}
+	if res.ForgetErr != nil {
+		out["forgetError"] = res.ForgetErr.Error()
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// killAndForgetResult bundles outputs from a kill+(optional)forget operation.
+type killAndForgetResult struct {
+	Kill      protocol.KillResponseData
+	DidForget bool
+	ForgetErr error
+}
+
+// killAndMaybeForget sends ctrl_kill for childID and, on a clean exit
+// (exitCode 0, no signal, not escalated) and when noForget is false, follows
+// up with ctrl_forget. Returns the kill result and whether forget ran.
+//
+// Shared between `pic kill` and `pic create`/`pic attach`'s post-detach
+// terminate prompt so both code paths apply the same auto-forget policy.
+func killAndMaybeForget(ctx context.Context, c *client.Client, childID string, st, kt time.Duration, noForget bool) (killAndForgetResult, error) {
+	var res killAndForgetResult
 
 	req := protocol.KillRequest{
 		Type:    protocol.TypeCtrlKill,
@@ -91,47 +124,33 @@ func killOne(ctx context.Context, cmd *cobra.Command, c *client.Client, arg stri
 
 	resp, err := c.Request(ctx, req)
 	if err != nil {
-		return err
+		return res, err
 	}
 	if !resp.Success {
-		return fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
+		return res, fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
 	}
 
-	var killData protocol.KillResponseData
-	if err := json.Unmarshal(resp.Data, &killData); err != nil {
-		// Couldn't decode kill response — dump raw and skip forget logic.
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(json.RawMessage(resp.Data))
+	if err := json.Unmarshal(resp.Data, &res.Kill); err != nil {
+		// Couldn't decode kill response — surface the raw payload and skip forget logic.
+		return res, fmt.Errorf("decode kill response: %w (raw=%s)", err, string(resp.Data))
 	}
 
-	// Auto-forget on clean exit: exitCode 0, no signal, not escalated.
-	cleanExit := killData.ExitCode != nil && *killData.ExitCode == 0 &&
-		killData.Signal == "" && !killData.Escalated
-	didForget := false
-	var forgetErr error
+	cleanExit := res.Kill.ExitCode != nil && *res.Kill.ExitCode == 0 &&
+		res.Kill.Signal == "" && !res.Kill.Escalated
 	if cleanExit && !noForget {
-		fresp, ferr := c.Request(cmdCtx(cmd), protocol.ForgetRequest{
+		fresp, ferr := c.Request(ctx, protocol.ForgetRequest{
 			Type:    protocol.TypeCtrlForget,
 			ChildID: childID,
 		})
-		if ferr != nil {
-			forgetErr = ferr
-		} else if !fresp.Success {
-			forgetErr = fmt.Errorf("%s", client.FormatError(fresp))
-		} else {
-			didForget = true
+		switch {
+		case ferr != nil:
+			res.ForgetErr = ferr
+		case !fresp.Success:
+			res.ForgetErr = fmt.Errorf("%s", client.FormatError(fresp))
+		default:
+			res.DidForget = true
 		}
 	}
 
-	out := map[string]any{
-		"kill":   killData,
-		"forgot": didForget,
-	}
-	if forgetErr != nil {
-		out["forgetError"] = forgetErr.Error()
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return res, nil
 }

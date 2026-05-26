@@ -188,15 +188,15 @@ func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit 
 	// Re-dial: pic-attach's connection has already closed when it exited.
 	c := mustDial(cmd)
 	defer c.Close()
-	resp, err := c.Request(cmdCtx(cmd), protocol.KillRequest{
-		Type:    protocol.TypeCtrlKill,
-		ChildID: childID,
-	})
+
+	// Use the same kill+forget policy as `pic kill` so a confirmed
+	// terminate also removes the child from `pic list` on clean exit.
+	res, err := killAndMaybeForget(cmdCtx(cmd), c, childID, 0, 0, false)
 	if err != nil {
 		return fmt.Errorf("kill: %w", err)
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
+	if res.ForgetErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: forget after kill failed: %v\n", res.ForgetErr)
 	}
 	return nil
 }
