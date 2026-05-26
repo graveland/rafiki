@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -55,5 +56,68 @@ func TestInstallFromEmbed_CopiesFiles(t *testing.T) {
 		if info.Size() == 0 {
 			t.Fatalf("file %s is empty", path)
 		}
+	}
+}
+
+func TestHelpersVersionCheck_NotInstalled(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bundled, installed, err := helpersVersionCheck()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundled == "" {
+		t.Fatal("bundled version is empty")
+	}
+	if installed != "" {
+		t.Fatalf("expected installed = \"\", got %q", installed)
+	}
+}
+
+func TestEnsurePicHelpersInstalled_FreshInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PIC_NO_AUTO_INSTALL_HELPERS", "")
+	if err := ensurePicHelpersInstalled(); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(home, ".pi", "agent", "extensions", "pic-helpers")
+	if _, err := os.Stat(filepath.Join(dest, "index.ts")); err != nil {
+		t.Fatalf("index.ts not installed: %v", err)
+	}
+}
+
+func TestEnsurePicHelpersInstalled_OptOut(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PIC_NO_AUTO_INSTALL_HELPERS", "1")
+	if err := ensurePicHelpersInstalled(); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(home, ".pi", "agent", "extensions", "pic-helpers")
+	if _, err := os.Stat(dest); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("opt-out should have skipped install; got: %v", err)
+	}
+}
+
+func TestEnsurePicHelpersInstalled_AlreadyCurrent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PIC_NO_AUTO_INSTALL_HELPERS", "")
+	// First install.
+	if err := ensurePicHelpersInstalled(); err != nil {
+		t.Fatal(err)
+	}
+	// Stamp a marker file inside to detect overwrite.
+	dest := filepath.Join(home, ".pi", "agent", "extensions", "pic-helpers")
+	marker := filepath.Join(dest, ".not-overwritten")
+	if err := os.WriteFile(marker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Second call should be a no-op.
+	if err := ensurePicHelpersInstalled(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker missing — install was not idempotent: %v", err)
 	}
 }

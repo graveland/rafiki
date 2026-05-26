@@ -18,6 +18,11 @@ func newCreateCmd() *cobra.Command {
 		Short: "Spawn a new pi child and attach a local TUI to it",
 		Long: `Spawn a new pi child via the controller, then open the pi TUI driving it.
 
+The pic-helpers pi extension is auto-installed (or upgraded) into
+~/.pi/agent/extensions/pic-helpers/ before spawning, so slash commands
+like /reload work inside the TUI. Use --no-install-helpers or set
+PIC_NO_AUTO_INSTALL_HELPERS=1 to skip.
+
 By default, quitting the TUI (Ctrl+D, /quit) detaches — the session keeps
 running in the daemon. Use --kill-on-exit for native pi exit semantics
 (quitting terminates the session).
@@ -35,6 +40,7 @@ scripting / AFK workflows, use --detached.)`,
 	addSpawnFlags(cmd)
 	cmd.Flags().Bool("detached", false, "Spawn without attaching; the child runs in the background")
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits")
+	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the pic-helpers pi extension")
 	return cmd
 }
 
@@ -111,6 +117,14 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 func runCreate(cmd *cobra.Command, args []string) error {
 	c := mustDial(cmd)
 	defer c.Close()
+
+	noInstall, _ := cmd.Flags().GetBool("no-install-helpers")
+	if !noInstall {
+		if err := ensurePicHelpersInstalled(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: pic-helpers auto-install failed: %v\n", err)
+			// proceed anyway
+		}
+	}
 
 	req, err := buildSpawnRequest(cmd, args)
 	if err != nil {
