@@ -155,6 +155,23 @@ afterEach(async () => {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("RemoteAgentSessionRuntime", () => {
+    it("connect — sends ctrl_subscribe for the childId", async () => {
+        const captured: Array<Record<string, unknown>> = [];
+        const srv = await startServer(makeHandler(captured));
+        servers.push(srv);
+
+        const runtime = await RemoteAgentSessionRuntime.connect({
+            socket: srv.sockPath,
+            childId: CHILD_ID,
+        });
+
+        const subReqs = captured.filter((r) => r["type"] === "ctrl_subscribe");
+        expect(subReqs).toHaveLength(1);
+        expect(subReqs[0]!["childId"]).toBe(CHILD_ID);
+
+        await runtime.dispose();
+    });
+
     it("connect with fake server — fetches metadata and exposes correct cwd", async () => {
         const captured: Array<Record<string, unknown>> = [];
         const srv = await startServer(makeHandler(captured));

@@ -115,13 +115,31 @@ export class RemoteAgentSessionRuntime {
             modelRegistry,
         });
 
-        return new RemoteAgentSessionRuntime({
+        const runtime = new RemoteAgentSessionRuntime({
             client,
             session,
             services,
             cwd: meta.cwd,
             killOnExit: opts.killOnExit ?? false,
         });
+
+        // Tell the daemon to deliver events for this child to our connection.
+        // Without this, the daemon's bus never routes anything to us.
+        try {
+            const subResp = await client.request({
+                type: "ctrl_subscribe",
+                childId: opts.childId,
+            });
+            if (!subResp.success) {
+                await client.close();
+                throw new Error(`ctrl_subscribe: ${subResp.error?.code ?? "unknown"}`);
+            }
+        } catch (err) {
+            await client.close();
+            throw err;
+        }
+
+        return runtime;
     }
 
     // ── Constructor ───────────────────────────────────────────────────────────
@@ -303,6 +321,17 @@ export class RemoteAgentSessionRuntime {
 
         if (this.killOnExit) {
             await this.killChild();
+        }
+
+        // Best-effort unsubscribe before closing — the daemon cleans up on
+        // connection close anyway, but being explicit is tidy.
+        try {
+            await this._client.request({
+                type: "ctrl_unsubscribe",
+                childId: this._session.childId,
+            });
+        } catch {
+            // Ignore — we're tearing down regardless.
         }
 
         await this._client.close();
