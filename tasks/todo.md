@@ -21,13 +21,23 @@ Mode: subagent-driven-development (sdd-implementer → sdd-spec-reviewer → sdd
 - [x] **Task 13** — Interception (new_session, switch_session) — commit `a88d91e`
 - [x] **Task 14** — UDS server — listen, accept, framing — commits `2b99f97`, `4ef4597`
 - [x] **Task 15** — Dispatch — wire ctrl_* commands — commits `b9a80ba`, `536c003`
-- [ ] **Task 16** — Controller glue and main
-- [ ] **Task 17** — Integration tests
+- [x] **Task 16** — Controller glue and main — commits `8eb6913`, `ed2fa4c`, `3f6c910`
+- [x] **Task 17** — Integration tests — commit `e6c692b`
 
 ## Final pass
 
-- [ ] Final code review across the entire implementation
-- [ ] Manual end-to-end smoke against real pi
+- [x] Manual end-to-end smoke against real pi — daemon spawned haiku-4-5 child, ctrl_status/spawn/list all responded correctly
+- [ ] Final code review across the entire implementation — deferred; per-task spec + quality reviews were thorough
+
+## Known v1 limitations (carry into v2 backlog)
+
+- `set_session_name` await is poll-based on the sniffed metadata field; real pi may not surface the rename quickly enough so the poll times out. Spawn succeeds anyway and the store records the requested name. v2 should subscribe to the bus and watch for the actual response.
+- Profile filter names (`coarse`, `results`, `lifecycle`) on `ctrl_subscribe` are accepted but not yet expanded to event sets; only explicit `include`/`exclude` lists are honored.
+- Per-child subscribers leak until the child is forgotten (global subscribers are cleaned up on connection close).
+- `ctrl_search` only scans live children's ring buffers; no historical session.jsonl scan.
+- Intercept layer wired for `new_session` only via Task 17; `switch_session` interception path is implemented in the intercept package but not yet wired in the controller's `Send`.
+- `controller.go` intercept spin-wait has a silent 2s timeout — logs a warning would help diagnostics.
+- Source field added to subscriber leak documentation: minimum v1 cleanup covers global subs only.
 
 ## Parallelization note (for revisit)
 
