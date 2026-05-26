@@ -88,11 +88,12 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// forget
-	forgetCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "forget", "smoke")
-	out, err = forgetCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("forget failed: %v\n%s", err, out)
+	// `pic kill` auto-forgets on clean exit (commit 995a7e1), so `smoke`
+	// should already be gone from the store.  Verify by attempting to get it.
+	getCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "get", "smoke")
+	out, _ = getCmd.CombinedOutput()
+	if !strings.Contains(string(out), "no child matches") {
+		t.Fatalf("expected child to be auto-forgotten after kill; get output: %s", out)
 	}
 }
 
@@ -195,11 +196,12 @@ func TestCLI_CreateDetached(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// forget
-	forgetCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "forget", "test-detached")
-	out, err = forgetCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("forget failed: %v\n%s", err, out)
+	// `pic kill` auto-forgets on clean exit (commit 995a7e1), so the child
+	// should already be gone from the store.
+	getCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "get", "test-detached")
+	out, _ = getCmd.CombinedOutput()
+	if !strings.Contains(string(out), "no child matches") {
+		t.Fatalf("expected child to be auto-forgotten after kill; get output: %s", out)
 	}
 }
 

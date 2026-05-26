@@ -130,13 +130,27 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 		return nil
 	}
 
-	// RPC responses (e.g. pic-attach's autocomplete get_commands fetch) are
-	// fanned to every subscriber by the daemon.  Suppress by default; show
-	// pretty-printed in --verbose mode.
-	if hdr.Type == "response" {
-		if !r.verbose {
+	// In non-verbose mode, suppress events that are either internal plumbing
+	// (RPC responses, fanned by the daemon to every subscriber) or already
+	// covered by another event.  Specifically:
+	//
+	//   - response           → internal RPC chatter
+	//   - turn_start         → lifecycle noise; agent_start is enough
+	//   - message_start      → except for user messages, where it's the
+	//                          earliest signal of new user input.  Assistant
+	//                          message_start is empty (content streamed in).
+	//   - message_end        → user echo already shown via message_start;
+	//                          assistant text is shown by turn_end.
+	if !r.verbose {
+		switch hdr.Type {
+		case "response", "turn_start", "message_end":
 			return nil
+		case "message_start":
+			return r.renderUserMessage(event)
 		}
+	}
+
+	if hdr.Type == "response" {
 		return r.renderResponseFrame(event)
 	}
 
@@ -192,6 +206,43 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 		}
 		r.printDim(fmt.Sprintf("[%s] %s", hdr.Type, compact.String()))
 	}
+	return nil
+}
+
+// renderUserMessage prints a user message_start as `[user] text`, suppressing
+// non-user messages (assistant message_starts are empty placeholders — their
+// content streams in over message_update events and the final text appears
+// via turn_end).  Returns nil to short-circuit further dispatch.
+func (r *tailRenderer) renderUserMessage(event json.RawMessage) error {
+	var p struct {
+		Message struct {
+			Role    string            `json:"role"`
+			Content []json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(event, &p); err != nil {
+		return nil
+	}
+	if p.Message.Role != "user" {
+		return nil
+	}
+	var text strings.Builder
+	for _, raw := range p.Message.Content {
+		var block struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &block); err != nil {
+			continue
+		}
+		if block.Type == "text" {
+			text.WriteString(block.Text)
+		}
+	}
+	if text.Len() == 0 {
+		return nil
+	}
+	fmt.Fprintf(r.w, "%s %s\n", r.applyColor(cyan, "[user]"), text.String())
 	return nil
 }
 
