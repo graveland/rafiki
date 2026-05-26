@@ -6,23 +6,23 @@ Mode: subagent-driven-development (sdd-implementer → sdd-spec-reviewer → sdd
 
 ## Tasks
 
-- [ ] **Task 1** — Bootstrap (Cobra dep, root command, global flags)
-- [ ] **Task 2** — Client lib — connection + framing
-- [ ] **Task 3** — Client lib — subscribe stream
-- [ ] **Task 4** — Client lib — identifier resolution
-- [ ] **Task 5** — Output formatting (JSON, table, color)
-- [ ] **Task 6** — Read-only subcommands: list, get, status
-- [ ] **Task 7** — Lifecycle subcommands: spawn, resume, kill
-- [ ] **Task 8** — Forget subcommand
-- [ ] **Task 9** — Recent, search, send subcommands
-- [ ] **Task 10** — Active file + tab completion
-- [ ] **Task 11** — Tail subcommand + event renderer
-- [ ] **Task 12** — Logs subcommand + integration tests
+- [x] **Task 1** — Bootstrap (Cobra dep, root command, global flags) — commit `ba47fbe`
+- [x] **Task 2** — Client lib — connection + framing — commit `6659971`
+- [x] **Task 3** — Client lib — subscribe stream — commit `ecf8072`
+- [x] **Task 4** — Client lib — identifier resolution — commit `27d5d0a`
+- [x] **Task 5** — Output formatting (JSON, table, color) — commit `d78de5f`
+- [x] **Task 6** — Read-only subcommands: list, get, status — commit `e58afb2`
+- [x] **Task 7** — Lifecycle subcommands: spawn, resume, kill — commit `bef1a98`
+- [x] **Task 8** — Forget subcommand — commit `133f882`
+- [x] **Task 9** — Recent, search, send subcommands — commit `b2575a8`
+- [x] **Task 10** — Active file + tab completion — commit `1f72b9f`
+- [x] **Task 11** — Tail subcommand + event renderer — commit `a16a4a5`
+- [x] **Task 12** — Logs subcommand + integration tests — commit `22f8c26`
 
 ## Final pass
 
-- [ ] Final whole-implementation review
-- [ ] Manual end-to-end smoke against real pi
+- [x] Final whole-implementation review — 3 IMPORTANT + 7 MINOR issues found and fixed (`3281a08`)
+- [x] Manual end-to-end smoke against real pi — spawn/list/get-by-prefix/kill/forget all work; logs has a minor race with handleChildExit dump (kill returns before dump completes; documented limitation)
 
 ## Parallelization note
 
