@@ -56,11 +56,14 @@ func TestRender_ChildExited(t *testing.T) {
 	_ = exitCode
 }
 
+// Response frames arrive wrapped in ctrl_event envelopes (the daemon
+// fans pi's whole stdout stream to per-child subscribers under that
+// wrapper).  The inner event type is "response".
 func TestRender_Response_HiddenByDefault(t *testing.T) {
 	var buf bytes.Buffer
 	r := newTailRenderer(&buf, false, outputTable, false)
 
-	_ = r.render([]byte(`{"id":"gc-1","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}`))
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"id":"gc-1","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}}`))
 
 	if s := buf.String(); s != "" {
 		t.Fatalf("expected response frame to be hidden without --verbose; got: %q", s)
@@ -71,7 +74,7 @@ func TestRender_Response_ShownWithVerbose(t *testing.T) {
 	var buf bytes.Buffer
 	r := newTailRenderer(&buf, false, outputTable, true)
 
-	_ = r.render([]byte(`{"id":"gc-1","type":"response","command":"get_commands","success":true}`))
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"id":"gc-1","type":"response","command":"get_commands","success":true}}`))
 
 	out := buf.String()
 	if !strings.Contains(out, "[response]") {

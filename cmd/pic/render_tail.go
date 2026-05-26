@@ -67,14 +67,6 @@ func (r *tailRenderer) render(frame []byte) error {
 	}
 
 	switch hdr.Type {
-	case "response":
-		// RPC responses are internal plumbing.  Hide by default; pretty-print
-		// when --verbose so power users can still observe them when debugging.
-		if !r.verbose {
-			return nil
-		}
-		return r.renderResponseFrame(frame)
-
 	case protocol.TypeCtrlEvent:
 		return r.renderPiEvent(hdr.Event)
 
@@ -136,6 +128,16 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 	if err := json.Unmarshal(event, &hdr); err != nil {
 		fmt.Fprintln(r.w, string(event))
 		return nil
+	}
+
+	// RPC responses (e.g. pic-attach's autocomplete get_commands fetch) are
+	// fanned to every subscriber by the daemon.  Suppress by default; show
+	// pretty-printed in --verbose mode.
+	if hdr.Type == "response" {
+		if !r.verbose {
+			return nil
+		}
+		return r.renderResponseFrame(event)
 	}
 
 	switch hdr.Type {
