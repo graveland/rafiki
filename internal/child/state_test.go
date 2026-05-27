@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"graveland.dev/pi-controller/internal/child"
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 func TestStateMachine_BasicLifecycle(t *testing.T) {

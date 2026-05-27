@@ -15,7 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 // Client is a connected JSONL client to the pi-controller daemon.

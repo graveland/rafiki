@@ -9,7 +9,7 @@ import (
 	"sort"
 
 	"graveland.dev/pi-controller/internal/models"
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 // ListModels enumerates LLM models from all configured sources.

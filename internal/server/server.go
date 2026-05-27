@@ -14,7 +14,7 @@ import (
 	"os"
 	"sync"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 // Connection represents the write side of a single client connection. It is

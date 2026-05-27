@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"graveland.dev/pi-controller/internal/persist"
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 func TestRecordWriter_RoundTrip(t *testing.T) {

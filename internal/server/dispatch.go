@@ -8,7 +8,7 @@ import (
 	"errors"
 	"path/filepath"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 	"graveland.dev/pi-controller/internal/store"
 )
 

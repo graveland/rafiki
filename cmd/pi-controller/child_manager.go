@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"graveland.dev/pi-controller/internal/child"
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 	"graveland.dev/pi-controller/internal/server"
 )
 

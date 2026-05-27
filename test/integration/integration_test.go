@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 // ─── TestMain: build binary once for all tests ────────────────────────────────

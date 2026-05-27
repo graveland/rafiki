@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 	"graveland.dev/pi-controller/internal/ring"
 )
 

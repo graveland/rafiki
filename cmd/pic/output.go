@@ -11,7 +11,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"golang.org/x/term"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 type outputMode string

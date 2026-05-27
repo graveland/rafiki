@@ -9,8 +9,8 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/client"
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/client"
+	"graveland.dev/pi-controller/protocol"
 )
 
 func newModelsCmd() *cobra.Command {

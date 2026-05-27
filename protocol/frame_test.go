@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 func TestFrameReader_SplitsOnLFOnly(t *testing.T) {

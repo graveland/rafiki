@@ -21,7 +21,7 @@ import (
 	"graveland.dev/pi-controller/internal/child"
 	"graveland.dev/pi-controller/internal/intercept"
 	"graveland.dev/pi-controller/internal/persist"
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 	"graveland.dev/pi-controller/internal/ring"
 	"graveland.dev/pi-controller/internal/server"
 	"graveland.dev/pi-controller/internal/store"

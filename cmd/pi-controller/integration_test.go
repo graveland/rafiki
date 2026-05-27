@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 	"graveland.dev/pi-controller/internal/server"
 	"graveland.dev/pi-controller/internal/store"
 	"graveland.dev/pi-controller/internal/version"

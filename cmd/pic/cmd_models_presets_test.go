@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"graveland.dev/pi-controller/protocol"
 )
 
 // ─── renderModels ──────────────────────────────────────────────────────────────
