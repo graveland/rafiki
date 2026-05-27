@@ -84,6 +84,16 @@ type Controller interface {
 	// map. Rejects keys with the pic/ prefix and invalid key characters.
 	SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error)
 
+	// ListModels enumerates LLM models from all configured sources (user-config,
+	// builtin list, Ollama, LM Studio). When provider is non-empty only models
+	// from that provider are returned. Best-effort: missing or unreachable
+	// sources return no entries rather than errors.
+	ListModels(ctx context.Context, provider string) ([]protocol.ModelInfo, error)
+
+	// ListPresets enumerates presets from ~/.pi/agent/pic-presets.json.
+	// labels and hasLabel apply the same AND-match filter semantics as ctrl_list.
+	ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error)
+
 	// Per-connection subscriptions. conn is the Connection passed to
 	// FrameHandler; it serves as both the event-delivery target and the
 	// identity key for subsequent Unsubscribe calls.
@@ -159,6 +169,10 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.ctrlSend(frame, hdr.ID)
 	case protocol.TypeCtrlSetLabels:
 		return d.setLabels(frame, hdr.ID)
+	case protocol.TypeCtrlListModels:
+		return d.listModels(frame, hdr.ID)
+	case protocol.TypeCtrlListPresets:
+		return d.listPresets(frame, hdr.ID)
 	case protocol.TypeCtrlSubscribe:
 		return d.subscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUnsubscribe:
@@ -417,6 +431,38 @@ func (d *dispatcher) forgetAllExited(frame []byte, id string) []byte {
 		return mapErr(protocol.TypeCtrlForgetAllExited, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlForgetAllExited, id, protocol.ForgetAllExitedResponseData{Count: count})
+}
+
+// ─── Enumeration handlers ────────────────────────────────────────────────────
+
+func (d *dispatcher) listModels(frame []byte, id string) []byte {
+	var req protocol.ListModelsRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlListModels, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	infos, err := d.c.ListModels(context.Background(), req.Provider)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlListModels, id, err, protocol.ErrInternal)
+	}
+	if infos == nil {
+		infos = []protocol.ModelInfo{}
+	}
+	return okResponse(protocol.TypeCtrlListModels, id, protocol.ListModelsResponseData{Models: infos})
+}
+
+func (d *dispatcher) listPresets(frame []byte, id string) []byte {
+	var req protocol.ListPresetsRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlListPresets, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	presets, err := d.c.ListPresets(req.Labels, req.HasLabel)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlListPresets, id, err, protocol.ErrInternal)
+	}
+	if presets == nil {
+		presets = []protocol.PresetInfo{}
+	}
+	return okResponse(protocol.TypeCtrlListPresets, id, protocol.ListPresetsResponseData{Presets: presets})
 }
 
 // ─── Labels handler ───────────────────────────────────────────────────────────

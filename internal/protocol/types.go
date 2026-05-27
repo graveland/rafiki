@@ -18,6 +18,8 @@ const (
 	TypeCtrlDaemonShutdown    = "ctrl_daemon_shutdown"
 	TypeCtrlList              = "ctrl_list"
 	TypeCtrlGet               = "ctrl_get"
+	TypeCtrlListModels        = "ctrl_list_models"
+	TypeCtrlListPresets       = "ctrl_list_presets"
 	TypeCtrlSpawn             = "ctrl_spawn"
 	TypeCtrlResume            = "ctrl_resume"
 	TypeCtrlKill              = "ctrl_kill"
@@ -531,4 +533,54 @@ type CtrlChildLabeled struct {
 	Type    string            `json:"type"`    // "ctrl_child_labeled"
 	ChildID string            `json:"childId"`
 	Labels  map[string]string `json:"labels"`  // complete post-mutation label set
+}
+
+// ─── ctrl_list_models ────────────────────────────────────────────────────────
+
+// ListModelsRequest enumerates LLM models from all configured sources.
+// Provider is an optional filter; when non-empty only models whose provider
+// field matches are returned.
+type ListModelsRequest struct {
+	Type     string `json:"type"`               // "ctrl_list_models"
+	ID       string `json:"id,omitempty"`
+	Provider string `json:"provider,omitempty"` // optional provider filter
+}
+
+// ListModelsResponseData is the data payload for ctrl_list_models responses.
+type ListModelsResponseData struct {
+	Models []ModelInfo `json:"models"`
+}
+
+// ModelInfo is one entry in a ctrl_list_models response.
+type ModelInfo struct {
+	ID       string `json:"id"`               // "provider/model"
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Name     string `json:"name,omitempty"`   // display name from models.json
+	Source   string `json:"source"`          // user-config | builtin | ollama | lmstudio
+}
+
+// ─── ctrl_list_presets ───────────────────────────────────────────────────────
+
+// ListPresetsRequest enumerates presets from ~/.pi/agent/pic-presets.json.
+// Labels and HasLabel filter results with the same AND-match semantics as
+// ctrl_list: all Labels k=v pairs must match and all HasLabel keys must be
+// present on the preset's labels map.
+type ListPresetsRequest struct {
+	Type     string            `json:"type"`               // "ctrl_list_presets"
+	ID       string            `json:"id,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`   // AND-match: all k=v must match
+	HasLabel []string          `json:"hasLabel,omitempty"` // key presence only
+}
+
+// ListPresetsResponseData is the data payload for ctrl_list_presets responses.
+type ListPresetsResponseData struct {
+	Presets []PresetInfo `json:"presets"`
+}
+
+// PresetInfo is one entry in a ctrl_list_presets response.
+type PresetInfo struct {
+	Name   string            `json:"name"`
+	Model  string            `json:"model,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
