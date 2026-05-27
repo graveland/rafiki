@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -44,6 +45,18 @@ scripting / AFK workflows, use --detached.)`,
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the pic-helpers pi extension")
 	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/pic-presets.json")
+	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		// Best-effort: silently empty list when presets file is missing or malformed.
+		pf, err := loadPresets()
+		if err != nil || pf == nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		names := make([]string, 0, len(pf.Presets))
+		for name := range pf.Presets {
+			names = append(names, name)
+		}
+		return names, cobra.ShellCompDirectiveNoFileComp
+	})
 	return cmd
 }
 
@@ -60,6 +73,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
 	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see PIC_DEFAULT_LABELS")
+	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -130,6 +144,12 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		name = args[0]
 	}
 
+	forwardEnv, _ := cmd.Flags().GetBool("forward-env")
+	var env map[string]string
+	if forwardEnv {
+		env = collectCallerEnv()
+	}
+
 	return protocol.SpawnRequest{
 		Type:          protocol.TypeCtrlSpawn,
 		Name:          name,
@@ -144,7 +164,34 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		Verbose:       verbose,
 		ExtraArgs:     extraArgs,
 		Labels:        labels,
+		Env:           env,
+		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
+		// caller-forwarded vars win on duplicate keys.  This is what users
+		// usually want — SSH_AUTH_SOCK, *_API_KEY, GOOGLE_APPLICATION_CREDENTIALS,
+		// and the caller's PATH (often richer than launchd's) all override the
+		// daemon's minimal defaults.
+		EnvOverride: false,
 	}, nil
+}
+
+// collectCallerEnv snapshots the calling process's environment for inclusion
+// in a SpawnRequest.  Reserved PI_CONTROLLER_* keys are stripped so they
+// can't override what the daemon injects per-child.
+func collectCallerEnv() map[string]string {
+	environ := os.Environ()
+	out := make(map[string]string, len(environ))
+	for _, kv := range environ {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		k := kv[:eq]
+		if strings.HasPrefix(k, "PI_CONTROLLER_") {
+			continue
+		}
+		out[k] = kv[eq+1:]
+	}
+	return out
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
