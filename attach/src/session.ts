@@ -218,7 +218,8 @@ export function restoreTerminal(): void {
     }
     if (process.stdout.isTTY) {
         // Show cursor, exit alternate screen, disable bracketed paste, disable
-        // mouse tracking (1000/1002/1003/1006), reset attributes.
+        // mouse tracking (1000/1002/1003/1006), pop kitty keyboard protocol
+        // stack, disable xterm modifyOtherKeys, reset attributes.
         process.stdout.write(
             "\x1b[?25h" +    // DECTCEM show cursor
             "\x1b[?1049l" +  // exit alternate screen buffer
@@ -227,6 +228,8 @@ export function restoreTerminal(): void {
             "\x1b[?1002l" +  // disable cell motion mouse tracking
             "\x1b[?1003l" +  // disable all-motion mouse tracking
             "\x1b[?1006l" +  // disable SGR-encoded mouse
+            "\x1b[<u" +      // pop kitty keyboard protocol stack
+            "\x1b[>4;0m" +   // disable xterm modifyOtherKeys
             "\x1b[0m"        // reset SGR attributes
         );
     }

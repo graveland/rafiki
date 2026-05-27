@@ -164,8 +164,19 @@ func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit 
 	defer signal.Stop(sigCh)
 
 	if err := execPicAttach(childID); err != nil {
+		// Even on subprocess error, defensively reset the terminal — pic-attach
+		// may have crashed mid-render with raw mode / alt screen / kitty
+		// keyboard protocol active, and the user is about to see Go-side output.
+		resetTerminal()
 		return err
 	}
+
+	// Defensively reset the terminal regardless of pic-attach's exit path.
+	// Pi-tui's own teardown should handle this, but races on hard exit paths
+	// (daemon broadcast, signal-driven shutdown, uncaught throws) have left
+	// the terminal in advanced modes (kitty keyboard, modifyOtherKeys, etc.)
+	// that the TS-side restoreTerminal missed.  This is a safety net.
+	resetTerminal()
 
 	// Stop delivery before the non-blocking drain so there's no race between
 	// signal.Stop and the select.
@@ -314,6 +325,40 @@ func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
 		}
 	}
 	return out
+}
+
+// resetTerminal writes a comprehensive set of escape sequences to restore the
+// terminal to a sane interactive state.  Called by attachAndDecide after the
+// pic-attach subprocess returns — a safety net in case the TS-side
+// restoreTerminal missed something (kitty keyboard protocol races, etc.).
+//
+// Mirrors what `reset(1)` does for advanced terminal modes pi-tui activates:
+//   - DECTCEM (?25h)       → show cursor
+//   - ?1049l               → exit alternate screen buffer
+//   - ?2004l               → disable bracketed paste
+//   - ?1000l/?1002l/?1003l → disable mouse tracking (X11/cell/all-motion)
+//   - ?1006l               → disable SGR-encoded mouse
+//   - <u                   → pop kitty keyboard protocol stack (full reset)
+//   - >4;0m                → disable xterm modifyOtherKeys
+//   - 0m                   → reset SGR attributes
+//
+// All writes go to stdout (where the TUI was) regardless of pic-attach's
+// stdout direction — pic's stdout is the terminal in this caller path.
+func resetTerminal() {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return
+	}
+	const seq = "\x1b[?25h" + // show cursor
+		"\x1b[?1049l" + // exit alt screen
+		"\x1b[?2004l" + // disable bracketed paste
+		"\x1b[?1000l" + // disable X11 mouse
+		"\x1b[?1002l" + // disable cell motion mouse
+		"\x1b[?1003l" + // disable all-motion mouse
+		"\x1b[?1006l" + // disable SGR-encoded mouse
+		"\x1b[<u" + // pop kitty keyboard protocol stack
+		"\x1b[>4;0m" + // disable xterm modifyOtherKeys
+		"\x1b[0m" // reset SGR attributes
+	_, _ = os.Stdout.WriteString(seq)
 }
 
 // knownEventTypes lists pi RPC event types used by --include/--exclude
