@@ -71,6 +71,9 @@ func addSpawnFlags(cmd *cobra.Command) {
 		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
 	})
 	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
+	_ = cmd.RegisterFlagCompletionFunc("model", func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeModel(toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
 }
 
 // buildSpawnRequest constructs a SpawnRequest from the spawn flags, env-var
