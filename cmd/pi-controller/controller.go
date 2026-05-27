@@ -416,8 +416,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	}
 
 	// Emit ctrl_child_spawned immediately after the process is running and the
-	// state record is persisted (spec §6.3.3, §7.2). Delivered to both global
-	// subscribers and per-child subscribers of this child.
+	// state record is persisted (spec §6.3.3, §7.2). Delivered to global,
+	// per-child, and label-filtered subscribers.
 	spawnedEvt := protocol.CtrlChildSpawned{
 		Type:    protocol.TypeCtrlChildSpawned,
 		ChildID: childID,
@@ -430,6 +430,9 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	if b, err := json.Marshal(spawnedEvt); err == nil {
 		c.cm.DeliverToGlobal(b)
 		c.cm.DeliverToChild(childID, b)
+		if snap, ok := c.st.Get(childID); ok {
+			c.cm.DeliverToMatching(childID, snap.Labels, b)
+		}
 	}
 
 	// Post-Idle: name reconciliation, metadata update, status transition,
@@ -631,6 +634,9 @@ func (c *Controller) activateLiveChild(
 	if b, err := json.Marshal(spawnedEvt); err == nil {
 		c.cm.DeliverToGlobal(b)
 		c.cm.DeliverToChild(childID, b)
+		if spawnSnap, ok := c.st.Get(childID); ok {
+			c.cm.DeliverToMatching(childID, spawnSnap.Labels, b)
+		}
 	}
 
 	go c.monitorChild(childID, ch)
@@ -1004,7 +1010,11 @@ func (c *Controller) SetLabels(childID string, set map[string]string, remove []s
 }
 
 // emitChildLabeled broadcasts a ctrl_child_labeled event carrying the full
-// post-mutation label map to both global and per-child subscribers.
+// post-mutation label map to global, per-child, and label-filtered subscribers.
+//
+// Label-filtered delivery uses the NEW (post-mutation) labels for matching.
+// Subscribers that matched the old labels but not the new simply stop
+// receiving future events — no synthetic "left filter" event is emitted (v1).
 func (c *Controller) emitChildLabeled(childID string, labels map[string]string) {
 	evt := protocol.CtrlChildLabeled{
 		Type:    protocol.TypeCtrlChildLabeled,
@@ -1014,6 +1024,8 @@ func (c *Controller) emitChildLabeled(childID string, labels map[string]string) 
 	if b, err := json.Marshal(evt); err == nil {
 		c.cm.DeliverToGlobal(b)
 		c.cm.DeliverToChild(childID, b)
+		// Use new labels for dynamic filter evaluation.
+		c.cm.DeliverToMatching(childID, labels, b)
 	}
 }
 
@@ -1148,15 +1160,30 @@ func (c *Controller) GlobalUnsubscribe(conn server.Connection) error {
 	return nil
 }
 
+// SubscribeLabeled registers conn as a label-filtered subscriber. Events are
+// delivered from every child whose labels match the filter, evaluated
+// dynamically on each event. A nil filter means "pass everything".
+// Cleanup occurs automatically in OnConnectionClose.
+func (c *Controller) SubscribeLabeled(conn server.Connection, labels map[string]string, hasLabel []string, filter protocol.SubscribeFilter) error {
+	var fp *protocol.SubscribeFilter
+	if filter.Profile != "" || len(filter.Include) > 0 || len(filter.Exclude) > 0 {
+		f := filter
+		fp = &f
+	}
+	c.cm.RegisterLabeled(conn, labels, hasLabel, fp)
+	return nil
+}
+
 // OnConnectionClose is called by the server when a client connection closes.
-// It removes any global subscriptions held by this connection.
+// It removes global and label-filtered subscriptions held by this connection.
 //
-// TODO: per-child subscribers for this connection are not cleaned up here;
+// Note: per-child subscribers for this connection are not cleaned up here;
 // they accumulate until the child is removed from the ChildManager on exit.
 // This is a known limitation — per-child sub sets are bounded by the child
 // lifetime and the subscriber count is small in practice.
 func (c *Controller) OnConnectionClose(conn server.Connection) {
 	c.cm.GlobalUnsubscribe(conn)
+	c.cm.RemoveLabeledSubsForConn(conn)
 }
 
 // ─── monitorChild ─────────────────────────────────────────────────────────────
@@ -1189,7 +1216,12 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			}
 			// Wrap in ctrl_event envelope so subscribers can correlate events to
 			// their source child (spec §7.1).
-			c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, frame))
+			wrapped := wrapCtrlEvent(childID, frame)
+			c.cm.DeliverToChild(childID, wrapped)
+			// Deliver to label-filtered subscribers using the child's current labels.
+			if snap, ok := c.st.Get(childID); ok {
+				c.cm.DeliverToMatching(childID, snap.Labels, wrapped)
+			}
 
 			// Check for status change and keep store + global subs in sync.
 			if newStatus := ch.Status(); newStatus != lastStatus {
@@ -1224,7 +1256,11 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 					if !ok {
 						drained = true
 					} else {
-						c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, frame))
+						wrapped := wrapCtrlEvent(childID, frame)
+						c.cm.DeliverToChild(childID, wrapped)
+						if snap, ok := c.st.Get(childID); ok {
+							c.cm.DeliverToMatching(childID, snap.Labels, wrapped)
+						}
 					}
 				default:
 					drained = true
@@ -1260,9 +1296,12 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		At:       now.UnixMilli(),
 	}
 	if b, err := json.Marshal(evt); err == nil {
-		// Deliver to global subscribers AND to per-child subscribers (spec §7.4).
+		// Deliver to global, per-child, and label-filtered subscribers (spec §7.4).
 		c.cm.DeliverToGlobal(b)
 		c.cm.DeliverToChild(childID, b)
+		if snap, ok := c.st.Get(childID); ok {
+			c.cm.DeliverToMatching(childID, snap.Labels, b)
+		}
 	}
 }
 
@@ -1312,6 +1351,9 @@ func (c *Controller) handleChildRenamed(childID, newName, previous string) {
 	if b, err := json.Marshal(evt); err == nil {
 		c.cm.DeliverToGlobal(b)
 		c.cm.DeliverToChild(childID, b)
+		if snap, ok := c.st.Get(childID); ok {
+			c.cm.DeliverToMatching(childID, snap.Labels, b)
+		}
 	}
 }
 
@@ -1377,10 +1419,14 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		At:         now.UnixMilli(),
 	}
 	if b, err := json.Marshal(exitEvt); err == nil {
-		// Deliver to per-child subscribers BEFORE Remove so the subscriber list
-		// is still reachable. Deliver to global subscribers too (spec §7.3).
+		// Deliver to per-child and global subscribers BEFORE Remove so the
+		// subscriber list is still reachable (spec §7.3).
 		c.cm.DeliverToChild(childID, b)
 		c.cm.DeliverToGlobal(b)
+		// Deliver to label-filtered subscribers; read snap (already marked exited).
+		if snap, ok := c.st.Get(childID); ok {
+			c.cm.DeliverToMatching(childID, snap.Labels, b)
+		}
 	}
 
 	c.cm.Remove(childID)

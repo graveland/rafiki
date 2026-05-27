@@ -253,6 +253,69 @@ func isStdinTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
+// completeLabelPairs returns "k=v" completions from all currently-known
+// children, skipping pic/ auto-labels.  Used for --label flag completion.
+func completeLabelPairs(cmd *cobra.Command, toComplete string) []string {
+	c, err := client.Dial(socketFromCmd(cmd))
+	if err != nil {
+		return nil
+	}
+	defer c.Close()
+	children, err := c.List(cmdCtx(cmd), protocol.ListFilter{})
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, ch := range children {
+		for k, v := range ch.Labels {
+			if strings.HasPrefix(k, "pic/") {
+				continue
+			}
+			pair := k + "=" + v
+			if _, ok := seen[pair]; ok {
+				continue
+			}
+			if strings.HasPrefix(pair, toComplete) {
+				out = append(out, pair)
+			}
+			seen[pair] = struct{}{}
+		}
+	}
+	return out
+}
+
+// completeLabelKeys returns label key completions from all currently-known
+// children, skipping pic/ auto-labels.  Used for --has-label flag completion.
+func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
+	c, err := client.Dial(socketFromCmd(cmd))
+	if err != nil {
+		return nil
+	}
+	defer c.Close()
+	children, err := c.List(cmdCtx(cmd), protocol.ListFilter{})
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, ch := range children {
+		for k := range ch.Labels {
+			if strings.HasPrefix(k, "pic/") {
+				continue
+			}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			if strings.HasPrefix(k, toComplete) {
+				out = append(out, k)
+			}
+			seen[k] = struct{}{}
+		}
+	}
+	return out
+}
+
 // knownEventTypes lists pi RPC event types used by --include/--exclude
 // flags on tail and recent. Source: tasks/pi-controller-protocol.md §7 and §10.
 var knownEventTypes = []string{

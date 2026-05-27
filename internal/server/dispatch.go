@@ -92,6 +92,12 @@ type Controller interface {
 	GlobalSubscribe(conn Connection) error
 	GlobalUnsubscribe(conn Connection) error
 
+	// SubscribeLabeled subscribes conn to events from every child whose labels
+	// match the given filter (AND-match across labels; key-presence for
+	// hasLabel).  Delivery is dynamic: matching starts or stops as labels
+	// change.  Cleanup occurs when OnConnectionClose is called for conn.
+	SubscribeLabeled(conn Connection, labels map[string]string, hasLabel []string, filter protocol.SubscribeFilter) error
+
 	// OnConnectionClose is called when a client connection closes. The
 	// controller removes any subscriptions (global and per-child) held by
 	// this connection so they do not leak.
@@ -459,12 +465,29 @@ func (d *dispatcher) subscribe(conn Connection, frame []byte, id string) []byte 
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlSubscribe, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	if req.ChildID == "" {
-		return errResponse(protocol.TypeCtrlSubscribe, id, protocol.ErrInvalidArgs, "childId required")
+
+	// childId and label filter are mutually exclusive.
+	if req.ChildID != "" && (len(req.Labels) > 0 || len(req.HasLabel) > 0) {
+		return errResponse(protocol.TypeCtrlSubscribe, id, protocol.ErrInvalidArgs,
+			"subscribe: childId and labels are mutually exclusive")
 	}
+
 	var filter protocol.SubscribeFilter
 	if req.Filter != nil {
 		filter = *req.Filter
+	}
+
+	// Label-filtered subscription mode.
+	if len(req.Labels) > 0 || len(req.HasLabel) > 0 {
+		if err := d.c.SubscribeLabeled(conn, req.Labels, req.HasLabel, filter); err != nil {
+			return mapErr(protocol.TypeCtrlSubscribe, id, err, protocol.ErrInternal)
+		}
+		return okResponse(protocol.TypeCtrlSubscribe, id, nil)
+	}
+
+	// Per-child subscription (existing behaviour).
+	if req.ChildID == "" {
+		return errResponse(protocol.TypeCtrlSubscribe, id, protocol.ErrInvalidArgs, "childId required")
 	}
 	if err := d.c.Subscribe(req.ChildID, conn, filter); err != nil {
 		return mapErr(protocol.TypeCtrlSubscribe, id, err, protocol.ErrChildNotFound)

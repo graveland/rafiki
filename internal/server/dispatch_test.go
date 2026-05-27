@@ -36,6 +36,7 @@ type fakeController struct {
 	unsubscribeFn         func(string, server.Connection) error
 	globalSubscribeFn     func(server.Connection) error
 	globalUnsubscribeFn   func(server.Connection) error
+	subscribeLabeledFn    func(server.Connection, map[string]string, []string, protocol.SubscribeFilter) error
 	onConnectionCloseFn   func(server.Connection)
 }
 
@@ -140,6 +141,13 @@ func (f *fakeController) GlobalSubscribe(conn server.Connection) error {
 func (f *fakeController) GlobalUnsubscribe(conn server.Connection) error {
 	if f.globalUnsubscribeFn != nil {
 		return f.globalUnsubscribeFn(conn)
+	}
+	return nil
+}
+
+func (f *fakeController) SubscribeLabeled(conn server.Connection, labels map[string]string, hasLabel []string, filter protocol.SubscribeFilter) error {
+	if f.subscribeLabeledFn != nil {
+		return f.subscribeLabeledFn(conn, labels, hasLabel, filter)
 	}
 	return nil
 }
@@ -908,6 +916,80 @@ func TestDispatch_Subscribe_MissingChildID(t *testing.T) {
 	d := server.NewDispatch(&fakeController{})
 	resp := d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_subscribe","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
+}
+
+func TestDispatch_Subscribe_LabelFiltered_Success(t *testing.T) {
+	var gotLabels map[string]string
+	var gotHasLabel []string
+	var gotFilter protocol.SubscribeFilter
+	c := &fakeController{
+		subscribeLabeledFn: func(_ server.Connection, labels map[string]string, hasLabel []string, filter protocol.SubscribeFilter) error {
+			gotLabels = labels
+			gotHasLabel = hasLabel
+			gotFilter = filter
+			return nil
+		},
+	}
+	d := server.NewDispatch(c)
+	frame := `{"type":"ctrl_subscribe","id":"lf-1","labels":{"context":"work"},"hasLabel":["team"]}`
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+	if r.Command != protocol.TypeCtrlSubscribe {
+		t.Errorf("command: %s", r.Command)
+	}
+	if gotLabels["context"] != "work" {
+		t.Errorf("labels: %v", gotLabels)
+	}
+	if len(gotHasLabel) != 1 || gotHasLabel[0] != "team" {
+		t.Errorf("hasLabel: %v", gotHasLabel)
+	}
+	_ = gotFilter
+}
+
+func TestDispatch_Subscribe_LabelFiltered_WithFilter(t *testing.T) {
+	var gotFilter protocol.SubscribeFilter
+	c := &fakeController{
+		subscribeLabeledFn: func(_ server.Connection, _ map[string]string, _ []string, filter protocol.SubscribeFilter) error {
+			gotFilter = filter
+			return nil
+		},
+	}
+	d := server.NewDispatch(c)
+	frame := `{"type":"ctrl_subscribe","id":"lf-2","labels":{"env":"prod"},"filter":{"profile":"coarse"}}`
+	mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+	if gotFilter.Profile != "coarse" {
+		t.Errorf("filter.profile: %s", gotFilter.Profile)
+	}
+}
+
+func TestDispatch_Subscribe_ChildIDAndLabels_MutuallyExclusive(t *testing.T) {
+	d := server.NewDispatch(&fakeController{})
+	frame := `{"type":"ctrl_subscribe","id":"lf-3","childId":"c_001","labels":{"env":"prod"}}`
+	resp := d.HandleFrame(discardConn{}, []byte(frame))
+	mustError(t, resp, protocol.ErrInvalidArgs)
+	// Verify the error message is specific.
+	r := parseResponse(t, resp)
+	if r.Error.Message != "subscribe: childId and labels are mutually exclusive" {
+		t.Errorf("unexpected message: %s", r.Error.Message)
+	}
+}
+
+func TestDispatch_Subscribe_HasLabelOnly(t *testing.T) {
+	called := false
+	c := &fakeController{
+		subscribeLabeledFn: func(_ server.Connection, _ map[string]string, hasLabel []string, _ protocol.SubscribeFilter) error {
+			called = true
+			if len(hasLabel) != 1 || hasLabel[0] != "tier" {
+				return &server.ControllerError{Code: protocol.ErrInvalidArgs, Message: "wrong hasLabel"}
+			}
+			return nil
+		},
+	}
+	d := server.NewDispatch(c)
+	frame := `{"type":"ctrl_subscribe","id":"lf-4","hasLabel":["tier"]}`
+	mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+	if !called {
+		t.Error("SubscribeLabeled was not called")
+	}
 }
 
 // ─── ctrl_unsubscribe ────────────────────────────────────────────────────────

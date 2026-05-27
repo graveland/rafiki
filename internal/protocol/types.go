@@ -222,13 +222,24 @@ type AuthRequest struct {
 	Token string `json:"token"`
 }
 
-// SubscribeRequest subscribes to events from one child (§6.7).
-// Default profile when filter is omitted: firehose (everything).
+// SubscribeRequest subscribes to events from one child or a label-filtered
+// set of children (§6.7).  Default profile when filter is omitted: firehose.
+//
+// Mode resolution:
+//   - ChildID set, Labels/HasLabel empty → per-child subscription.
+//   - ChildID empty, Labels/HasLabel set → label-filtered subscription:
+//     events from every child currently matching the filter, including
+//     children that spawn or are relabelled into a match later.
+//   - ChildID set AND Labels/HasLabel set → error (mutually exclusive).
 type SubscribeRequest struct {
 	Type    string           `json:"type"`
 	ID      string           `json:"id,omitempty"`
-	ChildID string           `json:"childId"`
+	ChildID string           `json:"childId,omitempty"`
 	Filter  *SubscribeFilter `json:"filter,omitempty"`
+	// Labels and HasLabel select the label-filtered mode.  AND-match across
+	// Labels entries; HasLabel tests key presence only.
+	Labels   map[string]string `json:"labels,omitempty"`
+	HasLabel []string          `json:"hasLabel,omitempty"`
 }
 
 // UnsubscribeRequest removes the per-child subscription for this connection (§6.9).

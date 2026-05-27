@@ -17,6 +17,28 @@ import (
 // is received.  The run loop in cmd_tail.go uses this to exit cleanly.
 var errDaemonShutdown = errors.New("daemon_shutdown")
 
+// linePrefixWriter is an io.Writer that prepends Prefix to each non-empty,
+// non-blank Write call.  It is used by pic tail in label-filtered mode to
+// prefix each event line with the source child's short ID.  The Prefix field
+// is updated between events — safe because tail's render loop is single-
+// threaded with respect to writes.
+type linePrefixWriter struct {
+	w      io.Writer
+	Prefix string // updated per-event by the run loop
+}
+
+func (pw *linePrefixWriter) Write(p []byte) (int, error) {
+	// Don't prefix blank lines (e.g. the separator fmt.Fprintln(w, "") emits).
+	if pw.Prefix == "" || len(p) == 0 || p[0] == '\n' {
+		return pw.w.Write(p)
+	}
+	buf := make([]byte, 0, len(pw.Prefix)+len(p))
+	buf = append(buf, pw.Prefix...)
+	buf = append(buf, p...)
+	_, err := pw.w.Write(buf)
+	return len(p), err
+}
+
 // tailRenderer formats incoming event frames (raw bytes) onto w.
 // It handles the ctrl_event wrapper (pi events) and ctrl_child_* lifecycle events.
 //

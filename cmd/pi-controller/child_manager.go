@@ -22,15 +22,29 @@ type childEntry struct {
 	subs []*connSub
 }
 
-// ChildManager owns all live *child.Child instances and the per-child and
-// global subscriber registries. All exported methods are safe for concurrent
-// use.
+// labeledSub is a label-filtered subscriber: it receives events from every
+// child whose labels satisfy the AND-match (labels) and key-presence
+// (hasLabel) filter.  Delivery is re-evaluated on each event so label
+// changes take effect immediately without re-subscribing.
+type labeledSub struct {
+	conn     server.Connection
+	labels   map[string]string
+	hasLabel []string
+	filter   *protocol.SubscribeFilter // optional event-type filter
+}
+
+// ChildManager owns all live *child.Child instances and the per-child,
+// global, and label-filtered subscriber registries. All exported methods are
+// safe for concurrent use.
 type ChildManager struct {
 	mu       sync.RWMutex
 	children map[string]*childEntry
 
 	globalMu   sync.Mutex
 	globalSubs []*connSub // global subscribers (lifecycle events only)
+
+	labeledMu   sync.Mutex
+	labeledSubs []*labeledSub // label-filtered subscribers
 }
 
 func newChildManager() *ChildManager {
@@ -182,6 +196,79 @@ func (cm *ChildManager) DeliverToGlobal(frame []byte) {
 	cm.globalMu.Unlock()
 
 	for _, s := range subs {
+		s.conn.Deliver(frame)
+	}
+}
+
+// ─── Label-filtered subscriber methods ───────────────────────────────────────
+
+// RegisterLabeled adds conn as a label-filtered subscriber and returns the
+// registration handle (used by UnregisterLabeled for explicit cleanup; the
+// connection-close path uses RemoveLabeledSubsForConn instead).
+func (cm *ChildManager) RegisterLabeled(conn server.Connection, labels map[string]string, hasLabel []string, filter *protocol.SubscribeFilter) *labeledSub {
+	sub := &labeledSub{
+		conn:     conn,
+		labels:   labels,
+		hasLabel: hasLabel,
+		filter:   filter,
+	}
+	cm.labeledMu.Lock()
+	cm.labeledSubs = append(cm.labeledSubs, sub)
+	cm.labeledMu.Unlock()
+	return sub
+}
+
+// UnregisterLabeled removes a specific labeled subscription by pointer
+// identity. No-op if already removed.
+func (cm *ChildManager) UnregisterLabeled(sub *labeledSub) {
+	cm.labeledMu.Lock()
+	defer cm.labeledMu.Unlock()
+	for i, s := range cm.labeledSubs {
+		if s == sub {
+			cm.labeledSubs = append(cm.labeledSubs[:i], cm.labeledSubs[i+1:]...)
+			return
+		}
+	}
+}
+
+// RemoveLabeledSubsForConn removes all labeled subscriptions associated with
+// conn. Called from OnConnectionClose to prevent delivery to closed connections.
+func (cm *ChildManager) RemoveLabeledSubsForConn(conn server.Connection) {
+	cm.labeledMu.Lock()
+	defer cm.labeledMu.Unlock()
+	keep := cm.labeledSubs[:0]
+	for _, s := range cm.labeledSubs {
+		if s.conn != conn {
+			keep = append(keep, s)
+		}
+	}
+	cm.labeledSubs = keep
+}
+
+// DeliverToMatching delivers frame to all labeled subscribers whose label
+// filter matches currentLabels and whose event filter (if present) passes for
+// this frame.  The label match is evaluated on each call so label changes
+// take effect at the next event without requiring re-subscription.
+//
+// Note: subscribers whose labels previously matched but no longer do simply
+// stop receiving events — no synthetic "left filter" event is emitted (v1).
+func (cm *ChildManager) DeliverToMatching(childID string, currentLabels map[string]string, frame []byte) {
+	cm.labeledMu.Lock()
+	subs := make([]*labeledSub, len(cm.labeledSubs))
+	copy(subs, cm.labeledSubs)
+	cm.labeledMu.Unlock()
+
+	for _, s := range subs {
+		if !matchesLabelFilter(currentLabels, s.labels, s.hasLabel) {
+			continue
+		}
+		var filter protocol.SubscribeFilter
+		if s.filter != nil {
+			filter = *s.filter
+		}
+		if !eventPassesFilter(frame, filter) {
+			continue
+		}
 		s.conn.Deliver(frame)
 	}
 }

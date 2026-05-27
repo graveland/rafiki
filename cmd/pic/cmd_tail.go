@@ -24,7 +24,9 @@ func newTailCmd() *cobra.Command {
 By default, token-by-token message_update deltas are suppressed (--no-deltas=true).
 Use --profile to select a named filter preset, or --include/--exclude to customize.
 
-pic tail exits automatically when the child exits.`,
+In per-child mode, pic tail exits automatically when the child exits.
+In label-filtered mode (--label/--has-label), pic tail streams from all matching
+children and exits only on SIGINT/SIGTERM.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runTail,
 	}
@@ -33,6 +35,8 @@ pic tail exits automatically when the child exits.`,
 	cmd.Flags().StringSlice("exclude", nil, "Exclude event types from subscription (repeatable)")
 	cmd.Flags().Bool("no-deltas", true, "Suppress token-by-token message_update deltas (default true)")
 	cmd.Flags().BoolP("verbose", "v", false, "Include internal RPC response frames (autocomplete fetches, get_state, etc.)")
+	cmd.Flags().StringSlice("label", nil, "Subscribe to all children matching label k=v (repeatable; mutually exclusive with [id])")
+	cmd.Flags().StringSlice("has-label", nil, "Subscribe to all children that have label key k (repeatable)")
 
 	_ = cmd.RegisterFlagCompletionFunc("profile", cobra.FixedCompletions(
 		[]string{"firehose", "results", "coarse", "lifecycle"},
@@ -43,6 +47,12 @@ pic tail exits automatically when the child exits.`,
 	})
 	_ = cmd.RegisterFlagCompletionFunc("exclude", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("label", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeLabelPairs(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("has-label", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeLabelKeys(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
 
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -73,6 +83,121 @@ func runTail(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	labelPairs, _ := cmd.Flags().GetStringSlice("label")
+	hasLabelKeys, _ := cmd.Flags().GetStringSlice("has-label")
+
+	labels, err := parseLabelFilterPairs(labelPairs)
+	if err != nil {
+		return fmt.Errorf("--label: %w", err)
+	}
+	hasLabels, err := parseLabelFilterKeys(hasLabelKeys)
+	if err != nil {
+		return fmt.Errorf("--has-label: %w", err)
+	}
+
+	labelFiltered := len(labels) > 0 || len(hasLabels) > 0
+
+	// Validate: id/name and label filter are mutually exclusive.
+	if len(args) > 0 && labelFiltered {
+		return fmt.Errorf("specify either an id/name or --label/--has-label, not both")
+	}
+
+	profile, _ := cmd.Flags().GetString("profile")
+	include, _ := cmd.Flags().GetStringSlice("include")
+	exclude, _ := cmd.Flags().GetStringSlice("exclude")
+	noDeltas, _ := cmd.Flags().GetBool("no-deltas")
+	if noDeltas {
+		exclude = append(exclude, "message_update")
+	}
+
+	mode, useColor := outputOpts(cmd)
+	verbose, _ := cmd.Flags().GetBool("verbose")
+
+	events, cancelSub, err := c.Subscribe()
+	if err != nil {
+		return err
+	}
+	defer cancelSub()
+
+	if labelFiltered {
+		return runTailLabeled(ctx, c, events, labels, hasLabels, profile, include, exclude, mode, useColor, verbose)
+	}
+	return runTailChild(ctx, c, events, args, profile, include, exclude, mode, useColor, verbose)
+}
+
+// runTailLabeled handles the label-filtered subscription mode.  It subscribes
+// to events from all children matching the label filter and streams them with
+// a per-child ID prefix so multi-child output is readable.
+func runTailLabeled(
+	ctx context.Context,
+	c *client.Client,
+	events <-chan []byte,
+	labels map[string]string,
+	hasLabels []string,
+	profile string, include, exclude []string,
+	mode outputMode, useColor, verbose bool,
+) error {
+	subReq := protocol.SubscribeRequest{
+		Type:     protocol.TypeCtrlSubscribe,
+		Labels:   labels,
+		HasLabel: hasLabels,
+	}
+	if profile != "" || len(include) > 0 || len(exclude) > 0 {
+		subReq.Filter = &protocol.SubscribeFilter{
+			Profile: profile,
+			Include: include,
+			Exclude: exclude,
+		}
+	}
+
+	resp, err := c.Request(ctx, subReq)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("ctrl_subscribe: %s", client.FormatError(resp))
+	}
+
+	// In label-filtered mode each event is prefixed with the short child ID so
+	// multi-child output is parseable.
+	pw := &linePrefixWriter{w: os.Stdout}
+	renderer := newTailRenderer(pw, useColor, mode, verbose)
+
+	for {
+		select {
+		case frame, ok := <-events:
+			if !ok {
+				return nil
+			}
+			// Set the per-event prefix before rendering.
+			if cid := frameChildID(frame); cid != "" {
+				pw.Prefix = "[" + shortChildID(cid) + "] "
+			} else {
+				pw.Prefix = ""
+			}
+			if err := renderer.render(frame); err != nil {
+				if errors.Is(err, errDaemonShutdown) {
+					return nil
+				}
+				fmt.Fprintln(os.Stderr, "render error:", err)
+			}
+			// In label-filtered mode we never auto-exit: other matching
+			// children may still be active after any one child exits.
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+// runTailChild handles the per-child subscription mode (existing behaviour).
+func runTailChild(
+	ctx context.Context,
+	c *client.Client,
+	events <-chan []byte,
+	args []string,
+	profile string, include, exclude []string,
+	mode outputMode, useColor, verbose bool,
+) error {
 	target := ""
 	if len(args) > 0 {
 		target = args[0]
@@ -84,20 +209,6 @@ func runTail(cmd *cobra.Command, args []string) error {
 	// Best-effort: update the active marker so subsequent no-arg commands
 	// default to this child.
 	_ = setActive(childID)
-
-	events, cancelSub, err := c.Subscribe()
-	if err != nil {
-		return err
-	}
-	defer cancelSub()
-
-	profile, _ := cmd.Flags().GetString("profile")
-	include, _ := cmd.Flags().GetStringSlice("include")
-	exclude, _ := cmd.Flags().GetStringSlice("exclude")
-	noDeltas, _ := cmd.Flags().GetBool("no-deltas")
-	if noDeltas {
-		exclude = append(exclude, "message_update")
-	}
 
 	subReq := protocol.SubscribeRequest{
 		Type:    protocol.TypeCtrlSubscribe,
@@ -119,8 +230,6 @@ func runTail(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ctrl_subscribe: %s", client.FormatError(resp))
 	}
 
-	mode, useColor := outputOpts(cmd)
-	verbose, _ := cmd.Flags().GetBool("verbose")
 	renderer := newTailRenderer(os.Stdout, useColor, mode, verbose)
 
 	for {
@@ -155,4 +264,25 @@ func isChildExited(frame []byte, childID string) bool {
 		return false
 	}
 	return hdr.Type == protocol.TypeCtrlChildExited && hdr.ChildID == childID
+}
+
+// frameChildID extracts the childId field from a frame, returning "" if absent
+// or the frame is unparseable.
+func frameChildID(frame []byte) string {
+	var hdr struct {
+		ChildID string `json:"childId"`
+	}
+	if err := json.Unmarshal(frame, &hdr); err != nil {
+		return ""
+	}
+	return hdr.ChildID
+}
+
+// shortChildID returns up to 8 chars of id as a compact display token.
+func shortChildID(id string) string {
+	const n = 8
+	if len(id) <= n {
+		return id
+	}
+	return id[:n]
 }

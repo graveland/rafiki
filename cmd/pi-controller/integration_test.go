@@ -427,3 +427,83 @@ func TestIntegration_MultipleCommands(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegration_Subscribe_LabelFiltered verifies that a label-filtered
+// ctrl_subscribe succeeds and that combining childId + labels returns the
+// mutually-exclusive error.
+func TestIntegration_Subscribe_LabelFiltered(t *testing.T) {
+	t.Parallel()
+
+	dir := testSocketDir(t)
+	socketPath := filepath.Join(dir, "c.sock")
+	st := store.New()
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+
+	handler := server.NewDispatch(ctrl)
+	srv, err := server.Listen(socketPath, handler)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	br := bufio.NewReader(conn)
+
+	// Label-filtered subscribe: should succeed.
+	if _, err := conn.Write([]byte(`{"type":"ctrl_subscribe","id":"lf-1","labels":{"context":"work"}}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var resp protocol.Response
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("label-filtered subscribe: expected success, got %+v", resp.Error)
+	}
+
+	// hasLabel-only subscribe: should succeed.
+	if _, err := conn.Write([]byte(`{"type":"ctrl_subscribe","id":"lf-2","hasLabel":["tier"]}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	line, err = br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("hasLabel subscribe: expected success, got %+v", resp.Error)
+	}
+
+	// childId + labels: mutually exclusive error.
+	if _, err := conn.Write([]byte(`{"type":"ctrl_subscribe","id":"lf-3","childId":"c_x","labels":{"env":"prod"}}` + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	line, err = br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("expected error for childId+labels, got success")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrInvalidArgs {
+		t.Errorf("expected invalid_args, got %+v", resp.Error)
+	}
+	if resp.Error != nil && resp.Error.Message != "subscribe: childId and labels are mutually exclusive" {
+		t.Errorf("unexpected error message: %s", resp.Error.Message)
+	}
+}

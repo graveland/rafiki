@@ -47,6 +47,50 @@ func parseLabelPairs(pairs []string) (map[string]string, error) {
 	return result, nil
 }
 
+// parseLabelFilterPairs parses "k=v" strings for use in label filter queries
+// (e.g. pic tail --label).  Unlike parseLabelPairs, this does NOT reject the
+// pic/ prefix, since filtering by auto-labels (e.g. pic/model=...) is valid.
+func parseLabelFilterPairs(pairs []string) (map[string]string, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		idx := strings.IndexByte(pair, '=')
+		if idx < 0 {
+			return nil, fmt.Errorf("label %q is not in k=v format", pair)
+		}
+		k := pair[:idx]
+		v := pair[idx+1:]
+		if k == "" {
+			return nil, fmt.Errorf("label key must not be empty")
+		}
+		if !cliLabelKeyRE.MatchString(k) {
+			return nil, fmt.Errorf("label key %q contains invalid characters (allowed: a-z A-Z 0-9 _ . / -)", k)
+		}
+		result[k] = v
+	}
+	return result, nil
+}
+
+// parseLabelFilterKeys validates keys for label filter queries (--has-label).
+// Allows any valid key including the pic/ prefix, since filtering by
+// auto-labels (e.g. --has-label pic/model) is valid.
+func parseLabelFilterKeys(keys []string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	for _, k := range keys {
+		if k == "" {
+			return nil, fmt.Errorf("label key must not be empty")
+		}
+		if !cliLabelKeyRE.MatchString(k) {
+			return nil, fmt.Errorf("label key %q contains invalid characters (allowed: a-z A-Z 0-9 _ . / -)", k)
+		}
+	}
+	return keys, nil
+}
+
 // parseEnvLabels parses a comma-separated "k=v,k2=v2" string (e.g. PIC_DEFAULT_LABELS).
 // Empty parts are silently skipped.
 func parseEnvLabels(s string) (map[string]string, error) {
