@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -973,6 +974,24 @@ func (c *Controller) Forget(childID string) error {
 	if err := persist.DeleteRecord(c.stateDir, childID); err != nil {
 		slog.Warn("delete state record", "childId", childID, "error", err)
 	}
+	if err := c.deleteLogDump(childID); err != nil {
+		slog.Warn("delete log dump", "childId", childID, "error", err)
+	}
+	return nil
+}
+
+// deleteLogDump removes the per-child log dump directory at ~/.pi/run/logs/<childID>.
+// Forget calls this so 'pic forget' fully removes the child's footprint rather
+// than leaving orphan dumps to accumulate forever.  Missing directory is not
+// an error (no dump was written, e.g. for a child that crashed pre-Idle).
+func (c *Controller) deleteLogDump(childID string) error {
+	if c.logsDir == "" {
+		return nil
+	}
+	path := filepath.Join(c.logsDir, childID)
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return nil
 }
 
@@ -990,6 +1009,9 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 		c.st.Delete(s.ChildID)
 		if err := persist.DeleteRecord(c.stateDir, s.ChildID); err != nil {
 			slog.Warn("delete state record", "childId", s.ChildID, "error", err)
+		}
+		if err := c.deleteLogDump(s.ChildID); err != nil {
+			slog.Warn("delete log dump", "childId", s.ChildID, "error", err)
 		}
 		count++
 	}
