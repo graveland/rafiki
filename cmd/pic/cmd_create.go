@@ -33,6 +33,11 @@ The child runs in the background; reattach later with 'pic attach <name>'.
 
 --cwd defaults to the current directory. Specify explicitly to override.
 
+Environment variable defaults (applied before explicit flags; lowest priority):
+  PIC_DEFAULT_PRESET  preset name from ~/.pi/agent/pic-presets.json
+  PIC_DEFAULT_MODEL   fallback model string
+  PIC_DEFAULT_LABELS  comma-separated k=v label defaults
+
 (Note: pic create replaces the earlier ` + "`pic spawn`" + ` subcommand. For
 scripting / AFK workflows, use --detached.)`,
 		Args: cobra.MaximumNArgs(1),
@@ -44,7 +49,7 @@ scripting / AFK workflows, use --detached.)`,
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the pic-helpers pi extension")
-	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/pic-presets.json")
+	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/pic-presets.json (also settable via PIC_DEFAULT_PRESET)")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort: silently empty list when presets file is missing or malformed.
 		pf, err := loadPresets()
@@ -215,6 +220,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// buildSpawnRequest has already merged env-var defaults and --label flags;
 	// preset fills in any keys/model that weren't set by higher-priority sources.
 	presetName, _ := cmd.Flags().GetString("preset")
+	// PIC_DEFAULT_PRESET: fallback when --preset is not set explicitly.
+	if presetName == "" {
+		presetName = os.Getenv("PIC_DEFAULT_PRESET")
+	}
 	if presetName != "" {
 		pf, err := loadPresets()
 		if err != nil {
