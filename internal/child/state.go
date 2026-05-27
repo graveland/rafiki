@@ -4,7 +4,7 @@
 // reading the metadata fields (handleFrame and Status/Metadata both do this).
 package child
 
-import "graveland.dev/pi-controller/protocol"
+import "git.graveland.dev/brent/pi-controller/protocol"
 
 // PiUIRequestMeta carries the minimum fields needed from an
 // extension_ui_request event to make the dialog/fire-and-forget decision.

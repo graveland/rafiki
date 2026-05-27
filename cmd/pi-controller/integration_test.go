@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/protocol"
-	"graveland.dev/pi-controller/internal/server"
-	"graveland.dev/pi-controller/internal/store"
-	"graveland.dev/pi-controller/internal/version"
+	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/server"
+	"git.graveland.dev/brent/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/internal/version"
 )
 
 // testSocketDir returns a temp directory with a short path (macOS UDS paths

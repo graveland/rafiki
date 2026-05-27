@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/protocol"
-	"graveland.dev/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/store"
 )
 
 func newSess(id, name, cwd string) *store.Session {

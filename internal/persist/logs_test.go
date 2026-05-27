@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/persist"
+	"git.graveland.dev/brent/pi-controller/internal/persist"
 )
 
 func TestLogDump_AlwaysMode_WritesAllStreams(t *testing.T) {

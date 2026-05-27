@@ -5,9 +5,9 @@ import (
 	"sync"
 	"testing"
 
-	"graveland.dev/pi-controller/protocol"
-	"graveland.dev/pi-controller/internal/server"
-	"graveland.dev/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/server"
+	"git.graveland.dev/brent/pi-controller/internal/store"
 )
 
 // ─── fake Connection ──────────────────────────────────────────────────────────

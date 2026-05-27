@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 func TestRenderList_Table(t *testing.T) {

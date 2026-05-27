@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"graveland.dev/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // ─── Argument validation tests ───────────────────────────────────────────────

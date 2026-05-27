@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/bus"
+	"git.graveland.dev/brent/pi-controller/internal/bus"
 )
 
 func TestBus_SubscribeAndPublish(t *testing.T) {

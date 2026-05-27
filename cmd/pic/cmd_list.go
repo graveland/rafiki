@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 func newListCmd() *cobra.Command {

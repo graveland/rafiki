@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"graveland.dev/pi-controller/internal/bus"
-	"graveland.dev/pi-controller/protocol"
-	"graveland.dev/pi-controller/internal/ring"
+	"git.graveland.dev/brent/pi-controller/internal/bus"
+	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/ring"
 )
 
 // SpawnSpec describes how to launch a pi child process.

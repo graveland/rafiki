@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // intPtr is a test helper for *int fields.

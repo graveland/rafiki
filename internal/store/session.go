@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"graveland.dev/pi-controller/protocol"
-	"graveland.dev/pi-controller/internal/ring"
+	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/ring"
 )
 
 // Session is the controller's per-child record. Pure metadata —

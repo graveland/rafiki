@@ -1,4 +1,4 @@
-module graveland.dev/pi-controller
+module git.graveland.dev/brent/pi-controller
 
 go 1.25.0
 

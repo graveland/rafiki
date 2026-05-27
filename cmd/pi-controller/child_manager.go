@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"sync"
 
-	"graveland.dev/pi-controller/internal/child"
-	"graveland.dev/pi-controller/protocol"
-	"graveland.dev/pi-controller/internal/server"
+	"git.graveland.dev/brent/pi-controller/internal/child"
+	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/server"
 )
 
 // connSub is a registered per-child subscriber: a connection and an optional

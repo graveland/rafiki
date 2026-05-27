@@ -195,8 +195,8 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/client"
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/client"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 // startEchoServer spins up a tiny UDS that echoes every received frame
@@ -318,7 +318,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 // Client is a connected JSONL client to the pi-controller daemon.
@@ -722,8 +722,8 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/client"
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/client"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 // Use a fake Client interface for resolve tests (no real socket).
@@ -799,7 +799,7 @@ import (
 	"fmt"
 	"strings"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 // Lister is the subset of Client that Resolve needs. A concrete *Client
@@ -928,7 +928,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func TestRenderList_Table(t *testing.T) {
@@ -987,7 +987,7 @@ import (
 
 	"golang.org/x/term"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 type outputMode string
@@ -1149,7 +1149,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/client"
+	"git.graveland.dev/brent/pi-controller/internal/client"
 )
 
 // mustDial connects to the daemon's UDS using the --socket flag value
@@ -1192,7 +1192,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newListCmd() *cobra.Command {
@@ -1250,7 +1250,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newGetCmd() *cobra.Command {
@@ -1309,7 +1309,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newStatusCmd() *cobra.Command {
@@ -1402,7 +1402,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newSpawnCmd() *cobra.Command {
@@ -1497,7 +1497,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newResumeCmd() *cobra.Command {
@@ -1552,7 +1552,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newKillCmd() *cobra.Command {
@@ -1675,7 +1675,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newForgetCmd() *cobra.Command {
@@ -1788,7 +1788,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newRecentCmd() *cobra.Command {
@@ -1853,7 +1853,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newSearchCmd() *cobra.Command {
@@ -1920,7 +1920,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newSendCmd() *cobra.Command {
@@ -2186,7 +2186,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func newTailCmd() *cobra.Command {
@@ -2289,7 +2289,7 @@ import (
 	"strings"
 	"time"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 // tailRenderer formats incoming event frames (raw bytes) onto w.

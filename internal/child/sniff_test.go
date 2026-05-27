@@ -3,7 +3,7 @@ package child_test
 import (
 	"testing"
 
-	"graveland.dev/pi-controller/internal/child"
+	"git.graveland.dev/brent/pi-controller/internal/child"
 )
 
 func TestSniff_GetStateResponse(t *testing.T) {

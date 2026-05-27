@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"graveland.dev/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // errDaemonShutdown is returned by render when a ctrl_daemon_shutdown frame

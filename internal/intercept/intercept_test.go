@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/intercept"
+	"git.graveland.dev/brent/pi-controller/internal/intercept"
 )
 
 func TestInspect_NewSession(t *testing.T) {

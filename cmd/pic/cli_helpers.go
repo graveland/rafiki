@@ -15,8 +15,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"graveland.dev/pi-controller/client"
-	"graveland.dev/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/client"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // mustDial connects to the daemon's UDS using the --socket flag value

@@ -9,8 +9,8 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 
-	"graveland.dev/pi-controller/client"
-	"graveland.dev/pi-controller/protocol"
+	"git.graveland.dev/brent/pi-controller/client"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 func newPresetsCmd() *cobra.Command {

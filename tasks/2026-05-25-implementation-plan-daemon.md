@@ -95,7 +95,7 @@ The `internal/client` directory in the bootstrap is reserved for the `pi-ctl` pl
 
 ```bash
 cd ~/home/pi-controller
-go mod init graveland.dev/pi-controller
+go mod init git.graveland.dev/brent/pi-controller
 ```
 
 Note: if your monorepo namespace differs (`github.com/<user>/pi-controller` etc.), use that. Whatever you pick is the import path used throughout the rest of the plan.
@@ -181,7 +181,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func TestSpawnRequest_RoundTrip(t *testing.T) {
@@ -431,7 +431,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func TestFrameReader_SplitsOnLFOnly(t *testing.T) {
@@ -664,7 +664,7 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/bus"
+	"git.graveland.dev/brent/pi-controller/internal/bus"
 )
 
 func TestBus_SubscribeAndPublish(t *testing.T) {
@@ -931,7 +931,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/ring"
+	"git.graveland.dev/brent/pi-controller/internal/ring"
 )
 
 func TestRing_AppendAndRecent_InOrder(t *testing.T) {
@@ -1142,8 +1142,8 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/protocol"
-	"graveland.dev/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/store"
 )
 
 func TestSession_Snapshot_CopiesFields(t *testing.T) {
@@ -1188,7 +1188,7 @@ import (
 	"sync"
 	"time"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 // Session is the controller's per-child record. Pure metadata —
@@ -1371,8 +1371,8 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/protocol"
-	"graveland.dev/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/store"
 )
 
 func newSess(id, name, cwd string) *store.Session {
@@ -1515,7 +1515,7 @@ import (
 	"sort"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 var ErrNotFound = errors.New("session not found")
@@ -1732,8 +1732,8 @@ package child_test
 import (
 	"testing"
 
-	"graveland.dev/pi-controller/internal/child"
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/child"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func TestStateMachine_BasicLifecycle(t *testing.T) {
@@ -1884,7 +1884,7 @@ func TestStateMachine_DefensivePopOnEmptyStack(t *testing.T) {
 package child
 
 import (
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 // PiUIRequestMeta carries the minimum fields needed from an
@@ -2087,8 +2087,8 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/persist"
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/persist"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 func TestRecordWriter_RoundTrip(t *testing.T) {
@@ -2364,7 +2364,7 @@ import (
 	"strings"
 	"testing"
 
-	"graveland.dev/pi-controller/internal/persist"
+	"git.graveland.dev/brent/pi-controller/internal/persist"
 )
 
 func TestLogDump_AlwaysMode_WritesAllStreams(t *testing.T) {
@@ -2691,7 +2691,7 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/child"
+	"git.graveland.dev/brent/pi-controller/internal/child"
 )
 
 func fakePiPath(t *testing.T) string {
@@ -2816,9 +2816,9 @@ import (
 	"syscall"
 	"time"
 
-	"graveland.dev/pi-controller/internal/bus"
-	"graveland.dev/pi-controller/internal/protocol"
-	"graveland.dev/pi-controller/internal/ring"
+	"git.graveland.dev/brent/pi-controller/internal/bus"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/ring"
 )
 
 type SpawnSpec struct {
@@ -3105,7 +3105,7 @@ package child_test
 import (
 	"testing"
 
-	"graveland.dev/pi-controller/internal/child"
+	"git.graveland.dev/brent/pi-controller/internal/child"
 )
 
 func TestSniff_GetStateResponse(t *testing.T) {
@@ -3388,7 +3388,7 @@ package intercept_test
 import (
 	"testing"
 
-	"graveland.dev/pi-controller/internal/intercept"
+	"git.graveland.dev/brent/pi-controller/internal/intercept"
 )
 
 func TestInspect_NewSession(t *testing.T) {
@@ -3555,7 +3555,7 @@ import (
 	"testing"
 	"time"
 
-	"graveland.dev/pi-controller/internal/server"
+	"git.graveland.dev/brent/pi-controller/internal/server"
 )
 
 func TestServer_AcceptsAndEchoes(t *testing.T) {
@@ -3632,7 +3632,7 @@ import (
 	"os"
 	"sync"
 
-	"graveland.dev/pi-controller/internal/protocol"
+	"git.graveland.dev/brent/pi-controller/internal/protocol"
 )
 
 type FrameHandler func(frame []byte) []byte
@@ -3759,7 +3759,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"graveland.dev/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/internal/store"
 )
 
 // Controller is the surface dispatch needs from the rest of the daemon.
