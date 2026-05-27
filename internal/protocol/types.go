@@ -194,6 +194,14 @@ type SpawnRequest struct {
 
 	// Escape hatch: appended last to argv, wins by last-flag-wins.
 	ExtraArgs []string `json:"extraArgs,omitempty"`
+
+	// ResumedFromSession is set by `pic resume --pi-session` when spawning a
+	// fresh child to continue a pi session.jsonl that was not previously
+	// managed by pic.  When non-empty the daemon adds the reserved auto-label
+	// `pic/resumed-from-session=<value>` to the new child.  Sent here (rather
+	// than in Labels) because the `pic/` namespace is reserved for daemon
+	// auto-labels; user-supplied Labels with that prefix are rejected.
+	ResumedFromSession string `json:"resumedFromSession,omitempty"`
 }
 
 // ResumeRequest re-spawns a child against its persisted state record (§6.4).

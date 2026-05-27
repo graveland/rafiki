@@ -371,6 +371,9 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	}
 	initLabels["pic/cwd"] = req.Cwd
 	initLabels["pic/pid"] = strconv.Itoa(ch.PID())
+	if req.ResumedFromSession != "" {
+		initLabels["pic/resumed-from-session"] = req.ResumedFromSession
+	}
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
 	// process is confirmed running. A crash between exec and Idle() would

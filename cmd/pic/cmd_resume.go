@@ -213,14 +213,11 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 		}
 	}
 
-	// Add the reserved traceability label so `pic list` shows where this child
-	// came from.  Merge under existing labels so user labels take precedence.
-	if info.SessionID != "" {
-		if req.Labels == nil {
-			req.Labels = make(map[string]string)
-		}
-		req.Labels["pic/resumed-from-session"] = info.SessionID
-	}
+	// Tell the daemon to attach the reserved traceability auto-label
+	// `pic/resumed-from-session=<uuid>`.  Sent here rather than in req.Labels
+	// because the daemon (correctly) rejects user-supplied labels in the
+	// reserved pic/ namespace.
+	req.ResumedFromSession = info.SessionID
 
 	// Send ctrl_spawn to the daemon.
 	c := mustDial(cmd)
