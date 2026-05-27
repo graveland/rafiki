@@ -924,6 +924,19 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 		}
 		go func() {
 			_, err := ch.Shutdown(perChildShutdown, perChildKill)
+			// ch.Shutdown returns when the child *process* is reaped, but
+			// handleChildExit — which persists the exit code/signal to the
+			// state record — runs asynchronously in monitorChild's goroutine.
+			// Wait for that goroutine to finish (signalled by cm.Remove)
+			// before reporting this child done, so a racing daemon shutdown
+			// doesn't close before exit info is persisted.
+			deadline := time.Now().Add(perChildShutdown + perChildKill)
+			for time.Now().Before(deadline) {
+				if _, alive := c.cm.Get(id); !alive {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			done <- result{id: id, err: err}
 		}()
 	}
