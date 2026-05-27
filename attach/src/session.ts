@@ -428,9 +428,16 @@ export class RemoteAgentSession {
                     // Check before the per-child filter so it's never skipped.
                     if (frame["type"] === "ctrl_daemon_shutdown") {
                         const reason = (frame as { reason?: string }).reason ?? "unknown";
-                        restoreTerminal();
                         console.error(`[pic-attach] daemon shutting down (reason: ${reason})`);
-                        process.exit(0);
+                        // Self-signal SIGTERM instead of process.exit().  Signal
+                        // delivery preempts the event loop — important here
+                        // because pi's TUI is typically blocked on stdin and
+                        // process.exit() from inside an async iterator can sit
+                        // behind the stdin wait until the user hits a key.  Both
+                        // pi's own SIGTERM handler (which cleanly tears down the
+                        // TUI) and main.ts's gracefulExit will fire.
+                        process.kill(process.pid, "SIGTERM");
+                        return;
                     }
 
                     if (frame["type"] !== "ctrl_event") continue;
