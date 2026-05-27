@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -45,7 +46,11 @@ var knownModels = []string{
 
 // completeModel returns tab-completion candidates for the --model flag.
 // It combines:
-//   - A curated static list of common provider/model identifiers.
+//   - User-defined models from ~/.pi/agent/models.json (highest signal: those
+//     are the user's actual configured providers, including custom routing
+//     setups like anthropic-work/anthropic-personal).
+//   - A curated static list of common provider/model identifiers (fallback
+//     for users who haven't customised models.json).
 //   - Live enumeration of Ollama models (if Ollama is running locally).
 //   - Live enumeration of LM Studio / OpenAI-compatible local endpoints
 //     (best-effort; silently skipped if not reachable).
@@ -53,7 +58,12 @@ var knownModels = []string{
 // Errors are swallowed so completion never blocks or errors out: missing
 // providers just don't appear in the list.
 func completeModel(toComplete string) []string {
-	out := append([]string(nil), knownModels...)
+	var out []string
+
+	if models := piModelsJSON(); len(models) > 0 {
+		out = append(out, models...)
+	}
+	out = append(out, knownModels...)
 
 	if models := ollamaModels(); len(models) > 0 {
 		out = append(out, models...)
@@ -74,6 +84,43 @@ func completeModel(toComplete string) []string {
 	}
 	sort.Strings(dedup)
 	return dedup
+}
+
+// piModelsJSON enumerates the user's configured models from
+// ~/.pi/agent/models.json. Each provider's models become "provider/modelId"
+// entries. Returns nil if the file is missing or malformed — we don't
+// surface parse errors during completion.
+func piModelsJSON() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	path := filepath.Join(home, ".pi", "agent", "models.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var payload struct {
+		Providers map[string]struct {
+			Models []struct {
+				ID string `json:"id"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return nil
+	}
+
+	var out []string
+	for providerName, p := range payload.Providers {
+		for _, m := range p.Models {
+			if m.ID != "" {
+				out = append(out, providerName+"/"+m.ID)
+			}
+		}
+	}
+	return out
 }
 
 // ollamaModels lists models from a local Ollama instance via its /api/tags
