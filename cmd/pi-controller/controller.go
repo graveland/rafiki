@@ -973,6 +973,24 @@ func (c *Controller) Forget(childID string) error {
 	if snap.Status != protocol.StatusExited {
 		return &server.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
 	}
+
+	// Wait for handleChildExit (running on monitorChild's goroutine) to finish
+	// before we delete on-disk state.  MarkExited (which flips status to
+	// exited) and writeRecord (which atomically writes the .json) happen
+	// inside handleChildExit, and the FINAL step of that function is
+	// cm.Remove(childID).  Without this wait, our delete can race with the
+	// atomic-rename: writeRecord's .tmp is in-progress when Forget runs
+	// os.Remove(.json) — finds nothing — then writeRecord completes the
+	// rename, leaving an orphan .json that pic ls picks up on the next
+	// daemon restart via loadOrphans.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, alive := c.cm.Get(childID); !alive {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	c.st.Delete(childID)
 	if err := persist.DeleteRecord(c.stateDir, childID); err != nil {
 		slog.Warn("delete state record", "childId", childID, "error", err)
