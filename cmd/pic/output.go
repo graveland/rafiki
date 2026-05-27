@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		tw.AppendRow(table.Row{
 			ch.ChildID,
 			defaultDash(ch.Name),
-			colorStatus(ch.Status, useColor),
+			formatStatus(ch.Status, ch.ExitCode, ch.ExitSignal, useColor),
 			defaultDash(provider),
 			defaultDash(model),
 			defaultDash(shortenCwd(ch.Cwd)),
@@ -145,6 +146,25 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// formatStatus renders the STATUS cell for a child row.  For exited children
+// it appends the exit code (or signal name) in parentheses so users can tell
+// clean exits (0) from failures (!= 0) and signal-driven terminations at a
+// glance — useful for spotting cleanup bugs vs. legitimate non-zero exits.
+func formatStatus(status string, exitCode *int, exitSignal string, useColor bool) string {
+	colored := colorStatus(status, useColor)
+	if status != "exited" {
+		return colored
+	}
+	switch {
+	case exitSignal != "":
+		return colored + " (signal: " + exitSignal + ")"
+	case exitCode != nil:
+		return colored + " (" + strconv.Itoa(*exitCode) + ")"
+	default:
+		return colored + " (?)"
+	}
 }
 
 func colorStatus(status string, useColor bool) string {

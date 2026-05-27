@@ -1700,6 +1700,9 @@ func sessionFromRecord(rec persist.Record) *store.Session {
 		ExtraArgs:          rec.ExtraArgs,
 		StartedAt:          time.UnixMilli(rec.SpawnedAt),
 		LastActivity:       time.UnixMilli(rec.LastSeenAlive),
+		ExitedAt:           time.UnixMilli(rec.ExitedAt),
+		ExitCode:           rec.ExitCode,
+		ExitSignal:         rec.ExitSignal,
 		Labels:             rec.Labels,
 	}
 }
@@ -1738,6 +1741,9 @@ func recordFromSnapshot(snap store.Snapshot) persist.Record {
 		SpawnedAt:          snap.StartedAt.UnixMilli(),
 		LastSeenAlive:      snap.LastActivity.UnixMilli(),
 		LastStatus:         string(snap.Status),
+		ExitedAt:           snap.ExitedAt.UnixMilli(),
+		ExitCode:           snap.ExitCode,
+		ExitSignal:         snap.ExitSignal,
 		Labels:             snap.Labels,
 	}
 }

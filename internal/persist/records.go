@@ -53,6 +53,12 @@ type Record struct {
 	PID           int               `json:"pid"`
 	LastStatus    string            `json:"lastStatus"`
 
+	// Exit info — populated when LastStatus is "exited".  Missing fields
+	// deserialise to zero values, which the renderer treats as "unknown".
+	ExitedAt   int64  `json:"exitedAt,omitempty"`
+	ExitCode   *int   `json:"exitCode,omitempty"`
+	ExitSignal string `json:"exitSignal,omitempty"`
+
 	// Labels stores arbitrary user-defined and auto-derived key=value metadata.
 	// Records without this field deserialise to nil.
 	Labels map[string]string `json:"labels,omitempty"`
