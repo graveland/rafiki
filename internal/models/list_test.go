@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -138,6 +139,63 @@ func TestLoadUserConfig_ValidFile(t *testing.T) {
 	}
 	if withoutName.ID != "anthropic-work/claude-opus-4-7" {
 		t.Errorf("no-name entry ID = %q", withoutName.ID)
+	}
+}
+
+func TestLoadUserConfig_Inherit(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, ".pi", "agent")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := map[string]any{
+		"providers": map[string]any{
+			"anthropic-work": map[string]any{
+				"inherit": "anthropic",
+				"models": []any{
+					map[string]any{"id": "claude-custom"},
+				},
+			},
+			"bogus-inherit": map[string]any{
+				"inherit": "no-such-provider",
+			},
+		},
+	}
+	b, _ := json.Marshal(content)
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+
+	got := loadUserConfig()
+
+	ids := make(map[string]bool, len(got))
+	for _, m := range got {
+		ids[m.ID] = true
+	}
+
+	// Inherited anthropic models should be re-prefixed under anthropic-work.
+	for _, want := range []string{
+		"anthropic-work/claude-opus-4-7",
+		"anthropic-work/claude-sonnet-4-5",
+		"anthropic-work/claude-haiku-4-5",
+	} {
+		if !ids[want] {
+			t.Errorf("missing inherited entry %q", want)
+		}
+	}
+
+	// Explicit models still emit alongside inherited ones.
+	if !ids["anthropic-work/claude-custom"] {
+		t.Errorf("missing explicit entry anthropic-work/claude-custom")
+	}
+
+	// Inheriting from an unknown provider silently produces nothing for that
+	// provider (no bogus-inherit/* entries).
+	for id := range ids {
+		if strings.HasPrefix(id, "bogus-inherit/") {
+			t.Errorf("unexpected entry from unknown inherit target: %q", id)
+		}
 	}
 }
 

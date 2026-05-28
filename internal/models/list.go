@@ -107,7 +107,8 @@ func loadUserConfig() []Model {
 
 	var payload struct {
 		Providers map[string]struct {
-			Models []struct {
+			Inherit string `json:"inherit,omitempty"`
+			Models  []struct {
 				ID   string `json:"id"`
 				Name string `json:"name,omitempty"`
 			} `json:"models"`
@@ -119,6 +120,21 @@ func loadUserConfig() []Model {
 
 	var out []Model
 	for providerName, p := range payload.Providers {
+		if p.Inherit != "" {
+			prefix := p.Inherit + "/"
+			for _, id := range knownModels {
+				if !strings.HasPrefix(id, prefix) {
+					continue
+				}
+				model := id[len(prefix):]
+				out = append(out, Model{
+					ID:       providerName + "/" + model,
+					Provider: providerName,
+					Model:    model,
+					Source:   SourceUserConfig,
+				})
+			}
+		}
 		for _, m := range p.Models {
 			if m.ID == "" {
 				continue
