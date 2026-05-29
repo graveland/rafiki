@@ -13,7 +13,7 @@
         "build:linux-arm64": "bun build --compile --target=bun-linux-arm64  ./src/main.ts --outfile ../bin/pic-attach"
     },
     "dependencies": {
-        "@earendil-works/pi-coding-agent": "^0.75.5"
+        "@earendil-works/pi-coding-agent": "file:../pi/packages/coding-agent"
     },
     "devDependencies": {
         "bun-types": "^1.3.14",
