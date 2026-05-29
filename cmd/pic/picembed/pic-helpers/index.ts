@@ -243,11 +243,16 @@ export function setupTuiAutocomplete(
  *  1. Connect to the daemon socket (no auth needed on UDS).
  *  2. ctrl_subscribe to the child so event frames are delivered to us.
  *  3. ctrl_send {type:"get_commands", id} to forward the RPC to the child.
- *  4. Wait for a ctrl_event wrapping the child's {type:"response",
- *     command:"get_commands", id} reply.
- *  5. Parse and return the commands list; close the connection.
+ *     Sent immediately; the child's stdin buffers it if rebindSession is
+ *     still running, so this is safe for cold-start.
+ *  4. If the child emits {type:"ready"} (post-rebindSession signal),
+ *     resend get_commands defensively in case the first frame was lost.
+ *     Duplicate replies are tolerated: we resolve on the first.
+ *  5. Wait for a ctrl_event wrapping the child's {type:"response",
+ *     command:"get_commands", id} reply, parse the commands list, return.
  *
- * Times out after 5 s and resolves to [] to avoid blocking the TUI.
+ * Times out after 30 s — generous enough to cover slow init (MCP servers,
+ * extension loading) without hanging the autocomplete cache forever.
  */
 async function fetchCommandsFromDaemon(
     socketPath: string,
@@ -268,14 +273,12 @@ async function fetchCommandsFromDaemon(
             else resolve(result);
         };
 
-        // eslint-disable-next-line prefer-const
-        let timer: ReturnType<typeof setTimeout>;
-        timer = setTimeout(() => {
+        const timer = setTimeout(() => {
             cleanup(new Error(`get_commands timed out for child ${childId}`));
-        }, 5_000);
+        }, 30_000);
 
-        socket.on("connect", () => {
-            socket.write(JSON.stringify({ type: "ctrl_subscribe", childId }) + "\n");
+        const sendGetCommands = (): void => {
+            if (done) return;
             socket.write(
                 JSON.stringify({
                     type: "ctrl_send",
@@ -283,6 +286,11 @@ async function fetchCommandsFromDaemon(
                     frame: { type: "get_commands", id: reqId },
                 }) + "\n"
             );
+        };
+
+        socket.on("connect", () => {
+            socket.write(JSON.stringify({ type: "ctrl_subscribe", childId }) + "\n");
+            sendGetCommands();
         });
 
         socket.on("data", (chunk: Buffer) => {
@@ -299,12 +307,17 @@ async function fetchCommandsFromDaemon(
                     continue;
                 }
 
-                // Looking for the ctrl_event wrapping the child's get_commands response.
                 if (msg["type"] !== "ctrl_event") continue;
                 if (msg["childId"] !== childId) continue;
 
                 const ev = msg["event"] as Record<string, unknown> | undefined;
                 if (!ev) continue;
+
+                if (ev["type"] === "ready") {
+                    sendGetCommands();
+                    continue;
+                }
+
                 if (ev["type"] !== "response") continue;
                 if (ev["command"] !== "get_commands") continue;
                 if (ev["id"] !== reqId) continue;
