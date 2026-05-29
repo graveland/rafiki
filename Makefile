@@ -8,6 +8,7 @@ BIN_DIR := bin
 PI_DIR  := pi
 PI_PKG  := $(PI_DIR)/packages/coding-agent
 PI_DIST := $(PI_PKG)/dist/cli.js
+PI_MODULES := $(PI_DIR)/node_modules
 
 # Evaluated fresh on each invocation; empty when no .go files exist yet.
 PKGS := $(shell $(GO) list ./... 2>/dev/null)
@@ -24,7 +25,7 @@ build-pic:
 
 # pic-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
 # must be built first. Fail loudly if the submodule isn't initialised.
-build-attach: $(PI_DIST)
+build-attach: $(PI_MODULES) $(PI_DIST)
 	@if command -v bun >/dev/null 2>&1; then \
 	    cd attach && bun install --silent && bun run build; \
 	else \
@@ -38,6 +39,16 @@ build-attach: $(PI_DIST)
 
 $(PI_DIST): $(PI_PKG)/package.json
 	cd $(PI_DIR) && npm install && npm run build
+
+# pi's deps (yaml, chalk, typebox, ...) hoist to $(PI_MODULES) and are imported
+# by the bundled dist when attach is compiled, so node_modules must exist even
+# when dist/ is already built. This is kept separate from $(PI_DIST): the bundle
+# only needs node_modules + a present dist, whereas rebuilding dist runs the pi
+# toolchain (npm run build) which requires a newer Node than some hosts have.
+# Keyed on the lockfile so it reinstalls when deps change or node_modules is gone.
+$(PI_MODULES): $(PI_DIR)/package-lock.json
+	cd $(PI_DIR) && npm install
+	@touch $@
 
 $(PI_PKG)/package.json:
 	@echo "vendor/pi is not initialised. Run 'make bootstrap' (fresh clone)" >&2
