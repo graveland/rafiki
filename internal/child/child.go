@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,15 +20,19 @@ import (
 	"git.graveland.dev/brent/pi-controller/internal/ring"
 )
 
-// SpawnSpec describes how to launch a pi child process.
+// SpawnSpec describes how to launch a child process.
 type SpawnSpec struct {
 	ChildID     string
 	Cwd         string
-	PiBinary    string
+	PiBinary    string   // resolved binary path (pi or claude, per Provider)
 	Argv        []string // full argv excluding PiBinary itself
 	ExtraArgs   []string // appended after Argv; useful in tests
 	Env         []string // env vars for the child process; see EnvOverride
 	EnvOverride bool     // if true, Env replaces the parent env entirely; if false, Env is appended to os.Environ()
+
+	// Provider selects the wire protocol. When nil, PiProvider{} is used so
+	// existing callers and tests keep pi behavior unchanged.
+	Provider ProtocolProvider
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -115,7 +118,8 @@ type Child struct {
 	mu     sync.Mutex
 	closed bool // set by readStdout after cmd.Process.Wait() returns
 
-	sm *StateMachine
+	sm       *StateMachine
+	provider ProtocolProvider
 	// metaMu protects meta and sm to allow Status()/Metadata() concurrent reads.
 	metaMu   sync.Mutex
 	meta     SnifferMetadata
@@ -174,6 +178,11 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
+	prov := spec.Provider
+	if prov == nil {
+		prov = PiProvider{}
+	}
+
 	c := &Child{
 		ID:          spec.ChildID,
 		spec:        spec,
@@ -188,6 +197,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		bus:         bus.New[[]byte](bus.Options{}),
 		ring:        ring.New(ring.Options{}),
 		sm:          NewStateMachine(),
+		provider:    prov,
 		idle:        make(chan struct{}),
 	}
 
@@ -317,16 +327,22 @@ func (c *Child) supervise() {
 	go func() { defer wg.Done(); c.readStdout() }()
 	go func() { defer wg.Done(); c.readStderr() }()
 
-	// Signal that the write loop is running, then immediately queue the
-	// bootstrap get_state. cmdCh has capacity 16 so this never blocks;
-	// the first select iteration below drains and forwards it to pi's stdin.
+	// Signal that the write loop is running, then queue the provider's bootstrap
+	// frame (if any). cmdCh has capacity 16 so this never blocks.
 	close(c.ready)
-	c.cmdCh <- []byte(`{"type":"get_state","id":"__bootstrap__"}`)
+	if boot := c.provider.BootstrapFrame(); boot != nil {
+		c.cmdCh <- boot
+	}
 
 	for {
 		select {
 		case frame := <-c.cmdCh:
-			if _, err := c.stdin.Write(frame); err != nil {
+			out := c.provider.EncodeOutbound(frame)
+			if out == nil {
+				// Provider dropped a frame unsupported by this protocol.
+				continue
+			}
+			if _, err := c.stdin.Write(out); err != nil {
 				slog.Warn("stdin write failed", "child", c.ID, "error", err)
 				goto cleanup
 			}
@@ -334,7 +350,7 @@ func (c *Child) supervise() {
 				slog.Warn("stdin newline write failed", "child", c.ID, "error", err)
 				goto cleanup
 			}
-			c.in.append(frame) // capture for log dumps
+			c.in.append(frame) // capture the original (normalized) frame for log dumps
 		case <-c.processDone:
 			// Process exited; drain nothing, let cleanup wait for readers.
 			goto cleanup
@@ -383,35 +399,20 @@ func (c *Child) readStdout() {
 	close(c.processDone)
 }
 
-// handleFrame decodes a pi stdout frame, updates sniffed metadata, drives the
-// state machine, and (for get_state responses) closes the idle channel once.
-// Called exclusively from the readStdout goroutine.
+// handleFrame routes one stdout line through the child's ProtocolProvider and
+// applies the normalized result to the state machine + sniffed metadata. Called
+// exclusively from the readStdout goroutine.
 func (c *Child) handleFrame(line []byte) {
-	var hdr struct {
-		Type    string          `json:"type"`
-		Command string          `json:"command"`
-		Method  string          `json:"method,omitempty"`
-		ID      string          `json:"id,omitempty"`
-		Data    json.RawMessage `json:"data,omitempty"`
-	}
-	if err := json.Unmarshal(line, &hdr); err != nil {
-		slog.Debug("child: unparseable stdout frame", "child", c.ID, "len", len(line))
-		return
-	}
-
-	kickIdle := false
+	res := c.provider.Parse(line)
 
 	c.metaMu.Lock()
 
-	// SM transition: depends only on the response envelope, not on metadata
-	// content. A response.get_state with missing/empty data still releases
-	// spawning — pi just didn't tell us anything to cache.
-	if hdr.Type == "response" && hdr.Command == "get_state" {
+	if res.FirstResponse {
 		c.sm.OnFirstResponse()
-		kickIdle = true
 	}
 
-	if md, ok := ExtractMetadata(line); ok {
+	if res.HasMeta {
+		md := res.Meta
 		if md.SessionID != "" {
 			c.meta.SessionID = md.SessionID
 		}
@@ -426,26 +427,20 @@ func (c *Child) handleFrame(line []byte) {
 		}
 	}
 
-	// Route pi events (non-response frames) to the state machine.
-	if hdr.Type != "" && hdr.Type != "response" {
-		switch hdr.Type {
+	for _, e := range res.Events {
+		switch e.Type {
 		case "auto_retry_start":
-			// Dedicated method — not routed through OnPiEvent.
-			var payload struct {
-				ErrorMessage string `json:"errorMessage"`
-			}
-			_ = json.Unmarshal(line, &payload)
-			c.sm.OnAutoRetryStart(payload.ErrorMessage)
+			c.sm.OnAutoRetryStart(e.RetryError)
 		case "extension_ui_request":
-			c.sm.OnPiEvent(hdr.Type, &PiUIRequestMeta{ID: hdr.ID, Method: hdr.Method})
+			c.sm.OnPiEvent(e.Type, e.UI)
 		default:
-			c.sm.OnPiEvent(hdr.Type, nil)
+			c.sm.OnPiEvent(e.Type, nil)
 		}
 	}
 
 	c.metaMu.Unlock()
 
-	if kickIdle {
+	if res.FirstResponse {
 		c.idleOnce.Do(func() { close(c.idle) })
 	}
 }
