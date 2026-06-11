@@ -125,9 +125,20 @@ func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel s
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			content = append(content, PiTextBlock(b.Text))
+			// Skip empty text. PiContentBlock.Text is `omitempty`, so an empty
+			// string serializes to {type:"text"} with no `text` field, and pi's
+			// TUI does c.text.trim() → crashes on the undefined field.
+			if b.Text != "" {
+				content = append(content, PiTextBlock(b.Text))
+			}
 		case "thinking":
-			content = append(content, PiThinkingBlock(b.Thinking))
+			// Same hazard, hit in practice: Fable 5 with display:omitted streams
+			// thinking blocks with EMPTY text, which would serialize to
+			// {type:"thinking"} (no `thinking` field) and crash pi's TUI at
+			// c.thinking.trim(). Skip empty thinking blocks entirely.
+			if b.Thinking != "" {
+				content = append(content, PiThinkingBlock(b.Thinking))
+			}
 		case "tool_use":
 			content = append(content, PiToolCallBlock(b.ID, b.Name, b.Input))
 			toolCalls = append(toolCalls, b)
