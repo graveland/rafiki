@@ -153,6 +153,11 @@ type SpawnRequest struct {
 	// "claude" (Claude Code CLI, driven over stream-json).
 	Kind string `json:"kind,omitempty"`
 
+	// ConfigDir, for kind=claude, is exported to the child as CLAUDE_CONFIG_DIR
+	// — it selects the claude config dir (plugins, hooks, MCP, settings). It is
+	// persisted so a resumed claude child re-uses the same profile.
+	ConfigDir string `json:"configDir,omitempty"`
+
 	// Identity
 	Name   string            `json:"name,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; pic/ prefix rejected
