@@ -149,6 +149,10 @@ type SpawnRequest struct {
 	Type string `json:"type"`
 	ID   string `json:"id,omitempty"`
 
+	// Kind selects the child protocol/binary: "pi" (default, when empty) or
+	// "claude" (Claude Code CLI, driven over stream-json).
+	Kind string `json:"kind,omitempty"`
+
 	// Identity
 	Name   string            `json:"name,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; pic/ prefix rejected

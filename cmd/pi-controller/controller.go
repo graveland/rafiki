@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -324,25 +325,50 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		}
 	}
 
-	piBin, err := resolvePiBinary(req.PiBinary)
+	kind := req.Kind
+	if kind == "" {
+		kind = "pi"
+	}
+
+	var (
+		bin  string
+		argv []string
+		prov child.ProtocolProvider
+		err  error
+	)
+	switch kind {
+	case "claude":
+		bin, err = resolveClaudeBinary(req.PiBinary)
+		argv = buildClaudeArgv(req)
+		prov = child.ClaudeProvider{}
+	case "pi":
+		bin, err = resolvePiBinary(req.PiBinary)
+		argv = buildArgv(req)
+		prov = child.PiProvider{}
+	default:
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "unknown kind: " + kind,
+		}
+	}
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
-			Message: "pi binary not found: " + err.Error(),
+			Message: "binary not found: " + err.Error(),
 		}
 	}
 
 	childID := newChildID()
-	argv := buildArgv(req)
 	env := buildEnv(req, childID, c.socketPath)
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
 		Cwd:         req.Cwd,
-		PiBinary:    piBin,
+		PiBinary:    bin,
 		Argv:        argv,
 		Env:         env,
 		EnvOverride: req.EnvOverride,
+		Provider:    prov,
 	}
 
 	now := time.Now()
@@ -410,7 +436,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		SystemPrompt:       req.SystemPrompt,
 		AppendSystemPrompt: req.AppendSystemPrompt,
 		Verbose:            req.Verbose,
-		PiBinary:           piBin,
+		PiBinary:           bin,
 		ExtraArgs:          req.ExtraArgs,
 	}
 	c.st.Insert(sess)
@@ -444,7 +470,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	// activateLiveChild (baseSnap==nil selects the Spawn-specific branch).
 	// noSession/resumeSession/forkSession are unused by that branch (req is used
 	// instead); pass zero values for clarity.
-	return c.activateLiveChild(childID, ch, piBin, req, nil, false, "", "")
+	return c.activateLiveChild(childID, ch, bin, req, nil, false, "", "")
 }
 
 // activateLiveChild handles the post-spawn registration sequence. It waits for
@@ -1599,6 +1625,48 @@ func buildArgv(req protocol.SpawnRequest) []string {
 	}
 
 	// Extra args are appended last (last-flag-wins override).
+	argv = append(argv, req.ExtraArgs...)
+	return argv
+}
+
+// resolveClaudeBinary resolves the Claude Code CLI binary path. Precedence:
+// explicit override → CLAUDE_BINARY env → ~/.local/bin/claude (the path the
+// user's claudew/claudep wrappers exec) → PATH lookup of "claude".
+func resolveClaudeBinary(override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if env := os.Getenv("CLAUDE_BINARY"); env != "" {
+		return env, nil
+	}
+	if u, err := user.Current(); err == nil {
+		cand := filepath.Join(u.HomeDir, ".local", "bin", "claude")
+		if _, err := os.Stat(cand); err == nil {
+			return cand, nil
+		}
+	}
+	return exec.LookPath("claude")
+}
+
+// buildClaudeArgv converts a SpawnRequest into the claude CLI argument list
+// (excluding the binary itself) for stream-json bidirectional driving.
+func buildClaudeArgv(req protocol.SpawnRequest) []string {
+	argv := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions",
+	}
+	if req.Model != "" {
+		argv = append(argv, "--model", req.Model)
+	}
+	if req.ResumeSession != "" {
+		argv = append(argv, "--resume", req.ResumeSession)
+	}
+	if req.AppendSystemPrompt != "" {
+		argv = append(argv, "--append-system-prompt", req.AppendSystemPrompt)
+	}
 	argv = append(argv, req.ExtraArgs...)
 	return argv
 }
