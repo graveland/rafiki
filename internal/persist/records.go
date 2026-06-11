@@ -22,6 +22,8 @@ type Record struct {
 	ChildID            string   `json:"childId"`
 	Name               string   `json:"name,omitempty"`
 	Cwd                string   `json:"cwd"`
+	Kind               string   `json:"kind,omitempty"`
+	ConfigDir          string   `json:"configDir,omitempty"`
 	Provider           string   `json:"provider,omitempty"`
 	Model              string   `json:"model,omitempty"`
 	Thinking           string   `json:"thinking,omitempty"`
