@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
 	"git.graveland.dev/brent/pi-controller/internal/ring"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // Session is the controller's per-child record. Pure metadata —
@@ -23,6 +23,10 @@ type Session struct {
 	PID     int
 	Name    string
 	Cwd     string
+	Kind    string // "pi" (default) or "claude"; selects the child protocol
+
+	// ConfigDir, for claude children, is exported as CLAUDE_CONFIG_DIR.
+	ConfigDir string
 
 	Provider string
 	Model    string
@@ -95,10 +99,12 @@ type Session struct {
 
 // Snapshot is a defensive copy used at every boundary.
 type Snapshot struct {
-	ChildID string
-	PID     int
-	Name    string
-	Cwd     string
+	ChildID   string
+	PID       int
+	Name      string
+	Cwd       string
+	Kind      string
+	ConfigDir string
 
 	Provider string
 	Model    string
@@ -163,6 +169,7 @@ func (s *Session) Snapshot() Snapshot {
 	}
 	return Snapshot{
 		ChildID: s.ChildID, Name: s.Name, Cwd: s.Cwd, PID: s.PID,
+		Kind: s.Kind, ConfigDir: s.ConfigDir,
 		Provider: s.Provider, Model: s.Model, Thinking: s.Thinking,
 		SessionID: s.SessionID, SessionFile: s.SessionFile,
 		Status: s.Status, StartedAt: s.StartedAt, LastActivity: s.LastActivity,
