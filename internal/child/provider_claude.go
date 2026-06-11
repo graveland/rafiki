@@ -7,11 +7,26 @@ import "encoding/json"
 // --verbose). It maps claude's system/assistant/user/result objects onto the
 // daemon's normalized state-machine vocabulary, and encodes outbound prompts as
 // claude stream-json user messages.
+//
+// ClaudeProvider is the stateless factory value stored in a SpawnSpec; its
+// Fresh() yields a per-child *claudeProvider that carries the translation state
+// (accumulated messages, pending tool calls, turn flag, model) used by
+// BusFrames. The factory's own BusFrames is a no-op — only the per-child
+// instance translates.
 type ClaudeProvider struct{}
+
+// Fresh returns a per-child stateful translator instance. Each Child gets its
+// own so accumulated messages / pending tool calls never leak across children.
+func (ClaudeProvider) Fresh() ProtocolProvider { return newClaudeProvider() }
 
 // BootstrapFrame is nil: claude begins working only when it receives a user
 // message, and emits its system/init line on startup without any kickoff.
 func (ClaudeProvider) BootstrapFrame() []byte { return nil }
+
+// BusFrames on the factory value is a no-op; translation happens on the
+// per-child *claudeProvider returned by Fresh(). The real translator is added in
+// Task 3.
+func (ClaudeProvider) BusFrames(_ []byte, _ int64) [][]byte { return nil }
 
 // claudeFrame is the minimal envelope shared by claude stream-json objects.
 type claudeFrame struct {

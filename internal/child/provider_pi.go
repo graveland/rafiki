@@ -7,10 +7,21 @@ import "encoding/json"
 // lived inline in Child.handleFrame.
 type PiProvider struct{}
 
+// Fresh returns a fresh PiProvider. pi is stateless on the bus (its stdout
+// already IS the AgentSessionEvent stream), so the value is its own per-child
+// instance.
+func (PiProvider) Fresh() ProtocolProvider { return PiProvider{} }
+
 // BootstrapFrame returns pi's get_state kickoff; pi replies with a
 // response.get_state that releases the spawning→idle transition.
 func (PiProvider) BootstrapFrame() []byte {
 	return []byte(`{"type":"get_state","id":"__bootstrap__"}`)
+}
+
+// BusFrames is the identity for pi: its stdout already IS the pi
+// AgentSessionEvent stream, so each raw line is published verbatim on the bus.
+func (PiProvider) BusFrames(line []byte, _ int64) [][]byte {
+	return [][]byte{line}
 }
 
 // EncodeOutbound is the identity for pi: clients already send native pi frames.

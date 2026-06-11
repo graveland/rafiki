@@ -182,6 +182,9 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	if prov == nil {
 		prov = PiProvider{}
 	}
+	// Each Child gets its own provider instance so a stateful translator
+	// (ClaudeProvider) never shares accumulation state across children.
+	prov = prov.Fresh()
 
 	c := &Child{
 		ID:          spec.ChildID,
@@ -375,8 +378,14 @@ func (c *Child) readStdout() {
 			break
 		}
 		ts := time.Now().UnixMilli()
+		// The ring keeps the RAW child frame (so subagent_view raw stays
+		// forensically real); the bus carries the provider's normalized pi
+		// AgentSessionEvent frames. For pi these are identical (identity
+		// provider); for claude the provider translates raw → pi vocabulary.
 		c.ring.Append(line, ts)
-		c.bus.Publish(line)
+		for _, f := range c.provider.BusFrames(line, ts) {
+			c.bus.Publish(f)
+		}
 		c.handleFrame(line)
 	}
 
