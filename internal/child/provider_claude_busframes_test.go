@@ -92,13 +92,29 @@ func TestClaudeBusFrames_TextTurn(t *testing.T) {
 		t.Fatalf("agent_end.willRetry = %v, want false", end["willRetry"])
 	}
 
-	// The text content block must map to a pi text block.
-	upd := frames[2] // first message_update
-	msg := upd["message"].(map[string]any)
-	content := msg["content"].([]any)
-	first := content[0].(map[string]any)
-	if first["type"] != "thinking" {
-		t.Fatalf("first assistant content block type = %v, want thinking", first["type"])
+	// The startup fixture's first assistant frame is thinking-only with EMPTY
+	// thinking text (Fable 5 display:omitted), which is skipped — so NO thinking
+	// content block is ever emitted (emitting {type:"thinking"} with no field
+	// crashes pi's TUI). The "pong" reply maps to a pi text block.
+	sawPong := false
+	for _, fr := range frames {
+		msg, ok := fr["message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		content, _ := msg["content"].([]any)
+		for _, c := range content {
+			blk := c.(map[string]any)
+			if blk["type"] == "thinking" {
+				t.Fatalf("emitted a thinking block (the only claude one was empty, must be skipped): %v", blk)
+			}
+			if blk["type"] == "text" && blk["text"] == "pong" {
+				sawPong = true
+			}
+		}
+	}
+	if !sawPong {
+		t.Fatalf("expected a pi text block with \"pong\"")
 	}
 }
 
