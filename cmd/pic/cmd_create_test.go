@@ -258,6 +258,9 @@ func TestBuildSpawnRequest_KindClaude(t *testing.T) {
 	if err := cmd.Flags().Set("config-dir", "/x"); err != nil {
 		t.Fatal(err)
 	}
+	if err := cmd.Flags().Set("append-system-prompt", "be terse"); err != nil {
+		t.Fatal(err)
+	}
 
 	req, err := buildSpawnRequest(cmd, nil)
 	if err != nil {
@@ -268,6 +271,9 @@ func TestBuildSpawnRequest_KindClaude(t *testing.T) {
 	}
 	if req.ConfigDir != "/x" {
 		t.Errorf("ConfigDir = %q, want /x", req.ConfigDir)
+	}
+	if req.AppendSystemPrompt != "be terse" {
+		t.Errorf("AppendSystemPrompt = %q, want 'be terse'", req.AppendSystemPrompt)
 	}
 }
 

@@ -70,6 +70,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
 	cmd.Flags().String("kind", "pi", "Agent kind: pi (default) or claude (Claude Code)")
 	cmd.Flags().String("config-dir", "", "For --kind claude: CLAUDE_CONFIG_DIR selecting the claude profile (plugins/hooks/MCP/settings)")
+	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
 	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via PIC_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
@@ -124,6 +125,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 
 	kind, _ := cmd.Flags().GetString("kind")
 	configDir, _ := cmd.Flags().GetString("config-dir")
+	appendSysPrompt, _ := cmd.Flags().GetString("append-system-prompt")
 
 	thinking, _ := cmd.Flags().GetString("thinking")
 	noSession, _ := cmd.Flags().GetBool("no-session")
@@ -161,22 +163,23 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	}
 
 	return protocol.SpawnRequest{
-		Type:          protocol.TypeCtrlSpawn,
-		Name:          name,
-		Cwd:           cwd,
-		Kind:          kind,
-		ConfigDir:     configDir,
-		Model:         model,
-		Thinking:      thinking,
-		NoSession:     noSession,
-		ResumeSession: resume,
-		ForkSession:   fork,
-		NoExtensions:  noExt,
-		Extensions:    exts,
-		Verbose:       verbose,
-		ExtraArgs:     extraArgs,
-		Labels:        labels,
-		Env:           env,
+		Type:               protocol.TypeCtrlSpawn,
+		Name:               name,
+		Cwd:                cwd,
+		Kind:               kind,
+		ConfigDir:          configDir,
+		AppendSystemPrompt: appendSysPrompt,
+		Model:              model,
+		Thinking:           thinking,
+		NoSession:          noSession,
+		ResumeSession:      resume,
+		ForkSession:        fork,
+		NoExtensions:       noExt,
+		Extensions:         exts,
+		Verbose:            verbose,
+		ExtraArgs:          extraArgs,
+		Labels:             labels,
+		Env:                env,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
 		// caller-forwarded vars win on duplicate keys.  This is what users
 		// usually want — SSH_AUTH_SOCK, *_API_KEY, GOOGLE_APPLICATION_CREDENTIALS,
