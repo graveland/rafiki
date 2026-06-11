@@ -100,3 +100,174 @@ func TestClaudeChild_EndToEnd(t *testing.T) {
 		t.Fatalf("outbound frame = %q, want a claude user envelope with content 'hi'", line)
 	}
 }
+
+// writeFakeClaudeToolTurn writes a fake-claude that, on the first stdin line,
+// emits a full tool turn: assistant(tool_use) → user(tool_result) →
+// assistant(text) → result. This exercises the daemon's bus normalization end
+// to end (tool_execution_start/end + a toolResult message in agent_end).
+func writeFakeClaudeToolTurn(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fakeclaude_tool.sh")
+	body := `#!/bin/bash
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-tool","model":"claude-fable-5"}'
+read -r line
+printf '%s\n' '{"type":"assistant","session_id":"sess-tool","message":{"role":"assistant","model":"claude-fable-5","content":[{"type":"tool_use","id":"toolu_X","name":"Bash","input":{"command":"ls"}}]}}'
+printf '%s\n' '{"type":"user","session_id":"sess-tool","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_X","content":"go.mod\ngo.sum","is_error":false}]}}'
+printf '%s\n' '{"type":"assistant","session_id":"sess-tool","message":{"role":"assistant","model":"claude-fable-5","content":[{"type":"text","text":"Done."}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-tool","result":"Done."}'
+sleep 30
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake claude tool: %v", err)
+	}
+	return script
+}
+
+// TestClaudeChild_BusCarriesNormalizedPiFrames is the Plan 4 correctness gate. It
+// drives a fake-claude tool turn through the real Child loop and asserts:
+//   - the BUS delivers the pi-vocabulary sequence (agent_start, message_start/
+//     update/end, tool_execution_start/end, agent_end) — NOT raw claude
+//     assistant/user/result frames.
+//   - agent_end.messages contains the assistant(tool_use) + toolResult +
+//     assistant(text) messages with mapped pi content blocks.
+//   - the RING still holds the RAW claude frames (subagent_view raw fidelity).
+func TestClaudeChild_BusCarriesNormalizedPiFrames(t *testing.T) {
+	bin := writeFakeClaudeToolTurn(t)
+	cwd, _ := os.Getwd()
+	ch, err := Spawn(context.Background(), SpawnSpec{
+		ChildID:  "c_bus",
+		Cwd:      cwd,
+		PiBinary: bin,
+		Provider: ClaudeProvider{},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
+
+	// Subscribe to the bus BEFORE prompting so we capture the whole sequence.
+	busCh, cancel := ch.Bus().Subscribe()
+	defer cancel()
+
+	select {
+	case <-ch.Idle():
+	case <-time.After(3 * time.Second):
+		t.Fatal("child never became idle from system/init")
+	}
+
+	if err := ch.Send([]byte(`{"type":"prompt","message":"list files"}`)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Collect bus frames until we observe agent_end (the turn terminator).
+	var busFrames []map[string]any
+	deadline := time.After(5 * time.Second)
+loop:
+	for {
+		select {
+		case raw, ok := <-busCh:
+			if !ok {
+				break loop
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("bus frame not valid JSON: %v (%s)", err, raw)
+			}
+			busFrames = append(busFrames, m)
+			if m["type"] == "agent_end" {
+				break loop
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for agent_end; saw bus types %v", busTypes(busFrames))
+		}
+	}
+
+	// The bus must carry the pi-vocabulary sequence, NOT raw claude frames.
+	gotTypes := busTypes(busFrames)
+	want := []string{
+		"agent_start",
+		"message_start", "message_update", "tool_execution_start", "message_end",
+		"tool_execution_end",
+		"message_start", "message_update", "message_end",
+		"agent_end",
+	}
+	if strings.Join(gotTypes, ",") != strings.Join(want, ",") {
+		t.Fatalf("bus sequence:\n got=%v\nwant=%v", gotTypes, want)
+	}
+
+	// No raw claude frame types should ever appear on the bus.
+	for _, ty := range gotTypes {
+		switch ty {
+		case "assistant", "user", "result", "system":
+			t.Fatalf("bus carried a RAW claude frame type %q — bus must be pi-vocabulary only", ty)
+		}
+	}
+
+	// agent_end.messages: assistant(tool_use) + toolResult + assistant(text).
+	end := busFrames[len(busFrames)-1]
+	msgs, ok := end["messages"].([]any)
+	if !ok {
+		t.Fatalf("agent_end.messages not an array: %v", end["messages"])
+	}
+	roles := make([]string, len(msgs))
+	for i, raw := range msgs {
+		roles[i] = raw.(map[string]any)["role"].(string)
+	}
+	if strings.Join(roles, ",") != "assistant,toolResult,assistant" {
+		t.Fatalf("agent_end.messages roles = %v, want [assistant toolResult assistant]", roles)
+	}
+	// The first assistant message must carry a mapped pi toolCall block.
+	a0 := msgs[0].(map[string]any)
+	block0 := a0["content"].([]any)[0].(map[string]any)
+	if block0["type"] != "toolCall" || block0["name"] != "Bash" {
+		t.Fatalf("agent_end assistant content not a mapped toolCall: %v", block0)
+	}
+	if _, bad := block0["input"]; bad {
+		t.Fatalf("toolCall must use arguments not input: %v", block0)
+	}
+	// The toolResult message must be pi-shaped.
+	tr := msgs[1].(map[string]any)
+	if tr["toolCallId"] != "toolu_X" || tr["toolName"] != "Bash" {
+		t.Fatalf("toolResult message not paired: %v", tr)
+	}
+
+	// The RING must still hold the RAW claude frames (forensic fidelity).
+	rawFrames := ch.RingSnapshot()
+	sawRawAssistant, sawRawResult, sawRawToolUse := false, false, false
+	for _, rf := range rawFrames {
+		var m map[string]any
+		if err := json.Unmarshal(rf, &m); err != nil {
+			continue
+		}
+		switch m["type"] {
+		case "assistant":
+			sawRawAssistant = true
+			if msg, ok := m["message"].(map[string]any); ok {
+				if content, ok := msg["content"].([]any); ok {
+					for _, c := range content {
+						if cb, ok := c.(map[string]any); ok && cb["type"] == "tool_use" {
+							sawRawToolUse = true
+						}
+					}
+				}
+			}
+		case "result":
+			sawRawResult = true
+		}
+	}
+	if !sawRawAssistant || !sawRawResult {
+		t.Fatalf("ring lost raw claude frames: assistant=%v result=%v (ring=%d frames)", sawRawAssistant, sawRawResult, len(rawFrames))
+	}
+	if !sawRawToolUse {
+		t.Fatal("ring must preserve the raw claude tool_use block (not the mapped toolCall)")
+	}
+}
+
+func busTypes(frames []map[string]any) []string {
+	out := make([]string, len(frames))
+	for i, f := range frames {
+		out[i], _ = f["type"].(string)
+	}
+	return out
+}
