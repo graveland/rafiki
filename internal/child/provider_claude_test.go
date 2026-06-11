@@ -2,6 +2,7 @@ package child
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -114,5 +115,44 @@ func TestClaudeProvider_GoldenTranscripts(t *testing.T) {
 				t.Fatalf("want >=1 agent_end (terminal result), got %d", agentEnds)
 			}
 		})
+	}
+}
+
+func TestClaudeProvider_EncodePrompt(t *testing.T) {
+	got := ClaudeProvider{}.EncodeOutbound([]byte(`{"type":"prompt","message":"hello there"}`))
+	if got == nil {
+		t.Fatal("prompt must encode to a non-nil frame")
+	}
+	var env struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(got, &env); err != nil {
+		t.Fatalf("encoded frame is not valid JSON: %v (%s)", err, got)
+	}
+	if env.Type != "user" || env.Message.Role != "user" || env.Message.Content != "hello there" {
+		t.Fatalf("bad envelope: %s", got)
+	}
+}
+
+func TestClaudeProvider_EncodeSteerSameAsPrompt(t *testing.T) {
+	got := ClaudeProvider{}.EncodeOutbound([]byte(`{"type":"steer","message":"keep going"}`))
+	if got == nil || !json.Valid(got) {
+		t.Fatalf("steer should encode like a prompt, got %q", got)
+	}
+}
+
+func TestClaudeProvider_EncodeUnknownDropped(t *testing.T) {
+	if got := (ClaudeProvider{}).EncodeOutbound([]byte(`{"type":"set_session_name","name":"x"}`)); got != nil {
+		t.Fatalf("unsupported frame should be dropped (nil), got %q", got)
+	}
+}
+
+func TestClaudeProvider_EncodeGarbageDropped(t *testing.T) {
+	if got := (ClaudeProvider{}).EncodeOutbound([]byte(`not json`)); got != nil {
+		t.Fatalf("garbage should be dropped (nil), got %q", got)
 	}
 }

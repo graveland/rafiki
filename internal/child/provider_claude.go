@@ -79,5 +79,39 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 	return res
 }
 
-// EncodeOutbound is implemented in Task 5.
-func (ClaudeProvider) EncodeOutbound(frame []byte) []byte { return frame }
+// EncodeOutbound translates the daemon's normalized outbound frames into claude
+// stream-json stdin messages. prompt/steer become a user message; everything
+// else (including pi-only frames like set_session_name) is dropped, since claude
+// has no equivalent and silently writing them would corrupt the input stream.
+func (ClaudeProvider) EncodeOutbound(frame []byte) []byte {
+	var in struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(frame, &in); err != nil {
+		return nil
+	}
+	switch in.Type {
+	case "prompt", "steer":
+		// claude -p --input-format stream-json accepts a user message with the
+		// Anthropic message shape. String content is accepted (confirmed in
+		// Task 0 Step 3.7); switch to a [{type:text,text:...}] block array here
+		// if your capture required block content.
+		env := struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+		}{Type: "user"}
+		env.Message.Role = "user"
+		env.Message.Content = in.Message
+		out, err := json.Marshal(env)
+		if err != nil {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
