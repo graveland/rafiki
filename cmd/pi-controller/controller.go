@@ -492,7 +492,7 @@ func (c *Controller) activateLiveChild(
 	if baseSnap == nil {
 		// Fresh Spawn path. Perform name reconciliation before reading final
 		// metadata so the returned SessionName reflects any rename.
-		if !stalled && req.Name != "" && meta.SessionName != req.Name {
+		if !stalled && req.Kind != "claude" && req.Name != "" && meta.SessionName != req.Name {
 			renameID := "controller-rename-1"
 			frame := []byte(fmt.Sprintf(`{"type":"set_session_name","id":%q,"name":%q}`, renameID, req.Name))
 			if err := ch.Send(frame); err == nil {
