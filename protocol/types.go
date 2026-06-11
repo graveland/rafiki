@@ -361,6 +361,7 @@ type ChildSummary struct {
 	PID          *int              `json:"pid"` // null when exited
 	Cwd          string            `json:"cwd"`
 	Name         string            `json:"name,omitempty"`
+	Kind         string            `json:"kind,omitempty"` // child protocol kind ("claude"); absent for pi children
 	Model        string            `json:"model,omitempty"`
 	SessionID    string            `json:"sessionId,omitempty"`
 	SessionFile  string            `json:"sessionFile,omitempty"`

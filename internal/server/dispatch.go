@@ -252,6 +252,7 @@ func snapshotToSummary(snap store.Snapshot) protocol.ChildSummary {
 		PID:          pid,
 		Cwd:          snap.Cwd,
 		Name:         snap.Name,
+		Kind:         snap.Kind,
 		Model:        model,
 		SessionID:    snap.SessionID,
 		SessionFile:  snap.SessionFile,

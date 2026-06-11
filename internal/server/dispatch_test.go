@@ -361,6 +361,87 @@ func TestDispatch_Get_Success(t *testing.T) {
 	}
 }
 
+// TestDispatch_Get_ClaudeChildMetadata asserts a claude child's ctrl_get
+// response carries kind:"claude" plus the sessionId/model/cwd/name fields the
+// attach layer's ChildMetadata reads (fetchChildMetadata maps data.name →
+// sessionName). claude has no session file, so sessionFile is empty.
+func TestDispatch_Get_ClaudeChildMetadata(t *testing.T) {
+	snap := store.Snapshot{
+		ChildID:      "c_claude",
+		PID:          77,
+		Cwd:          "/proj",
+		Name:         "review-bot",
+		Kind:         "claude",
+		Provider:     "", // claude carries a bare model id, no provider prefix
+		Model:        "claude-opus-4-8",
+		SessionID:    "sess-claude-1",
+		SessionFile:  "", // claude has no session file
+		Status:       protocol.StatusIdle,
+		StartedAt:    time.Unix(1716000000, 0),
+		LastActivity: time.Unix(1716000001, 0),
+	}
+	c := &fakeController{
+		getFn: func(id string) (store.Snapshot, bool) {
+			if id == "c_claude" {
+				return snap, true
+			}
+			return store.Snapshot{}, false
+		},
+	}
+	d := server.NewDispatch(c)
+	frame := `{"type":"ctrl_get","id":"9","childId":"c_claude"}`
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+
+	// Decode into a generic map so we can assert the exact wire keys the attach
+	// ChildMetadata reads (kind, sessionId, model, cwd, name).
+	var m map[string]any
+	if err := json.Unmarshal(r.Data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["kind"] != "claude" {
+		t.Fatalf("ctrl_get must carry kind:claude, got %v", m["kind"])
+	}
+	if m["sessionId"] != "sess-claude-1" {
+		t.Fatalf("sessionId = %v, want sess-claude-1", m["sessionId"])
+	}
+	if m["model"] != "claude-opus-4-8" {
+		t.Fatalf("model = %v, want claude-opus-4-8 (no provider prefix)", m["model"])
+	}
+	if m["cwd"] != "/proj" {
+		t.Fatalf("cwd = %v", m["cwd"])
+	}
+	if m["name"] != "review-bot" {
+		t.Fatalf("name (sessionName) = %v, want review-bot", m["name"])
+	}
+
+	// Also assert the typed ChildSummary.Kind round-trips.
+	var ch protocol.ChildSummary
+	if err := json.Unmarshal(r.Data, &ch); err != nil {
+		t.Fatal(err)
+	}
+	if ch.Kind != "claude" {
+		t.Fatalf("ChildSummary.Kind = %q, want claude", ch.Kind)
+	}
+}
+
+// TestDispatch_Get_PiChildOmitsKind asserts a pi child (empty Kind) omits the
+// kind field on the wire (omitempty), so existing pi clients see no change.
+func TestDispatch_Get_PiChildOmitsKind(t *testing.T) {
+	snap := makeSnapshot("c_pi", protocol.StatusIdle) // Kind unset ("")
+	c := &fakeController{
+		getFn: func(id string) (store.Snapshot, bool) { return snap, true },
+	}
+	d := server.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_get","id":"10","childId":"c_pi"}`)))
+	var m map[string]any
+	if err := json.Unmarshal(r.Data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := m["kind"]; present {
+		t.Fatalf("pi child must omit kind on the wire, got %v", m["kind"])
+	}
+}
+
 func TestDispatch_Get_NotFound(t *testing.T) {
 	c := &fakeController{
 		getFn: func(string) (store.Snapshot, bool) { return store.Snapshot{}, false },
