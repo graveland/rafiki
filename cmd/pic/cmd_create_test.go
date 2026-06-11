@@ -247,6 +247,48 @@ func TestBuildSpawnRequest_InvalidLabelKey(t *testing.T) {
 	}
 }
 
+func TestBuildSpawnRequest_KindClaude(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("kind", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("config-dir", "/x"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Kind != "claude" {
+		t.Errorf("Kind = %q, want claude", req.Kind)
+	}
+	if req.ConfigDir != "/x" {
+		t.Errorf("ConfigDir = %q, want /x", req.ConfigDir)
+	}
+}
+
+func TestBuildSpawnRequest_KindDefaultsPi(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Kind != "pi" {
+		t.Errorf("Kind = %q, want pi (default)", req.Kind)
+	}
+	if req.ConfigDir != "" {
+		t.Errorf("ConfigDir = %q, want empty", req.ConfigDir)
+	}
+}
+
 func TestBuildSpawnRequest_ReservedLabelKey(t *testing.T) {
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {

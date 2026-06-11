@@ -68,6 +68,8 @@ scripting / AFK workflows, use --detached.)`,
 // addSpawnFlags registers the shared spawn-related flags on cmd.
 func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
+	cmd.Flags().String("kind", "pi", "Agent kind: pi (default) or claude (Claude Code)")
+	cmd.Flags().String("config-dir", "", "For --kind claude: CLAUDE_CONFIG_DIR selecting the claude profile (plugins/hooks/MCP/settings)")
 	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via PIC_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
@@ -120,6 +122,9 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		model = os.Getenv("PIC_DEFAULT_MODEL")
 	}
 
+	kind, _ := cmd.Flags().GetString("kind")
+	configDir, _ := cmd.Flags().GetString("config-dir")
+
 	thinking, _ := cmd.Flags().GetString("thinking")
 	noSession, _ := cmd.Flags().GetBool("no-session")
 	resume, _ := cmd.Flags().GetString("session")
@@ -159,6 +164,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		Type:          protocol.TypeCtrlSpawn,
 		Name:          name,
 		Cwd:           cwd,
+		Kind:          kind,
+		ConfigDir:     configDir,
 		Model:         model,
 		Thinking:      thinking,
 		NoSession:     noSession,
@@ -203,8 +210,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	c := mustDial(cmd)
 	defer c.Close()
 
+	// claude children have no pi extension system, so the pic-helpers pi
+	// extension is meaningless for them (the helper frame would just be
+	// dropped). Skip the auto-install entirely for --kind claude.
+	kind, _ := cmd.Flags().GetString("kind")
 	noInstall, _ := cmd.Flags().GetBool("no-install-helpers")
-	if !noInstall {
+	if !noInstall && kind != "claude" {
 		if err := ensurePicHelpersInstalled(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: pic-helpers auto-install failed: %v\n", err)
 			// proceed anyway
