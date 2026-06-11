@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"git.graveland.dev/brent/pi-controller/internal/child"
+	"git.graveland.dev/brent/pi-controller/internal/store"
 	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
@@ -38,5 +39,35 @@ func TestResolveSpawnPlan_PiDefault(t *testing.T) {
 func TestResolveSpawnPlan_UnknownKind(t *testing.T) {
 	if _, _, _, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "bogus"}); err == nil {
 		t.Fatal("expected error for unknown kind")
+	}
+}
+
+func TestResumeRequestFromSnapshot_Claude(t *testing.T) {
+	snap := store.Snapshot{
+		Cwd:       "/tmp",
+		Kind:      "claude",
+		ConfigDir: "/home/u/.claude-personal",
+		Model:     "claude-opus-4-8",
+		SessionID: "sess-xyz",
+	}
+	req := resumeRequestFromSnapshot(snap, "")
+	if req.Kind != "claude" || req.ConfigDir != "/home/u/.claude-personal" {
+		t.Fatalf("kind/configdir not carried: %+v", req)
+	}
+	if req.ResumeSession != "sess-xyz" {
+		t.Fatalf("claude must resume by session id, got ResumeSession=%q", req.ResumeSession)
+	}
+}
+
+func TestResumeRequestFromSnapshot_Pi(t *testing.T) {
+	snap := store.Snapshot{
+		Cwd:         "/tmp",
+		Kind:        "", // pi
+		SessionFile: "/tmp/sessions/s.jsonl",
+		SessionID:   "ignored-for-pi",
+	}
+	req := resumeRequestFromSnapshot(snap, "")
+	if req.ResumeSession != "/tmp/sessions/s.jsonl" {
+		t.Fatalf("pi must resume by session file path, got %q", req.ResumeSession)
 	}
 }

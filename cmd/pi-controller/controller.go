@@ -593,6 +593,8 @@ func (c *Controller) activateLiveChild(
 		PID:                ch.PID(),
 		Name:               snap.Name,
 		Cwd:                snap.Cwd,
+		Kind:               snap.Kind,
+		ConfigDir:          snap.ConfigDir,
 		Provider:           provider,
 		Model:              model,
 		Thinking:           snap.Thinking,
@@ -660,33 +662,14 @@ func (c *Controller) activateLiveChild(
 	}, nil
 }
 
-func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (server.SpawnResult, error) {
-	snap, ok := c.st.Get(childID)
-	if !ok {
-		return server.SpawnResult{}, &server.ControllerError{
-			Code:    protocol.ErrNotFound,
-			Message: "child not found: " + childID,
-		}
-	}
-	if snap.Status != protocol.StatusExited {
-		return server.SpawnResult{}, &server.ControllerError{
-			Code:    protocol.ErrNotResumable,
-			Message: "child is not exited (status: " + string(snap.Status) + ")",
-		}
-	}
-
-	// Verify session file exists if this session has one.
-	if !snap.NoSession && snap.SessionFile != "" {
-		if _, err := os.Stat(snap.SessionFile); err != nil {
-			return server.SpawnResult{}, &server.ControllerError{
-				Code:    protocol.ErrSessionFileMissing,
-				Message: "session file not found: " + snap.SessionFile,
-			}
-		}
-	}
-
-	// Rebuild spawn request from the snapshot.
+// resumeRequestFromSnapshot rebuilds a SpawnRequest from an exited child's
+// snapshot. The resume token differs by kind: pi re-opens its session file via
+// --session <path> (ResumeSession=SessionFile); claude re-attaches its stored
+// conversation via --resume <id> (ResumeSession=SessionID).
+func resumeRequestFromSnapshot(snap store.Snapshot, apiKey string) protocol.SpawnRequest {
 	req := protocol.SpawnRequest{
+		Kind:               snap.Kind,
+		ConfigDir:          snap.ConfigDir,
 		Name:               snap.Name,
 		Cwd:                snap.Cwd,
 		Provider:           snap.Provider,
@@ -695,7 +678,6 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		APIKey:             apiKey,
 		NoSession:          snap.NoSession,
 		SessionDir:         snap.SessionDir,
-		ResumeSession:      snap.SessionFile, // re-open the existing session file
 		ForkSession:        snap.ForkSession,
 		Tools:              strings.Join(snap.Tools, ","),
 		NoTools:            snap.NoTools,
@@ -715,24 +697,69 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 	}
+	if snap.Kind == "claude" {
+		req.ResumeSession = snap.SessionID
+	} else {
+		req.ResumeSession = snap.SessionFile
+	}
+	return req
+}
 
-	piBin, err := resolvePiBinary(req.PiBinary)
-	if err != nil {
+func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (server.SpawnResult, error) {
+	snap, ok := c.st.Get(childID)
+	if !ok {
 		return server.SpawnResult{}, &server.ControllerError{
-			Code:    protocol.ErrSpawnFailed,
-			Message: "pi binary not found: " + err.Error(),
+			Code:    protocol.ErrNotFound,
+			Message: "child not found: " + childID,
+		}
+	}
+	if snap.Status != protocol.StatusExited {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrNotResumable,
+			Message: "child is not exited (status: " + string(snap.Status) + ")",
 		}
 	}
 
-	argv := buildArgv(req)
+	kind := snap.Kind
+	if kind == "" {
+		kind = "pi"
+	}
+
+	// Verify the session file exists for pi children that have one. Claude does
+	// not track a session file (it manages its own ~/.claude store keyed by
+	// session id), so there is nothing to stat.
+	if kind == "pi" && !snap.NoSession && snap.SessionFile != "" {
+		if _, err := os.Stat(snap.SessionFile); err != nil {
+			return server.SpawnResult{}, &server.ControllerError{
+				Code:    protocol.ErrSessionFileMissing,
+				Message: "session file not found: " + snap.SessionFile,
+			}
+		}
+	}
+
+	req := resumeRequestFromSnapshot(snap, apiKey)
+
+	bin, argv, prov, err := resolveSpawnPlan(req)
+	if err != nil {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "spawn plan: " + err.Error(),
+		}
+	}
+
 	env := buildEnv(req, childID, c.socketPath)
+	if kind == "claude" {
+		env = append(env, claudeEnv(req.ConfigDir)...)
+	}
 
 	spec := child.SpawnSpec{
-		ChildID:  childID,
-		Cwd:      req.Cwd,
-		PiBinary: piBin,
-		Argv:     argv,
-		Env:      env,
+		ChildID:     childID,
+		Cwd:         req.Cwd,
+		PiBinary:    bin,
+		Argv:        argv,
+		Env:         env,
+		EnvOverride: req.EnvOverride,
+		Provider:    prov,
 	}
 
 	ch, err := child.Spawn(ctx, spec)
@@ -751,7 +778,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 	// activateLiveChild (baseSnap != nil path): waits for Idle, builds the full
 	// Session from snap with Resume's session-continuity values, inserts it,
 	// adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
-	return c.activateLiveChild(childID, ch, piBin, protocol.SpawnRequest{}, &snap,
+	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
 		snap.NoSession, snap.SessionFile, snap.ForkSession)
 }
 
