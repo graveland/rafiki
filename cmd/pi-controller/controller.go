@@ -325,41 +325,19 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		}
 	}
 
-	kind := req.Kind
-	if kind == "" {
-		kind = "pi"
-	}
-
-	var (
-		bin  string
-		argv []string
-		prov child.ProtocolProvider
-		err  error
-	)
-	switch kind {
-	case "claude":
-		bin, err = resolveClaudeBinary(req.PiBinary)
-		argv = buildClaudeArgv(req)
-		prov = child.ClaudeProvider{}
-	case "pi":
-		bin, err = resolvePiBinary(req.PiBinary)
-		argv = buildArgv(req)
-		prov = child.PiProvider{}
-	default:
-		return server.SpawnResult{}, &server.ControllerError{
-			Code:    protocol.ErrInvalidArgs,
-			Message: "unknown kind: " + kind,
-		}
-	}
+	bin, argv, prov, err := resolveSpawnPlan(req)
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
-			Message: "binary not found: " + err.Error(),
+			Message: "spawn plan: " + err.Error(),
 		}
 	}
 
 	childID := newChildID()
 	env := buildEnv(req, childID, c.socketPath)
+	if req.Kind == "claude" {
+		env = append(env, claudeEnv(req.ConfigDir)...)
+	}
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
@@ -410,6 +388,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		Status:       protocol.StatusSpawning,
 		Name:         req.Name,
 		Cwd:          req.Cwd,
+		Kind:         req.Kind,
+		ConfigDir:    req.ConfigDir,
 		Provider:     req.Provider,
 		Model:        req.Model,
 		Thinking:     req.Thinking,
@@ -1669,6 +1649,36 @@ func buildClaudeArgv(req protocol.SpawnRequest) []string {
 	}
 	argv = append(argv, req.ExtraArgs...)
 	return argv
+}
+
+// resolveSpawnPlan picks the binary, argv, and ProtocolProvider for a spawn
+// request based on its Kind. Empty Kind defaults to "pi". Shared by Spawn and
+// Resume so the two paths can never diverge on protocol selection.
+func resolveSpawnPlan(req protocol.SpawnRequest) (bin string, argv []string, prov child.ProtocolProvider, err error) {
+	kind := req.Kind
+	if kind == "" {
+		kind = "pi"
+	}
+	switch kind {
+	case "claude":
+		bin, err = resolveClaudeBinary(req.PiBinary)
+		return bin, buildClaudeArgv(req), child.ClaudeProvider{}, err
+	case "pi":
+		bin, err = resolvePiBinary(req.PiBinary)
+		return bin, buildArgv(req), child.PiProvider{}, err
+	default:
+		return "", nil, nil, fmt.Errorf("unknown kind: %s", kind)
+	}
+}
+
+// claudeEnv returns the extra env entries a claude child needs. Currently just
+// CLAUDE_CONFIG_DIR; returns nil when configDir is empty so the child inherits
+// the controller's default config dir.
+func claudeEnv(configDir string) []string {
+	if configDir == "" {
+		return nil
+	}
+	return []string{"CLAUDE_CONFIG_DIR=" + configDir}
 }
 
 // buildEnv assembles the per-process env var additions for a child process.
