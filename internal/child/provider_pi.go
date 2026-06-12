@@ -31,6 +31,11 @@ func (PiProvider) BusFrames(line []byte, _ int64) [][]byte {
 // EncodeOutbound is the identity for pi: clients already send native pi frames.
 func (PiProvider) EncodeOutbound(frame []byte) []byte { return frame }
 
+// OutboundEcho returns nil: a pi child's stdout already carries the user
+// message_start (its stdout IS the AgentSessionEvent stream), so synthesizing an
+// echo here would render the user's message twice.
+func (PiProvider) OutboundEcho([]byte, int64) [][]byte { return nil }
+
 // Parse classifies one pi stdout line. It mirrors the original handleFrame:
 //   - response.get_state            → FirstResponse
 //   - any recognized metadata frame → Meta (via ExtractMetadata)

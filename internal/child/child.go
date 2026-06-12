@@ -367,6 +367,13 @@ func (c *Child) supervise() {
 				slog.Warn("stdin newline write failed", "child", c.ID, "error", err)
 				goto cleanup
 			}
+			// Publish any provider-synthesized echo (e.g. the user message for a
+			// claude child, which never echoes the prompt on its own stdout) so the
+			// user's turn reaches the bus. Done after the stdin write but before the
+			// child can respond, so it lands ahead of the assistant frames.
+			for _, f := range c.provider.OutboundEcho(frame, time.Now().UnixMilli()) {
+				c.bus.Publish(f)
+			}
 			c.in.append(frame) // capture the original (normalized) frame for log dumps
 		case <-c.processDone:
 			// Process exited; drain nothing, let cleanup wait for readers.

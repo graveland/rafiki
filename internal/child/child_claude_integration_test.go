@@ -190,8 +190,12 @@ loop:
 	}
 
 	// The bus must carry the pi-vocabulary sequence, NOT raw claude frames.
+	// The leading message_start/message_end is the synthesized user echo: claude
+	// never echoes the prompt on stdout, so the daemon emits it when forwarding
+	// the prompt (before the child responds), ahead of agent_start.
 	gotTypes := busTypes(busFrames)
 	want := []string{
+		"message_start", "message_end",
 		"agent_start",
 		"message_start", "message_update", "tool_execution_start", "message_end",
 		"tool_execution_end",
@@ -210,7 +214,8 @@ loop:
 		}
 	}
 
-	// agent_end.messages: assistant(tool_use) + toolResult + assistant(text).
+	// agent_end.messages: user(echo) + assistant(tool_use) + toolResult + assistant(text).
+	// The echoed user prompt is recorded first so a post-turn cache rebuild keeps it.
 	end := busFrames[len(busFrames)-1]
 	msgs, ok := end["messages"].([]any)
 	if !ok {
@@ -220,11 +225,11 @@ loop:
 	for i, raw := range msgs {
 		roles[i] = raw.(map[string]any)["role"].(string)
 	}
-	if strings.Join(roles, ",") != "assistant,toolResult,assistant" {
-		t.Fatalf("agent_end.messages roles = %v, want [assistant toolResult assistant]", roles)
+	if strings.Join(roles, ",") != "user,assistant,toolResult,assistant" {
+		t.Fatalf("agent_end.messages roles = %v, want [user assistant toolResult assistant]", roles)
 	}
 	// The first assistant message must carry a mapped pi toolCall block.
-	a0 := msgs[0].(map[string]any)
+	a0 := msgs[1].(map[string]any)
 	block0 := a0["content"].([]any)[0].(map[string]any)
 	if block0["type"] != "toolCall" || block0["name"] != "Bash" {
 		t.Fatalf("agent_end assistant content not a mapped toolCall: %v", block0)
@@ -233,7 +238,7 @@ loop:
 		t.Fatalf("toolCall must use arguments not input: %v", block0)
 	}
 	// The toolResult message must be pi-shaped.
-	tr := msgs[1].(map[string]any)
+	tr := msgs[2].(map[string]any)
 	if tr["toolCallId"] != "toolu_X" || tr["toolName"] != "Bash" {
 		t.Fatalf("toolResult message not paired: %v", tr)
 	}

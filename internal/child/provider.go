@@ -6,11 +6,13 @@ package child
 // how to encode outbound frames for its stdin.
 //
 // Concurrency: Parse and BusFrames are called only from the readStdout
-// goroutine (in that order, per line), and EncodeOutbound + BootstrapFrame only
-// from the supervise goroutine, so a provider that keeps per-child translation
-// state needs no internal locks. Each Child obtains its own instance via Fresh()
-// in Spawn, so stateful providers (ClaudeProvider) never share state across
-// children.
+// goroutine (in that order, per line), and EncodeOutbound + BootstrapFrame +
+// OutboundEcho only from the supervise goroutine. These two goroutines run
+// concurrently, so any per-child state touched by BOTH sides (e.g. the claude
+// translator's message list, appended by BusFrames and by OutboundEcho) must be
+// guarded; state touched by only one side needs no lock. Each Child obtains its
+// own instance via Fresh() in Spawn, so stateful providers (ClaudeProvider)
+// never share state across children.
 type ProtocolProvider interface {
 	// Fresh returns a per-child instance of this provider. Stateless providers
 	// (PiProvider) may return an equivalent value; stateful translators
@@ -50,6 +52,17 @@ type ProtocolProvider interface {
 	// protocol). Providers whose native protocol already matches the normalized
 	// vocabulary return frame unchanged.
 	EncodeOutbound(frame []byte) []byte
+
+	// OutboundEcho returns pi AgentSessionEvent frames to publish on the bus when
+	// an outbound frame is sent to the child, or nil. It exists for providers
+	// whose child does not echo the user's own prompt on its stdout (claude emits
+	// user frames only for tool results): without it the user's typed message
+	// never reaches the bus, so the TUI — which renders a user bubble solely from
+	// a message_start(role:user) event — shows nothing. Identity providers whose
+	// child echoes user input natively (PiProvider) return nil to avoid a double
+	// render. ts is the send time in unix milliseconds. Called from the supervise
+	// goroutine; see the concurrency note above re: state shared with BusFrames.
+	OutboundEcho(frame []byte, ts int64) [][]byte
 }
 
 // ParseResult is the normalized outcome of parsing one stdout line.

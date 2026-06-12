@@ -98,6 +98,7 @@ type PiAssistantMessage struct {
 // a content-block array; the daemon synthesizes the string form.
 type PiUserMessage struct {
 	Role      string `json:"role"`
+	ID        string `json:"id,omitempty"`
 	Content   any    `json:"content"`
 	Timestamp int64  `json:"timestamp"`
 }
@@ -137,6 +138,23 @@ func PiMessageStart(msg PiAssistantMessage) any {
 // PiMessageEnd builds {"type":"message_end","message":<assistant>}.
 func PiMessageEnd(msg PiAssistantMessage) any {
 	return piMessageEnvelope{Type: "message_end", Message: msg}
+}
+
+type piUserMessageEnvelope struct {
+	Type    string        `json:"type"`
+	Message PiUserMessage `json:"message"`
+}
+
+// PiUserMessageStart builds {"type":"message_start","message":<user>}. The TUI
+// renders a user bubble only on a message_start whose message.role is "user".
+func PiUserMessageStart(msg PiUserMessage) any {
+	return piUserMessageEnvelope{Type: "message_start", Message: msg}
+}
+
+// PiUserMessageEnd builds {"type":"message_end","message":<user>}. The consumer
+// appends the message to its cache on message_end (deduping by id).
+func PiUserMessageEnd(msg PiUserMessage) any {
+	return piUserMessageEnvelope{Type: "message_end", Message: msg}
 }
 
 type piMessageUpdate struct {

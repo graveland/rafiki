@@ -145,3 +145,13 @@ func (ClaudeProvider) EncodeOutbound(frame []byte) []byte {
 		return nil
 	}
 }
+
+// OutboundEcho returns the user-message echo frames for a prompt/steer, without
+// recording state. This stateless template is never the live per-child provider
+// (Fresh returns a *claudeProvider whose OutboundEcho override also records the
+// message for agent_end); it exists so a bare ClaudeProvider satisfies
+// ProtocolProvider.
+func (ClaudeProvider) OutboundEcho(frame []byte, ts int64) [][]byte {
+	_, frames, _ := claudeUserEcho(frame, ts)
+	return frames
+}

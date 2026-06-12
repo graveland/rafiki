@@ -2,7 +2,9 @@ package child
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 )
 
 // claudeProvider is the per-child stateful translator returned by
@@ -18,12 +20,15 @@ type claudeProvider struct {
 
 // claudeState holds the per-child translation accumulators:
 //   - messages: the ordered user/assistant/toolResult message list, pre-
-//     marshalled, replayed in full on every agent_end.
+//     marshalled, replayed in full on every agent_end. Appended by BusFrames
+//     (readStdout goroutine) AND by OutboundEcho (supervise goroutine), so it is
+//     guarded by mu; the other fields are touched only by BusFrames.
 //   - model/provider/api: captured from system/init, stamped on every
 //     synthesized assistant message.
 //   - turnActive: whether a turn (agent_start) is currently open, so the first
 //     assistant/user frame of a turn opens it exactly once.
 type claudeState struct {
+	mu         sync.Mutex
 	messages   []json.RawMessage
 	model      string
 	provider   string
@@ -33,6 +38,72 @@ type claudeState struct {
 
 // newClaudeProvider constructs a fresh per-child claude translator.
 func newClaudeProvider() *claudeProvider { return &claudeProvider{} }
+
+// appendMessage records a pre-marshalled message under the lock. Called from
+// both the readStdout goroutine (BusFrames) and the supervise goroutine
+// (OutboundEcho), hence the guard.
+func (p *claudeProvider) appendMessage(raw json.RawMessage) {
+	p.st.mu.Lock()
+	p.st.messages = append(p.st.messages, raw)
+	p.st.mu.Unlock()
+}
+
+// snapshotMessages returns a copy of the accumulated messages under the lock,
+// for replay in agent_end.
+func (p *claudeProvider) snapshotMessages() []json.RawMessage {
+	p.st.mu.Lock()
+	defer p.st.mu.Unlock()
+	msgs := make([]json.RawMessage, len(p.st.messages))
+	copy(msgs, p.st.messages)
+	return msgs
+}
+
+// claudeUserEcho builds the synthetic user-message echo for an outbound
+// prompt/steer frame: the PiUserMessage plus its message_start/message_end bus
+// frames. ok is false for frames carrying no user-authored text (abort,
+// set_session_name, empty message, ...). Pure (no state), so the stateless
+// ClaudeProvider template and the per-child *claudeProvider share it.
+//
+// claude's stdout never carries the user's own prompt text (its user frames hold
+// only tool_result blocks — see emitUser), so without publishing this the TUI
+// never receives a message_start(role:user) and the user's typed message is
+// invisible even though it reached the model.
+func claudeUserEcho(frame []byte, ts int64) (PiUserMessage, [][]byte, bool) {
+	var in struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(frame, &in); err != nil {
+		return PiUserMessage{}, nil, false
+	}
+	if in.Type != "prompt" && in.Type != "steer" {
+		return PiUserMessage{}, nil, false
+	}
+	if in.Message == "" {
+		return PiUserMessage{}, nil, false
+	}
+	msg := PiUserMessage{
+		Role:      "user",
+		ID:        fmt.Sprintf("user-%d", ts),
+		Content:   in.Message,
+		Timestamp: ts,
+	}
+	return msg, [][]byte{mustFrame(PiUserMessageStart(msg)), mustFrame(PiUserMessageEnd(msg))}, true
+}
+
+// OutboundEcho (per-child, stateful) records the user message in state so the
+// turn's agent_end replays it, then returns the echo bus frames. Runs on the
+// supervise goroutine concurrently with BusFrames; the append is mutex-guarded.
+func (p *claudeProvider) OutboundEcho(frame []byte, ts int64) [][]byte {
+	msg, frames, ok := claudeUserEcho(frame, ts)
+	if !ok {
+		return nil
+	}
+	if raw, err := json.Marshal(msg); err == nil {
+		p.appendMessage(raw)
+	}
+	return frames
+}
 
 // claudeStreamFrame is the full claude stream-json envelope BusFrames needs to
 // translate. It is richer than the minimal claudeFrame used by Parse: it decodes
@@ -170,7 +241,7 @@ func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel s
 	out = appendFrame(out, PiMessageEnd(msg))
 
 	if raw, err := json.Marshal(msg); err == nil {
-		p.st.messages = append(p.st.messages, raw)
+		p.appendMessage(raw)
 	}
 	return out
 }
@@ -203,7 +274,7 @@ func (p *claudeProvider) emitUser(blocks []claudeContentBlock, ts int64) [][]byt
 			Timestamp:  ts,
 		}
 		if raw, err := json.Marshal(tr); err == nil {
-			p.st.messages = append(p.st.messages, raw)
+			p.appendMessage(raw)
 		}
 	}
 	return out
@@ -214,9 +285,7 @@ func (p *claudeProvider) emitUser(blocks []claudeContentBlock, ts int64) [][]byt
 // subsequent turn's agent_end still reflects the whole conversation.
 func (p *claudeProvider) emitResult() [][]byte {
 	p.st.turnActive = false
-	msgs := make([]json.RawMessage, len(p.st.messages))
-	copy(msgs, p.st.messages)
-	return [][]byte{mustFrame(PiAgentEnd(msgs))}
+	return [][]byte{mustFrame(PiAgentEnd(p.snapshotMessages()))}
 }
 
 // openTurn returns an agent_start frame the first time a turn opens, or nil if a
