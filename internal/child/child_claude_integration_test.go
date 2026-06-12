@@ -264,6 +264,96 @@ loop:
 	}
 }
 
+// writeFakeClaudeRealStartup mimics the REAL claude un-prompted startup: it emits
+// the SessionStart hook lifecycle (hook_started/hook_response) but WITHHOLDS
+// system/init until the first user message arrives — exactly the sequence that
+// left a freshly-spawned, un-prompted child stuck in spawning (subagent_send,
+// idle-gated, rejected forever). On the first stdin line it emits the deferred
+// init + a one-line turn.
+func writeFakeClaudeRealStartup(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fakeclaude_realstartup.sh")
+	body := `#!/bin/bash
+printf '%s\n' '{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup","session_id":"sess-real"}'
+printf '%s\n' '{"type":"system","subtype":"hook_response","session_id":"sess-real"}'
+while IFS= read -r line; do
+  printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-real","model":"claude-opus-4-8"}'
+  printf '%s\n' '{"type":"assistant","session_id":"sess-real","message":{"content":[{"type":"text","text":"OK"}]}}'
+  printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-real"}'
+done
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	return script
+}
+
+// TestClaudeChild_IdleFromSessionStartHookOnly is the readiness golden test. It
+// drives a fake-claude that reproduces the REAL un-prompted startup (SessionStart
+// hooks, no init) and asserts:
+//   - the child reaches idle from the hook lifecycle ALONE, before any prompt
+//     (the bug: it stayed spawning until a steer);
+//   - a subsequent send is accepted and answered, returning the child to idle —
+//     proving an un-prompted claude child is usable without a steer workaround.
+func TestClaudeChild_IdleFromSessionStartHookOnly(t *testing.T) {
+	bin := writeFakeClaudeRealStartup(t)
+	cwd, _ := os.Getwd()
+	ch, err := Spawn(context.Background(), SpawnSpec{
+		ChildID:  "c_realstartup",
+		Cwd:      cwd,
+		PiBinary: bin,
+		Provider: ClaudeProvider{},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
+
+	// Core of the fix: idle must come from the SessionStart hook lifecycle alone,
+	// with NO system/init and NO prompt.
+	select {
+	case <-ch.Idle():
+	case <-time.After(3 * time.Second):
+		t.Fatal("child never became idle from the SessionStart hook (stuck spawning)")
+	}
+	if st := ch.Status(); st != protocol.StatusIdle {
+		t.Fatalf("status after SessionStart = %q, want idle", st)
+	}
+
+	// Subscribe before sending so we capture the whole turn, then prove the send
+	// is processed: the deferred init + assistant + result must drive a turn that
+	// ends with agent_end and returns the child to idle.
+	busCh, cancel := ch.Bus().Subscribe()
+	defer cancel()
+
+	if err := ch.Send([]byte(`{"type":"prompt","message":"reply OK"}`)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case raw, ok := <-busCh:
+			if !ok {
+				t.Fatal("bus closed before agent_end")
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("bus frame not JSON: %v (%s)", err, raw)
+			}
+			if m["type"] == "agent_end" {
+				if st := ch.Status(); st != protocol.StatusIdle {
+					t.Fatalf("status after turn = %q, want idle", st)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("turn did not complete (no agent_end) after send to an idle un-prompted child")
+		}
+	}
+}
+
 func busTypes(frames []map[string]any) []string {
 	out := make([]string, len(frames))
 	for i, f := range frames {

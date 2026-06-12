@@ -28,6 +28,32 @@ func TestClaudeProvider_Parse_SystemInitIsFirstResponse(t *testing.T) {
 	}
 }
 
+func TestClaudeProvider_Parse_SessionStartHookIsFirstResponse(t *testing.T) {
+	// The real `claude -p --input-format stream-json` does NOT emit system/init
+	// un-prompted; on startup it emits only the SessionStart hook lifecycle and
+	// then waits for input. Those frames must signal readiness, or a freshly-
+	// spawned, un-prompted child never reaches idle and subagent_send (idle-gated)
+	// is rejected forever.
+	for _, line := range []string{
+		`{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup","session_id":"sess-h"}`,
+		`{"type":"system","subtype":"hook_response","session_id":"sess-h"}`,
+	} {
+		res := ClaudeProvider{}.Parse([]byte(line))
+		if !res.FirstResponse {
+			t.Fatalf("system frame must signal FirstResponse (readiness): %s", line)
+		}
+		if len(res.Events) != 0 {
+			t.Fatalf("system frame should emit no SM events, got %+v", res.Events)
+		}
+	}
+	// The session id is captured from the hook frame so the spawn result / resume
+	// token is populated before the first turn's init arrives.
+	res := ClaudeProvider{}.Parse([]byte(`{"type":"system","subtype":"hook_started","session_id":"sess-h"}`))
+	if !res.HasMeta || res.Meta.SessionID != "sess-h" {
+		t.Fatalf("hook frame should capture session id, meta=%+v hasMeta=%v", res.Meta, res.HasMeta)
+	}
+}
+
 func TestClaudeProvider_Parse_AssistantTextIsAgentStart(t *testing.T) {
 	line := []byte(`{"type":"assistant","session_id":"sess-123","message":{"content":[{"type":"text","text":"hi"}]}}`)
 	res := ClaudeProvider{}.Parse(line)
@@ -76,8 +102,13 @@ func TestClaudeProvider_Parse_Garbage(t *testing.T) {
 }
 
 // TestClaudeProvider_GoldenTranscripts replays the captured transcripts through
-// Parse and asserts the high-level invariants that the daemon relies on:
-// exactly one FirstResponse, and an agent_end for the terminal result.
+// Parse and asserts the invariants the daemon relies on for readiness:
+//   - readiness (FirstResponse) is signaled, and ONLY by `system` frames;
+//   - it fires on the FIRST system frame (the SessionStart hook lifecycle), not
+//     deferred to a later system/init — an un-prompted child must reach idle from
+//     startup alone (downstream idleOnce/OnFirstResponse enforce once-ness, so
+//     Parse re-reporting FirstResponse on later system frames is harmless);
+//   - the terminal result yields an agent_end.
 func TestClaudeProvider_GoldenTranscripts(t *testing.T) {
 	for _, name := range []string{"startup_and_turn.jsonl", "turn_with_tool.jsonl"} {
 		t.Run(name, func(t *testing.T) {
@@ -88,6 +119,8 @@ func TestClaudeProvider_GoldenTranscripts(t *testing.T) {
 			defer func() { _ = f.Close() }()
 
 			firstResponses, agentEnds := 0, 0
+			firstFRIdx, firstSystemIdx := -1, -1
+			idx := 0
 			sc := bufio.NewScanner(f)
 			sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
 			for sc.Scan() {
@@ -95,21 +128,38 @@ func TestClaudeProvider_GoldenTranscripts(t *testing.T) {
 				if ln == "" {
 					continue
 				}
+				var probe struct {
+					Type string `json:"type"`
+				}
+				_ = json.Unmarshal([]byte(ln), &probe)
+				if probe.Type == "system" && firstSystemIdx == -1 {
+					firstSystemIdx = idx
+				}
 				res := ClaudeProvider{}.Parse([]byte(ln))
 				if res.FirstResponse {
 					firstResponses++
+					if firstFRIdx == -1 {
+						firstFRIdx = idx
+					}
+					if probe.Type != "system" {
+						t.Fatalf("FirstResponse fired on a non-system frame (type=%q) at line %d", probe.Type, idx)
+					}
 				}
 				for _, e := range res.Events {
 					if e.Type == "agent_end" {
 						agentEnds++
 					}
 				}
+				idx++
 			}
 			if err := sc.Err(); err != nil {
 				t.Fatalf("scan: %v", err)
 			}
-			if firstResponses != 1 {
-				t.Fatalf("want exactly 1 FirstResponse, got %d (check system/init shape vs NOTES.md)", firstResponses)
+			if firstResponses < 1 {
+				t.Fatalf("want >=1 FirstResponse (readiness signaled), got %d", firstResponses)
+			}
+			if firstFRIdx != firstSystemIdx {
+				t.Fatalf("readiness must fire on the first system frame (idx %d), but first fired at idx %d", firstSystemIdx, firstFRIdx)
 			}
 			if agentEnds < 1 {
 				t.Fatalf("want >=1 agent_end (terminal result), got %d", agentEnds)

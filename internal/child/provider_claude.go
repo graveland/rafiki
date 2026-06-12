@@ -19,8 +19,10 @@ type ClaudeProvider struct{}
 // own so accumulated messages / pending tool calls never leak across children.
 func (ClaudeProvider) Fresh() ProtocolProvider { return newClaudeProvider() }
 
-// BootstrapFrame is nil: claude begins working only when it receives a user
-// message, and emits its system/init line on startup without any kickoff.
+// BootstrapFrame is nil: claude needs no kickoff RPC (unlike pi's get_state
+// probe). On startup it streams the SessionStart hook lifecycle and then waits
+// for input; readiness is derived from that first system frame in Parse. (Note:
+// system/init is NOT emitted un-prompted — it arrives only with the first turn.)
 func (ClaudeProvider) BootstrapFrame() []byte { return nil }
 
 // BusFrames on the factory value is a no-op; translation happens on the
@@ -56,12 +58,25 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 
 	switch f.Type {
 	case "system":
-		if f.Subtype == "init" {
-			res.FirstResponse = true
-			if f.SessionID != "" || f.Model != "" {
-				res.Meta = SnifferMetadata{SessionID: f.SessionID, Model: f.Model}
-				res.HasMeta = true
-			}
+		// Readiness derives from the FIRST system frame of ANY subtype, not from
+		// `init` alone. The real `claude -p --input-format stream-json` does NOT
+		// emit system/init un-prompted: on startup it emits only the SessionStart
+		// hook lifecycle (hook_started/hook_response) and then waits for input;
+		// init arrives only once the first user turn begins. Keying readiness on
+		// init left a freshly-spawned, un-prompted child stuck in spawning (its
+		// Idle() never closed, activateLiveChild timed out → stalled), so
+		// subagent_send (idle-gated) was rejected forever. Any system frame proves
+		// the session is up; claude buffers stdin, so accepting a send now is safe.
+		// FirstResponse is idempotent downstream (OnFirstResponse only transitions
+		// out of spawning; the idle channel closes once), so re-firing on later
+		// system frames — e.g. mid-turn tool hooks — is harmless.
+		res.FirstResponse = true
+		// Capture whatever metadata this frame carries: hook frames provide the
+		// session id early; init additionally provides the resolved model. Empty
+		// fields are merged, not overwritten, by the child's metadata handling.
+		if f.SessionID != "" || f.Model != "" {
+			res.Meta = SnifferMetadata{SessionID: f.SessionID, Model: f.Model}
+			res.HasMeta = true
 		}
 
 	case "assistant":
