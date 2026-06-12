@@ -375,6 +375,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	}
 	initLabels["pic/cwd"] = req.Cwd
 	initLabels["pic/pid"] = strconv.Itoa(ch.PID())
+	initLabels["pic/kind"] = spawnKindLabel(req.Kind)
+	if req.ConfigDir != "" {
+		initLabels["pic/config_dir"] = req.ConfigDir
+	}
 	if req.ResumedFromSession != "" {
 		initLabels["pic/resumed-from-session"] = req.ResumedFromSession
 	}
@@ -577,6 +581,10 @@ func (c *Controller) activateLiveChild(
 	}
 	resumeLabels["pic/cwd"] = snap.Cwd
 	resumeLabels["pic/pid"] = strconv.Itoa(ch.PID())
+	resumeLabels["pic/kind"] = spawnKindLabel(snap.Kind)
+	if snap.ConfigDir != "" {
+		resumeLabels["pic/config_dir"] = snap.ConfigDir
+	}
 	if provider != "" {
 		resumeLabels["pic/provider"] = provider
 	} else {
@@ -1731,6 +1739,16 @@ func resolveSpawnPlan(req protocol.SpawnRequest) (bin string, argv []string, pro
 	default:
 		return "", nil, nil, fmt.Errorf("unknown kind: %s", kind)
 	}
+}
+
+// spawnKindLabel normalizes a SpawnRequest/snapshot Kind into the value used for
+// the pic/kind auto-label. Empty defaults to "pi" (the implicit default kind),
+// matching resolveSpawnPlan's kind handling.
+func spawnKindLabel(kind string) string {
+	if kind == "" {
+		return "pi"
+	}
+	return kind
 }
 
 // claudeEnv returns the extra env entries a claude child needs. Currently just
