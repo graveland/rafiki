@@ -1,31 +1,49 @@
-.PHONY: build build-controller build-pic build-attach \
+.PHONY: help build update build-controller build-pic build-attach \
         bootstrap pi-build pi-install pi-update \
         test test-race vet fmt clean
 
 GO      ?= go
 BIN_DIR := bin
 
+BOLD   := \033[1m
+NORMAL := \033[0m
+GREEN  := \033[1;32m
+
+.DEFAULT_GOAL := update
+HELP_TARGET_DEPTH ?= \#
+help: # Show available targets
+	@printf "make targets (e.g. $(BOLD)make build$(NORMAL)):\n\n"
+	@awk -F':+ |$(HELP_TARGET_DEPTH)' '/^[0-9a-zA-Z._%-]+:+.+$(HELP_TARGET_DEPTH).+$$/ { printf "$(GREEN)%-18s$(NORMAL) %s\n", $$1, $$3 }' $(MAKEFILE_LIST)
+	@echo
+
 PI_DIR  := pi
 PI_PKG  := $(PI_DIR)/packages/coding-agent
 PI_DIST := $(PI_PKG)/dist/cli.js
 PI_MODULES := $(PI_DIR)/node_modules
 
+# Every package's TypeScript source. $(PI_DIST) must depend on these: keying the
+# rebuild on package.json alone meant editing a .ts file never recompiled dist,
+# so `make`/`pi-install` shipped a stale bundle from previously-compiled JS.
+PI_SRC := $(shell find $(PI_DIR)/packages/*/src -type f \( -name '*.ts' -o -name '*.tsx' \) ! -name '*.test.ts' 2>/dev/null)
+
 # Evaluated fresh on each invocation; empty when no .go files exist yet.
 PKGS := $(shell $(GO) list ./... 2>/dev/null)
 
-build: build-controller build-pic build-attach
+build: build-controller build-pic build-attach # Build pi-controller, pic, and pic-attach
 
-build-controller:
+update: build pi-install # Build everything AND install the global pi backend
+
+build-controller: # Build the daemon binary (bin/pi-controller)
 	mkdir -p $(BIN_DIR)
 	$(GO) build -o $(BIN_DIR)/pi-controller ./cmd/pi-controller
 
-build-pic:
+build-pic: # Build the pic CLI (bin/pic)
 	mkdir -p $(BIN_DIR)
 	$(GO) build -o $(BIN_DIR)/pic ./cmd/pic
 
 # pic-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
 # must be built first. Fail loudly if the submodule isn't initialised.
-build-attach: $(PI_MODULES) $(PI_DIST)
+build-attach: $(PI_MODULES) $(PI_DIST) # Bundle the pic-attach TUI binary (recompiles pi dist first)
 	@if command -v bun >/dev/null 2>&1; then \
 	    cd attach && bun install --silent && bun run build; \
 	else \
@@ -37,7 +55,7 @@ build-attach: $(PI_MODULES) $(PI_DIST)
 # spawns the matching pi binary off PATH. `pi-install` keeps the global install
 # in lock-step with the submodule pin.
 
-$(PI_DIST): $(PI_PKG)/package.json
+$(PI_DIST): $(PI_PKG)/package.json $(PI_SRC)
 	cd $(PI_DIR) && npm install && npm run build
 
 # pi's deps (yaml, chalk, typebox, ...) hoist to $(PI_MODULES) and are imported
@@ -55,32 +73,32 @@ $(PI_PKG)/package.json:
 	@echo "or 'git submodule update --init --recursive'." >&2
 	@exit 1
 
-pi-build: $(PI_DIST)
+pi-build: $(PI_DIST) # Recompile the pi submodule's TypeScript to dist
 
-pi-install: $(PI_DIST)
+pi-install: $(PI_DIST) # Install the pi binary globally (the daemon-spawned backend)
 	npm install -g ./$(PI_PKG)
 
-pi-update:
+pi-update: # Bump the pi submodule to its remote tip, then rebuild + install
 	git submodule update --remote $(PI_DIR)
 	$(MAKE) pi-build pi-install
 
-bootstrap:
+bootstrap: # Fresh-clone setup — init submodules, build and install everything
 	git submodule update --init --recursive
 	$(MAKE) pi-build pi-install build
 
 # ─── tests / housekeeping ─────────────────────────────────────────────────────
 
-test:
+test: # Run the Go test suite
 	$(if $(PKGS),$(GO) test $(PKGS),@echo "(no Go packages yet)")
 
-test-race:
+test-race: # Run the Go test suite with the race detector
 	$(if $(PKGS),$(GO) test -race $(PKGS),@echo "(no Go packages yet)")
 
-vet:
+vet: # Run go vet over all packages
 	$(if $(PKGS),$(GO) vet $(PKGS),@echo "(no Go packages yet)")
 
-fmt:
+fmt: # gofmt all Go sources
 	$(GO) fmt ./...
 
-clean:
+clean: # Remove built binaries
 	rm -rf $(BIN_DIR)
