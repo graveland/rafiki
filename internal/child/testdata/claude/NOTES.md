@@ -14,21 +14,25 @@ Two fixtures: `startup_and_turn.jsonl` (text-only turn) and `turn_with_tool.json
 ## Answers to the spike questions
 
 1. **Does `system/init` appear before any user message is sent?**
-   **No — and the original spike answer here was WRONG.** The capture command
-   above *pipes a user message into stdin* (`printf ... | claude`), so the message
-   was available immediately and `init` appeared as part of processing it. That
-   capture could not observe the truly un-prompted case. In the controller's real
-   spawn, stdin is open but **empty** (the prompt is sent later via `subagent_send`):
-   claude runs the `CLAUDE_CONFIG_DIR` hooks, emits only
-   `{"type":"system","subtype":"hook_started",...}` /
-   `{"type":"system","subtype":"hook_response",...}`, then **waits silently for
-   input**. `system/init` does NOT arrive until the first turn begins.
-   → Gating `FirstResponse` on `subtype=="init"` left a freshly-spawned, un-prompted
-   child stuck in `spawning` forever (its `Idle()` never closed → `activateLiveChild`
-   timed out → stalled → `subagent_send`, idle-gated, rejected). `ClaudeProvider.Parse`
-   now derives readiness from the **first `system` frame of any subtype** (the
-   SessionStart hook lifecycle); claude buffers stdin so accepting a send right after
-   is safe. Once-ness is enforced downstream (`idleOnce`/`OnFirstResponse`).
+   **No — the original spike answer here was WRONG, and so was a first patch that
+   tried to read the hooks.** The capture command above *pipes a user message into
+   stdin* (`printf ... | claude`), so the message was available immediately and the
+   whole stream (hooks, `init`, the turn) appeared as part of processing it. That
+   capture could not observe the truly un-prompted case. Verified directly against
+   `claude 2.1.172` with **stdin held open and no input**: claude emits **ZERO bytes**
+   on stdout (and stderr) — no hooks, no `init`, nothing — until the first user
+   message arrives. (The "only hooks at startup" observation came from an *already
+   steered* child, i.e. after input.) In the controller's real spawn, stdin is open
+   but empty (the prompt is sent later via `subagent_send`), so the child is silent.
+   → There is **no stdout signal** that can drive `spawning→idle`. Gating
+   `FirstResponse` on `subtype=="init"` (or on any `system` frame) left a freshly-
+   spawned, un-prompted child stuck in `spawning` forever (its `Idle()` never closed
+   → `activateLiveChild` timed out → stalled → `subagent_send`, idle-gated, rejected).
+   The fix is **process-up readiness**: `ClaudeProvider.ReadyOnSpawn()` returns true
+   and the `Child` fires `spawning→idle` the instant the process launches (claude
+   buffers stdin, so accepting a send immediately is safe; hooks still run when the
+   message is processed). `Parse` keeps `FirstResponse` on `init` only — it no longer
+   drives initial readiness, but the `init` line still carries the session id/model.
 
 2. **Session id path:** top-level `session_id` on `system/init`, on every
    `assistant`/`user` frame, and on `result`. (Plan 1 reads it from init + result.)
@@ -55,12 +59,15 @@ Two fixtures: `startup_and_turn.jsonl` (text-only turn) and `turn_with_tool.json
 ## Other observed frame types
 
 - `system/hook_started`, `system/hook_response` — from the config dir's hooks.
-  These are the **only** stdout an un-prompted child emits, so they are the
-  readiness signal (see spike answer #1): the `system` case in `Parse` fires
-  `FirstResponse` for any subtype, including these. (They carry `session_id` but
-  no `model`; the resolved model still comes from the later `init`.)
+  These appear **only after** a turn begins (input arrived), interleaved with the
+  turn — NOT un-prompted (see spike answer #1). `Parse` ignores them (no case);
+  readiness is process-up, not derived from these.
 - `rate_limit_event` — interleaved telemetry. `Parse`'s `switch f.Type` has no
   case for it, so it returns a zero `ParseResult` (no-op).
+
+The fixtures (`startup_and_turn.jsonl`, `turn_with_tool.jsonl`) were captured with
+a piped prompt, so they show hooks→init→turn back-to-back. A real un-prompted spawn
+shows **none** of this until the first `subagent_send`.
 
 ## Process lifecycle
 
@@ -78,11 +85,12 @@ across turns and exits only when stdin is closed (Shutdown) — matching pi.
 ## Plan refinements surfaced by this capture (apply during implementation)
 
 - **Plan 1 `ClaudeProvider` readiness was wrong** (see spike answer #1, corrected).
-  Readiness must derive from the first `system` frame (the SessionStart hook
-  lifecycle), not `init` — `init` is not emitted un-prompted. The golden-transcript
-  test no longer asserts "exactly 1 FirstResponse" (these piped-stdin fixtures
-  contain `init`, but a real un-prompted spawn does not); it now asserts readiness
-  fires on the first `system` frame and only on `system` frames.
+  claude emits nothing on stdout un-prompted, so initial readiness is **process-up**
+  (`ReadyOnSpawn()` → the `Child` fires `spawning→idle` on launch), not derived from
+  any stdout frame. `Parse` still maps `init`→session-id/model and `result`→agent_end.
+  The golden-transcript test keeps "exactly 1 FirstResponse" (the one `init` line);
+  the live readiness path is covered by `TestClaudeChild_IdleOnSpawnWhenSilent` (a
+  fake-claude that is silent until input).
 - **Plan 3 `shapeTranscript`**: a `thinking`-only assistant frame yields an empty
   `turnView`. Skip turns with empty `Text` and no `ToolCalls` to avoid blank
   transcript entries.

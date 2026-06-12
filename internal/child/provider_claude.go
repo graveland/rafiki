@@ -20,10 +20,18 @@ type ClaudeProvider struct{}
 func (ClaudeProvider) Fresh() ProtocolProvider { return newClaudeProvider() }
 
 // BootstrapFrame is nil: claude needs no kickoff RPC (unlike pi's get_state
-// probe). On startup it streams the SessionStart hook lifecycle and then waits
-// for input; readiness is derived from that first system frame in Parse. (Note:
-// system/init is NOT emitted un-prompted — it arrives only with the first turn.)
+// probe). It is ready for input the instant the process launches.
 func (ClaudeProvider) BootstrapFrame() []byte { return nil }
+
+// ReadyOnSpawn is true: an un-prompted `claude -p --input-format stream-json`
+// emits NOTHING on stdout (verified: zero bytes with stdin open + no input) —
+// the SessionStart hooks, system/init, and the turn all stream only once the
+// first user message arrives. So there is no stdout signal that could drive
+// spawning→idle; readiness is process-up. claude buffers stdin, so accepting a
+// send the moment the process is live is safe (the message is processed, hooks
+// and all, once claude reads it). session_id/model are unknown until that first
+// turn's init and are synced to the store then (controller monitorChild).
+func (ClaudeProvider) ReadyOnSpawn() bool { return true }
 
 // BusFrames on the factory value is a no-op; translation happens on the
 // per-child *claudeProvider returned by Fresh(). The real translator is added in
@@ -58,25 +66,17 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 
 	switch f.Type {
 	case "system":
-		// Readiness derives from the FIRST system frame of ANY subtype, not from
-		// `init` alone. The real `claude -p --input-format stream-json` does NOT
-		// emit system/init un-prompted: on startup it emits only the SessionStart
-		// hook lifecycle (hook_started/hook_response) and then waits for input;
-		// init arrives only once the first user turn begins. Keying readiness on
-		// init left a freshly-spawned, un-prompted child stuck in spawning (its
-		// Idle() never closed, activateLiveChild timed out → stalled), so
-		// subagent_send (idle-gated) was rejected forever. Any system frame proves
-		// the session is up; claude buffers stdin, so accepting a send now is safe.
-		// FirstResponse is idempotent downstream (OnFirstResponse only transitions
-		// out of spawning; the idle channel closes once), so re-firing on later
-		// system frames — e.g. mid-turn tool hooks — is harmless.
-		res.FirstResponse = true
-		// Capture whatever metadata this frame carries: hook frames provide the
-		// session id early; init additionally provides the resolved model. Empty
-		// fields are merged, not overwritten, by the child's metadata handling.
-		if f.SessionID != "" || f.Model != "" {
-			res.Meta = SnifferMetadata{SessionID: f.SessionID, Model: f.Model}
-			res.HasMeta = true
+		// system/init carries the resolved session id + model. It does NOT drive
+		// readiness — claude is silent until prompted, so spawning→idle is
+		// process-up (ReadyOnSpawn), fired by the Child on launch. init arrives
+		// only with the first turn; FirstResponse here is harmless (the child is
+		// already idle) and is kept so a future non-ReadyOnSpawn path still works.
+		if f.Subtype == "init" {
+			res.FirstResponse = true
+			if f.SessionID != "" || f.Model != "" {
+				res.Meta = SnifferMetadata{SessionID: f.SessionID, Model: f.Model}
+				res.HasMeta = true
+			}
 		}
 
 	case "assistant":

@@ -22,11 +22,11 @@ import (
 	"git.graveland.dev/brent/pi-controller/internal/child"
 	"git.graveland.dev/brent/pi-controller/internal/intercept"
 	"git.graveland.dev/brent/pi-controller/internal/persist"
-	"git.graveland.dev/brent/pi-controller/protocol"
 	"git.graveland.dev/brent/pi-controller/internal/ring"
 	"git.graveland.dev/brent/pi-controller/internal/server"
 	"git.graveland.dev/brent/pi-controller/internal/store"
 	"git.graveland.dev/brent/pi-controller/internal/version"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // Controller wires together the store, child lifecycle, persistence and the
@@ -1290,9 +1290,13 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	// Initialise last-known model so we can detect model changes (set_model/cycle_model).
 	lastKnownName := ""
 	lastKnownModel := ""
+	lastKnownSessionID := ""
+	lastKnownSessionFile := ""
 	if snap, ok := c.st.Get(childID); ok {
 		lastKnownName = snap.Name
 		lastKnownModel = joinModel(snap.Provider, snap.Model)
+		lastKnownSessionID = snap.SessionID
+		lastKnownSessionFile = snap.SessionFile
 	}
 
 	for {
@@ -1334,6 +1338,18 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			if md.Model != "" && md.Model != lastKnownModel {
 				c.handleModelChange(childID, md.Model)
 				lastKnownModel = md.Model
+			}
+
+			// Sync session id / file once they appear. For ReadyOnSpawn children
+			// (claude) the process is silent until prompted, so these are unknown
+			// at spawn and only surface on the first turn's init; without this the
+			// store would keep the empty session id captured at activate time and
+			// resume could not re-attach.
+			if (md.SessionID != "" && md.SessionID != lastKnownSessionID) ||
+				(md.SessionFile != "" && md.SessionFile != lastKnownSessionFile) {
+				c.handleSessionMetaChange(childID, md.SessionID, md.SessionFile)
+				lastKnownSessionID = md.SessionID
+				lastKnownSessionFile = md.SessionFile
 			}
 
 		case <-ch.Done():
@@ -1424,6 +1440,25 @@ func (c *Controller) handleModelChange(childID, modelStr string) {
 		slog.Warn("write state record after model change", "childId", childID, "error", err)
 	}
 	c.emitChildLabeled(childID, snap.Labels)
+}
+
+// handleSessionMetaChange syncs the child's sniffed session id / file into the
+// store and persists the record. For ReadyOnSpawn children (claude) these are
+// unknown at spawn — the process is silent until prompted — and only appear on
+// the first turn's init; without this sync the store keeps the empty session id
+// captured at activate time and resume cannot re-attach.
+func (c *Controller) handleSessionMetaChange(childID, sessionID, sessionFile string) {
+	_ = c.st.Update(childID, func(s *store.Session) {
+		if sessionID != "" {
+			s.SessionID = sessionID
+		}
+		if sessionFile != "" {
+			s.SessionFile = sessionFile
+		}
+	})
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write state record after session meta change", "childId", childID, "error", err)
+	}
 }
 
 // handleChildRenamed updates the store and emits ctrl_child_renamed when the

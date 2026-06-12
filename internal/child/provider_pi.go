@@ -18,6 +18,10 @@ func (PiProvider) BootstrapFrame() []byte {
 	return []byte(`{"type":"get_state","id":"__bootstrap__"}`)
 }
 
+// ReadyOnSpawn is false: pi announces readiness via response.get_state (driven
+// by the BootstrapFrame probe), so the Child waits for that stdout signal.
+func (PiProvider) ReadyOnSpawn() bool { return false }
+
 // BusFrames is the identity for pi: its stdout already IS the pi
 // AgentSessionEvent stream, so each raw line is published verbatim on the bus.
 func (PiProvider) BusFrames(line []byte, _ int64) [][]byte {

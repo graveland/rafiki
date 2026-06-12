@@ -22,6 +22,14 @@ type ProtocolProvider interface {
 	// after the write loop starts, or nil if the child needs no kickoff.
 	BootstrapFrame() []byte
 
+	// ReadyOnSpawn reports whether the child is ready for input the instant its
+	// process launches, rather than after a stdout readiness signal. pi returns
+	// false: it must be probed (BootstrapFrame) and waits for response.get_state.
+	// claude returns true: it is silent on stdout until prompted, so there is no
+	// signal to wait for; the Child fires spawning→idle on launch. When true the
+	// provider's Parse FirstResponse is not relied upon for the initial readiness.
+	ReadyOnSpawn() bool
+
 	// Parse decodes one stdout line into normalized signals. An unparseable or
 	// irrelevant line returns the zero ParseResult (a no-op). Parse drives the
 	// state machine + sniffed metadata and is independent of BusFrames.
@@ -46,10 +54,12 @@ type ProtocolProvider interface {
 
 // ParseResult is the normalized outcome of parsing one stdout line.
 type ParseResult struct {
-	// FirstResponse is true on the single line that signals the child finished
-	// starting and is ready for input (pi: response.get_state; claude: the
-	// system/init line). It drives the spawning→idle transition and closes the
-	// Idle() channel exactly once.
+	// FirstResponse is true on the line that signals the child finished starting
+	// and is ready for input (pi: response.get_state). It drives the
+	// spawning→idle transition and closes the Idle() channel exactly once.
+	// Providers that are ReadyOnSpawn (claude) instead have the Child fire this
+	// transition on launch; their Parse need not report FirstResponse for initial
+	// readiness (claude is silent on stdout until prompted).
 	FirstResponse bool
 
 	// Meta carries session/model fields found on this line; only honored when

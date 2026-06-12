@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"git.graveland.dev/brent/pi-controller/internal/bus"
-	"git.graveland.dev/brent/pi-controller/protocol"
 	"git.graveland.dev/brent/pi-controller/internal/ring"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // SpawnSpec describes how to launch a child process.
@@ -335,6 +335,20 @@ func (c *Child) supervise() {
 	close(c.ready)
 	if boot := c.provider.BootstrapFrame(); boot != nil {
 		c.cmdCh <- boot
+	}
+
+	// Process-up readiness: a ReadyOnSpawn provider (claude) emits nothing on
+	// stdout until it is prompted, so there is no readiness signal to wait for —
+	// the child is ready for input the instant it launches (stdin is buffered).
+	// Fire spawning→idle now so subagent_send is unblocked; the first turn's
+	// metadata (session id/model) is sniffed later from its stdout. Without this
+	// such a child would sit in spawning until activateLiveChild's idle wait timed
+	// out (stalled), and the store status would never advance.
+	if c.provider.ReadyOnSpawn() {
+		c.metaMu.Lock()
+		c.sm.OnFirstResponse()
+		c.metaMu.Unlock()
+		c.idleOnce.Do(func() { close(c.idle) })
 	}
 
 	for {

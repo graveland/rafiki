@@ -52,17 +52,23 @@ func TestClaudeChild_EndToEnd(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
 
-	// system/init must drive spawning→idle and close Idle().
+	// Process-up readiness: claude is idle on spawn (ReadyOnSpawn), before init.
 	select {
 	case <-ch.Idle():
 	case <-time.After(3 * time.Second):
-		t.Fatal("child never became idle from system/init")
+		t.Fatal("child never became idle")
+	}
+	if st := ch.Status(); st != protocol.StatusIdle {
+		t.Fatalf("status on spawn = %q, want idle", st)
+	}
+	// The fake emits system/init at startup; the session id is sniffed shortly
+	// after — not necessarily by the instant Idle() closes (process-up readiness).
+	sidDeadline := time.Now().Add(3 * time.Second)
+	for ch.Metadata().SessionID == "" && time.Now().Before(sidDeadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
 	if got := ch.Metadata().SessionID; got != "sess-int" {
 		t.Fatalf("session id = %q, want sess-int", got)
-	}
-	if st := ch.Status(); st != protocol.StatusIdle {
-		t.Fatalf("status after init = %q, want idle", st)
 	}
 
 	// Send a normalized prompt; the provider must encode it as a claude user
@@ -264,20 +270,21 @@ loop:
 	}
 }
 
-// writeFakeClaudeRealStartup mimics the REAL claude un-prompted startup: it emits
-// the SessionStart hook lifecycle (hook_started/hook_response) but WITHHOLDS
-// system/init until the first user message arrives — exactly the sequence that
-// left a freshly-spawned, un-prompted child stuck in spawning (subagent_send,
-// idle-gated, rejected forever). On the first stdin line it emits the deferred
-// init + a one-line turn.
-func writeFakeClaudeRealStartup(t *testing.T) string {
+// writeFakeClaudeSilentUntilInput mimics the REAL claude un-prompted behavior:
+// it emits NOTHING on stdout until the first user message arrives (verified
+// against the real binary: zero bytes with stdin open + no input). On the first
+// stdin line it emits the deferred hook lifecycle + init + a one-line turn. This
+// is the case that left a freshly-spawned, un-prompted child stuck in spawning
+// (subagent_send, idle-gated, rejected forever).
+func writeFakeClaudeSilentUntilInput(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	script := filepath.Join(dir, "fakeclaude_realstartup.sh")
+	script := filepath.Join(dir, "fakeclaude_silent.sh")
 	body := `#!/bin/bash
-printf '%s\n' '{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup","session_id":"sess-real"}'
-printf '%s\n' '{"type":"system","subtype":"hook_response","session_id":"sess-real"}'
+# Silent until prompted — emit nothing until a line is read from stdin.
 while IFS= read -r line; do
+  printf '%s\n' '{"type":"system","subtype":"hook_started","session_id":"sess-real"}'
+  printf '%s\n' '{"type":"system","subtype":"hook_response","session_id":"sess-real"}'
   printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-real","model":"claude-opus-4-8"}'
   printf '%s\n' '{"type":"assistant","session_id":"sess-real","message":{"content":[{"type":"text","text":"OK"}]}}'
   printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-real"}'
@@ -289,18 +296,20 @@ done
 	return script
 }
 
-// TestClaudeChild_IdleFromSessionStartHookOnly is the readiness golden test. It
-// drives a fake-claude that reproduces the REAL un-prompted startup (SessionStart
-// hooks, no init) and asserts:
-//   - the child reaches idle from the hook lifecycle ALONE, before any prompt
-//     (the bug: it stayed spawning until a steer);
-//   - a subsequent send is accepted and answered, returning the child to idle —
-//     proving an un-prompted claude child is usable without a steer workaround.
-func TestClaudeChild_IdleFromSessionStartHookOnly(t *testing.T) {
-	bin := writeFakeClaudeRealStartup(t)
+// TestClaudeChild_IdleOnSpawnWhenSilent is the readiness golden test. It drives a
+// fake-claude that reproduces the REAL un-prompted behavior (silent on stdout
+// until prompted) and asserts:
+//   - the child reaches idle from process-up readiness (ReadyOnSpawn), before any
+//     prompt and with NO stdout at all (the bug: it stayed spawning until a steer);
+//   - the session id is unknown until the first turn;
+//   - a subsequent send is accepted and answered, returning the child to idle and
+//     surfacing the session id — proving an un-prompted claude child is usable
+//     without a steer workaround, and that resume metadata is still captured.
+func TestClaudeChild_IdleOnSpawnWhenSilent(t *testing.T) {
+	bin := writeFakeClaudeSilentUntilInput(t)
 	cwd, _ := os.Getwd()
 	ch, err := Spawn(context.Background(), SpawnSpec{
-		ChildID:  "c_realstartup",
+		ChildID:  "c_silent",
 		Cwd:      cwd,
 		PiBinary: bin,
 		Provider: ClaudeProvider{},
@@ -310,20 +319,23 @@ func TestClaudeChild_IdleFromSessionStartHookOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
 
-	// Core of the fix: idle must come from the SessionStart hook lifecycle alone,
-	// with NO system/init and NO prompt.
+	// Core of the fix: a claude child emitting NOTHING on stdout must still reach
+	// idle, from process-up readiness, before any prompt.
 	select {
 	case <-ch.Idle():
 	case <-time.After(3 * time.Second):
-		t.Fatal("child never became idle from the SessionStart hook (stuck spawning)")
+		t.Fatal("silent claude child never became idle (stuck spawning)")
 	}
 	if st := ch.Status(); st != protocol.StatusIdle {
-		t.Fatalf("status after SessionStart = %q, want idle", st)
+		t.Fatalf("status on spawn = %q, want idle", st)
+	}
+	if sid := ch.Metadata().SessionID; sid != "" {
+		t.Fatalf("session id should be empty before the first turn, got %q", sid)
 	}
 
 	// Subscribe before sending so we capture the whole turn, then prove the send
 	// is processed: the deferred init + assistant + result must drive a turn that
-	// ends with agent_end and returns the child to idle.
+	// ends with agent_end, returns to idle, and surfaces the session id.
 	busCh, cancel := ch.Bus().Subscribe()
 	defer cancel()
 
@@ -346,10 +358,13 @@ func TestClaudeChild_IdleFromSessionStartHookOnly(t *testing.T) {
 				if st := ch.Status(); st != protocol.StatusIdle {
 					t.Fatalf("status after turn = %q, want idle", st)
 				}
+				if sid := ch.Metadata().SessionID; sid != "sess-real" {
+					t.Fatalf("session id after turn = %q, want sess-real", sid)
+				}
 				return
 			}
 		case <-deadline:
-			t.Fatal("turn did not complete (no agent_end) after send to an idle un-prompted child")
+			t.Fatal("turn did not complete (no agent_end) after send to a silent un-prompted child")
 		}
 	}
 }
