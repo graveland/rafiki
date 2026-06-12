@@ -184,6 +184,16 @@ export function setupTuiAutocomplete(
     const refresh = async (): Promise<void> => {
         if (!childId) return;
         try {
+            // get_commands is a pi rpc-mode RPC that returns the child's loaded
+            // extension/skill/prompt commands. Claude (stream-json) has no such
+            // RPC — its provider drops the frame, so probing it just 30s-times
+            // out. The TUI's built-in slash commands come from the base provider
+            // regardless of backend, so non-pi children simply get none here.
+            const kind = await fetchChildKind(socketPath, childId);
+            if (kind !== "pi") {
+                cachedCommands = [];
+                return;
+            }
             cachedCommands = await fetchCommandsFromDaemon(socketPath, childId);
         } catch (err: unknown) {
             console.error(
@@ -234,6 +244,52 @@ export function setupTuiAutocomplete(
 }
 
 // ─── One-shot daemon UDS client ───────────────────────────────────────────────
+
+/**
+ * Fetch a child's kind ("pi" | "claude" | ...) via a one-shot ctrl_get. This is
+ * a daemon-level request answered from its store (not forwarded to the child),
+ * so it is fast and reliable regardless of backend. Returns "" on any failure;
+ * callers treat unknown as non-pi and skip the pi-only command fetch.
+ */
+async function fetchChildKind(socketPath: string, childId: string): Promise<string> {
+    return new Promise<string>((resolve) => {
+        const socket = net.createConnection(socketPath);
+        let buf = "";
+        let done = false;
+        const finish = (kind: string): void => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            socket.destroy();
+            resolve(kind);
+        };
+        const timer = setTimeout(() => finish(""), 5_000);
+
+        socket.on("connect", () => {
+            socket.write(JSON.stringify({ type: "ctrl_get", childId }) + "\n");
+        });
+        socket.on("data", (chunk: Buffer) => {
+            buf += chunk.toString("utf8");
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                let msg: Record<string, unknown>;
+                try {
+                    msg = JSON.parse(line) as Record<string, unknown>;
+                } catch {
+                    continue;
+                }
+                if (msg["type"] !== "ctrl_response") continue;
+                const data = msg["data"] as { kind?: string } | undefined;
+                finish(typeof data?.kind === "string" ? data.kind : "");
+                return;
+            }
+        });
+        socket.on("error", () => finish(""));
+        socket.on("close", () => finish(""));
+    });
+}
 
 /**
  * Fetch slash commands from the daemon's pi child via a dedicated one-shot
