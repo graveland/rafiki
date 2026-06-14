@@ -107,6 +107,35 @@ func TestRender_ToolDetail_WidthClamp(t *testing.T) {
 	}
 }
 
+func TestRender_PiPerMessageUsage_Footer(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+
+	// pi carries usage on each assistant message_end (not on agent_end).
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input":1200,"output":50,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.012}}}}}`))
+
+	out := buf.String()
+	if !strings.Contains(out, "hi") {
+		t.Fatalf("assistant text missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "1.2k in / 50 out") || !strings.Contains(out, "$0.0120") {
+		t.Fatalf("per-message usage footer missing; got:\n%s", out)
+	}
+}
+
+func TestRender_ZeroUsage_NoFooter(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+
+	// claude emits a zero per-message usage (the real total rides on agent_end);
+	// a zero usage must not render a spurious footer line.
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":{"total":0}}}}}`))
+
+	if out := buf.String(); strings.Contains(out, "·") {
+		t.Fatalf("zero usage should not render a footer; got:\n%s", out)
+	}
+}
+
 func TestRender_AgentEnd_UsageFooter(t *testing.T) {
 	var buf bytes.Buffer
 	r := newTailRenderer(&buf, false, outputTable, false)

@@ -436,6 +436,7 @@ func (r *tailRenderer) renderConversationMessage(event json.RawMessage, isEnd bo
 		Message struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
+			Usage   json.RawMessage `json:"usage"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(event, &p); err != nil {
@@ -455,6 +456,12 @@ func (r *tailRenderer) renderConversationMessage(event json.RawMessage, isEnd bo
 			return nil // start is an empty placeholder (pi) or a duplicate (claude)
 		}
 		r.renderAssistantContent(p.Message.Content, nest)
+		// pi reports token usage per assistant message; the claude provider
+		// reports the turn total on agent_end and emits a zero per-message usage
+		// (which formatUsage renders as empty), so this footer fires only for pi.
+		if u := r.formatUsage(p.Message.Usage); u != "" {
+			r.printDim(nest + "· " + u)
+		}
 	}
 	return nil
 }
