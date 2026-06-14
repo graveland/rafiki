@@ -113,11 +113,28 @@ type claudeStreamFrame struct {
 	Subtype string `json:"subtype,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Result  string `json:"result,omitempty"`
-	Message *struct {
+	// ParentToolUseID is set on assistant/user frames produced by a sub-agent
+	// (the Task tool); it names the spawning tool call so the activity can be
+	// attributed and indented downstream.
+	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
+	// Result-frame token/cost totals for the turn (present only on type=result).
+	TotalCostUSD float64      `json:"total_cost_usd,omitempty"`
+	Usage        *claudeUsage `json:"usage,omitempty"`
+	Message      *struct {
 		Role    string               `json:"role"`
 		Model   string               `json:"model,omitempty"`
 		Content []claudeContentBlock `json:"content"`
 	} `json:"message,omitempty"`
+}
+
+// claudeUsage is the subset of claude's result-frame usage we surface: turn
+// token counts. The per-category cost breakdown isn't provided (only a single
+// total_cost_usd), so only the total cost is carried.
+type claudeUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
 
 // claudeContentBlock is one assistant/user content block in claude's wire shape.
@@ -164,16 +181,16 @@ func (p *claudeProvider) BusFrames(line []byte, ts int64) [][]byte {
 		if f.Message == nil || len(f.Message.Content) == 0 {
 			return nil
 		}
-		return p.emitAssistant(f.Message.Content, f.Message.Model, ts)
+		return p.emitAssistant(f.Message.Content, f.Message.Model, f.ParentToolUseID, ts)
 
 	case "user":
 		if f.Message == nil {
 			return nil
 		}
-		return p.emitUser(f.Message.Content, ts)
+		return p.emitUser(f.Message.Content, f.ParentToolUseID, ts)
 
 	case "result":
-		return p.emitResult()
+		return p.emitResult(f)
 
 	default:
 		// rate_limit_event, unknown — no bus output.
@@ -184,7 +201,7 @@ func (p *claudeProvider) BusFrames(line []byte, ts int64) [][]byte {
 // emitAssistant maps a claude assistant frame to message_start / message_update /
 // tool_execution_start* / message_end, appends the assistant message to state,
 // and opens the turn if needed.
-func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel string, ts int64) [][]byte {
+func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel, parentToolUseID string, ts int64) [][]byte {
 	model := frameModel
 	if model == "" {
 		model = p.st.model
@@ -233,12 +250,12 @@ func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel s
 
 	var out [][]byte
 	out = append(out, p.openTurn()...)
-	out = appendFrame(out, PiMessageStart(msg))
-	out = appendFrame(out, PiMessageUpdate(msg))
+	out = appendFrame(out, PiMessageStart(msg, parentToolUseID))
+	out = appendFrame(out, PiMessageUpdate(msg, parentToolUseID))
 	for _, tc := range toolCalls {
-		out = appendFrame(out, PiToolExecutionStart(tc.ID, tc.Name, anyArgs(tc.Input)))
+		out = appendFrame(out, PiToolExecutionStart(tc.ID, tc.Name, anyArgs(tc.Input), parentToolUseID))
 	}
-	out = appendFrame(out, PiMessageEnd(msg))
+	out = appendFrame(out, PiMessageEnd(msg, parentToolUseID))
 
 	if raw, err := json.Marshal(msg); err == nil {
 		p.appendMessage(raw)
@@ -251,7 +268,7 @@ func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel s
 // tool results is the agent loop's tool-result turn, not a fresh user prompt; it
 // still opens the turn if one isn't active (so a tool result arriving first is
 // rendered).
-func (p *claudeProvider) emitUser(blocks []claudeContentBlock, ts int64) [][]byte {
+func (p *claudeProvider) emitUser(blocks []claudeContentBlock, parentToolUseID string, ts int64) [][]byte {
 	var out [][]byte
 	opened := false
 	for _, b := range blocks {
@@ -263,7 +280,7 @@ func (p *claudeProvider) emitUser(blocks []claudeContentBlock, ts int64) [][]byt
 			opened = true
 		}
 		text := toolResultText(b.Content)
-		out = appendFrame(out, PiToolExecutionEnd(b.ToolUseID, p.toolNameFor(b.ToolUseID), text, b.IsError))
+		out = appendFrame(out, PiToolExecutionEnd(b.ToolUseID, p.toolNameFor(b.ToolUseID), text, b.IsError, parentToolUseID))
 
 		tr := PiToolResultMessage{
 			Role:       "toolResult",
@@ -281,11 +298,31 @@ func (p *claudeProvider) emitUser(blocks []claudeContentBlock, ts int64) [][]byt
 }
 
 // emitResult closes the turn with an agent_end carrying the full accumulated
-// messages[]. The messages are retained (not cleared) so a later ctrl_get or a
-// subsequent turn's agent_end still reflects the whole conversation.
-func (p *claudeProvider) emitResult() [][]byte {
+// messages[] and the turn's token/cost totals. The messages are retained (not
+// cleared) so a later ctrl_get or a subsequent turn's agent_end still reflects
+// the whole conversation.
+func (p *claudeProvider) emitResult(f claudeStreamFrame) [][]byte {
 	p.st.turnActive = false
-	return [][]byte{mustFrame(PiAgentEnd(p.snapshotMessages()))}
+	return [][]byte{mustFrame(PiAgentEnd(p.snapshotMessages(), claudeResultUsage(f)))}
+}
+
+// claudeResultUsage maps a claude result frame's token counts and total cost to
+// a PiUsage. Returns nil when the frame carries no usage data so agent_end omits
+// the field entirely. Only the total cost is known (claude gives a single
+// total_cost_usd, no per-category breakdown).
+func claudeResultUsage(f claudeStreamFrame) *PiUsage {
+	if f.Usage == nil && f.TotalCostUSD == 0 {
+		return nil
+	}
+	u := &PiUsage{Cost: PiCost{Total: f.TotalCostUSD}}
+	if f.Usage != nil {
+		u.Input = f.Usage.InputTokens
+		u.Output = f.Usage.OutputTokens
+		u.CacheRead = f.Usage.CacheReadInputTokens
+		u.CacheWrite = f.Usage.CacheCreationInputTokens
+		u.TotalTokens = u.Input + u.Output + u.CacheRead + u.CacheWrite
+	}
+	return u
 }
 
 // openTurn returns an agent_start frame the first time a turn opens, or nil if a

@@ -107,6 +107,52 @@ func TestRender_ToolDetail_WidthClamp(t *testing.T) {
 	}
 }
 
+func TestRender_AgentEnd_UsageFooter(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"agent_end","messages":[],"usage":{"input":8444,"output":79,"cacheRead":41125,"cacheWrite":13998,"cost":{"total":0.4095}}}}`))
+
+	out := buf.String()
+	if !strings.Contains(out, "8.4k in / 79 out") {
+		t.Fatalf("usage tokens missing; got:\n%s", out)
+	}
+	if !strings.Contains(out, "cached") || !strings.Contains(out, "$0.4095") {
+		t.Fatalf("usage cache/cost missing; got:\n%s", out)
+	}
+}
+
+func TestRender_AgentEnd_NoUsage_PlainDivider(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"agent_end","messages":[]}}`))
+
+	out := buf.String()
+	if !strings.Contains(out, "agent_end") || strings.Contains(out, "·") {
+		t.Fatalf("expected plain agent_end divider; got:\n%s", out)
+	}
+}
+
+func TestRender_SubAgentNesting_Indents(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+	r.width = 200
+
+	// A tool running inside a Task sub-agent carries parentToolUseId.
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"tool_execution_start","toolName":"Grep","parentToolUseId":"task_1","args":{"pattern":"foo"}}}`))
+	// A top-level tool does not.
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"tool_execution_start","toolName":"Bash","args":{"command":"ls"}}}`))
+
+	out := buf.String()
+	if !strings.Contains(out, "      ↻ Grep") { // nest(4) + 2 = 6 spaces
+		t.Fatalf("nested tool should be indented 6 spaces; got:\n%s", out)
+	}
+	if !strings.Contains(out, "\n  ↻ Bash") { // top-level = 2 spaces
+		t.Fatalf("top-level tool should be indented 2 spaces; got:\n%s", out)
+	}
+}
+
 func mustJSON(s string) string {
 	b, err := json.Marshal(s)
 	if err != nil {

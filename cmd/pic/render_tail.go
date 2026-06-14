@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,13 +173,15 @@ func (r *tailRenderer) renderResponseFrame(frame []byte) error {
 // renderPiEvent handles the pi event payload inside a ctrl_event wrapper.
 func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 	var hdr struct {
-		Type       string          `json:"type"`
-		ToolName   string          `json:"toolName,omitempty"`
-		ToolCallID string          `json:"toolCallId,omitempty"`
-		IsError    bool            `json:"isError,omitempty"`
-		Message    json.RawMessage `json:"message,omitempty"`
-		Args       json.RawMessage `json:"args,omitempty"`
-		Result     json.RawMessage `json:"result,omitempty"`
+		Type            string          `json:"type"`
+		ToolName        string          `json:"toolName,omitempty"`
+		ToolCallID      string          `json:"toolCallId,omitempty"`
+		IsError         bool            `json:"isError,omitempty"`
+		Message         json.RawMessage `json:"message,omitempty"`
+		Args            json.RawMessage `json:"args,omitempty"`
+		Result          json.RawMessage `json:"result,omitempty"`
+		ParentToolUseID string          `json:"parentToolUseId,omitempty"`
+		Usage           json.RawMessage `json:"usage,omitempty"`
 	}
 	if err := json.Unmarshal(event, &hdr); err != nil {
 		fmt.Fprintln(r.w, string(event))
@@ -203,9 +206,9 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 		case "response", "turn_start", "turn_end":
 			return nil
 		case "message_start":
-			return r.renderConversationMessage(event, false)
+			return r.renderConversationMessage(event, false, nestPrefix(hdr.ParentToolUseID))
 		case "message_end":
-			return r.renderConversationMessage(event, true)
+			return r.renderConversationMessage(event, true, nestPrefix(hdr.ParentToolUseID))
 		}
 	}
 
@@ -220,19 +223,25 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 	case "agent_end":
 		// Blank line before the divider for visual separation.
 		fmt.Fprintln(r.w, "")
-		r.printDim("─── agent_end ───")
+		if usage := r.formatUsage(hdr.Usage); usage != "" {
+			r.printDim("─── agent_end · " + usage + " ───")
+		} else {
+			r.printDim("─── agent_end ───")
+		}
 
 	case "tool_execution_start":
-		fmt.Fprintf(r.w, "  %s %s\n", r.cyan("↻"), hdr.ToolName)
-		r.printToolDetail(hdr.Args)
+		nest := nestPrefix(hdr.ParentToolUseID)
+		fmt.Fprintf(r.w, "%s  %s %s\n", nest, r.cyan("↻"), hdr.ToolName)
+		r.printToolDetail(hdr.Args, nest)
 
 	case "tool_execution_end":
+		nest := nestPrefix(hdr.ParentToolUseID)
 		mark, fn := "✓", r.green
 		if hdr.IsError {
 			mark, fn = "✗", r.red
 		}
-		fmt.Fprintf(r.w, "  %s %s\n", fn(mark), hdr.ToolName)
-		r.printToolDetail(hdr.Result)
+		fmt.Fprintf(r.w, "%s  %s %s\n", nest, fn(mark), hdr.ToolName)
+		r.printToolDetail(hdr.Result, nest)
 
 	case "extension_ui_request":
 		var ui struct {
@@ -276,24 +285,20 @@ const (
 )
 
 // printToolDetail renders an abridged tool args/result payload indented beneath
-// the tool line.  No-op on empty payloads (e.g. a tool with no args).
-func (r *tailRenderer) printToolDetail(raw json.RawMessage) {
-	for _, ln := range r.abridgeToolPayload(raw) {
-		fmt.Fprintln(r.w, r.applyColor(dim, strings.Repeat(" ", toolDetailIndent)+ln))
+// the tool line.  nest is the sub-agent indent prefix ("" at top level).  No-op
+// on empty payloads (e.g. a tool with no args).
+func (r *tailRenderer) printToolDetail(raw json.RawMessage, nest string) {
+	indent := nest + strings.Repeat(" ", toolDetailIndent)
+	for _, ln := range r.abridgeText(toolPayloadText(raw), len(indent)) {
+		fmt.Fprintln(r.w, r.applyColor(dim, indent+ln))
 	}
-}
-
-// abridgeToolPayload turns a tool args/result payload into bounded display
-// lines: head+tail elision when it exceeds toolDetail{Head,Tail}Lines, and a
-// per-line width clamp so wide command output never wraps past the margin.
-func (r *tailRenderer) abridgeToolPayload(raw json.RawMessage) []string {
-	return r.abridgeText(toolPayloadText(raw))
 }
 
 // abridgeText bounds free text for tail display: head+tail line elision when it
 // exceeds toolDetail{Head,Tail}Lines, then a per-line clamp to the terminal
-// width.  Shared by tool args/results and assistant thinking blocks.
-func (r *tailRenderer) abridgeText(text string) []string {
+// width (less indentCols, the columns the caller will prepend).  Shared by tool
+// args/results and assistant thinking blocks.
+func (r *tailRenderer) abridgeText(text string, indentCols int) []string {
 	text = strings.TrimRight(text, "\n")
 	if text == "" {
 		return nil
@@ -311,7 +316,7 @@ func (r *tailRenderer) abridgeText(text string) []string {
 		lines = merged
 	}
 
-	avail := r.width - toolDetailIndent
+	avail := r.width - indentCols
 	if avail < 16 {
 		avail = 16
 	}
@@ -320,6 +325,57 @@ func (r *tailRenderer) abridgeText(text string) []string {
 		lines[i] = runewidth.Truncate(ln, avail, "…")
 	}
 	return lines
+}
+
+// nestPrefix returns the indent for sub-agent (Task) activity.  A non-empty
+// parentToolUseId means the event was produced inside a Task call, so it is
+// indented one level beneath the spawning tool line; top-level events get "".
+func nestPrefix(parentToolUseID string) string {
+	if parentToolUseID == "" {
+		return ""
+	}
+	return strings.Repeat(" ", toolDetailIndent)
+}
+
+// formatUsage renders a compact token/cost summary from an agent_end usage
+// payload, e.g. "8.4k in / 79 out · 55.1k cached · $0.4095".  Returns "" when
+// no usage data is present (the field is omitted for backends that don't
+// report it).
+func (r *tailRenderer) formatUsage(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var u struct {
+		Input      int `json:"input"`
+		Output     int `json:"output"`
+		CacheRead  int `json:"cacheRead"`
+		CacheWrite int `json:"cacheWrite"`
+		Cost       struct {
+			Total float64 `json:"total"`
+		} `json:"cost"`
+	}
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return ""
+	}
+	var parts []string
+	if u.Input > 0 || u.Output > 0 {
+		parts = append(parts, fmt.Sprintf("%s in / %s out", humanCount(u.Input), humanCount(u.Output)))
+	}
+	if cached := u.CacheRead + u.CacheWrite; cached > 0 {
+		parts = append(parts, humanCount(cached)+" cached")
+	}
+	if u.Cost.Total > 0 {
+		parts = append(parts, fmt.Sprintf("$%.4f", u.Cost.Total))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// humanCount renders a token count compactly: 79 → "79", 8444 → "8.4k".
+func humanCount(n int) string {
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // toolPayloadText converts a tool args/result payload into display text.
@@ -375,7 +431,7 @@ func toolPayloadText(raw json.RawMessage) string {
 // message (both halves of the start/end pair carry content), the user prompt is
 // rendered on message_start and the assistant reply on message_end — the
 // authoritative final content for both the pi (streamed) and claude backends.
-func (r *tailRenderer) renderConversationMessage(event json.RawMessage, isEnd bool) error {
+func (r *tailRenderer) renderConversationMessage(event json.RawMessage, isEnd bool, nest string) error {
 	var p struct {
 		Message struct {
 			Role    string          `json:"role"`
@@ -392,22 +448,22 @@ func (r *tailRenderer) renderConversationMessage(event json.RawMessage, isEnd bo
 			return nil // already shown at message_start
 		}
 		if text := messageText(p.Message.Content); text != "" {
-			fmt.Fprintf(r.w, "%s %s\n", r.applyColor(cyan, "[user]"), text)
+			fmt.Fprintf(r.w, "%s%s %s\n", nest, r.applyColor(cyan, "[user]"), text)
 		}
 	case "assistant":
 		if !isEnd {
 			return nil // start is an empty placeholder (pi) or a duplicate (claude)
 		}
-		r.renderAssistantContent(p.Message.Content)
+		r.renderAssistantContent(p.Message.Content, nest)
 	}
 	return nil
 }
 
 // renderAssistantContent prints an assistant message's text and thinking blocks
-// in source order.  tool_use blocks are skipped here — they surface via the
-// tool_execution_start/end events.  Thinking is dimmed and abridged (it can be
-// long); text is printed verbatim as the agent's reply.
-func (r *tailRenderer) renderAssistantContent(content json.RawMessage) {
+// in source order, prefixed by nest (the sub-agent indent).  tool_use blocks are
+// skipped here — they surface via the tool_execution_start/end events.  Thinking
+// is dimmed and abridged (it can be long); text is the agent's reply.
+func (r *tailRenderer) renderAssistantContent(content json.RawMessage, nest string) {
 	var blocks []struct {
 		Type     string `json:"type"`
 		Text     string `json:"text"`
@@ -417,7 +473,7 @@ func (r *tailRenderer) renderAssistantContent(content json.RawMessage) {
 		// Legacy / partial frames may carry content as a plain string.
 		var s string
 		if json.Unmarshal(content, &s) == nil && s != "" {
-			fmt.Fprintln(r.w, s)
+			r.writeLines(s, nest)
 		}
 		return
 	}
@@ -427,15 +483,28 @@ func (r *tailRenderer) renderAssistantContent(content json.RawMessage) {
 			if b.Thinking == "" {
 				continue
 			}
-			r.printDim("[thinking]")
-			for _, ln := range r.abridgeText(b.Thinking) {
-				fmt.Fprintln(r.w, r.applyColor(dim, strings.Repeat(" ", toolDetailIndent)+ln))
+			r.printDim(nest + "[thinking]")
+			indent := nest + strings.Repeat(" ", toolDetailIndent)
+			for _, ln := range r.abridgeText(b.Thinking, len(indent)) {
+				fmt.Fprintln(r.w, r.applyColor(dim, indent+ln))
 			}
 		case "text":
 			if b.Text != "" {
-				fmt.Fprintln(r.w, b.Text)
+				r.writeLines(b.Text, nest)
 			}
 		}
+	}
+}
+
+// writeLines prints text with nest prepended to each line (a no-op prefix at top
+// level, so a multi-line reply still renders verbatim).
+func (r *tailRenderer) writeLines(text, nest string) {
+	if nest == "" {
+		fmt.Fprintln(r.w, text)
+		return
+	}
+	for _, ln := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		fmt.Fprintln(r.w, nest+ln)
 	}
 }
 

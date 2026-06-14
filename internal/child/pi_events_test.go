@@ -170,12 +170,12 @@ func TestPiEvents_TypeDiscriminators(t *testing.T) {
 
 	mustType(t, mustMarshal(t, PiAgentStart()), "agent_start")
 
-	mStart := mustType(t, mustMarshal(t, PiMessageStart(asst)), "message_start")
+	mStart := mustType(t, mustMarshal(t, PiMessageStart(asst, "")), "message_start")
 	if _, ok := mStart["message"]; !ok {
 		t.Fatal("message_start missing message")
 	}
 
-	mUpd := mustType(t, mustMarshal(t, PiMessageUpdate(asst)), "message_update")
+	mUpd := mustType(t, mustMarshal(t, PiMessageUpdate(asst, "")), "message_update")
 	if _, ok := mUpd["message"]; !ok {
 		t.Fatal("message_update missing message")
 	}
@@ -183,12 +183,12 @@ func TestPiEvents_TypeDiscriminators(t *testing.T) {
 		t.Fatal("message_update missing assistantMessageEvent")
 	}
 
-	mEnd := mustType(t, mustMarshal(t, PiMessageEnd(asst)), "message_end")
+	mEnd := mustType(t, mustMarshal(t, PiMessageEnd(asst, "")), "message_end")
 	if _, ok := mEnd["message"]; !ok {
 		t.Fatal("message_end missing message")
 	}
 
-	ts := mustType(t, mustMarshal(t, PiToolExecutionStart("t1", "Bash", map[string]any{"command": "ls"})), "tool_execution_start")
+	ts := mustType(t, mustMarshal(t, PiToolExecutionStart("t1", "Bash", map[string]any{"command": "ls"}, "")), "tool_execution_start")
 	if ts["toolCallId"] != "t1" || ts["toolName"] != "Bash" {
 		t.Fatalf("tool_execution_start fields wrong: %v", ts)
 	}
@@ -196,7 +196,7 @@ func TestPiEvents_TypeDiscriminators(t *testing.T) {
 		t.Fatal("tool_execution_start missing args")
 	}
 
-	te := mustType(t, mustMarshal(t, PiToolExecutionEnd("t1", "Bash", "ok", false)), "tool_execution_end")
+	te := mustType(t, mustMarshal(t, PiToolExecutionEnd("t1", "Bash", "ok", false, "")), "tool_execution_end")
 	if te["toolCallId"] != "t1" || te["isError"] != false {
 		t.Fatalf("tool_execution_end fields wrong: %v", te)
 	}
@@ -204,7 +204,7 @@ func TestPiEvents_TypeDiscriminators(t *testing.T) {
 		t.Fatal("tool_execution_end missing result")
 	}
 
-	ae := mustType(t, mustMarshal(t, PiAgentEnd([]json.RawMessage{mustMarshal(t, asst)})), "agent_end")
+	ae := mustType(t, mustMarshal(t, PiAgentEnd([]json.RawMessage{mustMarshal(t, asst)}, nil)), "agent_end")
 	msgs, ok := ae["messages"].([]any)
 	if !ok || len(msgs) != 1 {
 		t.Fatalf("agent_end messages not a 1-element array: %v", ae["messages"])

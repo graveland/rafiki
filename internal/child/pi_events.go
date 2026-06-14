@@ -125,19 +125,25 @@ type piAgentStart struct {
 // PiAgentStart builds {"type":"agent_start"}.
 func PiAgentStart() any { return piAgentStart{Type: "agent_start"} }
 
+// piMessageEnvelope carries an assistant message_start/message_end frame.
+// parentToolUseId is set (to the spawning Task tool call's id) for frames
+// produced by a sub-agent, so consumers can attribute and indent them; it is a
+// pic extension to the pi vocabulary (omitted, and ignored by pi's TUI, when
+// the frame is from the top-level agent).
 type piMessageEnvelope struct {
-	Type    string             `json:"type"`
-	Message PiAssistantMessage `json:"message"`
+	Type            string             `json:"type"`
+	Message         PiAssistantMessage `json:"message"`
+	ParentToolUseID string             `json:"parentToolUseId,omitempty"`
 }
 
 // PiMessageStart builds {"type":"message_start","message":<assistant>}.
-func PiMessageStart(msg PiAssistantMessage) any {
-	return piMessageEnvelope{Type: "message_start", Message: msg}
+func PiMessageStart(msg PiAssistantMessage, parentToolUseID string) any {
+	return piMessageEnvelope{Type: "message_start", Message: msg, ParentToolUseID: parentToolUseID}
 }
 
 // PiMessageEnd builds {"type":"message_end","message":<assistant>}.
-func PiMessageEnd(msg PiAssistantMessage) any {
-	return piMessageEnvelope{Type: "message_end", Message: msg}
+func PiMessageEnd(msg PiAssistantMessage, parentToolUseID string) any {
+	return piMessageEnvelope{Type: "message_end", Message: msg, ParentToolUseID: parentToolUseID}
 }
 
 type piUserMessageEnvelope struct {
@@ -161,6 +167,7 @@ type piMessageUpdate struct {
 	Type                  string             `json:"type"`
 	Message               PiAssistantMessage `json:"message"`
 	AssistantMessageEvent piDoneEvent        `json:"assistantMessageEvent"`
+	ParentToolUseID       string             `json:"parentToolUseId,omitempty"`
 }
 
 // piDoneEvent is the AssistantMessageEvent carried by message_update. claude has
@@ -176,7 +183,7 @@ type piDoneEvent struct {
 // PiMessageUpdate builds a message_update carrying the full mapped content and a
 // terminal "done" assistantMessageEvent. reason mirrors the message stopReason
 // (toolUse / stop / length); other StopReason values aren't producible here.
-func PiMessageUpdate(msg PiAssistantMessage) any {
+func PiMessageUpdate(msg PiAssistantMessage, parentToolUseID string) any {
 	reason := msg.StopReason
 	switch reason {
 	case "toolUse", "length":
@@ -188,50 +195,58 @@ func PiMessageUpdate(msg PiAssistantMessage) any {
 		Type:                  "message_update",
 		Message:               msg,
 		AssistantMessageEvent: piDoneEvent{Type: "done", Reason: reason, Message: msg},
+		ParentToolUseID:       parentToolUseID,
 	}
 }
 
 type piToolExecutionStart struct {
-	Type       string `json:"type"`
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Args       any    `json:"args"`
+	Type            string `json:"type"`
+	ToolCallID      string `json:"toolCallId"`
+	ToolName        string `json:"toolName"`
+	Args            any    `json:"args"`
+	ParentToolUseID string `json:"parentToolUseId,omitempty"`
 }
 
-// PiToolExecutionStart builds a tool_execution_start frame.
-func PiToolExecutionStart(toolCallID, toolName string, args any) any {
+// PiToolExecutionStart builds a tool_execution_start frame. parentToolUseID is
+// the spawning Task call's id when this tool runs inside a sub-agent (empty
+// otherwise).
+func PiToolExecutionStart(toolCallID, toolName string, args any, parentToolUseID string) any {
 	if args == nil {
 		args = map[string]any{}
 	}
-	return piToolExecutionStart{Type: "tool_execution_start", ToolCallID: toolCallID, ToolName: toolName, Args: args}
+	return piToolExecutionStart{Type: "tool_execution_start", ToolCallID: toolCallID, ToolName: toolName, Args: args, ParentToolUseID: parentToolUseID}
 }
 
 type piToolExecutionEnd struct {
-	Type       string `json:"type"`
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Result     any    `json:"result"`
-	IsError    bool   `json:"isError"`
+	Type            string `json:"type"`
+	ToolCallID      string `json:"toolCallId"`
+	ToolName        string `json:"toolName"`
+	Result          any    `json:"result"`
+	IsError         bool   `json:"isError"`
+	ParentToolUseID string `json:"parentToolUseId,omitempty"`
 }
 
-// PiToolExecutionEnd builds a tool_execution_end frame.
-func PiToolExecutionEnd(toolCallID, toolName string, result any, isError bool) any {
-	return piToolExecutionEnd{Type: "tool_execution_end", ToolCallID: toolCallID, ToolName: toolName, Result: result, IsError: isError}
+// PiToolExecutionEnd builds a tool_execution_end frame. parentToolUseID is the
+// spawning Task call's id when this tool runs inside a sub-agent.
+func PiToolExecutionEnd(toolCallID, toolName string, result any, isError bool, parentToolUseID string) any {
+	return piToolExecutionEnd{Type: "tool_execution_end", ToolCallID: toolCallID, ToolName: toolName, Result: result, IsError: isError, ParentToolUseID: parentToolUseID}
 }
 
 type piAgentEnd struct {
 	Type      string            `json:"type"`
 	Messages  []json.RawMessage `json:"messages"`
 	WillRetry bool              `json:"willRetry"`
+	Usage     *PiUsage          `json:"usage,omitempty"`
 }
 
 // PiAgentEnd builds the terminal agent_end frame carrying the FULL accumulated
 // messages[] and willRetry:false. messages is pre-marshalled (each entry is a
 // user / assistant / toolResult message) so a heterogeneous slice round-trips
-// without an interface tag.
-func PiAgentEnd(messages []json.RawMessage) any {
+// without an interface tag. usage (a pic extension to the pi vocabulary,
+// ignored by pi's TUI) carries the turn's token/cost totals when known.
+func PiAgentEnd(messages []json.RawMessage, usage *PiUsage) any {
 	if messages == nil {
 		messages = []json.RawMessage{}
 	}
-	return piAgentEnd{Type: "agent_end", Messages: messages, WillRetry: false}
+	return piAgentEnd{Type: "agent_end", Messages: messages, WillRetry: false, Usage: usage}
 }
