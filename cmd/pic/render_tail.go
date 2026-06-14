@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-runewidth"
+
 	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
@@ -53,10 +55,11 @@ type tailRenderer struct {
 	useColor bool
 	mode     outputMode
 	verbose  bool
+	width    int // terminal columns, for clamping abridged tool detail
 }
 
 func newTailRenderer(w io.Writer, useColor bool, mode outputMode, verbose bool) *tailRenderer {
-	return &tailRenderer{w: w, useColor: useColor, mode: mode, verbose: verbose}
+	return &tailRenderer{w: w, useColor: useColor, mode: mode, verbose: verbose, width: tailDisplayWidth()}
 }
 
 // render writes a human-readable (or JSON) representation of frame to w.
@@ -174,6 +177,8 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 		ToolCallID string          `json:"toolCallId,omitempty"`
 		IsError    bool            `json:"isError,omitempty"`
 		Message    json.RawMessage `json:"message,omitempty"`
+		Args       json.RawMessage `json:"args,omitempty"`
+		Result     json.RawMessage `json:"result,omitempty"`
 	}
 	if err := json.Unmarshal(event, &hdr); err != nil {
 		fmt.Fprintln(r.w, string(event))
@@ -218,6 +223,7 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 
 	case "tool_execution_start":
 		fmt.Fprintf(r.w, "  %s %s\n", r.cyan("↻"), hdr.ToolName)
+		r.printToolDetail(hdr.Args)
 
 	case "tool_execution_end":
 		mark, fn := "✓", r.green
@@ -225,6 +231,7 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 			mark, fn = "✗", r.red
 		}
 		fmt.Fprintf(r.w, "  %s %s\n", fn(mark), hdr.ToolName)
+		r.printToolDetail(hdr.Result)
 
 	case "extension_ui_request":
 		var ui struct {
@@ -257,6 +264,102 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 		r.printDim(fmt.Sprintf("[%s] %s", hdr.Type, compact.String()))
 	}
 	return nil
+}
+
+// Tool-detail abridging bounds: large args/results collapse to the first and
+// last N lines, and each printed line is clamped to the terminal width.
+const (
+	toolDetailHeadLines = 5
+	toolDetailTailLines = 5
+	toolDetailIndent    = 4 // spaces; aligns detail beneath the "  ↻ Tool" line
+)
+
+// printToolDetail renders an abridged tool args/result payload indented beneath
+// the tool line.  No-op on empty payloads (e.g. a tool with no args).
+func (r *tailRenderer) printToolDetail(raw json.RawMessage) {
+	for _, ln := range r.abridgeToolPayload(raw) {
+		fmt.Fprintln(r.w, r.applyColor(dim, strings.Repeat(" ", toolDetailIndent)+ln))
+	}
+}
+
+// abridgeToolPayload turns a tool args/result payload into bounded display
+// lines: head+tail elision when it exceeds toolDetail{Head,Tail}Lines, and a
+// per-line width clamp so wide command output never wraps past the margin.
+func (r *tailRenderer) abridgeToolPayload(raw json.RawMessage) []string {
+	text := strings.TrimRight(toolPayloadText(raw), "\n")
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+
+	// Elide the middle only when doing so actually removes lines — at exactly
+	// head+tail+1 the marker would replace a single line, which is pointless.
+	if n := len(lines); n > toolDetailHeadLines+toolDetailTailLines+1 {
+		omitted := n - toolDetailHeadLines - toolDetailTailLines
+		merged := make([]string, 0, toolDetailHeadLines+toolDetailTailLines+1)
+		merged = append(merged, lines[:toolDetailHeadLines]...)
+		merged = append(merged, fmt.Sprintf("… (%d more lines)", omitted))
+		merged = append(merged, lines[n-toolDetailTailLines:]...)
+		lines = merged
+	}
+
+	avail := r.width - toolDetailIndent
+	if avail < 16 {
+		avail = 16
+	}
+	for i, ln := range lines {
+		ln = strings.ReplaceAll(ln, "\t", "    ")
+		lines[i] = runewidth.Truncate(ln, avail, "…")
+	}
+	return lines
+}
+
+// toolPayloadText converts a tool args/result payload into display text.
+// A bare JSON string is used verbatim; an AgentToolResult-shaped object
+// ({content:[{type,text}]}) is flattened to its text blocks; anything else
+// (notably args objects) falls back to pretty-printed JSON.
+func toolPayloadText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+
+	var res struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &res); err == nil && len(res.Content) > 0 {
+		var b strings.Builder
+		for _, c := range res.Content {
+			switch c.Type {
+			case "text":
+				b.WriteString(c.Text)
+				if !strings.HasSuffix(c.Text, "\n") {
+					b.WriteByte('\n')
+				}
+			case "image":
+				b.WriteString("[image]\n")
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+	}
+
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return string(raw)
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return string(raw)
+	}
+	return string(b)
 }
 
 // renderUserMessage prints a user message_start as `[user] text`, suppressing

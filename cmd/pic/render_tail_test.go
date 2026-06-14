@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -42,6 +43,76 @@ func TestRender_ToolExecution(t *testing.T) {
 	if !strings.Contains(out, "✓") {
 		t.Fatalf("missing success marker ✓ in output:\n%s", out)
 	}
+}
+
+func TestRender_ToolDetail_ArgsAndResult(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+	r.width = 200
+
+	// Bash: args carry the command, result is an AgentToolResult content block.
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"tool_execution_start","toolName":"Bash","args":{"command":"echo hi"}}}`))
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"tool_execution_end","toolName":"Bash","isError":false,"result":{"content":[{"type":"text","text":"hi"}]}}}`))
+
+	out := buf.String()
+	if !strings.Contains(out, `"command": "echo hi"`) {
+		t.Fatalf("args not rendered; got:\n%s", out)
+	}
+	// Result text block should be flattened to its text, not raw JSON.
+	if !strings.Contains(out, "hi") || strings.Contains(out, `"content"`) {
+		t.Fatalf("result content not flattened to text; got:\n%s", out)
+	}
+}
+
+func TestRender_ToolDetail_HeadTailElision(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+	r.width = 200
+
+	var lines []string
+	for i := 0; i < 30; i++ {
+		lines = append(lines, "line")
+	}
+	text := strings.Join(lines, "\n")
+	frame := `{"type":"ctrl_event","childId":"c_x","event":{"type":"tool_execution_end","toolName":"Bash","result":{"content":[{"type":"text","text":` +
+		mustJSON(text) + `}]}}}`
+	_ = r.render([]byte(frame))
+
+	out := buf.String()
+	if !strings.Contains(out, "… (20 more lines)") {
+		t.Fatalf("expected elision marker for 30 lines; got:\n%s", out)
+	}
+	// 1 tool line + 5 head + 1 marker + 5 tail = 12 lines of output.
+	if got := strings.Count(out, "\n"); got != 12 {
+		t.Fatalf("expected 12 output lines, got %d:\n%s", got, out)
+	}
+}
+
+func TestRender_ToolDetail_WidthClamp(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+	r.width = 20 // avail = 20 - 4 indent = 16
+
+	long := strings.Repeat("x", 100)
+	frame := `{"type":"ctrl_event","childId":"c_x","event":{"type":"tool_execution_end","toolName":"Bash","result":{"content":[{"type":"text","text":` +
+		mustJSON(long) + `}]}}}`
+	_ = r.render([]byte(frame))
+
+	out := buf.String()
+	if !strings.Contains(out, "…") {
+		t.Fatalf("expected width-truncation ellipsis; got:\n%s", out)
+	}
+	if strings.Contains(out, strings.Repeat("x", 100)) {
+		t.Fatalf("long line was not clamped; got:\n%s", out)
+	}
+}
+
+func mustJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 func TestRender_ChildExited(t *testing.T) {

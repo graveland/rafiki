@@ -60,6 +60,15 @@ func isStdoutTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
+// tailDisplayWidth returns the terminal column count for clamping tail output,
+// falling back to 100 when stdout is not a terminal (piped/redirected).
+func tailDisplayWidth() int {
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+		return w
+	}
+	return 100
+}
+
 // renderList writes a list of ChildSummary either as JSON or as a table.
 func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, useColor bool) error {
 	if mode == outputJSON {
