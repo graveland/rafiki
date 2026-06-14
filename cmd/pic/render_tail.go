@@ -185,23 +185,27 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 		return nil
 	}
 
-	// In non-verbose mode, suppress events that are either internal plumbing
-	// (RPC responses, fanned by the daemon to every subscriber) or already
-	// covered by another event.  Specifically:
+	// In non-verbose mode we render the conversation, suppressing internal
+	// plumbing and the redundant half of each message pair.  Backends differ:
+	// pi emits turn_end carrying the assistant message; claude emits no turn_end
+	// and instead carries the reply in message_end.  Both emit message_end with
+	// the assistant content, so we render assistant text/thinking there (works
+	// for both) and treat turn_end as structural-only.  Specifically:
 	//
-	//   - response           → internal RPC chatter
-	//   - turn_start         → lifecycle noise; agent_start is enough
-	//   - message_start      → except for user messages, where it's the
-	//                          earliest signal of new user input.  Assistant
-	//                          message_start is empty (content streamed in).
-	//   - message_end        → user echo already shown via message_start;
-	//                          assistant text is shown by turn_end.
+	//   - response       → internal RPC chatter
+	//   - turn_start/end → lifecycle; assistant text comes via message_end
+	//   - message_start  → render only the user prompt (assistant start is an
+	//                      empty placeholder for pi, a duplicate for claude)
+	//   - message_end    → render only the assistant reply (user message_end is
+	//                      the echo's duplicate, already shown at message_start)
 	if !r.verbose {
 		switch hdr.Type {
-		case "response", "turn_start", "message_end":
+		case "response", "turn_start", "turn_end":
 			return nil
 		case "message_start":
-			return r.renderUserMessage(event)
+			return r.renderConversationMessage(event, false)
+		case "message_end":
+			return r.renderConversationMessage(event, true)
 		}
 	}
 
@@ -217,9 +221,6 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 		// Blank line before the divider for visual separation.
 		fmt.Fprintln(r.w, "")
 		r.printDim("─── agent_end ───")
-
-	case "turn_end":
-		r.renderTurnEnd(hdr.Message)
 
 	case "tool_execution_start":
 		fmt.Fprintf(r.w, "  %s %s\n", r.cyan("↻"), hdr.ToolName)
@@ -286,7 +287,14 @@ func (r *tailRenderer) printToolDetail(raw json.RawMessage) {
 // lines: head+tail elision when it exceeds toolDetail{Head,Tail}Lines, and a
 // per-line width clamp so wide command output never wraps past the margin.
 func (r *tailRenderer) abridgeToolPayload(raw json.RawMessage) []string {
-	text := strings.TrimRight(toolPayloadText(raw), "\n")
+	return r.abridgeText(toolPayloadText(raw))
+}
+
+// abridgeText bounds free text for tail display: head+tail line elision when it
+// exceeds toolDetail{Head,Tail}Lines, then a per-line clamp to the terminal
+// width.  Shared by tool args/results and assistant thinking blocks.
+func (r *tailRenderer) abridgeText(text string) []string {
+	text = strings.TrimRight(text, "\n")
 	if text == "" {
 		return nil
 	}
@@ -362,78 +370,97 @@ func toolPayloadText(raw json.RawMessage) string {
 	return string(b)
 }
 
-// renderUserMessage prints a user message_start as `[user] text`, suppressing
-// non-user messages (assistant message_starts are empty placeholders — their
-// content streams in over message_update events and the final text appears
-// via turn_end).  Returns nil to short-circuit further dispatch.
-func (r *tailRenderer) renderUserMessage(event json.RawMessage) error {
+// renderConversationMessage renders a message_start (isEnd=false) or message_end
+// (isEnd=true) frame as conversation text.  To avoid double-printing each
+// message (both halves of the start/end pair carry content), the user prompt is
+// rendered on message_start and the assistant reply on message_end — the
+// authoritative final content for both the pi (streamed) and claude backends.
+func (r *tailRenderer) renderConversationMessage(event json.RawMessage, isEnd bool) error {
 	var p struct {
 		Message struct {
-			Role    string            `json:"role"`
-			Content []json.RawMessage `json:"content"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(event, &p); err != nil {
 		return nil
 	}
-	if p.Message.Role != "user" {
-		return nil
-	}
-	var text strings.Builder
-	for _, raw := range p.Message.Content {
-		var block struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+
+	switch p.Message.Role {
+	case "user":
+		if isEnd {
+			return nil // already shown at message_start
 		}
-		if err := json.Unmarshal(raw, &block); err != nil {
-			continue
+		if text := messageText(p.Message.Content); text != "" {
+			fmt.Fprintf(r.w, "%s %s\n", r.applyColor(cyan, "[user]"), text)
 		}
-		if block.Type == "text" {
-			text.WriteString(block.Text)
+	case "assistant":
+		if !isEnd {
+			return nil // start is an empty placeholder (pi) or a duplicate (claude)
 		}
+		r.renderAssistantContent(p.Message.Content)
 	}
-	if text.Len() == 0 {
-		return nil
-	}
-	fmt.Fprintf(r.w, "%s %s\n", r.applyColor(cyan, "[user]"), text.String())
 	return nil
 }
 
-// renderTurnEnd extracts and prints the assistant's text from a turn_end message.
-func (r *tailRenderer) renderTurnEnd(messageRaw json.RawMessage) {
-	if len(messageRaw) == 0 {
+// renderAssistantContent prints an assistant message's text and thinking blocks
+// in source order.  tool_use blocks are skipped here — they surface via the
+// tool_execution_start/end events.  Thinking is dimmed and abridged (it can be
+// long); text is printed verbatim as the agent's reply.
+func (r *tailRenderer) renderAssistantContent(content json.RawMessage) {
+	var blocks []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	}
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		// Legacy / partial frames may carry content as a plain string.
+		var s string
+		if json.Unmarshal(content, &s) == nil && s != "" {
+			fmt.Fprintln(r.w, s)
+		}
 		return
 	}
-	var msg struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content,omitempty"`
-	}
-	if err := json.Unmarshal(messageRaw, &msg); err != nil {
-		return
-	}
-
-	// Content is normally an array of typed blocks; extract text blocks.
-	var content []map[string]any
-	if err := json.Unmarshal(msg.Content, &content); err == nil {
-		var text strings.Builder
-		for _, block := range content {
-			if t, _ := block["type"].(string); t == "text" {
-				if s, _ := block["text"].(string); s != "" {
-					text.WriteString(s)
-				}
+	for _, b := range blocks {
+		switch b.Type {
+		case "thinking":
+			if b.Thinking == "" {
+				continue
+			}
+			r.printDim("[thinking]")
+			for _, ln := range r.abridgeText(b.Thinking) {
+				fmt.Fprintln(r.w, r.applyColor(dim, strings.Repeat(" ", toolDetailIndent)+ln))
+			}
+		case "text":
+			if b.Text != "" {
+				fmt.Fprintln(r.w, b.Text)
 			}
 		}
-		if text.Len() > 0 {
-			fmt.Fprintln(r.w, text.String())
-		}
-		return
 	}
+}
 
-	// Fallback: content may be a plain string (legacy / partial frames).
+// messageText flattens a message's content into plain text.  Content is a
+// JSON string for claude user prompts (the synthesized echo) and an array of
+// typed blocks for everything else; both are handled.
+func messageText(content json.RawMessage) string {
 	var s string
-	if err := json.Unmarshal(msg.Content, &s); err == nil && s != "" {
-		fmt.Fprintln(r.w, s)
+	if err := json.Unmarshal(content, &s); err == nil {
+		return s
 	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, b := range blocks {
+		if b.Type == "text" {
+			sb.WriteString(b.Text)
+		}
+	}
+	return sb.String()
 }
 
 // ─── Color helpers ────────────────────────────────────────────────────────────

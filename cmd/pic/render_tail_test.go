@@ -157,15 +157,45 @@ func TestRender_AssistantMessageStart_Suppressed(t *testing.T) {
 	}
 }
 
-func TestRender_MessageEnd_Suppressed(t *testing.T) {
+func TestRender_AssistantReply_ShownOnMessageEnd(t *testing.T) {
 	var buf bytes.Buffer
 	r := newTailRenderer(&buf, false, outputTable, false)
 
-	// Assistant message_end carries the full text; turn_end emits it for us.
-	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}}`))
+	// claude emits no turn_end; the reply arrives in the assistant message_end.
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]}}}`))
 
-	if s := buf.String(); s != "" {
-		t.Fatalf("message_end should be hidden by default; got: %q", s)
+	if s := buf.String(); !strings.Contains(s, "hi there") {
+		t.Fatalf("assistant reply should be shown on message_end; got: %q", s)
+	}
+}
+
+func TestRender_UserPrompt_StringContent(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+
+	// claude's synthesized user echo carries content as a plain string, not a
+	// block array — this previously failed to parse and showed nothing.
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"message_start","message":{"role":"user","content":"do the thing"}}}`))
+
+	out := buf.String()
+	if !strings.Contains(out, "[user]") || !strings.Contains(out, "do the thing") {
+		t.Fatalf("user prompt with string content should render; got: %q", out)
+	}
+}
+
+func TestRender_Thinking_ShownDimmedAndAbridged(t *testing.T) {
+	var buf bytes.Buffer
+	r := newTailRenderer(&buf, false, outputTable, false)
+	r.width = 200
+
+	_ = r.render([]byte(`{"type":"ctrl_event","childId":"c_x","event":{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"let me reason"},{"type":"text","text":"answer"}]}}}`))
+
+	out := buf.String()
+	if !strings.Contains(out, "[thinking]") || !strings.Contains(out, "let me reason") {
+		t.Fatalf("thinking block should render; got: %q", out)
+	}
+	if !strings.Contains(out, "answer") {
+		t.Fatalf("assistant text after thinking should render; got: %q", out)
 	}
 }
 
