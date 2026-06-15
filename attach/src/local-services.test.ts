@@ -10,6 +10,7 @@ import {
     buildLocalModelRegistry,
     buildLocalSessionManager,
     buildLocalSettingsManager,
+    seedSessionManagerFromFrames,
 } from "./local-services.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -71,6 +72,72 @@ describe("buildLocalSessionManager", () => {
         const sm = await buildLocalSessionManager(filePath);
         expect(sm.getEntries()).toHaveLength(1);
         expect(sm.getEntries()[0]!.type).toBe("model_change");
+    });
+});
+
+// ─── seedSessionManagerFromFrames ─────────────────────────────────────────────
+
+describe("seedSessionManagerFromFrames", () => {
+    // Realistic UserMessage / AssistantMessage shapes per pi-ai types.ts.
+    const userMsg = {
+        role: "user",
+        content: [{ type: "text", text: "hi" }],
+        timestamp: 1,
+    };
+    const assistantMsg = {
+        role: "assistant",
+        content: [{ type: "text", text: "yo" }],
+        api: "anthropic",
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        stopReason: "stop",
+        timestamp: 2,
+    };
+
+    it("round-trips messages through appendMessage → buildSessionContext", () => {
+        const frames = [{ type: "agent_end", messages: [userMsg, assistantMsg] }];
+        const sm = seedSessionManagerFromFrames("/tmp/test", frames);
+
+        const ctx = sm.buildSessionContext();
+        expect(ctx.messages).toHaveLength(2);
+        expect((ctx.messages[0] as { role: string }).role).toBe("user");
+        expect((ctx.messages[1] as { role: string }).role).toBe("assistant");
+        expect((ctx.messages[0] as { content: { text: string }[] }).content[0]!.text).toBe("hi");
+        expect((ctx.messages[1] as { content: { text: string }[] }).content[0]!.text).toBe("yo");
+    });
+
+    it("uses the LAST frame carrying a messages array (full replay)", () => {
+        const frames = [
+            { type: "agent_end", messages: [userMsg] },
+            { type: "agent_start" },
+            { type: "agent_end", messages: [userMsg, assistantMsg] },
+        ];
+        const sm = seedSessionManagerFromFrames("/tmp/test", frames);
+        expect(sm.buildSessionContext().messages).toHaveLength(2);
+    });
+
+    it("filters out non-appendable variants (branch/compaction summaries)", () => {
+        const branchSummary = { role: "branchSummary", summary: "x", fromId: "f", timestamp: 3 };
+        const frames = [{ type: "agent_end", messages: [userMsg, branchSummary, assistantMsg] }];
+        const sm = seedSessionManagerFromFrames("/tmp/test", frames);
+
+        const ctx = sm.buildSessionContext();
+        expect(ctx.messages).toHaveLength(2);
+        expect(ctx.messages.every((m) => (m as { role: string }).role !== "branchSummary")).toBe(
+            true
+        );
+    });
+
+    it("no frame with messages → empty SessionManager", () => {
+        const frames = [{ type: "agent_start" }, { type: "message_update", delta: "x" }];
+        const sm = seedSessionManagerFromFrames("/tmp/test", frames);
+        expect(sm.buildSessionContext().messages).toHaveLength(0);
+    });
+
+    it("empty frames → empty SessionManager", () => {
+        const sm = seedSessionManagerFromFrames("/tmp/test", []);
+        expect(sm.buildSessionContext().messages).toHaveLength(0);
     });
 });
 

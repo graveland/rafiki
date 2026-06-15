@@ -29,6 +29,7 @@ import {
     buildLocalModelRegistry,
     buildLocalSessionManager,
     buildLocalSettingsManager,
+    seedSessionManagerFromFrames,
 } from "./local-services.ts";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ReplacedSessionContext } from "./session.ts";
@@ -90,7 +91,25 @@ export class RemoteAgentSessionRuntime {
 
         const settingsManager = await buildLocalSettingsManager();
         const modelRegistry = await buildLocalModelRegistry(settingsManager);
-        const sessionManager = await buildLocalSessionManager(meta.sessionFile);
+        let sessionManager = await buildLocalSessionManager(meta.sessionFile);
+
+        // For children with no pi-format session file (claude), the manager is
+        // empty and pi's renderInitialMessages() — which paints from
+        // sessionManager.buildSessionContext() — would show no scrollback. Seed
+        // it from the daemon's rendered history so the prior transcript paints.
+        if (sessionManager.buildSessionContext().messages.length === 0) {
+            try {
+                const frames = await client.getRecent(opts.childId, -1);
+                const seeded = seedSessionManagerFromFrames(meta.cwd, frames);
+                if (seeded.buildSessionContext().messages.length > 0) {
+                    sessionManager = seeded;
+                }
+            } catch (err) {
+                if (process.env["PIC_ATTACH_DEBUG"] === "1") {
+                    console.error("[pic-attach] scrollback seed failed:", err);
+                }
+            }
+        }
 
         const model = resolveModelFromRegistry(modelRegistry, meta.model);
         const thinking = (meta.thinking ?? "medium") as "low" | "medium" | "high";
