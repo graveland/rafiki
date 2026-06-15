@@ -5,11 +5,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"git.graveland.dev/brent/pi-controller/client"
 	"git.graveland.dev/brent/pi-controller/protocol"
 )
+
+// emitMachineFrame writes inner (a raw inner pi-event frame) for the machine-
+// readable output modes: raw prints it verbatim as one JSONL line; otherwise it
+// is pretty-printed. Using the inner event for both backfill and live keeps the
+// two streams identical in shape. Falls back to the verbatim bytes if inner is
+// not valid JSON.
+func emitMachineFrame(w io.Writer, inner []byte, raw bool) {
+	if raw {
+		fmt.Fprintln(w, string(inner))
+		return
+	}
+	var v any
+	if err := json.Unmarshal(inner, &v); err != nil {
+		fmt.Fprintln(w, string(inner))
+		return
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Fprintln(w, string(inner))
+		return
+	}
+	fmt.Fprintln(w, string(b))
+}
 
 // historyOpts configures runHistoryOut. Defaults differ by frontend:
 // tail sets follow=true,tailN=20; logs sets follow=false,tailN=-1.
@@ -117,6 +141,11 @@ func runHistoryOut(ctx context.Context, c *client.Client, childID string, opts h
 
 	renderer := newTailRenderer(os.Stdout, opts.useColor, opts.mode, opts.verbose)
 
+	// raw and --output json are the two machine-readable modes: both emit the
+	// inner event for backfill and live so the two streams share one shape. Text
+	// mode goes through the renderer.
+	machine := opts.raw || opts.mode == outputJSON
+
 	// Render backfill (raw inner pi events).
 	// dedup assumes live inner bytes are byte-identical to ring bytes (true for the
 	// pi identity provider over compacted JSON; claude re-marshals, so it
@@ -124,8 +153,8 @@ func runHistoryOut(ctx context.Context, c *client.Client, childID string, opts h
 	seen := make(map[string]bool, len(backfill))
 	for _, f := range backfill {
 		seen[string(f)] = true
-		if opts.raw {
-			fmt.Fprintln(os.Stdout, string(f))
+		if machine {
+			emitMachineFrame(os.Stdout, f, opts.raw)
 			continue
 		}
 		if err := renderer.renderPiEvent(f); err != nil {
@@ -144,16 +173,16 @@ func runHistoryOut(ctx context.Context, c *client.Client, childID string, opts h
 			if !ok {
 				return nil
 			}
+			inner := innerEvent(frame)
 			if dedupWindow {
-				inner := innerEvent(frame)
 				if seen[string(inner)] {
 					delete(seen, string(inner))
 					continue
 				}
 				dedupWindow = false // first non-duplicate closes the window
 			}
-			if opts.raw {
-				fmt.Fprintln(os.Stdout, string(innerEvent(frame)))
+			if machine {
+				emitMachineFrame(os.Stdout, inner, opts.raw)
 			} else if err := renderer.render(frame); err != nil {
 				if errors.Is(err, errDaemonShutdown) {
 					return nil

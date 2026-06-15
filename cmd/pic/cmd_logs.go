@@ -22,11 +22,19 @@ func newLogsCmd() *cobra.Command {
 		Aliases: []string{"log"},
 		Short:   "Show the captured logs for a child",
 		Long: `logs == tail; -f follows. Rendered by default; --raw for verbatim bytes.
+
+Filter the rendered out stream with --profile (a named preset) or
+--include/--exclude (specific event types), same as pic tail. Note --profile
+applies only to the live follow stream, not the backfill.
+
 Only the out stream can be followed; --in/--err are snapshots (live stderr is
-unavailable — captured to disk on exit).`,
+unavailable — captured to disk on exit) and ignore the filter flags.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runLogs,
 	}
+	cmd.Flags().String("profile", "", "Subscription profile: firehose|results|coarse|lifecycle")
+	cmd.Flags().StringSlice("include", nil, "Include only these event types (repeatable)")
+	cmd.Flags().StringSlice("exclude", nil, "Exclude these event types (repeatable)")
 	cmd.Flags().Bool("in", false, "Dump the raw stdin stream (snapshot, no follow)")
 	cmd.Flags().Bool("err", false, "Dump the raw stderr stream (snapshot; live stderr unavailable — see logs after exit)")
 	cmd.Flags().Bool("all", false, "Print all three streams with separator headers")
@@ -38,6 +46,17 @@ unavailable — captured to disk on exit).`,
 	cmd.Flags().BoolP("verbose", "v", false, "Include internal RPC/lifecycle frames")
 
 	cmd.MarkFlagsMutuallyExclusive("in", "err", "all", "path")
+
+	_ = cmd.RegisterFlagCompletionFunc("profile", cobra.FixedCompletions(
+		[]string{"firehose", "results", "coarse", "lifecycle"},
+		cobra.ShellCompDirectiveNoFileComp,
+	))
+	_ = cmd.RegisterFlagCompletionFunc("include", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("exclude", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
@@ -85,15 +104,19 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return dumpRawStreams(ctx, c, childID, wantIn, wantErr, wantAll)
 	}
 
-	var exclude []string
+	profile, _ := cmd.Flags().GetString("profile")
+	include, _ := cmd.Flags().GetStringSlice("include")
+	exclude, _ := cmd.Flags().GetStringSlice("exclude")
 	if noDeltas {
-		exclude = []string{"message_update"}
+		exclude = append(exclude, "message_update")
 	}
 
 	return runHistoryOut(ctx, c, childID, historyOpts{
 		follow:   follow,
 		tailN:    tailN,
 		raw:      raw,
+		profile:  profile,
+		include:  include,
 		exclude:  exclude,
 		verbose:  verbose,
 		mode:     mode,

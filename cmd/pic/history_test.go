@@ -1,6 +1,46 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestEmitMachineFrame(t *testing.T) {
+	// raw=true → verbatim bytes plus a trailing newline, no reformatting.
+	t.Run("raw verbatim", func(t *testing.T) {
+		inner := []byte(`{"type":"message_end","x":1}`)
+		var buf bytes.Buffer
+		emitMachineFrame(&buf, inner, true)
+		if got, want := buf.String(), string(inner)+"\n"; got != want {
+			t.Fatalf("raw emit = %q, want %q", got, want)
+		}
+	})
+
+	// raw=false, valid JSON → pretty-printed (multi-line, indented).
+	t.Run("pretty json", func(t *testing.T) {
+		inner := []byte(`{"type":"message_end","x":1}`)
+		var buf bytes.Buffer
+		emitMachineFrame(&buf, inner, false)
+		out := buf.String()
+		if !strings.Contains(out, "\n") {
+			t.Fatalf("pretty emit not multi-line: %q", out)
+		}
+		if !strings.Contains(out, "  \"type\": \"message_end\"") {
+			t.Fatalf("pretty emit not indented: %q", out)
+		}
+	})
+
+	// raw=false, invalid JSON → verbatim fallback.
+	t.Run("invalid json fallback", func(t *testing.T) {
+		inner := []byte(`{not json`)
+		var buf bytes.Buffer
+		emitMachineFrame(&buf, inner, false)
+		if got, want := buf.String(), string(inner)+"\n"; got != want {
+			t.Fatalf("fallback emit = %q, want %q", got, want)
+		}
+	})
+}
 
 func TestLogsFlagDefaults(t *testing.T) {
 	cmd := newLogsCmd()
