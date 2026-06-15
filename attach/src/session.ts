@@ -411,14 +411,18 @@ export class RemoteAgentSession {
             },
         } as unknown as Agent;
 
-        // Start consuming events from the daemon.
-        void this.consumeEvents();
+        // Register the event iterator now so frames the daemon pushes after
+        // ctrl_subscribe are buffered (AsyncQueue, 256) — but do NOT begin
+        // consuming until start(), so primeHistory() can seed _messages first
+        // without racing live updates.
+        this._eventIter = this._client.subscribe();
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
 
     private async consumeEvents(): Promise<void> {
-        this._eventIter = this._client.subscribe();
+        // _eventIter was registered in the constructor.
+        if (!this._eventIter) this._eventIter = this._client.subscribe();
         const debug = process.env.PIC_ATTACH_DEBUG === "1";
 
         try {
@@ -481,6 +485,43 @@ export class RemoteAgentSession {
                 );
             }
         }
+    }
+
+    /**
+     * Seed _messages from the daemon's retained history so the TUI shows prior
+     * transcript on attach. Replays each retained event through the same
+     * translate→updateCacheFromEvent path the live loop uses. message_update
+     * deltas (transient streaming state) are skipped. limit <= 0 = all.
+     * Faithful for pi children; claude frames may not reconstruct cleanly.
+     * Best-effort: a fetch failure leaves _messages empty (blank scrollback).
+     */
+    async primeHistory(limit: number): Promise<void> {
+        if (limit === 0) return;
+        let frames: Record<string, unknown>[];
+        try {
+            frames = await this._client.getRecent(this._childId, limit);
+        } catch (err) {
+            if (process.env.PIC_ATTACH_DEBUG === "1") {
+                console.error("[pic-attach] primeHistory failed:", err);
+            }
+            return;
+        }
+        for (const inner of frames) {
+            if (inner["type"] === "message_update") continue;
+            const ev = this.translate(inner);
+            if (ev === null) continue;
+            this.updateCacheFromEvent(ev);
+        }
+        // History replay can leave _isStreaming true if the last retained event
+        // was an agent_start; the first live event corrects it, but reset here
+        // so the initial paint isn't stuck in a streaming state.
+        this._isStreaming = false;
+        this._streamingMessage = undefined;
+    }
+
+    /** Begin consuming live events. Call after primeHistory(). */
+    start(): void {
+        void this.consumeEvents();
     }
 
     /**

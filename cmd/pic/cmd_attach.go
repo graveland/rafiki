@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"strconv"
+
 	"github.com/spf13/cobra"
 
 	"git.graveland.dev/brent/pi-controller/protocol"
@@ -20,6 +23,7 @@ and choose explicitly.`,
 	}
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
+	cmd.Flags().IntP("tail", "n", -1, "Scrollback: replay the last N retained events into the TUI (-1 = all, 0 = none)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	// Attachable: any live state except spawning/shutting_down.
 	attachable := func(ch protocol.ChildSummary) bool {
@@ -58,6 +62,9 @@ func runAttach(cmd *cobra.Command, args []string) error {
 		// Best effort.
 		_ = err
 	}
+
+	tailN, _ := cmd.Flags().GetInt("tail")
+	os.Setenv("PIC_ATTACH_TAIL", strconv.Itoa(tailN))
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
 	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")

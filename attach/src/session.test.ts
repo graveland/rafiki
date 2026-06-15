@@ -26,6 +26,9 @@ class FakeClient {
     /** Response override — use to inject error responses for testing. */
     public nextResponse?: Partial<Response>;
 
+    /** getRecent override — supplies canned retained history frames. */
+    public getRecentImpl?: (childId: string, limit: number) => Promise<Record<string, unknown>[]>;
+
     private readonly _pending: Array<(r: IteratorResult<Record<string, unknown>>) => void> = [];
     private readonly _buffered: Array<Record<string, unknown>> = [];
     private _closed = false;
@@ -42,6 +45,13 @@ class FakeClient {
             success: true,
             ...override,
         } as Response;
+    }
+
+    async getRecent(childId: string, limit: number): Promise<Record<string, unknown>[]> {
+        if (this.getRecentImpl) {
+            return this.getRecentImpl(childId, limit);
+        }
+        return [];
     }
 
     subscribe(): AsyncIterableIterator<Record<string, unknown>> {
@@ -130,6 +140,20 @@ function makeInit(client: FakeClient, childId = "child-1"): RemoteSessionInit {
     };
 }
 
+/**
+ * Build a RemoteAgentSession backed by a FakeClient, optionally with a
+ * getRecent override so primeHistory() replays canned retained frames.
+ */
+function makeTestSession(opts?: {
+    getRecent?: (childId: string, limit: number) => Promise<Record<string, unknown>[]>;
+}): RemoteAgentSession {
+    const fake = new FakeClient();
+    if (opts?.getRecent) {
+        fake.getRecentImpl = opts.getRecent;
+    }
+    return new RemoteAgentSession(makeInit(fake));
+}
+
 /** Wrap a session push with a small tick so consumeEvents() processes it. */
 async function tick(): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -144,6 +168,10 @@ describe("RemoteAgentSession", () => {
     beforeEach(() => {
         client = new FakeClient();
         session = new RemoteAgentSession(makeInit(client));
+        // The constructor no longer auto-starts the consume loop (primeHistory
+        // runs first in production). These tests exercise the live loop, so
+        // start it explicitly.
+        session.start();
     });
 
     afterEach(() => {
@@ -806,5 +834,36 @@ describe("RemoteAgentSession", () => {
 
     it("agent.signal: returns undefined (no active run from client side)", () => {
         expect(session.agent.signal).toBeUndefined();
+    });
+});
+
+// ─── primeHistory ───────────────────────────────────────────────────────────────
+
+describe("RemoteAgentSession.primeHistory", () => {
+    it("primeHistory rebuilds messages from retained agent_end", async () => {
+        const recorded: Record<string, unknown>[] = [
+            { type: "agent_start" },
+            {
+                type: "agent_end",
+                messages: [
+                    { role: "user", content: "hello" },
+                    { role: "assistant", content: "hi there" },
+                ],
+                willRetry: false,
+            },
+        ];
+        const session = makeTestSession({ getRecent: async () => recorded });
+        await session.primeHistory(-1);
+        expect(session.messages.map((m: any) => m.content)).toEqual(["hello", "hi there"]);
+        session.dispose();
+    });
+
+    it("primeHistory ignores message_update deltas", async () => {
+        const session = makeTestSession({
+            getRecent: async () => [{ type: "message_update", delta: "partial" }],
+        });
+        await session.primeHistory(-1);
+        expect(session.messages).toEqual([]);
+        session.dispose();
     });
 });

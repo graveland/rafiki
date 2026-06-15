@@ -248,6 +248,22 @@ export class Client {
     }
 
     /**
+     * Fetch the last `limit` retained event frames for a child via
+     * ctrl_get_recent. limit <= 0 means "all in buffer". Returns the inner pi
+     * event frames (already unwrapped — the ring stores raw child stdout).
+     */
+    async getRecent(childId: string, limit: number): Promise<Record<string, unknown>[]> {
+        const req: Record<string, unknown> = { type: "ctrl_get_recent", childId };
+        if (limit > 0) req["limit"] = limit;
+        const resp = await this.request(req);
+        if (!resp.success) {
+            throw new Error(`ctrl_get_recent failed: ${resp.error?.code ?? "unknown"}`);
+        }
+        const data = resp.data as { events?: Record<string, unknown>[] } | undefined;
+        return data?.events ?? [];
+    }
+
+    /**
      * Shuts down the connection. Pending requests reject; subscriber iterators
      * terminate. Idempotent.
      */

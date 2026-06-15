@@ -219,6 +219,9 @@ describe("pic-attach consumes daemon-normalized claude frames", () => {
     it("renders a claude tool turn: assistant text, toolCall, toolResult, clean end", async () => {
         const client = new FakeClient();
         const session = new RemoteAgentSession(makeInit(client));
+        // Constructor no longer auto-starts the consume loop; start it for the
+        // live-event path this test exercises.
+        session.start();
 
         // Capture the emitted AgentSessionEvent stream — this is exactly what
         // InteractiveMode subscribes to for live rendering.
@@ -320,6 +323,9 @@ describe("pic-attach consumes daemon-normalized claude frames", () => {
     it("mid-turn streamingMessage tracks the in-flight assistant message", async () => {
         const client = new FakeClient();
         const session = new RemoteAgentSession(makeInit(client));
+        // Constructor no longer auto-starts the consume loop; start it for the
+        // live-event path this test exercises.
+        session.start();
 
         try {
             // agent_start → streaming begins, no partial message yet.
