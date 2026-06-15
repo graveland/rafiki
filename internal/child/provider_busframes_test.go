@@ -38,3 +38,15 @@ func TestProviderFresh_PerChildInstance(t *testing.T) {
 		t.Fatal("ClaudeProvider.Fresh must return distinct per-child instances")
 	}
 }
+
+func TestProviderNormalizes(t *testing.T) {
+	if (PiProvider{}).Normalizes() {
+		t.Fatal("PiProvider.Normalizes() = true, want false (stdout is already pi-vocabulary)")
+	}
+	if !(ClaudeProvider{}.Normalizes()) {
+		t.Fatal("ClaudeProvider.Normalizes() = false, want true (translates claude→pi)")
+	}
+	if !(ClaudeProvider{}).Fresh().Normalizes() {
+		t.Fatal("claudeProvider (Fresh) Normalizes() = false, want true")
+	}
+}

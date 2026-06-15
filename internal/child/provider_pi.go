@@ -36,6 +36,10 @@ func (PiProvider) EncodeOutbound(frame []byte) []byte { return frame }
 // echo here would render the user's message twice.
 func (PiProvider) OutboundEcho([]byte, int64) [][]byte { return nil }
 
+// Normalizes is false: pi's stdout already IS the pi AgentSessionEvent stream,
+// so the raw ring is renderable as-is.
+func (PiProvider) Normalizes() bool { return false }
+
 // Parse classifies one pi stdout line. It mirrors the original handleFrame:
 //   - response.get_state            → FirstResponse
 //   - any recognized metadata frame → Meta (via ExtractMetadata)

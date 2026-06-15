@@ -51,6 +51,11 @@ type claudeFrame struct {
 	} `json:"message,omitempty"`
 }
 
+// Normalizes is true: claude's stdout is its native stream-json, translated to
+// pi vocabulary on the bus by the per-child translator. The raw ring is not
+// renderable, so the Child captures the bus output into a render-ring.
+func (ClaudeProvider) Normalizes() bool { return true }
+
 // Parse classifies one claude stdout line:
 //   - system/init                 → FirstResponse (+ session id, model)
 //   - assistant (with content)    → agent_start, then one tool_execution_start

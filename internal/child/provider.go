@@ -63,6 +63,13 @@ type ProtocolProvider interface {
 	// render. ts is the send time in unix milliseconds. Called from the supervise
 	// goroutine; see the concurrency note above re: state shared with BusFrames.
 	OutboundEcho(frame []byte, ts int64) [][]byte
+
+	// Normalizes reports whether the provider translates the child's raw stdout
+	// into a different pi-vocabulary bus stream (claude), versus the raw stdout
+	// already being the bus stream (pi, identity). When true the Child maintains
+	// a render-ring capturing the bus output, since the raw ring alone is not
+	// renderable.
+	Normalizes() bool
 }
 
 // ParseResult is the normalized outcome of parsing one stdout line.
