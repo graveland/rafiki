@@ -86,6 +86,10 @@ type Session struct {
 	// removed, so ctrl_get_recent remains queryable after exit (spec §11.4).
 	ExitedRing []ring.Event
 
+	// ExitedRenderRing snapshots the render-ring at exit (normalizing children
+	// only), so the rendered ctrl_get_recent view survives the child's removal.
+	ExitedRenderRing []ring.Event
+
 	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
 	// Keys with the "pic/" prefix are reserved for auto-labels set by the daemon.
 	Labels map[string]string
@@ -151,6 +155,10 @@ type Snapshot struct {
 	// Populated for exited sessions; nil for live sessions.
 	ExitedRing []ring.Event
 
+	// ExitedRenderRing is a snapshot of the render-ring taken at exit time.
+	// Populated for exited normalizing sessions; nil otherwise.
+	ExitedRenderRing []ring.Event
+
 	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
 	// This is a defensive copy; callers may mutate it freely.
 	Labels map[string]string
@@ -196,8 +204,9 @@ func (s *Session) Snapshot() Snapshot {
 		AutoRetries:     s.AutoRetries,
 		LastRetryError:  s.LastRetryError,
 		LastRetryFinal:  s.LastRetryFinal,
-		ExitedRing:      copyRingEvents(s.ExitedRing),
-		Labels:          copyLabels(s.Labels),
+		ExitedRing:       copyRingEvents(s.ExitedRing),
+		ExitedRenderRing: copyRingEvents(s.ExitedRenderRing),
+		Labels:           copyLabels(s.Labels),
 	}
 }
 

@@ -3,7 +3,9 @@ package persist_test
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +24,7 @@ func TestLogDump_AlwaysMode_WritesAllStreams(t *testing.T) {
 	err := []byte("warning: trivial\n")
 	meta := persist.Meta{ChildID: "c_1", Cwd: "/x"}
 
-	if e := d.Dump("c_1", in, out, err, meta, exitInfo); e != nil {
+	if e := d.Dump("c_1", in, out, nil, err, meta, exitInfo); e != nil {
 		t.Fatal(e)
 	}
 
@@ -46,7 +48,7 @@ func TestLogDump_OnFailure_SkipsCleanExit(t *testing.T) {
 	dir := t.TempDir()
 	d := persist.NewLogDumper(dir, persist.ModeOnFailure)
 	exitInfo := persist.ExitInfo{ExitCode: 0}
-	d.Dump("c_1", nil, nil, nil, persist.Meta{ChildID: "c_1"}, exitInfo)
+	d.Dump("c_1", nil, nil, nil, nil, persist.Meta{ChildID: "c_1"}, exitInfo)
 	if _, err := os.Stat(filepath.Join(dir, "c_1")); !os.IsNotExist(err) {
 		t.Fatalf("dir created on clean exit in ModeOnFailure: %v", err)
 	}
@@ -56,7 +58,7 @@ func TestLogDump_OnFailure_DumpsBadExit(t *testing.T) {
 	dir := t.TempDir()
 	d := persist.NewLogDumper(dir, persist.ModeOnFailure)
 	exitInfo := persist.ExitInfo{ExitCode: 1}
-	d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil,
+	d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil, nil,
 		persist.Meta{ChildID: "c_1"}, exitInfo)
 	if _, err := os.Stat(filepath.Join(dir, "c_1", "out.jsonl.gz")); err != nil {
 		t.Fatalf("expected dump on bad exit: %v", err)
@@ -66,10 +68,38 @@ func TestLogDump_OnFailure_DumpsBadExit(t *testing.T) {
 func TestLogDump_NeverMode(t *testing.T) {
 	dir := t.TempDir()
 	d := persist.NewLogDumper(dir, persist.ModeNever)
-	d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil,
+	d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil, nil,
 		persist.Meta{ChildID: "c_1"}, persist.ExitInfo{ExitCode: 1})
 	if _, err := os.Stat(filepath.Join(dir, "c_1")); !os.IsNotExist(err) {
 		t.Fatal("ModeNever wrote to disk")
+	}
+}
+
+func TestDumpWritesRenderJSONL(t *testing.T) {
+	dir := t.TempDir()
+	d := persist.NewLogDumper(dir, persist.ModeOnExit)
+	render := [][]byte{[]byte(`{"type":"message_start"}`), []byte(`{"type":"message_end"}`)}
+	err := d.Dump("c1", nil, [][]byte{[]byte(`{"type":"system"}`)}, render, nil, persist.Meta{ChildID: "c1"}, persist.ExitInfo{})
+	if err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	got, err := persist.ReadGzLines(filepath.Join(dir, "c1", "render.jsonl.gz"))
+	if err != nil {
+		t.Fatalf("ReadGzLines: %v", err)
+	}
+	if len(got) != 2 || string(got[0]) != `{"type":"message_start"}` {
+		t.Fatalf("render.jsonl.gz = %v, want the 2 render frames", got)
+	}
+}
+
+func TestDumpSkipsRenderWhenNil(t *testing.T) {
+	dir := t.TempDir()
+	d := persist.NewLogDumper(dir, persist.ModeOnExit)
+	if err := d.Dump("c1", nil, nil, nil, nil, persist.Meta{ChildID: "c1"}, persist.ExitInfo{}); err != nil {
+		t.Fatalf("Dump: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "c1", "render.jsonl.gz")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("render.jsonl.gz should not exist when render frames are nil")
 	}
 }
 
@@ -111,7 +141,7 @@ func TestLogDump_MetaJsonRoundTrip(t *testing.T) {
 		ExitSignal:  "SIGTERM",
 		Argv:        []string{"pi", "--mode", "rpc"},
 	}
-	if err := d.Dump("c_1", nil, nil, nil, in, persist.ExitInfo{ExitCode: 1}); err != nil {
+	if err := d.Dump("c_1", nil, nil, nil, nil, in, persist.ExitInfo{ExitCode: 1}); err != nil {
 		t.Fatal(err)
 	}
 

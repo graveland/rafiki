@@ -1511,6 +1511,19 @@ func (c *Controller) handleChildRenamed(childID, newName, previous string) {
 	}
 }
 
+// renderRingEvents wraps render-ring byte frames as ring.Events (timestamp 0;
+// exact arrival times are not retained in the byte snapshot).
+func renderRingEvents(frames [][]byte) []ring.Event {
+	if len(frames) == 0 {
+		return nil
+	}
+	out := make([]ring.Event, len(frames))
+	for i, f := range frames {
+		out[i] = ring.Event{Bytes: f}
+	}
+	return out
+}
+
 func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	res := ch.ExitResult()
 	now := time.Now()
@@ -1522,11 +1535,12 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// Snapshot the ring before removing the child so ctrl_get_recent continues
 	// to work after the child is gone (spec §11.4).
 	ringSnapshot := ch.Ring().Recent(ring.Query{})
+	renderSnapshot := ch.RenderRingSnapshot()
 
 	// MarkExited sets Status, ExitedAt, ExitCode, ExitSignal, and ExitedRing
 	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
 	// observe Status=Exited with ExitedRing still nil.
-	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot)
+	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot, renderRingEvents(renderSnapshot))
 
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record on exit", "childId", childID, "error", err)
@@ -1553,7 +1567,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 			Signal:     res.Signal,
 			LastStatus: lastStatus,
 		}
-		if err := c.dumper.Dump(childID, ch.InSnapshot(), ch.RingSnapshot(), ch.StderrSnapshot(), meta, exitInfo); err != nil {
+		if err := c.dumper.Dump(childID, ch.InSnapshot(), ch.RingSnapshot(), renderSnapshot, ch.StderrSnapshot(), meta, exitInfo); err != nil {
 			slog.Warn("log dump failed", "child", childID, "error", err)
 		}
 	}

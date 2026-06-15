@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"bufio"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -59,15 +60,17 @@ func NewLogDumper(dir string, mode Mode) *LogDumper {
 	return &LogDumper{dir: dir, mode: mode}
 }
 
-// Dump writes in.jsonl.gz, out.jsonl.gz, err.log.gz, and meta.json for
-// childID under the configured directory, subject to the emission mode.
+// Dump writes in.jsonl.gz, out.jsonl.gz, err.log.gz, meta.json, and (when
+// render is non-empty) render.jsonl.gz for childID under the configured
+// directory, subject to the emission mode.
 //
-// Layout: <dir>/<childID>/{in.jsonl.gz, out.jsonl.gz, err.log.gz, meta.json}
-// All stream files are 0o600; the directory is 0o700.
+// Layout: <dir>/<childID>/{in.jsonl.gz, out.jsonl.gz, render.jsonl.gz,
+// err.log.gz, meta.json}. All stream files are 0o600; the directory is 0o700.
 func (d *LogDumper) Dump(
 	childID string,
 	in [][]byte,
 	out [][]byte,
+	render [][]byte,
 	errBytes []byte,
 	meta Meta,
 	exit ExitInfo,
@@ -98,7 +101,39 @@ func (d *LogDumper) Dump(
 	if err := writeGzLines(filepath.Join(childDir, "out.jsonl.gz"), out); err != nil {
 		return err
 	}
+	if len(render) > 0 {
+		if err := writeGzLines(filepath.Join(childDir, "render.jsonl.gz"), render); err != nil {
+			return err
+		}
+	}
 	return writeGzBytes(filepath.Join(childDir, "err.log.gz"), errBytes)
+}
+
+// ReadGzLines reads a gzip-compressed newline-delimited file into one []byte
+// per line (trailing newline stripped). Returns an os.ErrNotExist-wrapped error
+// when the file is absent so callers can distinguish "no dump" from a read
+// failure.
+func ReadGzLines(path string) ([][]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	var out [][]byte
+	sc := bufio.NewScanner(gz)
+	sc.Buffer(make([]byte, 0, 64*1024), 16<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		cp := make([]byte, len(line))
+		copy(cp, line)
+		out = append(out, cp)
+	}
+	return out, sc.Err()
 }
 
 // writeGzLines writes each line to a gzip-compressed file, appending \n after
