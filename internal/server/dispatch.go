@@ -34,10 +34,11 @@ type KillResult = protocol.KillResponseData
 
 // RecentQuery carries parameters for Controller.GetRecent.
 type RecentQuery struct {
-	Limit   int
-	Since   int64
-	Include []string
-	Exclude []string
+	Limit    int
+	Since    int64
+	Include  []string
+	Exclude  []string
+	Rendered bool
 }
 
 // RecentResult is returned by Controller.GetRecent.
@@ -319,10 +320,11 @@ func (d *dispatcher) getRecent(frame []byte, id string) []byte {
 		return errResponse(protocol.TypeCtrlGetRecent, id, protocol.ErrInvalidArgs, "childId required")
 	}
 	q := RecentQuery{
-		Limit:   req.Limit,
-		Since:   req.Since,
-		Include: req.Include,
-		Exclude: req.Exclude,
+		Limit:    req.Limit,
+		Since:    req.Since,
+		Include:  req.Include,
+		Exclude:  req.Exclude,
+		Rendered: req.Rendered,
 	}
 	result, err := d.c.GetRecent(req.ChildID, q)
 	if err != nil {

@@ -551,6 +551,21 @@ func TestDispatch_GetRecent_EmptyEventsIsArray(t *testing.T) {
 	}
 }
 
+func TestDispatchGetRecentRenderedFlag(t *testing.T) {
+	var got server.RecentQuery
+	c := &fakeController{
+		getRecentFn: func(_ string, q server.RecentQuery) (server.RecentResult, error) {
+			got = q
+			return server.RecentResult{}, nil
+		},
+	}
+	d := server.NewDispatch(c)
+	d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_get_recent","id":"1","childId":"c1","rendered":true}`))
+	if !got.Rendered {
+		t.Fatal("Rendered flag did not propagate to RecentQuery")
+	}
+}
+
 func TestDispatch_GetRecent_NotFound(t *testing.T) {
 	c := &fakeController{
 		getRecentFn: func(string, server.RecentQuery) (server.RecentResult, error) {

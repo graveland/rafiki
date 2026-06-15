@@ -181,22 +181,47 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 	}
 
 	ch, alive := c.cm.Get(childID)
+
+	// Select the source event slice based on raw-vs-rendered and liveness.
 	var events []ring.Event
 	var total int
 	var oldestTS int64
 
 	if alive {
-		// Live child: query the in-memory ring buffer.
-		r := ch.Ring()
-		events = r.Recent(ring.Query{Limit: q.Limit, Since: q.Since})
-		total, _, oldestTS = r.Stats()
+		if q.Rendered && ch.Normalizes() {
+			events = ch.RenderRecent(ring.Query{Limit: q.Limit, Since: q.Since})
+			total = len(ch.RenderRecent(ring.Query{}))
+		} else {
+			r := ch.Ring()
+			events = r.Recent(ring.Query{Limit: q.Limit, Since: q.Since})
+			total, _, oldestTS = r.Stats()
+		}
 	} else {
-		// Exited child: fall back to the ring snapshot taken at exit time
-		// (spec §11.4). Apply Since + Limit filtering manually.
-		all := snap.ExitedRing
+		// Exited: pick the snapshot, falling back to the on-disk dump for
+		// orphans reloaded after a restart (in-memory snapshots are lost then).
+		var all []ring.Event
+		switch {
+		case q.Rendered && snap.Kind == "claude":
+			all = snap.ExitedRenderRing
+			if len(all) == 0 {
+				all = c.readDiskEvents(childID, "render.jsonl.gz")
+			}
+		default:
+			all = snap.ExitedRing
+			if len(all) == 0 {
+				all = c.readDiskEvents(childID, "out.jsonl.gz")
+			}
+		}
+		total = len(all)
+		if len(all) > 0 {
+			oldestTS = all[0].Timestamp
+		}
 		if q.Since > 0 {
 			i := 0
-			for i < len(all) && all[i].Timestamp < q.Since {
+			// A zero timestamp means "unknown" (render frames sourced from the
+			// on-disk render.jsonl.gz carry no timestamp) — keep those rather
+			// than dropping the whole disk-sourced rendered backfill.
+			for i < len(all) && all[i].Timestamp != 0 && all[i].Timestamp < q.Since {
 				i++
 			}
 			all = all[i:]
@@ -205,10 +230,6 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 			all = all[len(all)-q.Limit:]
 		}
 		events = all
-		total = len(snap.ExitedRing)
-		if len(snap.ExitedRing) > 0 {
-			oldestTS = snap.ExitedRing[0].Timestamp
-		}
 	}
 
 	out := make([]json.RawMessage, 0, len(events))
@@ -224,6 +245,24 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 		OldestTimestamp:  oldestTS,
 		TruncatedByLimit: q.Limit > 0 && len(out) == q.Limit,
 	}, nil
+}
+
+// readDiskEvents reads a per-child on-disk dump file (out.jsonl.gz /
+// render.jsonl.gz) into ring.Events with zero timestamps. Returns nil when the
+// dump is absent or unreadable (best-effort backfill after a restart).
+func (c *Controller) readDiskEvents(childID, name string) []ring.Event {
+	if c.logsDir == "" {
+		return nil
+	}
+	frames, err := persist.ReadGzLines(filepath.Join(c.logsDir, childID, name))
+	if err != nil {
+		return nil
+	}
+	out := make([]ring.Event, len(frames))
+	for i, f := range frames {
+		out[i] = ring.Event{Bytes: f}
+	}
+	return out
 }
 
 func (c *Controller) GetStreams(childID string, which string) (server.GetStreamsResult, error) {

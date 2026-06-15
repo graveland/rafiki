@@ -291,6 +291,8 @@ type GetRecentRequest struct {
 	Since   int64    `json:"since,omitempty"`
 	Include []string `json:"include,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
+
+	Rendered bool `json:"rendered,omitempty"`
 }
 
 // SendRequest forwards a pi-RPC frame to a child's stdin (§6.12).
