@@ -27,8 +27,8 @@ unavailable — captured to disk on exit).`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runLogs,
 	}
-	cmd.Flags().Bool("in", false, "Print the in (stdin) stream instead")
-	cmd.Flags().Bool("err", false, "Print the err (stderr) stream instead")
+	cmd.Flags().Bool("in", false, "Dump the raw stdin stream (snapshot, no follow)")
+	cmd.Flags().Bool("err", false, "Dump the raw stderr stream (snapshot; live stderr unavailable — see logs after exit)")
 	cmd.Flags().Bool("all", false, "Print all three streams with separator headers")
 	cmd.Flags().Bool("path", false, "Print just the log directory path")
 	cmd.Flags().IntP("tail", "n", -1, "Show the last N events (-1 = all, 0 = none)")
@@ -85,9 +85,8 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return dumpRawStreams(ctx, c, childID, wantIn, wantErr, wantAll)
 	}
 
-	// Suppress token deltas in the rendered view (raw shows everything).
 	var exclude []string
-	if noDeltas && !raw {
+	if noDeltas {
 		exclude = []string{"message_update"}
 	}
 
@@ -131,7 +130,7 @@ func dumpRawStreams(ctx context.Context, c *client.Client, childID string, wantI
 		}
 		if data.Alive {
 			if wantAll {
-				fmt.Println("=== in.jsonl ===")
+				fmt.Println("=== in ===")
 			}
 			if wantIn || wantAll {
 				for _, line := range data.In {
@@ -139,7 +138,7 @@ func dumpRawStreams(ctx context.Context, c *client.Client, childID string, wantI
 				}
 			}
 			if wantAll {
-				fmt.Println("=== out.jsonl ===")
+				fmt.Println("=== out ===")
 				bf, err := fetchBackfill(ctx, c, childID, historyOpts{tailN: -1})
 				if err != nil {
 					return err
@@ -147,7 +146,7 @@ func dumpRawStreams(ctx context.Context, c *client.Client, childID string, wantI
 				for _, f := range bf {
 					fmt.Fprintln(os.Stdout, string(f))
 				}
-				fmt.Println("=== err.log ===")
+				fmt.Println("=== err ===")
 			}
 			if wantErr || wantAll {
 				if len(data.Err) > 0 {
@@ -170,9 +169,13 @@ func dumpDiskStreams(childID string, wantIn, wantErr, wantAll bool) error {
 		return fmt.Errorf("no logs at %s (child alive but capture unavailable, or persistence mode is `never`)", logsDir)
 	}
 	if wantAll {
-		for _, name := range []string{"in.jsonl.gz", "out.jsonl.gz", "err.log.gz"} {
-			fmt.Printf("=== %s ===\n", name)
-			if err := zcatTo(os.Stdout, filepath.Join(logsDir, name)); err != nil {
+		for _, s := range []struct{ header, file string }{
+			{"in", "in.jsonl.gz"},
+			{"out", "out.jsonl.gz"},
+			{"err", "err.log.gz"},
+		} {
+			fmt.Printf("=== %s ===\n", s.header)
+			if err := zcatTo(os.Stdout, filepath.Join(logsDir, s.file)); err != nil {
 				fmt.Fprintln(os.Stderr, "warning:", err)
 			}
 		}
