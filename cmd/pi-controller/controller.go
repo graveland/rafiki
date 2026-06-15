@@ -207,8 +207,12 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 				all = c.readDiskEvents(childID, "render.jsonl.gz")
 			}
 		}
-		if len(all) == 0 {
-			// raw, or rendered with no render data (e.g. pi children)
+		// Fall back to the raw stream UNLESS this is a rendered request for a
+		// normalizing (claude) child: claude's raw stdout is NOT renderable, so
+		// an empty render-ring must stay empty rather than dumping raw frames
+		// into the rendered view (matches the live path). pi's raw ring already
+		// IS pi-vocabulary, so pi rendered requests still fall through here.
+		if len(all) == 0 && !(q.Rendered && snap.Kind == "claude") {
 			all = snap.ExitedRing
 			if len(all) == 0 {
 				all = c.readDiskEvents(childID, "out.jsonl.gz")

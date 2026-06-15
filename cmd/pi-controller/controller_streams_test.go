@@ -86,6 +86,38 @@ func TestGetRecentRenderedExited(t *testing.T) {
 	}
 }
 
+// TestGetRecentRenderedExitedNoRenderData verifies a rendered request for an
+// exited claude child with no render frames stays EMPTY rather than dumping
+// raw stream-json into the rendered view (claude raw stdout is not renderable).
+func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTestController(t)
+	ctrl.st.Insert(&store.Session{
+		ChildID:    "c2",
+		Kind:       "claude",
+		Status:     protocol.StatusExited,
+		ExitedRing: []ring.Event{{Bytes: []byte(`{"type":"system"}`)}},
+		// ExitedRenderRing intentionally empty; no logsDir dump.
+	})
+
+	rendered, err := ctrl.GetRecent("c2", server.RecentQuery{Rendered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendered.Events) != 0 {
+		t.Fatalf("rendered events = %v, want zero (no raw fallback for claude)", rendered.Events)
+	}
+
+	raw, err := ctrl.GetRecent("c2", server.RecentQuery{Rendered: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}` {
+		t.Fatalf("raw events = %v, want the raw frame", raw.Events)
+	}
+}
+
 // TestGetRecentDiskFallback exercises the orphan-after-restart path: the
 // in-memory exit snapshots are empty, so GetRecent must backfill from the
 // on-disk dump (out.jsonl.gz / render.jsonl.gz).

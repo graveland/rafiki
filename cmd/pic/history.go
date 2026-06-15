@@ -114,8 +114,9 @@ func fetchBackfill(ctx context.Context, c *client.Client, childID string, opts h
 // runHistoryOut handles the default `out` event stream: optional backfill,
 // then optional live follow. Used by both `tail` and `logs`.
 //
-// Backfill frames are raw inner pi events → rendered via renderPiEvent (or
-// printed verbatim with --raw). Live frames are ctrl_event envelopes → rendered
+// Backfill frames are pi-vocabulary inner events (rendered for normalizing
+// children) → rendered via renderPiEvent (or printed verbatim with --raw).
+// Live frames are ctrl_event envelopes → rendered
 // via render(). Dedup compares the inner bytes: any live frame whose inner event
 // duplicates a backfilled frame (during the brief subscribe↔fetch overlap) is
 // dropped, and the first non-duplicate closes the dedup window.
@@ -154,7 +155,7 @@ func runHistoryOut(ctx context.Context, c *client.Client, childID string, opts h
 	// mode goes through the renderer.
 	machine := opts.raw || opts.mode == outputJSON
 
-	// Render backfill (raw inner pi events).
+	// Render backfill (pi-vocabulary inner events, rendered for normalizing children).
 	// dedup assumes live inner bytes are byte-identical to ring bytes (true for the
 	// pi identity provider over compacted JSON; claude re-marshals, so it
 	// under-dedups harmlessly).
