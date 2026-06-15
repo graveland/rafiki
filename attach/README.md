@@ -34,6 +34,20 @@ pic attach my-session
 # (reattach later)
 ```
 
+## Scrollback
+
+On attach, pic-attach replays the child's retained history into the TUI so you
+see the prior transcript, then follows live. Control how much is replayed with
+`-n/--tail` (default `-1` = all retained, `0` = none):
+
+```bash
+pic attach my-session -n 0    # no scrollback, live only (old behaviour)
+pic attach my-session -n 50   # last 50 retained events, then live
+```
+
+Scrollback is faithful for pi children; for claude children the retained frames
+render best-effort (the normalized view is produced live-only).
+
 ## Exit semantics
 
 By default, exiting the TUI (Ctrl+D, /quit, terminal close) **detaches** —
