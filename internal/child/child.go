@@ -109,9 +109,10 @@ type Child struct {
 
 	exit ShutdownResult
 
-	bus  *bus.Bus[[]byte]
-	ring *ring.Ring
-	in   inBuffer // bounded stdin frame capture for log dumps
+	bus        *bus.Bus[[]byte]
+	ring       *ring.Ring
+	renderRing *ring.Ring // bus-frame capture for normalizing providers (claude); nil otherwise
+	in         inBuffer   // bounded stdin frame capture for log dumps
 
 	errBuf bytes.Buffer // written by readStderr only; safe to read after Done() is closed
 
@@ -204,6 +205,10 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		idle:        make(chan struct{}),
 	}
 
+	if c.provider.Normalizes() {
+		c.renderRing = ring.New(ring.Options{})
+	}
+
 	go c.supervise()
 	return c, nil
 }
@@ -292,6 +297,49 @@ func (c *Child) RingSnapshot() [][]byte {
 	return out
 }
 
+// publishBus appends a bus frame to the render-ring (when the provider
+// normalizes) and publishes it. The render-ring captures the exact
+// pi-vocabulary stream the bus carries — assistant turns and synthesized user
+// turns — so backfill can render claude children. Safe for concurrent use: the
+// c.renderRing != nil read is unsynchronized but safe because renderRing is set
+// once in Spawn before the readStdout and supervise goroutines start (write
+// once, before publish), and ring.Ring's own mutex covers the concurrent
+// Append from those two goroutines.
+func (c *Child) publishBus(f []byte, ts int64) {
+	if c.renderRing != nil {
+		c.renderRing.Append(f, ts)
+	}
+	c.bus.Publish(f)
+}
+
+// RenderRingSnapshot returns a copy of all frames in the render-ring, or nil
+// when the provider does not normalize (no render-ring).
+func (c *Child) RenderRingSnapshot() [][]byte {
+	if c.renderRing == nil {
+		return nil
+	}
+	events := c.renderRing.Recent(ring.Query{})
+	out := make([][]byte, len(events))
+	for i, e := range events {
+		out[i] = e.Bytes
+	}
+	return out
+}
+
+// RenderRecent returns render-ring events matching q, or nil when there is no
+// render-ring.
+func (c *Child) RenderRecent(q ring.Query) []ring.Event {
+	if c.renderRing == nil {
+		return nil
+	}
+	return c.renderRing.Recent(q)
+}
+
+// Normalizes reports whether this child's provider translates stdout into a
+// distinct bus stream (claude). When true, the render-ring is the renderable
+// source; when false, the raw ring is already renderable.
+func (c *Child) Normalizes() bool { return c.provider.Normalizes() }
+
 // StderrSnapshot returns a copy of buffered stderr bytes.
 // Must only be called after Done() is closed; otherwise concurrent
 // readStderr writes may race.
@@ -371,8 +419,9 @@ func (c *Child) supervise() {
 			// claude child, which never echoes the prompt on its own stdout) so the
 			// user's turn reaches the bus. Done after the stdin write but before the
 			// child can respond, so it lands ahead of the assistant frames.
-			for _, f := range c.provider.OutboundEcho(frame, time.Now().UnixMilli()) {
-				c.bus.Publish(f)
+			echoTS := time.Now().UnixMilli()
+			for _, f := range c.provider.OutboundEcho(frame, echoTS) {
+				c.publishBus(f, echoTS)
 			}
 			c.in.append(frame) // capture the original (normalized) frame for log dumps
 		case <-c.processDone:
@@ -405,7 +454,7 @@ func (c *Child) readStdout() {
 		// provider); for claude the provider translates raw → pi vocabulary.
 		c.ring.Append(line, ts)
 		for _, f := range c.provider.BusFrames(line, ts) {
-			c.bus.Publish(f)
+			c.publishBus(f, ts)
 		}
 		c.handleFrame(line)
 	}
