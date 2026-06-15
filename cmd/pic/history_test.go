@@ -2,6 +2,17 @@ package main
 
 import "testing"
 
+func TestLogsFlagDefaults(t *testing.T) {
+	cmd := newLogsCmd()
+	n, err := cmd.Flags().GetInt("tail")
+	if err != nil || n != -1 {
+		t.Fatalf("logs tail default = %d (err %v), want -1 (all)", n, err)
+	}
+	if f, err := cmd.Flags().GetBool("follow"); err != nil || f {
+		t.Fatalf("logs follow default = %v (err %v), want false", f, err)
+	}
+}
+
 func TestInnerEvent(t *testing.T) {
 	// A ctrl_event envelope (live shape) → returns the inner event bytes verbatim.
 	env := []byte(`{"type":"ctrl_event","childId":"c1","event":{"type":"message_end","x":1}}`)
