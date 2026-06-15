@@ -162,7 +162,7 @@ func dumpRawStreams(ctx context.Context, c *client.Client, childID string, wantI
 			}
 			if wantAll {
 				fmt.Println("=== out ===")
-				bf, err := fetchBackfill(ctx, c, childID, historyOpts{tailN: -1})
+				bf, err := fetchBackfill(ctx, c, childID, historyOpts{tailN: -1, raw: true})
 				if err != nil {
 					return err
 				}

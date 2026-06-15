@@ -42,6 +42,24 @@ func TestEmitMachineFrame(t *testing.T) {
 	})
 }
 
+func TestBackfillRequestRendered(t *testing.T) {
+	if got := backfillRequest("c1", historyOpts{raw: false}).Rendered; !got {
+		t.Fatal("non-raw backfill should request Rendered:true")
+	}
+	if got := backfillRequest("c1", historyOpts{raw: true}).Rendered; got {
+		t.Fatal("--raw backfill should request Rendered:false")
+	}
+	if got := backfillRequest("c1", historyOpts{tailN: 5}).Limit; got != 5 {
+		t.Fatalf("tailN 5 → Limit %d, want 5", got)
+	}
+	if got := backfillRequest("c1", historyOpts{tailN: 0}).Limit; got != 0 {
+		t.Fatalf("tailN 0 → Limit %d, want 0", got)
+	}
+	if got := backfillRequest("c1", historyOpts{tailN: -1}).Limit; got != 0 {
+		t.Fatalf("tailN -1 → Limit %d, want 0 (all)", got)
+	}
+}
+
 func TestLogsFlagDefaults(t *testing.T) {
 	cmd := newLogsCmd()
 	n, err := cmd.Flags().GetInt("tail")

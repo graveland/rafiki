@@ -70,21 +70,29 @@ func innerEvent(frame []byte) []byte {
 // fetchBackfill returns the last-N (per opts.tailN) out-stream event frames for
 // childID via ctrl_get_recent. Frames are raw inner pi events. Returns nil when
 // tailN == 0.
+// backfillRequest builds the ctrl_get_recent request for a backfill fetch.
+// Rendered is the inverse of raw: the human/JSON views want the normalized
+// (pi-vocabulary) stream; --raw wants the verbatim backend frames.
+func backfillRequest(childID string, opts historyOpts) protocol.GetRecentRequest {
+	limit := 0
+	if opts.tailN > 0 {
+		limit = opts.tailN
+	}
+	return protocol.GetRecentRequest{
+		Type:     protocol.TypeCtrlGetRecent,
+		ChildID:  childID,
+		Limit:    limit,
+		Include:  opts.include,
+		Exclude:  opts.exclude,
+		Rendered: !opts.raw,
+	}
+}
+
 func fetchBackfill(ctx context.Context, c *client.Client, childID string, opts historyOpts) ([][]byte, error) {
 	if opts.tailN == 0 {
 		return nil, nil
 	}
-	limit := 0 // 0 = no limit (all) on the daemon side
-	if opts.tailN > 0 {
-		limit = opts.tailN
-	}
-	req := protocol.GetRecentRequest{
-		Type:    protocol.TypeCtrlGetRecent,
-		ChildID: childID,
-		Limit:   limit,
-		Include: opts.include,
-		Exclude: opts.exclude,
-	}
+	req := backfillRequest(childID, opts)
 	resp, err := c.Request(ctx, req)
 	if err != nil {
 		return nil, err
