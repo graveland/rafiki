@@ -45,8 +45,16 @@ pic attach my-session -n 0    # no scrollback, live only (old behaviour)
 pic attach my-session -n 50   # last 50 retained events, then live
 ```
 
-Scrollback is faithful for pi children; for claude children the retained frames
-render best-effort (the normalized view is produced live-only).
+Scrollback renders the conversation for both pi and claude children: the daemon
+captures the normalized (pi-vocabulary) bus stream into a per-child render-ring
+(persisted to `render.jsonl.gz` so it survives a daemon restart), and the TUI
+primes from that. The raw backend stream is still available via `pic logs --raw`.
+
+## Slash-command autocomplete
+
+For both pi and claude children, typing `/` offers the child's slash commands.
+pi commands come from a live `get_commands` RPC; claude commands are captured
+from its init frame and served from the daemon's store.
 
 ## Exit semantics
 
