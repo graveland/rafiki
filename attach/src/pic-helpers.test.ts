@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it, beforeEach } from "bun:test";
-import { setupTuiAutocomplete, filterCommandSuggestions } from "../../cmd/pic/picembed/pic-helpers/index.ts";
+import { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/pic/picembed/pic-helpers/index.ts";
 
 // ─── Inline AutocompleteProvider type (mirrors @earendil-works/pi-tui) ────────
 
@@ -293,6 +293,16 @@ describe("setupTuiAutocomplete", () => {
 
         it("does not match slash embedded in word", () => {
             expect(filterCommandSuggestions("foo/bar", commands, [])).toBeNull();
+        });
+    });
+
+    describe("slashCommandsToCommandInfo", () => {
+        it("maps names to CommandInfo", () => {
+            const got = slashCommandsToCommandInfo(["compact", "review"]);
+            expect(got).toEqual([
+                { name: "compact", description: undefined },
+                { name: "review", description: undefined },
+            ]);
         });
     });
 

@@ -159,6 +159,14 @@ export function filterCommandSuggestions(
 }
 
 /**
+ * Map claude's slash_commands (names only) into the CommandInfo shape the
+ * autocomplete provider consumes. claude advertises no descriptions.
+ */
+export function slashCommandsToCommandInfo(names: string[]): CommandInfo[] {
+    return names.map((name) => ({ name, description: undefined }));
+}
+
+/**
  * Wire the TUI autocomplete provider into the ExtensionUIContext.
  *
  * Called by RemoteAgentSession.bindExtensions() when uiContext is available.
@@ -184,17 +192,26 @@ export function setupTuiAutocomplete(
     const refresh = async (): Promise<void> => {
         if (!childId) return;
         try {
-            // get_commands is a pi rpc-mode RPC that returns the child's loaded
-            // extension/skill/prompt commands. Claude (stream-json) has no such
-            // RPC — its provider drops the frame, so probing it just 30s-times
-            // out. The TUI's built-in slash commands come from the base provider
-            // regardless of backend, so non-pi children simply get none here.
+            // pi children: get_commands is a pi rpc-mode RPC that returns the
+            // child's loaded extension/skill/prompt commands.
+            //
+            // claude children: claude (stream-json) has no such RPC, but the
+            // daemon captures the slash_commands it advertises in its init
+            // frame and serves them from its store via ctrl_get — no round-trip
+            // to the child, no 30s timeout.
+            //
+            // Other backends: the TUI's built-in slash commands come from the
+            // base provider regardless, so they simply get none here.
             const kind = await fetchChildKind(socketPath, childId);
-            if (kind !== "pi") {
+            if (kind === "pi") {
+                cachedCommands = await fetchCommandsFromDaemon(socketPath, childId);
+            } else if (kind === "claude") {
+                cachedCommands = slashCommandsToCommandInfo(
+                    await fetchSlashCommandsFromDaemon(socketPath, childId)
+                );
+            } else {
                 cachedCommands = [];
-                return;
             }
-            cachedCommands = await fetchCommandsFromDaemon(socketPath, childId);
         } catch (err: unknown) {
             console.error(
                 "[pic-helpers] failed to refresh daemon commands:",
@@ -288,6 +305,52 @@ async function fetchChildKind(socketPath: string, childId: string): Promise<stri
         });
         socket.on("error", () => finish(""));
         socket.on("close", () => finish(""));
+    });
+}
+
+/**
+ * Fetch a claude child's advertised slash commands via a one-shot ctrl_get,
+ * read from the daemon's store (not forwarded to the child). Returns [] on any
+ * failure.
+ */
+async function fetchSlashCommandsFromDaemon(socketPath: string, childId: string): Promise<string[]> {
+    return new Promise<string[]>((resolve) => {
+        const socket = net.createConnection(socketPath);
+        let buf = "";
+        let done = false;
+        const finish = (cmds: string[]): void => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            socket.destroy();
+            resolve(cmds);
+        };
+        const timer = setTimeout(() => finish([]), 5_000);
+
+        socket.on("connect", () => {
+            socket.write(JSON.stringify({ type: "ctrl_get", childId }) + "\n");
+        });
+        socket.on("data", (chunk: Buffer) => {
+            buf += chunk.toString("utf8");
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                let msg: Record<string, unknown>;
+                try {
+                    msg = JSON.parse(line) as Record<string, unknown>;
+                } catch {
+                    continue;
+                }
+                if (msg["type"] !== "ctrl_response") continue;
+                const data = msg["data"] as { slashCommands?: string[] } | undefined;
+                const sc = data?.slashCommands;
+                finish(Array.isArray(sc) ? sc : []);
+                return;
+            }
+        });
+        socket.on("error", () => finish([]));
+        socket.on("close", () => finish([]));
     });
 }
 
