@@ -18,4 +18,14 @@ func TestInnerEvent(t *testing.T) {
 	if got := string(innerEvent(life)); got != string(life) {
 		t.Fatalf("innerEvent(lifecycle) = %s, want unchanged", got)
 	}
+	// A ctrl_event envelope with no inner event → returned unchanged.
+	noEvent := []byte(`{"type":"ctrl_event","childId":"c1"}`)
+	if got := string(innerEvent(noEvent)); got != string(noEvent) {
+		t.Fatalf("innerEvent(no-event) = %s, want unchanged", got)
+	}
+	// Malformed JSON → returned unchanged.
+	bad := []byte(`{not json`)
+	if got := string(innerEvent(bad)); got != string(bad) {
+		t.Fatalf("innerEvent(malformed) = %s, want unchanged", got)
+	}
 }

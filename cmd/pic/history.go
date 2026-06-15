@@ -118,6 +118,9 @@ func runHistoryOut(ctx context.Context, c *client.Client, childID string, opts h
 	renderer := newTailRenderer(os.Stdout, opts.useColor, opts.mode, opts.verbose)
 
 	// Render backfill (raw inner pi events).
+	// dedup assumes live inner bytes are byte-identical to ring bytes (true for the
+	// pi identity provider over compacted JSON; claude re-marshals, so it
+	// under-dedups harmlessly).
 	seen := make(map[string]bool, len(backfill))
 	for _, f := range backfill {
 		seen[string(f)] = true
@@ -125,8 +128,8 @@ func runHistoryOut(ctx context.Context, c *client.Client, childID string, opts h
 			fmt.Fprintln(os.Stdout, string(f))
 			continue
 		}
-		if err := renderer.renderPiEvent(f); err != nil && !errors.Is(err, errDaemonShutdown) {
-			fmt.Fprintln(os.Stderr, "render error:", err)
+		if err := renderer.renderPiEvent(f); err != nil {
+			fmt.Fprintf(os.Stderr, "render error (child %s): %v\n", childID, err)
 		}
 	}
 
@@ -155,7 +158,7 @@ func runHistoryOut(ctx context.Context, c *client.Client, childID string, opts h
 				if errors.Is(err, errDaemonShutdown) {
 					return nil
 				}
-				fmt.Fprintln(os.Stderr, "render error:", err)
+				fmt.Fprintf(os.Stderr, "render error (child %s): %v\n", childID, err)
 			}
 			if isChildExited(frame, childID) {
 				return nil
