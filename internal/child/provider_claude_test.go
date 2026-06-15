@@ -28,6 +28,17 @@ func TestClaudeProvider_Parse_SystemInitIsFirstResponse(t *testing.T) {
 	}
 }
 
+func TestParseInitCapturesSlashCommands(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"init","session_id":"s1","model":"claude","slash_commands":["compact","review","init"]}`)
+	res := ClaudeProvider{}.Parse(line)
+	if !res.HasMeta {
+		t.Fatal("init frame should produce metadata")
+	}
+	if len(res.Meta.SlashCommands) != 3 || res.Meta.SlashCommands[0] != "compact" {
+		t.Fatalf("SlashCommands = %v, want [compact review init]", res.Meta.SlashCommands)
+	}
+}
+
 func TestClaudeProvider_ReadyOnSpawn(t *testing.T) {
 	// claude is silent on stdout until prompted, so readiness is process-up.
 	if !(ClaudeProvider{}).ReadyOnSpawn() {

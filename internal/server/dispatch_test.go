@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
 	"git.graveland.dev/brent/pi-controller/internal/server"
 	"git.graveland.dev/brent/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // discardConn is a no-op Connection used in dispatch tests where event
@@ -21,27 +21,27 @@ func (discardConn) Deliver(_ []byte) {}
 // ─── fakeController ───────────────────────────────────────────────────────────
 
 type fakeController struct {
-	listFn                func(protocol.ListFilter) []store.Snapshot
-	getFn                 func(string) (store.Snapshot, bool)
-	getRecentFn           func(string, server.RecentQuery) (server.RecentResult, error)
-	searchFn              func(server.SearchQuery) server.SearchResult
-	statusFn              func() server.ControllerStatus
-	spawnFn               func(context.Context, protocol.SpawnRequest) (server.SpawnResult, error)
-	resumeFn              func(context.Context, string, string) (server.SpawnResult, error)
-	killFn                func(context.Context, string, int64, int64) (server.KillResult, error)
-	forgetFn              func(string) error
-	forgetAllExitedFn     func(int64) (int, error)
-	sendFn                func(string, json.RawMessage) error
-	subscribeFn           func(string, server.Connection, protocol.SubscribeFilter) error
-	unsubscribeFn         func(string, server.Connection) error
-	globalSubscribeFn     func(server.Connection) error
-	globalUnsubscribeFn   func(server.Connection) error
-	subscribeLabeledFn    func(server.Connection, map[string]string, []string, protocol.SubscribeFilter) error
-	onConnectionCloseFn   func(server.Connection)
-	listModelsFn          func(context.Context, string) ([]protocol.ModelInfo, error)
-	listPresetsFn         func(map[string]string, []string) ([]protocol.PresetInfo, error)
-	getStreamsResult      server.GetStreamsResult
-	getStreamsErr         error
+	listFn              func(protocol.ListFilter) []store.Snapshot
+	getFn               func(string) (store.Snapshot, bool)
+	getRecentFn         func(string, server.RecentQuery) (server.RecentResult, error)
+	searchFn            func(server.SearchQuery) server.SearchResult
+	statusFn            func() server.ControllerStatus
+	spawnFn             func(context.Context, protocol.SpawnRequest) (server.SpawnResult, error)
+	resumeFn            func(context.Context, string, string) (server.SpawnResult, error)
+	killFn              func(context.Context, string, int64, int64) (server.KillResult, error)
+	forgetFn            func(string) error
+	forgetAllExitedFn   func(int64) (int, error)
+	sendFn              func(string, json.RawMessage) error
+	subscribeFn         func(string, server.Connection, protocol.SubscribeFilter) error
+	unsubscribeFn       func(string, server.Connection) error
+	globalSubscribeFn   func(server.Connection) error
+	globalUnsubscribeFn func(server.Connection) error
+	subscribeLabeledFn  func(server.Connection, map[string]string, []string, protocol.SubscribeFilter) error
+	onConnectionCloseFn func(server.Connection)
+	listModelsFn        func(context.Context, string) ([]protocol.ModelInfo, error)
+	listPresetsFn       func(map[string]string, []string) ([]protocol.PresetInfo, error)
+	getStreamsResult    server.GetStreamsResult
+	getStreamsErr       error
 }
 
 func (f *fakeController) List(filter protocol.ListFilter) []store.Snapshot {
@@ -448,6 +448,31 @@ func TestDispatch_Get_PiChildOmitsKind(t *testing.T) {
 	}
 	if _, present := m["kind"]; present {
 		t.Fatalf("pi child must omit kind on the wire, got %v", m["kind"])
+	}
+}
+
+func TestDispatchGetCarriesSlashCommands(t *testing.T) {
+	snap := store.Snapshot{
+		ChildID:       "c1",
+		Status:        protocol.StatusIdle,
+		SlashCommands: []string{"compact", "review"},
+	}
+	c := &fakeController{
+		getFn: func(id string) (store.Snapshot, bool) {
+			if id == "c1" {
+				return snap, true
+			}
+			return store.Snapshot{}, false
+		},
+	}
+	d := server.NewDispatch(c)
+	resp := d.HandleFrame(nil, []byte(`{"type":"ctrl_get","id":"1","childId":"c1"}`))
+	var r protocol.Response
+	_ = json.Unmarshal(resp, &r)
+	var cs protocol.ChildSummary
+	_ = json.Unmarshal(r.Data, &cs)
+	if len(cs.SlashCommands) != 2 || cs.SlashCommands[0] != "compact" {
+		t.Fatalf("SlashCommands = %v, want [compact review]", cs.SlashCommands)
 	}
 }
 

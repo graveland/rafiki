@@ -94,6 +94,10 @@ type Session struct {
 	// Keys with the "pic/" prefix are reserved for auto-labels set by the daemon.
 	Labels map[string]string
 
+	// SlashCommands is the claude child's advertised slash-command list (names),
+	// captured from its init frame. Empty for pi children.
+	SlashCommands []string
+
 	// Handles into the live Child. Set by store.Insert from
 	// Child setup; nil for sessions in "exited" state without an
 	// associated Child.
@@ -162,6 +166,10 @@ type Snapshot struct {
 	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
 	// This is a defensive copy; callers may mutate it freely.
 	Labels map[string]string
+
+	// SlashCommands is the claude child's advertised slash-command list (names),
+	// captured from its init frame. Empty for pi children.
+	SlashCommands []string
 }
 
 // Snapshot returns a deep copy of the session's fields. The caller may freely
@@ -200,13 +208,14 @@ func (s *Session) Snapshot() Snapshot {
 		Verbose: s.Verbose, PiBinary: s.PiBinary,
 		ExtraArgs: copyStrings(s.ExtraArgs),
 
-		ExtensionErrors: s.ExtensionErrors,
-		AutoRetries:     s.AutoRetries,
-		LastRetryError:  s.LastRetryError,
-		LastRetryFinal:  s.LastRetryFinal,
+		ExtensionErrors:  s.ExtensionErrors,
+		AutoRetries:      s.AutoRetries,
+		LastRetryError:   s.LastRetryError,
+		LastRetryFinal:   s.LastRetryFinal,
 		ExitedRing:       copyRingEvents(s.ExitedRing),
 		ExitedRenderRing: copyRingEvents(s.ExitedRenderRing),
 		Labels:           copyLabels(s.Labels),
+		SlashCommands:    copyStrings(s.SlashCommands),
 	}
 }
 

@@ -9,6 +9,8 @@ type SnifferMetadata struct {
 	SessionFile string
 	SessionName string
 	Model       string // formatted as "provider/id"
+
+	SlashCommands []string // claude init frame's slash_commands list (names only)
 }
 
 // ExtractMetadata inspects a pi-RPC frame and returns metadata fields found in

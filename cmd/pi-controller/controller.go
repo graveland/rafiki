@@ -1366,6 +1366,7 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	lastKnownModel := ""
 	lastKnownSessionID := ""
 	lastKnownSessionFile := ""
+	slashSynced := false
 	if snap, ok := c.st.Get(childID); ok {
 		lastKnownName = snap.Name
 		lastKnownModel = joinModel(snap.Provider, snap.Model)
@@ -1424,6 +1425,14 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 				c.handleSessionMetaChange(childID, md.SessionID, md.SessionFile)
 				lastKnownSessionID = md.SessionID
 				lastKnownSessionFile = md.SessionFile
+			}
+
+			// Capture claude's advertised slash commands once they appear
+			// (claude emits them in the init frame; static for the session).
+			if len(md.SlashCommands) > 0 && !slashSynced {
+				sc := md.SlashCommands
+				_ = c.st.Update(childID, func(s *store.Session) { s.SlashCommands = sc })
+				slashSynced = true
 			}
 
 		case <-ch.Done():

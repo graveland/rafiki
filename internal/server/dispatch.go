@@ -8,8 +8,8 @@ import (
 	"errors"
 	"path/filepath"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
 	"git.graveland.dev/brent/pi-controller/internal/store"
+	"git.graveland.dev/brent/pi-controller/protocol"
 )
 
 // ─── ControllerError ──────────────────────────────────────────────────────────
@@ -273,6 +273,9 @@ func snapshotToSummary(snap store.Snapshot) protocol.ChildSummary {
 	}
 	if len(snap.Labels) > 0 {
 		cs.Labels = snap.Labels
+	}
+	if len(snap.SlashCommands) > 0 {
+		cs.SlashCommands = snap.SlashCommands
 	}
 	return cs
 }

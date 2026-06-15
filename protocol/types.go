@@ -360,20 +360,21 @@ type ErrorBody struct {
 // PID is nil when status is exited. ExitCode is nil while the child is alive.
 // ExitSignal is absent (not "null") when the child exited via normal exit code rather than a signal.
 type ChildSummary struct {
-	ChildID      string            `json:"childId"`
-	PID          *int              `json:"pid"` // null when exited
-	Cwd          string            `json:"cwd"`
-	Name         string            `json:"name,omitempty"`
-	Kind         string            `json:"kind,omitempty"` // child protocol kind ("claude"); absent for pi children
-	Model        string            `json:"model,omitempty"`
-	SessionID    string            `json:"sessionId,omitempty"`
-	SessionFile  string            `json:"sessionFile,omitempty"`
-	Status       string            `json:"status"`
-	StartedAt    int64             `json:"startedAt"`
-	LastActivity int64             `json:"lastActivity"`
-	ExitCode     *int              `json:"exitCode"` // null while alive
-	ExitSignal   string            `json:"exitSignal,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
+	ChildID       string            `json:"childId"`
+	PID           *int              `json:"pid"` // null when exited
+	Cwd           string            `json:"cwd"`
+	Name          string            `json:"name,omitempty"`
+	Kind          string            `json:"kind,omitempty"` // child protocol kind ("claude"); absent for pi children
+	Model         string            `json:"model,omitempty"`
+	SessionID     string            `json:"sessionId,omitempty"`
+	SessionFile   string            `json:"sessionFile,omitempty"`
+	Status        string            `json:"status"`
+	StartedAt     int64             `json:"startedAt"`
+	LastActivity  int64             `json:"lastActivity"`
+	ExitCode      *int              `json:"exitCode"` // null while alive
+	ExitSignal    string            `json:"exitSignal,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	SlashCommands []string          `json:"slashCommands,omitempty"`
 }
 
 // ListResponseData is the data payload for ctrl_list responses.
@@ -557,7 +558,7 @@ type CtrlChildRenamed struct {
 // Set entries are applied first, then Remove entries are deleted.
 // Keys using the pic/ prefix are reserved and rejected with ErrInvalidArgs.
 type SetLabelsRequest struct {
-	Type    string            `json:"type"`    // "ctrl_set_labels"
+	Type    string            `json:"type"` // "ctrl_set_labels"
 	ID      string            `json:"id,omitempty"`
 	ChildID string            `json:"childId"`
 	Set     map[string]string `json:"set,omitempty"`
@@ -573,9 +574,9 @@ type SetLabelsResponseData struct {
 // CtrlChildLabeled is broadcast to subscribers when labels change (§7.6).
 // Labels contains the full post-mutation map, not a delta.
 type CtrlChildLabeled struct {
-	Type    string            `json:"type"`    // "ctrl_child_labeled"
+	Type    string            `json:"type"` // "ctrl_child_labeled"
 	ChildID string            `json:"childId"`
-	Labels  map[string]string `json:"labels"`  // complete post-mutation label set
+	Labels  map[string]string `json:"labels"` // complete post-mutation label set
 }
 
 // ─── ctrl_list_models ────────────────────────────────────────────────────────
@@ -584,7 +585,7 @@ type CtrlChildLabeled struct {
 // Provider is an optional filter; when non-empty only models whose provider
 // field matches are returned.
 type ListModelsRequest struct {
-	Type     string `json:"type"`               // "ctrl_list_models"
+	Type     string `json:"type"` // "ctrl_list_models"
 	ID       string `json:"id,omitempty"`
 	Provider string `json:"provider,omitempty"` // optional provider filter
 }
@@ -596,11 +597,11 @@ type ListModelsResponseData struct {
 
 // ModelInfo is one entry in a ctrl_list_models response.
 type ModelInfo struct {
-	ID       string `json:"id"`               // "provider/model"
+	ID       string `json:"id"` // "provider/model"
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
-	Name     string `json:"name,omitempty"`   // display name from models.json
-	Source   string `json:"source"`          // user-config | builtin | ollama | lmstudio
+	Name     string `json:"name,omitempty"` // display name from models.json
+	Source   string `json:"source"`         // user-config | builtin | ollama | lmstudio
 }
 
 // ─── ctrl_list_presets ───────────────────────────────────────────────────────
@@ -610,7 +611,7 @@ type ModelInfo struct {
 // ctrl_list: all Labels k=v pairs must match and all HasLabel keys must be
 // present on the preset's labels map.
 type ListPresetsRequest struct {
-	Type     string            `json:"type"`               // "ctrl_list_presets"
+	Type     string            `json:"type"` // "ctrl_list_presets"
 	ID       string            `json:"id,omitempty"`
 	Labels   map[string]string `json:"labels,omitempty"`   // AND-match: all k=v must match
 	HasLabel []string          `json:"hasLabel,omitempty"` // key presence only

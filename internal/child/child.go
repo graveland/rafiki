@@ -514,6 +514,9 @@ func (c *Child) handleFrame(line []byte) {
 		if md.Model != "" {
 			c.meta.Model = md.Model
 		}
+		if len(md.SlashCommands) > 0 {
+			c.meta.SlashCommands = md.SlashCommands
+		}
 	}
 
 	for _, e := range res.Events {

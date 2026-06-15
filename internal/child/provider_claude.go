@@ -40,11 +40,12 @@ func (ClaudeProvider) BusFrames(_ []byte, _ int64) [][]byte { return nil }
 
 // claudeFrame is the minimal envelope shared by claude stream-json objects.
 type claudeFrame struct {
-	Type      string `json:"type"`
-	Subtype   string `json:"subtype,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Message   *struct {
+	Type          string   `json:"type"`
+	Subtype       string   `json:"subtype,omitempty"`
+	SessionID     string   `json:"session_id,omitempty"`
+	Model         string   `json:"model,omitempty"`
+	SlashCommands []string `json:"slash_commands,omitempty"`
+	Message       *struct {
 		Content []struct {
 			Type string `json:"type"`
 		} `json:"content"`
@@ -78,8 +79,12 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 		// already idle) and is kept so a future non-ReadyOnSpawn path still works.
 		if f.Subtype == "init" {
 			res.FirstResponse = true
-			if f.SessionID != "" || f.Model != "" {
-				res.Meta = SnifferMetadata{SessionID: f.SessionID, Model: f.Model}
+			if f.SessionID != "" || f.Model != "" || len(f.SlashCommands) > 0 {
+				res.Meta = SnifferMetadata{
+					SessionID:     f.SessionID,
+					Model:         f.Model,
+					SlashCommands: f.SlashCommands,
+				}
 				res.HasMeta = true
 			}
 		}
