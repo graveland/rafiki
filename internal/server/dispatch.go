@@ -343,6 +343,11 @@ func (d *dispatcher) getStreams(frame []byte, id string) []byte {
 	if req.ChildID == "" {
 		return errResponse(protocol.TypeCtrlGetStreams, id, protocol.ErrInvalidArgs, "childId required")
 	}
+	switch req.Which {
+	case "", "in", "err", "all":
+	default:
+		return errResponse(protocol.TypeCtrlGetStreams, id, protocol.ErrInvalidArgs, `which must be one of "in", "err", "all"`)
+	}
 	result, err := d.c.GetStreams(req.ChildID, req.Which)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlGetStreams, id, err, protocol.ErrChildNotFound)

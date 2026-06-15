@@ -415,7 +415,13 @@ type GetRecentResponseData struct {
 }
 
 // GetStreamsRequest queries a live child's in-memory stdin/stderr capture.
-// Which selects the streams: "in", "err", or "all".
+// Which selects the streams: "in", "err", or "all" ("" means "all").
+//
+// Note: live stderr is never served. The child's stderr buffer is an unguarded
+// in-memory buffer written by a reader goroutine, so snapshotting it while the
+// child runs would race. "err" and "all" therefore only ever return stdin for a
+// live child; stderr is available exclusively post-exit via the on-disk dump,
+// which the CLI falls back to.
 type GetStreamsRequest struct {
 	Type    string `json:"type"`
 	ID      string `json:"id,omitempty"`
@@ -424,9 +430,14 @@ type GetStreamsRequest struct {
 }
 
 // GetStreamsResponseData carries raw, uncompressed stream bytes for a live
-// child. In holds stdin frames (one []byte per frame, no trailing newline);
-// Err holds raw stderr bytes. Alive is false when the child has already
-// exited, signalling the caller to fall back to the on-disk dump.
+// child. In holds stdin frames (one []byte per frame, no trailing newline).
+// Alive is false when the child has already exited, signalling the caller to
+// fall back to the on-disk dump.
+//
+// Err is always nil for a live child by design: the stderr buffer is unguarded
+// and racing the reader goroutine, so live stderr is never served. Stderr is
+// only available post-exit via the on-disk dump. The field remains in the
+// payload for forward compatibility but is never populated by this RPC.
 type GetStreamsResponseData struct {
 	Alive bool     `json:"alive"`
 	In    [][]byte `json:"in,omitempty"`

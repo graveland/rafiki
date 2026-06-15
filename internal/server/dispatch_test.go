@@ -1395,27 +1395,59 @@ func TestDispatch_ListPresets_HasLabelFilter(t *testing.T) {
 }
 
 func TestDispatchGetStreams(t *testing.T) {
-	fc := &fakeController{getStreamsResult: server.GetStreamsResult{
-		Alive: true,
-		In:    [][]byte{[]byte(`{"type":"user_input"}`)},
-		Err:   []byte("boom\n"),
-	}}
-	d := server.NewDispatch(fc)
-	req := []byte(`{"type":"ctrl_get_streams","id":"x1","childId":"child-1","which":"all"}`)
-	resp := d.HandleFrame(nil, req)
+	// Success/all round-trip: the fake echoes whatever result it is given, so
+	// this exercises dispatch wiring and payload serialization end to end.
+	t.Run("success_all", func(t *testing.T) {
+		fc := &fakeController{getStreamsResult: server.GetStreamsResult{
+			Alive: true,
+			In:    [][]byte{[]byte(`{"type":"user_input"}`)},
+			Err:   []byte("boom\n"),
+		}}
+		d := server.NewDispatch(fc)
+		req := []byte(`{"type":"ctrl_get_streams","id":"x1","childId":"child-1","which":"all"}`)
+		got := mustSuccess(t, d.HandleFrame(nil, req))
+		var data protocol.GetStreamsResponseData
+		if err := json.Unmarshal(got.Data, &data); err != nil {
+			t.Fatalf("unmarshal data: %v", err)
+		}
+		if !data.Alive || len(data.In) != 1 || string(data.Err) != "boom\n" {
+			t.Fatalf("unexpected data: %+v", data)
+		}
+	})
 
-	var got protocol.Response
-	if err := json.Unmarshal(resp, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !got.Success {
-		t.Fatalf("expected success, got error: %+v", got.Error)
-	}
-	var data protocol.GetStreamsResponseData
-	if err := json.Unmarshal(got.Data, &data); err != nil {
-		t.Fatalf("unmarshal data: %v", err)
-	}
-	if !data.Alive || len(data.In) != 1 || string(data.Err) != "boom\n" {
-		t.Fatalf("unexpected data: %+v", data)
-	}
+	t.Run("alive_false_round_trip", func(t *testing.T) {
+		fc := &fakeController{getStreamsResult: server.GetStreamsResult{Alive: false}}
+		d := server.NewDispatch(fc)
+		req := []byte(`{"type":"ctrl_get_streams","id":"x2","childId":"child-1"}`)
+		got := mustSuccess(t, d.HandleFrame(nil, req))
+		var data protocol.GetStreamsResponseData
+		if err := json.Unmarshal(got.Data, &data); err != nil {
+			t.Fatalf("unmarshal data: %v", err)
+		}
+		if data.Alive {
+			t.Fatalf("expected alive=false, got %+v", data)
+		}
+	})
+
+	t.Run("missing_childId", func(t *testing.T) {
+		d := server.NewDispatch(&fakeController{})
+		req := []byte(`{"type":"ctrl_get_streams","id":"x3","which":"all"}`)
+		mustError(t, d.HandleFrame(nil, req), protocol.ErrInvalidArgs)
+	})
+
+	t.Run("invalid_which", func(t *testing.T) {
+		d := server.NewDispatch(&fakeController{})
+		req := []byte(`{"type":"ctrl_get_streams","id":"x4","childId":"child-1","which":"bogus"}`)
+		mustError(t, d.HandleFrame(nil, req), protocol.ErrInvalidArgs)
+	})
+
+	t.Run("controller_error_maps_code", func(t *testing.T) {
+		fc := &fakeController{getStreamsErr: &server.ControllerError{
+			Code:    protocol.ErrChildNotFound,
+			Message: "child not found: child-1",
+		}}
+		d := server.NewDispatch(fc)
+		req := []byte(`{"type":"ctrl_get_streams","id":"x5","childId":"child-1"}`)
+		mustError(t, d.HandleFrame(nil, req), protocol.ErrChildNotFound)
+	})
 }
