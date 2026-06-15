@@ -866,4 +866,41 @@ describe("RemoteAgentSession.primeHistory", () => {
         expect(session.messages).toEqual([]);
         session.dispose();
     });
+
+    it("dedup: live frame duplicating a primed frame is dropped, window closes on first non-dup", async () => {
+        // Frame F is retained in the ring at getRecent time AND also arrives
+        // live (the subscribe↔getRecent overlap). It must be emitted exactly
+        // once — via primeHistory, not re-emitted by the live loop.
+        const F: Record<string, unknown> = {
+            type: "agent_end",
+            messages: [{ role: "assistant", content: "primed reply" }],
+            willRetry: false,
+        };
+        const fake = new FakeClient();
+        fake.getRecentImpl = async () => [structuredClone(F)];
+        const session = new RemoteAgentSession(makeInit(fake));
+
+        const emitted: string[] = [];
+        session.subscribe((ev) => emitted.push(ev.type));
+
+        // Enqueue the duplicate live frame BEFORE start() — it is buffered in
+        // the iterator the constructor already registered.
+        fake.push({ type: "ctrl_event", childId: "child-1", event: structuredClone(F) });
+        // A genuinely new live frame that must survive (closes the window).
+        fake.push({ type: "ctrl_event", childId: "child-1", event: { type: "agent_start" } });
+
+        await session.primeHistory(-1);
+        session.start();
+        await tick();
+        await tick();
+
+        // The duplicate agent_end was dropped; only the fresh agent_start emitted.
+        expect(emitted).toEqual(["agent_start"]);
+        // Cache reflects the primed agent_end (not doubled by the live duplicate).
+        expect(session.messages).toHaveLength(1);
+        expect((session.messages[0] as any).content).toBe("primed reply");
+
+        session.dispose();
+        fake.close();
+    });
 });

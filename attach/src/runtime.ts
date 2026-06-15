@@ -140,7 +140,8 @@ export class RemoteAgentSessionRuntime {
         }
 
         // Seed prior transcript, then begin consuming live events.
-        const tail = Number(process.env["PIC_ATTACH_TAIL"] ?? "-1");
+        const raw = process.env["PIC_ATTACH_TAIL"];
+        const tail = raw && raw !== "" ? Number(raw) : -1;
         await session.primeHistory(Number.isFinite(tail) ? tail : -1);
         session.start();
 

@@ -321,6 +321,12 @@ export class RemoteAgentSession {
     private _eventIter?: AsyncIterableIterator<Record<string, unknown>>;
     private _disposed = false;
 
+    // Dedup window for the subscribe↔getRecent overlap (mirrors
+    // cmd/pic/history.go). Frames already shown via primeHistory must not be
+    // re-emitted to listeners when they also arrive live.
+    private _primedKeys: Set<string> | undefined;
+    private _dedupWindowOpen = false;
+
     // ── Cached state (updated from incoming events) ──────────────────────────
     private _model: Model<any> | undefined;
     private _thinkingLevel: ThinkingLevel;
@@ -449,6 +455,17 @@ export class RemoteAgentSession {
                     const inner = frame["event"] as Record<string, unknown>;
                     if (!inner || typeof inner !== "object") continue;
 
+                    if (this._dedupWindowOpen && this._primedKeys) {
+                        // drop the brief subscribe↔getRecent overlap already shown
+                        // by primeHistory (mirrors cmd/pic/history.go dedup window)
+                        const key = JSON.stringify(inner);
+                        if (this._primedKeys.has(key)) {
+                            this._primedKeys.delete(key);
+                            continue;
+                        }
+                        this._dedupWindowOpen = false; // first non-duplicate closes the window
+                    }
+
                     const ev = this.translate(inner);
                     if (ev === null) continue;
 
@@ -506,11 +523,19 @@ export class RemoteAgentSession {
             }
             return;
         }
+        // Key on ALL fetched frames (including message_update ones we skip for
+        // replay) so the live dedup window matches every retained frame.
+        const primed = new Set<string>();
         for (const inner of frames) {
+            primed.add(JSON.stringify(inner));
             if (inner["type"] === "message_update") continue;
             const ev = this.translate(inner);
             if (ev === null) continue;
             this.updateCacheFromEvent(ev);
+        }
+        if (primed.size > 0) {
+            this._primedKeys = primed;
+            this._dedupWindowOpen = true;
         }
         // History replay can leave _isStreaming true if the last retained event
         // was an agent_start; the first live event corrects it, but reset here
