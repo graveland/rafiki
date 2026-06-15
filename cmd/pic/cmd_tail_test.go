@@ -28,11 +28,14 @@ func TestIsChildExited(t *testing.T) {
 
 func TestTailFlagsDefaults(t *testing.T) {
 	cmd := newTailCmd()
-	n, _ := cmd.Flags().GetInt("tail")
-	if n != 20 {
-		t.Fatalf("tail default = %d, want 20", n)
+	n, err := cmd.Flags().GetInt("tail")
+	if err != nil || n != 20 {
+		t.Fatalf("tail default = %d (err %v), want 20", n, err)
 	}
-	if _, err := cmd.Flags().GetBool("raw"); err != nil {
-		t.Fatalf("raw flag missing: %v", err)
+	if raw, err := cmd.Flags().GetBool("raw"); err != nil || raw {
+		t.Fatalf("raw default = %v (err %v), want false", raw, err)
+	}
+	if cmd.Flags().ShorthandLookup("n") == nil {
+		t.Fatalf("missing -n shorthand for --tail")
 	}
 }
