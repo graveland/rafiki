@@ -117,6 +117,33 @@ describe("seedSessionManagerFromFrames", () => {
         expect(sm.buildSessionContext().messages).toHaveLength(2);
     });
 
+    it("preserves appendable variants (bashExecution + custom)", () => {
+        // Real BashExecutionMessage / CustomMessage shapes per pi messages.ts.
+        const bashMsg = {
+            role: "bashExecution",
+            command: "ls",
+            output: "a\nb",
+            exitCode: 0,
+            cancelled: false,
+            truncated: false,
+            timestamp: 4,
+        };
+        const customMsg = {
+            role: "custom",
+            customType: "note",
+            content: "remember this",
+            display: true,
+            timestamp: 5,
+        };
+        const frames = [{ type: "agent_end", messages: [bashMsg, customMsg] }];
+        const sm = seedSessionManagerFromFrames("/tmp/test", frames);
+
+        const ctx = sm.buildSessionContext();
+        expect(ctx.messages).toHaveLength(2);
+        expect((ctx.messages[0] as { role: string }).role).toBe("bashExecution");
+        expect((ctx.messages[1] as { role: string }).role).toBe("custom");
+    });
+
     it("filters out non-appendable variants (branch/compaction summaries)", () => {
         const branchSummary = { role: "branchSummary", summary: "x", fromId: "f", timestamp: 3 };
         const frames = [{ type: "agent_end", messages: [userMsg, branchSummary, assistantMsg] }];
