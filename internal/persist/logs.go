@@ -110,9 +110,9 @@ func (d *LogDumper) Dump(
 }
 
 // ReadGzLines reads a gzip-compressed newline-delimited file into one []byte
-// per line (trailing newline stripped). Returns an os.ErrNotExist-wrapped error
-// when the file is absent so callers can distinguish "no dump" from a read
-// failure.
+// per line (trailing newline stripped). When the file is absent it returns
+// os.Open's error — a *PathError wrapping fs.ErrNotExist — so callers can
+// distinguish "no dump" from a read failure via errors.Is(err, fs.ErrNotExist).
 func ReadGzLines(path string) ([][]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
