@@ -37,6 +37,8 @@ children and exits only on SIGINT/SIGTERM.`,
 	cmd.Flags().BoolP("verbose", "v", false, "Include internal RPC response frames (autocomplete fetches, get_state, etc.)")
 	cmd.Flags().StringSlice("label", nil, "Subscribe to all children matching label k=v (repeatable; mutually exclusive with [id])")
 	cmd.Flags().StringSlice("has-label", nil, "Subscribe to all children that have label key k (repeatable)")
+	cmd.Flags().IntP("tail", "n", 20, "Backfill the last N events before following (-1 = all in buffer, 0 = none)")
+	cmd.Flags().Bool("raw", false, "Emit raw event frames (JSONL) instead of the rendered view")
 
 	_ = cmd.RegisterFlagCompletionFunc("profile", cobra.FixedCompletions(
 		[]string{"firehose", "results", "coarse", "lifecycle"},
@@ -112,17 +114,18 @@ func runTail(cmd *cobra.Command, args []string) error {
 
 	mode, useColor := outputOpts(cmd)
 	verbose, _ := cmd.Flags().GetBool("verbose")
-
-	events, cancelSub, err := c.Subscribe()
-	if err != nil {
-		return err
-	}
-	defer cancelSub()
+	tailN, _ := cmd.Flags().GetInt("tail")
+	raw, _ := cmd.Flags().GetBool("raw")
 
 	if labelFiltered {
+		events, cancelSub, err := c.Subscribe()
+		if err != nil {
+			return err
+		}
+		defer cancelSub()
 		return runTailLabeled(ctx, c, events, labels, hasLabels, profile, include, exclude, mode, useColor, verbose)
 	}
-	return runTailChild(ctx, c, events, args, profile, include, exclude, mode, useColor, verbose)
+	return runTailChild(ctx, c, args, tailN, raw, profile, include, exclude, mode, useColor, verbose)
 }
 
 // runTailLabeled handles the label-filtered subscription mode.  It subscribes
@@ -189,12 +192,13 @@ func runTailLabeled(
 	}
 }
 
-// runTailChild handles the per-child subscription mode (existing behaviour).
+// runTailChild handles the per-child mode: it backfills the last N events and
+// then follows live via the shared history engine.
 func runTailChild(
 	ctx context.Context,
 	c *client.Client,
-	events <-chan []byte,
 	args []string,
+	tailN int, raw bool,
 	profile string, include, exclude []string,
 	mode outputMode, useColor, verbose bool,
 ) error {
@@ -209,48 +213,17 @@ func runTailChild(
 	// Best-effort: update the active marker so subsequent no-arg commands
 	// default to this child.
 	_ = setActive(childID)
-
-	subReq := protocol.SubscribeRequest{
-		Type:    protocol.TypeCtrlSubscribe,
-		ChildID: childID,
-	}
-	if profile != "" || len(include) > 0 || len(exclude) > 0 {
-		subReq.Filter = &protocol.SubscribeFilter{
-			Profile: profile,
-			Include: include,
-			Exclude: exclude,
-		}
-	}
-
-	resp, err := c.Request(ctx, subReq)
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_subscribe: %s", client.FormatError(resp))
-	}
-
-	renderer := newTailRenderer(os.Stdout, useColor, mode, verbose)
-
-	for {
-		select {
-		case frame, ok := <-events:
-			if !ok {
-				return nil
-			}
-			if err := renderer.render(frame); err != nil {
-				if errors.Is(err, errDaemonShutdown) {
-					return nil // clean exit — daemon is shutting down
-				}
-				fmt.Fprintln(os.Stderr, "render error:", err)
-			}
-			if isChildExited(frame, childID) {
-				return nil
-			}
-		case <-ctx.Done():
-			return nil
-		}
-	}
+	return runHistoryOut(ctx, c, childID, historyOpts{
+		follow:   true,
+		tailN:    tailN,
+		raw:      raw,
+		profile:  profile,
+		include:  include,
+		exclude:  exclude,
+		verbose:  verbose,
+		mode:     mode,
+		useColor: useColor,
+	})
 }
 
 // isChildExited returns true if the frame is a ctrl_child_exited event

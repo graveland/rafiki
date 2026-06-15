@@ -25,3 +25,14 @@ func TestIsChildExited(t *testing.T) {
 		})
 	}
 }
+
+func TestTailFlagsDefaults(t *testing.T) {
+	cmd := newTailCmd()
+	n, _ := cmd.Flags().GetInt("tail")
+	if n != 20 {
+		t.Fatalf("tail default = %d, want 20", n)
+	}
+	if _, err := cmd.Flags().GetBool("raw"); err != nil {
+		t.Fatalf("raw flag missing: %v", err)
+	}
+}
