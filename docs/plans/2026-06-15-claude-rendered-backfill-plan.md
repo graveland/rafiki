@@ -613,7 +613,10 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 		}
 		if q.Since > 0 {
 			i := 0
-			for i < len(all) && all[i].Timestamp < q.Since {
+			// A zero timestamp means "unknown" (render frames sourced from the
+			// on-disk render.jsonl.gz carry no timestamp) — keep those rather
+			// than dropping the whole disk-sourced rendered backfill.
+			for i < len(all) && all[i].Timestamp != 0 && all[i].Timestamp < q.Since {
 				i++
 			}
 			all = all[i:]
