@@ -226,6 +226,28 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 	}, nil
 }
 
+func (c *Controller) GetStreams(childID string, which string) (server.GetStreamsResult, error) {
+	if _, ok := c.st.Get(childID); !ok {
+		return server.GetStreamsResult{}, &server.ControllerError{
+			Code:    protocol.ErrChildNotFound,
+			Message: "child not found: " + childID,
+		}
+	}
+	ch, alive := c.cm.Get(childID)
+	if !alive {
+		return server.GetStreamsResult{Alive: false}, nil
+	}
+	res := server.GetStreamsResult{Alive: true}
+	if which == "" || which == "all" || which == "in" {
+		res.In = ch.InSnapshot()
+	}
+	// Live stderr is intentionally omitted: errBuf is an unguarded bytes.Buffer
+	// written by the readStderr goroutine, so StderrSnapshot races until Done()
+	// is closed. Stderr for a live child is therefore left nil; callers fall
+	// back to the on-disk dump, which becomes available after the child exits.
+	return res, nil
+}
+
 func (c *Controller) Search(q server.SearchQuery) server.SearchResult {
 	start := time.Now()
 	limit := q.Limit

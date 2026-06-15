@@ -29,6 +29,7 @@ const (
 	TypeCtrlGlobalSubscribe   = "ctrl_global_subscribe"
 	TypeCtrlGlobalUnsubscribe = "ctrl_global_unsubscribe"
 	TypeCtrlGetRecent         = "ctrl_get_recent"
+	TypeCtrlGetStreams        = "ctrl_get_streams"
 	TypeCtrlSend              = "ctrl_send"
 	TypeCtrlForget            = "ctrl_forget"
 	TypeCtrlForgetAllExited   = "ctrl_forget_all_exited"
@@ -411,6 +412,25 @@ type GetRecentResponseData struct {
 	TotalInBuffer    int               `json:"totalInBuffer"`
 	OldestTimestamp  int64             `json:"oldestTimestamp"`
 	TruncatedByLimit bool              `json:"truncatedByLimit"`
+}
+
+// GetStreamsRequest queries a live child's in-memory stdin/stderr capture.
+// Which selects the streams: "in", "err", or "all".
+type GetStreamsRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	ChildID string `json:"childId"`
+	Which   string `json:"which,omitempty"` // "in" | "err" | "all"; default "all"
+}
+
+// GetStreamsResponseData carries raw, uncompressed stream bytes for a live
+// child. In holds stdin frames (one []byte per frame, no trailing newline);
+// Err holds raw stderr bytes. Alive is false when the child has already
+// exited, signalling the caller to fall back to the on-disk dump.
+type GetStreamsResponseData struct {
+	Alive bool     `json:"alive"`
+	In    [][]byte `json:"in,omitempty"`
+	Err   []byte   `json:"err,omitempty"`
 }
 
 // ForgetAllExitedResponseData is the data payload for ctrl_forget_all_exited responses.

@@ -40,6 +40,8 @@ type fakeController struct {
 	onConnectionCloseFn   func(server.Connection)
 	listModelsFn          func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn         func(map[string]string, []string) ([]protocol.PresetInfo, error)
+	getStreamsResult      server.GetStreamsResult
+	getStreamsErr         error
 }
 
 func (f *fakeController) List(filter protocol.ListFilter) []store.Snapshot {
@@ -61,6 +63,13 @@ func (f *fakeController) GetRecent(childID string, q server.RecentQuery) (server
 		return f.getRecentFn(childID, q)
 	}
 	return server.RecentResult{}, nil
+}
+
+func (f *fakeController) GetStreams(childID string, which string) (server.GetStreamsResult, error) {
+	if f.getStreamsErr != nil {
+		return server.GetStreamsResult{}, f.getStreamsErr
+	}
+	return f.getStreamsResult, nil
 }
 
 func (f *fakeController) Search(q server.SearchQuery) server.SearchResult {
@@ -1382,5 +1391,31 @@ func TestDispatch_ListPresets_HasLabelFilter(t *testing.T) {
 	mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
 	if len(capturedHasLabel) != 1 || capturedHasLabel[0] != "team" {
 		t.Errorf("hasLabel not passed through: %v", capturedHasLabel)
+	}
+}
+
+func TestDispatchGetStreams(t *testing.T) {
+	fc := &fakeController{getStreamsResult: server.GetStreamsResult{
+		Alive: true,
+		In:    [][]byte{[]byte(`{"type":"user_input"}`)},
+		Err:   []byte("boom\n"),
+	}}
+	d := server.NewDispatch(fc)
+	req := []byte(`{"type":"ctrl_get_streams","id":"x1","childId":"child-1","which":"all"}`)
+	resp := d.HandleFrame(nil, req)
+
+	var got protocol.Response
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Success {
+		t.Fatalf("expected success, got error: %+v", got.Error)
+	}
+	var data protocol.GetStreamsResponseData
+	if err := json.Unmarshal(got.Data, &data); err != nil {
+		t.Fatalf("unmarshal data: %v", err)
+	}
+	if !data.Alive || len(data.In) != 1 || string(data.Err) != "boom\n" {
+		t.Fatalf("unexpected data: %+v", data)
 	}
 }

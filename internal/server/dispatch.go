@@ -43,6 +43,9 @@ type RecentQuery struct {
 // RecentResult is returned by Controller.GetRecent.
 type RecentResult = protocol.GetRecentResponseData
 
+// GetStreamsResult is returned by Controller.GetStreams.
+type GetStreamsResult = protocol.GetStreamsResponseData
+
 // SearchQuery carries parameters for Controller.Search.
 type SearchQuery struct {
 	Query         string
@@ -67,6 +70,9 @@ type Controller interface {
 	List(filter protocol.ListFilter) []store.Snapshot
 	Get(childID string) (store.Snapshot, bool)
 	GetRecent(childID string, q RecentQuery) (RecentResult, error)
+	// GetStreams returns a live child's in-memory stdin/stderr capture.
+	// Returns Alive:false (no error) when the child has exited.
+	GetStreams(childID string, which string) (GetStreamsResult, error)
 	Search(q SearchQuery) SearchResult
 	Status() ControllerStatus
 
@@ -161,6 +167,8 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.forgetAllExited(frame, hdr.ID)
 	case protocol.TypeCtrlGetRecent:
 		return d.getRecent(frame, hdr.ID)
+	case protocol.TypeCtrlGetStreams:
+		return d.getStreams(frame, hdr.ID)
 	case protocol.TypeCtrlSearch:
 		return d.search(frame, hdr.ID)
 	case protocol.TypeCtrlStatus:
@@ -325,6 +333,21 @@ func (d *dispatcher) getRecent(frame []byte, id string) []byte {
 		result.Events = []json.RawMessage{}
 	}
 	return okResponse(protocol.TypeCtrlGetRecent, id, result)
+}
+
+func (d *dispatcher) getStreams(frame []byte, id string) []byte {
+	var req protocol.GetStreamsRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlGetStreams, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ChildID == "" {
+		return errResponse(protocol.TypeCtrlGetStreams, id, protocol.ErrInvalidArgs, "childId required")
+	}
+	result, err := d.c.GetStreams(req.ChildID, req.Which)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlGetStreams, id, err, protocol.ErrChildNotFound)
+	}
+	return okResponse(protocol.TypeCtrlGetStreams, id, result)
 }
 
 func (d *dispatcher) search(frame []byte, id string) []byte {
