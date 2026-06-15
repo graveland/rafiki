@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -190,7 +191,7 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 	if alive {
 		if q.Rendered && ch.Normalizes() {
 			events = ch.RenderRecent(ring.Query{Limit: q.Limit, Since: q.Since})
-			total = len(ch.RenderRecent(ring.Query{}))
+			total, oldestTS = ch.RenderStats()
 		} else {
 			r := ch.Ring()
 			events = r.Recent(ring.Query{Limit: q.Limit, Since: q.Since})
@@ -200,13 +201,14 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 		// Exited: pick the snapshot, falling back to the on-disk dump for
 		// orphans reloaded after a restart (in-memory snapshots are lost then).
 		var all []ring.Event
-		switch {
-		case q.Rendered && snap.Kind == "claude":
+		if q.Rendered {
 			all = snap.ExitedRenderRing
 			if len(all) == 0 {
 				all = c.readDiskEvents(childID, "render.jsonl.gz")
 			}
-		default:
+		}
+		if len(all) == 0 {
+			// raw, or rendered with no render data (e.g. pi children)
 			all = snap.ExitedRing
 			if len(all) == 0 {
 				all = c.readDiskEvents(childID, "out.jsonl.gz")
@@ -256,6 +258,9 @@ func (c *Controller) readDiskEvents(childID, name string) []ring.Event {
 	}
 	frames, err := persist.ReadGzLines(filepath.Join(c.logsDir, childID, name))
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Debug("readDiskEvents: backfill dump unreadable", "child", childID, "file", name, "error", err)
+		}
 		return nil
 	}
 	out := make([]ring.Event, len(frames))

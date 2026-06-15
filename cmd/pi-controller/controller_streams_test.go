@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"git.graveland.dev/brent/pi-controller/internal/persist"
 	"git.graveland.dev/brent/pi-controller/internal/ring"
 	"git.graveland.dev/brent/pi-controller/internal/server"
 	"git.graveland.dev/brent/pi-controller/internal/store"
@@ -82,5 +83,73 @@ func TestGetRecentRenderedExited(t *testing.T) {
 	}
 	if len(rendered.Events) != 1 || string(rendered.Events[0]) != `{"type":"message_end"}` {
 		t.Fatalf("rendered events = %v, want the render frame", rendered.Events)
+	}
+}
+
+// TestGetRecentDiskFallback exercises the orphan-after-restart path: the
+// in-memory exit snapshots are empty, so GetRecent must backfill from the
+// on-disk dump (out.jsonl.gz / render.jsonl.gz).
+func TestGetRecentDiskFallback(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTestController(t)
+	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
+	out := [][]byte{[]byte(`{"type":"system"}`)}
+	render := [][]byte{[]byte(`{"type":"message_end"}`)}
+	if err := dumper.Dump("c1", nil, out, render, nil,
+		persist.Meta{ChildID: "c1"}, persist.ExitInfo{}); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	ctrl.st.Insert(&store.Session{
+		ChildID: "c1",
+		Kind:    "claude",
+		Status:  protocol.StatusExited,
+		// ExitedRing / ExitedRenderRing intentionally empty (lost on restart).
+	})
+
+	raw, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}` {
+		t.Fatalf("raw events = %v, want the disk out frame", raw.Events)
+	}
+
+	rendered, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendered.Events) != 1 || string(rendered.Events[0]) != `{"type":"message_end"}` {
+		t.Fatalf("rendered events = %v, want the disk render frame", rendered.Events)
+	}
+}
+
+// TestGetRecentDiskZeroTimestampSinceGuard verifies that disk-sourced frames
+// (which carry no timestamp) survive a nonzero Since filter rather than being
+// dropped wholesale.
+func TestGetRecentDiskZeroTimestampSinceGuard(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTestController(t)
+	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
+	render := [][]byte{[]byte(`{"type":"message_end"}`)}
+	if err := dumper.Dump("c1", nil, nil, render, nil,
+		persist.Meta{ChildID: "c1"}, persist.ExitInfo{}); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	ctrl.st.Insert(&store.Session{
+		ChildID: "c1",
+		Kind:    "claude",
+		Status:  protocol.StatusExited,
+	})
+
+	res, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: true, Since: 1716000000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Events) != 1 || string(res.Events[0]) != `{"type":"message_end"}` {
+		t.Fatalf("events = %v, want the zero-TS disk frame kept despite Since", res.Events)
 	}
 }

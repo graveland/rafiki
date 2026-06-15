@@ -335,6 +335,16 @@ func (c *Child) RenderRecent(q ring.Query) []ring.Event {
 	return c.renderRing.Recent(q)
 }
 
+// RenderStats returns the render-ring's event count and oldest timestamp, or
+// (0,0) when there is no render-ring.
+func (c *Child) RenderStats() (events int, oldestTimestamp int64) {
+	if c.renderRing == nil {
+		return 0, 0
+	}
+	n, _, oldest := c.renderRing.Stats()
+	return n, oldest
+}
+
 // Normalizes reports whether this child's provider translates stdout into a
 // distinct bus stream (claude). When true, the render-ring is the renderable
 // source; when false, the raw ring is already renderable.
