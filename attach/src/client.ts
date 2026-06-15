@@ -253,7 +253,7 @@ export class Client {
      * event frames (already unwrapped — the ring stores raw child stdout).
      */
     async getRecent(childId: string, limit: number): Promise<Record<string, unknown>[]> {
-        const req: Record<string, unknown> = { type: "ctrl_get_recent", childId };
+        const req: Record<string, unknown> = { type: "ctrl_get_recent", childId, rendered: true };
         if (limit > 0) req["limit"] = limit;
         const resp = await this.request(req);
         if (!resp.success) {

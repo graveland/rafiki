@@ -243,6 +243,35 @@ describe("Client", () => {
         await srv.close();
     });
 
+    // 4b. getRecent requests rendered frames
+    it("getRecent requests rendered frames", async () => {
+        let captured: Record<string, unknown> | undefined;
+
+        const srv = await startServer(async (conn) => {
+            const line = await readLine(conn);
+            captured = JSON.parse(line) as Record<string, unknown>;
+            await writeLine(conn, {
+                type: "ctrl_response",
+                command: captured["type"],
+                id: captured["id"],
+                success: true,
+                data: { events: [] },
+            });
+        });
+
+        const client = await Client.dial({ socket: srv.sockPath });
+        clients.push(client);
+
+        await client.getRecent("c1", 10);
+
+        expect(captured!["type"]).toBe("ctrl_get_recent");
+        expect(captured!["rendered"]).toBe(true);
+        expect(captured!["limit"]).toBe(10);
+
+        await client.close();
+        await srv.close();
+    });
+
     // 5. concurrent_requests_correlated
     it("concurrent_requests_correlated", async () => {
         const srv = await startServer(async (conn) => {
