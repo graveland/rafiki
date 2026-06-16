@@ -1203,6 +1203,16 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 		return c.handleInterceptedSend(childID, decision)
 	}
 
+	// Claude abort: claude -p has no in-band abort frame and can only be
+	// interrupted by signalling the process. Intercept abort for claude
+	// children and run the interrupt+resume cycle; pi children fall through and
+	// forward abort natively to --mode rpc.
+	if isAbortFrame(frame) {
+		if snap, ok := c.st.Get(childID); ok && snap.Kind == "claude" {
+			return c.handleClaudeAbort(childID)
+		}
+	}
+
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
@@ -1301,6 +1311,90 @@ func (c *Controller) handleInterceptedSend(childID string, decision intercept.De
 	synthFrame := intercept.SynthesizeResponse(string(decision.Type), decision.PiRequestID)
 	c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, synthFrame))
 
+	return nil
+}
+
+// isAbortFrame reports whether a ctrl_send frame is the normalized abort
+// command ({"type":"abort"}). Used to special-case claude children, whose
+// headless stream-json stdin has no abort frame (see handleClaudeAbort).
+func isAbortFrame(frame []byte) bool {
+	if len(frame) == 0 {
+		return false
+	}
+	var hdr struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(frame, &hdr); err != nil {
+		return false
+	}
+	return hdr.Type == "abort"
+}
+
+// handleClaudeAbort cancels an in-flight turn on a claude child. claude -p has
+// no in-band abort frame, so we SIGINT the process (claude flushes a
+// "[Request interrupted by user]" frame + result:error_during_execution, which
+// the translator turns into agent_end so the TUI unblocks, and persists the
+// turn), wait for exit, then re-spawn with --resume <session_id> via the
+// kind-aware Resume. The childID and per-child subscribers are preserved.
+func (c *Controller) handleClaudeAbort(childID string) error {
+	ch, ok := c.cm.Get(childID)
+	if !ok {
+		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+	}
+
+	// Save subscribers before exit: handleChildExit clears them on process exit.
+	savedSubs := c.cm.GetSubscribers(childID)
+
+	if err := ch.Interrupt(); err != nil {
+		return fmt.Errorf("claude abort interrupt: %w", err)
+	}
+
+	// Wait for the process to exit (status flips to Exited via handleChildExit).
+	// Escalate to a hard Kill if SIGINT didn't take within the grace window.
+	deadline := time.Now().Add(3 * time.Second)
+	exited := false
+	for time.Now().Before(deadline) {
+		if snap, ok := c.st.Get(childID); ok && snap.Status == protocol.StatusExited {
+			exited = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !exited {
+		if _, err := c.Kill(context.Background(), childID, 1000, 500); err != nil {
+			var ce *server.ControllerError
+			if !errors.As(err, &ce) || (ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
+				return fmt.Errorf("claude abort kill: %w", err)
+			}
+		}
+		// Wait again for Exited.
+		deadline = time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if snap, ok := c.st.Get(childID); ok && snap.Status == protocol.StatusExited {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Wait for handleChildExit to call cm.Remove before calling Resume, which
+	// calls cm.Add. If cm.Add races with cm.Remove, the new entry can be
+	// silently deleted, causing the restored subscribers to be dropped.
+	cmDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(cmDeadline) {
+		if _, alive := c.cm.Get(childID); !alive {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Re-spawn resumed. apiKey "" is correct for claude (auth via CLAUDE_CONFIG_DIR,
+	// no --api-key); Resume uses snap.SessionID for kind == "claude".
+	if _, err := c.Resume(context.Background(), childID, ""); err != nil {
+		return fmt.Errorf("claude abort resume: %w", err)
+	}
+
+	c.cm.RestoreSubscribers(childID, savedSubs)
 	return nil
 }
 
