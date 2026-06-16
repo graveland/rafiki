@@ -2,8 +2,10 @@ package child_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -207,5 +209,88 @@ func TestChild_ProcessExits_ReadyStillFires(t *testing.T) {
 	case <-c.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("Done never closed for instantly-exiting child")
+	}
+}
+
+func TestChild_InterruptSendsSIGINT(t *testing.T) {
+	// The fake child installs NO signal trap, so a default-disposition SIGINT
+	// terminates it and is recorded as exit signal "interrupt". Asserting on the
+	// recorded exit signal proves Interrupt() delivers SIGINT specifically,
+	// without depending on a shell trap firing — trapped-SIGINT delivery to bash
+	// subprocesses is unreliable under the `go test` harness (an externally sent
+	// SIGINT terminates the shell but its INT trap does not run, while a
+	// self-sent one does). The graceful claude-interrupt behavior (the
+	// "[Request interrupted by user]" result) is covered by the live smoke test.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake.sh")
+	body := "#!/bin/bash\n" +
+		"printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}'\n" +
+		"while true; do sleep 0.05; done\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	cwd, _ := os.Getwd()
+	ch, err := child.Spawn(context.Background(), child.SpawnSpec{
+		ChildID:  "c_int",
+		Cwd:      cwd,
+		PiBinary: script,
+		Provider: child.ClaudeProvider{},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _, _ = ch.Shutdown(100*time.Millisecond, 100*time.Millisecond) })
+
+	select {
+	case <-ch.Idle():
+	case <-time.After(3 * time.Second):
+		t.Fatal("never idle")
+	}
+	time.Sleep(100 * time.Millisecond) // ensure the process is fully running
+
+	if err := ch.Interrupt(); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if sig := ch.ExitResult().Signal; sig != "" {
+			if sig != syscall.SIGINT.String() {
+				t.Fatalf("child exit signal = %q, want %q", sig, syscall.SIGINT.String())
+			}
+			return // exited via SIGINT — Interrupt() delivered the right signal
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("child did not exit after Interrupt()")
+}
+
+func TestChild_InterruptAfterExitIsNoOp(t *testing.T) {
+	// Interrupt() on an already-exited child must be a no-op returning nil.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake.sh")
+	body := "#!/bin/bash\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	cwd, _ := os.Getwd()
+	ch, err := child.Spawn(context.Background(), child.SpawnSpec{
+		ChildID:  "c_int2",
+		Cwd:      cwd,
+		PiBinary: script,
+		Provider: child.ClaudeProvider{},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	// Wait for the process to exit and be reaped (Done closes after the supervise
+	// loop sets closed), so Interrupt hits the already-closed branch.
+	select {
+	case <-ch.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("child never exited")
+	}
+	if err := ch.Interrupt(); err != nil {
+		t.Fatalf("Interrupt() on exited child = %v, want nil", err)
 	}
 }

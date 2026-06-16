@@ -615,3 +615,28 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 	res.Duration = time.Since(start)
 	return res, nil
 }
+
+// Interrupt sends SIGINT to the child's process group. For a claude child this
+// makes claude flush a "[Request interrupted by user]" frame plus a
+// result:error_during_execution, persist the (possibly partial) turn to its
+// session store, and exit. It does NOT wait for exit — the caller observes the
+// transition to StatusExited. A no-op if the process has already exited.
+func (c *Child) Interrupt() error {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return nil
+	}
+	if c.cmd == nil || c.cmd.Process == nil {
+		return fmt.Errorf("interrupt: no process handle")
+	}
+	// Signal the whole process group (negative PID), matching Shutdown, so any
+	// subprocess the child spawned is interrupted too. A process that exited
+	// between the closed check and here yields ESRCH — treat that as the no-op
+	// the caller asked for, not an error.
+	if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
