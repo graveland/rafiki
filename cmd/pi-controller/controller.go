@@ -1794,6 +1794,12 @@ func buildClaudeArgv(req protocol.SpawnRequest) []string {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
+		// AskUserQuestion has no interactive renderer in headless -p mode: claude
+		// self-resolves it with an error ("Answer questions?") in the same turn,
+		// then the agent falls back to asking in prose — which round-trips fine
+		// over the prompt/steer channel. Disallow the dead tool so it never wastes
+		// a turn attempting it. Variadic flag stops at the next --option below.
+		"--disallowedTools", "AskUserQuestion",
 	}
 	if req.Model != "" {
 		argv = append(argv, "--model", req.Model)

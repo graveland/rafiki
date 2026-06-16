@@ -15,6 +15,7 @@ func TestBuildClaudeArgv_Defaults(t *testing.T) {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
+		"--disallowedTools", "AskUserQuestion",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %v\nwant %v", got, want)
@@ -34,6 +35,7 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
+		"--disallowedTools", "AskUserQuestion",
 		"--model", "claude-opus-4-8",
 		"--resume", "sess-abc",
 		"--append-system-prompt", "be brief",
