@@ -74,9 +74,13 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 	// Honors --resume by reusing the session id arg.
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fakeclaude.sh")
+	// The id is "fresh" on a cold spawn and "got-<arg>" only when --resume is
+	// threaded through. So asserting the resumed child reports "got-fresh" proves
+	// the abort path actually passed --resume <first session id>, not that the
+	// fake happened to default to the expected value.
 	body := "#!/bin/bash\n" +
-		"SID=sess-abort\n" +
-		"for a in \"$@\"; do if [ \"$prev\" = \"--resume\" ]; then SID=\"$a\"; fi; prev=\"$a\"; done\n" +
+		"SID=fresh\n" +
+		"for a in \"$@\"; do if [ \"$prev\" = \"--resume\" ]; then SID=\"got-$a\"; fi; prev=\"$a\"; done\n" +
 		"printf '%s\\n' \"{\\\"type\\\":\\\"system\\\",\\\"subtype\\\":\\\"init\\\",\\\"session_id\\\":\\\"$SID\\\",\\\"model\\\":\\\"claude-opus-4-8\\\"}\"\n" +
 		"while IFS= read -r line; do :; done\n" +
 		"while true; do sleep 0.05; done\n"
@@ -114,8 +118,8 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 	if chAfter.PID() == pidBefore {
 		t.Fatal("expected a new process after interrupt+resume")
 	}
-	if got := chAfter.Metadata().SessionID; got != "sess-abort" {
-		t.Fatalf("resumed session id = %q, want sess-abort", got)
+	if got := chAfter.Metadata().SessionID; got != "got-fresh" {
+		t.Fatalf("resumed session id = %q, want got-fresh (proves --resume <id> was threaded)", got)
 	}
 }
 

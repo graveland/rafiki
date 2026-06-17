@@ -1341,6 +1341,31 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	if !ok {
 		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+	}
+	if snap.Status == protocol.StatusShuttingDown {
+		return &server.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
+	}
+	if snap.Status == protocol.StatusExited {
+		return &server.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+	}
+	// Resume threads --resume <snap.SessionID>. The store's SessionID is synced
+	// lazily by monitorChild on the first bus event, but claude's system/init
+	// produces no bus frame, so snap.SessionID can lag the live sniffed value
+	// (which is set right after init, at spawn). Read the live metadata and
+	// persist it before Resume so the resumed child actually continues the
+	// conversation rather than silently starting a fresh session. Without any
+	// sniffed id there is nothing to resume — refuse rather than discard history
+	// (this window only exists before claude's first system/init).
+	sessionID := ch.Metadata().SessionID
+	if sessionID == "" {
+		return &server.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
+	}
+	if snap.SessionID != sessionID {
+		_ = c.st.Update(childID, func(s *store.Session) { s.SessionID = sessionID })
+	}
 
 	// Save subscribers before exit: handleChildExit clears them on process exit.
 	savedSubs := c.cm.GetSubscribers(childID)
