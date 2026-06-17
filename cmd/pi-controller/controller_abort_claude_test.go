@@ -118,3 +118,50 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 		t.Fatalf("resumed session id = %q, want sess-abort", got)
 	}
 }
+
+// TestSend_PiAbortForwardedNatively guards the constraint that abort for a
+// non-claude (pi) child is NOT intercepted: it must be written to the child's
+// stdin (pi handles it natively in --mode rpc) and the process must NOT be
+// interrupted/respawned.
+func TestSend_PiAbortForwardedNatively(t *testing.T) {
+	ctrl := newTestController(t)
+	childID := spawnTestChild(t, ctrl, nil) // fake-pi child (kind defaults to pi)
+
+	chBefore, ok := ctrl.cm.Get(childID)
+	if !ok {
+		t.Fatalf("child %s not live", childID)
+	}
+	pidBefore := chBefore.PID()
+
+	if err := ctrl.Send(childID, []byte(`{"type":"abort"}`)); err != nil {
+		t.Fatalf("send abort: %v", err)
+	}
+
+	// The abort frame must reach the child's stdin (forwarded, not intercepted).
+	deadline := time.Now().Add(2 * time.Second)
+	forwarded := false
+	for time.Now().Before(deadline) {
+		for _, f := range chBefore.InSnapshot() {
+			if isAbortFrame(f) {
+				forwarded = true
+				break
+			}
+		}
+		if forwarded {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !forwarded {
+		t.Fatal("pi abort was not forwarded to child stdin")
+	}
+
+	// Same child, same process — a pi child must not be interrupted/respawned.
+	chAfter, ok := ctrl.cm.Get(childID)
+	if !ok {
+		t.Fatal("pi child disappeared after abort")
+	}
+	if chAfter.PID() != pidBefore {
+		t.Fatalf("pi child pid changed (%d -> %d): abort must be forwarded, not respawn", pidBefore, chAfter.PID())
+	}
+}
