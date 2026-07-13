@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/timescale/rafiki/store"
 )
 
 type CaptureStore struct{ pool *pgxpool.Pool }
@@ -108,14 +110,28 @@ type TurnIntent struct {
 func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turnID string, createdAt time.Time, err error) {
 	protocol := t.Protocol
 	if protocol == "" {
-		protocol = "anthropic"
+		protocol = string(store.ProtocolAnthropic)
 	}
 	err = s.pool.QueryRow(ctx,
 		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, status, model, request, source, author, author_kind, prefix_hash, protocol)
 		 VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9) RETURNING id::text, created_at`,
 		t.ConversationID, t.Ordinal, nullify(t.Model), t.Request,
 		nullify(t.Source), nullify(t.Author), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol).Scan(&turnID, &createdAt)
-	return turnID, createdAt, err
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	// Backfill conversation.model once known: client-driven conversations are
+	// created from the session header with no model; the first turn's resolved
+	// model fills it. First-seen wins (WHERE model IS NULL) — mid-conversation
+	// model changes stay visible per-turn, never rewrite the conversation.
+	// Best-effort: a failed backfill must not fail the turn, and the next
+	// turn retries it (the column is still NULL).
+	if t.Model != "" {
+		_, _ = s.pool.Exec(ctx, `UPDATE conversations.conversation
+			SET model = $2, updated_at = now()
+			WHERE id = $1::uuid AND model IS NULL`, t.ConversationID, t.Model)
+	}
+	return turnID, createdAt, nil
 }
 
 type TurnResult struct {
