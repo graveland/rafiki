@@ -1,0 +1,18 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      # deferred response-body closes in code moved byte-identical from
+      # savannah-client (which disables errcheck entirely; we keep it on)
+      exclude-functions:
+        - (io.ReadCloser).Close
+  exclusions:
+    rules:
+      # SeedForTest struct copy in code moved byte-identical from
+      # savannah-client; fix upstream post-extraction, not in the move.
+      - path: routing/orcatalog\.go
+        text: "S1016"
+formatters:
+  enable:
+    - gofmt
+    - goimports

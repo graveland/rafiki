@@ -1,0 +1,5 @@
+/rafiki
+/bin/
+*.test
+.env
+.env-*
