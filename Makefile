@@ -1,5 +1,5 @@
 .PHONY: help build update build-controller build-pic build-attach \
-        bootstrap pi-build pi-install pi-update \
+        bootstrap pi-build pi-install pi-update pi-refresh-catalogs \
         test test-race vet fmt clean
 
 GO      ?= go
@@ -55,8 +55,22 @@ build-attach: $(PI_MODULES) $(PI_DIST) # Bundle the pic-attach TUI binary (recom
 # spawns the matching pi binary off PATH. `pi-install` keeps the global install
 # in lock-step with the submodule pin.
 
+# Compile only — deliberately NOT `npm run build` at the pi root: packages/ai's
+# build script first re-fetches the model catalogs from live provider APIs,
+# which makes every build non-reproducible and leaves the submodule dirty with
+# synced drift. The generated catalogs are committed source (upstream's model
+# too); resync them deliberately with `make pi-refresh-catalogs` and commit the
+# result in the submodule.
 $(PI_DIST): $(PI_PKG)/package.json $(PI_SRC)
-	cd $(PI_DIR) && npm install && npm run build
+	cd $(PI_DIR) && npm install
+	cd $(PI_DIR)/packages/tui && npm run build
+	cd $(PI_DIR)/packages/ai && npx tsgo -p tsconfig.build.json
+	cd $(PI_DIR)/packages/agent && npm run build
+	cd $(PI_DIR)/packages/coding-agent && npm run build
+	cd $(PI_DIR)/packages/orchestrator && npm run build
+
+pi-refresh-catalogs: $(PI_MODULES) # Regenerate pi's model catalogs from live provider APIs (commit the result in the submodule)
+	cd $(PI_DIR)/packages/ai && npm run generate-models && npm run generate-image-models
 
 # pi's deps (yaml, chalk, typebox, ...) hoist to $(PI_MODULES) and are imported
 # by the bundled dist when attach is compiled, so node_modules must exist even
