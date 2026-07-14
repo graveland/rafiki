@@ -298,12 +298,16 @@ func (p *claudeProvider) emitUser(blocks []claudeContentBlock, parentToolUseID s
 }
 
 // emitResult closes the turn with an agent_end carrying the full accumulated
-// messages[] and the turn's token/cost totals. The messages are retained (not
-// cleared) so a later ctrl_get or a subsequent turn's agent_end still reflects
-// the whole conversation.
+// messages[] and the turn's token/cost totals, followed by agent_settled
+// (claude has no retry continuation, so the turn is truly idle here). The
+// messages are retained (not cleared) so a later ctrl_get or a subsequent
+// turn's agent_end still reflects the whole conversation.
 func (p *claudeProvider) emitResult(f claudeStreamFrame) [][]byte {
 	p.st.turnActive = false
-	return [][]byte{mustFrame(PiAgentEnd(p.snapshotMessages(), claudeResultUsage(f)))}
+	return [][]byte{
+		mustFrame(PiAgentEnd(p.snapshotMessages(), claudeResultUsage(f))),
+		mustFrame(PiAgentSettled()),
+	}
 }
 
 // claudeResultUsage maps a claude result frame's token counts and total cost to

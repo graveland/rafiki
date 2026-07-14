@@ -66,7 +66,7 @@ func TestClaudeBusFrames_TextTurn(t *testing.T) {
 		"agent_start",
 		"message_start", "message_update", "message_end",
 		"message_start", "message_update", "message_end",
-		"agent_end",
+		"agent_end", "agent_settled",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("text turn sequence:\n got=%v\nwant=%v", got, want)
@@ -74,7 +74,7 @@ func TestClaudeBusFrames_TextTurn(t *testing.T) {
 
 	// agent_end must carry the full accumulated messages[] (2 assistant messages
 	// — no user message in this fixture since the turn is unsolicited startup).
-	end := frames[len(frames)-1]
+	end := frames[len(frames)-2]
 	msgs, ok := end["messages"].([]any)
 	if !ok {
 		t.Fatalf("agent_end.messages not an array: %v", end["messages"])
@@ -135,7 +135,7 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 		"message_start", "message_update", "tool_execution_start", "message_end",
 		"tool_execution_end",
 		"message_start", "message_update", "message_end",
-		"agent_end",
+		"agent_end", "agent_settled",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool turn sequence:\n got=%v\nwant=%v", got, want)
@@ -186,7 +186,7 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 	}
 
 	// agent_end.messages: assistant(tool_use) + toolResult + assistant(text) = 3.
-	end := frames[len(frames)-1]
+	end := frames[len(frames)-2]
 	msgs := end["messages"].([]any)
 	roles := make([]string, len(msgs))
 	for i, raw := range msgs {
@@ -229,14 +229,14 @@ func TestClaudeBusFrames_StateIsolated(t *testing.T) {
 	// Drive a full turn on a.
 	a.BusFrames([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`), 2)
 	aEnd := a.BusFrames([]byte(`{"type":"result","subtype":"success"}`), 3)
-	if len(aEnd) != 1 {
-		t.Fatalf("a result should emit 1 agent_end, got %d", len(aEnd))
+	if len(aEnd) != 2 {
+		t.Fatalf("a result should emit agent_end + agent_settled, got %d", len(aEnd))
 	}
 
 	// b has seen no assistant message; its agent_end must carry zero messages.
 	bEnd := b.BusFrames([]byte(`{"type":"result","subtype":"success"}`), 4)
-	if len(bEnd) != 1 {
-		t.Fatalf("b result should emit 1 agent_end, got %d", len(bEnd))
+	if len(bEnd) != 2 {
+		t.Fatalf("b result should emit agent_end + agent_settled, got %d", len(bEnd))
 	}
 	var m map[string]any
 	_ = json.Unmarshal(bEnd[0], &m)

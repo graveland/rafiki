@@ -394,17 +394,7 @@ export class RemoteAgentSession {
             // Extension command handlers (commandContextActions.waitForIdle) call
             // this to defer work until the agent finishes its current turn.
             waitForIdle(): Promise<void> {
-                if (!self.isStreaming) {
-                    return Promise.resolve();
-                }
-                return new Promise<void>((resolve) => {
-                    const unsub = self.subscribe((ev) => {
-                        if (ev.type === "agent_end") {
-                            unsub();
-                            resolve();
-                        }
-                    });
-                });
+                return self.waitForIdle();
             },
 
             // ── signal ────────────────────────────────────────────────────────
@@ -602,6 +592,15 @@ export class RemoteAgentSession {
                 }
                 break;
             }
+
+            case "agent_settled":
+                // Authoritative idle (pi ≥0.80.x): no retry or compaction
+                // continuation follows.
+                this._isStreaming = false;
+                this._streamingMessage = undefined;
+                this._isRetrying = false;
+                this._retryAttempt = 0;
+                break;
 
             case "message_start":
             case "message_update":
@@ -951,6 +950,31 @@ export class RemoteAgentSession {
 
     get isStreaming(): boolean {
         return this._isStreaming;
+    }
+
+    // pi ≥0.80.x AgentSession member; read by InteractiveMode's shutdown
+    // handler and command-context host.
+    get isIdle(): boolean {
+        return !this._isStreaming && !this._isRetrying;
+    }
+
+    /**
+     * pi ≥0.80.x AgentSession member: resolves at true idle. Keys on
+     * agent_settled with a non-retrying agent_end as fallback so it cannot
+     * hang against a stream that predates agent_settled.
+     */
+    waitForIdle(): Promise<void> {
+        if (!this._isStreaming) {
+            return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+            const unsub = this.subscribe((ev) => {
+                if (ev.type === "agent_settled" || (ev.type === "agent_end" && (ev as { willRetry?: boolean }).willRetry !== true)) {
+                    unsub();
+                    resolve();
+                }
+            });
+        });
     }
 
     /** Stub: system prompt is not available client-side. */

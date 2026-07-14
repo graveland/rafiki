@@ -52,10 +52,10 @@ func TestClaudeOutboundEchoEmitsUserMessage(t *testing.T) {
 
 	// The recorded user message must survive into the turn's agent_end so a
 	// post-turn cache rebuild (which replaces _messages with agent_end.messages)
-	// does not drop the user turn.
+	// does not drop the user turn. The turn closes agent_end + agent_settled.
 	end := decodeFrames(t, prov.BusFrames([]byte(`{"type":"result"}`), 1100))
-	if len(end) != 1 || end[0]["type"] != "agent_end" {
-		t.Fatalf("want a single agent_end, got %v", end)
+	if len(end) != 2 || end[0]["type"] != "agent_end" || end[1]["type"] != "agent_settled" {
+		t.Fatalf("want [agent_end, agent_settled], got %v", end)
 	}
 	msgs, ok := end[0]["messages"].([]any)
 	if !ok || len(msgs) == 0 {

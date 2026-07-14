@@ -250,3 +250,15 @@ func PiAgentEnd(messages []json.RawMessage, usage *PiUsage) any {
 	}
 	return piAgentEnd{Type: "agent_end", Messages: messages, WillRetry: false, Usage: usage}
 }
+
+type piAgentSettled struct {
+	Type string `json:"type"`
+}
+
+// PiAgentSettled builds {"type":"agent_settled"} — pi's true-idle event
+// (since v0.80.x agent_end only ends one low-level run and may be followed
+// by an auto-retry or compaction; consumers like pi's InteractiveMode key
+// post-run actions on agent_settled). The claude backend has no retry
+// continuation, so the synthesized stream settles immediately after
+// agent_end.
+func PiAgentSettled() any { return piAgentSettled{Type: "agent_settled"} }

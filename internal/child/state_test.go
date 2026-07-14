@@ -33,6 +33,20 @@ func TestStateMachine_BasicLifecycle(t *testing.T) {
 	if !changed || sm.Current() != protocol.StatusIdle {
 		t.Fatalf("agent_end: %v", sm.Current())
 	}
+
+	// agent_settled after agent_end is a no-op (already idle).
+	changed, _ = sm.OnPiEvent("agent_settled", nil)
+	if changed || sm.Current() != protocol.StatusIdle {
+		t.Fatalf("agent_settled after agent_end: changed=%v cur=%v", changed, sm.Current())
+	}
+
+	// agent_settled alone also idles a streaming agent (pi ≥0.80.x true-idle
+	// event; agent_end may be skipped observationally under retry races).
+	sm.OnPiEvent("agent_start", nil)
+	changed, _ = sm.OnPiEvent("agent_settled", nil)
+	if !changed || sm.Current() != protocol.StatusIdle {
+		t.Fatalf("agent_settled: %v", sm.Current())
+	}
 }
 
 func TestStateMachine_ParallelTools(t *testing.T) {

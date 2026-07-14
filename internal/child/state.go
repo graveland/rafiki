@@ -96,9 +96,14 @@ func (sm *StateMachine) OnPiEvent(eventType string, meta *PiUIRequestMeta) (chan
 	case "agent_start":
 		sm.transition(protocol.StatusStreaming)
 
-	case "agent_end":
-		// Defensively reset the tool counter in case any tool_execution_end
-		// events were missed — this prevents the counter from leaking across turns.
+	case "agent_end", "agent_settled":
+		// Since pi v0.80.x agent_end closes one low-level run (a retry or
+		// compaction continuation may follow) and agent_settled marks true
+		// idle. Both idle here: settled is authoritative, agent_end stays as
+		// a fallback so an older pi that never emits agent_settled cannot
+		// wedge the status in streaming. Defensively reset the tool counter
+		// in case any tool_execution_end events were missed — this prevents
+		// the counter from leaking across turns.
 		sm.activeTools = 0
 		sm.transition(protocol.StatusIdle)
 
