@@ -48,6 +48,9 @@ type MessagesProxy struct {
 // SetMetrics attaches Prometheus instrumentation (optional).
 func (p *MessagesProxy) SetMetrics(m *Metrics) { p.metrics = m }
 
+// latency renders a turn duration for logs, rounded to 100ms.
+func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
+
 func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *tslogs.Logger) *MessagesProxy {
 	// ResponseHeaderTimeout bounds connect + time-to-first-byte so a hung
 	// upstream can't wedge the stream-copy loop forever. It does NOT cap
@@ -299,19 +302,19 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	elapsed := int(time.Since(start).Milliseconds())
+	elapsed := time.Since(start)
 	// A 4xx/5xx upstream is a failed turn, not a clean completion; so is a
 	// mid-stream read error that truncated the body. (The Messages API never
 	// responds 3xx, so treating <400 as success is safe.)
 	if resp.StatusCode >= 400 {
-		p.logger.Warn("llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "status", resp.StatusCode, "latency_ms", elapsed)
-		p.metrics.ObserveTurn(upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
+		p.logger.Warn("llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "status", resp.StatusCode, "latency", latency(elapsed))
+		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "upstream status "+strconv.Itoa(resp.StatusCode))
 		return
 	}
 	if streamErr != nil {
-		p.logger.Warn("llm turn truncated", "conversation", cr.convID, "upstream", upstream, "model", model, "error", streamErr, "latency_ms", elapsed)
-		p.metrics.ObserveTurn(upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
+		p.logger.Warn("llm turn truncated", "conversation", cr.convID, "upstream", upstream, "model", model, "error", streamErr, "latency", latency(elapsed))
+		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "mid-stream read error: "+streamErr.Error())
 		return
 	}
@@ -319,8 +322,8 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// The client disconnected mid-stream: the accumulated body is a partial
 		// response with undercounted usage. Record it errored, not 'complete', so
 		// truncated turns don't pollute the capture store as clean completions.
-		p.logger.Warn("llm turn aborted", "conversation", cr.convID, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "latency_ms", elapsed)
-		p.metrics.ObserveTurn(upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
+		p.logger.Warn("llm turn aborted", "conversation", cr.convID, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "latency", latency(elapsed))
+		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "client disconnected mid-stream")
 		return
 	}
@@ -338,8 +341,8 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"conversation", cr.convID, "upstream", upstream, "model", model,
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
-		"stop_reason", stop, "latency_ms", elapsed)
-	p.metrics.ObserveTurn(upstream, "complete", "anthropic", time.Since(start), usage)
+		"stop_reason", stop, "latency", latency(elapsed))
+	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
 	if !cr.on {
 		return
 	}
@@ -352,7 +355,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		TurnID: cr.turnID, CreatedAt: cr.createdAt, Response: canonical, StopReason: stop, Upstream: upstream,
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
-		LatencyMS: elapsed,
+		LatencyMS: int(elapsed.Milliseconds()),
 	}); cerr != nil {
 		p.logger.Warn("proxy capture: complete-turn failed", "conversation", cr.convID, "error", cerr)
 		// Don't leave the turn stranded 'pending' on a completion write failure;

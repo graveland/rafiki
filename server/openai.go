@@ -156,7 +156,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 	elapsed := time.Since(start)
 	switch {
 	case resp.StatusCode >= 400:
-		p.logger.Warn("llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "status", resp.StatusCode, "latency_ms", elapsed.Milliseconds())
+		p.logger.Warn("llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai", "status", resp.StatusCode, "latency", latency(elapsed))
 		p.metrics.ObserveTurn(upstream, "error", "openai", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "upstream status "+strconv.Itoa(resp.StatusCode))
 		return
@@ -183,7 +183,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 		"conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai",
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens,
-		"finish_reason", finish, "latency_ms", elapsed.Milliseconds())
+		"finish_reason", finish, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "openai", elapsed, usage)
 	if !cr.on {
 		return

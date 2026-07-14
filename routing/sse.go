@@ -89,8 +89,21 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 			if ev.Delta.StopReason != "" {
 				stop = ev.Delta.StopReason
 			}
+			// Anthropic reports input/cache tokens in message_start and only
+			// cumulative output_tokens here; OpenRouter's Anthropic face sends
+			// zeros in message_start and the full usage in the final
+			// message_delta. Take any field the delta actually populates.
 			if ev.Usage.OutputTokens > 0 {
 				u.OutputTokens = ev.Usage.OutputTokens // cumulative
+			}
+			if ev.Usage.InputTokens > 0 {
+				u.InputTokens = ev.Usage.InputTokens
+			}
+			if ev.Usage.CacheReadInputTokens > 0 {
+				u.CacheReadTokens = ev.Usage.CacheReadInputTokens
+			}
+			if ev.Usage.CacheCreationInputTokens > 0 {
+				u.CacheCreationTokens = ev.Usage.CacheCreationInputTokens
 			}
 		}
 		// Reassemble the finished message (best-effort: an event that doesn't
@@ -102,6 +115,13 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 			}
 		}
 	}
+	// The SDK accumulator only merges output_tokens from message_delta, so a
+	// stream that reports input/cache usage there (OpenRouter) would persist
+	// zeros for them in the canonical message; sync those with what we
+	// extracted (output_tokens the accumulator already handles).
+	msg.Usage.InputTokens = u.InputTokens
+	msg.Usage.CacheReadInputTokens = u.CacheReadTokens
+	msg.Usage.CacheCreationInputTokens = u.CacheCreationTokens
 	// Persist the reassembled message only if accumulation actually produced
 	// content; otherwise (SDK/wire skew, or deltas with no content_block_start)
 	// a zero-value Message still marshals to a valid-but-empty {"content":null}
