@@ -13,7 +13,7 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { RemoteAgentSessionRuntime } from "./runtime.ts";
+import { DEFAULT_TAIL_LIMIT, RemoteAgentSessionRuntime, resolveTailLimit } from "./runtime.ts";
 
 // ─── Server harness (mirrors client.test.ts) ──────────────────────────────────
 
@@ -291,5 +291,93 @@ describe("RemoteAgentSessionRuntime", () => {
         expect(sendReqs[0]!["childId"]).toBe(CHILD_ID);
 
         await runtime.dispose();
+    });
+});
+
+// ─── Tail limit ───────────────────────────────────────────────────────────────
+
+describe("resolveTailLimit", () => {
+    it("defaults to a bounded tail when unset or garbage", () => {
+        expect(resolveTailLimit(undefined)).toBe(DEFAULT_TAIL_LIMIT);
+        expect(resolveTailLimit("")).toBe(DEFAULT_TAIL_LIMIT);
+        expect(resolveTailLimit("nope")).toBe(DEFAULT_TAIL_LIMIT);
+    });
+
+    it("passes through explicit values", () => {
+        expect(resolveTailLimit("100")).toBe(100);
+        expect(resolveTailLimit("0")).toBe(0);
+        expect(resolveTailLimit("-1")).toBe(-1);
+    });
+});
+
+describe("connect scrollback bound", () => {
+    function withTailEnv(value: string | undefined, fn: () => Promise<void>): Promise<void> {
+        const prev = process.env["PIC_ATTACH_TAIL"];
+        if (value === undefined) delete process.env["PIC_ATTACH_TAIL"];
+        else process.env["PIC_ATTACH_TAIL"] = value;
+        return fn().finally(() => {
+            if (prev === undefined) delete process.env["PIC_ATTACH_TAIL"];
+            else process.env["PIC_ATTACH_TAIL"] = prev;
+        });
+    }
+
+    it("connect with PIC_ATTACH_TAIL unset — every ctrl_get_recent carries the default limit", async () => {
+        await withTailEnv(undefined, async () => {
+            const captured: Array<Record<string, unknown>> = [];
+            const srv = await startServer(makeHandler(captured));
+            servers.push(srv);
+
+            const runtime = await RemoteAgentSessionRuntime.connect({
+                socket: srv.sockPath,
+                childId: CHILD_ID,
+            });
+
+            const recentReqs = captured.filter((r) => r["type"] === "ctrl_get_recent");
+            expect(recentReqs.length).toBeGreaterThan(0);
+            for (const r of recentReqs) {
+                expect(r["limit"]).toBe(DEFAULT_TAIL_LIMIT);
+            }
+
+            await runtime.dispose();
+        });
+    });
+
+    it("connect with PIC_ATTACH_TAIL=25 — the claude seed fetch honors it", async () => {
+        await withTailEnv("25", async () => {
+            const captured: Array<Record<string, unknown>> = [];
+            const srv = await startServer(makeHandler(captured));
+            servers.push(srv);
+
+            const runtime = await RemoteAgentSessionRuntime.connect({
+                socket: srv.sockPath,
+                childId: CHILD_ID,
+            });
+
+            const recentReqs = captured.filter((r) => r["type"] === "ctrl_get_recent");
+            expect(recentReqs.length).toBeGreaterThan(0);
+            for (const r of recentReqs) {
+                expect(r["limit"]).toBe(25);
+            }
+
+            await runtime.dispose();
+        });
+    });
+
+    it("connect with PIC_ATTACH_TAIL=0 — no history is fetched at all", async () => {
+        await withTailEnv("0", async () => {
+            const captured: Array<Record<string, unknown>> = [];
+            const srv = await startServer(makeHandler(captured));
+            servers.push(srv);
+
+            const runtime = await RemoteAgentSessionRuntime.connect({
+                socket: srv.sockPath,
+                childId: CHILD_ID,
+            });
+
+            const recentReqs = captured.filter((r) => r["type"] === "ctrl_get_recent");
+            expect(recentReqs).toHaveLength(0);
+
+            await runtime.dispose();
+        });
     });
 });

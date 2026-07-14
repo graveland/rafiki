@@ -447,7 +447,7 @@ cleanup:
 // bus and ring, then reaps the process. It signals processDone when done so
 // the supervise loop can exit cleanly.
 func (c *Child) readStdout() {
-	r := protocol.NewFrameReader(c.stdout, 16<<20)
+	r := protocol.NewFrameReader(c.stdout, protocol.MaxFrameBytes)
 	for {
 		line, err := r.ReadFrame()
 		if err == io.EOF {

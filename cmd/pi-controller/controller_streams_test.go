@@ -185,3 +185,73 @@ func TestGetRecentDiskZeroTimestampSinceGuard(t *testing.T) {
 		t.Fatalf("events = %v, want the zero-TS disk frame kept despite Since", res.Events)
 	}
 }
+
+// TestGetRecentByteBudget verifies GetRecent trims oldest events so the
+// response payload never exceeds the per-frame byte budget: every client
+// reads responses through a protocol.MaxFrameBytes-capped frame reader, so
+// an unbounded history dump would kill the connection (frame too large).
+func TestGetRecentByteBudget(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTestController(t)
+
+	// 5 events of ~3 MiB each (~15 MiB total) — past the 8 MiB budget.
+	big := make([]byte, 3<<20)
+	for i := range big {
+		big[i] = 'a'
+	}
+	events := make([]ring.Event, 5)
+	for i := range events {
+		events[i] = ring.Event{
+			Bytes:     []byte(`{"type":"system","seq":` + string(rune('0'+i)) + `,"pad":"` + string(big) + `"}`),
+			Timestamp: int64(i + 1),
+		}
+	}
+	ctrl.st.Insert(&store.Session{
+		ChildID:    "c1",
+		Kind:       "pi",
+		Status:     protocol.StatusExited,
+		ExitedRing: events,
+	})
+
+	res, err := ctrl.GetRecent("c1", server.RecentQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TruncatedBySize {
+		t.Fatalf("TruncatedBySize = false, want true (payload exceeded budget)")
+	}
+	if len(res.Events) == 0 || len(res.Events) >= 5 {
+		t.Fatalf("len(Events) = %d, want a newest-tail subset (0 < n < 5)", len(res.Events))
+	}
+	total := 0
+	for _, ev := range res.Events {
+		total += len(ev) + 1
+	}
+	if total > protocol.MaxFrameBytes/2 {
+		t.Fatalf("payload = %d bytes, exceeds budget %d", total, protocol.MaxFrameBytes/2)
+	}
+	// Newest events must be the ones kept.
+	last := res.Events[len(res.Events)-1]
+	if string(last) != string(events[4].Bytes) {
+		t.Fatalf("newest event not retained")
+	}
+	if res.TotalInBuffer != 5 {
+		t.Fatalf("TotalInBuffer = %d, want 5", res.TotalInBuffer)
+	}
+
+	// A small history passes through untrimmed.
+	ctrl.st.Insert(&store.Session{
+		ChildID:    "c2",
+		Kind:       "pi",
+		Status:     protocol.StatusExited,
+		ExitedRing: []ring.Event{{Bytes: []byte(`{"type":"system"}`), Timestamp: 1}},
+	})
+	small, err := ctrl.GetRecent("c2", server.RecentQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small.TruncatedBySize || len(small.Events) != 1 {
+		t.Fatalf("small history: TruncatedBySize=%v len=%d, want false/1", small.TruncatedBySize, len(small.Events))
+	}
+}

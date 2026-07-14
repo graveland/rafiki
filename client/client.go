@@ -136,7 +136,7 @@ func (c *Client) send(b []byte) error {
 
 func (c *Client) readLoop() {
 	defer close(c.closeCh)
-	r := protocol.NewFrameReader(c.conn, 16<<20)
+	r := protocol.NewFrameReader(c.conn, protocol.MaxFrameBytes)
 	for {
 		frame, err := r.ReadFrame()
 		if err != nil {

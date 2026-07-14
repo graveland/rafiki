@@ -415,6 +415,9 @@ type GetRecentResponseData struct {
 	TotalInBuffer    int               `json:"totalInBuffer"`
 	OldestTimestamp  int64             `json:"oldestTimestamp"`
 	TruncatedByLimit bool              `json:"truncatedByLimit"`
+	// TruncatedBySize reports that oldest events were dropped so the response
+	// frame stays under the MaxFrameBytes reader cap.
+	TruncatedBySize bool `json:"truncatedBySize,omitempty"`
 }
 
 // GetStreamsRequest queries a live child's in-memory stdin/stderr capture.

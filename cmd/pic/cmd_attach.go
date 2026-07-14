@@ -23,7 +23,7 @@ and choose explicitly.`,
 	}
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
-	cmd.Flags().IntP("tail", "n", -1, "Scrollback: replay the last N retained events into the TUI (-1 = all, 0 = none)")
+	cmd.Flags().IntP("tail", "n", 500, "Scrollback: replay the last N retained events into the TUI (-1 = all, 0 = none)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	// Attachable: any live state except spawning/shutting_down.
 	attachable := func(ch protocol.ChildSummary) bool {

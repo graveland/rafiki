@@ -170,7 +170,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}()
 
 	defer s.handler.HandleClose(nc)
-	r := protocol.NewFrameReader(conn, 16<<20)
+	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
 	for {
 		frame, err := r.ReadFrame()
 		if err != nil {

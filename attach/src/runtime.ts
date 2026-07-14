@@ -93,13 +93,17 @@ export class RemoteAgentSessionRuntime {
         const modelRegistry = await buildLocalModelRegistry(settingsManager);
         let sessionManager = await buildLocalSessionManager(meta.sessionFile);
 
+        // Scrollback bound: PIC_ATTACH_TAIL (set by `pic attach --tail`),
+        // -1 = all. Applied to both the claude seed fetch and primeHistory.
+        const tail = resolveTailLimit(process.env["PIC_ATTACH_TAIL"]);
+
         // For children with no pi-format session file (claude), the manager is
         // empty and pi's renderInitialMessages() — which paints from
         // sessionManager.buildSessionContext() — would show no scrollback. Seed
         // it from the daemon's rendered history so the prior transcript paints.
-        if (sessionManager.buildSessionContext().messages.length === 0) {
+        if (tail !== 0 && sessionManager.buildSessionContext().messages.length === 0) {
             try {
-                const frames = await client.getRecent(opts.childId, -1);
+                const frames = await client.getRecent(opts.childId, tail);
                 const seeded = seedSessionManagerFromFrames(meta.cwd, frames);
                 if (seeded.buildSessionContext().messages.length > 0) {
                     sessionManager = seeded;
@@ -159,9 +163,7 @@ export class RemoteAgentSessionRuntime {
         }
 
         // Seed prior transcript, then begin consuming live events.
-        const raw = process.env["PIC_ATTACH_TAIL"];
-        const tail = raw && raw !== "" ? Number(raw) : -1;
-        await session.primeHistory(Number.isFinite(tail) ? tail : -1);
+        await session.primeHistory(tail);
         session.start();
 
         return runtime;
@@ -364,6 +366,22 @@ export class RemoteAgentSessionRuntime {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Default scrollback replay when PIC_ATTACH_TAIL is unset (direct pic-attach
+ * invocation). Bounded — an unbounded fetch of a large history produced a
+ * ctrl_get_recent response past the 16 MiB frame cap and killed the connect. */
+export const DEFAULT_TAIL_LIMIT = 500;
+
+/**
+ * Parse a PIC_ATTACH_TAIL value: N > 0 = last N events, 0 = none, -1 = all.
+ * Unset/empty/garbage falls back to DEFAULT_TAIL_LIMIT.
+ */
+export function resolveTailLimit(raw: string | undefined): number {
+    if (raw === undefined || raw === "") return DEFAULT_TAIL_LIMIT;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return DEFAULT_TAIL_LIMIT;
+    return Math.trunc(n);
+}
 
 /** Fetch a child's metadata from the daemon via ctrl_get. */
 async function fetchChildMetadata(client: Client, childId: string): Promise<ChildMetadata> {

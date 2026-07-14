@@ -245,13 +245,33 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 		}
 	}
 
+	// The response is a single JSONL frame and every reader caps frames at
+	// protocol.MaxFrameBytes; keep the newest events that fit half that
+	// budget (headroom for the response envelope and other data fields).
+	size := 0
+	cut := len(out)
+	for i := len(out) - 1; i >= 0; i-- {
+		if size+len(out[i])+1 > recentResponseBudget {
+			break
+		}
+		size += len(out[i]) + 1
+		cut = i
+	}
+	truncatedBySize := cut > 0
+	out = out[cut:]
+
 	return server.RecentResult{
 		Events:           out,
 		TotalInBuffer:    total,
 		OldestTimestamp:  oldestTS,
 		TruncatedByLimit: q.Limit > 0 && len(out) == q.Limit,
+		TruncatedBySize:  truncatedBySize,
 	}, nil
 }
+
+// recentResponseBudget bounds the summed event bytes in one GetRecent
+// response so the marshaled frame stays well under protocol.MaxFrameBytes.
+const recentResponseBudget = protocol.MaxFrameBytes / 2
 
 // readDiskEvents reads a per-child on-disk dump file (out.jsonl.gz /
 // render.jsonl.gz) into ring.Events with zero timestamps. Returns nil when the
