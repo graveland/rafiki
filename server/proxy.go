@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"github.com/timescale/rafiki/routing"
 	"github.com/timescale/savannah-common/go/tslogs"
 )
@@ -59,10 +61,23 @@ func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, u
 	// total streaming duration, so legitimate multi-minute SSE conversations
 	// are unaffected — unlike http.Client.Timeout, which would cap the whole
 	// stream and must not be set here.
-	httpClient := &http.Client{Transport: &http.Transport{
+	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		ResponseHeaderTimeout: 60 * time.Second,
-	}}
+	}
+	// h2 keepalive: without ReadIdleTimeout a silently dead upstream TCP
+	// connection (NAT/LB drop) leaves the stream-copy Read hanging forever —
+	// the client sees a stalled stream with no error. With it, a quiet
+	// connection is pinged and torn down in ~40s, surfacing a real read error.
+	// Anthropic's SSE ping events reset the timer, so healthy long turns are
+	// unaffected.
+	if h2, err := http2.ConfigureTransports(transport); err == nil {
+		h2.ReadIdleTimeout = 30 * time.Second
+		h2.PingTimeout = 10 * time.Second
+	} else {
+		logger.Warn("proxy: h2 transport configure failed; no upstream keepalive pings", "error", err)
+	}
+	httpClient := &http.Client{Transport: transport}
 	p := &MessagesProxy{auth: auth, apiKey: apiKey, upstreamURL: upstreamURL, defaultModel: defaultModel, catalog: catalog, httpClient: httpClient, logger: logger}
 	if store != nil {
 		p.store = store // avoid a typed-nil interface: nil *CaptureStore = capture-less
@@ -292,12 +307,20 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	var acc bytes.Buffer
 	body := io.TeeReader(resp.Body, &acc)
 	flusher, _ := w.(http.Flusher)
+	if flusher == nil {
+		// Without a Flusher every SSE event (including keep-alive pings) sits in
+		// net/http's buffer until it fills — the client's stall detector will
+		// abort long turns. Loud because it means a middleware broke streaming.
+		p.logger.Warn("proxy: ResponseWriter is not an http.Flusher; SSE responses will buffer", "conversation", cr.convID)
+	}
 	buf := make([]byte, 16*1024)
-	var streamErr error // a real mid-stream read error (not clean io.EOF)
-	clientGone := false // client disconnected mid-stream (w.Write failed)
+	var streamErr error    // a real mid-stream read error (not clean io.EOF)
+	clientGone := false    // client disconnected mid-stream (w.Write failed)
+	lastByte := time.Now() // when the last upstream byte arrived (starts at header time)
 	for {
 		n, rerr := body.Read(buf)
 		if n > 0 {
+			lastByte = time.Now()
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				p.logger.Warn("proxy: client write failed mid-stream", "conversation", cr.convID, "error", werr)
 				clientGone = true
@@ -316,17 +339,37 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	}
 
 	elapsed := time.Since(start)
+	user := "<unknown>"
+	if p.auth != nil {
+		if id := p.auth.Identify(r); id != nil && id.Username != "" {
+			user = id.Username
+		}
+	}
 	// A 4xx/5xx upstream is a failed turn, not a clean completion; so is a
 	// mid-stream read error that truncated the body. (The Messages API never
 	// responds 3xx, so treating <400 as success is safe.)
 	if resp.StatusCode >= 400 {
-		p.logger.Warn("llm turn failed", "conversation", cr.convID, "upstream", upstream, "model", model, "status", resp.StatusCode, "latency", latency(elapsed))
+		p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "latency", latency(elapsed))
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "upstream status "+strconv.Itoa(resp.StatusCode))
 		return
 	}
 	if streamErr != nil {
-		p.logger.Warn("llm turn truncated", "conversation", cr.convID, "upstream", upstream, "model", model, "error", streamErr, "latency", latency(elapsed))
+		// last_byte_ago disambiguates the two stall stories: ~0 means bytes were
+		// still flowing when the stream died (proxy→client hop or client gave up
+		// early); tens of seconds means upstream went quiet first and the client's
+		// stall detector correctly bailed.
+		stall := latency(time.Since(lastByte))
+		if r.Context().Err() != nil {
+			// Inbound request context canceled — the client hung up (stall-detector
+			// abort, Esc, disconnect) and the cancel propagated into our upstream
+			// read. Upstream is not implicated.
+			p.logger.Warn("llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client canceled", "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
+			p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+			p.failTurn(r, cr, "client canceled mid-stream (last upstream byte "+stall+" earlier)")
+			return
+		}
+		p.logger.Warn("llm turn truncated", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "error", streamErr, "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "mid-stream read error: "+streamErr.Error())
 		return
@@ -335,7 +378,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// The client disconnected mid-stream: the accumulated body is a partial
 		// response with undercounted usage. Record it errored, not 'complete', so
 		// truncated turns don't pollute the capture store as clean completions.
-		p.logger.Warn("llm turn aborted", "conversation", cr.convID, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "latency", latency(elapsed))
+		p.logger.Warn("llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "bytes", acc.Len(), "last_byte_ago", latency(time.Since(lastByte)), "latency", latency(elapsed))
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 		p.failTurn(r, cr, "client disconnected mid-stream")
 		return
@@ -351,7 +394,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	p.logger.Info("llm turn",
-		"conversation", cr.convID, "upstream", upstream, "model", model,
+		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
 		"stop_reason", stop, "latency", latency(elapsed))
