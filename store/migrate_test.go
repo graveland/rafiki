@@ -277,6 +277,37 @@ func dumpRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q string) s
 	return b.String()
 }
 
+// TestMigrateAdoptsSchemaWithDecompositionColumns proves the baseline probe is a
+// presence check, not an exact-set check: a scadmin DB that has been further
+// migrated through admindb 0013 (the decomposition columns) still has all
+// four required provenance/prefix_hash columns, plus extras the probe doesn't
+// know about — it must still be classified as an adoptable baseline.
+func TestMigrateAdoptsSchemaWithDecompositionColumns(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	applyScadminChain(t, ctx, pool,
+		"0007_conversations.up.sql", "0008_turn_provenance.up.sql", "0009_turn_prefix_hash.up.sql")
+	// Simulate admindb 0013: the decomposition columns, applied directly
+	// (not via the rafiki chain) so the DB looks like a scadmin instance that
+	// has moved past 0009 but has no rafiki_schema_migrations table yet.
+	if _, err := pool.Exec(ctx, `ALTER TABLE conversations.conversation_turn
+		ADD COLUMN IF NOT EXISTS response_ordinal INT,
+		ADD COLUMN IF NOT EXISTS prefix_content   JSONB,
+		ADD COLUMN IF NOT EXISTS cache_breakpoints JSONB;
+		ALTER TABLE conversations.conversation_turn ALTER COLUMN request DROP NOT NULL`); err != nil {
+		t.Fatalf("seed decomposition columns: %v", err)
+	}
+
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate must adopt a baseline-plus-decomposition schema, got: %v", err)
+	}
+	name, adopted := baselineRow(t, ctx, pool)
+	if !adopted || name != "baseline" {
+		t.Errorf("baseline row = (%q, adopted=%v), want (baseline, true): extra decomposition columns must not block adoption", name, adopted)
+	}
+}
+
 // TestMigrateConcurrent runs Migrate from two pools against the same fresh
 // database: the advisory lock must serialize them, both must return nil, and
 // the chain must be applied exactly once.

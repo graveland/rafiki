@@ -306,6 +306,14 @@ func (f *recordingChatStore) FailTurn(_ context.Context, _ string, _ time.Time, 
 	return nil
 }
 
+func (f *recordingChatStore) DecomposeRequest(_ context.Context, _, _ string, _ time.Time, _ []byte, _ string) (int, error) {
+	return 0, nil
+}
+
+func (f *recordingChatStore) AppendResponseMessage(_ context.Context, _, _ string, _ time.Time, _ int, _ []byte, _, _ int64, _ string) error {
+	return nil
+}
+
 // End-to-end tee against a REAL capture store (RAFIKI_TEST_DSN): adversarial
 // chunking upstream, then assert the persisted turn is complete with a valid
 // reassembled canonical response — the fake-store tests can't catch
@@ -365,20 +373,33 @@ func TestMessagesTeeWithRealStore(t *testing.T) {
 	if rec.Body.String() != weirdSSE {
 		t.Fatalf("stream mutated under real store")
 	}
-	var status, response string
+	var status string
+	var responseNull bool
 	var outTokens int64
-	if err := pool.QueryRow(ctx, `SELECT t.status, t.response::text, t.output_tokens
+	if err := pool.QueryRow(ctx, `SELECT t.status, t.response IS NULL, t.output_tokens
 		FROM conversations.conversation_turn t
 		JOIN conversations.conversation c ON c.id = t.conversation_id
-		WHERE c.external_ref = 'tee-real-store'`).Scan(&status, &response, &outTokens); err != nil {
+		WHERE c.external_ref = 'tee-real-store'`).Scan(&status, &responseNull, &outTokens); err != nil {
 		t.Fatalf("read captured turn: %v", err)
 	}
 	if status != "complete" || outTokens != 7 {
 		t.Errorf("turn = %s/%d tokens, want complete/7", status, outTokens)
 	}
-	var msg map[string]any
-	if err := json.Unmarshal([]byte(response), &msg); err != nil {
-		t.Errorf("canonical response is not valid JSON: %v", err)
+	if !responseNull {
+		t.Error("turn.response should be NULL; decomposition replaces the full-JSONB write")
+	}
+	// The canonical response's marshaling correctness is now verified via the
+	// decomposed assistant conversation_message instead of turn.response.
+	var msgContent string
+	if err := pool.QueryRow(ctx, `SELECT m.content::text
+		FROM conversations.conversation_message m
+		JOIN conversations.conversation c ON c.id = m.conversation_id
+		WHERE c.external_ref = 'tee-real-store' AND m.role = 'assistant'`).Scan(&msgContent); err != nil {
+		t.Fatalf("read decomposed assistant message: %v", err)
+	}
+	var content any
+	if err := json.Unmarshal([]byte(msgContent), &content); err != nil {
+		t.Errorf("decomposed assistant content is not valid JSON: %v", err)
 	}
 }
 

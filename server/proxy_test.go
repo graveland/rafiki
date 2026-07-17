@@ -8,11 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/timescale/rafiki/routing"
+	"github.com/timescale/rafiki/store"
 	"github.com/timescale/savannah-common/go/tslogs"
 )
 
@@ -53,6 +56,14 @@ func (f *fakeProxyStore) CompleteTurn(ctx context.Context, r routing.TurnResult)
 
 func (f *fakeProxyStore) FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error {
 	f.fails++
+	return nil
+}
+
+func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error) {
+	return 0, nil
+}
+
+func (f *fakeProxyStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
 	return nil
 }
 
@@ -412,6 +423,81 @@ func TestProxyResolveModel(t *testing.T) {
 	body, resolved, err = p.resolveModel(garbage)
 	if err != nil || resolved != "" || string(body) != string(garbage) {
 		t.Errorf("malformed body = (%q,%q,%v), want passthrough+empty+nil", body, resolved, err)
+	}
+}
+
+// End-to-end: a real proxied turn decomposes into conversation_message rows
+// (user + assistant) and leaves conversation_turn.request NULL — the bulky
+// full-request JSONB is no longer written now that decomposition covers it.
+func TestProxy_DecomposesConversation(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
+			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
+		}
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	name := fmt.Sprintf("rafiki_decompose_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)") })
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Database = name
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	cs := routing.NewCaptureStore(pool)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"role":"assistant","content":[{"type":"text","text":"hi back"}],` +
+			`"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	p := NewMessagesProxy(cs, nil, "key", upstream.URL, "claude", nil, logger)
+
+	body := `{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("X-Rafiki-Session", "sess-decompose-1")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// user message + assistant response decomposed; turn.request left NULL
+	var msgs int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_message`).Scan(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	if msgs != 2 {
+		t.Errorf("conversation_message count = %d, want 2", msgs)
+	}
+	var reqNull bool
+	if err := pool.QueryRow(ctx,
+		`SELECT request IS NULL FROM conversations.conversation_turn LIMIT 1`).Scan(&reqNull); err != nil {
+		t.Fatal(err)
+	}
+	if !reqNull {
+		t.Error("conversation_turn.request should be NULL; decomposition replaces the full-JSONB write")
 	}
 }
 

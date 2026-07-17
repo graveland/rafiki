@@ -20,6 +20,8 @@ type proxyStore interface {
 	InsertTurnIntent(ctx context.Context, t routing.TurnIntent) (turnID string, createdAt time.Time, err error)
 	CompleteTurn(ctx context.Context, r routing.TurnResult) error
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
+	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error)
+	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error
 }
 
 type MessagesProxy struct {
@@ -184,10 +186,13 @@ func (p *MessagesProxy) resolveModel(reqBody []byte) ([]byte, string, error) {
 // completion helpers don't each take four positional args. on=false means
 // capture is disabled for this turn (the proxy still forwards).
 type captureRef struct {
-	convID    string
-	turnID    string
-	createdAt time.Time
-	on        bool
+	convID      string
+	turnID      string
+	createdAt   time.Time
+	on          bool
+	reqBody     []byte // decomposed post-stream in streamAndCapture (see beginCapture)
+	prefixHash  string
+	nextOrdinal int // ordinal for the assistant response message (= request message count)
 }
 
 func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -205,8 +210,7 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Best-effort capture setup (never blocks the proxy on failure).
-	convID, turnID, turnCreatedAt, capturing := p.beginCapture(r, reqBody, model)
-	cr := captureRef{convID: convID, turnID: turnID, createdAt: turnCreatedAt, on: capturing}
+	cr := p.beginCapture(r, reqBody, model)
 
 	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, cr)
 	if handled {
@@ -361,7 +365,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
 	if cerr := p.store.CompleteTurn(capCtx, routing.TurnResult{
-		TurnID: cr.turnID, CreatedAt: cr.createdAt, Response: canonical, StopReason: stop, Upstream: upstream,
+		TurnID: cr.turnID, CreatedAt: cr.createdAt, Response: nil, StopReason: stop, Upstream: upstream,
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
 		LatencyMS: int(elapsed.Milliseconds()),
@@ -370,6 +374,19 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// Don't leave the turn stranded 'pending' on a completion write failure;
 		// mark it errored so it isn't a false orphan for the sweep.
 		p.failTurn(r, cr, "complete-turn failed: "+cerr.Error())
+		return
+	}
+	// Best-effort: decompose the request into conversation_message rows (the
+	// DB I/O deliberately deferred from beginCapture — see its comment) before
+	// appending the response, so request messages at ordinals 0..N-1 exist
+	// before the response lands at cr.nextOrdinal (=N). Neither call fails the
+	// turn — CompleteTurn above already recorded it complete.
+	if _, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
+		p.logger.Warn("proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
+	}
+	if aerr := p.store.AppendResponseMessage(capCtx, cr.convID, cr.turnID, cr.createdAt,
+		cr.nextOrdinal, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
+		p.logger.Warn("proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
 	}
 }
 
@@ -387,11 +404,16 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 	}
 }
 
-// beginCapture correlates the session + write-aheads the request. Best-effort:
-// returns capturing=false (proxy still forwards) on any failure.
-func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model string) (convID, turnID string, createdAt time.Time, capturing bool) {
+// beginCapture correlates the session and write-aheads the request
+// (InsertTurnIntent — deliberately synchronous, before the upstream call).
+// Decomposing reqBody into conversation_message rows is DB I/O and is
+// deferred to streamAndCapture's post-stream block so it never gates the
+// proxied request; here we only need nextOrdinal, computed with a cheap,
+// I/O-free parse. cr.on=false (proxy still forwards) on any failure setting
+// up the turn itself.
+func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model string) captureRef {
 	if p.store == nil {
-		return "", "", time.Time{}, false // capture-less (no store configured)
+		return captureRef{} // capture-less (no store configured)
 	}
 	owner := ""
 	if p.auth != nil {
@@ -422,16 +444,36 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	})
 	if err != nil {
 		p.logger.Warn("proxy capture: ensure-conversation failed", "error", err)
-		return "", "", time.Time{}, false
+		return captureRef{}
 	}
 	// Ordering on the client path is by created_at; ordinal is unused here.
-	turnID, createdAt, err = p.store.InsertTurnIntent(r.Context(), routing.TurnIntent{
-		ConversationID: convID, Ordinal: 0, Model: model, Request: reqBody,
-		Source: source, Author: owner, AuthorKind: "human", PrefixHash: routing.PrefixHash(reqBody),
+	// Request is no longer stored verbatim on the turn row — DecomposeRequest
+	// below covers it as conversation_message rows.
+	prefixHash := routing.PrefixHash(reqBody)
+	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), routing.TurnIntent{
+		ConversationID: convID, Ordinal: 0, Model: model, Request: nil,
+		Source: source, Author: owner, AuthorKind: "human", PrefixHash: prefixHash,
 	})
 	if err != nil {
 		p.logger.Warn("proxy capture: insert-intent failed", "conversation", convID, "error", err)
-		return convID, "", time.Time{}, false
+		return captureRef{convID: convID}
 	}
-	return convID, turnID, createdAt, true
+	return captureRef{
+		convID: convID, turnID: turnID, createdAt: createdAt, on: true,
+		reqBody: reqBody, prefixHash: prefixHash, nextOrdinal: countRequestMessages(reqBody),
+	}
+}
+
+// countRequestMessages returns len(reqBody.messages) via a cheap, allocation-
+// light unmarshal (no DB I/O) — just enough to know the ordinal the assistant
+// response will land on. Decomposition itself (the actual conversation_message
+// INSERTs) happens later, off the latency-critical path; 0 on any parse error.
+func countRequestMessages(reqBody []byte) int {
+	var body struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(reqBody, &body); err != nil {
+		return 0
+	}
+	return len(body.Messages)
 }

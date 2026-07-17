@@ -166,16 +166,34 @@ func probeConversationsSchema(ctx context.Context, conn *pgxpool.Conn) (schemaSh
 	if !conv || !turn || !attach {
 		return schemaPartial, nil
 	}
-	var cols int
-	err = conn.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
+	rows, err := conn.Query(ctx, `SELECT column_name FROM information_schema.columns
 		WHERE table_schema='conversations' AND table_name='conversation_turn'
-		  AND column_name IN ('source','author','author_kind','prefix_hash')`,
-	).Scan(&cols)
+		  AND column_name IN ('source','author','author_kind','prefix_hash')`)
 	if err != nil {
 		return schemaAbsent, fmt.Errorf("migrate: probe columns: %w", err)
 	}
-	if cols != 4 {
-		return schemaPartial, nil
+	defer rows.Close()
+	present := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return schemaAbsent, fmt.Errorf("migrate: scan column: %w", err)
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return schemaAbsent, fmt.Errorf("migrate: probe columns: %w", err)
+	}
+	// required baseline columns on conversation_turn for an adoptable scadmin
+	// shape. This is a presence check, not an exact-set check: a schema that
+	// has since grown further columns (e.g. the 0005 turn-decomposition
+	// columns, applied out-of-band by scadmin before rafiki's chain ever ran
+	// against it) is still adoptable as long as these four are present.
+	required := []string{"source", "author", "author_kind", "prefix_hash"}
+	for _, c := range required {
+		if !present[c] {
+			return schemaPartial, nil
+		}
 	}
 	return schemaComplete, nil
 }

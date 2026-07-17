@@ -2,7 +2,10 @@ package routing
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,5 +219,294 @@ func testConversationModelBackfill(t *testing.T, ctx context.Context, pool *pgxp
 	}
 	if pinned != "claude-sonnet-5" {
 		t.Fatalf("pinned model = %q, want creation-time claude-sonnet-5", pinned)
+	}
+}
+
+func TestDecomposeRequest_MessagesAndPrefix(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewCaptureStore(pool)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req := []byte(`{"model":"claude","system":[{"type":"text","text":"S"}],
+		"tools":[{"name":"T"}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hi"}]},
+			{"role":"assistant","content":[{"type":"text","text":"yo"}]}
+		]}`)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Request: req, PrefixHash: PrefixHash(req), Protocol: "anthropic"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+
+	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req))
+	if err != nil {
+		t.Fatalf("DecomposeRequest: %v", err)
+	}
+	if next != 2 {
+		t.Fatalf("next ordinal = %d, want 2 (two messages)", next)
+	}
+
+	// two message rows, content stored verbatim
+	var cnt int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1`, convID).Scan(&cnt); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if cnt != 2 {
+		t.Fatalf("message count = %d, want 2", cnt)
+	}
+
+	// content stored byte-for-byte (modulo JSON normalization) for message 0
+	var gotContent string
+	if err := pool.QueryRow(ctx,
+		`SELECT content::text FROM conversations.conversation_message WHERE conversation_id=$1 AND ordinal=0`,
+		convID).Scan(&gotContent); err != nil {
+		t.Fatalf("read message 0 content: %v", err)
+	}
+	wantContent := `[{"type":"text","text":"hi"}]`
+	var gotNorm, wantNorm any
+	if err := json.Unmarshal([]byte(gotContent), &gotNorm); err != nil {
+		t.Fatalf("unmarshal got content: %v", err)
+	}
+	if err := json.Unmarshal([]byte(wantContent), &wantNorm); err != nil {
+		t.Fatalf("unmarshal want content: %v", err)
+	}
+	if !reflect.DeepEqual(gotNorm, wantNorm) {
+		t.Fatalf("message 0 content = %s, want %s (verbatim)", gotContent, wantContent)
+	}
+
+	// prefix_content stored on this (first) turn
+	var pc *string
+	if err := pool.QueryRow(ctx,
+		`SELECT prefix_content::text FROM conversations.conversation_turn WHERE id=$1 AND created_at=$2`,
+		turnID, createdAt).Scan(&pc); err != nil {
+		t.Fatalf("read prefix_content: %v", err)
+	}
+	if pc == nil {
+		t.Fatal("prefix_content is NULL, want the request envelope stored on the first turn")
+	}
+	if !strings.Contains(*pc, `"tools"`) {
+		t.Fatalf("prefix_content = %q, want it to contain \"tools\"", *pc)
+	}
+}
+
+func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewCaptureStore(pool)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"}]}`)
+	h := PrefixHash(req)
+	t1, c1, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent (t1): %v", err)
+	}
+	if _, err := s.DecomposeRequest(ctx, convID, t1, c1, req, h); err != nil {
+		t.Fatalf("DecomposeRequest (t1): %v", err)
+	}
+
+	// second turn, same prefix hash → prefix_content must be NULL
+	req2 := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
+	t2, c2, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req2, PrefixHash: h})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent (t2): %v", err)
+	}
+	if _, err := s.DecomposeRequest(ctx, convID, t2, c2, req2, h); err != nil {
+		t.Fatalf("DecomposeRequest (t2): %v", err)
+	}
+
+	var pc *string
+	if err := pool.QueryRow(ctx,
+		`SELECT prefix_content::text FROM conversations.conversation_turn WHERE id=$1 AND created_at=$2`, t2, c2).Scan(&pc); err != nil {
+		t.Fatalf("read prefix_content: %v", err)
+	}
+	if pc != nil {
+		t.Fatalf("prefix_content = %q, want NULL (prefix_hash unchanged from previous turn)", *pc)
+	}
+}
+
+// TestDecomposeRequest_CacheBreakpoints verifies breakpoint detection is
+// structure-aware: only messages with an actual cache_control field on a
+// content block are recorded, not messages whose text merely contains the
+// literal substring "cache_control".
+func TestDecomposeRequest_CacheBreakpoints(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewCaptureStore(pool)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req := []byte(`{"model":"claude","tools":[{"name":"T"}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"plain, no marker"}]},
+			{"role":"assistant","content":[{"type":"text","text":"cached block","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"this text literally says cache_control but has no such field"}]}
+		]}`)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Request: req, PrefixHash: PrefixHash(req)})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req)); err != nil {
+		t.Fatalf("DecomposeRequest: %v", err)
+	}
+
+	var bp *string
+	if err := pool.QueryRow(ctx,
+		`SELECT cache_breakpoints::text FROM conversations.conversation_turn WHERE id=$1 AND created_at=$2`,
+		turnID, createdAt).Scan(&bp); err != nil {
+		t.Fatalf("read cache_breakpoints: %v", err)
+	}
+	if bp == nil {
+		t.Fatal("cache_breakpoints is NULL, want [1]")
+	}
+	var got []int
+	if err := json.Unmarshal([]byte(*bp), &got); err != nil {
+		t.Fatalf("unmarshal cache_breakpoints %q: %v", *bp, err)
+	}
+	want := []int{1}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cache_breakpoints = %v, want %v (only the message with a real cache_control field, not the text-only mention)", got, want)
+	}
+}
+
+// TestAppendResponseMessage verifies the canonical assistant response is
+// appended as a conversation_message at the caller-supplied ordinal (verbatim
+// content, token usage, stop_reason) and that the turn's response_ordinal is
+// set to that same ordinal.
+func TestAppendResponseMessage(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewCaptureStore(pool)
+
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Request: req, PrefixHash: PrefixHash(req)})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req))
+	if err != nil {
+		t.Fatalf("DecomposeRequest: %v", err)
+	}
+	if next != 1 {
+		t.Fatalf("next ordinal = %d, want 1 (one request message)", next)
+	}
+
+	canonical := []byte(`{"role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}`)
+	if err := s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, canonical, 10, 5, "end_turn"); err != nil {
+		t.Fatalf("AppendResponseMessage: %v", err)
+	}
+
+	var role, stop string
+	var out int64
+	if err := pool.QueryRow(ctx,
+		`SELECT role, coalesce(stop_reason,''), coalesce(output_tokens,0) FROM conversations.conversation_message
+		  WHERE conversation_id=$1 AND ordinal=$2`, convID, next).Scan(&role, &stop, &out); err != nil {
+		t.Fatalf("read conversation_message: %v", err)
+	}
+	if role != "assistant" {
+		t.Fatalf("role = %q, want assistant", role)
+	}
+	if stop != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn", stop)
+	}
+	if out != 5 {
+		t.Fatalf("output_tokens = %d, want 5", out)
+	}
+
+	var gotContent string
+	if err := pool.QueryRow(ctx,
+		`SELECT content::text FROM conversations.conversation_message WHERE conversation_id=$1 AND ordinal=$2`,
+		convID, next).Scan(&gotContent); err != nil {
+		t.Fatalf("read content: %v", err)
+	}
+	wantContent := `[{"type":"text","text":"hello"}]`
+	var gotNorm, wantNorm any
+	if err := json.Unmarshal([]byte(gotContent), &gotNorm); err != nil {
+		t.Fatalf("unmarshal got content: %v", err)
+	}
+	if err := json.Unmarshal([]byte(wantContent), &wantNorm); err != nil {
+		t.Fatalf("unmarshal want content: %v", err)
+	}
+	if !reflect.DeepEqual(gotNorm, wantNorm) {
+		t.Fatalf("content = %s, want %s (verbatim canonical.content)", gotContent, wantContent)
+	}
+
+	var respOrd int
+	if err := pool.QueryRow(ctx,
+		`SELECT response_ordinal FROM conversations.conversation_turn WHERE id=$1 AND created_at=$2`,
+		turnID, createdAt).Scan(&respOrd); err != nil {
+		t.Fatalf("read response_ordinal: %v", err)
+	}
+	if respOrd != next {
+		t.Fatalf("response_ordinal = %d, want %d", respOrd, next)
 	}
 }
