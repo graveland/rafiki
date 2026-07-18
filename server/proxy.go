@@ -416,17 +416,24 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.failTurn(r, cr, "complete-turn failed: "+cerr.Error())
 		return
 	}
-	// Best-effort: decompose the request into conversation_message rows (the
-	// DB I/O deliberately deferred from beginCapture — see its comment) before
-	// appending the response, so request messages at ordinals 0..N-1 exist
-	// before the response lands at cr.nextOrdinal (=N). Neither call fails the
-	// turn — CompleteTurn above already recorded it complete.
+	// Decompose the request into conversation_message rows (the DB I/O deliberately
+	// deferred from beginCapture — see its comment) before appending the response,
+	// so request messages at ordinals 0..N-1 exist before the response lands at
+	// cr.nextOrdinal (=N). CompleteTurn above already recorded the turn complete, so
+	// a capture-write failure here would otherwise leave a clean-looking completion
+	// with its response captured nowhere (append) or a response orphaned past missing
+	// request rows (decompose). Re-mark the turn errored instead, so the gap is
+	// visible rather than a silent complete-without-response.
 	if _, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
 		p.logger.Warn("proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
+		p.failTurn(r, cr, "decompose request failed: "+derr.Error())
+		return
 	}
 	if aerr := p.store.AppendResponseMessage(capCtx, cr.convID, cr.turnID, cr.createdAt,
 		cr.nextOrdinal, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
 		p.logger.Warn("proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
+		p.failTurn(r, cr, "append response failed: "+aerr.Error())
+		return
 	}
 }
 
@@ -439,7 +446,17 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 	}
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
-	if ferr := p.store.FailTurn(capCtx, cr.turnID, cr.createdAt, reason); ferr != nil {
+	p.failTurnCtx(capCtx, cr, reason)
+}
+
+// failTurnCtx is failTurn against a caller-supplied context, so a fail path that
+// also issues other capture writes can share one detached context instead of
+// opening a second. No-op when capture is off.
+func (p *MessagesProxy) failTurnCtx(ctx context.Context, cr captureRef, reason string) {
+	if !cr.on {
+		return
+	}
+	if ferr := p.store.FailTurn(ctx, cr.turnID, cr.createdAt, reason); ferr != nil {
 		p.logger.Warn("proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr)
 	}
 }
@@ -465,17 +482,14 @@ func boundedErrorBody(b []byte) string {
 	return string(b)
 }
 
-// decomposeRequestBestEffort decomposes cr.reqBody into conversation_message
-// rows on a fail path, where no CompleteTurn ran (so no capCtx exists). Uses a
-// detached, bounded context: the client may already be gone. No-op when capture
-// is off.
-func (p *MessagesProxy) decomposeRequestBestEffort(r *http.Request, cr captureRef) {
+// decomposeRequestCtx decomposes cr.reqBody into conversation_message rows on a
+// fail path against a caller-supplied context, so it can share the fail path's
+// one detached context. No-op when capture is off.
+func (p *MessagesProxy) decomposeRequestCtx(ctx context.Context, cr captureRef) {
 	if !cr.on {
 		return
 	}
-	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	defer cancel()
-	if _, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
+	if _, derr := p.store.DecomposeRequest(ctx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
 		p.logger.Warn("proxy capture: decompose request (failed turn) failed", "conversation", cr.convID, "error", derr)
 	}
 }
@@ -530,12 +544,15 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	}
 	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
-	p.failTurn(r, cr, reason)
-	// Decompose the request even on failure so the turn is inspectable — the
-	// messages/prefix that triggered the error are exactly what you need to see
-	// (especially for a request-caused 4xx). The success path decomposes after
-	// CompleteTurn; here there is no completion, only the request.
-	p.decomposeRequestBestEffort(r, cr)
+	// Resolve the failed turn and decompose the request (so the turn is inspectable —
+	// the messages/prefix that triggered the error are what you need to see) under one
+	// shared detached context; r.Context() may already be canceled (client hung up).
+	if cr.on {
+		capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancel()
+		p.failTurnCtx(capCtx, cr, reason)
+		p.decomposeRequestCtx(capCtx, cr)
+	}
 }
 
 // requestUser resolves the caller's username for turn logs, or "<unknown>".
@@ -556,7 +573,8 @@ func (p *MessagesProxy) requestUser(r *http.Request) string {
 //
 // where the actionable detail (e.g. an unsupported value and the allowed set)
 // lives in metadata.raw. Lift raw.error.message into the top-level
-// error.message, preserving the rest of the body, so a client that displays
+// error.message, prefixed with the provider name when present (e.g.
+// "OpenAI: ..."), preserving the rest of the body, so a client that displays
 // error.message (Claude Code) shows it. Returns (nil, false) when the body is
 // not such an envelope — the caller then passes the original through unchanged.
 func surfaceProviderError(body []byte) ([]byte, bool) {

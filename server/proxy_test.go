@@ -327,6 +327,53 @@ func TestMessagesProxySurfacesProviderErrorToClient(t *testing.T) {
 	}
 }
 
+func TestHandleUpstreamErrorContentEncoding(t *testing.T) {
+	// A rewritten (surfaced) error body is plaintext, so an upstream
+	// Content-Encoding must be dropped or the client mis-decodes it; a passthrough
+	// (non-envelope) body keeps upstream's encoding. `br` is used because Go's
+	// transport passes it through untouched (it only auto-decodes the gzip it
+	// requests), so the strip logic is what's exercised.
+	innerRaw := `{"error":{"message":"boom","code":"unsupported_value"}}`
+	envBytes, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message":  "Provider returned error",
+		"metadata": map[string]any{"raw": innerRaw, "provider_name": "OpenAI"},
+	}})
+
+	cases := []struct {
+		name         string
+		body         []byte
+		wantEncoding string // expected client-facing Content-Encoding
+	}{
+		{"surfaced rewrite drops encoding", envBytes, ""},
+		{"passthrough preserves encoding", []byte(`{"type":"error","error":{"type":"api_error"}}`), "br"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Encoding", "br")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write(tc.body)
+			}))
+			defer upstream.Close()
+
+			logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+			p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+			p.store = &fakeProxyStore{}
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			if got := rec.Header().Get("Content-Encoding"); got != tc.wantEncoding {
+				t.Errorf("Content-Encoding = %q, want %q", got, tc.wantEncoding)
+			}
+		})
+	}
+}
+
 func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(529) // overloaded

@@ -216,8 +216,13 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 	if err != nil {
 		return len(req.Messages), err
 	}
+	envelope, breakpoints, err := splitEnvelopeAndBreakpoints(reqBody)
+	if err != nil {
+		return len(req.Messages), fmt.Errorf("decompose: %w", err)
+	}
+	// cache_breakpoints is a per-request property (always recorded); prefix_content
+	// is stored only when the envelope changed from the previous turn (sparse, on-change).
 	if changed {
-		envelope, breakpoints := splitEnvelopeAndBreakpoints(reqBody)
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET prefix_content=$3, cache_breakpoints=$4
 			  WHERE id=$1::uuid AND created_at=$2`,
@@ -225,8 +230,6 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 			return len(req.Messages), fmt.Errorf("decompose: store prefix_content: %w", err)
 		}
 	} else {
-		// still record breakpoints (per-request property) even when envelope unchanged
-		_, breakpoints := splitEnvelopeAndBreakpoints(reqBody)
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET cache_breakpoints=$3 WHERE id=$1::uuid AND created_at=$2`,
 			turnID, createdAt, breakpoints); err != nil {
@@ -256,10 +259,10 @@ func (s *CaptureStore) prefixChanged(ctx context.Context, convID string, created
 // splitEnvelopeAndBreakpoints returns (request-minus-messages JSONB, cache_control breakpoint
 // ordinals JSONB). Breakpoints are the indices of messages carrying a cache_control marker,
 // as a JSON array; envelope is the request with "messages" removed.
-func splitEnvelopeAndBreakpoints(reqBody []byte) (envelope []byte, breakpoints []byte) {
+func splitEnvelopeAndBreakpoints(reqBody []byte) (envelope []byte, breakpoints []byte, err error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(reqBody, &m); err != nil {
-		return nil, nil
+		return nil, nil, fmt.Errorf("split envelope: unmarshal request: %w", err)
 	}
 	// breakpoints: index of each message whose content has a cache_control field
 	var msgs []struct {
@@ -276,9 +279,15 @@ func splitEnvelopeAndBreakpoints(reqBody []byte) (envelope []byte, breakpoints [
 		}
 	}
 	delete(m, "messages")
-	envelope, _ = json.Marshal(m)
-	breakpoints, _ = json.Marshal(idxs)
-	return envelope, breakpoints
+	envelope, err = json.Marshal(m)
+	if err != nil {
+		return nil, nil, fmt.Errorf("split envelope: marshal envelope: %w", err)
+	}
+	breakpoints, err = json.Marshal(idxs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("split envelope: marshal breakpoints: %w", err)
+	}
+	return envelope, breakpoints, nil
 }
 
 // messageHasCacheControl reports whether a message's content carries a
@@ -286,8 +295,9 @@ func splitEnvelopeAndBreakpoints(reqBody []byte) (envelope []byte, breakpoints [
 // blocks (the shape cache_control actually appears in) and inspects each
 // block's cache_control field directly, so a message whose text merely
 // contains the literal substring "cache_control" is not a false positive.
-// If content isn't an array of blocks (e.g. a plain string), it falls back to
-// a conservative substring check so capture never fails on unexpected shapes.
+// Plain-string content carries no cache_control block, so it is always false —
+// even when the string text embeds the literal token. Only a genuinely
+// unexpected shape falls back to a conservative substring check.
 func messageHasCacheControl(content json.RawMessage) bool {
 	var blocks []struct {
 		CacheControl json.RawMessage `json:"cache_control"`
@@ -300,8 +310,14 @@ func messageHasCacheControl(content json.RawMessage) bool {
 		}
 		return false
 	}
-	// content wasn't an array of blocks (e.g. a plain string) — fall back to a
-	// conservative substring check so we never fail capture.
+	// A plain string message has no per-block cache_control; decoding it as a
+	// string (rather than substring-matching) avoids flagging text that merely
+	// mentions the token.
+	var str string
+	if err := json.Unmarshal(content, &str); err == nil {
+		return false
+	}
+	// Genuinely unexpected shape — conservative substring check so capture never fails.
 	return bytes.Contains(content, []byte(`"cache_control"`))
 }
 
@@ -310,8 +326,10 @@ func messageHasCacheControl(content json.RawMessage) bool {
 // stored verbatim from canonical.content, plus token usage and stop_reason.
 // Insert is ON CONFLICT (conversation_id, ordinal) DO NOTHING — lenient,
 // best-effort, matching DecomposeRequest's message-insert semantics. Also
-// sets the turn's response_ordinal to `ordinal`. `ordinal` is expected to be
-// the nextOrdinal returned by DecomposeRequest.
+// sets the turn's response_ordinal to `ordinal`. `ordinal` is expected to equal
+// the request's message count (the caller's cr.nextOrdinal from
+// countRequestMessages), so the assistant lands right after request messages
+// 0..ordinal-1.
 func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
 	var msg struct {
 		Content json.RawMessage `json:"content"`

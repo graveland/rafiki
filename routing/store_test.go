@@ -360,6 +360,164 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 	}
 }
 
+// TestMessageHasCacheControl checks the structure-aware detection directly (no
+// DB): only a real cache_control field on a content block counts; plain-string
+// content is never a breakpoint even when its text embeds the literal token.
+func TestMessageHasCacheControl(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"block with cache_control", `[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]`, true},
+		{"block without cache_control", `[{"type":"text","text":"x"}]`, false},
+		{"plain string mentioning the token", `"please explain \"cache_control\" to me"`, false},
+		{"plain string", `"hello"`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := messageHasCacheControl(json.RawMessage(c.content)); got != c.want {
+				t.Errorf("messageHasCacheControl(%s) = %v, want %v", c.content, got, c.want)
+			}
+		})
+	}
+}
+
+// TestDecomposeRequest_PrefixChangeReStores verifies on-change prefix detection
+// re-fires after an unchanged run: three turns hashed h1, h1, h2 must store
+// prefix_content on turns 1 and 3 (NULL on 2).
+func TestDecomposeRequest_PrefixChangeReStores(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewCaptureStore(pool)
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	reqA := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"}]}`)
+	reqB := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
+	reqC := []byte(`{"model":"claude","tools":[{"name":"T"},{"name":"U"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"},{"role":"assistant","content":"d"},{"role":"user","content":"e"}]}`)
+	hA, hB, hC := PrefixHash(reqA), PrefixHash(reqB), PrefixHash(reqC)
+	if hA != hB {
+		t.Fatalf("precondition: reqA and reqB must share a prefix hash (same envelope), got %q vs %q", hA, hB)
+	}
+	if hC == hA {
+		t.Fatalf("precondition: reqC must differ (new tool), got same hash %q", hC)
+	}
+
+	decompose := func(req []byte, h string) (string, time.Time) {
+		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
+		if err != nil {
+			t.Fatalf("InsertTurnIntent: %v", err)
+		}
+		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h); err != nil {
+			t.Fatalf("DecomposeRequest: %v", err)
+		}
+		return id, ca
+	}
+	prefixOf := func(id string, ca time.Time) *string {
+		var pc *string
+		if err := pool.QueryRow(ctx,
+			`SELECT prefix_content::text FROM conversations.conversation_turn WHERE id=$1 AND created_at=$2`, id, ca).Scan(&pc); err != nil {
+			t.Fatalf("read prefix_content: %v", err)
+		}
+		return pc
+	}
+
+	id1, c1 := decompose(reqA, hA)
+	id2, c2 := decompose(reqB, hB)
+	id3, c3 := decompose(reqC, hC)
+
+	if prefixOf(id1, c1) == nil {
+		t.Fatal("turn 1 prefix_content is NULL, want stored (first turn)")
+	}
+	if prefixOf(id2, c2) != nil {
+		t.Fatal("turn 2 prefix_content stored, want NULL (unchanged from turn 1)")
+	}
+	pc3 := prefixOf(id3, c3)
+	if pc3 == nil {
+		t.Fatal("turn 3 prefix_content is NULL, want re-stored (envelope changed after an unchanged run)")
+	}
+	if !strings.Contains(*pc3, `"U"`) {
+		t.Fatalf("turn 3 prefix_content = %q, want the new tool \"U\" in the envelope", *pc3)
+	}
+}
+
+// TestDecomposeRequest_CrossTurnIdempotent verifies each resubmitted message
+// persists exactly once at a contiguous ordinal (ON CONFLICT DO NOTHING,
+// first-writer-wins) across turns of one conversation.
+func TestDecomposeRequest_CrossTurnIdempotent(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewCaptureStore(pool)
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"a"}]}`)
+	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
+	for _, req := range [][]byte{req1, req2} {
+		h := PrefixHash(req)
+		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
+		if err != nil {
+			t.Fatalf("InsertTurnIntent: %v", err)
+		}
+		if _, err := s.DecomposeRequest(ctx, convID, id, ca, req, h); err != nil {
+			t.Fatalf("DecomposeRequest: %v", err)
+		}
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT ordinal, role FROM conversations.conversation_message WHERE conversation_id=$1 ORDER BY ordinal`, convID)
+	if err != nil {
+		t.Fatalf("query messages: %v", err)
+	}
+	defer rows.Close()
+	type msg struct {
+		ord  int
+		role string
+	}
+	var got []msg
+	for rows.Next() {
+		var m msg
+		if err := rows.Scan(&m.ord, &m.role); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, m)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	want := []msg{{0, "user"}, {1, "assistant"}, {2, "user"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("conversation_message = %v, want %v (each resubmitted message once, contiguous ordinals)", got, want)
+	}
+}
+
 // TestDecomposeRequest_CacheBreakpoints verifies breakpoint detection is
 // structure-aware: only messages with an actual cache_control field on a
 // content block are recorded, not messages whose text merely contains the
