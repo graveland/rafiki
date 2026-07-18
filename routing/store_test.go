@@ -383,6 +383,82 @@ func TestMessageHasCacheControl(t *testing.T) {
 	}
 }
 
+// TestJSONBSafe checks the U+0000 sanitizer directly (no DB): clean content is
+// returned verbatim, NUL-bearing content is stripped and stays valid JSON with
+// integers preserved, and invalid JSON is passed through unchanged.
+func TestJSONBSafe(t *testing.T) {
+	clean := `{"type":"text","text":"hello"}`
+	if got := string(jsonbSafe([]byte(clean))); got != clean {
+		t.Errorf("clean content changed: %s (want verbatim)", got)
+	}
+
+	withNUL := `[{"type":"text","text":"a\u0000b","n":123456789012345678}]`
+	out := string(jsonbSafe([]byte(withNUL)))
+	if strings.Contains(out, `\u0000`) || strings.IndexByte(out, 0) >= 0 {
+		t.Errorf("output still carries NUL: %s", out)
+	}
+	if !strings.Contains(out, "123456789012345678") {
+		t.Errorf("large integer not preserved (UseNumber): %s", out)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(out), &arr); err != nil {
+		t.Fatalf("output not valid json: %v", err)
+	}
+	if arr[0]["text"] != "ab" {
+		t.Errorf("text = %v, want \"ab\" (NUL stripped)", arr[0]["text"])
+	}
+
+	bad := `not json \u0000`
+	if got := string(jsonbSafe([]byte(bad))); got != bad {
+		t.Errorf("invalid json changed: %s (want unchanged)", got)
+	}
+}
+
+// TestDecomposeRequest_NullEscapeInContent verifies a message whose content
+// carries a \u0000 escape (which a raw jsonb insert rejects with SQLSTATE 22P05)
+// is captured with the NUL stripped rather than failing the decompose.
+func TestDecomposeRequest_NullEscapeInContent(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	s := NewCaptureStore(pool)
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"before\u0000after"}]}]}`)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: PrefixHash(req)})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent with a \\u0000 in request: %v", err)
+	}
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req)); err != nil {
+		t.Fatalf("DecomposeRequest with a \\u0000 in content should succeed, got: %v", err)
+	}
+
+	var content string
+	if err := pool.QueryRow(ctx,
+		`SELECT content::text FROM conversations.conversation_message WHERE conversation_id=$1 AND ordinal=0`, convID).Scan(&content); err != nil {
+		t.Fatalf("read content: %v", err)
+	}
+	if strings.IndexByte(content, 0) >= 0 {
+		t.Errorf("stored content still contains a NUL byte: %q", content)
+	}
+	if !strings.Contains(content, "beforeafter") {
+		t.Errorf("content = %q, want the NUL stripped to \"beforeafter\"", content)
+	}
+}
+
 // TestDecomposeRequest_PrefixChangeReStores verifies on-change prefix detection
 // re-fires after an unchanged run: three turns hashed h1, h1, h2 must store
 // prefix_content on turns 1 and 3 (NULL on 2).

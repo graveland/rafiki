@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -117,7 +118,7 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 	err = s.pool.QueryRow(ctx,
 		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, status, model, request, source, author, author_kind, prefix_hash, protocol)
 		 VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9) RETURNING id::text, created_at`,
-		t.ConversationID, t.Ordinal, nullify(t.Model), nullifyBytes(t.Request),
+		t.ConversationID, t.Ordinal, nullify(t.Model), nullifyBytes(jsonbSafe(t.Request)),
 		nullify(t.Source), nullify(t.Author), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol).Scan(&turnID, &createdAt)
 	if err != nil {
 		return "", time.Time{}, err
@@ -155,7 +156,7 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 		    SET status='complete', response=$3, stop_reason=$4, upstream=$5,
 		        input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10
 		  WHERE id=$1::uuid AND created_at=$2`,
-		r.TurnID, r.CreatedAt, nullifyBytes(r.Response), nullify(r.StopReason), nullify(r.Upstream),
+		r.TurnID, r.CreatedAt, nullifyBytes(jsonbSafe(r.Response)), nullify(r.StopReason), nullify(r.Upstream),
 		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS)
 	if err != nil {
 		return err
@@ -206,7 +207,7 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 		if _, err := s.pool.Exec(ctx,
 			`INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
 			 VALUES ($1,$2,$3,$4) ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
-			convID, i, m.Role, []byte(content)); err != nil {
+			convID, i, m.Role, jsonbSafe(content)); err != nil {
 			return 0, fmt.Errorf("decompose: insert message %d: %w", i, err)
 		}
 	}
@@ -226,7 +227,7 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET prefix_content=$3, cache_breakpoints=$4
 			  WHERE id=$1::uuid AND created_at=$2`,
-			turnID, createdAt, envelope, breakpoints); err != nil {
+			turnID, createdAt, jsonbSafe(envelope), breakpoints); err != nil {
 			return len(req.Messages), fmt.Errorf("decompose: store prefix_content: %w", err)
 		}
 	} else {
@@ -321,6 +322,54 @@ func messageHasCacheControl(content json.RawMessage) bool {
 	return bytes.Contains(content, []byte(`"cache_control"`))
 }
 
+// jsonbSafe makes a JSON value storable in a Postgres jsonb column, which
+// cannot represent U+0000: a `\u0000` escape triggers SQLSTATE 22P05 on insert.
+// Captured content is arbitrary client/model text (a pasted NUL, a tool result),
+// so strip U+0000 from every string. Values without the escape are returned
+// verbatim — only NUL-bearing content pays the decode/re-encode. Invalid JSON is
+// returned unchanged so the insert surfaces the real error.
+func jsonbSafe(b []byte) []byte {
+	if !bytes.Contains(b, []byte(`\u0000`)) {
+		return b
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber() // preserve integer precision through the round-trip
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return b
+	}
+	out, err := json.Marshal(stripNUL(v))
+	if err != nil {
+		return b
+	}
+	return out
+}
+
+// stripNUL recursively removes U+0000 from every string (and map key) in a
+// decoded JSON value. json.Number and other scalars pass through unchanged.
+func stripNUL(v any) any {
+	switch t := v.(type) {
+	case string:
+		if strings.IndexByte(t, 0) < 0 {
+			return t
+		}
+		return strings.ReplaceAll(t, "\x00", "")
+	case []any:
+		for i, e := range t {
+			t[i] = stripNUL(e)
+		}
+		return t
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[strings.ReplaceAll(k, "\x00", "")] = stripNUL(e)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 // AppendResponseMessage appends the canonical assistant Message (canonical, an
 // anthropic.Message JSON) as a conversation_message at `ordinal`, content
 // stored verbatim from canonical.content, plus token usage and stop_reason.
@@ -346,7 +395,7 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 		   (conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
 		 VALUES ($1,$2,'assistant',$3,$4,$5,$6)
 		 ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
-		convID, ordinal, []byte(content), in, out, nullify(stopReason)); err != nil {
+		convID, ordinal, jsonbSafe(content), in, out, nullify(stopReason)); err != nil {
 		return fmt.Errorf("append response: insert: %w", err)
 	}
 	if _, err := s.pool.Exec(ctx,
