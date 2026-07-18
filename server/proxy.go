@@ -298,6 +298,14 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 // response. The per-turn "llm turn" log fires regardless of whether DB capture
 // is on, so savannah-admin surfaces every proxied turn.
 func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time) {
+	// A 4xx/5xx is a small, non-streamed error body — handle it before touching
+	// the streaming path so we can buffer, surface the provider's real message
+	// to the client, and capture it. (The Messages API never responds 3xx, so
+	// treating <400 as a stream to tee is safe.)
+	if resp.StatusCode >= 400 {
+		p.handleUpstreamError(w, r, resp, cr, upstream, model, start)
+		return
+	}
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
@@ -339,21 +347,10 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	}
 
 	elapsed := time.Since(start)
-	user := "<unknown>"
-	if p.auth != nil {
-		if id := p.auth.Identify(r); id != nil && id.Username != "" {
-			user = id.Username
-		}
-	}
-	// A 4xx/5xx upstream is a failed turn, not a clean completion; so is a
-	// mid-stream read error that truncated the body. (The Messages API never
-	// responds 3xx, so treating <400 as success is safe.)
-	if resp.StatusCode >= 400 {
-		p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "latency", latency(elapsed))
-		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
-		p.failTurn(r, cr, "upstream status "+strconv.Itoa(resp.StatusCode))
-		return
-	}
+	user := p.requestUser(r)
+	// A mid-stream read error that truncated the body is a failed turn, not a
+	// clean completion. (Upstream 4xx/5xx is handled before streaming begins, in
+	// handleUpstreamError.)
 	if streamErr != nil {
 		// last_byte_ago disambiguates the two stall stories: ~0 means bytes were
 		// still flowing when the stream died (proxy→client hop or client gave up
@@ -445,6 +442,166 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 	if ferr := p.store.FailTurn(capCtx, cr.turnID, cr.createdAt, reason); ferr != nil {
 		p.logger.Warn("proxy capture: fail-turn failed", "conversation", cr.convID, "error", ferr)
 	}
+}
+
+// maxCapturedErrorBody bounds how much of an upstream error body is folded into
+// a failed turn's reason. Provider 4xx bodies are small JSON; the cap only
+// guards against a pathological upstream, not normal errors.
+const maxCapturedErrorBody = 8 << 10 // 8 KiB
+
+// boundedErrorBody returns a trimmed, size-bounded copy of an upstream error
+// body suitable for storing and logging. Empty in → empty out.
+func boundedErrorBody(b []byte) string {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 {
+		return ""
+	}
+	if len(b) > maxCapturedErrorBody {
+		// Cut on a valid UTF-8 boundary: a raw byte offset can split a multi-byte
+		// rune, and the invalid tail would break a UTF8 log sink or a text/jsonb
+		// column insert (dropping the very capture this preserves).
+		return strings.ToValidUTF8(string(b[:maxCapturedErrorBody]), "") + "…(truncated)"
+	}
+	return string(b)
+}
+
+// decomposeRequestBestEffort decomposes cr.reqBody into conversation_message
+// rows on a fail path, where no CompleteTurn ran (so no capCtx exists). Uses a
+// detached, bounded context: the client may already be gone. No-op when capture
+// is off.
+func (p *MessagesProxy) decomposeRequestBestEffort(r *http.Request, cr captureRef) {
+	if !cr.on {
+		return
+	}
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	if _, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
+		p.logger.Warn("proxy capture: decompose request (failed turn) failed", "conversation", cr.convID, "error", derr)
+	}
+}
+
+// handleUpstreamError forwards a non-2xx upstream response to the client and
+// records the failed turn. It buffers the (small) error body so it can (a)
+// surface the provider's real message — OpenRouter wraps the actionable detail
+// in error.metadata.raw, which a client showing only the top-level
+// error.message otherwise never sees — and (b) store it, making the failure
+// diagnosable from the capture store alone.
+func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time) {
+	raw, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		// The error body is small; a read failure means the upstream connection
+		// dropped mid-delivery. Note it so the failed turn isn't a silent,
+		// bodyless mystery, and still forward whatever bytes did arrive.
+		p.logger.Warn("proxy: reading upstream error body failed", "conversation", cr.convID, "error", rerr, "bytes", len(raw))
+	}
+	elapsed := time.Since(start)
+	user := p.requestUser(r)
+
+	clientBody, surfaced := raw, false
+	if s, ok := surfaceProviderError(raw); ok {
+		clientBody, surfaced = s, true
+	}
+	for k, vs := range resp.Header {
+		// Content-Length is recomputed below. When we rewrote the body to
+		// plaintext, an upstream Content-Encoding would mislabel it, so drop that
+		// too — but only then; a passthrough body keeps upstream's encoding.
+		if strings.EqualFold(k, "Content-Length") || (surfaced && strings.EqualFold(k, "Content-Encoding")) {
+			continue
+		}
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(clientBody)))
+	w.WriteHeader(resp.StatusCode)
+	if _, werr := w.Write(clientBody); werr != nil {
+		p.logger.Warn("proxy: client write failed on error response", "conversation", cr.convID, "error", werr)
+	}
+
+	// Store the ORIGINAL upstream body (the richest form) on the turn, not the
+	// client-facing rewrite.
+	errBody := boundedErrorBody(raw)
+	reason := "upstream status " + strconv.Itoa(resp.StatusCode)
+	if rerr != nil {
+		reason += " (error body read failed: " + rerr.Error() + ")"
+	}
+	if errBody != "" {
+		reason += ": " + errBody
+	}
+	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
+	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	p.failTurn(r, cr, reason)
+	// Decompose the request even on failure so the turn is inspectable — the
+	// messages/prefix that triggered the error are exactly what you need to see
+	// (especially for a request-caused 4xx). The success path decomposes after
+	// CompleteTurn; here there is no completion, only the request.
+	p.decomposeRequestBestEffort(r, cr)
+}
+
+// requestUser resolves the caller's username for turn logs, or "<unknown>".
+func (p *MessagesProxy) requestUser(r *http.Request) string {
+	if p.auth != nil {
+		if id := p.auth.Identify(r); id != nil && id.Username != "" {
+			return id.Username
+		}
+	}
+	return "<unknown>"
+}
+
+// surfaceProviderError unwraps OpenRouter's provider-error envelope so the
+// client sees the real reason. On a provider rejection OpenRouter returns
+//
+//	{"error":{"message":"Provider returned error","metadata":{"raw":"<json>",
+//	 "provider_name":"OpenAI"}}}
+//
+// where the actionable detail (e.g. an unsupported value and the allowed set)
+// lives in metadata.raw. Lift raw.error.message into the top-level
+// error.message, preserving the rest of the body, so a client that displays
+// error.message (Claude Code) shows it. Returns (nil, false) when the body is
+// not such an envelope — the caller then passes the original through unchanged.
+func surfaceProviderError(body []byte) ([]byte, bool) {
+	var env struct {
+		Error struct {
+			Metadata struct {
+				Raw          string `json:"raw"`
+				ProviderName string `json:"provider_name"`
+			} `json:"metadata"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || env.Error.Metadata.Raw == "" {
+		return nil, false
+	}
+	var inner struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(env.Error.Metadata.Raw), &inner); err != nil || inner.Error.Message == "" {
+		return nil, false
+	}
+	detail := inner.Error.Message
+	if pn := env.Error.Metadata.ProviderName; pn != "" {
+		detail = pn + ": " + detail
+	}
+	// Rewrite only the top-level error.message, preserving the rest of the
+	// structure the client expects. UseNumber keeps integer fields exact through
+	// the round-trip (a plain map decode would widen them to float64).
+	var generic map[string]any
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&generic); err != nil {
+		return nil, false
+	}
+	errObj, ok := generic["error"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	errObj["message"] = detail
+	out, err := json.Marshal(generic)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // beginCapture correlates the session and write-aheads the request

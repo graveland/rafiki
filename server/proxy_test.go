@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/timescale/rafiki/routing"
@@ -30,7 +31,9 @@ type fakeProxyStore struct {
 	lastIntentModel      string
 	lastIntentSource     string
 	lastIntentAuthorKind string
-	completeErr          error // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
+	lastFailMsg          string // errMsg passed to the last FailTurn
+	decomposes           int    // DecomposeRequest call count
+	completeErr          error  // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
 }
 
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref routing.ConversationRef) (string, error) {
@@ -56,10 +59,12 @@ func (f *fakeProxyStore) CompleteTurn(ctx context.Context, r routing.TurnResult)
 
 func (f *fakeProxyStore) FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error {
 	f.fails++
+	f.lastFailMsg = errMsg
 	return nil
 }
 
 func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error) {
+	f.decomposes++
 	return 0, nil
 }
 
@@ -192,8 +197,133 @@ func TestMessagesProxyFailsTurnOnUpstreamError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 passed through", rec.Code)
 	}
+	// A non-envelope error body must reach the client byte-for-byte unmangled
+	// (surfaceProviderError returns false → passthrough).
+	if got := rec.Body.String(); got != `{"type":"error","error":{"type":"api_error"}}` {
+		t.Errorf("client body = %q, want the upstream body passed through unchanged", got)
+	}
 	if fs.fails != 1 || fs.completes != 0 {
 		t.Errorf("capture: fails=%d completes=%d, want 1/0", fs.fails, fs.completes)
+	}
+	// The failure reason must carry the upstream error body, not just the status,
+	// so a failed turn is diagnosable from the capture store alone.
+	if !strings.Contains(fs.lastFailMsg, "upstream status 500") {
+		t.Errorf("fail msg = %q, want it to mention the status", fs.lastFailMsg)
+	}
+	if !strings.Contains(fs.lastFailMsg, `"api_error"`) {
+		t.Errorf("fail msg = %q, want it to include the upstream error body", fs.lastFailMsg)
+	}
+	// The request is decomposed even on failure, so the messages that triggered
+	// the error are recorded.
+	if fs.decomposes != 1 {
+		t.Errorf("decomposes = %d, want 1 (request decomposed on failure)", fs.decomposes)
+	}
+}
+
+func TestBoundedErrorBody(t *testing.T) {
+	if got := boundedErrorBody([]byte("   ")); got != "" {
+		t.Errorf("blank body => %q, want empty", got)
+	}
+	if got := boundedErrorBody([]byte(`{"e":1}`)); got != `{"e":1}` {
+		t.Errorf("small body => %q, want passthrough", got)
+	}
+	// An oversized body whose byte cut lands mid multi-byte rune must still be
+	// valid UTF-8 (3-byte '€' guarantees the 8 KiB offset splits a rune).
+	out := boundedErrorBody([]byte(strings.Repeat("€", 3000)))
+	if !utf8.ValidString(out) {
+		t.Errorf("truncated output is not valid UTF-8")
+	}
+	if !strings.HasSuffix(out, "…(truncated)") {
+		t.Errorf("want truncation marker, got tail %q", out[len(out)-16:])
+	}
+}
+
+func TestSurfaceProviderError(t *testing.T) {
+	innerRaw := `{"error":{"message":"Unsupported value: 'high' is not supported with the 'gpt-5-codex' model. Supported values are: 'medium'.","param":"text.verbosity","code":"unsupported_value"}}`
+	envelope, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message":  "Provider returned error",
+		"metadata": map[string]any{"raw": innerRaw, "provider_name": "OpenAI"},
+	}})
+	rawNotJSON, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"metadata": map[string]any{"raw": "not json"},
+	}})
+
+	cases := []struct {
+		name         string
+		in           []byte
+		wantOK       bool
+		wantContains string
+	}{
+		{"openrouter envelope", envelope, true, "OpenAI: Unsupported value: 'high'"},
+		{"plain anthropic error", []byte(`{"type":"error","error":{"type":"api_error","message":"overloaded"}}`), false, ""},
+		{"no metadata.raw", []byte(`{"error":{"message":"x","metadata":{"provider_name":"OpenAI"}}}`), false, ""},
+		{"malformed body", []byte(`not json`), false, ""},
+		{"raw not json", rawNotJSON, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, ok := surfaceProviderError(c.in)
+			if ok != c.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, c.wantOK)
+			}
+			if ok && !strings.Contains(string(out), c.wantContains) {
+				t.Errorf("out = %s, want it to contain %q", out, c.wantContains)
+			}
+		})
+	}
+}
+
+func TestMessagesProxySurfacesProviderErrorToClient(t *testing.T) {
+	// OpenRouter buries the provider's real error in error.metadata.raw and shows
+	// only "Provider returned error" at the top level. The proxy must lift the
+	// real message so a client displaying error.message (Claude Code) sees it.
+	innerRaw := `{"error":{"message":"Unsupported value: 'high' is not supported with the 'gpt-5-codex' model. Supported values are: 'medium'.","param":"text.verbosity","code":"unsupported_value"}}`
+	envBytes, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message":  "Provider returned error",
+		"code":     400,
+		"metadata": map[string]any{"raw": innerRaw, "provider_name": "OpenAI"},
+	}})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(envBytes)
+	}))
+	defer upstream.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	req.Header.Set("X-Rafiki-Session", "sess-surface")
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 passed through", rec.Code)
+	}
+	var got struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("client body not JSON: %v", err)
+	}
+	if !strings.Contains(got.Error.Message, "OpenAI:") || !strings.Contains(got.Error.Message, "gpt-5-codex") {
+		t.Errorf("client error.message = %q, want the provider detail surfaced", got.Error.Message)
+	}
+	// Content-Length must match the rewritten body, not the upstream's.
+	if cl := rec.Header().Get("Content-Length"); cl != fmt.Sprint(rec.Body.Len()) {
+		t.Errorf("Content-Length = %q, want %d", cl, rec.Body.Len())
+	}
+	// Capture still records the failure (with the original raw body) and
+	// decomposes the request.
+	if fs.fails != 1 || fs.decomposes != 1 {
+		t.Errorf("fails=%d decomposes=%d, want 1/1", fs.fails, fs.decomposes)
+	}
+	if !strings.Contains(fs.lastFailMsg, "unsupported_value") {
+		t.Errorf("fail msg = %q, want the original raw body stored", fs.lastFailMsg)
 	}
 }
 
