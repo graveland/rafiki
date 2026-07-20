@@ -238,10 +238,22 @@ func serveCmd(args []string) error {
 		return err // listener died on its own
 	case <-ctx.Done():
 	}
-	// Graceful drain: in-flight SSE streams get the full grace period to
-	// finish (and their detached-context capture writes to land) before the
-	// process exits — a SIGTERM must not strand turns 'pending'.
-	shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// First signal received: re-arm the default handler so a second Ctrl-C (or
+	// SIGTERM) force-quits immediately instead of being swallowed for the whole
+	// drain. Without this the process ignores every subsequent signal until the
+	// grace period elapses.
+	stop()
+	// Graceful drain: in-flight SSE streams get the grace period to finish (and
+	// their detached-context capture writes to land) before the process exits —
+	// a production SIGTERM must not strand turns 'pending'. Dev restarts want to
+	// be snappy (Claude Code holds a persistent connection that counts as active),
+	// so --dev drains briefly; a local turn is disposable.
+	grace := 30 * time.Second
+	if *dev {
+		grace = 2 * time.Second
+	}
+	logger.Info("draining in-flight streams before exit (Ctrl-C again to force-quit)", "grace", grace)
+	shutCtx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
 		logger.Warn("shutdown did not drain cleanly", "error", err)
