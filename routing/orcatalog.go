@@ -113,6 +113,16 @@ func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, er
 		}
 		return "", fmt.Errorf("cannot resolve %q: OpenRouter model catalog unavailable", requested)
 	}
+	// A slash id routes to OpenRouter unchanged — except OpenRouter's auto-latest
+	// aliases carry a leading "~" (e.g. ~openai/gpt-latest) that AllIDs strips for
+	// shell-safety and users drop when copy-pasting, which OpenRouter 400s. Re-add
+	// it when the catalog confirms the tilde form is the real id and the bare one
+	// isn't, so both the completion-suggested and hand-typed bare forms resolve.
+	if cat != nil && strings.Contains(requested, "/") && !strings.HasPrefix(requested, "~") {
+		if norm, changed := cat.normalizeTilde(requested); changed {
+			return norm, nil
+		}
+	}
 	return requested, nil
 }
 
@@ -310,9 +320,34 @@ func (c *ModelCatalog) OpenRouterModel(anthropicModel string) string {
 	return "anthropic/" + anthropicModel
 }
 
+// normalizeTilde re-adds the leading "~" to a slash id when the catalog contains
+// the tilde form but not the bare one — rescuing an OpenRouter auto-latest alias
+// (~openai/gpt-latest) requested without its tilde. Conservative: returns
+// (id, false) unless the tilde form is present and the bare one absent, so a
+// stale or partial cache never rewrites a genuinely valid id.
+func (c *ModelCatalog) normalizeTilde(id string) (string, bool) {
+	c.refresh()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	tilde := "~" + id
+	var hasBare, hasTilde bool
+	for _, m := range c.models {
+		switch m.ID {
+		case id:
+			hasBare = true
+		case tilde:
+			hasTilde = true
+		}
+	}
+	if hasTilde && !hasBare {
+		return tilde, true
+	}
+	return id, false
+}
+
 // AllIDs returns every catalog model id (leading "~" auto-alias marker
-// stripped), sorted + de-duplicated, for client-side completion. Empty if the
-// catalog hasn't loaded.
+// stripped, for shell-safe completion; the proxy re-adds it at routing time via
+// normalizeTilde), sorted + de-duplicated. Empty if the catalog hasn't loaded.
 func (c *ModelCatalog) AllIDs() []string {
 	c.refresh()
 	c.mu.Lock()

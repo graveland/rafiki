@@ -141,6 +141,9 @@ func TestResolveModel(t *testing.T) {
 		{ID: "deepseek/deepseek-v4-pro", Created: 4},
 		{ID: "deepseek/deepseek-v4-flash", Created: 5},
 		{ID: "z-ai/glm-5.2", Created: 6},
+		{ID: "openai/gpt-4o", Created: 7},
+		{ID: "~openai/gpt-latest", Created: 8}, // auto-latest alias (tilde form only)
+		{ID: "~anthropic/claude-sonnet-latest", Created: 9},
 	})
 	mustResolve := func(def, req, want string) {
 		t.Helper()
@@ -151,7 +154,19 @@ func TestResolveModel(t *testing.T) {
 	mustResolve("haiku-latest", "", "claude-haiku-4-5") // empty -> default alias -> catalog
 	mustResolve("haiku-latest", "sonnet-latest", "claude-sonnet-5")
 	mustResolve("haiku-latest", "claude-opus-4-8", "claude-opus-4-8") // concrete passthrough
-	mustResolve("haiku-latest", "openai/gpt-4o", "openai/gpt-4o")     // slash passthrough
+	mustResolve("haiku-latest", "openai/gpt-4o", "openai/gpt-4o")     // real slash id: passthrough
+
+	// OpenRouter auto-latest alias: the bare form (AllIDs strips the ~, and users
+	// copy-paste it) is re-tilded to the real catalog id instead of 400ing.
+	mustResolve("haiku-latest", "openai/gpt-latest", "~openai/gpt-latest")
+	// Already-tilde form is left as-is.
+	mustResolve("haiku-latest", "~openai/gpt-latest", "~openai/gpt-latest")
+	// A slash id with neither bare nor tilde form must not gain an invented tilde;
+	// it passes through and OpenRouter's (now surfaced) error explains it.
+	mustResolve("haiku-latest", "openai/nonexistent", "openai/nonexistent")
+	// Anthropic -latest resolves to a concrete id in every form, including OR's
+	// ~anthropic/claude-<fam>-latest.
+	mustResolve("haiku-latest", "~anthropic/claude-sonnet-latest", "claude-sonnet-5")
 
 	// Short model aliases resolve to the line's newest OR id (slash form, so
 	// downstream slash routing sends them to OpenRouter). An empty request
