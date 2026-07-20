@@ -141,8 +141,12 @@ func LatestAlias(model string) (string, bool) {
 }
 
 type orModel struct {
-	ID      string `json:"id"`
-	Created int64  `json:"created"`
+	ID          string `json:"id"`
+	Created     int64  `json:"created"`
+	ContextLen  int    `json:"context_length"`
+	TopProvider struct {
+		MaxCompletionTokens int `json:"max_completion_tokens"`
+	} `json:"top_provider"`
 }
 
 // ModelCatalog fetches and caches the OpenRouter model list, and resolves the
@@ -156,6 +160,7 @@ type ModelCatalog struct {
 	url    string
 	ttl    time.Duration
 	logger *tslogs.Logger
+	store  SnapshotStore // optional cross-process cache; nil = memory-only
 
 	sf singleflight.Group // coalesces concurrent refreshes
 
@@ -164,8 +169,74 @@ type ModelCatalog struct {
 	fetched time.Time
 }
 
+// SnapshotStore persists the catalog's JSON snapshot between processes so a
+// short-lived host (a CLI launch) reuses a warm catalog instead of re-fetching.
+// The host supplies the storage; the catalog stays free of filesystem policy.
+// Load returns the last saved bytes, or an error — any error (including a
+// missing entry) is treated as a cold cache, so a "not found" need not be
+// distinguished. The bytes are opaque to the host (the catalog owns the schema).
+type SnapshotStore interface {
+	Load() ([]byte, error)
+	Save([]byte) error
+}
+
 func NewModelCatalog(httpClient *http.Client, ttl time.Duration, logger *tslogs.Logger) *ModelCatalog {
 	return &ModelCatalog{http: httpClient, url: openRouterModelsURL, ttl: ttl, logger: logger}
+}
+
+// WithCache wires a SnapshotStore and loads any existing snapshot immediately, so
+// a short-lived process reuses a warm catalog across invocations. A snapshot
+// within the catalog's ttl satisfies fresh() and skips the network entirely; a
+// stale one is still loaded so an offline fetch keeps serving it. Best-effort: a
+// missing or unreadable snapshot just leaves a cold in-memory cache. Returns the
+// receiver for chaining.
+func (c *ModelCatalog) WithCache(store SnapshotStore) *ModelCatalog {
+	c.store = store
+	c.loadCache()
+	return c
+}
+
+type catalogSnapshot struct {
+	Fetched time.Time `json:"fetched"`
+	Models  []orModel `json:"models"`
+}
+
+func (c *ModelCatalog) loadCache() {
+	if c.store == nil {
+		return
+	}
+	data, err := c.store.Load()
+	if err != nil || len(data) == 0 {
+		return // cold cache
+	}
+	var snap catalogSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		c.logger.Warn("model catalog: ignoring unreadable cache snapshot", "error", err)
+		return
+	}
+	if len(snap.Models) == 0 {
+		return // empty/old-schema snapshot: treat as cold so refresh() refetches
+	}
+	c.mu.Lock()
+	c.models = snap.Models
+	c.fetched = snap.Fetched
+	c.mu.Unlock()
+}
+
+func (c *ModelCatalog) saveCache() {
+	if c.store == nil {
+		return
+	}
+	c.mu.Lock()
+	snap := catalogSnapshot{Fetched: c.fetched, Models: c.models}
+	c.mu.Unlock()
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	if err := c.store.Save(data); err != nil {
+		c.logger.Warn("model catalog: cache save failed", "error", err)
+	}
 }
 
 // refresh reloads the catalog when the cache is empty or stale. Concurrent
@@ -224,6 +295,7 @@ func (c *ModelCatalog) fetch() {
 	c.models = payload.Data
 	c.fetched = time.Now()
 	c.mu.Unlock()
+	c.saveCache() // best-effort; persists the snapshot for the next process
 }
 
 // ResolveLatest returns the newest anthropic/claude-<family>-* model (excluding
@@ -366,10 +438,61 @@ func (c *ModelCatalog) AllIDs() []string {
 	return ids
 }
 
+// ContextWindow returns the OpenRouter-reported context length and max
+// completion tokens for a requested model, resolving it the same way the proxy
+// does (empty->default is not applied here; "<family>-latest" and bare/slash
+// ids resolve to the concrete OpenRouter entry). ok is false on a nil receiver,
+// an unresolvable model, a cold/stale cache without the entry, or an entry that
+// doesn't report a context length.
+func (c *ModelCatalog) ContextWindow(model string) (contextLen, maxCompletion int, ok bool) {
+	if c == nil {
+		return 0, 0, false
+	}
+	resolved, err := ResolveModel(c, "", model)
+	if err != nil || resolved == "" {
+		return 0, 0, false
+	}
+	orID := c.OpenRouterModel(resolved)
+	c.refresh()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.models {
+		if m.ID == orID {
+			return m.ContextLen, m.TopProvider.MaxCompletionTokens, m.ContextLen > 0
+		}
+	}
+	return 0, 0, false
+}
+
+// AutoCompactWindow computes a CLAUDE_CODE_AUTO_COMPACT_WINDOW token threshold
+// from a model's context length: the full window minus a reply reserve. The
+// reserve is the model's max completion tokens, clamped to [5%, 10%] of the
+// window — a floor so a model that reports no (or a tiny) max output still keeps
+// headroom for the compaction summary and a reply, and a cap so a huge-output
+// model doesn't compact absurdly early. Returns 0 when contextLen is
+// non-positive, so callers skip the variable and Claude Code keeps its default.
+func AutoCompactWindow(contextLen, maxCompletion int) int {
+	if contextLen <= 0 {
+		return 0
+	}
+	minReserve := contextLen / 20 // 5% floor
+	maxReserve := contextLen / 10 // 10% cap
+	reserve := maxCompletion
+	if reserve < minReserve {
+		reserve = minReserve
+	}
+	if reserve > maxReserve {
+		reserve = maxReserve
+	}
+	return contextLen - reserve
+}
+
 // CatalogEntry is the exported shape for test seeding.
 type CatalogEntry struct {
-	ID      string
-	Created int64
+	ID                  string
+	Created             int64
+	ContextLength       int
+	MaxCompletionTokens int
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
@@ -378,7 +501,8 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 	defer c.mu.Unlock()
 	c.models = make([]orModel, len(entries))
 	for i, e := range entries {
-		c.models[i] = orModel{ID: e.ID, Created: e.Created}
+		c.models[i] = orModel{ID: e.ID, Created: e.Created, ContextLen: e.ContextLength}
+		c.models[i].TopProvider.MaxCompletionTokens = e.MaxCompletionTokens
 	}
 	c.fetched = time.Now().Add(c.ttl) // never refresh in tests
 }

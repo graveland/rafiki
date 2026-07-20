@@ -259,3 +259,98 @@ func TestAllIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestAutoCompactWindow(t *testing.T) {
+	cases := []struct {
+		name                      string
+		contextLen, maxComp, want int
+	}{
+		{"codex: reserve capped at 10%", 400000, 128000, 360000},
+		{"sonnet: reserve = full max completion", 1000000, 64000, 936000},
+		{"gpt-4o: reserve capped at 10%", 128000, 16000, 115200},
+		{"small max completion floored to 5%", 200000, 8000, 190000},
+		{"no max completion reported -> 5% floor, not full window", 200000, 0, 190000},
+		{"zero context -> 0 (caller skips)", 0, 64000, 0},
+		{"negative context -> 0", -5, 64000, 0},
+	}
+	for _, c := range cases {
+		if got := AutoCompactWindow(c.contextLen, c.maxComp); got != c.want {
+			t.Errorf("%s: AutoCompactWindow(%d,%d) = %d, want %d", c.name, c.contextLen, c.maxComp, got, c.want)
+		}
+	}
+}
+
+func TestContextWindow(t *testing.T) {
+	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c.SeedForTest([]CatalogEntry{
+		{ID: "openai/gpt-5-codex", Created: 1, ContextLength: 400000, MaxCompletionTokens: 128000},
+		{ID: "anthropic/claude-sonnet-5", Created: 2, ContextLength: 1000000, MaxCompletionTokens: 64000},
+		{ID: "~openai/gpt-latest", Created: 3, ContextLength: 400000, MaxCompletionTokens: 128000},
+		{ID: "openai/no-window", Created: 4}, // reports no context_length
+	})
+	cases := []struct {
+		name, model      string
+		wantCtx, wantMax int
+		wantOK           bool
+	}{
+		{"slash id direct", "openai/gpt-5-codex", 400000, 128000, true},
+		{"OR auto-latest alias re-tilded", "openai/gpt-latest", 400000, 128000, true},
+		{"family-latest -> anthropic OR entry", "sonnet-latest", 1000000, 64000, true},
+		{"catalog miss", "openai/unknown", 0, 0, false},
+		{"entry without a context length", "openai/no-window", 0, 0, false},
+	}
+	for _, tc := range cases {
+		gotCtx, gotMax, ok := c.ContextWindow(tc.model)
+		if ok != tc.wantOK || gotCtx != tc.wantCtx || gotMax != tc.wantMax {
+			t.Errorf("%s: ContextWindow(%q) = (%d,%d,%v), want (%d,%d,%v)",
+				tc.name, tc.model, gotCtx, gotMax, ok, tc.wantCtx, tc.wantMax, tc.wantOK)
+		}
+	}
+	var nilCat *ModelCatalog
+	if _, _, ok := nilCat.ContextWindow("openai/gpt-5-codex"); ok {
+		t.Error("nil catalog must return ok=false")
+	}
+}
+
+// memStore is an in-memory SnapshotStore for tests. An empty store returns
+// (nil,nil), which the catalog treats as a cold cache.
+type memStore struct{ data []byte }
+
+func (m *memStore) Load() ([]byte, error) { return m.data, nil }
+func (m *memStore) Save(b []byte) error   { m.data = b; return nil }
+
+func TestModelCatalogCache(t *testing.T) {
+	var hits atomic.Int32
+	body := `{"data":[{"id":"openai/gpt-5-codex","created":1,"context_length":400000,"top_provider":{"max_completion_tokens":128000}}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	store := &memStore{}
+
+	// Cold cache: one fetch, snapshot persisted to the store.
+	c1 := NewModelCatalog(srv.Client(), time.Hour, tslogs.NewDiscardingLogger())
+	c1.url = srv.URL
+	c1.WithCache(store)
+	if ctxLen, maxComp, ok := c1.ContextWindow("openai/gpt-5-codex"); !ok || ctxLen != 400000 || maxComp != 128000 {
+		t.Fatalf("c1 ContextWindow = (%d,%d,%v), want (400000,128000,true)", ctxLen, maxComp, ok)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("cold cache should fetch once, got %d hits", got)
+	}
+	if len(store.data) == 0 {
+		t.Fatal("fetch must persist a snapshot to the store")
+	}
+
+	// A fresh process sharing the warm store must not hit the network.
+	c2 := NewModelCatalog(srv.Client(), time.Hour, tslogs.NewDiscardingLogger())
+	c2.url = srv.URL
+	c2.WithCache(store)
+	if ctxLen, _, ok := c2.ContextWindow("openai/gpt-5-codex"); !ok || ctxLen != 400000 {
+		t.Fatalf("c2 ContextWindow from cache = (%d,%v), want (400000,true)", ctxLen, ok)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("warm cache must not re-fetch, got %d hits (want 1)", got)
+	}
+}
