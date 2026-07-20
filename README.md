@@ -100,6 +100,18 @@ This repo owns the `conversations` schema. The migration chain baselines at
 scadmin's 0007–0009 state; `store.Migrate` detects an existing scadmin-shaped
 schema and adopts it (records the baseline as applied without executing).
 
+## Model effort adaptation
+
+Some OpenRouter models reject an `output_config.effort` value Claude Code sends
+(e.g. `gpt-5-codex` accepts only `medium`). The proxy learns each model's
+allowed set at runtime: on a rejection that enumerates supported values, it
+records the constraint in an in-memory cache, clamps the effort, and retries the
+request once, so the client gets a working response instead of a dead turn.
+Subsequent requests to that model clamp proactively. The cache is per-process
+(never persisted) and starts empty, so it always reflects the current provider
+behavior. See `routing/effortmap.go` (`EffortCache`) and `server/proxy.go`
+(`effortRetry`).
+
 ## goldenwire status
 
 The committed goldens (`routing/testdata/goldenwire.json` and

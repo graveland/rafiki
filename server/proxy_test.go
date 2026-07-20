@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -543,7 +545,7 @@ func TestProxyResolveModel(t *testing.T) {
 	})
 
 	// empty model -> default (haiku-latest) -> concrete anthropic id
-	body, resolved, err := p.resolveModel([]byte(`{"max_tokens":1,"messages":[]}`))
+	body, resolved, err := p.resolveAndAdapt([]byte(`{"max_tokens":1,"messages":[]}`))
 	if err != nil {
 		t.Fatalf("empty->default errored: %v", err)
 	}
@@ -554,7 +556,7 @@ func TestProxyResolveModel(t *testing.T) {
 		t.Errorf("empty->default resolved = %q, want claude-haiku-4-5", resolved)
 	}
 	// explicit sonnet-latest -> concrete
-	body, resolved, err = p.resolveModel([]byte(`{"model":"sonnet-latest","max_tokens":1}`))
+	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"sonnet-latest","max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("sonnet-latest errored: %v", err)
 	}
@@ -565,7 +567,7 @@ func TestProxyResolveModel(t *testing.T) {
 		t.Errorf("sonnet-latest resolved = %q, want claude-sonnet-5", resolved)
 	}
 	// concrete id -> untouched
-	body, resolved, err = p.resolveModel([]byte(`{"model":"claude-opus-4-8"}`))
+	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"claude-opus-4-8"}`))
 	if err != nil {
 		t.Fatalf("concrete errored: %v", err)
 	}
@@ -577,7 +579,7 @@ func TestProxyResolveModel(t *testing.T) {
 	}
 	// short model alias -> the line's newest OR slash id (selectUpstream then
 	// routes the slash id to OpenRouter, per the slash-routing tests above)
-	body, resolved, err = p.resolveModel([]byte(`{"model":"kimi-k3","max_tokens":1}`))
+	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"kimi-k3","max_tokens":1}`))
 	if err != nil {
 		t.Fatalf("kimi-k3 errored: %v", err)
 	}
@@ -588,16 +590,16 @@ func TestProxyResolveModel(t *testing.T) {
 		t.Errorf("kimi-k3 resolved = %q, want moonshotai/kimi-k3", resolved)
 	}
 	// a model alias the catalog can't resolve -> error (no hardcoded fallback)
-	if _, _, err = p.resolveModel([]byte(`{"model":"deepseek-v4-pro"}`)); err == nil {
+	if _, _, err = p.resolveAndAdapt([]byte(`{"model":"deepseek-v4-pro"}`)); err == nil {
 		t.Error("deepseek-v4-pro absent from catalog must error")
 	}
 	// a "<family>-latest" the catalog can't resolve -> error (no hardcoded fallback)
-	if _, _, err = p.resolveModel([]byte(`{"model":"opus-latest"}`)); err == nil {
+	if _, _, err = p.resolveAndAdapt([]byte(`{"model":"opus-latest"}`)); err == nil {
 		t.Error("opus-latest absent from catalog must error")
 	}
 	// malformed body -> best-effort passthrough, no error
 	garbage := []byte(`not json`)
-	body, resolved, err = p.resolveModel(garbage)
+	body, resolved, err = p.resolveAndAdapt(garbage)
 	if err != nil || resolved != "" || string(body) != string(garbage) {
 		t.Errorf("malformed body = (%q,%q,%v), want passthrough+empty+nil", body, resolved, err)
 	}
@@ -687,4 +689,130 @@ func modelOf(t *testing.T, body []byte) string {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	return m.Model
+}
+
+func TestMessagesProxyAdaptsEffort(t *testing.T) {
+	cases := []struct {
+		name       string
+		model      string
+		reqEffort  string // "" means no output_config
+		wantEffort string // "" means output_config/effort absent on the wire
+		rawReqBody string // if set, used verbatim in place of the model/reqEffort construction
+	}{
+		{"clamp high to medium", "openai/gpt-5-codex", "high", "medium", ""},
+		{"already allowed untouched", "openai/gpt-5-codex", "medium", "medium", ""},
+		{"strip on empty set", "vendor/rejects-effort", "high", "", ""},
+		{"passthrough when absent", "vendor/unmapped", "high", "high", ""},
+		{"mapped model, no output_config at all", "openai/gpt-5-codex", "", "", ""},
+		{"mapped model, output_config present without effort key", "openai/gpt-5-codex", "", "", `{"model":"openai/gpt-5-codex","stream":true,"output_config":{"other_field":true}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotEffort string
+			var sawOutputConfig bool
+			or := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var m map[string]any
+				_ = json.Unmarshal(body, &m)
+				if oc, ok := m["output_config"].(map[string]any); ok {
+					sawOutputConfig = true
+					gotEffort, _ = oc["effort"].(string)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+			}))
+			defer or.Close()
+
+			logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+			p := NewMessagesProxy(nil, nil, "real-key", "http://unused.example", "" /*default*/, nil /*catalog*/, logger)
+			p.SetFallback("or-key", or.URL, nil) // slash ids route here
+			// Pre-seed the runtime cache to exercise proactive clamping (the
+			// learn-from-rejection path is covered by TestMessagesProxyEffortRetry).
+			p.effortCache.Learn("openai/gpt-5-codex", []string{"medium"})
+			p.effortCache.Learn("vendor/rejects-effort", []string{})
+
+			reqBody := tc.rawReqBody
+			if reqBody == "" {
+				reqBody = `{"model":"` + tc.model + `","stream":true}`
+				if tc.reqEffort != "" {
+					reqBody = `{"model":"` + tc.model + `","stream":true,"output_config":{"effort":"` + tc.reqEffort + `"}}`
+				}
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody))
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+			}
+			if tc.wantEffort == "" {
+				if sawOutputConfig && gotEffort != "" {
+					t.Errorf("effort should be stripped, upstream saw %q", gotEffort)
+				}
+			} else if gotEffort != tc.wantEffort {
+				t.Errorf("upstream effort = %q, want %q", gotEffort, tc.wantEffort)
+			}
+		})
+	}
+}
+
+// TestMessagesProxyEffortRetry covers the learn-from-rejection path: a cold
+// cache sends the client's effort, the upstream rejects it enumerating the
+// allowed set, and the proxy learns, clamps, and retries once — then clamps
+// proactively on the next request without a second rejection.
+func TestMessagesProxyEffortRetry(t *testing.T) {
+	innerRaw := `{"error":{"message":"Unsupported value: 'high' is not supported with the 'gpt-5-codex' model. Supported values are: 'medium'.","param":"text.verbosity","code":"unsupported_value"}}`
+	envBytes, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message":  "Provider returned error",
+		"metadata": map[string]any{"raw": innerRaw, "provider_name": "OpenAI"},
+	}})
+
+	var mu sync.Mutex
+	var efforts []string // effort seen by the upstream, per request
+	or := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var m map[string]any
+		_ = json.Unmarshal(body, &m)
+		eff := ""
+		if oc, ok := m["output_config"].(map[string]any); ok {
+			eff, _ = oc["effort"].(string)
+		}
+		mu.Lock()
+		efforts = append(efforts, eff)
+		mu.Unlock()
+		if eff == "high" { // reject exactly what the model can't do
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write(envBytes)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer or.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	p := NewMessagesProxy(nil, nil, "real-key", "http://unused.example", "" /*default*/, nil /*catalog*/, logger)
+	p.SetFallback("or-key", or.URL, nil) // slash ids route here
+
+	do := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+			strings.NewReader(`{"model":"openai/gpt-5-codex","stream":true,"output_config":{"effort":"high"}}`))
+		p.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := do(); rec.Code != http.StatusOK { // cold: reject -> learn -> clamp -> retry -> 200
+		t.Fatalf("first request: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := do(); rec.Code != http.StatusOK { // warm: proactively clamped, no rejection
+		t.Fatalf("second request: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"high", "medium", "medium"} // req1 high (rejected), req1-retry medium, req2 medium
+	if !reflect.DeepEqual(efforts, want) {
+		t.Errorf("upstream efforts = %v, want %v", efforts, want)
+	}
 }

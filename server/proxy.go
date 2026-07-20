@@ -46,6 +46,11 @@ type MessagesProxy struct {
 	catalog      *routing.ModelCatalog
 	defaultModel string // e.g. "haiku-latest"
 
+	// effortCache clamps/strips output_config.effort per model, learned at runtime
+	// from provider rejections (never a static snapshot). Empty until a model
+	// rejects an effort; see effortRetry.
+	effortCache *routing.EffortCache
+
 	metrics *Metrics // optional Prometheus instrumentation
 }
 
@@ -82,6 +87,7 @@ func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, u
 	if store != nil {
 		p.store = store // avoid a typed-nil interface: nil *CaptureStore = capture-less
 	}
+	p.effortCache = routing.NewEffortCache()
 	return p
 }
 
@@ -165,16 +171,19 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *htt
 	return resp, err
 }
 
-// resolveModel rewrites the request body's "model" via routing.ResolveModel
-// (empty -> server default, "<family>-latest" -> the catalog's concrete newest)
-// and returns the possibly-rewritten body plus the resolved model. A decode/
-// marshal failure is best-effort (the input is forwarded unchanged). A
-// "<family>-latest" that the catalog can't resolve returns an error so the
-// caller fails the request cleanly rather than forwarding an unusable alias.
-func (p *MessagesProxy) resolveModel(reqBody []byte) ([]byte, string, error) {
+// resolveAndAdapt rewrites the request body in one decode/marshal pass: it
+// resolves "model" via routing.ResolveModel (empty -> default, "<family>-latest"
+// -> concrete newest) and proactively adapts output_config.effort to what the
+// resolved model is known to allow (clamp/strip per the runtime effort cache; a
+// cold cache is a no-op and any rejection is caught by effortRetry). Best-effort:
+// a decode/marshal failure forwards the input unchanged. An unresolvable
+// "<family>-latest" returns
+// an error so the caller fails cleanly. Returns the (possibly-rewritten) body and
+// the resolved model.
+func (p *MessagesProxy) resolveAndAdapt(reqBody []byte) ([]byte, string, error) {
 	var body map[string]any
 	if err := json.Unmarshal(reqBody, &body); err != nil {
-		p.logger.Warn("proxy: model resolve decode failed", "error", err)
+		p.logger.Warn("proxy: request rewrite decode failed", "error", err)
 		return reqBody, "", nil
 	}
 	requested, _ := body["model"].(string)
@@ -182,19 +191,58 @@ func (p *MessagesProxy) resolveModel(reqBody []byte) ([]byte, string, error) {
 	if err != nil {
 		return reqBody, "", err
 	}
-	if resolved == requested {
+	changed := false
+	if resolved != requested {
+		body["model"] = resolved
+		changed = true
+	}
+	if p.adaptEffortMap(body, resolved) {
+		changed = true
+	}
+	if !changed {
 		return reqBody, resolved, nil
 	}
-	body["model"] = resolved
 	out, err := json.Marshal(body)
 	if err != nil {
-		// Re-marshal failed: reqBody (still carrying `requested`) is what actually
-		// goes upstream, so report `requested` — not `resolved` — to keep the
-		// captured/logged model consistent with the wire.
-		p.logger.Warn("proxy: model resolve marshal failed", "error", err)
+		p.logger.Warn("proxy: request rewrite marshal failed; forwarding original", "model", requested, "error", err)
 		return reqBody, requested, nil
 	}
 	return out, resolved, nil
+}
+
+// adaptEffortMap clamps or strips body["output_config"]["effort"] for the model
+// per the runtime effort cache, mutating body in place. Returns true if it
+// changed anything. No-op (false) when the cache has nothing for the model
+// (unconstrained), output_config.effort is absent, or the value is already
+// allowed.
+func (p *MessagesProxy) adaptEffortMap(body map[string]any, model string) bool {
+	if p.effortCache == nil {
+		return false
+	}
+	oc, ok := body["output_config"].(map[string]any)
+	if !ok {
+		return false
+	}
+	eff, ok := oc["effort"].(string)
+	if !ok {
+		return false
+	}
+	newEff, action := p.effortCache.Clamp(model, eff)
+	switch action {
+	case "strip":
+		delete(oc, "effort")
+		if len(oc) == 0 {
+			delete(body, "output_config")
+		}
+		p.logger.Info("proxy: stripped unsupported effort", "model", model, "effort", eff)
+		return true
+	case "clamp":
+		oc["effort"] = newEff
+		p.logger.Info("proxy: clamped effort to allowed value", "model", model, "from", eff, "to", newEff)
+		return true
+	default: // "keep"
+		return false
+	}
 }
 
 // captureRef bundles the identifiers for a begun capture turn so the failTurn /
@@ -217,7 +265,7 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
-	reqBody, model, err := p.resolveModel(reqBody)
+	reqBody, model, err := p.resolveAndAdapt(reqBody)
 	if err != nil {
 		// An unresolvable "<family>-latest" (offline cold catalog): fail cleanly
 		// before capture begins rather than forward an unusable alias upstream.
@@ -236,8 +284,78 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
+	// If the upstream rejected the request for an unsupported effort value, learn
+	// the constraint from its error, clamp, and retry once — so a Claude Code
+	// subagent (which can't self-correct on a 400) gets a working response instead
+	// of a dead turn. Only output_config.effort changes; the messages are
+	// untouched, so the begun capture still describes this turn.
+	if resp.StatusCode == http.StatusBadRequest {
+		if retryBody, ok := p.effortRetry(resp, reqBody, model); ok {
+			resp, upstream, err, handled = p.selectUpstream(w, r, retryBody, model, cr)
+			if handled {
+				return
+			}
+			if err != nil {
+				p.failTurn(r, cr, err.Error())
+				http.Error(w, "upstream request failed", http.StatusBadGateway)
+				return
+			}
+		}
+	}
 	defer resp.Body.Close()
 	p.streamAndCapture(w, r, resp, cr, upstream, model, start)
+}
+
+// effortRetry inspects a 400 upstream response. If it is a provider rejection
+// enumerating supported effort values, it learns the constraint into the cache,
+// clamps this request's effort to it, and returns the retry body (ok=true).
+// Otherwise it restores resp.Body (consumed while inspecting) so the caller can
+// surface the original error, and returns ok=false. Either way it reads and
+// replaces resp.Body.
+func (p *MessagesProxy) effortRetry(resp *http.Response, reqBody []byte, model string) ([]byte, bool) {
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	allowed, ok := routing.ParseSupportedEfforts(raw)
+	if !ok || !mentionsEffortParam(raw) {
+		resp.Body = io.NopCloser(bytes.NewReader(raw)) // restore so the caller surfaces it
+		return nil, false
+	}
+	p.effortCache.Learn(model, allowed)
+	p.logger.Info("proxy: learned effort constraint from upstream rejection", "model", model, "allowed", allowed)
+	retryBody := p.clampEffortBody(reqBody, model)
+	if bytes.Equal(retryBody, reqBody) {
+		// Nothing to clamp (the request carried no effort to adjust); an identical
+		// retry would just fail again. Surface the original error.
+		resp.Body = io.NopCloser(bytes.NewReader(raw))
+		return nil, false
+	}
+	return retryBody, true
+}
+
+// mentionsEffortParam guards against mistaking a non-effort "Supported values
+// are:" rejection (some other enum parameter) for an effort constraint.
+func mentionsEffortParam(body []byte) bool {
+	return bytes.Contains(body, []byte("verbosity")) ||
+		bytes.Contains(body, []byte("effort")) ||
+		bytes.Contains(body, []byte("reasoning"))
+}
+
+// clampEffortBody re-marshals reqBody with output_config.effort clamped or
+// stripped per the cache's current knowledge of the model. Best-effort: a
+// decode/marshal failure or a no-op clamp returns reqBody unchanged.
+func (p *MessagesProxy) clampEffortBody(reqBody []byte, model string) []byte {
+	var body map[string]any
+	if err := json.Unmarshal(reqBody, &body); err != nil {
+		return reqBody
+	}
+	if !p.adaptEffortMap(body, model) {
+		return reqBody
+	}
+	out, err := json.Marshal(body)
+	if err != nil {
+		return reqBody
+	}
+	return out
 }
 
 // selectUpstream routes the request and returns the upstream response. A slash
