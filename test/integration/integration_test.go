@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(binDir)
 
 	for _, cmd := range []struct{ bin, pkg string }{
-		{"pi-controller", "./cmd/pi-controller"},
+		{"fundi", "./cmd/fundi"},
 		{"pic", "./cmd/pic"},
 	} {
 		out := filepath.Join(binDir, cmd.bin)
@@ -62,7 +62,7 @@ func TestMain(m *testing.M) {
 			log.Fatalf("build %s: %v", cmd.bin, err)
 		}
 		switch cmd.bin {
-		case "pi-controller":
+		case "fundi":
 			binaryPath = out
 		case "pic":
 			piCtlPath = out
