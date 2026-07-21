@@ -75,9 +75,11 @@ func Entrypoint(e string) ConvOption { return func(c *convConfig) { c.entrypoint
 // Persona records the persona used for this conversation.
 func Persona(p string) ConvOption { return func(c *convConfig) { c.persona = p } }
 
-// Model sets the conversation's model. "<family>-latest" aliases resolve to a
-// concrete id once, at Conversation creation, and stay fixed for the
-// conversation's life (prefix stability).
+// Model sets the conversation's model. Aliases ("<family>-latest", short
+// model aliases like "kimi-k3") resolve to a concrete id once, at
+// Conversation creation, and stay fixed for the conversation's life (prefix
+// stability). A slash (OpenRouter-native) id routes every send directly to
+// OpenRouter, with no failover.
 func Model(m string) ConvOption { return func(c *convConfig) { c.model = m } }
 
 // Fallback sets the upstream fallback chain consulted on retryable primary

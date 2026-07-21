@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -162,6 +163,17 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	if primary == "" {
 		primary = UpstreamAnthropic
 	}
+	fallbacks := meta.Fallback
+	if strings.Contains(string(params.Model), "/") {
+		// A slash id is OpenRouter-native: route directly to OpenRouter rather
+		// than defaulting to upstream anthropic. Keeps things compatible with
+		// non anthropic models by using OpenRouter's logic.
+		primary, fallbacks = UpstreamOpenRouter, nil
+	}
+	if primary == UpstreamOpenRouter {
+		// Injected before capture so the recorded request matches the wire.
+		applyProviderPrefs(&params)
+	}
 	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(
 		attribute.String("rafiki.model", string(params.Model)),
 		attribute.String("rafiki.primary", string(primary)),
@@ -174,7 +186,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	turnID, turnCreatedAt, capturing := c.beginTurn(ctx, meta, params)
 
 	start := time.Now()
-	resp, servedBy, err := c.callModel(ctx, span, primary, meta.Fallback, params)
+	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params)
 	latency := int(time.Since(start).Milliseconds())
 	span.SetAttributes(attribute.String("rafiki.upstream", string(servedBy)))
 
@@ -244,6 +256,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 		fbParams := params
 		if fb == UpstreamOpenRouter {
 			fbParams.Model = anthropic.Model(c.catalog.OpenRouterModel(string(params.Model)))
+			applyProviderPrefs(&fbParams)
 		}
 		resp, err := fbSender.New(ctx, fbParams)
 		if err == nil {
@@ -252,6 +265,16 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 		lastErr = err
 	}
 	return nil, primary, lastErr
+}
+
+// applyProviderPrefs injects OpenRouter provider-routing preferences for
+// pinned model lines (routing.ProviderPrefsFor) as the request body's
+// "provider" field. No-op for unpinned models; call only on params bound for
+// OpenRouter — the field is not part of the Anthropic API.
+func applyProviderPrefs(params *anthropic.MessageNewParams) {
+	if prefs, ok := routing.ProviderPrefsFor(string(params.Model)); ok {
+		params.SetExtraFields(map[string]any{"provider": prefs})
+	}
 }
 
 // beginTurn resolves the conversation and write-aheads the request row.

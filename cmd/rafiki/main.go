@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -204,6 +206,11 @@ func serveCmd(args []string) error {
 		chat.SetMetrics(metrics)
 	} else {
 		logger.Warn("OPENROUTER_API_KEY not set; /v1/chat/completions face and failover disabled")
+		// A default model only OpenRouter can serve would 502 every defaulted request
+		if strings.Contains(cfg.DefaultModel, "/") || slices.Contains(routing.ModelAliases(), cfg.DefaultModel) {
+			logger.Warn("default model requires OpenRouter; requests without an explicit model will fail",
+				"default_model", cfg.DefaultModel)
+		}
 	}
 
 	tokenAuth := server.NewStaticTokenAuth(cfg.Tokens)

@@ -131,6 +131,15 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *htt
 	} else {
 		p.logger.Warn("proxy: openrouter request has no string model; forwarding untranslated")
 	}
+	// Pinned model lines get their provider preferences injected; a
+	// caller-supplied provider object always wins over the pin.
+	if m, ok := payload["model"].(string); ok {
+		if _, has := payload["provider"]; !has {
+			if prefs, pinned := routing.ProviderPrefsFor(m); pinned {
+				payload["provider"] = prefs
+			}
+		}
+	}
 	rewritten, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err

@@ -2,6 +2,13 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
+# Internal Go module proxy: serves private timescale modules (savannah-common)
+# to environments with no GitHub credentials, e.g. CI runners. Same recipe as
+# savannah-deployer/hot-forge; overridable from the environment.
+GOPROXY   := $(or $(strip $(GOPROXY)),   REDACTED,direct)
+GONOPROXY := $(or $(strip $(GONOPROXY)), none)
+GOPRIVATE := $(strip $(GOPRIVATE))
+
 ##@ General
 
 # The help target prints out all targets with their descriptions organized
@@ -54,6 +61,12 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 	session="$${RAFIKI_SESSION:-make-claude-$$(uuidgen | tr '[:upper:]' '[:lower:]')}"; \
 	ANTHROPIC_BASE_URL="$$url" ANTHROPIC_AUTH_TOKEN="$${RAFIKI_TOKEN:-dev}" \
 	ANTHROPIC_CUSTOM_HEADERS="X-Rafiki-Session: $$session" exec claude $(ARGS)
+
+.PHONY: configure-proxy
+configure-proxy: ## Point the Go toolchain at the internal module proxy (CI).
+	go env -w GOPROXY="$(GOPROXY)"
+	go env -w GONOPROXY="$(GONOPROXY)"
+	go env -w GOPRIVATE="$(GOPRIVATE)"
 
 ##@ Quality
 

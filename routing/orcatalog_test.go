@@ -92,11 +92,55 @@ func TestOpenRouterModel(t *testing.T) {
 	}
 }
 
+// TestResolveNewest covers the model-alias resolver: newest release of a
+// model line by catalog prefix, where "release" means the prefix itself or a
+// stamped point release ("-0905") — never a variant fork (-thinking, -code),
+// a new line (kimi-k3.5), or a ~alias.
+func TestResolveNewest(t *testing.T) {
+	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c.SeedForTest([]CatalogEntry{
+		{ID: "moonshotai/kimi-k2.6", Created: 10},
+		{ID: "moonshotai/kimi-k3", Created: 20},
+		{ID: "moonshotai/kimi-k3-0905", Created: 30},     // stamped point release: newest wins
+		{ID: "moonshotai/kimi-k3-thinking", Created: 40}, // variant fork: excluded
+		{ID: "moonshotai/kimi-k3.5", Created: 50},        // new line: excluded
+		{ID: "~moonshotai/kimi-latest", Created: 60},     // OR alias: excluded
+		{ID: "deepseek/deepseek-v4-pro", Created: 70},
+		{ID: "deepseek/deepseek-v4-flash", Created: 80}, // different line, never matches -pro
+	})
+	if got, ok := c.ResolveNewest("moonshotai/kimi-k3"); !ok || got != "moonshotai/kimi-k3-0905" {
+		t.Errorf("kimi-k3: got (%q,%v), want moonshotai/kimi-k3-0905", got, ok)
+	}
+	if got, ok := c.ResolveNewest("deepseek/deepseek-v4-pro"); !ok || got != "deepseek/deepseek-v4-pro" {
+		t.Errorf("deepseek-v4-pro: got (%q,%v), want deepseek/deepseek-v4-pro", got, ok)
+	}
+	if got, ok := c.ResolveNewest("deepseek/deepseek-v5"); ok {
+		t.Errorf("absent line must not resolve, got %q", got)
+	}
+}
+
+func TestModelAliases(t *testing.T) {
+	got := ModelAliases()
+	want := []string{"deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2", "kimi-k3"}
+	if len(got) != len(want) {
+		t.Fatalf("ModelAliases = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ModelAliases = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestResolveModel(t *testing.T) {
 	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
 	c.SeedForTest([]CatalogEntry{
 		{ID: "anthropic/claude-haiku-4.5", Created: 1},
 		{ID: "anthropic/claude-sonnet-5", Created: 2},
+		{ID: "moonshotai/kimi-k3", Created: 3},
+		{ID: "deepseek/deepseek-v4-pro", Created: 4},
+		{ID: "deepseek/deepseek-v4-flash", Created: 5},
+		{ID: "z-ai/glm-5.2", Created: 6},
 	})
 	mustResolve := func(def, req, want string) {
 		t.Helper()
@@ -109,13 +153,46 @@ func TestResolveModel(t *testing.T) {
 	mustResolve("haiku-latest", "claude-opus-4-8", "claude-opus-4-8") // concrete passthrough
 	mustResolve("haiku-latest", "openai/gpt-4o", "openai/gpt-4o")     // slash passthrough
 
-	// A "<family>-latest" the catalog can't resolve errors — there is no hardcoded
+	// Short model aliases resolve to the line's newest OR id (slash form, so
+	// downstream slash routing sends them to OpenRouter). An empty request
+	// resolves through a model-alias default too.
+	mustResolve("haiku-latest", "kimi-k3", "moonshotai/kimi-k3")
+	mustResolve("haiku-latest", "deepseek-v4-pro", "deepseek/deepseek-v4-pro")
+	mustResolve("haiku-latest", "deepseek-v4-flash", "deepseek/deepseek-v4-flash")
+	mustResolve("haiku-latest", "glm-5.2", "z-ai/glm-5.2")
+	mustResolve("kimi-k3", "", "moonshotai/kimi-k3")
+
+	// An alias the catalog can't resolve errors — there is no hardcoded
 	// fallback list to silently paper over it with a stale id.
 	if _, err := ResolveModel(c, "", "opus-latest"); err == nil {
 		t.Error("opus-latest absent from catalog must error, not fall back to a hardcoded id")
 	}
 	if _, err := ResolveModel(nil, "", "haiku-latest"); err == nil {
 		t.Error("nil catalog + -latest must error")
+	}
+	if _, err := ResolveModel(nil, "", "kimi-k3"); err == nil {
+		t.Error("nil catalog + model alias must error")
+	}
+}
+
+// TestProviderPrefsFor covers provider pinning: a pinned line matches its
+// base id and stamped point releases (same inModelLine semantics as aliases),
+// never a different line, and unpinned models carry no preferences.
+func TestProviderPrefsFor(t *testing.T) {
+	for _, id := range []string{"z-ai/glm-5.2", "z-ai/glm-5.2-0905"} {
+		prefs, ok := ProviderPrefsFor(id)
+		if !ok {
+			t.Errorf("%s: want a pin", id)
+			continue
+		}
+		if len(prefs.Only) != 1 || prefs.Only[0] != "fireworks" {
+			t.Errorf("%s: Only = %v, want [fireworks]", id, prefs.Only)
+		}
+	}
+	for _, id := range []string{"z-ai/glm-5.20", "z-ai/glm-5", "z-ai/glm-5.2.1", "moonshotai/kimi-k3", "claude-haiku-4-5"} {
+		if _, ok := ProviderPrefsFor(id); ok {
+			t.Errorf("%s: must not be pinned", id)
+		}
 	}
 }
 
