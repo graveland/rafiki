@@ -29,6 +29,34 @@ cmd/rafiki/ standalone binary (serve, migrate, --dev)
 goldenwire/ frozen golden-wire fixture definitions (see note below)
 ```
 
+## Model selection
+
+Requests on the `/v1/messages` face (and `llm.Conversation`s) take:
+
+- a concrete Anthropic id (`claude-opus-4-8`) — sent to the Anthropic
+  primary, with breaker-gated OpenRouter failover when configured;
+- a `<family>-latest` alias (`opus-latest`) — resolved live from the
+  OpenRouter catalog to the family's newest Anthropic model;
+- a **short model alias** (`kimi-k3`, `deepseek-v4-pro`, `deepseek-v4-flash`,
+  `glm-5.2`) — resolved live from the catalog to the newest release of that
+  model line (the id itself or a stamped point release like `-0905`, never a
+  variant fork or a new line), yielding an OpenRouter slash id;
+- any OpenRouter slash id (`moonshotai/kimi-k3`) — routed directly to
+  OpenRouter with no failover: the caller asked for that specific model.
+
+Some model lines carry a **provider pin** (`routing.ProviderPrefsFor`):
+open-weight models are served by many OpenRouter providers of varying
+quantization and data-retention policy, so pinned lines get an OpenRouter
+`provider` routing object injected restricting them to vetted hosts
+(`glm-5.2` → Fireworks). A caller-supplied `provider` field always wins
+over the pin.
+
+No concrete model ids are hardcoded: aliases name families/lines and the
+catalog is the source of truth, so an unresolvable alias errors instead of
+falling back to a stale id. Slash ids and model aliases require
+`OPENROUTER_API_KEY`. The `/v1/chat/completions` face does no resolution —
+it takes raw ids and routes by configured prefix.
+
 ## Development
 
 ```bash

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -266,6 +267,57 @@ func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
 	}
 }
 
+// A pinned model line (routing provider pins) gets its provider preferences
+// injected into the OpenRouter body; a caller-supplied provider object wins.
+func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
+	var orBodies [][]byte
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		orBodies = append(orBodies, b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","stop_reason":"end_turn","usage":{"output_tokens":3}}`)
+	}))
+	defer orSrv.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	p := NewMessagesProxy(nil, nil, "real-key", "http://unused-primary", "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = &fakeProxyStore{}
+	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
+
+	send := func(body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer client-token")
+		p.ServeHTTP(rec, req)
+	}
+	send(`{"model":"z-ai/glm-5.2","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	send(`{"model":"z-ai/glm-5.2","provider":{"only":["baseten"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	send(`{"model":"openai/gpt-4o","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if len(orBodies) != 3 {
+		t.Fatalf("OpenRouter received %d requests, want 3", len(orBodies))
+	}
+
+	providerOf := func(body []byte) map[string]any {
+		t.Helper()
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("unmarshal OR body: %v", err)
+		}
+		prov, _ := payload["provider"].(map[string]any)
+		return prov
+	}
+	if prov := providerOf(orBodies[0]); fmt.Sprintf("%v", prov["only"]) != "[fireworks]" {
+		t.Errorf("pinned model provider = %v, want only=[fireworks]", prov)
+	}
+	if prov := providerOf(orBodies[1]); fmt.Sprintf("%v", prov["only"]) != "[baseten]" {
+		t.Errorf("caller-supplied provider must win, got %v", prov)
+	}
+	if prov := providerOf(orBodies[2]); prov != nil {
+		t.Errorf("unpinned model must carry no provider, got %v", prov)
+	}
+}
+
 // A slash model on a proxy with no OpenRouter key returns 502 AND must resolve
 // the turn it began, or the row is stranded 'pending' forever (a false orphan).
 func TestMessagesProxySlashWithoutOpenRouterFailsTurn(t *testing.T) {
@@ -296,7 +348,11 @@ func TestProxyResolveModel(t *testing.T) {
 	cat := routing.NewModelCatalog(nil, time.Minute, logger)
 	p := &MessagesProxy{logger: logger, catalog: cat, defaultModel: "haiku-latest"}
 	// Seed the catalog via its test hook instead of the network:
-	cat.SeedForTest([]routing.CatalogEntry{{ID: "anthropic/claude-haiku-4.5", Created: 1}, {ID: "anthropic/claude-sonnet-5", Created: 2}})
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "anthropic/claude-haiku-4.5", Created: 1},
+		{ID: "anthropic/claude-sonnet-5", Created: 2},
+		{ID: "moonshotai/kimi-k3", Created: 3},
+	})
 
 	// empty model -> default (haiku-latest) -> concrete anthropic id
 	body, resolved, err := p.resolveModel([]byte(`{"max_tokens":1,"messages":[]}`))
@@ -330,6 +386,22 @@ func TestProxyResolveModel(t *testing.T) {
 	}
 	if resolved != "claude-opus-4-8" {
 		t.Errorf("concrete resolved = %q, want unchanged", resolved)
+	}
+	// short model alias -> the line's newest OR slash id (selectUpstream then
+	// routes the slash id to OpenRouter, per the slash-routing tests above)
+	body, resolved, err = p.resolveModel([]byte(`{"model":"kimi-k3","max_tokens":1}`))
+	if err != nil {
+		t.Fatalf("kimi-k3 errored: %v", err)
+	}
+	if got := modelOf(t, body); got != "moonshotai/kimi-k3" {
+		t.Errorf("kimi-k3 = %q, want moonshotai/kimi-k3", got)
+	}
+	if resolved != "moonshotai/kimi-k3" {
+		t.Errorf("kimi-k3 resolved = %q, want moonshotai/kimi-k3", resolved)
+	}
+	// a model alias the catalog can't resolve -> error (no hardcoded fallback)
+	if _, _, err = p.resolveModel([]byte(`{"model":"deepseek-v4-pro"}`)); err == nil {
+		t.Error("deepseek-v4-pro absent from catalog must error")
 	}
 	// a "<family>-latest" the catalog can't resolve -> error (no hardcoded fallback)
 	if _, _, err = p.resolveModel([]byte(`{"model":"opus-latest"}`)); err == nil {

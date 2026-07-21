@@ -179,6 +179,111 @@ func TestSendParamsNonRetryableDoesNotFailOver(t *testing.T) {
 	}
 }
 
+// TestSendParamsSlashModelRoutesToOpenRouter proves an OpenRouter-native
+// (slash) model — e.g. a resolved model alias like kimi-k3 — goes straight
+// to the OpenRouter sender untranslated, never touching the Anthropic primary
+// and never failing over (the caller asked for this specific model).
+func TestSendParamsSlashModelRoutesToOpenRouter(t *testing.T) {
+	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("must not be reached"),
+	}}
+	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("from openrouter"),
+	}}
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, primary),
+		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithBreaker(15*time.Minute),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := anthropic.MessageNewParams{Model: "moonshotai/kimi-k3", MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params)
+	if err != nil {
+		t.Fatalf("SendParams: %v", err)
+	}
+	if resp.Content[0].Text != "from openrouter" {
+		t.Errorf("response = %q, want openrouter", resp.Content[0].Text)
+	}
+	if primary.calls != 0 {
+		t.Errorf("anthropic primary called %d times, want 0", primary.calls)
+	}
+	if got := string(openrouter.lastReq[0].Model); got != "moonshotai/kimi-k3" {
+		t.Errorf("openrouter model = %q, want moonshotai/kimi-k3 untranslated", got)
+	}
+}
+
+// TestSendParamsPinnedModelCarriesProviderPrefs proves a provider-pinned
+// slash model (routing provider pins) reaches the OpenRouter sender with the
+// "provider" extra field set, and an unpinned one does not.
+func TestSendParamsPinnedModelCarriesProviderPrefs(t *testing.T) {
+	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("ok"), respondText("ok"),
+	}}
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, &scriptedSender{}),
+		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(model string) {
+		t.Helper()
+		params := anthropic.MessageNewParams{Model: anthropic.Model(model), MaxTokens: 16,
+			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+		if _, err := c.SendParams(context.Background(), SendMeta{}, params); err != nil {
+			t.Fatalf("SendParams(%s): %v", model, err)
+		}
+	}
+	send("z-ai/glm-5.2")
+	send("moonshotai/kimi-k3")
+
+	wire := func(i int) string {
+		t.Helper()
+		b, err := json.Marshal(openrouter.lastReq[i])
+		if err != nil {
+			t.Fatalf("marshal wire params: %v", err)
+		}
+		return string(b)
+	}
+	if got := wire(0); !strings.Contains(got, `"provider":{"only":["fireworks"]}`) {
+		t.Errorf("pinned model wire body missing provider pin: %s", got)
+	}
+	if got := wire(1); strings.Contains(got, `"provider"`) {
+		t.Errorf("unpinned model must not carry a provider field: %s", got)
+	}
+}
+
+// A slash model with no OpenRouter sender configured must fail cleanly, not
+// leak the request to the Anthropic API (which would 404 the model anyway).
+func TestSendParamsSlashModelWithoutOpenRouterErrors(t *testing.T) {
+	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("must not be reached"),
+	}}
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, primary),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := anthropic.MessageNewParams{Model: "deepseek/deepseek-v4-pro", MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+	if _, err := c.SendParams(context.Background(), SendMeta{}, params); err == nil {
+		t.Fatal("slash model without an OpenRouter sender must error")
+	}
+	if primary.calls != 0 {
+		t.Errorf("anthropic primary called %d times, want 0", primary.calls)
+	}
+}
+
 func TestSendParamsNoFallbackBypassesBreaker(t *testing.T) {
 	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondErr(overloadedErr()), // trips via the WITH-fallback send
