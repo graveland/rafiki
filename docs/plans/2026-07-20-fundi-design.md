@@ -41,8 +41,10 @@ sub-call; the planner writes specs at a density matched to the worker tier it sp
 ## Repos and dependency arrow
 
 - **`~/home/rafiki`** — thin fork of `github.com/timescale/rafiki`, gitea repo at
-  `git.graveland.dev/brent/rafiki` acting as the branch. Module path **stays**
-  `github.com/timescale/rafiki` so rebasing on / upstreaming to work is trivial. The fork stays
+  `git.graveland.dev/brent/rafiki` acting as the branch. The fork **renames the module** to
+  `git.graveland.dev/brent/rafiki` (one mechanical commit: `go mod edit -module` + self-import
+  rewrite, with the rewrite script kept in the repo so upstream merges re-apply it
+  deterministically; upstreaming a patch reverses the rename on that diff). The fork stays
   structurally identical to upstream; home-specific needs (streaming sender, configurable
   truncation backstop) are upstream candidates, not divergence.
 - **`~/home/fundi`** — fork of pi-controller, renamed. The platform repo: daemon, `pic`, attach
@@ -50,12 +52,11 @@ sub-call; the planner writes specs at a density matched to the worker tier it sp
   supervision tests.
 - **Dependency arrow:** fundi → rafiki (library). Never the reverse. rafiki stays reusable by
   other consumers (e.g. Sentinel could later front Zoe's LLM traffic with rafiki's proxy faces).
-- **Build wiring:** `go.work` everywhere — no `replace` in go.mod. Locally, the workspace spans
-  `~/home/fundi` and `~/home/rafiki`. In CI, the rafiki fork is checked out alongside fundi at a
-  pinned ref and the workspace covers both (a git submodule is the natural pinning mechanism —
-  the repo already uses one for `pi/`; go.work points at the submodule path in CI and at
-  `~/home/rafiki` locally). go.mod keeps the plain `github.com/timescale/rafiki` require, which
-  is never resolved over the network.
+- **Build wiring:** a normal dependency. fundi's go.mod does
+  `require git.graveland.dev/brent/rafiki vX.Y.Z`; CI sets `GOPRIVATE=git.graveland.dev` and
+  fetches from gitea like any other module. No replace, no submodule, no workspace requirement in
+  CI. `go.work` (uncommitted) remains purely a local-dev convenience for live-editing both
+  checkouts.
 
 ## Architecture
 
