@@ -26,3 +26,8 @@ coverage.txt
 /tasks/
 /pi-controller
 /pic
+
+# go.work is a local-dev convenience wiring fundi -> ../rafiki live; never committed.
+# CI resolves rafiki via the versioned require in go.mod.
+go.work
+go.work.sum
