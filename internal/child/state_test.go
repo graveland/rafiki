@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"git.graveland.dev/brent/pi-controller/internal/child"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/internal/child"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 func TestStateMachine_BasicLifecycle(t *testing.T) {

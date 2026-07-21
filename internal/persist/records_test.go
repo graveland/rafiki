@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/internal/persist"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/internal/persist"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 func TestRecordWriter_RoundTrip(t *testing.T) {

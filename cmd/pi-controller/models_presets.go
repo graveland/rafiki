@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 
-	"git.graveland.dev/brent/pi-controller/internal/models"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/internal/models"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // ListModels enumerates LLM models from all configured sources.

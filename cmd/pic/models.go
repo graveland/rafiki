@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"git.graveland.dev/brent/pi-controller/internal/models"
+	"git.graveland.dev/brent/fundi/internal/models"
 )
 
 // completeModel returns tab-completion candidates for the --model flag.

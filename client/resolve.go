@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // Lister is the subset of Client that Resolve needs. A concrete *Client

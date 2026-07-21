@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
-	"git.graveland.dev/brent/pi-controller/internal/store"
+	"git.graveland.dev/brent/fundi/protocol"
+	"git.graveland.dev/brent/fundi/internal/store"
 )
 
 // fakePiBin returns the path to fake-pi.sh for use in shutdown tests.

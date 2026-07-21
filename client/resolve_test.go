@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/pi-controller/client"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/client"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // fakeLister is an in-memory Lister used by resolver tests. No real socket

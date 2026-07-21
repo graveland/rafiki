@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	"git.graveland.dev/brent/pi-controller/protocol"
-	"git.graveland.dev/brent/pi-controller/internal/ring"
+	"git.graveland.dev/brent/fundi/protocol"
+	"git.graveland.dev/brent/fundi/internal/ring"
 )
 
 // ErrNotFound is returned when the requested ChildID does not exist.

@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/pi-controller/cmd/pic/picembed"
+	"git.graveland.dev/brent/fundi/cmd/pic/picembed"
 )
 
 func newInstallExtensionCmd() *cobra.Command {

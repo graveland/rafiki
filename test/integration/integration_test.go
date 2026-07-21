@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // ─── TestMain: build binary once for all tests ────────────────────────────────

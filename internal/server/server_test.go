@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/internal/server"
+	"git.graveland.dev/brent/fundi/internal/server"
 )
 
 func TestServer_AcceptsAndEchoes(t *testing.T) {

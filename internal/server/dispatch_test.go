@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/internal/server"
-	"git.graveland.dev/brent/pi-controller/internal/store"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/internal/server"
+	"git.graveland.dev/brent/fundi/internal/store"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // discardConn is a no-op Connection used in dispatch tests where event

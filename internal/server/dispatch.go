@@ -8,8 +8,8 @@ import (
 	"errors"
 	"path/filepath"
 
-	"git.graveland.dev/brent/pi-controller/internal/store"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/internal/store"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // ─── ControllerError ──────────────────────────────────────────────────────────

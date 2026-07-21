@@ -15,7 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // Client is a connected JSONL client to the pi-controller daemon.

@@ -11,8 +11,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"git.graveland.dev/brent/pi-controller/client"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/client"
+	"git.graveland.dev/brent/fundi/protocol"
 	"github.com/spf13/cobra"
 )
 

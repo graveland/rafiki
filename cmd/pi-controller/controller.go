@@ -20,14 +20,14 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"git.graveland.dev/brent/pi-controller/internal/child"
-	"git.graveland.dev/brent/pi-controller/internal/intercept"
-	"git.graveland.dev/brent/pi-controller/internal/persist"
-	"git.graveland.dev/brent/pi-controller/internal/ring"
-	"git.graveland.dev/brent/pi-controller/internal/server"
-	"git.graveland.dev/brent/pi-controller/internal/store"
-	"git.graveland.dev/brent/pi-controller/internal/version"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/internal/child"
+	"git.graveland.dev/brent/fundi/internal/intercept"
+	"git.graveland.dev/brent/fundi/internal/persist"
+	"git.graveland.dev/brent/fundi/internal/ring"
+	"git.graveland.dev/brent/fundi/internal/server"
+	"git.graveland.dev/brent/fundi/internal/store"
+	"git.graveland.dev/brent/fundi/internal/version"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // Controller wires together the store, child lifecycle, persistence and the

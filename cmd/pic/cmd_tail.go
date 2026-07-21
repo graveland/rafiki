@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/pi-controller/client"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/client"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 func newTailCmd() *cobra.Command {

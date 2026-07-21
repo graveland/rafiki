@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"git.graveland.dev/brent/pi-controller/internal/store"
+	"git.graveland.dev/brent/fundi/internal/store"
 )
 
 func TestRecordRoundTrip_KindAndConfigDir(t *testing.T) {

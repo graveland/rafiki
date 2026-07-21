@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/internal/bus"
-	"git.graveland.dev/brent/pi-controller/internal/ring"
+	"git.graveland.dev/brent/fundi/internal/bus"
+	"git.graveland.dev/brent/fundi/internal/ring"
 )
 
 func newTestBus() *bus.Bus[[]byte] { return bus.New[[]byte](bus.Options{}) }

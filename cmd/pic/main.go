@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/pi-controller/internal/version"
+	"git.graveland.dev/brent/fundi/internal/version"
 )
 
 func main() {

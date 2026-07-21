@@ -1,4 +1,4 @@
-module git.graveland.dev/brent/pi-controller
+module git.graveland.dev/brent/fundi
 
 go 1.25.0
 

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/pi-controller/internal/ring"
+	"git.graveland.dev/brent/fundi/internal/ring"
 )
 
 func TestRing_AppendAndRecent_InOrder(t *testing.T) {

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/client"
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/client"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // startEchoServer spins up a tiny UDS that echoes every received frame

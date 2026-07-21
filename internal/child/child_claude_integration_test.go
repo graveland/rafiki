@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/pi-controller/protocol"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // writeFakeClaude writes a bash script that mimics claude's stream-json stdio:
