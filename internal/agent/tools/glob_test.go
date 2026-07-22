@@ -105,6 +105,49 @@ func TestGlobToolRecursivePattern(t *testing.T) {
 	}
 }
 
+// TestGlobToolAbsolutePatternInsideBase guards the "confident wrong answer"
+// bug: read/write/edit all require absolute paths, so the tool surface trains
+// the model to pass one here too. An absolute pattern used to match nothing
+// against the base-rooted fs and return a cheerful "no files matched".
+func TestGlobToolAbsolutePatternInsideBase(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(nested, "a.go")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fn := newGlobTool()
+	out, err := fn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"pattern":%q,"path":%q}`, filepath.Join(dir, "**", "*.go"), dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, p) {
+		t.Fatalf("expected an absolute pattern inside path to be rebased and match %q, got %q", p, out)
+	}
+}
+
+// TestGlobToolAbsolutePatternOutsideBase: when the pattern can't be rebased,
+// say so explicitly rather than reporting "no files matched".
+func TestGlobToolAbsolutePatternOutsideBase(t *testing.T) {
+	dir := t.TempDir()
+	other := t.TempDir()
+
+	fn := newGlobTool()
+	_, err := fn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"pattern":%q,"path":%q}`, filepath.Join(other, "*.go"), dir)))
+	if err == nil {
+		t.Fatal("expected an explicit error for an absolute pattern outside path, got nil")
+	}
+	if !strings.Contains(err.Error(), "relative to path") {
+		t.Fatalf("expected the error to name the relative-to-path contract, got %v", err)
+	}
+}
+
 func TestGlobToolDefaultsToWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cwd-match.go")

@@ -30,7 +30,7 @@ const (
 		"properties": {
 			"pattern": {"type": "string", "description": "Regular expression (RE2 syntax) to search for."},
 			"path": {"type": "string", "description": "Base directory to search from. Defaults to the current working directory."},
-			"glob": {"type": "string", "description": "Optional glob pattern to restrict which files are searched, relative to path."},
+			"glob": {"type": "string", "description": "Optional glob pattern to restrict which files are searched, matched against each file's path relative to path. A pattern with no / (e.g. \"*.go\") matches by file name at any depth, like ripgrep's -g."},
 			"max_matches": {"type": "integer", "description": "Maximum number of matches to return. Defaults to 100."}
 		},
 		"required": ["pattern"]
@@ -109,6 +109,17 @@ func newGrepTool() ToolFunc {
 				ok, mErr := doublestar.Match(in.Glob, rel)
 				if mErr != nil {
 					return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
+				}
+				// doublestar's `*` does not cross a path separator, so a
+				// bare "*.go" would match only top-level files and silently
+				// under-report everything nested. The model's prior is
+				// ripgrep's -g '*.go', which matches at any depth: treat a
+				// separator-free pattern as a basename pattern.
+				if !ok && !strings.ContainsRune(in.Glob, '/') {
+					ok, mErr = doublestar.Match(in.Glob, filepath.Base(rel))
+					if mErr != nil {
+						return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
+					}
 				}
 				if !ok {
 					return nil

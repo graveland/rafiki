@@ -51,6 +51,15 @@ func newEditTool(tr *FileTracker) ToolFunc {
 		if in.OldString == "" {
 			return "", fmt.Errorf("edit: old_string is required")
 		}
+		// Everything from here down is a read-modify-write. rafiki's agentloop
+		// runs a tool batch concurrently, and a model emitting two edits on
+		// one file in a single batch is routine — without this lock both would
+		// verify, both would read the pre-state, and the second write would
+		// silently discard the first while reporting success. Hold it across
+		// verify, read, compute, write, and RecordRead.
+		unlock := tr.Lock(in.Path)
+		defer unlock()
+
 		if err := tr.Verify(in.Path); err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}

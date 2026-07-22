@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -82,6 +83,65 @@ func TestWriteToolRefusesRelativePath(t *testing.T) {
 	_, err := fn(context.Background(), json.RawMessage(`{"path":"rel.txt","content":"x"}`))
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("expected an absolute-path error, got %v", err)
+	}
+}
+
+// TestWriteToolConcurrentWritesAreSerialized: writes to one path in a
+// concurrently-executed tool batch must not interleave. Whichever write lands
+// last, the file must hold exactly one of the payloads verbatim — never a
+// torn mix of two — and the tracker must be left consistent enough that a
+// following edit needs no fresh read.
+func TestWriteToolConcurrentWritesAreSerialized(t *testing.T) {
+	const n = 8
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "contended.txt")
+	tr := NewFileTracker()
+	writeFn := newWriteTool(tr)
+	editFn := newEditTool(tr)
+
+	payloads := make([]string, n)
+	for i := range payloads {
+		payloads[i] = "payload-" + strings.Repeat(fmt.Sprintf("%d", i), 512)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = writeFn(context.Background(), json.RawMessage(
+				fmt.Sprintf(`{"path":%q,"content":%q}`, p, payloads[i])))
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("write %d failed: %v", i, err)
+		}
+	}
+
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	matched := false
+	for _, want := range payloads {
+		if got == want {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("final content is not any single payload verbatim (torn write): %q", got)
+	}
+
+	if _, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"old_string":"payload-","new_string":"done-"}`, p))); err != nil {
+		t.Fatalf("expected the tracker to be left consistent after concurrent writes, got %v", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -131,6 +132,63 @@ func TestEditToolChainedEditsNeedOnlyOneRead(t *testing.T) {
 	b, _ := os.ReadFile(p)
 	if string(b) != "1 2 three" {
 		t.Fatalf("content = %q", b)
+	}
+}
+
+// TestEditToolConcurrentEditsAreNotLost is the regression test for the
+// read-modify-write race: rafiki's agentloop runs a tool batch concurrently
+// (errgroup, SetLimit(6)), and a model emitting several edits on one file in
+// one batch is routine. Without per-path locking in FileTracker every
+// goroutine verifies, reads the same pre-state, and the last write wins —
+// silently discarding the others while reporting success to the model.
+func TestEditToolConcurrentEditsAreNotLost(t *testing.T) {
+	const n = 8
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	tokens := make([]string, n)
+	for i := range tokens {
+		tokens[i] = fmt.Sprintf("t%d", i)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(tokens, " ")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = editFn(context.Background(), json.RawMessage(
+				fmt.Sprintf(`{"path":%q,"old_string":"t%d","new_string":"X%d"}`, p, i, i)))
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("edit %d failed: %v", i, err)
+		}
+	}
+
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for i := 0; i < n; i++ {
+		want := fmt.Sprintf("X%d", i)
+		if !strings.Contains(got, want) {
+			t.Errorf("edit %d was silently lost: %q missing from %q", i, want, got)
+		}
 	}
 }
 

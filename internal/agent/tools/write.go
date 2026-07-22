@@ -46,6 +46,14 @@ func newWriteTool(tr *FileTracker) ToolFunc {
 			return "", fmt.Errorf("write: path must be absolute, got %q", in.Path)
 		}
 
+		// Everything from here down is a read-modify-write (stat, verify,
+		// write, record). rafiki's agentloop runs a tool batch concurrently,
+		// so hold the per-path lock across the whole sequence — otherwise a
+		// concurrent write or edit on the same file can interleave between the
+		// verify and the write and have its change silently discarded.
+		unlock := tr.Lock(in.Path)
+		defer unlock()
+
 		mode := os.FileMode(0o644)
 		if existing, err := os.Stat(in.Path); err == nil {
 			if existing.IsDir() {

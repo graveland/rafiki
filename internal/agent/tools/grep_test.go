@@ -73,6 +73,72 @@ func TestGrepToolGlobFilter(t *testing.T) {
 	}
 }
 
+// TestGrepToolGlobFilterMatchesNestedFiles guards the silent-under-reporting
+// bug: doublestar's `*` does not cross a path separator, so matching a bare
+// "*.go" against the base-relative path searched only top-level files and
+// reported no/partial matches with no indication anything was skipped. The
+// model's prior is ripgrep's -g '*.go', which matches at any depth.
+func TestGrepToolGlobFilterMatchesNestedFiles(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "sub", "deeper")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	top := filepath.Join(dir, "a.go")
+	deep := filepath.Join(nested, "b.go")
+	skipped := filepath.Join(nested, "c.txt")
+	for _, p := range []string{top, deep, skipped} {
+		if err := os.WriteFile(p, []byte("needle\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fn := newGrepTool()
+	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"*.go"}`, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, top) {
+		t.Errorf("expected the top-level %q in %q", top, out)
+	}
+	if !strings.Contains(out, deep) {
+		t.Errorf("expected the nested %q in %q — a separator-free glob must match at any depth", deep, out)
+	}
+	if strings.Contains(out, skipped) {
+		t.Errorf("expected %q to be filtered out, got %q", skipped, out)
+	}
+}
+
+// TestGrepToolGlobWithSeparatorStaysPathRelative checks the basename fallback
+// didn't loosen patterns that do carry a separator — those stay anchored to
+// the base-relative path.
+func TestGrepToolGlobWithSeparatorStaysPathRelative(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inSub := filepath.Join(sub, "b.go")
+	atTop := filepath.Join(dir, "a.go")
+	for _, p := range []string{inSub, atTop} {
+		if err := os.WriteFile(p, []byte("needle\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fn := newGrepTool()
+	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"sub/*.go"}`, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, inSub) {
+		t.Errorf("expected %q in %q", inSub, out)
+	}
+	if strings.Contains(out, atTop) {
+		t.Errorf("expected %q to be excluded by a path-anchored glob, got %q", atTop, out)
+	}
+}
+
 func TestGrepToolMaxMatchesTrailer(t *testing.T) {
 	dir := t.TempDir()
 	var lines []string

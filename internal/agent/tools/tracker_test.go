@@ -84,6 +84,116 @@ func TestFileTrackerVerifyDeletedSinceRead(t *testing.T) {
 	}
 }
 
+// TestFileTrackerNormalizesUncleanPath covers the /tmp/x/./a.txt spelling —
+// a read recorded under one form must satisfy a verify under another.
+func TestFileTrackerNormalizesUncleanPath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	tr.RecordRead(p, info.ModTime())
+
+	unclean := filepath.Join(dir, "sub", "..", ".", "a.txt")
+	if err := tr.Verify(unclean); err != nil {
+		t.Fatalf("expected the uncleaned spelling %q to verify, got %v", unclean, err)
+	}
+}
+
+// TestFileTrackerNormalizesSymlinkedPath is the macOS /tmp -> /private/tmp
+// case: read one spelling, edit the other, and the tracker must not claim the
+// file "has not been read yet".
+func TestFileTrackerNormalizesSymlinkedPath(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := filepath.Join(real, "a.txt")
+	if err := os.WriteFile(p, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr := NewFileTracker()
+	tr.RecordRead(p, info.ModTime())
+	viaLink := filepath.Join(link, "a.txt")
+	if err := tr.Verify(viaLink); err != nil {
+		t.Fatalf("expected the symlinked spelling %q to verify, got %v", viaLink, err)
+	}
+
+	// And in the other direction: record via the link, verify via the real path.
+	tr2 := NewFileTracker()
+	tr2.RecordRead(viaLink, info.ModTime())
+	if err := tr2.Verify(p); err != nil {
+		t.Fatalf("expected the real path %q to verify after a symlinked read, got %v", p, err)
+	}
+}
+
+// TestFileTrackerLockIsPerPath checks that Lock excludes on the same path,
+// keys through the same normalization as RecordRead/Verify, and does not
+// serialize unrelated paths.
+func TestFileTrackerLockIsPerPath(t *testing.T) {
+	dir := t.TempDir()
+	tr := NewFileTracker()
+
+	a := filepath.Join(dir, "a.txt")
+	unlockA := tr.Lock(a)
+
+	// A different path must not block.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tr.Lock(filepath.Join(dir, "b.txt"))()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Lock on an unrelated path blocked")
+	}
+
+	// The same path spelled differently must block until unlockA runs.
+	blocked := make(chan struct{})
+	go func() {
+		defer close(blocked)
+		tr.Lock(filepath.Join(dir, "sub", "..", "a.txt"))()
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("Lock did not exclude a differently-spelled form of the same path")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	unlockA()
+	unlockA() // idempotent: a second release must not panic or double-unlock.
+
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Lock was not released")
+	}
+
+	// Refcounting must clean up: no leftover entries once everything unlocks.
+	tr.mu.Lock()
+	leftover := len(tr.locks)
+	tr.mu.Unlock()
+	if leftover != 0 {
+		t.Fatalf("expected the locks map to drain, got %d entries", leftover)
+	}
+}
+
 // TestFileTrackerConcurrentAccess hammers RecordRead/Verify from many
 // goroutines — read/write/edit tools execute concurrently under the loop's
 // errgroup and all share one FileTracker. Run with -race.

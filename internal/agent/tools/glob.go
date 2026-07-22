@@ -25,7 +25,7 @@ const (
 	globSchema = `{
 		"type": "object",
 		"properties": {
-			"pattern": {"type": "string", "description": "Glob pattern (doublestar syntax, supports **) to match file paths against, relative to path."},
+			"pattern": {"type": "string", "description": "Glob pattern (doublestar syntax, supports **) to match file paths against. Relative to path — use \"**/*.go\", not an absolute path."},
 			"path": {"type": "string", "description": "Base directory to search from. Defaults to the current working directory."}
 		},
 		"required": ["pattern"]
@@ -57,6 +57,10 @@ func newGlobTool() ToolFunc {
 			}
 			base = wd
 		}
+		base, err := filepath.Abs(base)
+		if err != nil {
+			return "", fmt.Errorf("glob: %w", err)
+		}
 		baseInfo, err := os.Stat(base)
 		if err != nil {
 			return "", fmt.Errorf("glob: %w", err)
@@ -65,7 +69,24 @@ func newGlobTool() ToolFunc {
 			return "", fmt.Errorf("glob: %q is not a directory", base)
 		}
 
-		matches, err := doublestar.Glob(os.DirFS(base), in.Pattern)
+		// The pattern is matched against an fs rooted at base, so an absolute
+		// pattern matches nothing and would return a cheerful "no files
+		// matched". read/write/edit all *require* absolute paths, so the tool
+		// surface actively trains the model to pass one here: rebase it onto
+		// base when it lands inside, and say so plainly when it doesn't.
+		pattern := in.Pattern
+		if filepath.IsAbs(pattern) {
+			rel, relErr := filepath.Rel(base, filepath.Clean(pattern))
+			if relErr != nil {
+				return "", fmt.Errorf("glob: pattern %q is absolute and could not be interpreted relative to path %s: %w; pattern is relative to path", in.Pattern, base, relErr)
+			}
+			if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return "", fmt.Errorf("glob: pattern %q is absolute and falls outside path %s; pattern is relative to path — pass the containing directory as path and a relative pattern such as \"**/*.go\"", in.Pattern, base)
+			}
+			pattern = rel
+		}
+
+		matches, err := doublestar.Glob(os.DirFS(base), pattern)
 		if err != nil {
 			return "", fmt.Errorf("glob: invalid pattern %q: %w", in.Pattern, err)
 		}
