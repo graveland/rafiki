@@ -115,13 +115,22 @@ func (i *Insights) Export(ctx context.Context, conversationID string) (*Transcri
 	return tr, nil
 }
 
+// turnMetricsByOrdinal maps the ordinal of each turn's produced assistant
+// message to that turn's metrics. The key is coalesce(response_ordinal,
+// ordinal): the proxy path stamps response_ordinal (and writes turn ordinal 0),
+// while the direct (in-process) path leaves response_ordinal NULL and its turn
+// ordinal already equals the assistant message ordinal it produced
+// (llm.Conversation derives both from the same nextOrdinal). ORDER BY created_at
+// makes the assignment deterministic: on a duplicate key (e.g. a resumed turn
+// re-run at the same ordinal) the newest turn's metrics win, stably across runs.
 func (i *Insights) turnMetricsByOrdinal(ctx context.Context, conversationID string) (map[int]turnMetrics, error) {
 	rows, err := i.pool.Query(ctx, `
-		SELECT response_ordinal, coalesce(input_tokens,0), coalesce(output_tokens,0),
+		SELECT coalesce(response_ordinal, ordinal), coalesce(input_tokens,0), coalesce(output_tokens,0),
 		       coalesce(cache_read_tokens,0), coalesce(latency_ms,0),
 		       coalesce(model,''), coalesce(prefix_hash,'')
 		  FROM conversations.conversation_turn
-		 WHERE conversation_id = $1::uuid AND response_ordinal IS NOT NULL`, conversationID)
+		 WHERE conversation_id = $1::uuid
+		 ORDER BY created_at`, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("export: load turn metrics: %w", err)
 	}
@@ -135,7 +144,7 @@ func (i *Insights) turnMetricsByOrdinal(ctx context.Context, conversationID stri
 		if err := rows.Scan(&ord, &m.inTok, &m.outTok, &m.cacheRead, &m.latencyMS, &m.model, &m.prefixHash); err != nil {
 			return nil, fmt.Errorf("export: scan turn metrics: %w", err)
 		}
-		out[ord] = m
+		out[ord] = m // ORDER BY created_at → newest wins on duplicate keys
 	}
 	return out, rows.Err()
 }
