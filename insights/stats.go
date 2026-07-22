@@ -2,10 +2,13 @@ package insights
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // cacheWasteInputThreshold is the input-token floor above which a turn that saw
@@ -133,6 +136,9 @@ func pathForDrivenBy(drivenBy string) string {
 
 // GlobalStats computes the aggregate bundle over conversations matching f.
 func (i *Insights) GlobalStats(ctx context.Context, f StatsFilter) (*Stats, error) {
+	if err := f.Path.validate(); err != nil {
+		return nil, err
+	}
 	var a argList
 	conds := []string{"1=1"}
 	if db := f.Path.drivenBy(); db != "" {
@@ -160,8 +166,18 @@ func (i *Insights) GlobalStats(ctx context.Context, f StatsFilter) (*Stats, erro
 }
 
 // ConversationStats computes the same bundle scoped to one conversation, without
-// the cross-conversation prefix analytics.
+// the cross-conversation prefix analytics. Returns ErrNotFound when the
+// conversation does not exist (rather than a zeroed bundle indistinguishable
+// from a real conversation with no turns).
 func (i *Insights) ConversationStats(ctx context.Context, conversationID string) (*Stats, error) {
+	var exists bool
+	if err := i.pool.QueryRow(ctx,
+		`SELECT true FROM conversations.conversation WHERE id = $1::uuid`, conversationID).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("conversation %s: %w", conversationID, ErrNotFound)
+		}
+		return nil, fmt.Errorf("stats: conversation lookup: %w", err)
+	}
 	var a argList
 	where := "c.id = " + a.next(conversationID) + "::uuid"
 	return i.compute(ctx, statsScope{where: where, args: a.args, global: false})
@@ -282,24 +298,34 @@ func (i *Insights) cost(ctx context.Context, sc statsScope, s *Stats) error {
 	if err != nil {
 		return fmt.Errorf("stats: cost: %w", err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var r CostRow
 		if err := rows.Scan(&r.Model, &r.Turns,
 			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens); err != nil {
+			rows.Close()
 			return fmt.Errorf("stats: scan cost: %w", err)
-		}
-		if i.pricer != nil {
-			if p, ok := i.pricer(r.Model); ok {
-				r.CostUSD = float64(r.InputTokens)*p.PromptUSD +
-					float64(r.OutputTokens)*p.CompletionUSD +
-					float64(r.CacheReadTokens)*p.CacheReadUSD +
-					float64(r.CacheCreationTokens)*p.CacheWriteUSD
-			}
 		}
 		s.Cost = append(s.Cost, r)
 	}
-	return rows.Err()
+	rows.Close() // release the cursor before pricing
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("stats: cost rows: %w", err)
+	}
+	// Price only after the DB cursor is released, so a pricer that consults the
+	// model catalog can't contend with an open rows cursor on the pool.
+	if i.pricer == nil {
+		return nil
+	}
+	for idx := range s.Cost {
+		r := &s.Cost[idx]
+		if p, ok := i.pricer(r.Model); ok {
+			r.CostUSD = float64(r.InputTokens)*p.PromptUSD +
+				float64(r.OutputTokens)*p.CompletionUSD +
+				float64(r.CacheReadTokens)*p.CacheReadUSD +
+				float64(r.CacheCreationTokens)*p.CacheWriteUSD
+		}
+	}
+	return nil
 }
 
 func (i *Insights) failures(ctx context.Context, sc statsScope, s *Stats) error {

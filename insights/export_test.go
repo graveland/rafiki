@@ -2,6 +2,7 @@ package insights
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -97,6 +98,9 @@ func TestExport_NotFound(t *testing.T) {
 	_, err := New(pool).Export(ctx, "00000000-0000-0000-0000-000000000000")
 	if err == nil {
 		t.Fatal("export of a missing conversation must error")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("export missing conversation err = %v, want ErrNotFound", err)
 	}
 }
 

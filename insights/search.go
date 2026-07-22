@@ -49,6 +49,9 @@ const defaultSearchLimit = 50
 // turn counts come from a per-conversation aggregate over conversation_turn;
 // FirstMessage is the leading 200 chars of the earliest user message.
 func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSummary, error) {
+	if err := f.Path.validate(); err != nil {
+		return nil, err
+	}
 	limit := f.Limit
 	if limit <= 0 {
 		limit = defaultSearchLimit

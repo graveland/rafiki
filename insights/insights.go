@@ -5,12 +5,17 @@
 package insights
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/timescale/rafiki/routing"
 )
+
+// ErrNotFound is returned when a requested conversation does not exist. Callers
+// (e.g. the gRPC handler) match it with errors.Is to map to a NotFound status.
+var ErrNotFound = errors.New("insights: conversation not found")
 
 // Pricer resolves a model id to its per-token list price. It is injected (the
 // server passes ModelCatalog.Pricing) so insights carries no catalog/network
@@ -42,6 +47,17 @@ const (
 	PathProxy  Path = "proxy"  // driven_by = 'client'
 	PathDirect Path = "direct" // driven_by = 'server'
 )
+
+// validate rejects a non-empty Path that is neither proxy nor direct, so a
+// typo'd filter errors loudly instead of silently returning unfiltered results.
+func (p Path) validate() error {
+	switch p {
+	case PathAny, PathProxy, PathDirect:
+		return nil
+	default:
+		return fmt.Errorf("invalid path %q: use %q or %q", string(p), PathProxy, PathDirect)
+	}
+}
 
 // drivenBy maps a Path filter to the driven_by column value, or "" for no filter.
 func (p Path) drivenBy() string {

@@ -64,7 +64,7 @@ func (i *Insights) Export(ctx context.Context, conversationID string) (*Transcri
 		conversationID).Scan(&tr.Owner, &tr.Persona, &tr.DrivenBy, &tr.Source)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("export: conversation %s not found", conversationID)
+			return nil, fmt.Errorf("export: conversation %s: %w", conversationID, ErrNotFound)
 		}
 		return nil, fmt.Errorf("export: load conversation: %w", err)
 	}

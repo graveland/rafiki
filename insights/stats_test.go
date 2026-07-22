@@ -2,6 +2,7 @@ package insights
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -192,5 +193,34 @@ func TestGlobalStats_UnpricedWithoutPricer(t *testing.T) {
 		if len(s.Cost) != 1 || s.Cost[0].CostUSD != 0 {
 			t.Errorf("%s: cost_usd = %v, want 0 (unpriced)", name, s.Cost)
 		}
+	}
+}
+
+func TestStats_InvalidPathErrors(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ins := New(pool)
+
+	if _, err := ins.GlobalStats(ctx, StatsFilter{Path: Path("server")}); err == nil {
+		t.Error("GlobalStats with an invalid path must error")
+	}
+	if _, err := ins.Search(ctx, SearchFilter{Path: Path("client")}); err == nil {
+		t.Error("Search with an invalid path (raw driven_by value) must error")
+	}
+	// The valid aliases still work.
+	if _, err := ins.GlobalStats(ctx, StatsFilter{Path: PathProxy}); err != nil {
+		t.Errorf("GlobalStats(proxy) = %v, want nil", err)
+	}
+	if _, err := ins.Search(ctx, SearchFilter{Path: PathAny}); err != nil {
+		t.Errorf("Search(any) = %v, want nil", err)
+	}
+}
+
+func TestConversationStats_NotFound(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	_, err := New(pool).ConversationStats(ctx, "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("ConversationStats on a missing conversation err = %v, want ErrNotFound", err)
 	}
 }
