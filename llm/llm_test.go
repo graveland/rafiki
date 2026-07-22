@@ -431,7 +431,7 @@ func TestDefaultTrimPolicyKeepsFirstAndRecent(t *testing.T) {
 	}
 }
 
-func TestAssembleAppliesSingleBreakpoint(t *testing.T) {
+func TestAssembleAppliesCachePolicy(t *testing.T) {
 	conv := &Conversation{cfg: convConfig{
 		model:     "claude-haiku-4-5",
 		maxTokens: 4096,
@@ -444,10 +444,12 @@ func TestAssembleAppliesSingleBreakpoint(t *testing.T) {
 	var k int64 = 40
 	conv.cfg.temperature, conv.cfg.topK = &temp, &k
 
-	params := conv.assemble(UserTextMessages("hi"), sendConfig{maxTokens: 1024})
+	msgs := UserTextMessages("hi")
+	params := conv.assemble(msgs, sendConfig{maxTokens: 1024})
 	if params.MaxTokens != 1024 {
 		t.Errorf("per-send max_tokens override lost: %d", params.MaxTokens)
 	}
+	// Default policy: one 5m breakpoint on the LAST system block.
 	var withCC int
 	for i, b := range params.System {
 		if b.CacheControl.Type != "" || b.CacheControl.TTL != "" {
@@ -455,20 +457,110 @@ func TestAssembleAppliesSingleBreakpoint(t *testing.T) {
 			if i != len(params.System)-1 {
 				t.Errorf("breakpoint on block %d, want last", i)
 			}
-			if b.CacheControl.TTL != anthropic.CacheControlEphemeralTTLTTL1h {
-				t.Errorf("TTL = %q, want 1h", b.CacheControl.TTL)
+			if b.CacheControl.TTL != "" {
+				t.Errorf("TTL = %q, want empty (5m default)", b.CacheControl.TTL)
 			}
 		}
 	}
 	if withCC != 1 {
-		t.Errorf("%d cache breakpoints, want exactly 1", withCC)
+		t.Errorf("%d system cache breakpoints, want exactly 1", withCC)
+	}
+	// Default policy: moving breakpoint on the request's last message block —
+	// on the assembled request only; the caller's messages stay untouched.
+	last := params.Messages[len(params.Messages)-1].Content
+	if cc := last[len(last)-1].GetCacheControl(); cc == nil || cc.Type == "" {
+		t.Error("no moving breakpoint on the last message block")
+	}
+	origLast := msgs[len(msgs)-1].Content
+	if cc := origLast[len(origLast)-1].GetCacheControl(); cc != nil && cc.Type != "" {
+		t.Error("assemble mutated the caller's message blocks")
 	}
 	// The conversation's configured system must NOT be mutated by assembly.
-	if conv.cfg.system[len(conv.cfg.system)-1].CacheControl.TTL != "" {
+	if conv.cfg.system[len(conv.cfg.system)-1].CacheControl.Type != "" {
 		t.Error("assemble mutated the conversation's system blocks")
 	}
 	if v, _ := params.Temperature.Value, false; v != 0.7 {
 		t.Errorf("temperature = %v, want 0.7", v)
+	}
+}
+
+func TestAssembleCachePolicyVariants(t *testing.T) {
+	system := []anthropic.TextBlockParam{{Text: "sys"}}
+
+	// 1h system, messages off.
+	conv := &Conversation{cfg: convConfig{model: "m", system: system,
+		cache: &CachePolicy{SystemTTL: Cache1h, MessagesTTL: CacheOff, Breakpoints: 1}}}
+	params := conv.assemble(UserTextMessages("hi"), sendConfig{maxTokens: 64})
+	if got := params.System[0].CacheControl.TTL; got != anthropic.CacheControlEphemeralTTLTTL1h {
+		t.Errorf("system TTL = %q, want 1h", got)
+	}
+	mLast := params.Messages[0].Content
+	if cc := mLast[len(mLast)-1].GetCacheControl(); cc != nil && cc.Type != "" {
+		t.Error("messages off: unexpected moving breakpoint")
+	}
+
+	// Everything off.
+	conv = &Conversation{cfg: convConfig{model: "m", system: system,
+		cache: &CachePolicy{SystemTTL: CacheOff, MessagesTTL: CacheOff, Breakpoints: 1}}}
+	params = conv.assemble(UserTextMessages("hi"), sendConfig{maxTokens: 64})
+	if params.System[0].CacheControl.Type != "" {
+		t.Error("system off: unexpected breakpoint")
+	}
+}
+
+func TestWithMessageBreakpoints(t *testing.T) {
+	policy := &CachePolicy{MessagesTTL: Cache5m, Breakpoints: 2}
+
+	markedAt := func(msgs []Message) []int {
+		var marked []int
+		for i := range msgs {
+			if cc := msgs[i].Content[0].GetCacheControl(); cc != nil && cc.Type != "" {
+				marked = append(marked, i)
+			}
+		}
+		return marked
+	}
+
+	// A block-heavy history: 30 single-block user messages.
+	var msgs []Message
+	for i := 0; i < 30; i++ {
+		msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock("b")))
+	}
+	out := withMessageBreakpoints(msgs, policy)
+	marked := markedAt(out)
+	if len(marked) != 2 {
+		t.Fatalf("marked %v, want 2 breakpoints", marked)
+	}
+	if marked[len(marked)-1] != len(msgs)-1 {
+		t.Errorf("last message not marked: %v", marked)
+	}
+	if gap := marked[1] - marked[0]; gap < lookbackStride {
+		t.Errorf("breakpoint gap %d < stride %d", gap, lookbackStride)
+	}
+	// Copy-on-write: the input history carries no markers.
+	if got := markedAt(msgs); got != nil {
+		t.Errorf("input mutated: markers at %v", got)
+	}
+
+	// A history reloaded from capture carries stale markers verbatim; they
+	// must be cleared on the assembled request (4-breakpoint API limit).
+	stale := withMessageBreakpoints(out, policy) // out has markers baked in
+	if got := markedAt(stale); len(got) != 2 {
+		t.Errorf("stale markers not consolidated: %v", got)
+	}
+
+	// One more message MOVES the markers on the new request.
+	grown := append(append([]Message{}, msgs...), anthropic.NewUserMessage(anthropic.NewTextBlock("new")))
+	out2 := withMessageBreakpoints(grown, policy)
+	m2 := markedAt(out2)
+	if len(m2) != 2 || m2[len(m2)-1] != len(grown)-1 {
+		t.Errorf("after growth: markers %v, want last=%d", m2, len(grown)-1)
+	}
+
+	// Off policy still scrubs stale markers.
+	off := withMessageBreakpoints(out, &CachePolicy{MessagesTTL: CacheOff, Breakpoints: 1})
+	if got := markedAt(off); got != nil {
+		t.Errorf("off policy left markers: %v", got)
 	}
 }
 

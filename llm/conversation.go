@@ -53,6 +53,7 @@ type convConfig struct {
 	maxTokens   int64
 	trim        TrimPolicy
 	authorKind  string
+	cache       *CachePolicy
 }
 
 type ConvOption func(*convConfig)
@@ -95,10 +96,10 @@ func TopK(k int64) ConvOption { return func(c *convConfig) { c.topK = &k } }
 // MaxTokens sets the default output cap (4096 when unset).
 func MaxTokens(n int64) ConvOption { return func(c *convConfig) { c.maxTokens = n } }
 
-// System sets the system prompt blocks. The prompt-cache breakpoint
-// (ephemeral, 1h) is applied internally at request assembly — callers never
-// set cache_control themselves. System is immutable for the conversation's
-// life.
+// System sets the system prompt blocks. Prompt-cache breakpoints are applied
+// internally at request assembly per the conversation's CachePolicy — callers
+// never set cache_control themselves. System is immutable for the
+// conversation's life.
 func System(blocks []anthropic.TextBlockParam) ConvOption {
 	return func(c *convConfig) { c.system = blocks }
 }
@@ -115,6 +116,34 @@ func WithTrimPolicy(p TrimPolicy) ConvOption { return func(c *convConfig) { c.tr
 // AuthorKind stamps turn provenance ('human' | 'agent' | 'system').
 func AuthorKind(k string) ConvOption { return func(c *convConfig) { c.authorKind = k } }
 
+// CachePolicy controls where the conversation places prompt-cache
+// breakpoints when assembling each request. SystemTTL caches the static
+// prefix (tools render before system, so one breakpoint on the last system
+// block covers both). MessagesTTL enables moving breakpoints over the
+// message history — the standard multi-turn pattern: the last content block
+// of the request is marked each send, so turn N reads the whole history from
+// cache and pays only the delta. Breakpoints (clamped to [1,3]) is how many
+// moving markers to place; the extras trail every ~15 blocks to stay inside
+// the API's 20-block cache lookback on tool-heavy turns. At most 4 total
+// breakpoints are used (1 system + up to 3 moving), the API maximum.
+type CachePolicy struct {
+	SystemTTL   CacheTTL
+	MessagesTTL CacheTTL
+	Breakpoints int
+}
+
+// DefaultCachePolicy caches everything at the 5-minute TTL with two moving
+// breakpoints: the cheapest policy that keeps an active conversation fully
+// cached. Callers with cross-conversation prefix reuse inside an hour (batch
+// analyzers, busy alert loops) should raise SystemTTL to CacheTTL1h.
+func DefaultCachePolicy() CachePolicy {
+	return CachePolicy{SystemTTL: Cache5m, MessagesTTL: Cache5m, Breakpoints: 2}
+}
+
+// WithCache overrides the conversation's prompt-cache policy (default:
+// DefaultCachePolicy).
+func WithCache(p CachePolicy) ConvOption { return func(c *convConfig) { c.cache = &p } }
+
 // Conversation loads or creates a conversation. With WithStore it is
 // DB-backed (captured, resumable); without, it degrades to an in-memory
 // history with identical loop semantics.
@@ -122,6 +151,15 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	cfg := convConfig{maxTokens: 4096, trim: defaultTrimPolicy{}, authorKind: "agent"}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if cfg.cache == nil {
+		d := DefaultCachePolicy()
+		cfg.cache = &d
+	}
+	if cfg.cache.Breakpoints < 1 {
+		cfg.cache.Breakpoints = 1
+	} else if cfg.cache.Breakpoints > 3 {
+		cfg.cache.Breakpoints = 3
 	}
 	if cfg.entrypoint == "" {
 		return nil, errors.New("llm: an entrypoint is required (NewConversation or Entrypoint)")
@@ -417,24 +455,31 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 	return nil, errors.New("llm: prompt still too large after trim retries")
 }
 
-// assemble builds the wire request. The single prompt-cache breakpoint
-// (ephemeral, 1h) goes on the LAST system block: tools render before system
-// in the Anthropic prefix, so this one breakpoint caches tool schemas +
-// system prompt together.
+// assemble builds the wire request and places prompt-cache breakpoints per
+// the conversation's CachePolicy: one on the LAST system block (tools render
+// before system in the Anthropic prefix, so it caches tool schemas + system
+// prompt together) and up to three moving breakpoints over the message
+// history (see CachePolicy).
 func (conv *Conversation) assemble(reqMsgs []Message, scfg sendConfig) anthropic.MessageNewParams {
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(conv.cfg.model),
 		MaxTokens: scfg.maxTokens,
 		Messages:  reqMsgs,
 	}
+	policy := conv.cfg.cache
+	if policy == nil { // direct-construction (tests) safety; Conversation() always sets it
+		d := DefaultCachePolicy()
+		policy = &d
+	}
 	if len(conv.cfg.system) > 0 {
 		system := make([]anthropic.TextBlockParam, len(conv.cfg.system))
 		copy(system, conv.cfg.system)
-		system[len(system)-1].CacheControl = anthropic.CacheControlEphemeralParam{
-			TTL: anthropic.CacheControlEphemeralTTLTTL1h,
+		if cc, on := cacheControlFor(policy.SystemTTL); on {
+			system[len(system)-1].CacheControl = cc
 		}
 		params.System = system
 	}
+	params.Messages = withMessageBreakpoints(reqMsgs, policy)
 	if len(scfg.tools) > 0 {
 		params.Tools = scfg.tools
 	}
@@ -445,6 +490,148 @@ func (conv *Conversation) assemble(reqMsgs []Message, scfg sendConfig) anthropic
 		params.TopK = anthropic.Int(*conv.cfg.topK)
 	}
 	return params
+}
+
+// cacheControlFor maps a CacheTTL to its wire form. on=false for CacheOff
+// (and the zero value, so an unset field never emits a breakpoint).
+func cacheControlFor(ttl CacheTTL) (anthropic.CacheControlEphemeralParam, bool) {
+	switch ttl {
+	case Cache5m:
+		return anthropic.NewCacheControlEphemeralParam(), true // TTL omitted = 5m default
+	case Cache1h:
+		cc := anthropic.NewCacheControlEphemeralParam()
+		cc.TTL = anthropic.CacheControlEphemeralTTLTTL1h
+		return cc, true
+	default:
+		return anthropic.CacheControlEphemeralParam{}, false
+	}
+}
+
+// lookbackStride spaces trailing moving breakpoints so each stays within the
+// API's 20-block cache lookback of the previous entry on block-heavy turns.
+const lookbackStride = 15
+
+// withMessageBreakpoints returns the request's message list with up to
+// p.Breakpoints moving cache markers, walking backward from the last
+// cacheable block (thinking/redacted blocks can't carry cache_control and
+// are skipped, but still count toward the lookback stride). Stale markers —
+// possible on histories reloaded from capture, whose stored content is the
+// verbatim prior request — are removed so the request never exceeds the
+// API's 4-breakpoint limit. STRICTLY copy-on-write: the caller's messages
+// (the conversation's shared history) are never mutated; only the affected
+// blocks are cloned. This keeps previously-captured request params stable.
+func withMessageBreakpoints(msgs []Message, p *CachePolicy) []Message {
+	cc, on := cacheControlFor(p.MessagesTTL)
+
+	type edit struct {
+		i, j int
+		cc   anthropic.CacheControlEphemeralParam
+	}
+	var edits []edit
+
+	placed, walked := 0, 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		content := msgs[i].Content
+		for j := len(content) - 1; j >= 0; j-- {
+			walked++
+			ptr := content[j].GetCacheControl()
+			if ptr == nil {
+				continue
+			}
+			pick := on && placed < p.Breakpoints && (placed == 0 || walked >= lookbackStride)
+			switch {
+			case pick:
+				edits = append(edits, edit{i, j, cc})
+				placed++
+				walked = 0
+			case ptr.Type != "" || ptr.TTL != "":
+				edits = append(edits, edit{i, j, anthropic.CacheControlEphemeralParam{}}) // clear stale marker
+			}
+		}
+	}
+	if len(edits) == 0 {
+		return msgs
+	}
+
+	out := make([]Message, len(msgs))
+	copy(out, msgs)
+	copied := map[int]bool{}
+	for _, e := range edits {
+		if !copied[e.i] {
+			nc := make([]anthropic.ContentBlockParamUnion, len(out[e.i].Content))
+			copy(nc, out[e.i].Content)
+			out[e.i].Content = nc
+			copied[e.i] = true
+		}
+		out[e.i].Content[e.j] = blockWithCacheControl(out[e.i].Content[e.j], e.cc)
+	}
+	return out
+}
+
+// blockWithCacheControl returns a copy of the block with cc applied, leaving
+// the original untouched. Covers every union member that carries
+// cache_control (mirrors ContentBlockParamUnion.GetCacheControl); a
+// non-cacheable block is returned unchanged.
+func blockWithCacheControl(b anthropic.ContentBlockParamUnion, cc anthropic.CacheControlEphemeralParam) anthropic.ContentBlockParamUnion {
+	switch {
+	case b.OfText != nil:
+		v := *b.OfText
+		v.CacheControl = cc
+		b.OfText = &v
+	case b.OfImage != nil:
+		v := *b.OfImage
+		v.CacheControl = cc
+		b.OfImage = &v
+	case b.OfDocument != nil:
+		v := *b.OfDocument
+		v.CacheControl = cc
+		b.OfDocument = &v
+	case b.OfSearchResult != nil:
+		v := *b.OfSearchResult
+		v.CacheControl = cc
+		b.OfSearchResult = &v
+	case b.OfToolUse != nil:
+		v := *b.OfToolUse
+		v.CacheControl = cc
+		b.OfToolUse = &v
+	case b.OfToolResult != nil:
+		v := *b.OfToolResult
+		v.CacheControl = cc
+		b.OfToolResult = &v
+	case b.OfServerToolUse != nil:
+		v := *b.OfServerToolUse
+		v.CacheControl = cc
+		b.OfServerToolUse = &v
+	case b.OfWebSearchToolResult != nil:
+		v := *b.OfWebSearchToolResult
+		v.CacheControl = cc
+		b.OfWebSearchToolResult = &v
+	case b.OfWebFetchToolResult != nil:
+		v := *b.OfWebFetchToolResult
+		v.CacheControl = cc
+		b.OfWebFetchToolResult = &v
+	case b.OfCodeExecutionToolResult != nil:
+		v := *b.OfCodeExecutionToolResult
+		v.CacheControl = cc
+		b.OfCodeExecutionToolResult = &v
+	case b.OfBashCodeExecutionToolResult != nil:
+		v := *b.OfBashCodeExecutionToolResult
+		v.CacheControl = cc
+		b.OfBashCodeExecutionToolResult = &v
+	case b.OfTextEditorCodeExecutionToolResult != nil:
+		v := *b.OfTextEditorCodeExecutionToolResult
+		v.CacheControl = cc
+		b.OfTextEditorCodeExecutionToolResult = &v
+	case b.OfToolSearchToolResult != nil:
+		v := *b.OfToolSearchToolResult
+		v.CacheControl = cc
+		b.OfToolSearchToolResult = &v
+	case b.OfContainerUpload != nil:
+		v := *b.OfContainerUpload
+		v.CacheControl = cc
+		b.OfContainerUpload = &v
+	}
+	return b
 }
 
 func nextOrdinal(history []store.Message) int {

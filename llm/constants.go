@@ -18,8 +18,9 @@ const (
 type CacheTTL string
 
 const (
-	Cache1h CacheTTL = "1h"
-	Cache5m CacheTTL = "5m"
+	CacheOff CacheTTL = "off" // no breakpoint
+	Cache1h  CacheTTL = "1h"  // 2x write premium; pays off with cross-conversation reuse
+	Cache5m  CacheTTL = "5m"  // 1.25x write premium; entry lives 5 minutes
 )
 
 const (
