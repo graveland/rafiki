@@ -354,3 +354,65 @@ func TestModelCatalogCache(t *testing.T) {
 		t.Errorf("warm cache must not re-fetch, got %d hits (want 1)", got)
 	}
 }
+
+// TestModelPricingWireDecode guards the json tags on orPricing against the live
+// OpenRouter wire shape: the pricing object was previously dropped on decode.
+func TestModelPricingWireDecode(t *testing.T) {
+	const wire = `{"data":[{"id":"anthropic/claude-sonnet-5","created":1,
+	 "pricing":{"prompt":"0.000002","completion":"0.00001","input_cache_read":"0.0000002",
+	           "input_cache_write":"0.0000025","input_cache_write_1h":"0.000004"}}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(wire))
+	}))
+	defer srv.Close()
+	c := NewModelCatalog(srv.Client(), time.Minute, tslogs.NewDiscardingLogger())
+	c.url = srv.URL
+	c.Warm()
+
+	p, ok := c.Pricing("anthropic/claude-sonnet-5")
+	if !ok {
+		t.Fatal("pricing not decoded from wire")
+	}
+	if p.PromptUSD != 0.000002 || p.CompletionUSD != 0.00001 {
+		t.Errorf("base price = prompt %g / completion %g, want 0.000002/0.00001", p.PromptUSD, p.CompletionUSD)
+	}
+	if p.CacheReadUSD != 0.0000002 || p.CacheWriteUSD != 0.0000025 || p.CacheWrite1hUSD != 0.000004 {
+		t.Errorf("cache prices = read %g / write %g / write1h %g, want 0.0000002/0.0000025/0.000004",
+			p.CacheReadUSD, p.CacheWriteUSD, p.CacheWrite1hUSD)
+	}
+}
+
+func TestPricing(t *testing.T) {
+	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	sonnet := ModelPricing{PromptUSD: 0.000002, CompletionUSD: 0.00001, CacheReadUSD: 0.0000002, CacheWriteUSD: 0.0000025}
+	c.SeedForTest([]CatalogEntry{
+		{ID: "anthropic/claude-sonnet-5", Created: 2, Pricing: &sonnet},
+		{ID: "~openai/gpt-latest", Created: 3, Pricing: &ModelPricing{PromptUSD: 0.000001, CompletionUSD: 0.000003}},
+		{ID: "moonshotai/kimi-k3", Created: 4}, // no pricing seeded → unpriced
+	})
+
+	// Bare Anthropic id resolves to anthropic/<id>.
+	if p, ok := c.Pricing("claude-sonnet-5"); !ok || p.PromptUSD != 0.000002 || p.CacheReadUSD != 0.0000002 {
+		t.Errorf("bare-id pricing = (%+v,%v), want sonnet prices", p, ok)
+	}
+	// Exact OR slug.
+	if p, ok := c.Pricing("anthropic/claude-sonnet-5"); !ok || p.CompletionUSD != 0.00001 {
+		t.Errorf("slug pricing = (%+v,%v), want sonnet prices", p, ok)
+	}
+	// Family-latest alias resolves to the newest of the family.
+	if p, ok := c.Pricing("sonnet-latest"); !ok || p.PromptUSD != 0.000002 {
+		t.Errorf("sonnet-latest pricing = (%+v,%v), want sonnet prices", p, ok)
+	}
+	// Tilde auto-latest requested without its "~" is normalized and resolves.
+	if p, ok := c.Pricing("openai/gpt-latest"); !ok || p.PromptUSD != 0.000001 {
+		t.Errorf("tilde-alias pricing = (%+v,%v), want gpt prices", p, ok)
+	}
+	// Unknown model → false.
+	if _, ok := c.Pricing("mystery/model-x"); ok {
+		t.Error("unknown model must not resolve pricing")
+	}
+	// Present model without prices → false.
+	if _, ok := c.Pricing("moonshotai/kimi-k3"); ok {
+		t.Error("model with no price strings must resolve ok=false")
+	}
+}

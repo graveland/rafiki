@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/timescale/rafiki/routing"
 )
 
 // seedTurns creates a conversation on the given path (owner uniquely derived
@@ -134,4 +136,61 @@ func inDelta(got, want, delta float64) bool {
 		d = -d
 	}
 	return d <= delta
+}
+
+func TestGlobalStats_CostFromPricer(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := insertConversation(t, pool, "client", "grace")
+	insertTurn(t, pool, convID, seedTurn{
+		ordinal: 0, model: "claude-sonnet-5", upstream: "anthropic",
+		inTok: 1000, outTok: 200, cacheRead: 5000, cacheCreate: 300,
+	})
+
+	// Fake pricer: prices only claude-sonnet-5, mirroring OR per-token USD.
+	pricer := func(model string) (routing.ModelPricing, bool) {
+		if model != "claude-sonnet-5" {
+			return routing.ModelPricing{}, false
+		}
+		return routing.ModelPricing{
+			PromptUSD: 0.000002, CompletionUSD: 0.00001,
+			CacheReadUSD: 0.0000002, CacheWriteUSD: 0.0000025,
+		}, true
+	}
+	ins := New(pool).WithPricer(pricer)
+
+	s, err := ins.GlobalStats(ctx, StatsFilter{})
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if len(s.Cost) != 1 {
+		t.Fatalf("cost rows = %d, want 1", len(s.Cost))
+	}
+	// 1000*2e-6 + 200*1e-5 + 5000*2e-7 + 300*2.5e-6 = 0.002 + 0.002 + 0.001 + 0.00075 = 0.00575
+	want := 1000*0.000002 + 200*0.00001 + 5000*0.0000002 + 300*0.0000025
+	if !inDelta(s.Cost[0].CostUSD, want, 1e-9) {
+		t.Errorf("cost_usd = %g, want %g", s.Cost[0].CostUSD, want)
+	}
+}
+
+func TestGlobalStats_UnpricedWithoutPricer(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := insertConversation(t, pool, "client", "heidi")
+	insertTurn(t, pool, convID, seedTurn{ordinal: 0, model: "claude-sonnet-5", inTok: 1000, outTok: 200})
+
+	// No pricer, and a pricer that never resolves, both leave CostUSD at 0.
+	for name, ins := range map[string]*Insights{
+		"no-pricer":      New(pool),
+		"nil-pricer":     New(pool).WithPricer(nil),
+		"unknown-pricer": New(pool).WithPricer(func(string) (routing.ModelPricing, bool) { return routing.ModelPricing{}, false }),
+	} {
+		s, err := ins.GlobalStats(ctx, StatsFilter{})
+		if err != nil {
+			t.Fatalf("%s: stats: %v", name, err)
+		}
+		if len(s.Cost) != 1 || s.Cost[0].CostUSD != 0 {
+			t.Errorf("%s: cost_usd = %v, want 0 (unpriced)", name, s.Cost)
+		}
+	}
 }

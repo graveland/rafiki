@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,61 @@ type orModel struct {
 	TopProvider struct {
 		MaxCompletionTokens int `json:"max_completion_tokens"`
 	} `json:"top_provider"`
+	// Pricing is OpenRouter's per-token USD price object. A cached snapshot
+	// written before this field existed decodes with empty strings, so its
+	// models resolve as unpriced until the next successful refresh repopulates
+	// pricing — acceptable, since the stale snapshot's ids still resolve.
+	Pricing orPricing `json:"pricing"`
+}
+
+// orPricing is OpenRouter's per-token USD price strings. prompt/completion are
+// always present; the cache fields are omitted for models without prompt
+// caching. Values are decimal USD-per-token (e.g. "0.000002").
+type orPricing struct {
+	Prompt            string `json:"prompt"`
+	Completion        string `json:"completion"`
+	InputCacheRead    string `json:"input_cache_read"`
+	InputCacheWrite   string `json:"input_cache_write"`
+	InputCacheWrite1h string `json:"input_cache_write_1h"`
+}
+
+// ModelPricing is a parsed per-token USD price for a model. Cache fields are 0
+// when the model or the OpenRouter entry doesn't price them.
+type ModelPricing struct {
+	PromptUSD       float64
+	CompletionUSD   float64
+	CacheReadUSD    float64
+	CacheWriteUSD   float64
+	CacheWrite1hUSD float64
+}
+
+// pricingFromOR parses an orPricing into ModelPricing. ok=false unless both the
+// prompt and completion prices parse (a model with no usable base price is
+// treated as unpriced); cache fields parse best-effort to 0.
+func pricingFromOR(p orPricing) (ModelPricing, bool) {
+	prompt, err := strconv.ParseFloat(p.Prompt, 64)
+	if err != nil {
+		return ModelPricing{}, false
+	}
+	completion, err := strconv.ParseFloat(p.Completion, 64)
+	if err != nil {
+		return ModelPricing{}, false
+	}
+	return ModelPricing{
+		PromptUSD:       prompt,
+		CompletionUSD:   completion,
+		CacheReadUSD:    parsePriceOrZero(p.InputCacheRead),
+		CacheWriteUSD:   parsePriceOrZero(p.InputCacheWrite),
+		CacheWrite1hUSD: parsePriceOrZero(p.InputCacheWrite1h),
+	}, true
+}
+
+func parsePriceOrZero(s string) float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // ModelCatalog fetches and caches the OpenRouter model list, and resolves the
@@ -464,6 +520,31 @@ func (c *ModelCatalog) ContextWindow(model string) (contextLen, maxCompletion in
 	return 0, 0, false
 }
 
+// Pricing returns the OpenRouter list price for a requested model, resolving it
+// the same way ContextWindow does (empty->default is not applied here;
+// "<family>-latest", bare Anthropic, and slash ids all resolve to the concrete
+// OpenRouter entry). ok is false on a nil receiver, an unresolvable model, a
+// cold/stale cache without the entry, or an entry with no parseable base price.
+func (c *ModelCatalog) Pricing(model string) (ModelPricing, bool) {
+	if c == nil {
+		return ModelPricing{}, false
+	}
+	resolved, err := ResolveModel(c, "", model)
+	if err != nil || resolved == "" {
+		return ModelPricing{}, false
+	}
+	orID := c.OpenRouterModel(resolved)
+	c.refresh()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range c.models {
+		if m.ID == orID {
+			return pricingFromOR(m.Pricing)
+		}
+	}
+	return ModelPricing{}, false
+}
+
 // AutoCompactWindow computes a CLAUDE_CODE_AUTO_COMPACT_WINDOW token threshold
 // from a model's context length: the full window minus a reply reserve. The
 // reserve is the model's max completion tokens, clamped to [5%, 10%] of the
@@ -487,12 +568,16 @@ func AutoCompactWindow(contextLen, maxCompletion int) int {
 	return contextLen - reserve
 }
 
-// CatalogEntry is the exported shape for test seeding.
+// CatalogEntry is the exported shape for test seeding. Pricing is nil for an
+// unpriced model (Pricing() then reports ok=false); when set, its floats are
+// formatted into the wire price strings so they round-trip back through
+// pricingFromOR.
 type CatalogEntry struct {
 	ID                  string
 	Created             int64
 	ContextLength       int
 	MaxCompletionTokens int
+	Pricing             *ModelPricing
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
@@ -503,6 +588,17 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 	for i, e := range entries {
 		c.models[i] = orModel{ID: e.ID, Created: e.Created, ContextLen: e.ContextLength}
 		c.models[i].TopProvider.MaxCompletionTokens = e.MaxCompletionTokens
+		if e.Pricing != nil {
+			c.models[i].Pricing = orPricing{
+				Prompt:            formatPrice(e.Pricing.PromptUSD),
+				Completion:        formatPrice(e.Pricing.CompletionUSD),
+				InputCacheRead:    formatPrice(e.Pricing.CacheReadUSD),
+				InputCacheWrite:   formatPrice(e.Pricing.CacheWriteUSD),
+				InputCacheWrite1h: formatPrice(e.Pricing.CacheWrite1hUSD),
+			}
+		}
 	}
 	c.fetched = time.Now().Add(c.ttl) // never refresh in tests
 }
+
+func formatPrice(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }

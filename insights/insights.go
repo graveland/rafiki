@@ -8,13 +8,30 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/timescale/rafiki/routing"
 )
 
-// Insights answers analysis queries over the conversations schema.
-type Insights struct{ pool *pgxpool.Pool }
+// Pricer resolves a model id to its per-token list price. It is injected (the
+// server passes ModelCatalog.Pricing) so insights carries no catalog/network
+// concern. ok=false leaves the model unpriced.
+type Pricer func(model string) (routing.ModelPricing, bool)
 
-// New returns an Insights backed by pool.
+// Insights answers analysis queries over the conversations schema.
+type Insights struct {
+	pool   *pgxpool.Pool
+	pricer Pricer
+}
+
+// New returns an Insights backed by pool. It is unpriced until WithPricer is set.
 func New(pool *pgxpool.Pool) *Insights { return &Insights{pool: pool} }
+
+// WithPricer sets the price resolver used to fill CostRow.CostUSD and returns
+// the receiver for chaining. Safe to call with nil (leaves cost unpriced).
+func (i *Insights) WithPricer(p Pricer) *Insights {
+	i.pricer = p
+	return i
+}
 
 // Path selects a capture path in filters. It maps to the immutable driven_by
 // column: the proxy (client-driven) path vs. the in-process (server-driven) one.
