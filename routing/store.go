@@ -140,6 +140,7 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 type TurnResult struct {
 	TurnID              string
 	CreatedAt           time.Time
+	Model               string // served model from the response; empty keeps the intent model
 	Response            []byte
 	StopReason          string
 	Upstream            string
@@ -154,10 +155,11 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE conversations.conversation_turn
 		    SET status='complete', response=$3, stop_reason=$4, upstream=$5,
-		        input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10
+		        input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10,
+		        model=COALESCE(NULLIF($11,''), model)
 		  WHERE id=$1::uuid AND created_at=$2`,
 		r.TurnID, r.CreatedAt, nullifyBytes(jsonbSafe(r.Response)), nullify(r.StopReason), nullify(r.Upstream),
-		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS)
+		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS, r.Model)
 	if err != nil {
 		return err
 	}

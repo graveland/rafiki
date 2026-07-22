@@ -105,6 +105,7 @@ func testInsertTurnIntentAndCompleteTurn(t *testing.T, ctx context.Context, pool
 	want := TurnResult{
 		TurnID:              turnID,
 		CreatedAt:           createdAt,
+		Model:               "claude-test-served", // response's served model overrides the intent
 		Response:            []byte(`{"content":[]}`),
 		StopReason:          "end_turn",
 		Upstream:            "anthropic",
@@ -121,6 +122,7 @@ func testInsertTurnIntentAndCompleteTurn(t *testing.T, ctx context.Context, pool
 	var (
 		gotStopReason          string
 		gotUpstream            string
+		gotModel               string
 		gotInputTokens         int64
 		gotOutputTokens        int64
 		gotCacheReadTokens     int64
@@ -128,11 +130,11 @@ func testInsertTurnIntentAndCompleteTurn(t *testing.T, ctx context.Context, pool
 		gotLatencyMS           int
 	)
 	err = pool.QueryRow(ctx, `
-		SELECT stop_reason, upstream, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, latency_ms
+		SELECT stop_reason, upstream, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, latency_ms
 		  FROM conversations.conversation_turn
 		 WHERE id=$1::uuid AND created_at=$2`,
 		turnID, createdAt).Scan(
-		&gotStopReason, &gotUpstream, &gotInputTokens, &gotOutputTokens,
+		&gotStopReason, &gotUpstream, &gotModel, &gotInputTokens, &gotOutputTokens,
 		&gotCacheReadTokens, &gotCacheCreationTokens, &gotLatencyMS,
 	)
 	if err != nil {
@@ -143,6 +145,9 @@ func testInsertTurnIntentAndCompleteTurn(t *testing.T, ctx context.Context, pool
 	}
 	if gotUpstream != want.Upstream {
 		t.Errorf("upstream = %q, want %q", gotUpstream, want.Upstream)
+	}
+	if gotModel != "claude-test-served" {
+		t.Errorf("model = %q, want served model to override intent", gotModel)
 	}
 	if gotInputTokens != want.InputTokens {
 		t.Errorf("input_tokens = %d, want %d", gotInputTokens, want.InputTokens)

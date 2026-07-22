@@ -403,6 +403,14 @@ func TestPricing(t *testing.T) {
 	if p, ok := c.Pricing("sonnet-latest"); !ok || p.PromptUSD != 0.000002 {
 		t.Errorf("sonnet-latest pricing = (%+v,%v), want sonnet prices", p, ok)
 	}
+	// Dated Anthropic snapshot ids aren't on OpenRouter; priced as the base model.
+	if p, ok := c.Pricing("claude-sonnet-5-20260101"); !ok || p.PromptUSD != 0.000002 {
+		t.Errorf("dated snapshot pricing = (%+v,%v), want sonnet prices", p, ok)
+	}
+	// A trailing number that isn't a date is not stripped.
+	if _, ok := c.Pricing("claude-sonnet-5-12345678"); ok {
+		t.Errorf("non-date numeric suffix should not price")
+	}
 	// Tilde auto-latest requested without its "~" is normalized and resolves.
 	if p, ok := c.Pricing("openai/gpt-latest"); !ok || p.PromptUSD != 0.000001 {
 		t.Errorf("tilde-alias pricing = (%+v,%v), want gpt prices", p, ok)
@@ -414,5 +422,25 @@ func TestPricing(t *testing.T) {
 	// Present model without prices → false.
 	if _, ok := c.Pricing("moonshotai/kimi-k3"); ok {
 		t.Error("model with no price strings must resolve ok=false")
+	}
+}
+
+func TestStripSnapshotDate(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"claude-haiku-4-5-20251001", "claude-haiku-4-5", true},
+		{"claude-sonnet-5", "", false},
+		{"moonshotai/kimi-k3", "", false},
+		{"claude-x-12345678", "", false}, // 8 digits but not a 20xx date
+		{"20251001", "", false},          // no base id
+	}
+	for _, tc := range cases {
+		got, ok := stripSnapshotDate(tc.in)
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("stripSnapshotDate(%q) = (%q,%v), want (%q,%v)", tc.in, got, ok, tc.want, tc.ok)
+		}
 	}
 }

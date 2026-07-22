@@ -529,6 +529,18 @@ func (c *ModelCatalog) Pricing(model string) (ModelPricing, bool) {
 	if c == nil {
 		return ModelPricing{}, false
 	}
+	if p, ok := c.pricingFor(model); ok {
+		return p, true
+	}
+	// Dated Anthropic snapshot ids (claude-haiku-4-5-20251001) aren't listed on
+	// OpenRouter; price them as their base model.
+	if base, ok := stripSnapshotDate(model); ok {
+		return c.pricingFor(base)
+	}
+	return ModelPricing{}, false
+}
+
+func (c *ModelCatalog) pricingFor(model string) (ModelPricing, bool) {
 	resolved, err := ResolveModel(c, "", model)
 	if err != nil || resolved == "" {
 		return ModelPricing{}, false
@@ -543,6 +555,25 @@ func (c *ModelCatalog) Pricing(model string) (ModelPricing, bool) {
 		}
 	}
 	return ModelPricing{}, false
+}
+
+// stripSnapshotDate cuts a trailing Anthropic snapshot date ("-20251001") off a
+// model id. ok=false when the id carries no date suffix.
+func stripSnapshotDate(id string) (string, bool) {
+	i := strings.LastIndex(id, "-")
+	if i <= 0 || len(id)-i-1 != 8 {
+		return "", false
+	}
+	suffix := id[i+1:]
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	if !strings.HasPrefix(suffix, "20") {
+		return "", false
+	}
+	return id[:i], true
 }
 
 // AutoCompactWindow computes a CLAUDE_CODE_AUTO_COMPACT_WINDOW token threshold

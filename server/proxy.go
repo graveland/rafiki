@@ -523,7 +523,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
 	if cerr := p.store.CompleteTurn(capCtx, routing.TurnResult{
-		TurnID: cr.turnID, CreatedAt: cr.createdAt, Response: nil, StopReason: stop, Upstream: upstream,
+		TurnID: cr.turnID, CreatedAt: cr.createdAt, Model: usage.Model, Response: nil, StopReason: stop, Upstream: upstream,
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
 		LatencyMS: int(elapsed.Milliseconds()),

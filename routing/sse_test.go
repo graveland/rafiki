@@ -30,6 +30,9 @@ func TestParseCapturedResponseSSE(t *testing.T) {
 	if u.InputTokens != 100 || u.OutputTokens != 25 || u.CacheReadTokens != 40 || u.CacheCreationTokens != 10 {
 		t.Errorf("usage = %+v", u)
 	}
+	if u.Model != "claude-sonnet-5" {
+		t.Errorf("served model = %q, want claude-sonnet-5 (from message_start)", u.Model)
+	}
 	// The stream is reassembled into a canonical JSON Message (never raw SSE), so
 	// it stores cleanly into the JSONB response column.
 	if !json.Valid(canonical) {
@@ -81,13 +84,16 @@ func TestParseCapturedResponseSSEMissingContentBlockStart(t *testing.T) {
 }
 
 func TestParseCapturedResponseJSON(t *testing.T) {
-	body := `{"type":"message","stop_reason":"max_tokens","usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
+	body := `{"type":"message","model":"moonshotai/kimi-k3","stop_reason":"max_tokens","usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 	stop, u, canonical, err := ParseCapturedResponse("application/json", []byte(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if stop != "max_tokens" || u.InputTokens != 7 || u.OutputTokens != 3 {
 		t.Errorf("stop=%q usage=%+v", stop, u)
+	}
+	if u.Model != "moonshotai/kimi-k3" {
+		t.Errorf("served model = %q, want moonshotai/kimi-k3", u.Model)
 	}
 	// A non-SSE body is already a JSON Message; returned unchanged.
 	if string(canonical) != body {

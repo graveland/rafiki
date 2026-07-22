@@ -191,7 +191,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
 	if cerr := p.store.CompleteTurn(capCtx, routing.TurnResult{
-		TurnID: cr.turnID, CreatedAt: cr.createdAt, Response: canonical, StopReason: finish, Upstream: upstream,
+		TurnID: cr.turnID, CreatedAt: cr.createdAt, Model: usage.Model, Response: canonical, StopReason: finish, Upstream: upstream,
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
 		LatencyMS: int(elapsed.Milliseconds()),
@@ -263,6 +263,7 @@ func modelOfBody(body []byte) string {
 func parseOpenAIResponse(contentType string, body []byte) (string, routing.CapturedUsage, []byte, error) {
 	if !strings.Contains(contentType, "text/event-stream") {
 		var m struct {
+			Model   string `json:"model"`
 			Choices []struct {
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
@@ -275,7 +276,9 @@ func parseOpenAIResponse(contentType string, body []byte) (string, routing.Captu
 		if len(m.Choices) > 0 {
 			finish = m.Choices[0].FinishReason
 		}
-		return finish, m.Usage.captured(), body, nil
+		u := m.Usage.captured()
+		u.Model = m.Model
+		return finish, u, body, nil
 	}
 
 	var (
@@ -373,7 +376,9 @@ func parseOpenAIResponse(contentType string, body []byte) (string, routing.Captu
 	if err != nil {
 		return "", routing.CapturedUsage{}, nil, fmt.Errorf("marshal canonical response: %w", err)
 	}
-	return finish, usage.captured(), canonical, nil
+	u := usage.captured()
+	u.Model = model
+	return finish, u, canonical, nil
 }
 
 // openAIToolCall is an accumulated tool_calls delta (arguments arrive as

@@ -14,6 +14,11 @@ type CapturedUsage struct {
 	OutputTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
+
+	// Model is the served model reported by the response (message.model), the
+	// ground truth when the request carried an alias (~vendor/x-latest). Empty
+	// when the response omits it.
+	Model string
 }
 
 type wireUsage struct {
@@ -43,12 +48,15 @@ func ParseCapturedResponse(contentType string, body []byte) (string, CapturedUsa
 func parseJSONMessage(body []byte) (string, CapturedUsage) {
 	var m struct {
 		StopReason string    `json:"stop_reason"`
+		Model      string    `json:"model"`
 		Usage      wireUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &m); err != nil {
 		return "", CapturedUsage{}
 	}
-	return m.StopReason, toCapturedUsage(m.Usage)
+	u := toCapturedUsage(m.Usage)
+	u.Model = m.Model
+	return m.StopReason, u
 }
 
 // parseSSE walks the event stream once, extracting stop_reason + usage (output
@@ -71,6 +79,7 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 		var ev struct {
 			Type    string `json:"type"`
 			Message struct {
+				Model string    `json:"model"`
 				Usage wireUsage `json:"usage"`
 			} `json:"message"`
 			Delta struct {
@@ -85,6 +94,7 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 		case "message_start":
 			cu := toCapturedUsage(ev.Message.Usage)
 			u.InputTokens, u.CacheReadTokens, u.CacheCreationTokens = cu.InputTokens, cu.CacheReadTokens, cu.CacheCreationTokens
+			u.Model = ev.Message.Model
 		case "message_delta":
 			if ev.Delta.StopReason != "" {
 				stop = ev.Delta.StopReason

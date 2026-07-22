@@ -337,7 +337,7 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 		cErr, reason = mErr, "capture serialization failed: "
 		c.logger.Warn("capture: marshal response failed", "error", mErr)
 	} else if cErr = c.capture.CompleteTurn(ctx, routing.TurnResult{
-		TurnID: turnID, CreatedAt: createdAt, Response: respJSON,
+		TurnID: turnID, CreatedAt: createdAt, Model: string(resp.Model), Response: respJSON,
 		StopReason: string(resp.StopReason), Upstream: string(upstream),
 		InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
 		CacheReadTokens: resp.Usage.CacheReadInputTokens, CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
