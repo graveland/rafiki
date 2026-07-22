@@ -4,6 +4,9 @@
 /pic
 /bin/
 
+# Isolated worktrees for multi-task feature work
+/.worktrees/
+
 # Go build artifacts
 *.test
 *.out
