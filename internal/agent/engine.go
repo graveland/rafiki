@@ -122,12 +122,17 @@ func (e *Engine) HandleSteer(text string) {
 	e.HandlePrompt(text)
 }
 
-// HandleAbort cancels the running turn's context, if any.
+// HandleAbort cancels the running turn's context, if any. An abort arriving
+// with nothing in flight (queued-but-unstarted prompts, or the narrow window
+// in runTurn before cancel is published) is logged rather than silently
+// dropped — in-band abort is this project's entire reason for existing, so a
+// no-op abort must still leave a trace.
 func (e *Engine) HandleAbort() {
 	e.mu.Lock()
 	cancel := e.cancel
 	e.mu.Unlock()
 	if cancel == nil {
+		slog.Info("agent: abort requested with no turn running", "conversation", e.conv.ID)
 		return
 	}
 	slog.Info("agent: turn abort requested", "conversation", e.conv.ID)
@@ -165,13 +170,18 @@ func (e *Engine) worker() {
 // user message itself, and the attach TUI renders the bubble before the
 // agent's activity indicator.
 func (e *Engine) runTurn(text string) {
-	e.em.UserMessage(text)
-	e.em.AgentStart()
-
+	// Publish cancel BEFORE the Emit calls below: those write JSON to stdout
+	// and can block on a slow reader, and an abort landing in that window
+	// used to find cancel still nil and vanish silently (see HandleAbort).
+	// Frame order on the wire is unchanged — user echo still precedes
+	// agent_start — only the cancel publication moved earlier.
 	ctx, cancel := context.WithCancel(e.baseCtx)
 	e.mu.Lock()
 	e.cancel = cancel
 	e.mu.Unlock()
+
+	e.em.UserMessage(text)
+	e.em.AgentStart()
 
 	_, err := agentloop.Run(ctx, e.conv, e.tools, e.events(), llm.UserText(text))
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
@@ -198,8 +208,11 @@ func (e *Engine) runTurn(text string) {
 	}
 	e.em.AgentEnd()
 
-	for _, s := range orphanedSteers {
-		e.HandlePrompt(s)
+	// Mirror drainSteers: join orphaned steers into ONE requeued prompt so a
+	// multi-line steer batch that missed the last PendingUser poll becomes
+	// one extra turn, not one turn per buffered line.
+	if len(orphanedSteers) > 0 {
+		e.HandlePrompt(strings.Join(orphanedSteers, "\n"))
 	}
 }
 

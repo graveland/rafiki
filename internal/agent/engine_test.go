@@ -128,9 +128,18 @@ func assertFrameTypes(t *testing.T, out string, want []string) {
 // conversation driven by a scripted sender.
 func newTestEngine(t *testing.T, ts fakeToolSet, bodies ...string) (*Engine, *syncBuffer) {
 	t.Helper()
+	return newTestEngineWithSender(t, ts, scriptedSender(t, bodies...))
+}
+
+// newTestEngineWithSender is newTestEngine's building block for tests that
+// need a Sender other than a plain scripted replay — e.g. one that pauses a
+// specific call to pin down timing that a scripted-body-only test can't
+// control deterministically.
+func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*Engine, *syncBuffer) {
+	t.Helper()
 	silenceSlog(t) // the engine logs turn lifecycle at info; keep test output pristine
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, scriptedSender(t, bodies...)),
+		llm.WithUpstream(llm.UpstreamAnthropic, sender),
 		llm.WithDefaultModel("claude-x"))
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +159,68 @@ func newTestEngine(t *testing.T, ts fakeToolSet, bodies ...string) (*Engine, *sy
 	}
 	fe.handler = eng
 	return eng, out
+}
+
+// blockingSender wraps a Sender and pauses its Nth call until the test
+// releases it. It exists to land a steer strictly after the agent loop's
+// FINAL PendingUser poll but before agentloop.Run returns — a window a
+// blocked tool can't reach, because PendingUser drains whatever is in
+// steerBuf at call time, so anything buffered before it fires is captured
+// in-turn (via drainSteers), never orphaned. The last PendingUser poll of a
+// turn runs synchronously immediately before the Continue call that follows
+// it, so pausing that Continue call (here, via the underlying Sender) is the
+// only deterministic way to hold the loop open in the "late" window.
+type blockingSender struct {
+	inner llm.Sender
+
+	mu      sync.Mutex
+	n       int
+	blockAt int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	s.mu.Lock()
+	s.n++
+	hit := s.n == s.blockAt
+	s.mu.Unlock()
+	if hit {
+		close(s.started)
+		<-s.release
+	}
+	return s.inner.New(ctx, params)
+}
+
+// userMessageTexts returns, in order, the Content of every user-role
+// message_start frame — the prompts/steers a run actually echoed to the TUI.
+func userMessageTexts(t *testing.T, out string) []string {
+	t.Helper()
+	var texts []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l == "" {
+			continue
+		}
+		var f struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(l), &f); err != nil {
+			t.Fatalf("bad frame %q: %v", l, err)
+		}
+		if f.Type != "message_start" || f.Message.Role != "user" {
+			continue
+		}
+		var text string
+		if err := json.Unmarshal(f.Message.Content, &text); err != nil {
+			t.Fatalf("user message_start content not a string: %q: %v", l, err)
+		}
+		texts = append(texts, text)
+	}
+	return texts
 }
 
 func TestEngineRunsScriptedTurn(t *testing.T) {
@@ -230,6 +301,103 @@ func TestHandlePromptReturnsWhileTurnInFlight(t *testing.T) {
 	}
 	if types[len(types)-1] != "agent_settled" {
 		t.Fatalf("last frame = %q, want agent_settled: %v", types[len(types)-1], types)
+	}
+}
+
+// TestEngineRequeuesLateSteersAsOneTurn covers runTurn's own invention (the
+// orphaned-steer requeue) and the fix to it: a steer that lands after the
+// loop's LAST PendingUser poll must still surface, as exactly one extra
+// bracketed turn — and when multiple steers land late, they must be joined
+// into that ONE turn (mirroring drainSteers), not replayed as N separate
+// turns.
+func TestEngineRequeuesLateSteersAsOneTurn(t *testing.T) {
+	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
+		return "file.txt", nil
+	}}
+	bs := &blockingSender{
+		// Body 1: tool_use (the turn's only tool iteration; its PendingUser
+		// poll fires here, before body 2 is requested, and finds steerBuf
+		// empty). Body 2: end_turn, the call we pause. Body 3: end_turn for
+		// the requeued turn.
+		inner:   scriptedSender(t, sampleResp, sampleEndTurn, sampleEndTurn),
+		blockAt: 2,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	eng, out := newTestEngineWithSender(t, ts, bs)
+
+	eng.HandlePrompt("go")
+	<-bs.started // the end_turn call is blocked; PendingUser already ran and
+	// found nothing buffered, so anything queued now is provably late.
+
+	eng.HandleSteer("line one")
+	eng.HandleSteer("line two")
+	close(bs.release)
+
+	eng.Wait()
+
+	assertFrameTypes(t, out.String(), []string{
+		"message_start", "message_end", // user echo: "go"
+		"agent_start",
+		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"tool_execution_start", "tool_execution_end",
+		"message_start", "message_update", "message_end", // assistant turn 1 (end_turn)
+		"agent_end", "agent_settled",
+		"message_start", "message_end", // user echo: requeued, joined steer
+		"agent_start",
+		"message_start", "message_update", "message_end", // assistant turn 2 (end_turn)
+		"agent_end", "agent_settled",
+	})
+
+	texts := userMessageTexts(t, out.String())
+	if len(texts) != 2 {
+		t.Fatalf("got %d user-echoed messages, want 2 (prompt + one joined requeue): %v", len(texts), texts)
+	}
+	if texts[0] != "go" {
+		t.Fatalf("first user message = %q, want %q", texts[0], "go")
+	}
+	if want := "line one\nline two"; texts[1] != want {
+		t.Fatalf("requeued turn's user message = %q, want %q (one turn, both lines joined)", texts[1], want)
+	}
+}
+
+// TestEngineEmitsAgentErrorOnLoopFailure covers the brief-mandated
+// agent_error emission: when agentloop.Run fails outright (not via abort),
+// the engine must emit an agent_error frame between the turn's last frame
+// and agent_end rather than silently dropping the failure.
+func TestEngineEmitsAgentErrorOnLoopFailure(t *testing.T) {
+	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
+		return "file.txt", nil
+	}}
+	// Only one scripted body (the tool_use turn): the loop's second Continue
+	// call finds the fake sender exhausted and fails the turn outright.
+	eng, out := newTestEngine(t, ts, sampleResp)
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	assertFrameTypes(t, out.String(), []string{
+		"message_start", "message_end", // user echo
+		"agent_start",
+		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"tool_execution_start", "tool_execution_end",
+		"agent_error",
+		"agent_end", "agent_settled",
+	})
+
+	var errFrame struct {
+		Type  string `json:"type"`
+		Error string `json:"error"`
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-3]), &errFrame); err != nil {
+		t.Fatalf("parse agent_error frame: %v", err)
+	}
+	if errFrame.Type != "agent_error" {
+		t.Fatalf("frame type = %q, want agent_error", errFrame.Type)
+	}
+	if !strings.Contains(errFrame.Error, "scripted turns exhausted") {
+		t.Fatalf("agent_error.error = %q, want it to mention the exhausted fake sender", errFrame.Error)
 	}
 }
 
