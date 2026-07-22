@@ -65,8 +65,13 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 	if f.Persona != "" {
 		conds = append(conds, "c.persona = "+a.next(f.Persona))
 	}
+	// Model and Source filter on the PER-TURN served value via EXISTS, matching
+	// the population GlobalStats selects (which filters t.model / t.source).
+	// Filtering the conversation-level c.model here would diverge from stats,
+	// since the served model is recorded per turn.
 	if f.Model != "" {
-		conds = append(conds, "c.model = "+a.next(f.Model))
+		conds = append(conds, "EXISTS (SELECT 1 FROM conversations.conversation_turn tm "+
+			"WHERE tm.conversation_id = c.id AND tm.model = "+a.next(f.Model)+")")
 	}
 	if f.Status != "" {
 		conds = append(conds, "c.status = "+a.next(f.Status))
@@ -78,20 +83,21 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 		conds = append(conds, "c.created_at < "+a.next(*f.Until))
 	}
 	if f.Source != "" {
-		conds = append(conds, "t.source = "+a.next(f.Source))
+		conds = append(conds, "EXISTS (SELECT 1 FROM conversations.conversation_turn ts "+
+			"WHERE ts.conversation_id = c.id AND ts.source = "+a.next(f.Source)+")")
 	}
 	if f.MinTokens > 0 {
 		conds = append(conds, "coalesce(t.in_tok,0) + coalesce(t.out_tok,0) >= "+a.next(f.MinTokens))
 	}
 	if f.Text != "" {
-		conds = append(conds, "fm.first_msg ILIKE '%' || "+a.next(f.Text)+" || '%'")
+		conds = append(conds, "fm.first_text ILIKE '%' || "+a.next(f.Text)+" || '%'")
 	}
 
 	query := `
 SELECT c.id::text, coalesce(c.owner,''), coalesce(c.persona,''),
        coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at,
        coalesce(t.turns,0), coalesce(t.in_tok,0), coalesce(t.out_tok,0), coalesce(t.cache_read,0),
-       coalesce(fm.first_msg,'')
+       coalesce(left(fm.first_text, 200), '')
 FROM conversations.conversation c
 LEFT JOIN LATERAL (
     SELECT count(*) AS turns,
@@ -101,7 +107,14 @@ LEFT JOIN LATERAL (
     FROM conversations.conversation_turn WHERE conversation_id = c.id
 ) t ON true
 LEFT JOIN LATERAL (
-    SELECT left(content::text, 200) AS first_msg
+    -- Extract the message's actual text, not raw JSONB: content is either an
+    -- array of blocks (take the first type=text block's .text) or a plain
+    -- JSON string. Feeds both the snippet and the Text ILIKE filter, so search
+    -- matches message text rather than JSON structure (keys like "type").
+    SELECT CASE jsonb_typeof(content)
+             WHEN 'array'  THEN jsonb_path_query_first(content, '$[*] ? (@.type == "text").text') #>> '{}'
+             WHEN 'string' THEN content #>> '{}'
+           END AS first_text
     FROM conversations.conversation_message
     WHERE conversation_id = c.id AND role = 'user' ORDER BY ordinal LIMIT 1
 ) fm ON true

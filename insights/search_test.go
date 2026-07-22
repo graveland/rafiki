@@ -113,3 +113,86 @@ func TestSearch_FiltersByOwnerAndText(t *testing.T) {
 		t.Errorf("min tokens 1000 matched %d, want 0 (seeded totals are lower)", len(byMinTokens))
 	}
 }
+
+func TestSearch_TextMatchesExtractedTextNotJSON(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	seedConversation(t, pool, "client", "alice") // user msg: [{"type":"text","text":"hello there"}]
+	ins := New(pool)
+
+	// "type" appears in the JSON structure but not in the message text.
+	byStruct, err := ins.Search(ctx, SearchFilter{Text: "type"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(byStruct) != 0 {
+		t.Errorf("text 'type' matched %d, want 0 (must match text, not JSON keys)", len(byStruct))
+	}
+
+	// The snippet is the extracted text, not raw JSONB.
+	got, err := ins.Search(ctx, SearchFilter{Text: "hello"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("text 'hello' matched %d, want 1", len(got))
+	}
+	if got[0].FirstMessage != "hello there" {
+		t.Errorf("first_message = %q, want %q", got[0].FirstMessage, "hello there")
+	}
+}
+
+func TestSearch_PlainStringContent(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := insertConversation(t, pool, "client", "bob")
+	insertTurn(t, pool, convID, seedTurn{ordinal: 0, source: "claude", inTok: 10})
+	insertMessage(t, pool, convID, 0, "user", `"just a plain string"`) // jsonb string, not an array
+	ins := New(pool)
+
+	got, err := ins.Search(ctx, SearchFilter{Text: "plain"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) != 1 || got[0].FirstMessage != "just a plain string" {
+		t.Fatalf("plain-string content search = %+v, want one row with the string text", got)
+	}
+}
+
+func TestSearch_ModelAndSourceMatchStatsPopulation(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	// conversation.model differs from the per-turn served model.
+	convID := insertConversation(t, pool, "client", "carol")
+	insertTurn(t, pool, convID, seedTurn{ordinal: 0, model: "served-model-x", source: "claude", inTok: 100})
+	insertTurn(t, pool, convID, seedTurn{ordinal: 1, model: "served-model-x", source: "slack", inTok: 100})
+	ins := New(pool)
+
+	// Search by served model finds it, and Stats over the same model filter
+	// selects the same single conversation (aligned population).
+	found, err := ins.Search(ctx, SearchFilter{Model: "served-model-x"})
+	if err != nil {
+		t.Fatalf("search model: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("search by served model = %d, want 1", len(found))
+	}
+	s, err := ins.GlobalStats(ctx, StatsFilter{Model: "served-model-x"})
+	if err != nil {
+		t.Fatalf("stats model: %v", err)
+	}
+	if s.Volume.Conversations != 1 {
+		t.Errorf("stats conversations for served model = %d, want 1 (must match search)", s.Volume.Conversations)
+	}
+
+	// A mixed-source conversation is found by search for BOTH of its sources.
+	for _, src := range []string{"claude", "slack"} {
+		got, err := ins.Search(ctx, SearchFilter{Source: src})
+		if err != nil {
+			t.Fatalf("search source %s: %v", src, err)
+		}
+		if len(got) != 1 {
+			t.Errorf("search source %s = %d, want 1", src, len(got))
+		}
+	}
+}
