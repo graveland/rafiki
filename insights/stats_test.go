@@ -1,0 +1,137 @@
+package insights
+
+import (
+	"context"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// seedTurns creates a conversation on the given path (owner uniquely derived
+// from drivenBy) with a single complete turn carrying the supplied token counts.
+func seedTurns(t *testing.T, pool *pgxpool.Pool, drivenBy string, inTok, cacheRead int64) string {
+	t.Helper()
+	convID := insertConversation(t, pool, drivenBy, "owner-"+drivenBy)
+	insertTurn(t, pool, convID, seedTurn{
+		ordinal: 0, model: "claude-fable-5", source: "claude", upstream: "anthropic",
+		inTok: inTok, outTok: 50, cacheRead: cacheRead, latencyMS: 1000,
+		prefixHash: "hash-" + drivenBy,
+	})
+	return convID
+}
+
+func TestGlobalStats_CacheHitByPath(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	seedTurns(t, pool, "client", 100, 900) // proxy: 900/(100+900) = 0.9
+	seedTurns(t, pool, "server", 100, 0)   // direct: 0/(100+0) = 0.0
+
+	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	if err != nil {
+		t.Fatalf("global stats: %v", err)
+	}
+	if got := s.ByPath[string(PathProxy)].CacheHitRatio; !inDelta(got, 0.9, 0.01) {
+		t.Errorf("proxy cache-hit ratio = %v, want ~0.9", got)
+	}
+	if got := s.ByPath[string(PathDirect)].CacheHitRatio; !inDelta(got, 0.0, 0.01) {
+		t.Errorf("direct cache-hit ratio = %v, want ~0.0", got)
+	}
+	if s.Adoption.DistinctOwners < 2 {
+		t.Errorf("distinct owners = %d, want >= 2", s.Adoption.DistinctOwners)
+	}
+	if s.Volume.Conversations != 2 || s.Volume.Turns != 2 {
+		t.Errorf("volume = %d conversations / %d turns, want 2/2", s.Volume.Conversations, s.Volume.Turns)
+	}
+	// Overall cache-hit ratio: 900 / (200 + 900) ≈ 0.818.
+	if got := s.Tokens.CacheHitRatio; !inDelta(got, 900.0/1100.0, 0.01) {
+		t.Errorf("overall cache-hit ratio = %v, want ~0.818", got)
+	}
+}
+
+func TestGlobalStats_PathFilterAndFacets(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	seedTurns(t, pool, "client", 100, 900)
+	seedTurns(t, pool, "server", 100, 0)
+
+	proxy, err := New(pool).GlobalStats(ctx, StatsFilter{Path: PathProxy})
+	if err != nil {
+		t.Fatalf("proxy stats: %v", err)
+	}
+	if proxy.Volume.Conversations != 1 {
+		t.Errorf("proxy conversations = %d, want 1", proxy.Volume.Conversations)
+	}
+	if proxy.Failures.Turns != 1 || proxy.Failures.Errors != 0 {
+		t.Errorf("proxy failures = %d/%d, want 1 turns / 0 errors", proxy.Failures.Turns, proxy.Failures.Errors)
+	}
+	if proxy.Latency.P50 <= 0 {
+		t.Errorf("proxy p50 latency = %v, want > 0", proxy.Latency.P50)
+	}
+	if len(proxy.Cost) != 1 || proxy.Cost[0].Model != "claude-fable-5" {
+		t.Errorf("proxy cost rows = %+v, want one claude-fable-5 row", proxy.Cost)
+	}
+}
+
+func TestGlobalStats_CacheWasteAndPrefix(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	// A large-prompt turn with zero cache_read is waste; give it a shared prefix
+	// across two conversations and one owner so cross-user reuse is 0.
+	c1 := insertConversation(t, pool, "client", "dave")
+	insertTurn(t, pool, c1, seedTurn{ordinal: 0, model: "m", inTok: 10000, cacheRead: 0, prefixHash: "shared"})
+	c2 := insertConversation(t, pool, "client", "dave")
+	insertTurn(t, pool, c2, seedTurn{ordinal: 0, model: "m", inTok: 10000, cacheRead: 500, prefixHash: "shared"})
+
+	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if s.CacheWaste.WastedTurns != 1 {
+		t.Errorf("wasted turns = %d, want 1", s.CacheWaste.WastedTurns)
+	}
+	if s.CacheWaste.WastedInputTokens != 10000 {
+		t.Errorf("wasted input tokens = %d, want 10000", s.CacheWaste.WastedInputTokens)
+	}
+	if s.Prefix.DistinctPrefixes != 1 {
+		t.Errorf("distinct prefixes = %d, want 1", s.Prefix.DistinctPrefixes)
+	}
+	if s.Prefix.TurnsWithPrefix != 2 {
+		t.Errorf("turns with prefix = %d, want 2", s.Prefix.TurnsWithPrefix)
+	}
+	if s.Prefix.CrossUserPrefixes != 0 {
+		t.Errorf("cross-user prefixes = %d, want 0 (single owner)", s.Prefix.CrossUserPrefixes)
+	}
+}
+
+func TestConversationStats_Scoped(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := seedConversation(t, pool, "client", "erin") // two turns, in 100+120, cacheRead 0+80
+	seedConversation(t, pool, "server", "frank")          // must be excluded
+
+	s, err := New(pool).ConversationStats(ctx, convID)
+	if err != nil {
+		t.Fatalf("conversation stats: %v", err)
+	}
+	if s.Volume.Conversations != 1 || s.Volume.Turns != 2 {
+		t.Errorf("volume = %d/%d, want 1 conversation / 2 turns", s.Volume.Conversations, s.Volume.Turns)
+	}
+	if s.Tokens.InputTokens != 220 || s.Tokens.CacheReadTokens != 80 {
+		t.Errorf("tokens = in %d / cache %d, want 220/80", s.Tokens.InputTokens, s.Tokens.CacheReadTokens)
+	}
+	// Both turns share prefix hash-a → no drift, no cross-user facet.
+	if s.Prefix.DriftedConversations != 0 {
+		t.Errorf("drifted = %d, want 0", s.Prefix.DriftedConversations)
+	}
+	if s.Prefix.CrossUserPrefixes != 0 {
+		t.Errorf("cross-user prefixes = %d, want 0 (not computed for a single conversation)", s.Prefix.CrossUserPrefixes)
+	}
+}
+
+func inDelta(got, want, delta float64) bool {
+	d := got - want
+	if d < 0 {
+		d = -d
+	}
+	return d <= delta
+}
