@@ -28,11 +28,34 @@ type OutputPolicy struct {
 	Budget int
 	// SpillDir is the directory full (unclipped) results are written to
 	// when a result exceeds Budget. Created if it does not already exist.
+	// Empty means os.TempDir(): a zero-value SpillDir must never degrade
+	// into "destroy the output and log about it".
 	SpillDir string
 }
 
+// spillTarget resolves the directory and file name a clip spills to.
+//
+// name reaches us from agentloop.ToolCallID(ctx) — a provider-supplied
+// string — so it is reduced to its last path element: a value containing
+// "/" or ".." would otherwise let a tool result be written anywhere the
+// process can write. Path elements that don't name a file after that
+// (".", "..", "/") fall back to a fixed name rather than targeting the
+// directory itself.
+func (p OutputPolicy) spillTarget(name string) (dir, file string) {
+	dir = p.SpillDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	file = filepath.Base(name)
+	switch file {
+	case ".", "..", string(filepath.Separator):
+		file = "spill"
+	}
+	return dir, file
+}
+
 // Clip returns s unchanged when len(s) <= Budget. Otherwise it writes the
-// FULL s to SpillDir/name, then returns
+// FULL s to SpillDir/filepath.Base(name) (see spillTarget), then returns
 // head(20% of budget) + marker + tail(80% of budget), where marker is
 // "\n[... elided N bytes: full output at <path> ...]\n" and N is the number
 // of bytes cut from the middle.
@@ -45,9 +68,10 @@ func (p OutputPolicy) Clip(s, name string) string {
 		return s
 	}
 
-	spillPath := filepath.Join(p.SpillDir, name)
-	if err := os.MkdirAll(p.SpillDir, 0o755); err != nil {
-		slog.Error("agent/tools: output policy: failed to create spill directory", "dir", p.SpillDir, "error", err)
+	spillDir, spillFile := p.spillTarget(name)
+	spillPath := filepath.Join(spillDir, spillFile)
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		slog.Error("agent/tools: output policy: failed to create spill directory", "dir", spillDir, "error", err)
 	} else if err := os.WriteFile(spillPath, []byte(s), 0o644); err != nil {
 		// Per "spill, never destroy": if we can't spill, we must still say
 		// so loudly rather than quietly handing the model a clip whose
