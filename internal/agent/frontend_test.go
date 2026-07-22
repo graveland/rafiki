@@ -61,6 +61,34 @@ func TestPromptSteerAbortDispatch(t *testing.T) {
 	}
 }
 
+func TestEmitMarshalFailureWritesFallbackFrame(t *testing.T) {
+	var out bytes.Buffer
+	f := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+
+	// chan int is not JSON-marshalable, forcing Emit's fallback path.
+	f.Emit(struct {
+		Ch chan int `json:"ch"`
+	}{Ch: make(chan int)})
+
+	line := strings.TrimSpace(out.String())
+	if line == "" {
+		t.Fatal("Emit wrote nothing on marshal failure")
+	}
+	var resp struct {
+		Type  string `json:"type"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("fallback frame is not valid JSON: %v (line=%s)", err, line)
+	}
+	if resp.Type != "agent_error" {
+		t.Fatalf("fallback frame type = %q, want agent_error", resp.Type)
+	}
+	if resp.Error == "" {
+		t.Fatal("fallback frame error field is empty")
+	}
+}
+
 func TestUnknownRequestGetsErrorResponse(t *testing.T) {
 	in := strings.NewReader(`{"type":"set_model","id":"7"}` + "\n")
 	var out bytes.Buffer

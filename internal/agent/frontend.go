@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 )
 
@@ -23,6 +24,13 @@ type Frontend struct {
 
 // Handler drives turn execution in response to inbound frames. Implemented by
 // the Engine (Task 7); Frontend only dispatches to it.
+//
+// Run calls these methods synchronously, inline in its reader loop.
+// Implementations MUST return promptly: queue the work and drive the actual
+// turn (e.g. an LLM call) on their own goroutine. A Handler that blocks for
+// the duration of a turn stalls the reader loop, so it can no longer read an
+// inbound "abort" or "steer" frame until the call returns — breaking in-band
+// abort/steer entirely.
 type Handler interface {
 	HandlePrompt(text string)
 	HandleSteer(text string)
@@ -54,13 +62,20 @@ func (f *Frontend) Emit(v any) {
 	if err != nil {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		fmt.Fprintf(f.out, `{"type":"agent_error","error":%q}`+"\n", err.Error())
+		if _, werr := fmt.Fprintf(f.out, `{"type":"agent_error","error":%q}`+"\n", err.Error()); werr != nil {
+			slog.Warn("agent frontend write failed", "error", werr)
+		}
 		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.out.Write(b)
-	io.WriteString(f.out, "\n")
+	if _, err := f.out.Write(b); err != nil {
+		slog.Warn("agent frontend write failed", "error", err)
+		return
+	}
+	if _, err := io.WriteString(f.out, "\n"); err != nil {
+		slog.Warn("agent frontend newline write failed", "error", err)
+	}
 }
 
 // stateResponse is the get_state reply shape internal/child/sniff.go parses:
@@ -87,6 +102,9 @@ type modelField struct {
 
 // Run reads ndjson frames from in until EOF, dispatching each to the
 // handler, and blocks until stdin is exhausted or a scan error occurs.
+// Dispatch to the Handler is synchronous and inline, so the Handler contract
+// (see Handler) requires prompt returns to keep the reader loop responsive to
+// abort/steer frames while a turn is in flight.
 func (f *Frontend) Run() error {
 	sc := bufio.NewScanner(f.in)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
