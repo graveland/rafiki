@@ -220,10 +220,17 @@ type ModelCatalog struct {
 
 	sf singleflight.Group // coalesces concurrent refreshes
 
-	mu      sync.Mutex
-	models  []orModel
-	fetched time.Time
+	mu       sync.Mutex
+	models   []orModel
+	fetched  time.Time
+	lastFail time.Time // last failed fetch; gates refresh backoff (see fetchBackoff)
 }
+
+// fetchBackoff is how long refresh() waits after a failed fetch before trying
+// again. Without it, a cold cache during an OpenRouter outage would fire a
+// fresh GET on every single call (each resolve/ContextWindow/Pricing), hammering
+// a dead endpoint; the backoff caps that to one attempt per interval.
+const fetchBackoff = 30 * time.Second
 
 // SnapshotStore persists the catalog's JSON snapshot between processes so a
 // short-lived host (a CLI launch) reuses a warm catalog instead of re-fetching.
@@ -301,16 +308,25 @@ func (c *ModelCatalog) saveCache() {
 // under load would fire N parallel GETs to OpenRouter. A fetch error is logged
 // and the previous snapshot is kept (best-effort).
 func (c *ModelCatalog) refresh() {
-	if c.fresh() {
+	if c.fresh() || c.backingOff() {
 		return
 	}
 	c.sf.Do("refresh", func() (any, error) { //nolint:errcheck // fetch logs its own errors
-		if c.fresh() { // a caller queued behind a just-finished refresh needn't fetch
+		if c.fresh() || c.backingOff() { // a caller queued behind a just-finished refresh needn't fetch
 			return nil, nil
 		}
 		c.fetch()
 		return nil, nil
 	})
+}
+
+// backingOff reports whether the last fetch failed within fetchBackoff, in
+// which case refresh() skips the network and keeps serving the current (stale
+// or cold) snapshot.
+func (c *ModelCatalog) backingOff() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.lastFail.IsZero() && time.Since(c.lastFail) < fetchBackoff
 }
 
 // Warm triggers a best-effort catalog refresh. Call it (in a goroutine) at
@@ -332,11 +348,13 @@ func (c *ModelCatalog) fetch() {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
 		c.logger.Warn("model catalog: build request failed", "error", err)
+		c.recordFailure()
 		return
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		c.logger.Warn("model catalog: fetch failed (keeping cached)", "error", err)
+		c.recordFailure()
 		return
 	}
 	defer resp.Body.Close()
@@ -345,13 +363,21 @@ func (c *ModelCatalog) fetch() {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		c.logger.Warn("model catalog: decode failed (keeping cached)", "error", err)
+		c.recordFailure()
 		return
 	}
 	c.mu.Lock()
 	c.models = payload.Data
 	c.fetched = time.Now()
+	c.lastFail = time.Time{} // success clears the backoff
 	c.mu.Unlock()
 	c.saveCache() // best-effort; persists the snapshot for the next process
+}
+
+func (c *ModelCatalog) recordFailure() {
+	c.mu.Lock()
+	c.lastFail = time.Now()
+	c.mu.Unlock()
 }
 
 // ResolveLatest returns the newest anthropic/claude-<family>-* model (excluding
@@ -501,49 +527,51 @@ func (c *ModelCatalog) AllIDs() []string {
 // an unresolvable model, a cold/stale cache without the entry, or an entry that
 // doesn't report a context length.
 func (c *ModelCatalog) ContextWindow(model string) (contextLen, maxCompletion int, ok bool) {
-	if c == nil {
+	m, found := c.entryFor(model)
+	if !found {
 		return 0, 0, false
 	}
-	resolved, err := ResolveModel(c, "", model)
-	if err != nil || resolved == "" {
-		return 0, 0, false
-	}
-	orID := c.OpenRouterModel(resolved)
-	c.refresh()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, m := range c.models {
-		if m.ID == orID {
-			return m.ContextLen, m.TopProvider.MaxCompletionTokens, m.ContextLen > 0
-		}
-	}
-	return 0, 0, false
+	return m.ContextLen, m.TopProvider.MaxCompletionTokens, m.ContextLen > 0
 }
 
-// Pricing returns the OpenRouter list price for a requested model, resolving it
-// the same way ContextWindow does (empty->default is not applied here;
-// "<family>-latest", bare Anthropic, and slash ids all resolve to the concrete
-// OpenRouter entry). ok is false on a nil receiver, an unresolvable model, a
-// cold/stale cache without the entry, or an entry with no parseable base price.
+// Pricing returns the OpenRouter list price for a requested model, resolved the
+// same way ContextWindow does. ok is false on a nil receiver, an unresolvable
+// model, a cold/stale cache without the entry, or an entry with no parseable
+// base price.
 func (c *ModelCatalog) Pricing(model string) (ModelPricing, bool) {
-	if c == nil {
+	m, found := c.entryFor(model)
+	if !found {
 		return ModelPricing{}, false
 	}
-	if p, ok := c.pricingFor(model); ok {
-		return p, true
-	}
-	// Dated Anthropic snapshot ids (claude-haiku-4-5-20251001) aren't listed on
-	// OpenRouter; price them as their base model.
-	if base, ok := stripSnapshotDate(model); ok {
-		return c.pricingFor(base)
-	}
-	return ModelPricing{}, false
+	return pricingFromOR(m.Pricing)
 }
 
-func (c *ModelCatalog) pricingFor(model string) (ModelPricing, bool) {
+// entryFor resolves a requested model to its catalog orModel, shared by
+// ContextWindow and Pricing so both apply identical resolution and staleness
+// semantics. It mirrors the proxy's rules ("<family>-latest", bare Anthropic,
+// slash ids) via lookup, and falls back to the base model for a dated Anthropic
+// snapshot id (claude-haiku-4-5-20251001), which OpenRouter doesn't list. ok is
+// false on a nil receiver or no match.
+func (c *ModelCatalog) entryFor(model string) (orModel, bool) {
+	if c == nil {
+		return orModel{}, false
+	}
+	if m, ok := c.lookup(model); ok {
+		return m, true
+	}
+	if base, ok := stripSnapshotDate(model); ok {
+		return c.lookup(base)
+	}
+	return orModel{}, false
+}
+
+// lookup resolves model to a concrete OpenRouter id and returns the matching
+// catalog entry, refreshing the snapshot first. ok=false when the model can't
+// be resolved or isn't present in the current snapshot.
+func (c *ModelCatalog) lookup(model string) (orModel, bool) {
 	resolved, err := ResolveModel(c, "", model)
 	if err != nil || resolved == "" {
-		return ModelPricing{}, false
+		return orModel{}, false
 	}
 	orID := c.OpenRouterModel(resolved)
 	c.refresh()
@@ -551,10 +579,10 @@ func (c *ModelCatalog) pricingFor(model string) (ModelPricing, bool) {
 	defer c.mu.Unlock()
 	for _, m := range c.models {
 		if m.ID == orID {
-			return pricingFromOR(m.Pricing)
+			return m, true
 		}
 	}
-	return ModelPricing{}, false
+	return orModel{}, false
 }
 
 // stripSnapshotDate cuts a trailing Anthropic snapshot date ("-20251001") off a

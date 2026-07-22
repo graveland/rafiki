@@ -296,6 +296,7 @@ func TestContextWindow(t *testing.T) {
 		{"slash id direct", "openai/gpt-5-codex", 400000, 128000, true},
 		{"OR auto-latest alias re-tilded", "openai/gpt-latest", 400000, 128000, true},
 		{"family-latest -> anthropic OR entry", "sonnet-latest", 1000000, 64000, true},
+		{"dated snapshot id -> base model", "claude-sonnet-5-20260630", 1000000, 64000, true},
 		{"catalog miss", "openai/unknown", 0, 0, false},
 		{"entry without a context length", "openai/no-window", 0, 0, false},
 	}
@@ -442,5 +443,25 @@ func TestStripSnapshotDate(t *testing.T) {
 		if ok != tc.ok || (ok && got != tc.want) {
 			t.Errorf("stripSnapshotDate(%q) = (%q,%v), want (%q,%v)", tc.in, got, ok, tc.want, tc.ok)
 		}
+	}
+}
+
+// TestFetchBackoff proves a failed fetch suppresses further network attempts
+// for fetchBackoff — a cold cache during an OpenRouter outage must not fire a
+// GET on every resolve.
+func TestFetchBackoff(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte("not json")) // decode fails → recorded failure
+	}))
+	defer srv.Close()
+	c := NewModelCatalog(srv.Client(), time.Minute, tslogs.NewDiscardingLogger())
+	c.url = srv.URL
+	for range 5 {
+		c.Warm() // each would refresh; backoff must cap fetches to one
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("fetch hits = %d, want 1 (failed fetch backs off for %s)", got, fetchBackoff)
 	}
 }
