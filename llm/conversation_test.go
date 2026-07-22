@@ -299,3 +299,59 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 		t.Errorf("second increment = %d, want 2", n)
 	}
 }
+
+// TestConversationStoresPrefixOnChange proves the in-process (direct) path
+// records turn prefix metadata for parity with the proxy path: prefix_content
+// on the first turn, NULL on an unchanged second turn (same static prefix), and
+// cache_breakpoints on every turn.
+func TestConversationStoresPrefixOnChange(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("one"), respondText("two"),
+	}}
+	c := testClient(t, pool, sender)
+
+	conv, err := c.Conversation(ctx, NewConversation("brent", "test"),
+		Model("sonnet-latest"), SystemText("you are a test"))
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	if _, err := conv.Send(ctx, UserText("hello")); err != nil {
+		t.Fatalf("Send 1: %v", err)
+	}
+	if _, err := conv.Send(ctx, UserText("again")); err != nil {
+		t.Fatalf("Send 2: %v", err)
+	}
+
+	rows, err := pool.Query(ctx,
+		`SELECT prefix_content IS NOT NULL, cache_breakpoints IS NOT NULL
+		   FROM conversations.conversation_turn WHERE conversation_id=$1::uuid ORDER BY created_at`, conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type row struct{ hasPrefix, hasBreakpoints bool }
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.hasPrefix, &r.hasBreakpoints); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, r)
+	}
+	if len(got) != 2 {
+		t.Fatalf("turns = %d, want 2", len(got))
+	}
+	if !got[0].hasPrefix {
+		t.Error("turn 1 prefix_content is NULL, want the request envelope stored")
+	}
+	if got[1].hasPrefix {
+		t.Error("turn 2 prefix_content is set, want NULL (prefix unchanged from turn 1)")
+	}
+	for i, r := range got {
+		if !r.hasBreakpoints {
+			t.Errorf("turn %d cache_breakpoints is NULL, want recorded", i+1)
+		}
+	}
+}

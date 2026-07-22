@@ -213,33 +213,48 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 			return 0, fmt.Errorf("decompose: insert message %d: %w", i, err)
 		}
 	}
-	// 2. prefix_content on-change: store the request envelope (request minus messages) iff
-	//    prefixHash differs from the most recent earlier turn's prefix_hash in this conversation.
+	// 2. Record the turn's prefix metadata (prefix_content on-change +
+	//    cache_breakpoints). Factored out so the in-process path can reuse it
+	//    without the message inserts above.
+	if err := s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash); err != nil {
+		return len(req.Messages), err
+	}
+	return len(req.Messages), nil
+}
+
+// StoreTurnPrefix records a turn's cache_breakpoints (always) and its
+// prefix_content (only when the static prefix changed from the previous turn,
+// keyed by prefixHash — sparse, on-change). It does NOT touch
+// conversation_message rows, so it is the safe unit for the in-process (direct)
+// path: that path writes messages at conversation-history ordinals, which don't
+// align with DecomposeRequest's index-in-request ordinals once history is merged
+// or trimmed. Best-effort: returns an error for the caller to Warn; never panics.
+func (s *CaptureStore) StoreTurnPrefix(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) error {
 	changed, err := s.prefixChanged(ctx, convID, createdAt, prefixHash)
 	if err != nil {
-		return len(req.Messages), err
+		return err
 	}
 	envelope, breakpoints, err := splitEnvelopeAndBreakpoints(reqBody)
 	if err != nil {
-		return len(req.Messages), fmt.Errorf("decompose: %w", err)
+		return fmt.Errorf("store turn prefix: %w", err)
 	}
 	// cache_breakpoints is a per-request property (always recorded); prefix_content
-	// is stored only when the envelope changed from the previous turn (sparse, on-change).
+	// is stored only when the envelope changed from the previous turn.
 	if changed {
 		if _, err := s.pool.Exec(ctx,
 			`UPDATE conversations.conversation_turn SET prefix_content=$3, cache_breakpoints=$4
 			  WHERE id=$1::uuid AND created_at=$2`,
 			turnID, createdAt, jsonbSafe(envelope), breakpoints); err != nil {
-			return len(req.Messages), fmt.Errorf("decompose: store prefix_content: %w", err)
+			return fmt.Errorf("store turn prefix: prefix_content: %w", err)
 		}
-	} else {
-		if _, err := s.pool.Exec(ctx,
-			`UPDATE conversations.conversation_turn SET cache_breakpoints=$3 WHERE id=$1::uuid AND created_at=$2`,
-			turnID, createdAt, breakpoints); err != nil {
-			return len(req.Messages), fmt.Errorf("decompose: store breakpoints: %w", err)
-		}
+		return nil
 	}
-	return len(req.Messages), nil
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE conversations.conversation_turn SET cache_breakpoints=$3 WHERE id=$1::uuid AND created_at=$2`,
+		turnID, createdAt, breakpoints); err != nil {
+		return fmt.Errorf("store turn prefix: breakpoints: %w", err)
+	}
+	return nil
 }
 
 // prefixChanged reports whether prefixHash differs from the most recent turn (by created_at)

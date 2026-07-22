@@ -315,14 +315,22 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	if source == "" {
 		source = meta.OriginEntrypoint
 	}
+	prefixHash := routing.PrefixHash(reqJSON)
 	turnID, createdAt, iErr := c.capture.InsertTurnIntent(ctx, routing.TurnIntent{
 		ConversationID: convID, Ordinal: meta.Ordinal, Model: string(params.Model), Request: reqJSON,
 		Source: source, Author: meta.Author, AuthorKind: meta.AuthorKind,
-		PrefixHash: routing.PrefixHash(reqJSON), Protocol: string(store.ProtocolAnthropic),
+		PrefixHash: prefixHash, Protocol: string(store.ProtocolAnthropic),
 	})
 	if iErr != nil {
 		c.logger.Warn("capture: insert-intent failed (capturing disabled for this turn)", "error", iErr)
 		return "", time.Time{}, false
+	}
+	// Record prefix_content (on-change) + cache_breakpoints for parity with the
+	// proxy path — the message rows are written separately by Conversation, so
+	// only the turn's prefix metadata is stored here (StoreTurnPrefix, not the
+	// message-writing DecomposeRequest). Best-effort: never fails the turn.
+	if err := c.capture.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqJSON, prefixHash); err != nil {
+		c.logger.Warn("capture: store turn prefix failed", "error", err)
 	}
 	return turnID, createdAt, true
 }

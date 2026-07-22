@@ -135,7 +135,7 @@ type CachePolicy struct {
 // DefaultCachePolicy caches everything at the 5-minute TTL with two moving
 // breakpoints: the cheapest policy that keeps an active conversation fully
 // cached. Callers with cross-conversation prefix reuse inside an hour (batch
-// analyzers, busy alert loops) should raise SystemTTL to CacheTTL1h.
+// analyzers, busy alert loops) should raise SystemTTL to Cache1h.
 func DefaultCachePolicy() CachePolicy {
 	return CachePolicy{SystemTTL: Cache5m, MessagesTTL: Cache5m, Breakpoints: 2}
 }
