@@ -215,3 +215,41 @@ func TestGrepToolDefaultsToWorkingDirectory(t *testing.T) {
 		t.Fatalf("expected default path to be the working directory, got %q", out)
 	}
 }
+
+// TestGrepToolEmitsAbsolutePathsForRelativeBase: grep's output is the model's
+// input to read and edit, and both of those *reject* a relative path. A
+// relative base therefore produced "path:line:text" lines the model could not
+// feed back into any other tool. glob already absolutizes; grep must too.
+func TestGrepToolEmitsAbsolutePathsForRelativeBase(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(sub, "a.go")
+	if err := os.WriteFile(p, []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	fn := newGrepTool()
+	out, err := fn(context.Background(), json.RawMessage(`{"pattern":"needle","path":"sub"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	line := strings.TrimRight(out, "\n")
+	emitted, _, ok := strings.Cut(line, ":")
+	if !ok {
+		t.Fatalf("expected a path:line:text match, got %q", out)
+	}
+	if !filepath.IsAbs(emitted) {
+		t.Fatalf("grep emitted the relative path %q; read/edit reject relative paths, so the model cannot reuse it", emitted)
+	}
+
+	// The real contract: the emitted path must be directly usable by read.
+	tr := NewFileTracker()
+	if _, err := newReadTool(tr)(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, emitted))); err != nil {
+		t.Fatalf("read rejected grep's own output %q: %v", emitted, err)
+	}
+}

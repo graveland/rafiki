@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -105,6 +106,9 @@ func newGlobTool() ToolFunc {
 			if err != nil {
 				// Raced away between Glob and Stat (deleted/renamed
 				// concurrently) — not a tool failure, just one fewer result.
+				// Still say so: a silently dropped match is indistinguishable
+				// from a pattern that never matched.
+				slog.Debug("agent/tools: glob: skipping match that could not be stat'd", "path", full, "error", err)
 				continue
 			}
 			entries = append(entries, entry{path: full, mtime: info.ModTime()})

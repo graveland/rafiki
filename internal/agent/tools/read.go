@@ -54,6 +54,15 @@ func newReadTool(tr *FileTracker) ToolFunc {
 			return "", fmt.Errorf("read: path must be absolute, got %q", in.Path)
 		}
 
+		// rafiki's agentloop runs a tool batch concurrently, so a read can land
+		// in the middle of a write or edit on the same path. os.WriteFile is
+		// O_TRUNC then Write — not atomic — so an unlocked read can scan the
+		// file between the two and hand the model torn content, then record an
+		// mtime for that non-state. Hold the same per-path lock write and edit
+		// hold, across the stat, the scan, and the RecordRead.
+		unlock := tr.Lock(in.Path)
+		defer unlock()
+
 		info, err := os.Stat(in.Path)
 		if err != nil {
 			return "", fmt.Errorf("read: %w", err)

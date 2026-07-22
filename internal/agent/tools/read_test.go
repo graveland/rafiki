@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReadTool(t *testing.T) {
@@ -169,5 +170,45 @@ func TestReadToolRecordsTrackerState(t *testing.T) {
 	}
 	if err := tr.Verify(p); err != nil {
 		t.Fatalf("expected read to satisfy the tracker, got %v", err)
+	}
+}
+
+// TestReadToolTakesPerPathLock: read shares the FileTracker with write and
+// edit, and a batch runs concurrently. os.WriteFile is O_TRUNC then Write —
+// not atomic — so an unlocked read can scan a file caught between the two and
+// hand the model torn content, then record an mtime for that non-state.
+// Asserting on the lock itself is deterministic; racing an actual torn read
+// would not be.
+func TestReadToolTakesPerPathLock(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+
+	unlock := tr.Lock(p)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p)))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("read completed while the path was locked (err=%v); it must take the per-path lock", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("read failed once the lock was released: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("read never completed after the lock was released")
 	}
 }

@@ -68,6 +68,14 @@ func newGrepTool() ToolFunc {
 			}
 			base = wd
 		}
+		// Absolutize before walking (glob does the same): every emitted match
+		// is prefixed with the walked path, and read/edit both *reject* a
+		// relative path — so a relative base would produce output the model
+		// cannot feed back into any other tool.
+		base, err = filepath.Abs(base)
+		if err != nil {
+			return "", fmt.Errorf("grep: %w", err)
+		}
 		baseInfo, err := os.Stat(base)
 		if err != nil {
 			return "", fmt.Errorf("grep: %w", err)
@@ -104,6 +112,12 @@ func newGrepTool() ToolFunc {
 			if in.Glob != "" {
 				rel, relErr := filepath.Rel(base, p)
 				if relErr != nil {
+					// p comes from WalkDir(base), so this should be
+					// unreachable — but if it ever fires, matching the glob
+					// against the full path silently changes what the filter
+					// means, which is exactly the kind of thing that must not
+					// happen quietly.
+					slog.Warn("agent/tools: grep: path is not relative to the search base, matching the glob against the full path", "base", base, "path", p, "error", relErr)
 					rel = p
 				}
 				ok, mErr := doublestar.Match(in.Glob, rel)

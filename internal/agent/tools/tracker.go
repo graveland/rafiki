@@ -25,7 +25,9 @@ import (
 // would both Verify, both read the pre-state, and the second write would
 // silently discard the first. FileTracker therefore also hands out per-path
 // mutual exclusion via Lock, which write and edit hold across their whole
-// verify -> read -> modify -> write -> record sequence.
+// verify -> read -> modify -> write -> record sequence, and which read holds
+// across its scan -> record so it can't hand the model a file caught midway
+// through a concurrent overwrite.
 type FileTracker struct {
 	mu    sync.Mutex
 	reads map[string]time.Time
@@ -53,23 +55,48 @@ func NewFileTracker() *FileTracker {
 // are symlinks — would miss the map and report "has not been read yet" for a
 // file that was just read.
 //
-// Symlink resolution is best-effort by design: the file may legitimately not
-// exist yet (write creating a new file), in which case the parent directory
-// is resolved instead so the pre-create and post-create keys agree.
+// The key MUST be invariant to what happens to exist on disk at the moment it
+// is computed, because write creates missing parent directories (see
+// write.go) partway through the sequence the lock is meant to protect. So
+// when the path itself doesn't resolve, resolve the deepest ancestor that
+// does and re-attach the not-yet-created remainder verbatim. A
+// resolve-file-or-resolve-parent-or-give-up ladder is NOT good enough: for a
+// write two directories deep it keys the pre-MkdirAll Lock on the unresolved
+// spelling and the post-MkdirAll RecordRead on the resolved one, and — worse
+// — hands a second writer arriving after MkdirAll a *different* mutex for the
+// same file, so two non-atomic os.WriteFile calls (O_TRUNC then Write) can
+// interleave into a torn file.
 func normalizePath(path string) string {
 	clean := filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
 		return resolved
 	}
-	if dir, file := filepath.Split(clean); dir != "" {
-		if resolvedDir, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
-			return filepath.Join(resolvedDir, file)
+
+	// Walk up to the deepest ancestor that resolves, collecting the
+	// components that don't exist yet, then rejoin them onto it.
+	var rest []string
+	dir := clean
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached the root (or the relative "." anchor) without resolving
+			// anything.
+			break
 		}
+		rest = append([]string{filepath.Base(dir)}, rest...)
+		dir = parent
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			continue
+		}
+		key := filepath.Join(append([]string{resolved}, rest...)...)
+		slog.Debug("agent/tools: path does not exist yet, keying on its deepest resolved ancestor", "path", path, "ancestor", dir, "key", key)
+		return key
 	}
-	// Neither the file nor its parent directory exists yet (write into a
-	// directory it is about to create). Clean alone is a consistent key for
-	// that case, and becomes the resolved form once the path materializes.
-	slog.Debug("agent/tools: path does not resolve to a real path yet, keying on its cleaned form", "path", path, "key", clean)
+
+	// Nothing along the path resolves at all. Clean alone is a consistent key
+	// for that case.
+	slog.Debug("agent/tools: no ancestor of path resolves, keying on its cleaned form", "path", path, "key", clean)
 	return clean
 }
 
@@ -80,7 +107,9 @@ func normalizePath(path string) string {
 // its change silently discarded. The returned closure is idempotent.
 //
 // Keying uses the same normalization as RecordRead and Verify, so the lock
-// and the record can never disagree about which file they refer to.
+// and the record can never disagree about which file they refer to — and
+// because normalizePath's key does not depend on whether the path exists yet,
+// that holds across write's os.MkdirAll too.
 func (t *FileTracker) Lock(path string) func() {
 	key := normalizePath(path)
 

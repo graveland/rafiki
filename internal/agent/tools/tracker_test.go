@@ -194,6 +194,88 @@ func TestFileTrackerLockIsPerPath(t *testing.T) {
 	}
 }
 
+// TestNormalizePathIsStableAcrossParentCreation pins the key invariant that
+// makes Lock trustworthy for write: the key for a path several directories
+// deep must not change when those directories are created underneath it.
+// t.TempDir() lives under /var/folders/... on macOS, and /var is a symlink to
+// /private/var — so the resolved and unresolved spellings genuinely differ,
+// which is the whole point of testing this on real paths.
+func TestNormalizePathIsStableAcrossParentCreation(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "nested", "deeper", "new.txt")
+
+	before := normalizePath(target)
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	afterMkdir := normalizePath(target)
+	if afterMkdir != before {
+		t.Fatalf("key changed when the parent directories were created: %q -> %q", before, afterMkdir)
+	}
+
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	afterWrite := normalizePath(target)
+	if afterWrite != before {
+		t.Fatalf("key changed when the file was created: %q -> %q", before, afterWrite)
+	}
+
+	// And the stable key must be the fully-resolved one, not the unresolved
+	// spelling frozen in — otherwise a later read of the resolved form misses.
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != resolved {
+		t.Fatalf("key %q is not the resolved form %q", before, resolved)
+	}
+}
+
+// TestFileTrackerLockExcludesAcrossParentCreation is the mutual-exclusion half
+// of the same defect: write takes the lock BEFORE os.MkdirAll, so a second
+// writer arriving after the directories exist must still land on the same
+// mutex. When it didn't, both ran os.WriteFile (O_TRUNC then Write, not
+// atomic) on one file concurrently.
+func TestFileTrackerLockExcludesAcrossParentCreation(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "nested", "deeper", "new.txt")
+
+	tr := NewFileTracker()
+	unlock := tr.Lock(target)
+
+	// Exactly what write does next.
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	blocked := make(chan struct{})
+	go func() {
+		defer close(blocked)
+		tr.Lock(target)()
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("Lock stopped excluding once the parent directories were created")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	unlock()
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Lock was not released")
+	}
+
+	tr.mu.Lock()
+	leftover := len(tr.locks)
+	tr.mu.Unlock()
+	if leftover != 0 {
+		t.Fatalf("expected the locks map to drain, got %d entries", leftover)
+	}
+}
+
 // TestFileTrackerConcurrentAccess hammers RecordRead/Verify from many
 // goroutines — read/write/edit tools execute concurrently under the loop's
 // errgroup and all share one FileTracker. Run with -race.
