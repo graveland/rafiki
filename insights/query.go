@@ -7,11 +7,32 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Query defaults and hard cap for the read-only executor.
+// Query bounds for the read-only executor.
 const (
 	defaultQueryLimit = 1000
 	maxQueryLimit     = 10000
+	// maxResultBytes caps the approximate serialized size of the returned rows,
+	// so a query for a few very large rows can't blow past gRPC's 4MB message
+	// cap or an LLM reader's context. Measured as the summed length of column
+	// names plus stringified values as rows are built (approximate, not the
+	// exact JSON size). At least one row is always returned even if it alone
+	// exceeds the budget.
+	maxResultBytes = 3 << 20 // 3 MiB
 )
+
+// clampQueryLimit maps a requested row limit into [1, maxQueryLimit]: a
+// non-positive limit becomes the default, an over-max limit is clamped DOWN to
+// the max (not reset to the smaller default).
+func clampQueryLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return defaultQueryLimit
+	case limit > maxQueryLimit:
+		return maxQueryLimit
+	default:
+		return limit
+	}
+}
 
 // Query runs a caller-validated read-only SELECT and returns up to limit rows.
 //
@@ -23,18 +44,15 @@ const (
 //
 // Defence in depth: the statement runs inside a read-only transaction with a
 // 30s statement_timeout, so a statement that slips past the validator still
-// cannot write and cannot run unbounded. limit is clamped to [1, maxQueryLimit]
-// (default defaultQueryLimit when <= 0); truncated reports that more rows were
-// available than returned.
+// cannot write and cannot run unbounded. truncated reports that the row cap or
+// the byte budget (maxResultBytes) stopped the scan before all rows were read.
 func (i *Insights) Query(ctx context.Context, sqlText string, limit int, validate func(string) error) (rows []map[string]any, truncated bool, err error) {
 	if validate != nil {
 		if err := validate(sqlText); err != nil {
 			return nil, false, fmt.Errorf("query rejected: %w", err)
 		}
 	}
-	if limit <= 0 || limit > maxQueryLimit {
-		limit = defaultQueryLimit
-	}
+	limit = clampQueryLimit(limit)
 
 	tx, err := i.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -54,24 +72,59 @@ func (i *Insights) Query(ctx context.Context, sqlText string, limit int, validat
 
 	fds := rs.FieldDescriptions()
 	out := make([]map[string]any, 0, limit)
+	var bytesSoFar int
 	for rs.Next() {
+		if len(out) >= limit {
+			truncated = true // one row past the cap proves truncation
+			break
+		}
 		vals, err := rs.Values()
 		if err != nil {
 			return nil, false, fmt.Errorf("query: read row: %w", err)
 		}
-		if len(out) >= limit {
-			// One row past the cap proves truncation; stop without keeping it.
+		row := make(map[string]any, len(fds))
+		rowBytes := 0
+		for j, fd := range fds {
+			v := canonicalValue(vals[j])
+			row[fd.Name] = v
+			rowBytes += len(fd.Name) + valueSize(v)
+		}
+		// Enforce the byte budget, but always return at least one row.
+		if len(out) > 0 && bytesSoFar+rowBytes > maxResultBytes {
 			truncated = true
 			break
 		}
-		row := make(map[string]any, len(fds))
-		for j, fd := range fds {
-			row[fd.Name] = vals[j]
-		}
 		out = append(out, row)
+		bytesSoFar += rowBytes
 	}
 	if err := rs.Err(); err != nil {
 		return nil, false, fmt.Errorf("query: rows: %w", err)
 	}
 	return out, truncated, nil
+}
+
+// canonicalValue normalizes pgx-decoded values for JSON output. Without a
+// registered data type, pgx yields a uuid column as a raw [16]byte, which
+// marshals as a JSON array of ints; render it as the canonical dashed string
+// instead so `SELECT id` matches `SELECT id::text`.
+func canonicalValue(v any) any {
+	if b, ok := v.([16]byte); ok {
+		return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	}
+	return v
+}
+
+// valueSize approximates the serialized byte size of a column value for the
+// result byte budget.
+func valueSize(v any) int {
+	switch t := v.(type) {
+	case nil:
+		return 0
+	case string:
+		return len(t)
+	case []byte:
+		return len(t)
+	default:
+		return len(fmt.Sprint(t))
+	}
 }

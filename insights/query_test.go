@@ -77,3 +77,61 @@ func TestQuery_ReadOnlyTxBlocksWrites(t *testing.T) {
 		t.Fatal("write must fail inside the read-only transaction even without validation")
 	}
 }
+
+func TestClampQueryLimit(t *testing.T) {
+	cases := []struct{ in, want int }{
+		{0, defaultQueryLimit},
+		{-5, defaultQueryLimit},
+		{50, 50},
+		{maxQueryLimit, maxQueryLimit},
+		{maxQueryLimit + 1, maxQueryLimit}, // clamp DOWN to max, not reset to default
+		{999999, maxQueryLimit},
+	}
+	for _, c := range cases {
+		if got := clampQueryLimit(c.in); got != c.want {
+			t.Errorf("clampQueryLimit(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestQuery_UUIDColumnIsString(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	seedConversation(t, pool, "client", "alice")
+	ins := New(pool)
+
+	// SELECT id WITHOUT ::text: the raw uuid must still render as a string.
+	rows, _, err := ins.Query(ctx, "SELECT id FROM conversations.conversation LIMIT 1", 10, selectOnly)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	id, ok := rows[0]["id"].(string)
+	if !ok {
+		t.Fatalf("id is %T, want string", rows[0]["id"])
+	}
+	if len(id) != 36 || strings.Count(id, "-") != 4 {
+		t.Errorf("id %q is not a canonical uuid string", id)
+	}
+}
+
+func TestQuery_ByteBudgetTruncates(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ins := New(pool)
+
+	// Three ~2MB rows: the first fits, the second would blow the 3MB budget.
+	rows, truncated, err := ins.Query(ctx,
+		"SELECT repeat('x', 2000000) AS big FROM generate_series(1,3)", 10, selectOnly)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !truncated {
+		t.Error("truncated = false, want true (byte budget hit)")
+	}
+	if len(rows) != 1 {
+		t.Errorf("rows = %d, want 1 (byte budget stops after the first row)", len(rows))
+	}
+}
