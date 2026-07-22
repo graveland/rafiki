@@ -96,10 +96,11 @@ func TestConversationSendPersistsBothGranularities(t *testing.T) {
 	if got := string(sender.lastReq[0].Model); got != "claude-sonnet-5" {
 		t.Errorf("model = %q, want resolved claude-sonnet-5", got)
 	}
-	// Single 1h breakpoint on the last system block.
+	// Default cache policy: one 5m breakpoint (empty TTL) on the last system
+	// block. Callers wanting 1h opt in via WithCache (see DefaultCachePolicy).
 	sys := sender.lastReq[0].System
-	if len(sys) != 1 || sys[0].CacheControl.TTL != anthropic.CacheControlEphemeralTTLTTL1h {
-		t.Errorf("system breakpoint wrong: %+v", sys)
+	if len(sys) != 1 || sys[0].CacheControl.Type == "" || sys[0].CacheControl.TTL != "" {
+		t.Errorf("system breakpoint wrong (want ephemeral/5m-default): %+v", sys)
 	}
 
 	// Second send loads history: request must carry 3 messages.
