@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -47,7 +48,8 @@ func (e *Emitter) AgentStart() {
 // prompt or steer, and accumulates the echoed user message for the eventual
 // agent_end frame.
 func (e *Emitter) UserMessage(text string) {
-	msg := child.PiUserMessage{Role: "user", Content: text, Timestamp: time.Now().UnixMilli()}
+	ts := time.Now().UnixMilli()
+	msg := child.PiUserMessage{Role: "user", ID: fmt.Sprintf("user-%d", ts), Content: text, Timestamp: ts}
 	e.fe.Emit(child.PiUserMessageStart(msg))
 	e.fe.Emit(child.PiUserMessageEnd(msg))
 	e.accumulate(msg)
@@ -138,9 +140,20 @@ func MapAssistantMessage(resp *anthropic.Message, provider string) child.PiAssis
 	for _, b := range resp.Content {
 		switch v := b.AsAny().(type) {
 		case anthropic.TextBlock:
-			blocks = append(blocks, child.PiTextBlock(v.Text))
+			// Skip empty text. PiContentBlock.Text is `omitempty`, so an empty
+			// string serializes to {type:"text"} with no `text` field, and pi's
+			// TUI does c.text.trim() → crashes on the undefined field. Mirrors
+			// the same guard in provider_claude_state.go's emitAssistant.
+			if v.Text != "" {
+				blocks = append(blocks, child.PiTextBlock(v.Text))
+			}
 		case anthropic.ThinkingBlock:
-			blocks = append(blocks, child.PiThinkingBlock(v.Thinking))
+			// Same hazard for thinking: an empty string would serialize to
+			// {type:"thinking"} (no `thinking` field) and crash pi's TUI at
+			// c.thinking.trim(). Skip empty thinking blocks entirely.
+			if v.Thinking != "" {
+				blocks = append(blocks, child.PiThinkingBlock(v.Thinking))
+			}
 		case anthropic.ToolUseBlock:
 			var args map[string]any
 			if err := json.Unmarshal(v.Input, &args); err != nil {
