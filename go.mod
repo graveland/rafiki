@@ -3,12 +3,21 @@ module git.graveland.dev/brent/fundi
 go 1.25.0
 
 require (
+	github.com/anthropics/anthropic-sdk-go v1.37.0
 	github.com/jedib0t/go-pretty/v6 v6.7.10
 	github.com/mattn/go-runewidth v0.0.16
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.43.0
+)
+
+require (
+	github.com/tidwall/gjson v1.18.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 )
 
 require (
