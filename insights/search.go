@@ -25,22 +25,22 @@ type SearchFilter struct {
 // ConversationSummary is one row of Search: the conversation plus a cheap
 // per-conversation turn aggregate and the first user message snippet.
 type ConversationSummary struct {
-	ID       string
-	Owner    string
-	Persona  string
-	Source   string
-	Model    string
-	Status   string
-	DrivenBy string
+	ID       string `json:"id"`
+	Owner    string `json:"owner"`
+	Persona  string `json:"persona"`
+	Source   string `json:"source"`
+	Model    string `json:"model"`
+	Status   string `json:"status"`
+	DrivenBy string `json:"driven_by"`
 
-	CreatedAt time.Time
-	Turns     int
+	CreatedAt time.Time `json:"created_at"`
+	Turns     int       `json:"turns"`
 
-	InputTokens     int64
-	OutputTokens    int64
-	CacheReadTokens int64
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
 
-	FirstMessage string
+	FirstMessage string `json:"first_message"`
 }
 
 const defaultSearchLimit = 50

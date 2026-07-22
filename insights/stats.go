@@ -26,78 +26,80 @@ type StatsFilter struct {
 // Stats is the aggregate bundle. Every facet is computed over the same filtered
 // population; ByPath additionally splits the token facet by capture path.
 type Stats struct {
-	Volume     VolumeStats
-	Adoption   AdoptionStats
-	Tokens     TokenStats
-	Cost       []CostRow
-	Failures   FailureStats
-	Latency    LatencyStats
-	CacheWaste CacheWasteStats
-	Prefix     PrefixStats
-	ByPath     map[string]TokenStats // keyed by "proxy"/"direct"
+	Volume     VolumeStats           `json:"volume"`
+	Adoption   AdoptionStats         `json:"adoption"`
+	Tokens     TokenStats            `json:"tokens"`
+	Cost       []CostRow             `json:"cost"`
+	Failures   FailureStats          `json:"failures"`
+	Latency    LatencyStats          `json:"latency"`
+	CacheWaste CacheWasteStats       `json:"cache_waste"`
+	Prefix     PrefixStats           `json:"prefix"`
+	ByPath     map[string]TokenStats `json:"by_path"` // keyed by "proxy"/"direct"
 }
 
 type VolumeStats struct {
-	Conversations int64
-	Turns         int64
+	Conversations int64 `json:"conversations"`
+	Turns         int64 `json:"turns"`
 }
 
 type AdoptionStats struct {
-	DistinctOwners int64
-	PerOwner       []OwnerCount
+	DistinctOwners int64        `json:"distinct_owners"`
+	PerOwner       []OwnerCount `json:"per_owner"`
 }
 
 type OwnerCount struct {
-	Owner         string
-	Conversations int64
-	Turns         int64
+	Owner         string `json:"owner"`
+	Conversations int64  `json:"conversations"`
+	Turns         int64  `json:"turns"`
 }
 
 type TokenStats struct {
-	InputTokens         int64
-	OutputTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	CacheHitRatio       float64 // cache_read / (input + cache_read)
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	CacheHitRatio       float64 `json:"cache_hit_ratio"` // cache_read / (input + cache_read)
 }
 
 // CostRow is a per-model token rollup. CostUSD is best-effort: it is 0 until a
 // per-model price table is wired in, so callers should treat 0 as "unpriced".
 type CostRow struct {
-	Model               string
-	Turns               int64
-	InputTokens         int64
-	OutputTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	CostUSD             float64
+	Model               string  `json:"model"`
+	Turns               int64   `json:"turns"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	CostUSD             float64 `json:"cost_usd"`
 }
 
 type FailureStats struct {
-	Turns        int64
-	Errors       int64
-	ErrorRate    float64
-	FailoverRate float64 // fraction of turns served by the openrouter upstream
+	Turns        int64   `json:"turns"`
+	Errors       int64   `json:"errors"`
+	ErrorRate    float64 `json:"error_rate"`
+	FailoverRate float64 `json:"failover_rate"` // fraction of turns served by the openrouter upstream
 }
 
 type LatencyStats struct {
-	P50, P95, P99 float64 // milliseconds
+	P50 float64 `json:"p50"`
+	P95 float64 `json:"p95"`
+	P99 float64 `json:"p99"`
 }
 
 type CacheWasteStats struct {
-	WastedTurns       int64
-	WastedInputTokens int64
-	Threshold         int64
+	WastedTurns       int64 `json:"wasted_turns"`
+	WastedInputTokens int64 `json:"wasted_input_tokens"`
+	Threshold         int64 `json:"threshold"`
 }
 
 // PrefixStats describes cache-prefix reuse. Cross-conversation facets
 // (CrossUserPrefixes) are only meaningful for GlobalStats.
 type PrefixStats struct {
-	DistinctPrefixes     int64
-	TurnsWithPrefix      int64
-	ReuseRatio           float64 // turns-with-prefix / distinct-prefixes
-	CrossUserPrefixes    int64   // prefixes reused across more than one owner
-	DriftedConversations int64   // conversations whose prefix_hash changed across turns
+	DistinctPrefixes     int64   `json:"distinct_prefixes"`
+	TurnsWithPrefix      int64   `json:"turns_with_prefix"`
+	ReuseRatio           float64 `json:"reuse_ratio"`           // turns-with-prefix / distinct-prefixes
+	CrossUserPrefixes    int64   `json:"cross_user_prefixes"`   // prefixes reused across more than one owner
+	DriftedConversations int64   `json:"drifted_conversations"` // conversations whose prefix_hash changed across turns
 }
 
 // statsScope is a shared WHERE clause plus its args over the turn⋈conversation
