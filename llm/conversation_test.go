@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -371,5 +372,42 @@ func TestWithCache_EachApplicationGetsItsOwnPolicy(t *testing.T) {
 	cfg1.cache.Breakpoints = 3 // what Conversation()'s clamp does
 	if cfg2.cache.Breakpoints != 9 {
 		t.Fatalf("clamping one conversation's policy leaked: Breakpoints = %d, want 9", cfg2.cache.Breakpoints)
+	}
+}
+
+func TestBlockWithCacheControl_CoversEveryCacheableUnionMember(t *testing.T) {
+	// Exhaustiveness guard against SDK bumps: if a new ContentBlockParamUnion
+	// member carries cache_control and blockWithCacheControl doesn't handle
+	// it, a stale marker on reloaded history couldn't be cleared and a
+	// request could exceed the API's 4-breakpoint limit.
+	marker := anthropic.NewCacheControlEphemeralParam()
+	ut := reflect.TypeOf(anthropic.ContentBlockParamUnion{})
+	tested := 0
+	for i := 0; i < ut.NumField(); i++ {
+		f := ut.Field(i)
+		if !strings.HasPrefix(f.Name, "Of") || f.Type.Kind() != reflect.Pointer {
+			continue
+		}
+		cc, ok := f.Type.Elem().FieldByName("CacheControl")
+		if !ok || cc.Type != reflect.TypeOf(marker) {
+			continue // member cannot carry cache_control (thinking blocks etc.)
+		}
+		member := reflect.New(f.Type.Elem())
+		member.Elem().FieldByName("CacheControl").Set(reflect.ValueOf(marker))
+		var b anthropic.ContentBlockParamUnion
+		reflect.ValueOf(&b).Elem().Field(i).Set(member)
+
+		got := blockWithCacheControl(b, anthropic.CacheControlEphemeralParam{})
+		ptr := got.GetCacheControl()
+		if ptr == nil || ptr.Type != "" || ptr.TTL != "" {
+			t.Errorf("%s: blockWithCacheControl did not clear cache_control (got %+v) — add it to the switch", f.Name, ptr)
+		}
+		if orig := b.GetCacheControl(); orig == nil || orig.Type == "" {
+			t.Errorf("%s: input block was mutated; blockWithCacheControl must copy", f.Name)
+		}
+		tested++
+	}
+	if tested < 14 { // the cacheable members as of anthropic-sdk-go v1.56
+		t.Fatalf("only %d cacheable union members found; reflection walk is broken", tested)
 	}
 }
