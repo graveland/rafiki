@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConversationSummary_JSONTags(t *testing.T) {
@@ -194,5 +195,65 @@ func TestSearch_ModelAndSourceMatchStatsPopulation(t *testing.T) {
 		if len(got) != 1 {
 			t.Errorf("search source %s = %d, want 1", src, len(got))
 		}
+	}
+}
+
+func TestSearch_SinceMatchesTurnActivityLikeStats(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	// An old conversation with a recent turn, and a recent conversation whose
+	// only turn is old. A since-window over "now-ish" must select the first
+	// and reject the second — matching the GlobalStats turn population.
+	oldConv := insertConversation(t, pool, "client", "alice")
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET created_at = now() - interval '10 days' WHERE id = $1::uuid`,
+		oldConv); err != nil {
+		t.Fatalf("backdate conversation: %v", err)
+	}
+	insertTurn(t, pool, oldConv, seedTurn{ordinal: 0, model: "m", source: "claude", inTok: 10})
+
+	staleConv := insertConversation(t, pool, "client", "bob")
+	insertTurn(t, pool, staleConv, seedTurn{
+		ordinal: 0, model: "m", source: "claude", inTok: 10,
+		createdAt: time.Now().Add(-10 * 24 * time.Hour),
+	})
+
+	since := time.Now().Add(-time.Hour)
+	rows, err := New(pool).Search(ctx, SearchFilter{Since: &since})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != oldConv {
+		t.Fatalf("search since = %+v, want exactly the old conversation with the recent turn", rows)
+	}
+
+	// The stats population over the same filter agrees.
+	s, err := New(pool).GlobalStats(ctx, StatsFilter{Since: &since})
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if s.Volume.Conversations != 1 || s.Volume.Turns != 1 {
+		t.Errorf("stats volume = %d/%d, want 1/1", s.Volume.Conversations, s.Volume.Turns)
+	}
+}
+
+func TestSearch_TurnFiltersRequireOneMatchingTurn(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	// model=X and source=Y on DIFFERENT turns must not match a combined
+	// model+source filter (stats ANDs them on the same turn row).
+	split := insertConversation(t, pool, "client", "carol")
+	insertTurn(t, pool, split, seedTurn{ordinal: 0, model: "model-x", source: "slack", inTok: 10})
+	insertTurn(t, pool, split, seedTurn{ordinal: 1, model: "model-y", source: "claude", inTok: 10})
+
+	both := insertConversation(t, pool, "client", "dan")
+	insertTurn(t, pool, both, seedTurn{ordinal: 0, model: "model-x", source: "claude", inTok: 10})
+
+	rows, err := New(pool).Search(ctx, SearchFilter{Model: "model-x", Source: "claude"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != both {
+		t.Fatalf("search model+source = %+v, want only the conversation with both on one turn", rows)
 	}
 }

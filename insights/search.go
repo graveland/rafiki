@@ -9,6 +9,11 @@ import (
 
 // SearchFilter narrows a conversation search. Zero-value fields are ignored, so
 // an empty filter returns the most recent conversations up to Limit.
+//
+// Since/Until, Model, and Source are TURN-level filters: a conversation
+// matches when a single turn satisfies all of them (turn activity in the
+// window, not conversation creation time) — the same population
+// GlobalStats selects with the same filter.
 type SearchFilter struct {
 	Since, Until *time.Time
 	Owner        string
@@ -57,43 +62,68 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 		limit = defaultSearchLimit
 	}
 
+	// Conditions split three ways: conversation-column conds (with the
+	// turn-level EXISTS folded in), and conds that reference the LATERAL
+	// aggregates and so can only apply outside the conversation scan.
 	var a argList
-	conds := []string{"1=1"}
+	convConds := []string{"1=1"}
 	if db := f.Path.drivenBy(); db != "" {
-		conds = append(conds, "c.driven_by = "+a.next(db))
+		convConds = append(convConds, "c.driven_by = "+a.next(db))
 	}
 	if f.Owner != "" {
-		conds = append(conds, "c.owner = "+a.next(f.Owner))
+		convConds = append(convConds, "c.owner = "+a.next(f.Owner))
 	}
 	if f.Persona != "" {
-		conds = append(conds, "c.persona = "+a.next(f.Persona))
-	}
-	// Model and Source filter on the PER-TURN served value via EXISTS, matching
-	// the population GlobalStats selects (which filters t.model / t.source).
-	// Filtering the conversation-level c.model here would diverge from stats,
-	// since the served model is recorded per turn.
-	if f.Model != "" {
-		conds = append(conds, "EXISTS (SELECT 1 FROM conversations.conversation_turn tm "+
-			"WHERE tm.conversation_id = c.id AND tm.model = "+a.next(f.Model)+")")
+		convConds = append(convConds, "c.persona = "+a.next(f.Persona))
 	}
 	if f.Status != "" {
-		conds = append(conds, "c.status = "+a.next(f.Status))
+		convConds = append(convConds, "c.status = "+a.next(f.Status))
 	}
-	if f.Since != nil {
-		conds = append(conds, "c.created_at >= "+a.next(*f.Since))
-	}
-	if f.Until != nil {
-		conds = append(conds, "c.created_at < "+a.next(*f.Until))
+	// Model, Source, and Since/Until filter on PER-TURN values via ONE shared
+	// EXISTS — a single turn must satisfy all of them, matching the population
+	// GlobalStats selects (which ANDs t.model/t.source/t.created_at on the
+	// same turn row). Filtering the conversation-level c.model or
+	// c.created_at here would diverge from stats: the served model is
+	// recorded per turn, and the time window bounds turn activity, not
+	// conversation creation.
+	var turnConds []string
+	if f.Model != "" {
+		turnConds = append(turnConds, "tm.model = "+a.next(f.Model))
 	}
 	if f.Source != "" {
-		conds = append(conds, "EXISTS (SELECT 1 FROM conversations.conversation_turn ts "+
-			"WHERE ts.conversation_id = c.id AND ts.source = "+a.next(f.Source)+")")
+		turnConds = append(turnConds, "tm.source = "+a.next(f.Source))
 	}
+	if f.Since != nil {
+		turnConds = append(turnConds, "tm.created_at >= "+a.next(*f.Since))
+	}
+	if f.Until != nil {
+		turnConds = append(turnConds, "tm.created_at < "+a.next(*f.Until))
+	}
+	if len(turnConds) > 0 {
+		convConds = append(convConds, "EXISTS (SELECT 1 FROM conversations.conversation_turn tm "+
+			"WHERE tm.conversation_id = c.id AND "+strings.Join(turnConds, " AND ")+")")
+	}
+	var lateralConds []string
 	if f.MinTokens > 0 {
-		conds = append(conds, "coalesce(t.in_tok,0) + coalesce(t.out_tok,0) >= "+a.next(f.MinTokens))
+		lateralConds = append(lateralConds, "coalesce(t.in_tok,0) + coalesce(t.out_tok,0) >= "+a.next(f.MinTokens))
 	}
 	if f.Text != "" {
-		conds = append(conds, "fm.first_text ILIKE '%' || "+a.next(f.Text)+" || '%'")
+		lateralConds = append(lateralConds, "fm.first_text ILIKE '%' || "+a.next(f.Text)+" || '%'")
+	}
+
+	// With no LATERAL-dependent filters the result page is decided by the
+	// conversation scan alone, so order+limit it BEFORE the lateral joins and
+	// the per-conversation aggregates run only for the returned page. With
+	// such filters the laterals must be probed until the page fills, so the
+	// limit stays outside.
+	limitArg := a.next(limit)
+	convFrom := `conversations.conversation c WHERE ` + strings.Join(convConds, "\n  AND ")
+	from := `(SELECT * FROM ` + convFrom + `
+  ORDER BY c.created_at DESC LIMIT ` + limitArg + `) c`
+	where := ""
+	if len(lateralConds) > 0 {
+		from = `(SELECT * FROM ` + convFrom + `) c`
+		where = "WHERE " + strings.Join(lateralConds, "\n  AND ")
 	}
 
 	query := `
@@ -101,7 +131,7 @@ SELECT c.id::text, coalesce(c.owner,''), coalesce(c.persona,''),
        coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at,
        coalesce(t.turns,0), coalesce(t.in_tok,0), coalesce(t.out_tok,0), coalesce(t.cache_read,0),
        coalesce(left(fm.first_text, 200), '')
-FROM conversations.conversation c
+FROM ` + from + `
 LEFT JOIN LATERAL (
     SELECT count(*) AS turns,
            sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,
@@ -121,9 +151,9 @@ LEFT JOIN LATERAL (
     FROM conversations.conversation_message
     WHERE conversation_id = c.id AND role = 'user' ORDER BY ordinal LIMIT 1
 ) fm ON true
-WHERE ` + strings.Join(conds, "\n  AND ") + `
+` + where + `
 ORDER BY c.created_at DESC
-LIMIT ` + a.next(limit)
+LIMIT ` + limitArg
 
 	rows, err := i.pool.Query(ctx, query, a.args...)
 	if err != nil {
