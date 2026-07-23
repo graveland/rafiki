@@ -84,7 +84,7 @@ type FailureStats struct {
 	Turns        int64   `json:"turns"`
 	Errors       int64   `json:"errors"`
 	ErrorRate    float64 `json:"error_rate"`
-	FailoverRate float64 `json:"failover_rate"` // fraction of turns served by the openrouter upstream
+	FailoverRate float64 `json:"failover_rate"` // openrouter-served turns / ALL turns (turns with no recorded upstream count in the denominator)
 }
 
 type LatencyStats struct {
@@ -186,49 +186,76 @@ func (i *Insights) ConversationStats(ctx context.Context, conversationID string)
 func (i *Insights) compute(ctx context.Context, sc statsScope) (*Stats, error) {
 	s := &Stats{ByPath: map[string]TokenStats{}, CacheWaste: CacheWasteStats{Threshold: cacheWasteInputThreshold}}
 
-	if err := i.volume(ctx, sc, s); err != nil {
+	if err := i.scalars(ctx, sc, s); err != nil {
 		return nil, err
 	}
-	if err := i.adoption(ctx, sc, s); err != nil {
+	if err := i.perOwner(ctx, sc, s); err != nil {
 		return nil, err
 	}
-	if err := i.tokens(ctx, sc, s); err != nil {
+	if err := i.tokensByPath(ctx, sc, s); err != nil {
 		return nil, err
 	}
 	if err := i.cost(ctx, sc, s); err != nil {
 		return nil, err
 	}
-	if err := i.failures(ctx, sc, s); err != nil {
-		return nil, err
-	}
-	if err := i.latency(ctx, sc, s); err != nil {
-		return nil, err
-	}
-	if err := i.cacheWaste(ctx, sc, s); err != nil {
-		return nil, err
-	}
-	if err := i.prefix(ctx, sc, s); err != nil {
+	if err := i.prefixGrouped(ctx, sc, s); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func (i *Insights) volume(ctx context.Context, sc statsScope, s *Stats) error {
+// scalars computes every single-row aggregate facet — volume, distinct
+// owners, token totals, failures, latency percentiles, cache waste, and
+// prefix reuse — in ONE pass over the filtered turn population. NULL
+// handling worth calling out: distinct owners coalesces NULL to ” so the
+// count matches the per-owner rows (which display NULL as ”); percentile_cont
+// ignores NULL latency rows like any aggregate; count(DISTINCT prefix_hash)
+// ignores NULLs.
+func (i *Insights) scalars(ctx context.Context, sc statsScope, s *Stats) error {
+	args := append(slices.Clone(sc.args), cacheWasteInputThreshold)
+	threshold := fmt.Sprintf("$%d", len(args))
+	wasted := `coalesce(t.cache_read_tokens,0)=0 AND coalesce(t.input_tokens,0) > ` + threshold
+	var failoverTurns int64
 	err := i.pool.QueryRow(ctx,
-		`SELECT count(DISTINCT t.conversation_id), count(t.id) `+statsFrom+` WHERE `+sc.where,
-		sc.args...).Scan(&s.Volume.Conversations, &s.Volume.Turns)
+		`SELECT count(DISTINCT t.conversation_id), count(t.id),
+		        count(DISTINCT coalesce(c.owner,'')),
+		        `+tokenSums+`,
+		        count(t.id) FILTER (WHERE t.status='error'),
+		        count(t.id) FILTER (WHERE t.upstream='openrouter'),
+		        coalesce(percentile_cont(0.5)  WITHIN GROUP (ORDER BY t.latency_ms), 0),
+		        coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY t.latency_ms), 0),
+		        coalesce(percentile_cont(0.99) WITHIN GROUP (ORDER BY t.latency_ms), 0),
+		        count(t.id) FILTER (WHERE `+wasted+`),
+		        coalesce(sum(t.input_tokens) FILTER (WHERE `+wasted+`), 0),
+		        count(DISTINCT t.prefix_hash),
+		        count(t.id) FILTER (WHERE t.prefix_hash IS NOT NULL)
+		 `+statsFrom+` WHERE `+sc.where, args...).Scan(
+		append(append([]any{
+			&s.Volume.Conversations, &s.Volume.Turns,
+			&s.Adoption.DistinctOwners},
+			scanTokens(&s.Tokens)...),
+			&s.Failures.Errors, &failoverTurns,
+			&s.Latency.P50, &s.Latency.P95, &s.Latency.P99,
+			&s.CacheWaste.WastedTurns, &s.CacheWaste.WastedInputTokens,
+			&s.Prefix.DistinctPrefixes, &s.Prefix.TurnsWithPrefix)...)
 	if err != nil {
-		return fmt.Errorf("stats: volume: %w", err)
+		return fmt.Errorf("stats: scalars: %w", err)
+	}
+	s.Tokens.finalize()
+	s.Failures.Turns = s.Volume.Turns
+	if s.Failures.Turns > 0 {
+		s.Failures.ErrorRate = float64(s.Failures.Errors) / float64(s.Failures.Turns)
+		// Rate over ALL turns: a turn with no recorded upstream still counts
+		// in the denominator (avg((upstream='openrouter')::int) would drop it).
+		s.Failures.FailoverRate = float64(failoverTurns) / float64(s.Failures.Turns)
+	}
+	if s.Prefix.DistinctPrefixes > 0 {
+		s.Prefix.ReuseRatio = float64(s.Prefix.TurnsWithPrefix) / float64(s.Prefix.DistinctPrefixes)
 	}
 	return nil
 }
 
-func (i *Insights) adoption(ctx context.Context, sc statsScope, s *Stats) error {
-	if err := i.pool.QueryRow(ctx,
-		`SELECT count(DISTINCT c.owner) `+statsFrom+` WHERE `+sc.where,
-		sc.args...).Scan(&s.Adoption.DistinctOwners); err != nil {
-		return fmt.Errorf("stats: distinct owners: %w", err)
-	}
+func (i *Insights) perOwner(ctx context.Context, sc statsScope, s *Stats) error {
 	rows, err := i.pool.Query(ctx,
 		`SELECT coalesce(c.owner,''), count(DISTINCT c.id), count(t.id) `+statsFrom+`
 		 WHERE `+sc.where+`
@@ -260,14 +287,7 @@ func (t *TokenStats) finalize() {
 const tokenSums = `coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
 	coalesce(sum(cache_read_tokens),0), coalesce(sum(cache_creation_tokens),0)`
 
-func (i *Insights) tokens(ctx context.Context, sc statsScope, s *Stats) error {
-	if err := i.pool.QueryRow(ctx,
-		`SELECT `+tokenSums+` `+statsFrom+` WHERE `+sc.where,
-		sc.args...).Scan(scanTokens(&s.Tokens)...); err != nil {
-		return fmt.Errorf("stats: tokens: %w", err)
-	}
-	s.Tokens.finalize()
-
+func (i *Insights) tokensByPath(ctx context.Context, sc statsScope, s *Stats) error {
 	rows, err := i.pool.Query(ctx,
 		`SELECT c.driven_by, `+tokenSums+` `+statsFrom+`
 		 WHERE `+sc.where+` GROUP BY c.driven_by`, sc.args...)
@@ -328,58 +348,9 @@ func (i *Insights) cost(ctx context.Context, sc statsScope, s *Stats) error {
 	return nil
 }
 
-func (i *Insights) failures(ctx context.Context, sc statsScope, s *Stats) error {
-	err := i.pool.QueryRow(ctx,
-		`SELECT count(t.id), count(t.id) FILTER (WHERE t.status='error'),
-		        coalesce(avg((t.upstream='openrouter')::int), 0) `+statsFrom+`
-		 WHERE `+sc.where, sc.args...).Scan(&s.Failures.Turns, &s.Failures.Errors, &s.Failures.FailoverRate)
-	if err != nil {
-		return fmt.Errorf("stats: failures: %w", err)
-	}
-	if s.Failures.Turns > 0 {
-		s.Failures.ErrorRate = float64(s.Failures.Errors) / float64(s.Failures.Turns)
-	}
-	return nil
-}
-
-func (i *Insights) latency(ctx context.Context, sc statsScope, s *Stats) error {
-	err := i.pool.QueryRow(ctx,
-		`SELECT coalesce(percentile_cont(0.5)  WITHIN GROUP (ORDER BY t.latency_ms), 0),
-		        coalesce(percentile_cont(0.95) WITHIN GROUP (ORDER BY t.latency_ms), 0),
-		        coalesce(percentile_cont(0.99) WITHIN GROUP (ORDER BY t.latency_ms), 0) `+statsFrom+`
-		 WHERE `+sc.where+` AND t.latency_ms IS NOT NULL`,
-		sc.args...).Scan(&s.Latency.P50, &s.Latency.P95, &s.Latency.P99)
-	if err != nil {
-		return fmt.Errorf("stats: latency: %w", err)
-	}
-	return nil
-}
-
-func (i *Insights) cacheWaste(ctx context.Context, sc statsScope, s *Stats) error {
-	args := append(slices.Clone(sc.args), cacheWasteInputThreshold)
-	threshold := fmt.Sprintf("$%d", len(args))
-	err := i.pool.QueryRow(ctx,
-		`SELECT count(t.id) FILTER (WHERE coalesce(t.cache_read_tokens,0)=0 AND coalesce(t.input_tokens,0) > `+threshold+`),
-		        coalesce(sum(t.input_tokens) FILTER (WHERE coalesce(t.cache_read_tokens,0)=0 AND coalesce(t.input_tokens,0) > `+threshold+`), 0) `+statsFrom+`
-		 WHERE `+sc.where, args...).Scan(&s.CacheWaste.WastedTurns, &s.CacheWaste.WastedInputTokens)
-	if err != nil {
-		return fmt.Errorf("stats: cache waste: %w", err)
-	}
-	return nil
-}
-
-func (i *Insights) prefix(ctx context.Context, sc statsScope, s *Stats) error {
-	err := i.pool.QueryRow(ctx,
-		`SELECT count(DISTINCT t.prefix_hash), count(t.id) FILTER (WHERE t.prefix_hash IS NOT NULL) `+statsFrom+`
-		 WHERE `+sc.where+` AND t.prefix_hash IS NOT NULL`,
-		sc.args...).Scan(&s.Prefix.DistinctPrefixes, &s.Prefix.TurnsWithPrefix)
-	if err != nil {
-		return fmt.Errorf("stats: prefix distinct: %w", err)
-	}
-	if s.Prefix.DistinctPrefixes > 0 {
-		s.Prefix.ReuseRatio = float64(s.Prefix.TurnsWithPrefix) / float64(s.Prefix.DistinctPrefixes)
-	}
-
+// prefixGrouped computes the prefix facets that need grouped subqueries:
+// drift and (globally) cross-user reuse.
+func (i *Insights) prefixGrouped(ctx context.Context, sc statsScope, s *Stats) error {
 	// Conversations whose prefix_hash changed across turns (prefix drift).
 	if err := i.pool.QueryRow(ctx,
 		`SELECT count(*) FROM (

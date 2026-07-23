@@ -224,3 +224,37 @@ func TestConversationStats_NotFound(t *testing.T) {
 		t.Errorf("ConversationStats on a missing conversation err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestGlobalStats_NullOwnerAndNullUpstream(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	// A NULL-owner conversation whose turn has no recorded upstream, next to a
+	// normal conversation served by openrouter.
+	c1 := insertConversation(t, pool, "server", "")
+	insertTurn(t, pool, c1, seedTurn{ordinal: 0, model: "m", inTok: 100})
+	c2 := insertConversation(t, pool, "client", "zoe")
+	insertTurn(t, pool, c2, seedTurn{ordinal: 0, model: "m", upstream: "openrouter", inTok: 100})
+
+	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	// The NULL owner must count as one distinct owner, matching its '' per-owner row.
+	if s.Adoption.DistinctOwners != 2 {
+		t.Errorf("distinct owners = %d, want 2 (NULL owner counts)", s.Adoption.DistinctOwners)
+	}
+	var sawEmpty bool
+	for _, oc := range s.Adoption.PerOwner {
+		if oc.Owner == "" {
+			sawEmpty = true
+		}
+	}
+	if !sawEmpty {
+		t.Errorf("per-owner rows %+v missing the ''-owner row", s.Adoption.PerOwner)
+	}
+	// Failover rate is over ALL turns: 1 openrouter turn / 2 total, the
+	// NULL-upstream turn stays in the denominator.
+	if !inDelta(s.Failures.FailoverRate, 0.5, 1e-9) {
+		t.Errorf("failover rate = %v, want 0.5", s.Failures.FailoverRate)
+	}
+}
