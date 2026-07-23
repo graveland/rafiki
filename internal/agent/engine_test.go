@@ -522,6 +522,79 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 	}
 }
 
+// TestEngineAbortRepairsOrphanedToolUse is the wiring test the review found
+// missing: every other abort test reaches RepairOrphans as a guaranteed
+// no-op, because the fake tool persists its own ctx.Err() result before the
+// cancelled branch runs (store-less conversations ignore ctx entirely — see
+// orphans.go's doc comment). Deleting the RepairOrphans call from
+// engine.go's cancelled-run branch must fail THIS test.
+//
+// It pre-seeds the conversation so the trailing assistant message already
+// carries an unresolved tool_use (tu_1) before the turn under test even
+// starts. The turn's own write-ahead user append (agentloop.Run's
+// AppendUser of the prompt text) carries no tool_result blocks, so it
+// doesn't resolve tu_1; and the turn's first (and only) Continue call is the
+// one that observes the abort and fails, so drive() returns before ever
+// extracting a tool_use batch to execute. tu_1 is therefore still genuinely
+// unresolved when runTurn's cancelled branch fires, and RepairOrphans' real
+// effect — a synthetic tool_result row — is asserted directly off
+// conv.History, not via a call-counting spy.
+func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
+	ts := fakeToolSet{} // never invoked: the turn's Continue call fails on
+	// the cancelled ctx before drive() reaches a tool_use batch.
+	sender := &blockingSender{
+		// ctxCheckingSender fails a cancelled-ctx call before delegating, so
+		// once released after HandleAbort the blocked Continue call returns
+		// context.Canceled without consuming the filler scripted body.
+		inner:   ctxCheckingSender{inner: scriptedSender(t, sampleEndTurn)},
+		blockAt: 1,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	eng, _ := newTestEngineWithSender(t, ts, sender)
+
+	ctx := context.Background()
+	if err := eng.conv.SeedHistory(ctx, []llm.Message{
+		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("seed")},
+		{Role: anthropic.MessageParamRoleAssistant, Content: []anthropic.ContentBlockParamUnion{
+			anthropic.NewToolUseBlock("tu_1", map[string]any{}, "bash"),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	eng.HandlePrompt("go")
+	<-sender.started // the turn's only Continue call is now blocked — abort
+	// lands strictly before any tool_use batch could be executed.
+
+	eng.HandleAbort()
+	close(sender.release)
+	eng.Wait()
+
+	history, err := eng.conv.History(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := history[len(history)-1]
+	if last.Param.Role != anthropic.MessageParamRoleUser {
+		t.Fatalf("trailing history row role = %v, want user (RepairOrphans' synthesized row)", last.Param.Role)
+	}
+	if len(last.Param.Content) != 1 {
+		t.Fatalf("trailing row has %d blocks, want 1 synthesized tool_result", len(last.Param.Content))
+	}
+	tr := last.Param.Content[0].OfToolResult
+	if tr == nil || tr.ToolUseID != "tu_1" {
+		t.Fatalf("trailing block = %+v, want a tool_result for tu_1", last.Param.Content[0])
+	}
+	if !tr.IsError.Value {
+		t.Fatal("synthesized tool_result is not marked IsError")
+	}
+	if len(tr.Content) != 1 || tr.Content[0].OfText == nil ||
+		tr.Content[0].OfText.Text != "Tool execution aborted by user." {
+		t.Fatalf("synthesized tool_result content = %+v, want the standard abort text", tr.Content)
+	}
+}
+
 // writeFrame marshals v as one ndjson line and writes it to w, bounded by a
 // timeout so a stuck reader loop fails the test instead of hanging it.
 func writeFrame(t *testing.T, w io.Writer, v any) {
