@@ -4,9 +4,18 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// RetryBackoffs is the fixed backoff schedule between primary retry attempts
+// before failing over to OpenRouter. 3 retries (4 total attempts against the
+// primary) — most Anthropic 5xx/429s are transient blips, not outages, so a
+// short retry burst avoids failing over (and losing prompt-cache locality) on
+// noise. Fixed, not exponential-with-jitter: the schedule is short-lived and
+// per-request, no thundering-herd risk to guard against.
+var RetryBackoffs = []time.Duration{500 * time.Millisecond, 2 * time.Second, 5 * time.Second}
 
 // ClassifyFailure reports whether a primary attempt is a retryable upstream
 // failure worth failing over on: a 5xx or 429 status, or a transport error with

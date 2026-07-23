@@ -414,6 +414,95 @@ func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
 	}
 }
 
+// A retryable primary failure (5xx/429) is retried against the primary per
+// routing.RetryBackoffs before failing over; a primary that recovers within
+// the retry budget never reaches OpenRouter.
+func TestMessagesProxyRetriesPrimaryBeforeFailover(t *testing.T) {
+	orig := routing.RetryBackoffs
+	routing.RetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { routing.RetryBackoffs = orig }()
+
+	var primaryCalls int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls++
+		if primaryCalls < 3 {
+			w.WriteHeader(529) // overloaded — retryable
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer primary.Close()
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("openrouter must not be called when the primary recovers within the retry budget")
+	}))
+	defer orSrv.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
+	p.ServeHTTP(rec, req)
+
+	if primaryCalls != 3 {
+		t.Errorf("primary calls = %d, want 3 (2 failures + 1 success)", primaryCalls)
+	}
+	if !strings.Contains(rec.Body.String(), "message_stop") {
+		t.Errorf("client did not get the primary's stream: %q", rec.Body.String())
+	}
+	if fs.lastUpstream != "anthropic" {
+		t.Errorf("captured upstream=%q, want anthropic", fs.lastUpstream)
+	}
+}
+
+// A primary that stays down through the entire retry budget still fails over
+// to OpenRouter, after exhausting all configured retries.
+func TestMessagesProxyFailsOverAfterExhaustingRetries(t *testing.T) {
+	orig := routing.RetryBackoffs
+	routing.RetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { routing.RetryBackoffs = orig }()
+
+	var primaryCalls int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls++
+		w.WriteHeader(529) // overloaded — retryable, never recovers
+	}))
+	defer primary.Close()
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer orSrv.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
+	p.ServeHTTP(rec, req)
+
+	if primaryCalls != 1+len(routing.RetryBackoffs) {
+		t.Errorf("primary calls = %d, want %d (1 initial + %d retries)", primaryCalls, 1+len(routing.RetryBackoffs), len(routing.RetryBackoffs))
+	}
+	if !strings.Contains(rec.Body.String(), "message_stop") {
+		t.Errorf("client did not get the OR stream: %q", rec.Body.String())
+	}
+	if fs.lastUpstream != "openrouter" {
+		t.Errorf("captured upstream=%q, want openrouter", fs.lastUpstream)
+	}
+}
+
 func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("primary must not be called for slash model")

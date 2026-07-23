@@ -358,12 +358,22 @@ func (p *MessagesProxy) clampEffortBody(reqBody []byte, model string) []byte {
 	return out
 }
 
+// statusOf returns resp's HTTP status, or 0 if resp is nil (a transport error
+// with no response).
+func statusOf(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
+}
+
 // selectUpstream routes the request and returns the upstream response. A slash
 // (OpenRouter-native) model goes straight to OpenRouter; otherwise the breaker
-// picks the Anthropic primary (failing over to OpenRouter on a retryable
-// failure) or OpenRouter directly when the breaker is open. handled=true means
-// it already wrote the response (a config error, not an upstream call) and
-// resolved any begun turn; the caller must just return.
+// picks the Anthropic primary — retrying a retryable failure per
+// routing.RetryBackoffs before failing over to OpenRouter — or OpenRouter
+// directly when the breaker is open. handled=true means it already wrote the
+// response (a config error, not an upstream call) and resolved any begun
+// turn; the caller must just return.
 func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, reqBody []byte, model string, cr captureRef) (resp *http.Response, upstream string, err error, handled bool) {
 	if strings.Contains(model, "/") {
 		// Slash id = an OpenRouter-native model; route directly to OpenRouter,
@@ -383,11 +393,26 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		if p.breaker == nil {
 			return resp, "anthropic", err, false
 		}
-		status := 0
-		if resp != nil {
-			status = resp.StatusCode
-		}
+		status := statusOf(resp)
 		primaryFailed := routing.ClassifyFailure(status, err)
+		// A retryable primary failure is usually a transient blip, not an
+		// outage — retry a few times before failing over to OpenRouter, so we
+		// don't lose Anthropic prompt-cache locality on noise.
+		for i := 0; primaryFailed && i < len(routing.RetryBackoffs); i++ {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			select {
+			case <-time.After(routing.RetryBackoffs[i]):
+			case <-r.Context().Done():
+				return resp, "anthropic", r.Context().Err(), false
+			}
+			p.logger.Warn("proxy: primary failed, retrying before failover",
+				"attempt", i+1, "status", status, "error", err)
+			resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, false, reqBody, r)
+			status = statusOf(resp)
+			primaryFailed = routing.ClassifyFailure(status, err)
+		}
 		p.breaker.RecordResult(now, primaryFailed)
 		if !primaryFailed || p.orKey == "" {
 			return resp, "anthropic", err, false
