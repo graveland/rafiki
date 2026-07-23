@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -30,7 +31,6 @@ func (s *stringSliceFlag) Set(v string) error {
 // buildAgentArgv targets verbatim. See parseAgentFlags.
 type agentFlags struct {
 	model              string
-	provider           string
 	thinking           string
 	systemPrompt       string
 	appendSystemPrompt string
@@ -55,8 +55,7 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // runAgent reports parse errors itself
 
-	fs.StringVar(&f.model, "model", "sonnet-latest", "model id or family alias")
-	fs.StringVar(&f.provider, "provider", "", "primary upstream: anthropic|openrouter (default: openrouter if --model contains \"/\", else anthropic)")
+	fs.StringVar(&f.model, "model", "", "provider-qualified model id, e.g. \"anthropic/sonnet-latest\" or \"deepseek/deepseek-chat\" (required)")
 	fs.StringVar(&f.thinking, "thinking", "off", "extended-thinking level: off|low|medium|high|xhigh")
 	fs.StringVar(&f.systemPrompt, "system-prompt", "", "override the base system prompt")
 	fs.StringVar(&f.appendSystemPrompt, "append-system-prompt", "", "append to the system prompt")
@@ -75,8 +74,8 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 		return agentFlags{}, err
 	}
 
-	if f.provider == "" {
-		f.provider = agent.DefaultProvider(f.model)
+	if f.model == "" || !strings.Contains(f.model, "/") {
+		return agentFlags{}, fmt.Errorf(`--model is required and must be provider-qualified, e.g. "anthropic/sonnet-latest" or "deepseek/deepseek-chat"`)
 	}
 	return f, nil
 }
@@ -196,7 +195,6 @@ func runAgent(args []string) int {
 
 	cfg := agent.Config{
 		Model:                f.model,
-		Provider:             f.provider,
 		ThinkingBudget:       thinkingBudget,
 		SystemPromptOverride: f.systemPrompt,
 		AppendSystemPrompt:   f.appendSystemPrompt,

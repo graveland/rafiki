@@ -20,7 +20,6 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"git.graveland.dev/brent/fundi/internal/agent"
 	"git.graveland.dev/brent/fundi/internal/child"
 	"git.graveland.dev/brent/fundi/internal/intercept"
 	"git.graveland.dev/brent/fundi/internal/persist"
@@ -2005,6 +2004,13 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		// protocol natively (internal/agent/frontend.go), so no translator is
 		// needed - child.PiProvider{} is the correct identity, same as the
 		// "pi" case above.
+		//
+		// --model is a required flag for `fundi agent` (parseAgentFlags):
+		// reject an unresolvable model here, at spawn time, rather than
+		// exec'ing a child that immediately dies on the flag-parse error.
+		if !agentSpawnHasModel(req) {
+			return "", nil, nil, errors.New(`agent kind requires a model: set SpawnRequest.Model (provider-qualified, e.g. "anthropic/sonnet-latest") or pass --model via ExtraArgs`)
+		}
 		self, selfErr := os.Executable()
 		if selfErr != nil {
 			return "", nil, nil, fmt.Errorf("resolving own binary for agent kind: %w", selfErr)
@@ -2022,6 +2028,27 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 // remove it), so the two can never diverge on the path.
 func agentSpillDir(stateDir, childID string) string {
 	return filepath.Join(stateDir, "spill", childID)
+}
+
+// agentSpawnHasModel reports whether an "agent" kind SpawnRequest resolves to
+// a non-empty --model: either req.Model itself, or a "--model"/"--model="
+// token supplied through the ExtraArgs escape hatch (buildAgentArgv appends
+// ExtraArgs last, so an ExtraArgs --model can stand in for req.Model even
+// though req.Model itself is required by parseAgentFlags). Checked by
+// resolveSpawnPlan before ever building the argv/exec'ing the child - `fundi
+// agent` treats a missing --model as a hard flag-parse error, and a spawn-
+// time rejection here is a far cleaner failure than a child that execs and
+// immediately dies.
+func agentSpawnHasModel(req protocol.SpawnRequest) bool {
+	if req.Model != "" {
+		return true
+	}
+	for _, a := range req.ExtraArgs {
+		if a == "--model" || strings.HasPrefix(a, "--model=") {
+			return true
+		}
+	}
+	return false
 }
 
 // buildAgentArgv converts a SpawnRequest into the `fundi agent` CLI argument
@@ -2109,7 +2136,11 @@ func claudeEnv(configDir string) []string {
 // child with no code here; (2) when the caller supplies req.APIKey
 // explicitly (the same field pi/claude thread via --api-key), this function
 // translates it into the correctly-named var below so it isn't silently
-// dropped for agent kind.
+// dropped for agent kind. Which var name to use is decided the same way
+// `fundi agent` itself decides routing (internal/agent/config.go's
+// senderOptions): an "anthropic/" prefixed model needs ANTHROPIC_API_KEY,
+// anything else needs OPENROUTER_API_KEY - there is no separate --provider
+// concept any more.
 func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 	var env []string
 	for k, v := range req.Env {
@@ -2120,13 +2151,9 @@ func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 		"PI_CONTROLLER_SOCKET="+socketPath,
 	)
 	if req.Kind == "agent" && req.APIKey != "" {
-		provider := req.Provider
-		if provider == "" {
-			provider = agent.DefaultProvider(req.Model)
-		}
-		envVar := "ANTHROPIC_API_KEY"
-		if provider == "openrouter" {
-			envVar = "OPENROUTER_API_KEY"
+		envVar := "OPENROUTER_API_KEY"
+		if strings.HasPrefix(req.Model, "anthropic/") {
+			envVar = "ANTHROPIC_API_KEY"
 		}
 		env = append(env, envVar+"="+req.APIKey)
 	}

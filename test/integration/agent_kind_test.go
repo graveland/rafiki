@@ -173,10 +173,14 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	scriptPath := fakeTurnsScript(t, markerPath, fifoPath)
 
 	spawnReq := protocol.SpawnRequest{
-		Type:      "ctrl_spawn",
-		ID:        "spawn1",
-		Kind:      "agent",
-		Cwd:       t.TempDir(),
+		Type: "ctrl_spawn",
+		ID:   "spawn1",
+		Kind: "agent",
+		Cwd:  t.TempDir(),
+		// --model is required by `fundi agent` (parseAgentFlags) since the
+		// provider/model redesign; --fake-turns replaces the sender, so the
+		// value itself is inert here beyond being provider-qualified.
+		Model:     "anthropic/claude-x",
 		ExtraArgs: []string{"--fake-turns", scriptPath},
 	}
 	spawnFrame, err := json.Marshal(spawnReq)

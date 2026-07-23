@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"git.graveland.dev/brent/rafiki/agentloop"
@@ -38,16 +37,6 @@ func ThinkingBudgetFor(level string) (int64, error) {
 	return budget, nil
 }
 
-// DefaultProvider is the --provider default heuristic: an OpenRouter-native
-// model id (one containing a slash, e.g. "meta-llama/llama-3.1-70b")
-// implies OpenRouter; anything else defaults to Anthropic.
-func DefaultProvider(model string) string {
-	if strings.Contains(model, "/") {
-		return "openrouter"
-	}
-	return "anthropic"
-}
-
 // Config is the fully-resolved input to BuildEngine. Every field is either a
 // flag value taken as-is, or something cmd/fundi has already produced via
 // I/O (env lookups, file reads, the assembled tool registry) before calling
@@ -61,10 +50,15 @@ func DefaultProvider(model string) string {
 // sides meet - see cmd/fundi/agent.go, which builds the Registry (file
 // tools, bash, skills, MCP) and hands it in here.
 type Config struct {
-	// Model is the model id or family alias (e.g. "sonnet-latest").
+	// Model is the provider-qualified model id, e.g. "anthropic/sonnet-latest"
+	// or "deepseek/deepseek-chat". rafiki routes on this id alone: an
+	// "anthropic/" prefix resolves through the native Anthropic sender
+	// (prefix stripped, remainder resolved as an alias or concrete id);
+	// anything else routes to OpenRouter. cmd/fundi requires --model to be
+	// provider-qualified (see parseAgentFlags) - BuildEngine itself does not
+	// re-validate that, so a bare id here (as some pre-redesign unit tests
+	// still use) is passed straight to rafiki uninterpreted.
 	Model string
-	// Provider selects the primary upstream: "anthropic" or "openrouter".
-	Provider string
 	// ThinkingBudget is the resolved extended-thinking token budget (0
 	// disables it) - see ThinkingBudgetFor.
 	ThinkingBudget int64
@@ -126,12 +120,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		return nil, nil, errors.New("agent: Config.Tools is required")
 	}
 
-	primary := llm.Upstream(c.Provider)
-	if primary != llm.UpstreamAnthropic && primary != llm.UpstreamOpenRouter {
-		return nil, nil, fmt.Errorf("agent: unknown --provider %q (want anthropic|openrouter)", c.Provider)
-	}
-
-	clientOpts, err := c.senderOptions(primary)
+	clientOpts, err := c.senderOptions()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -159,7 +148,6 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	convOpts := []llm.ConvOption{
 		llm.Entrypoint("agent"),
 		llm.Model(c.Model),
-		llm.Primary(primary),
 		llm.ThinkingBudget(c.ThinkingBudget),
 		llm.SystemText(BuildSystemPrompt(SysPromptConfig{
 			Base:            defaultBasePrompt,
@@ -174,20 +162,21 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	if c.Ref != "" {
 		convOpts = append(convOpts, llm.ByExternalRef(c.Ref))
 	}
-	// Only meaningful when primary is Anthropic: SendParams forces OpenRouter
-	// primary (with no fallback) whenever the model id itself contains a
-	// slash, and senderOptions never enables the breaker fallback needs
-	// unless the OpenRouter key is actually present.
-	if primary == llm.UpstreamAnthropic && c.OpenRouterAPIKey != "" && c.FakeTurns == "" {
+	// rafiki routes on the model id alone (an "anthropic/" prefix always
+	// wins native Anthropic; SendParams zeroes the fallback on its own for an
+	// OpenRouter-primary/slash model), so fundi needs no per-model branching
+	// here: whenever an OpenRouter key is configured, offer it as a fallback.
+	if c.OpenRouterAPIKey != "" && c.FakeTurns == "" {
 		convOpts = append(convOpts, llm.Fallback(llm.UpstreamOpenRouter))
 	}
 
+	provider, modelID := splitModel(c.Model)
 	eng, err := NewEngine(EngineConfig{
 		Client:   client,
 		ConvOpts: convOpts,
 		Tools:    c.Tools,
-		Provider: c.Provider,
-		ModelID:  c.Model,
+		Provider: provider,
+		ModelID:  modelID,
 		Name:     c.Name,
 		BaseCtx:  ctx,
 	}, fe)
@@ -223,41 +212,35 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 }
 
 // senderOptions builds the llm.ClientOptions wiring senders for the
-// configured upstream(s), erroring out when the CHOSEN primary's key is
-// missing (checked before any client/pool is constructed, so BuildEngine
-// fails fast at startup rather than on the first turn).
-func (c Config) senderOptions(primary llm.Upstream) ([]llm.ClientOption, error) {
+// configured upstream(s). rafiki's llm.NewClient unconditionally requires an
+// UpstreamAnthropic sender, so ANTHROPIC_API_KEY is always mandatory
+// regardless of which model is configured; OPENROUTER_API_KEY is only
+// mandatory when the model needs OpenRouter (i.e. isn't "anthropic/"
+// prefixed). Both checks run before any client/pool is constructed, so
+// BuildEngine fails fast at startup rather than on the first turn.
+func (c Config) senderOptions() ([]llm.ClientOption, error) {
+	needsOpenRouter := !strings.HasPrefix(c.Model, "anthropic/")
+
 	if c.FakeTurns != "" {
 		fake, err := LoadFakeSender(c.FakeTurns)
 		if err != nil {
 			return nil, err
 		}
 		opts := []llm.ClientOption{llm.WithUpstream(llm.UpstreamAnthropic, fake)}
-		if primary == llm.UpstreamOpenRouter {
+		if needsOpenRouter {
 			opts = append(opts, llm.WithUpstream(llm.UpstreamOpenRouter, fake))
 		}
 		return opts, nil
 	}
 
-	primaryKeyMissing := (primary == llm.UpstreamAnthropic && c.AnthropicAPIKey == "") ||
-		(primary == llm.UpstreamOpenRouter && c.OpenRouterAPIKey == "")
-	if primaryKeyMissing {
-		return nil, fmt.Errorf("agent: no API key configured for --provider %s (set %s)", primary, envVarFor(primary))
+	if c.AnthropicAPIKey == "" {
+		return nil, errors.New("agent: ANTHROPIC_API_KEY is required (rafiki's llm.NewClient always needs an Anthropic sender)")
+	}
+	if needsOpenRouter && c.OpenRouterAPIKey == "" {
+		return nil, fmt.Errorf("agent: model %q requires OPENROUTER_API_KEY", c.Model)
 	}
 
-	var opts []llm.ClientOption
-	if c.AnthropicAPIKey != "" {
-		opts = append(opts, llm.WithUpstream(llm.UpstreamAnthropic, llm.Anthropic(c.AnthropicAPIKey)))
-	} else {
-		// llm.NewClient unconditionally requires an UpstreamAnthropic sender,
-		// even when the configured provider is OpenRouter. Routing never
-		// selects Anthropic in that case - no ANTHROPIC_API_KEY here means no
-		// Fallback(UpstreamAnthropic) is ever configured either (see
-		// BuildEngine) - so a stub that errors if it's ever actually invoked
-		// is safe, and far clearer than a nil-sender panic if that invariant
-		// is ever broken.
-		opts = append(opts, llm.WithUpstream(llm.UpstreamAnthropic, unconfiguredSender{env: "ANTHROPIC_API_KEY"}))
-	}
+	opts := []llm.ClientOption{llm.WithUpstream(llm.UpstreamAnthropic, llm.Anthropic(c.AnthropicAPIKey))}
 	if c.OpenRouterAPIKey != "" {
 		// WithBreaker is what makes Fallback(UpstreamOpenRouter) actually
 		// live: llm.Client.callModel bypasses the whole fallback chain
@@ -271,20 +254,15 @@ func (c Config) senderOptions(primary llm.Upstream) ([]llm.ClientOption, error) 
 	return opts, nil
 }
 
-func envVarFor(u llm.Upstream) string {
-	if u == llm.UpstreamOpenRouter {
-		return "OPENROUTER_API_KEY"
+// splitModel splits a provider-qualified model id ("anthropic/sonnet-latest")
+// into the provider label and model id reported through get_state
+// (EngineConfig.Provider/ModelID) - a bare id with no slash reports an empty
+// provider, which only happens when a caller constructs Config directly
+// (e.g. pre-redesign unit tests) rather than through parseAgentFlags, which
+// requires --model to be provider-qualified.
+func splitModel(model string) (provider, id string) {
+	if i := strings.Index(model, "/"); i >= 0 {
+		return model[:i], model[i+1:]
 	}
-	return "ANTHROPIC_API_KEY"
-}
-
-// unconfiguredSender is a placeholder llm.Sender satisfying llm.NewClient's
-// mandatory UpstreamAnthropic registration when ANTHROPIC_API_KEY is unset
-// and the configured provider is OpenRouter. See senderOptions for why it
-// must never actually be called in that configuration; if it somehow is, it
-// fails loudly rather than silently reaching a real call with no key.
-type unconfiguredSender struct{ env string }
-
-func (s unconfiguredSender) New(context.Context, anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return nil, fmt.Errorf("agent: %s is not set; this sender must never be called", s.env)
+	return "", model
 }

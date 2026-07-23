@@ -91,8 +91,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	// database, simulating ctrl_resume's re-exec ---
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	cfg := Config{
-		Model:     "claude-x",
-		Provider:  "anthropic",
+		Model:     "anthropic/claude-x",
 		Ref:       ref,
 		DBURL:     dsn,
 		FakeTurns: writeFakeTurns(t, sampleEndTurn),
@@ -178,8 +177,7 @@ func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
 	out := &syncBuffer{}
 	fe := NewFrontend(inR, out, nil)
 	cfg := Config{
-		Model:     "claude-x",
-		Provider:  "anthropic",
+		Model:     "anthropic/claude-x",
 		Ref:       "resume-test-get-state",
 		DBURL:     dsn,
 		FakeTurns: writeFakeTurns(t, sampleEndTurn),

@@ -42,23 +42,6 @@ func TestThinkingBudgetForUnknownLevel(t *testing.T) {
 	}
 }
 
-func TestDefaultProvider(t *testing.T) {
-	cases := []struct {
-		model string
-		want  string
-	}{
-		{"sonnet-latest", "anthropic"},
-		{"claude-x", "anthropic"},
-		{"meta-llama/llama-3.1-70b", "openrouter"},
-		{"openai/gpt-5", "openrouter"},
-	}
-	for _, tc := range cases {
-		if got := DefaultProvider(tc.model); got != tc.want {
-			t.Errorf("DefaultProvider(%q) = %q, want %q", tc.model, got, tc.want)
-		}
-	}
-}
-
 // writeFakeTurns writes bodies (pretty-printed JSON anthropic.Message values)
 // as one ndjson file under t.TempDir and returns its path, mirroring
 // scriptedSender (engine_test.go) but returning the path itself rather than a
@@ -103,8 +86,7 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 	}
 
 	cfg := Config{
-		Model:     "claude-x",
-		Provider:  "anthropic",
+		Model:     "anthropic/claude-x",
 		Cwd:       t.TempDir(),
 		Name:      "w1",
 		FakeTurns: writeFakeTurns(t, sampleResp, sampleEndTurn),
@@ -153,34 +135,45 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 }
 
 func TestBuildEngineRequiresTools(t *testing.T) {
-	cfg := Config{Model: "claude-x", Provider: "anthropic", FakeTurns: writeFakeTurns(t, sampleEndTurn)}
+	cfg := Config{Model: "anthropic/claude-x", FakeTurns: writeFakeTurns(t, sampleEndTurn)}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
 		t.Fatal("BuildEngine with nil Tools: want error, got nil")
 	}
 }
 
-func TestBuildEngineUnknownProvider(t *testing.T) {
-	cfg := Config{Model: "claude-x", Provider: "carrier-pigeon", Tools: fakeToolSet{}, FakeTurns: writeFakeTurns(t, sampleEndTurn)}
-	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
-	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with an unknown --provider: want error, got nil")
-	}
-}
-
+// TestBuildEngineMissingAPIKey covers the always-mandatory ANTHROPIC_API_KEY
+// check: rafiki's llm.NewClient requires an Anthropic sender unconditionally,
+// so this errors regardless of which model is configured (see
+// TestBuildEngineMissingAPIKeyNonAnthropicModel for the non-anthropic case).
 func TestBuildEngineMissingAPIKey(t *testing.T) {
-	cfg := Config{Model: "claude-x", Provider: "anthropic", Tools: fakeToolSet{}}
+	cfg := Config{Model: "anthropic/claude-x", Tools: fakeToolSet{}}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
 		t.Fatal("BuildEngine with no ANTHROPIC_API_KEY and no --fake-turns: want error, got nil")
 	}
 }
 
-func TestBuildEngineOpenRouterProviderRequiresOpenRouterKey(t *testing.T) {
-	cfg := Config{Model: "meta-llama/llama-3.1-70b", Provider: "openrouter", Tools: fakeToolSet{}, AnthropicAPIKey: "sk-anthropic-not-relevant"}
+// TestBuildEngineMissingAPIKeyNonAnthropicModel confirms ANTHROPIC_API_KEY is
+// required even for a non-anthropic (OpenRouter-routed) model - rafiki's
+// llm.NewClient always needs an Anthropic sender, regardless of routing.
+func TestBuildEngineMissingAPIKeyNonAnthropicModel(t *testing.T) {
+	cfg := Config{Model: "deepseek/deepseek-chat", Tools: fakeToolSet{}, OpenRouterAPIKey: "sk-or-not-relevant"}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with --provider openrouter and no OPENROUTER_API_KEY: want error, got nil")
+		t.Fatal("BuildEngine with no ANTHROPIC_API_KEY (non-anthropic model): want error, got nil")
+	}
+}
+
+// TestBuildEngineNonAnthropicModelRequiresOpenRouterKey covers the other
+// mandatory-key check: a model with no "anthropic/" prefix routes to
+// OpenRouter, so OPENROUTER_API_KEY is required even though ANTHROPIC_API_KEY
+// is (always) also required.
+func TestBuildEngineNonAnthropicModelRequiresOpenRouterKey(t *testing.T) {
+	cfg := Config{Model: "meta-llama/llama-3.1-70b", Tools: fakeToolSet{}, AnthropicAPIKey: "sk-anthropic-not-relevant"}
+	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
+	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
+		t.Fatal("BuildEngine with a non-anthropic model and no OPENROUTER_API_KEY: want error, got nil")
 	}
 }
 

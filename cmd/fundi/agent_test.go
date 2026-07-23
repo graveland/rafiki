@@ -6,45 +6,40 @@ import (
 	"git.graveland.dev/brent/fundi/internal/agent"
 )
 
-func TestParseAgentFlagsDefaults(t *testing.T) {
-	f, err := parseAgentFlags(nil)
+// TestParseAgentFlagsRequiresModel covers the redesign's central invariant:
+// --model has no default any more (the caller must state the provider-
+// qualified model explicitly; fundi's core invents nothing).
+func TestParseAgentFlagsRequiresModel(t *testing.T) {
+	if _, err := parseAgentFlags(nil); err == nil {
+		t.Fatal("parseAgentFlags(nil) with no --model: want error, got nil")
+	}
+}
+
+// TestParseAgentFlagsRequiresSlash covers the other half of the invariant: a
+// bare (non-provider-qualified) --model is also rejected, since fundi does
+// not rely on rafiki's bare-id backward-compat resolution.
+func TestParseAgentFlagsRequiresSlash(t *testing.T) {
+	if _, err := parseAgentFlags([]string{"--model", "sonnet-latest"}); err == nil {
+		t.Fatal("parseAgentFlags with a bare (non-provider-qualified) --model: want error, got nil")
+	}
+}
+
+func TestParseAgentFlagsModelAndThinkingDefault(t *testing.T) {
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
 	if err != nil {
-		t.Fatalf("parseAgentFlags(nil): %v", err)
+		t.Fatalf("parseAgentFlags: %v", err)
 	}
-	if f.model != "sonnet-latest" {
-		t.Errorf("model = %q, want sonnet-latest", f.model)
-	}
-	if f.provider != "anthropic" {
-		t.Errorf("provider = %q, want anthropic (heuristic default for sonnet-latest)", f.provider)
+	if f.model != "anthropic/sonnet-latest" {
+		t.Errorf("model = %q, want anthropic/sonnet-latest", f.model)
 	}
 	if f.thinking != "off" {
 		t.Errorf("thinking = %q, want off", f.thinking)
 	}
 }
 
-func TestParseAgentFlagsProviderHeuristic(t *testing.T) {
-	f, err := parseAgentFlags([]string{"--model", "meta-llama/llama-3.1-70b"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.provider != "openrouter" {
-		t.Errorf("provider = %q, want openrouter for a slash-containing model id", f.provider)
-	}
-}
-
-func TestParseAgentFlagsExplicitProviderWins(t *testing.T) {
-	f, err := parseAgentFlags([]string{"--model", "meta-llama/llama-3.1-70b", "--provider", "anthropic"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.provider != "anthropic" {
-		t.Errorf("provider = %q, want anthropic (explicit --provider overrides the heuristic)", f.provider)
-	}
-}
-
 func TestParseAgentFlagsRefFromEnv(t *testing.T) {
 	t.Setenv("PI_CONTROLLER_CHILD_ID", "child-123")
-	f, err := parseAgentFlags(nil)
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
@@ -55,7 +50,7 @@ func TestParseAgentFlagsRefFromEnv(t *testing.T) {
 
 func TestParseAgentFlagsRefExplicitFlagWins(t *testing.T) {
 	t.Setenv("PI_CONTROLLER_CHILD_ID", "child-123")
-	f, err := parseAgentFlags([]string{"--ref", "explicit-ref"})
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--ref", "explicit-ref"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
@@ -66,7 +61,7 @@ func TestParseAgentFlagsRefExplicitFlagWins(t *testing.T) {
 
 func TestParseAgentFlagsDBFromEnv(t *testing.T) {
 	t.Setenv("FUNDI_AGENT_DB", "postgres://example/db")
-	f, err := parseAgentFlags(nil)
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
@@ -76,7 +71,7 @@ func TestParseAgentFlagsDBFromEnv(t *testing.T) {
 }
 
 func TestParseAgentFlagsRepeatableSkillsDir(t *testing.T) {
-	f, err := parseAgentFlags([]string{"--skills-dir", "/a", "--skills-dir", "/b"})
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--skills-dir", "/a", "--skills-dir", "/b"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
@@ -86,7 +81,7 @@ func TestParseAgentFlagsRepeatableSkillsDir(t *testing.T) {
 }
 
 func TestParseAgentFlagsThinkingLevel(t *testing.T) {
-	f, err := parseAgentFlags([]string{"--thinking", "xhigh"})
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--thinking", "xhigh"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
@@ -99,13 +94,13 @@ func TestParseAgentFlagsThinkingLevel(t *testing.T) {
 }
 
 func TestParseAgentFlagsRejectsUnknownFlag(t *testing.T) {
-	if _, err := parseAgentFlags([]string{"--not-a-real-flag"}); err == nil {
+	if _, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--not-a-real-flag"}); err == nil {
 		t.Fatal("parseAgentFlags with an unknown flag: want error, got nil")
 	}
 }
 
 func TestParseAgentFlagsNoSkillsAndNoContextFiles(t *testing.T) {
-	f, err := parseAgentFlags([]string{"--no-skills", "--no-context-files"})
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--no-skills", "--no-context-files"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}

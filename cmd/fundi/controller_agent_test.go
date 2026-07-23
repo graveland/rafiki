@@ -65,9 +65,38 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 		}
 	}
 
+	// --provider no longer exists as a flag - the model id alone determines
+	// routing (see internal/agent/config.go's senderOptions).
+	if strings.Contains(joined, "--provider") {
+		t.Fatalf("argv unexpectedly contains --provider (removed in the provider/model redesign): %v", argv)
+	}
+
 	// ExtraArgs must remain the trailing tokens (last-flag-wins escape hatch).
 	if argv[len(argv)-2] != "--fake-turns" || argv[len(argv)-1] != "/tmp/turns.ndjson" {
 		t.Fatalf("ExtraArgs not appended last: %v", argv)
+	}
+}
+
+// TestResolveSpawnPlanAgentKindRequiresModel covers the daemon-side half of
+// the redesign's required-model invariant: an "agent" kind spawn with no
+// resolvable model (neither SpawnRequest.Model nor a --model in ExtraArgs) is
+// rejected at spawn time with a clean control-plane error, rather than
+// exec'ing a child that immediately dies on `fundi agent`'s own flag-parse
+// error.
+func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
+	req := protocol.SpawnRequest{Kind: "agent"}
+	if _, _, _, err := resolveSpawnPlan(req, "c_test456", "/var/fundi-state"); err == nil {
+		t.Fatal("resolveSpawnPlan(agent kind, no model): want error, got nil")
+	}
+}
+
+// TestResolveSpawnPlanAgentKindModelViaExtraArgs confirms the ExtraArgs
+// escape hatch still satisfies the required-model check: a caller can supply
+// --model through ExtraArgs instead of SpawnRequest.Model.
+func TestResolveSpawnPlanAgentKindModelViaExtraArgs(t *testing.T) {
+	req := protocol.SpawnRequest{Kind: "agent", ExtraArgs: []string{"--model", "anthropic/sonnet-latest"}}
+	if _, _, _, err := resolveSpawnPlan(req, "c_test789", "/var/fundi-state"); err != nil {
+		t.Fatalf("resolveSpawnPlan(agent kind, model via ExtraArgs): unexpected error: %v", err)
 	}
 }
 
