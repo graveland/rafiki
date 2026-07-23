@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -48,6 +49,39 @@ func newTestMCPServer(name string) *mcp.Server {
 	return server
 }
 
+// newCustomMCPServer builds an in-process mcp.Server named serverName
+// exposing one echo-style tool per name in toolNames: each returns "ok:
+// <name>" as text when called. Used by tests that need specific (often
+// deliberately odd, e.g. containing dots/spaces/overlong) tool names rather
+// than the fixed set in newTestMCPServer.
+func newCustomMCPServer(serverName string, toolNames ...string) *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{Name: serverName}, nil)
+	for _, name := range toolNames {
+		name := name
+		mcp.AddTool(server, &mcp.Tool{Name: name, Description: "test tool " + name},
+			func(_ context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: "ok:" + name}},
+				}, nil, nil
+			})
+	}
+	return server
+}
+
+// newBigOutputMCPServer builds an in-process mcp.Server named serverName
+// exposing a single tool, toolName, that returns output (expected to be
+// large) as text - used to exercise OutputPolicy.Clip's spill path.
+func newBigOutputMCPServer(serverName, toolName, output string) *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{Name: serverName}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: toolName, Description: "returns a large fixed output"},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: output}},
+			}, nil, nil
+		})
+	return server
+}
+
 // connectInMemory connects a fresh client session to server over an
 // in-memory transport pair, mirroring what ConnectMCP does for a real
 // stdio/HTTP transport. The session is closed automatically via t.Cleanup.
@@ -81,7 +115,7 @@ func TestRegisterMCPServerTools(t *testing.T) {
 	session := connectInMemory(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "my-server", session, OutputPolicy{}); err != nil {
+	if err := registerMCPServerTools(context.Background(), r, "my-server", session, OutputPolicy{}, make(map[string]string)); err != nil {
 		t.Fatalf("registerMCPServerTools: %v", err)
 	}
 
@@ -115,7 +149,7 @@ func TestRegisterMCPServerToolsNormalizesHyphens(t *testing.T) {
 	session := connectInMemory(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "my-cool-server", session, OutputPolicy{}); err != nil {
+	if err := registerMCPServerTools(context.Background(), r, "my-cool-server", session, OutputPolicy{}, make(map[string]string)); err != nil {
 		t.Fatalf("registerMCPServerTools: %v", err)
 	}
 
@@ -138,7 +172,7 @@ func TestRegisterMCPServerToolsIsErrorBecomesGoError(t *testing.T) {
 	session := connectInMemory(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}); err != nil {
+	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
 		t.Fatalf("registerMCPServerTools: %v", err)
 	}
 
@@ -158,7 +192,7 @@ func TestRegisterMCPServerToolsInputSchemaPassedThrough(t *testing.T) {
 	session := connectInMemory(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}); err != nil {
+	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
 		t.Fatalf("registerMCPServerTools: %v", err)
 	}
 
@@ -267,5 +301,151 @@ func TestConnectMCPSkipsServerWithNoCommandOrURL(t *testing.T) {
 
 	if defs := r.Definitions(); len(defs) != 0 {
 		t.Fatalf("expected no tools registered, got %v", defs)
+	}
+}
+
+// anthropicToolNameRETest mirrors the exact grammar the Anthropic API
+// enforces for tool names, kept independent of anthropicToolNameRE in
+// mcp.go so this test can't be trivially satisfied by weakening the
+// production regexp.
+var anthropicToolNameRETest = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
+
+// TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators covers the T13
+// correctness fix: a real MCP tool name containing a dot (very common, e.g.
+// "github.create_issue") or a space must normalize to an all-underscores
+// name that satisfies Anthropic's ^[a-zA-Z0-9_-]{1,128}$ grammar and remain
+// callable under that name. Before this fix, normalizeMCPName replaced only
+// hyphens, so a dotted name produced an INVALID tool name that would 400
+// the entire tools array on the next turn.
+func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
+	const oddName = "github.create issue"
+	session := connectInMemory(t, newCustomMCPServer("test-server", oddName))
+
+	r := NewRegistry()
+	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
+		t.Fatalf("registerMCPServerTools: %v", err)
+	}
+
+	const want = "mcp__srv__github_create_issue"
+	var found bool
+	for _, def := range r.Definitions() {
+		if def.OfTool != nil && def.OfTool.Name == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected tool registered as %q, got %v", want, r.Definitions())
+	}
+	if !anthropicToolNameRETest.MatchString(want) {
+		t.Fatalf("registered name %q does not match Anthropic's tool name grammar", want)
+	}
+
+	out, err := r.Execute(context.Background(), want, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("unexpected error calling %q: %v", want, err)
+	}
+	if out != "ok:"+oddName {
+		t.Fatalf("expected %q, got %q", "ok:"+oddName, out)
+	}
+}
+
+// TestRegisterMCPServerToolsSkipsOverlongName covers the requirement that a
+// built mcp__server__tool name failing Anthropic's grammar even AFTER
+// normalization (here: length > 128) is skipped with a warning rather than
+// registered invalid - and that the rest of the same server's tools are
+// unaffected.
+func TestRegisterMCPServerToolsSkipsOverlongName(t *testing.T) {
+	longName := strings.Repeat("a", 130)
+	session := connectInMemory(t, newCustomMCPServer("test-server", longName, "short"))
+
+	r := NewRegistry()
+	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
+		t.Fatalf("registerMCPServerTools: %v", err)
+	}
+
+	names := map[string]bool{}
+	for _, def := range r.Definitions() {
+		if def.OfTool != nil {
+			names[def.OfTool.Name] = true
+		}
+	}
+	for name := range names {
+		if len(name) > 128 {
+			t.Fatalf("expected no registered name over 128 characters, got %q (%d chars)", name, len(name))
+		}
+	}
+	if !names["mcp__srv__short"] {
+		t.Fatalf("expected the other tool on the same server to still be registered, got %v", names)
+	}
+	if len(names) != 1 {
+		t.Fatalf("expected exactly one registered tool (the overlong one skipped), got %v", names)
+	}
+}
+
+// TestRegisterMCPServerToolsSkipsCollidingNormalizedNames covers the
+// collision-handling requirement: two distinct tool names that normalize to
+// the same mcp__server__tool string must not both register - the later one
+// is skipped (with a warning) rather than silently shadowing the first via
+// Registry.Register's overwrite semantics. Only one registration must
+// result, and neither call may panic.
+func TestRegisterMCPServerToolsSkipsCollidingNormalizedNames(t *testing.T) {
+	session := connectInMemory(t, newCustomMCPServer("test-server", "list-items", "list_items"))
+
+	r := NewRegistry()
+	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
+		t.Fatalf("registerMCPServerTools: %v", err)
+	}
+
+	count := 0
+	for _, def := range r.Definitions() {
+		if def.OfTool != nil && def.OfTool.Name == "mcp__srv__list_items" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one registration of the colliding name, got %d (defs: %v)", count, r.Definitions())
+	}
+}
+
+// TestRegisterMCPServerToolsClipsOversizedOutput covers the requirement
+// that MCP tool results go through OutputPolicy.Clip like every other
+// ToolFunc in this package: an over-budget result is clipped for the model,
+// with the FULL result spilled to SpillDir (mirrors bash_test.go's
+// TestBashOutputGoesThroughSpillPolicy).
+func TestRegisterMCPServerToolsClipsOversizedOutput(t *testing.T) {
+	spillDir := t.TempDir()
+	full := strings.Repeat("x", 2000)
+	session := connectInMemory(t, newBigOutputMCPServer("test-server", "big", full))
+
+	r := NewRegistry()
+	p := OutputPolicy{Budget: 200, SpillDir: spillDir}
+	if err := registerMCPServerTools(context.Background(), r, "srv", session, p, make(map[string]string)); err != nil {
+		t.Fatalf("registerMCPServerTools: %v", err)
+	}
+
+	out, err := r.Execute(context.Background(), "mcp__srv__big", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) > 400 {
+		t.Fatalf("expected clipped output, got %d bytes", len(out))
+	}
+	if !strings.Contains(out, "elided") {
+		t.Fatalf("expected elision marker, got %q", out)
+	}
+
+	entries, err := os.ReadDir(spillDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one spill file, got %d", len(entries))
+	}
+	spilled, err := os.ReadFile(filepath.Join(spillDir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(spilled) != full {
+		t.Fatalf("spilled file does not hold the full output: got %d bytes, want %d", len(spilled), len(full))
 	}
 }
