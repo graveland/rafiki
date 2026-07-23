@@ -191,3 +191,51 @@ func TestSkillBodyStripsFrontmatter(t *testing.T) {
 		t.Fatalf("expected body content preserved, got %q", body)
 	}
 }
+
+// TestSplitFrontmatterCRLF is the regression test for the CRLF body-split
+// bug: a Windows-authored SKILL.md (all line endings "\r\n") must not leave
+// a stray leading blank line in the split-out body. Without the
+// trimLeadingNewline fix, TrimPrefix(rest, "\n") fails to match the "\r\n"
+// left after the closing delimiter, and body comes back as
+// "\r\nBody text\r\nmore\r\n".
+func TestSplitFrontmatterCRLF(t *testing.T) {
+	content := "---\r\nname: x\r\ndescription: y\r\n---\r\nBody text\r\nmore\r\n"
+
+	_, body, err := splitFrontmatter(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(body, "\r\n") || strings.HasPrefix(body, "\n") {
+		t.Fatalf("expected no leading blank line in CRLF body, got %q", body)
+	}
+	if !strings.HasPrefix(body, "Body text") {
+		t.Fatalf("expected body to start with %q, got %q", "Body text", body)
+	}
+}
+
+// TestSplitFrontmatterNoFrontmatter covers content that never opens with the
+// "---" delimiter at all - the documented error path, not a crash or a
+// silently-wrong split.
+func TestSplitFrontmatterNoFrontmatter(t *testing.T) {
+	_, _, err := splitFrontmatter("Just a body, no frontmatter block here.\n")
+	if err == nil {
+		t.Fatal("expected an error for content with no opening frontmatter delimiter")
+	}
+}
+
+// TestSplitFrontmatterHorizontalRuleInBody asserts that a "---" appearing
+// later in the body (e.g. a markdown horizontal rule) is preserved verbatim
+// and does not get mistaken for a second closing delimiter - splitFrontmatter
+// uses strings.Index, which finds the *first* "\n---" only.
+func TestSplitFrontmatterHorizontalRuleInBody(t *testing.T) {
+	content := "---\nname: x\ndescription: y\n---\nIntro text.\n\n---\n\nMore text after the rule.\n"
+
+	_, body, err := splitFrontmatter(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Intro text.\n\n---\n\nMore text after the rule.\n"
+	if body != want {
+		t.Fatalf("expected horizontal rule preserved in body, got %q, want %q", body, want)
+	}
+}

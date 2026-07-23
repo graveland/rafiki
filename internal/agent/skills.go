@@ -74,7 +74,10 @@ func DiscoverSkills(dirs []string, only []string) ([]SkillMeta, error) {
 			skillDir := filepath.Join(dir, name)
 			skillPath := filepath.Join(skillDir, "SKILL.md")
 			if _, err := os.Stat(skillPath); err != nil {
-				continue // not a skill directory
+				if !os.IsNotExist(err) {
+					slog.Warn("agent: skipping skill dir, stat failed", "path", skillPath, "error", err)
+				}
+				continue // not a skill directory (or, if err != nil above, unreadable)
 			}
 
 			fm, err := readSkillFrontmatter(skillPath)
@@ -177,7 +180,7 @@ func splitFrontmatter(content string) (frontmatter, body string, err error) {
 	if !strings.HasPrefix(content, frontmatterDelim) {
 		return "", "", fmt.Errorf("missing opening frontmatter delimiter %q", frontmatterDelim)
 	}
-	rest := strings.TrimPrefix(content[len(frontmatterDelim):], "\n")
+	rest := trimLeadingNewline(content[len(frontmatterDelim):])
 
 	closeMarker := "\n" + frontmatterDelim
 	idx := strings.Index(rest, closeMarker)
@@ -186,6 +189,17 @@ func splitFrontmatter(content string) (frontmatter, body string, err error) {
 	}
 
 	frontmatter = rest[:idx]
-	body = strings.TrimPrefix(rest[idx+len(closeMarker):], "\n")
+	body = trimLeadingNewline(rest[idx+len(closeMarker):])
 	return frontmatter, body, nil
+}
+
+// trimLeadingNewline strips a single leading line break, "\r\n" or "\n",
+// from s. A bare TrimPrefix(s, "\n") leaves the "\r" of a CRLF-authored
+// SKILL.md in place, which surfaces as a stray leading blank line in the
+// split-out body - so the CRLF form must be checked first.
+func trimLeadingNewline(s string) string {
+	if rest, ok := strings.CutPrefix(s, "\r\n"); ok {
+		return rest
+	}
+	return strings.TrimPrefix(s, "\n")
 }
