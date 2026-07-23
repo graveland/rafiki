@@ -14,7 +14,7 @@ func TestResolveSpawnPlan_Claude(t *testing.T) {
 		Kind:     "claude",
 		PiBinary: "/custom/claude",
 		Model:    "claude-opus-4-8",
-	})
+	}, "", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestResolveSpawnPlan_Claude(t *testing.T) {
 }
 
 func TestResolveSpawnPlan_PiDefault(t *testing.T) {
-	_, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "", PiBinary: "/x/pi"})
+	_, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "", PiBinary: "/x/pi"}, "", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestResolveSpawnPlan_PiDefault(t *testing.T) {
 }
 
 func TestResolveSpawnPlan_UnknownKind(t *testing.T) {
-	if _, _, _, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "bogus"}); err == nil {
+	if _, _, _, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "bogus"}, "", ""); err == nil {
 		t.Fatal("expected error for unknown kind")
 	}
 }

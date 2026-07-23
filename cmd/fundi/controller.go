@@ -20,6 +20,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"git.graveland.dev/brent/fundi/internal/agent"
 	"git.graveland.dev/brent/fundi/internal/child"
 	"git.graveland.dev/brent/fundi/internal/intercept"
 	"git.graveland.dev/brent/fundi/internal/persist"
@@ -415,7 +416,11 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		}
 	}
 
-	bin, argv, prov, err := resolveSpawnPlan(req)
+	// childID is minted before resolveSpawnPlan (rather than after, as
+	// before) because the "agent" kind needs it to pin --spill-dir
+	// (see buildAgentArgv/agentSpillDir).
+	childID := newChildID()
+	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -423,7 +428,6 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		}
 	}
 
-	childID := newChildID()
 	env := buildEnv(req, childID, c.socketPath)
 	if req.Kind == "claude" {
 		env = append(env, claudeEnv(req.ConfigDir)...)
@@ -837,7 +841,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 
 	req := resumeRequestFromSnapshot(snap, apiKey)
 
-	bin, argv, prov, err := resolveSpawnPlan(req)
+	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1129,6 +1133,11 @@ func (c *Controller) Forget(childID string) error {
 	if err := c.deleteLogDump(childID); err != nil {
 		slog.Warn("delete log dump", "childId", childID, "error", err)
 	}
+	if snap.Kind == "agent" {
+		if err := c.deleteSpillDir(childID); err != nil {
+			slog.Warn("delete spill dir", "childId", childID, "error", err)
+		}
+	}
 	return nil
 }
 
@@ -1141,6 +1150,19 @@ func (c *Controller) deleteLogDump(childID string) error {
 		return nil
 	}
 	path := filepath.Join(c.logsDir, childID)
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// deleteSpillDir removes an agent-kind child's clipped-tool-output spill
+// directory (see buildAgentArgv/agentSpillDir). Forget/ForgetAllExited call
+// this for "agent" kind children so 'pic forget' fully removes the child's
+// footprint, mirroring deleteLogDump. Missing directory is not an error (the
+// child may have exited before writing any spilled output).
+func (c *Controller) deleteSpillDir(childID string) error {
+	path := agentSpillDir(c.stateDir, childID)
 	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -1164,6 +1186,11 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 		}
 		if err := c.deleteLogDump(s.ChildID); err != nil {
 			slog.Warn("delete log dump", "childId", s.ChildID, "error", err)
+		}
+		if s.Kind == "agent" {
+			if err := c.deleteSpillDir(s.ChildID); err != nil {
+				slog.Warn("delete spill dir", "childId", s.ChildID, "error", err)
+			}
 		}
 		count++
 	}
@@ -1956,7 +1983,11 @@ func buildClaudeArgv(req protocol.SpawnRequest) []string {
 // resolveSpawnPlan picks the binary, argv, and ProtocolProvider for a spawn
 // request based on its Kind. Empty Kind defaults to "pi". Shared by Spawn and
 // Resume so the two paths can never diverge on protocol selection.
-func resolveSpawnPlan(req protocol.SpawnRequest) (bin string, argv []string, prov child.ProtocolProvider, err error) {
+//
+// childID and stateDir are only used by the "agent" kind, which needs both to
+// pin --spill-dir to a location Forget can find deterministically later (see
+// buildAgentArgv/agentSpillDir). claude/pi ignore them.
+func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin string, argv []string, prov child.ProtocolProvider, err error) {
 	kind := req.Kind
 	if kind == "" {
 		kind = "pi"
@@ -1968,9 +1999,75 @@ func resolveSpawnPlan(req protocol.SpawnRequest) (bin string, argv []string, pro
 	case "pi":
 		bin, err = resolvePiBinary(req.PiBinary)
 		return bin, buildArgv(req), child.PiProvider{}, err
+	case "agent":
+		// The agent runtime is `fundi agent ...`: the daemon re-execs itself
+		// rather than shelling out to a separate binary. It speaks pi's rpc
+		// protocol natively (internal/agent/frontend.go), so no translator is
+		// needed - child.PiProvider{} is the correct identity, same as the
+		// "pi" case above.
+		self, selfErr := os.Executable()
+		if selfErr != nil {
+			return "", nil, nil, fmt.Errorf("resolving own binary for agent kind: %w", selfErr)
+		}
+		return self, buildAgentArgv(req, childID, stateDir), child.PiProvider{}, nil
 	default:
 		return "", nil, nil, fmt.Errorf("unknown kind: %s", kind)
 	}
+}
+
+// agentSpillDir returns the deterministic spill directory for an agent-kind
+// child's clipped tool output: <stateDir>/spill/<childID>. Shared by
+// buildAgentArgv (which pins the child's --spill-dir here, overriding Task
+// 14's own os.TempDir()-based default) and Forget/ForgetAllExited (which
+// remove it), so the two can never diverge on the path.
+func agentSpillDir(stateDir, childID string) string {
+	return filepath.Join(stateDir, "spill", childID)
+}
+
+// buildAgentArgv converts a SpawnRequest into the `fundi agent` CLI argument
+// list (excluding the binary itself), mirroring Task 14's flag contract
+// (cmd/fundi/agent.go's parseAgentFlags). The leading "agent" token is
+// required so main.go's `os.Args[1] == "agent"` dispatch fires on re-exec.
+//
+// --spill-dir is always pinned to agentSpillDir(stateDir, childID) so the
+// daemon and the agent child agree on where clipped tool output lives,
+// letting Forget clean it up deterministically - this intentionally
+// overrides parseAgentFlags' own os.TempDir()-based default. It is emitted
+// before req.ExtraArgs so the existing "extra args win last" escape hatch
+// (see buildArgv/buildClaudeArgv) still lets a caller override it.
+func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []string {
+	argv := []string{"agent"}
+
+	if req.Model != "" {
+		argv = append(argv, "--model", req.Model)
+	}
+	if req.Thinking != "" {
+		argv = append(argv, "--thinking", req.Thinking)
+	}
+	if req.SystemPrompt != "" {
+		argv = append(argv, "--system-prompt", req.SystemPrompt)
+	}
+	if req.AppendSystemPrompt != "" {
+		argv = append(argv, "--append-system-prompt", req.AppendSystemPrompt)
+	}
+	if len(req.Skills) > 0 {
+		argv = append(argv, "--skills", strings.Join(req.Skills, ","))
+	}
+	if req.NoSkills {
+		argv = append(argv, "--no-skills")
+	}
+	if req.NoContextFiles {
+		argv = append(argv, "--no-context-files")
+	}
+	if req.Name != "" {
+		argv = append(argv, "--name", req.Name)
+	}
+	argv = append(argv, "--spill-dir", agentSpillDir(stateDir, childID))
+
+	// Extra args are appended last (last-flag-wins override), same convention
+	// as buildArgv/buildClaudeArgv.
+	argv = append(argv, req.ExtraArgs...)
+	return argv
 }
 
 // spawnKindLabel normalizes a SpawnRequest/snapshot Kind into the value used for
@@ -1999,6 +2096,20 @@ func claudeEnv(configDir string) []string {
 // (honoured in child.Spawn, not here).
 //
 // The two reserved controller vars are always injected regardless of mode.
+//
+// Note on API key propagation for the "agent" kind: unlike pi/claude, `fundi
+// agent` has no --api-key flag (internal/agent.Config.AnthropicAPIKey /
+// OpenRouterAPIKey are read from the environment by cmd/fundi/agent.go's
+// runAgent, deliberately, so tests can exercise the missing-key path without
+// mutating the process env - see internal/agent/config.go's Config doc
+// comment). Two paths feed the child those vars: (1) when EnvOverride is
+// false (the default), child.Spawn merges os.Environ() - the daemon's own
+// inherited env - into the child's env for free, so an ANTHROPIC_API_KEY /
+// OPENROUTER_API_KEY already present in the daemon's environment reaches the
+// child with no code here; (2) when the caller supplies req.APIKey
+// explicitly (the same field pi/claude thread via --api-key), this function
+// translates it into the correctly-named var below so it isn't silently
+// dropped for agent kind.
 func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 	var env []string
 	for k, v := range req.Env {
@@ -2008,6 +2119,17 @@ func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 		"PI_CONTROLLER_CHILD_ID="+childID,
 		"PI_CONTROLLER_SOCKET="+socketPath,
 	)
+	if req.Kind == "agent" && req.APIKey != "" {
+		provider := req.Provider
+		if provider == "" {
+			provider = agent.DefaultProvider(req.Model)
+		}
+		envVar := "ANTHROPIC_API_KEY"
+		if provider == "openrouter" {
+			envVar = "OPENROUTER_API_KEY"
+		}
+		env = append(env, envVar+"="+req.APIKey)
+	}
 	return env
 }
 
