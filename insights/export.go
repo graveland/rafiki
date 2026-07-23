@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -172,7 +173,7 @@ func (i *Insights) availableSkills(ctx context.Context, conversationID string, i
 	if len(catalog) == 0 {
 		catalog = invoked
 	}
-	return sortedKeys(catalog), nil
+	return slices.Sorted(maps.Keys(catalog)), nil
 }
 
 // skillListingRE matches a markdown skill-listing entry, e.g. "- brainstorming:"
@@ -287,17 +288,5 @@ func dedupe(in []string) []string {
 		seen[s] = struct{}{}
 		out = append(out, s)
 	}
-	return out
-}
-
-func sortedKeys(m map[string]struct{}) []string {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
 	return out
 }
