@@ -235,3 +235,40 @@ Nothing in v1 commits to scaffolds.
 - Field-Guide-style shared memory (agent-curated, line-budgeted) — substrate could be the
   memory engine; deferred past M3.
 - Remote workspace strategy for k8s workers (clone-in-pod vs shared volume vs artifact-only).
+
+## Deferred design: provider as a configured-backend registry (post-M1)
+
+**Status:** agreed direction, NOT built in M1. Recorded 2026-07-23.
+
+M1 uses a single provider-qualified model knob: a model id like
+`anthropic/sonnet-latest` or `deepseek/deepseek-chat`. rafiki routes on the
+prefix — `anthropic/` → the native Anthropic SDK sender (prefix stripped),
+anything else → OpenRouter. fundi/rafiki invent no default: an unset or
+non-provider-qualified model errors loudly; defaults live only in callers
+(scli/`pic`, the pi plugin, Zoe, a future coordinator). fundi has no `--provider`
+flag; the provider is implicit in the model id's prefix.
+
+**The intended end state** (a rafiki-substrate feature, upstream candidate):
+`provider` becomes a **name key into a registry of configured backends**, each
+carrying `{url, protocol, api_key}`; `model` is simply the id passed to whichever
+backend the key resolves to. rafiki already holds the seed of this — its two
+hardcoded `Upstream`s (`WithUpstream(UpstreamAnthropic, sender)` /
+`WithUpstream(UpstreamOpenRouter, sender)`) are a name-key → configured-sender
+map frozen at two entries. The generalization: a rafiki `Provider` interface +
+provider packages, with callers supplying per-provider configuration via
+callbacks (URL/protocol/credentials), so any OpenAI-compatible endpoint (local
+vLLM, a proxy, OpenRouter, direct Anthropic) is just a configured provider. This
+fits the economics thesis (route workers to cheap/local backends by config, not
+code).
+
+**Why the M1 shape is forward-compatible, not a wrong turn:** "model-only, prefix
+picks a hardcoded sender" is a strict SUBSET of "model + named-provider registry."
+When the registry lands, an agent spawn gains an optional `provider` key that
+defaults to today's prefix behavior; nothing built in M1 is thrown away.
+
+**Interim state of the `Provider` wire/persist field:** it remains only for the
+legacy `pi` kind (optional `--provider` passthrough to the pi binary) and the
+`claude` kind's label, plus the models-list `provider` filter. The new `agent`
+kind never sets it (model carries everything). Do NOT invest in normalizing or
+deleting the current field before the registry redesign — it would be churn on a
+concept about to be replaced.
