@@ -112,6 +112,9 @@ func sameDir(a, b string) bool {
 // case is logged, not silently dropped).
 func loadInstructionFile(path string) string {
 	if _, err := os.Stat(path); err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("agent: failed to stat instruction file", "path", path, "error", err)
+		}
 		return ""
 	}
 	content, err := expandIncludes(path, 0, map[string]bool{})
@@ -172,6 +175,9 @@ func resolveInclude(ref, baseDir string, depth int, ancestors map[string]bool) s
 		return missingIncludeMarker(ref)
 	}
 	if _, err := os.Stat(absTarget); err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("agent: failed to stat include target", "include", ref, "path", absTarget, "error", err)
+		}
 		return missingIncludeMarker(ref)
 	}
 

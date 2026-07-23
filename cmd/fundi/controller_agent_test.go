@@ -100,6 +100,41 @@ func TestResolveSpawnPlanAgentKindModelViaExtraArgs(t *testing.T) {
 	}
 }
 
+// TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue covers the fix to
+// agentSpawnHasModel: a bare "--model" token in ExtraArgs with no following
+// value (either because it's the last element, or because the next element
+// is itself another flag) must NOT satisfy the required-model guard -
+// parseAgentFlags would fail on it exactly as if --model were absent.
+func TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue(t *testing.T) {
+	cases := []struct {
+		name      string
+		extraArgs []string
+	}{
+		{"trailing bare --model", []string{"--fake-turns", "/tmp/x.ndjson", "--model"}},
+		{"--model immediately followed by another flag", []string{"--model", "--thinking"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := protocol.SpawnRequest{Kind: "agent", ExtraArgs: tc.extraArgs}
+			if _, _, _, err := resolveSpawnPlan(req, "c_testbare", "/var/fundi-state"); err == nil {
+				t.Fatalf("resolveSpawnPlan(agent kind, %s): want error, got nil", tc.name)
+			}
+		})
+	}
+}
+
+// TestResolveSpawnPlanAgentKindRejectsProvider covers the invariant that the
+// agent kind carries its provider inside the model id (e.g.
+// "anthropic/sonnet-latest"), not as a separate field - a non-empty
+// req.Provider must be rejected at spawn time rather than silently dropped
+// or double-prefixed onto the reported model.
+func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
+	req := protocol.SpawnRequest{Kind: "agent", Model: "anthropic/sonnet-latest", Provider: "anthropic"}
+	if _, _, _, err := resolveSpawnPlan(req, "c_testprov", "/var/fundi-state"); err == nil {
+		t.Fatal("resolveSpawnPlan(agent kind, Provider set): want error, got nil")
+	}
+}
+
 // TestBuildAgentArgv_NoSkillsAndDefaults confirms the no-skills / minimal
 // request path emits only --spill-dir plus whatever ExtraArgs were given, with
 // none of the optional flags present when the request leaves them empty.

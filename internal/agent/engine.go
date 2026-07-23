@@ -95,7 +95,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		conv:    conv,
 		tools:   cfg.Tools,
 		fe:      fe,
-		em:      NewEmitter(fe, cfg.Provider, cfg.ModelID),
+		em:      NewEmitter(fe, cfg.Provider),
 		baseCtx: baseCtx,
 		state: StateData{
 			SessionID:   conv.ID,

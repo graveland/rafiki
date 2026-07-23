@@ -102,6 +102,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 		t.Fatalf("BuildEngine (process 2): %v", err)
 	}
 	defer shutdown2()
+	defer eng2.Close()
 
 	if eng2.conv.ID != conv1.ID {
 		t.Fatalf("process 2 conversation id = %s, want it to reattach to process 1's conversation %s", eng2.conv.ID, conv1.ID)

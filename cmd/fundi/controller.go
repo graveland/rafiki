@@ -2011,6 +2011,17 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		if !agentSpawnHasModel(req) {
 			return "", nil, nil, errors.New(`agent kind requires a model: set SpawnRequest.Model (provider-qualified, e.g. "anthropic/sonnet-latest") or pass --model via ExtraArgs`)
 		}
+		// Unlike pi/claude, the agent kind carries its provider inside the
+		// model id itself (e.g. "anthropic/sonnet-latest" - see
+		// internal/agent/config.go's senderOptions); there is no separate
+		// --provider flag for `fundi agent` to consume. A caller-supplied
+		// req.Provider here would silently be dropped were it not for this
+		// check, or worse, get double-prefixed onto the reported model - so
+		// reject it explicitly rather than exec'ing a child whose model
+		// doesn't match what the caller asked for.
+		if req.Provider != "" {
+			return "", nil, nil, errors.New(`agent kind does not accept a separate Provider: fold it into a provider-qualified Model (e.g. "anthropic/sonnet-latest") instead`)
+		}
 		self, selfErr := os.Executable()
 		if selfErr != nil {
 			return "", nil, nil, fmt.Errorf("resolving own binary for agent kind: %w", selfErr)
@@ -2031,20 +2042,29 @@ func agentSpillDir(stateDir, childID string) string {
 }
 
 // agentSpawnHasModel reports whether an "agent" kind SpawnRequest resolves to
-// a non-empty --model: either req.Model itself, or a "--model"/"--model="
-// token supplied through the ExtraArgs escape hatch (buildAgentArgv appends
-// ExtraArgs last, so an ExtraArgs --model can stand in for req.Model even
-// though req.Model itself is required by parseAgentFlags). Checked by
-// resolveSpawnPlan before ever building the argv/exec'ing the child - `fundi
-// agent` treats a missing --model as a hard flag-parse error, and a spawn-
-// time rejection here is a far cleaner failure than a child that execs and
-// immediately dies.
+// a non-empty --model: either req.Model itself, or a "--model VALUE"/
+// "--model=VALUE" pair supplied through the ExtraArgs escape hatch
+// (buildAgentArgv appends ExtraArgs last, so an ExtraArgs --model can stand
+// in for req.Model even though req.Model itself is required by
+// parseAgentFlags). Checked by resolveSpawnPlan before ever building the
+// argv/exec'ing the child - `fundi agent` treats a missing --model as a hard
+// flag-parse error, and a spawn-time rejection here is a far cleaner failure
+// than a child that execs and immediately dies.
+//
+// A bare "--model" token only counts when it is followed by a value that
+// isn't itself another flag: "--model" as the last ExtraArgs element, or
+// immediately followed by a "-"-prefixed token, is exactly the shape that
+// leaves parseAgentFlags with no value - the same failure as --model being
+// absent entirely - so it must not satisfy this guard.
 func agentSpawnHasModel(req protocol.SpawnRequest) bool {
 	if req.Model != "" {
 		return true
 	}
-	for _, a := range req.ExtraArgs {
-		if a == "--model" || strings.HasPrefix(a, "--model=") {
+	for i, a := range req.ExtraArgs {
+		if strings.HasPrefix(a, "--model=") {
+			return true
+		}
+		if a == "--model" && i+1 < len(req.ExtraArgs) && !strings.HasPrefix(req.ExtraArgs[i+1], "-") {
 			return true
 		}
 	}

@@ -27,16 +27,15 @@ import (
 type Emitter struct {
 	fe       *Frontend
 	provider string
-	modelID  string
 
 	messages []json.RawMessage
 	usage    child.PiUsage
 }
 
 // NewEmitter constructs an Emitter that writes pi frames through fe, tagging
-// assistant messages with provider/modelID.
-func NewEmitter(fe *Frontend, provider, modelID string) *Emitter {
-	return &Emitter{fe: fe, provider: provider, modelID: modelID}
+// assistant messages with provider.
+func NewEmitter(fe *Frontend, provider string) *Emitter {
+	return &Emitter{fe: fe, provider: provider}
 }
 
 // AgentStart emits {"type":"agent_start"}.

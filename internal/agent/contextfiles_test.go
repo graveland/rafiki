@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +14,19 @@ import (
 func isolateHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+}
+
+// captureSlog swaps the default slog.Logger for one writing into a
+// *syncBuffer (see engine_test.go) for the duration of the test, returning
+// an accessor for what was logged - so a test can assert a non-not-exist
+// stat error was actually logged, not just silently mapped to "absent".
+func captureSlog(t *testing.T) *syncBuffer {
+	t.Helper()
+	var b syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&b, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &b
 }
 
 func mustWriteFile(t *testing.T, path, content string) {
@@ -160,5 +174,65 @@ func TestLoadContextFilesDepthCapTerminates(t *testing.T) {
 	}
 	if !strings.Contains(got, "[missing include:") {
 		t.Fatalf("expected depth-cap marker, got %q", got)
+	}
+}
+
+// TestLoadContextFilesLogsNonNotExistStatError covers loadInstructionFile's
+// doc comment ("could not be read for any other reason ... logged, not
+// silently dropped"): a stat error other than "does not exist" - here,
+// ENOTDIR from a path whose parent component is a regular file, not a
+// directory, which is portable and doesn't depend on running as
+// non-root - must be logged, not just mapped to the empty-string "absent"
+// result used for the ordinary missing-file case.
+func TestLoadContextFilesLogsNonNotExistStatError(t *testing.T) {
+	isolateHome(t)
+	logged := captureSlog(t)
+
+	cwd := t.TempDir()
+	// A regular file where CLAUDE.md's parent directory would need to be:
+	// stat-ing "notadir/CLAUDE.md" fails with ENOTDIR, not ENOENT.
+	notADir := filepath.Join(cwd, "notadir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadContextFiles(filepath.Join(notADir, "sub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("expected no content from an unreadable path, got %q", got)
+	}
+	if !strings.Contains(logged.String(), "failed to stat instruction file") {
+		t.Fatalf("expected the stat error to be logged, got %q", logged.String())
+	}
+}
+
+// TestLoadContextFilesLogsNonNotExistIncludeStatError is
+// TestLoadContextFilesLogsNonNotExistStatError's counterpart for
+// resolveInclude's own os.Stat call: an @-include target whose parent path
+// component is a regular file must log the stat error (not just emit the
+// silent missing-include marker) - matching the analogous top-level
+// instruction file case above.
+func TestLoadContextFilesLogsNonNotExistIncludeStatError(t *testing.T) {
+	isolateHome(t)
+	logged := captureSlog(t)
+
+	cwd := t.TempDir()
+	notADir := filepath.Join(cwd, "notadir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "before\n@notadir/CLAUDE.md\nafter")
+
+	got, err := LoadContextFiles(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "[missing include: notadir/CLAUDE.md]") {
+		t.Fatalf("expected missing-include marker for the unreadable target, got %q", got)
+	}
+	if !strings.Contains(logged.String(), "failed to stat include target") {
+		t.Fatalf("expected the stat error to be logged, got %q", logged.String())
 	}
 }

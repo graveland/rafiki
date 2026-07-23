@@ -36,7 +36,7 @@ func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 	}
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
-	em := NewEmitter(fe, "anthropic", "claude-x")
+	em := NewEmitter(fe, "anthropic")
 	em.AgentStart()
 	em.UserMessage("go")
 	em.AssistantTurn(&resp)
@@ -133,7 +133,7 @@ func TestMapAssistantMessageEmptyContentIsEmptyArray(t *testing.T) {
 func TestUserMessageAssignsUniqueID(t *testing.T) {
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
-	em := NewEmitter(fe, "anthropic", "claude-x")
+	em := NewEmitter(fe, "anthropic")
 	em.UserMessage("first")
 	// A real turn always separates two UserMessage calls by at least one LLM
 	// round trip; sleep to guarantee distinct millisecond timestamps rather
@@ -346,7 +346,7 @@ func TestToolStart_RawFallback(t *testing.T) {
 	silenceSlog(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
-	em := NewEmitter(fe, "anthropic", "claude-x")
+	em := NewEmitter(fe, "anthropic")
 	em.ToolStart("tu_x", "mytool", json.RawMessage("not-json"))
 
 	line := strings.TrimSpace(out.String())
