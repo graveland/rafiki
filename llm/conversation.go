@@ -141,8 +141,15 @@ func DefaultCachePolicy() CachePolicy {
 }
 
 // WithCache overrides the conversation's prompt-cache policy (default:
-// DefaultCachePolicy).
-func WithCache(p CachePolicy) ConvOption { return func(c *convConfig) { c.cache = &p } }
+// DefaultCachePolicy). Each application takes its own copy: Conversation()
+// clamps Breakpoints in place, and sharing &p across conversations built
+// from one reused option would leak that clamp between them.
+func WithCache(p CachePolicy) ConvOption {
+	return func(c *convConfig) {
+		q := p
+		c.cache = &q
+	}
+}
 
 // Conversation loads or creates a conversation. With WithStore it is
 // DB-backed (captured, resumable); without, it degrades to an in-memory

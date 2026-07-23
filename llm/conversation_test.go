@@ -356,3 +356,20 @@ func TestConversationStoresPrefixOnChange(t *testing.T) {
 		}
 	}
 }
+
+func TestWithCache_EachApplicationGetsItsOwnPolicy(t *testing.T) {
+	// One reused ConvOption must not share a CachePolicy pointer across
+	// conversations: Conversation() clamps Breakpoints through cfg.cache, and
+	// with a shared pointer the first clamp would leak into later uses.
+	opt := WithCache(CachePolicy{SystemTTL: Cache1h, MessagesTTL: Cache5m, Breakpoints: 9})
+	var cfg1, cfg2 convConfig
+	opt(&cfg1)
+	opt(&cfg2)
+	if cfg1.cache == cfg2.cache {
+		t.Fatal("WithCache applications share one CachePolicy pointer")
+	}
+	cfg1.cache.Breakpoints = 3 // what Conversation()'s clamp does
+	if cfg2.cache.Breakpoints != 9 {
+		t.Fatalf("clamping one conversation's policy leaked: Breakpoints = %d, want 9", cfg2.cache.Breakpoints)
+	}
+}
