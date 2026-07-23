@@ -27,7 +27,11 @@ type fakeSender struct {
 // bodies and returns an llm.Sender that replays them in order. Blank lines are
 // ignored; a malformed body is an error rather than a silently skipped turn.
 // Once every scripted turn has been served, further calls return an error — an
-// over-running loop is a test bug, not something to paper over.
+// over-running loop is a test bug, not something to paper over. A file with
+// zero messages (including an empty file, e.g. /dev/null) is not itself an
+// error: it produces a sender that is immediately "exhausted", which is
+// exactly right for driving a session that only ever needs get_state/no LLM
+// call at all (see cmd/fundi agent --fake-turns's manual acceptance gate).
 func LoadFakeSender(path string) (llm.Sender, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -44,9 +48,6 @@ func LoadFakeSender(path string) (llm.Sender, error) {
 			return nil, fmt.Errorf("agent: scripted turn %s:%d: %w", path, i+1, err)
 		}
 		s.turns = append(s.turns, &msg)
-	}
-	if len(s.turns) == 0 {
-		return nil, fmt.Errorf("agent: scripted turns file %s has no messages", path)
 	}
 	return s, nil
 }

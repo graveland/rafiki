@@ -21,6 +21,15 @@ import (
 )
 
 func main() {
+	// Dispatch `fundi agent ...` before any daemon setup below - it is a
+	// separate process mode (a single agent child speaking pi's rpc
+	// protocol on stdio) and must not fall through into the daemon's own
+	// flag-less startup. Every other invocation (including no args) runs the
+	// daemon unchanged.
+	if len(os.Args) > 1 && os.Args[1] == "agent" {
+		os.Exit(runAgent(os.Args[2:]))
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))

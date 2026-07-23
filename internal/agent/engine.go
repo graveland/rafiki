@@ -16,6 +16,12 @@ import (
 	"git.graveland.dev/brent/rafiki/llm"
 )
 
+// repairTimeout bounds the post-abort orphan-repair call (see runTurn) — it
+// runs on its own context independent of the turn's cancelled context and
+// independent of the engine's baseCtx, so it isn't cut short by whatever
+// cancelled the turn in the first place.
+const repairTimeout = 10 * time.Second
+
 // EngineConfig is the wiring for one agent child: the rafiki client and the
 // conversation options that identify its conversation, the tools it may call,
 // and the identity it reports through get_state.
@@ -26,6 +32,11 @@ type EngineConfig struct {
 	Provider string
 	ModelID  string
 	Name     string
+	// BaseCtx is the engine-lifetime root every turn's cancellable context
+	// derives from — the seam for wiring process shutdown (a
+	// signal.NotifyContext parent) into in-flight turns. Nil defaults to
+	// context.Background(), matching every pre-Task-14 caller.
+	BaseCtx context.Context
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -72,7 +83,10 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	if fe == nil {
 		return nil, errors.New("agent: a Frontend is required")
 	}
-	baseCtx := context.Background()
+	baseCtx := cfg.BaseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	conv, err := cfg.Client.Conversation(baseCtx, cfg.ConvOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("agent: create conversation: %w", err)
@@ -91,6 +105,12 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		},
 		wake: make(chan struct{}, 1),
 	}
+	// fe's Handler is wired here rather than by the caller: Engine and
+	// Frontend are the same package, but BuildEngine (cmd/fundi's entry
+	// point, per the import-direction constraint) constructs fe before the
+	// Engine exists and cannot reach Frontend's unexported handler field
+	// itself.
+	fe.handler = e
 	go e.worker()
 	slog.Info("agent: engine started", "conversation", conv.ID, "provider", cfg.Provider, "model", cfg.ModelID)
 	return e, nil
@@ -145,6 +165,14 @@ func (e *Engine) State() StateData { return e.state }
 // Wait blocks until every queued turn has finished. Intended for tests and
 // shutdown; it does not stop new work from being queued.
 func (e *Engine) Wait() { e.wg.Wait() }
+
+// Close stops the engine's worker goroutine. Call it only after Wait() has
+// returned and after nothing can call HandlePrompt/HandleSteer/HandleAbort
+// again — in cmd/fundi's shutdown path that means: stop reading frames
+// (Frontend.Run has already returned), then Wait(), then Close(). Sending on
+// wake after Close (i.e. a HandlePrompt racing a Close) would panic on a
+// closed channel; the ordering above is what rules that race out.
+func (e *Engine) Close() { close(e.wake) }
 
 // worker drains the prompt queue serially for the engine's lifetime.
 func (e *Engine) worker() {
@@ -202,10 +230,16 @@ func (e *Engine) runTurn(text string) {
 		// A cancelled turn can leave the trailing assistant message's tool_use
 		// blocks unresolved (no tool_result yet appended); the next turn's
 		// request would then carry that dangling tool_use and the API would
-		// reject it outright. Repair on baseCtx, not the turn's own (already
-		// cancelled) ctx — the repair itself must not be aborted by the very
-		// cancellation it exists to clean up after.
-		repaired, rErr := RepairOrphans(e.baseCtx, e.conv)
+		// reject it outright. Repair on its own short-lived context, NOT
+		// e.baseCtx and not the turn's own (already cancelled) ctx — the
+		// repair itself must not be aborted by the very cancellation it
+		// exists to clean up after. This matters even more now that baseCtx
+		// can be a signal.NotifyContext: a SIGINT-triggered abort would
+		// otherwise cancel baseCtx and the repair together, leaving the
+		// orphan behind for the process's next start.
+		repairCtx, repairCancel := context.WithTimeout(context.Background(), repairTimeout)
+		repaired, rErr := RepairOrphans(repairCtx, e.conv)
+		repairCancel()
 		if rErr != nil {
 			slog.Error("agent: orphan repair failed after abort", "conversation", e.conv.ID, "error", rErr)
 		}
