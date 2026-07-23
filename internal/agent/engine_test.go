@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -433,4 +434,192 @@ func TestLoadFakeSenderRejectsBadFile(t *testing.T) {
 	if _, err := LoadFakeSender(path); err == nil {
 		t.Fatal("malformed body returned no error")
 	}
+}
+
+// blockOnCtxTool returns a fake tool function that signals started, then
+// blocks until its own context is cancelled and reports the cancellation as
+// an error result — the fixture shared by every "abort lands mid-tool" test
+// below. A real tool observes cancellation and returns promptly (see the
+// bash tool's process-group kill); this stands in for that without a real
+// subprocess.
+func blockOnCtxTool(started chan struct{}) func(ctx context.Context, in json.RawMessage) (string, error) {
+	return func(ctx context.Context, in json.RawMessage) (string, error) {
+		close(started)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+}
+
+// ctxCheckingSender fails fast on an already-cancelled context before
+// delegating, mirroring the real Anthropic HTTP client's ctx-awareness — the
+// plain fakeSender ignores ctx entirely, which would let a turn's Continue
+// call silently succeed via the replay script even after HandleAbort landed.
+// Failing without delegating also means it does NOT consume a scripted body,
+// so a later turn can still replay it.
+type ctxCheckingSender struct{ inner llm.Sender }
+
+func (s ctxCheckingSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.inner.New(ctx, params)
+}
+
+// TestEngineAbortMidTurnEndsCleanlyAndStaysReusable covers in-band abort end
+// to end at the Engine layer: HandleAbort while a tool is genuinely blocked
+// must (1) unblock the tool via ctx cancellation, (2) end the turn with
+// tool_execution_end(isError) -> agent_end -> agent_settled and no
+// agent_error frame (an abort is not a loop failure), and (3) leave the
+// engine fully usable for the very next prompt — the entire point of
+// in-band abort over Claude Code's SIGINT-and-respawn.
+func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
+	started := make(chan struct{})
+	ts := fakeToolSet{"bash": blockOnCtxTool(started)}
+	sender := ctxCheckingSender{inner: scriptedSender(t, sampleResp, sampleEndTurn)}
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("go")
+	<-started // the tool is now blocked on its ctx; the turn is genuinely in flight
+
+	eng.HandleAbort()
+	eng.Wait()
+
+	assertFrameTypes(t, out.String(), []string{
+		"message_start", "message_end", // user echo: "go"
+		"agent_start",
+		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"tool_execution_start", "tool_execution_end", // isError, checked below
+		"agent_end", "agent_settled",
+	})
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var endFrame struct {
+		Type    string `json:"type"`
+		IsError bool   `json:"isError"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-3]), &endFrame); err != nil {
+		t.Fatalf("parse tool_execution_end frame: %v", err)
+	}
+	if endFrame.Type != "tool_execution_end" || !endFrame.IsError {
+		t.Fatalf("tool_execution_end frame = %+v, want isError true", endFrame)
+	}
+
+	// The abort must not have poisoned the sender's replay position: the
+	// second turn's Continue call reaches the still-unconsumed sampleEndTurn
+	// body and finishes with a clean end_turn — no agent_error.
+	eng.HandlePrompt("second")
+	eng.Wait()
+
+	allTypes := frameTypes(t, out.String())
+	secondTurn := allTypes[len(allTypes)-8:]
+	want := []string{
+		"message_start", "message_end", // user echo: "second"
+		"agent_start",
+		"message_start", "message_update", "message_end", // assistant turn (end_turn)
+		"agent_end", "agent_settled",
+	}
+	if strings.Join(secondTurn, ",") != strings.Join(want, ",") {
+		t.Fatalf("second turn's frames:\n got %v\nwant %v (a clean run, no agent_error)", secondTurn, want)
+	}
+}
+
+// writeFrame marshals v as one ndjson line and writes it to w, bounded by a
+// timeout so a stuck reader loop fails the test instead of hanging it.
+func writeFrame(t *testing.T, w io.Writer, v any) {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = append(b, '\n')
+	done := make(chan error, 1)
+	go func() {
+		_, werr := w.Write(b)
+		done <- werr
+	}()
+	select {
+	case werr := <-done:
+		if werr != nil {
+			t.Fatalf("write frame %s: %v", v, werr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("write frame timed out; Frontend.Run's reader loop appears stuck")
+	}
+}
+
+// TestFrontendDispatchesAbortFrameToInFlightTurn is Task 10's Requirement 4:
+// the end-to-end contract no other test proves. Every other abort test calls
+// eng.HandleAbort() directly from the test goroutine, which only guards the
+// Handler-contract PRECONDITION (HandlePrompt returns promptly). This test
+// drives a real "abort" ndjson frame down a real Frontend.Run's stdin reader
+// loop while a turn is genuinely blocked in a tool, and proves the reader
+// loop actually read and dispatched it — the only real evidence that in-band
+// abort works over the wire, not just inside the Engine's own API.
+func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
+	silenceSlog(t)
+	started := make(chan struct{})
+	ts := fakeToolSet{"bash": blockOnCtxTool(started)}
+	client, err := llm.NewClient(
+		llm.WithUpstream(llm.UpstreamAnthropic, scriptedSender(t, sampleResp)),
+		llm.WithDefaultModel("claude-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inR, inW := io.Pipe()
+	out := &syncBuffer{}
+	fe := NewFrontend(inR, out, nil)
+	eng, err := NewEngine(EngineConfig{
+		Client:   client,
+		Tools:    ts,
+		Provider: "anthropic",
+		ModelID:  "claude-x",
+		Name:     "w1",
+		ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+	}, fe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fe.handler = eng
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- fe.Run() }()
+
+	writeFrame(t, inW, map[string]any{"type": "prompt", "message": "go"})
+	<-started // proves Run's reader loop already read AND dispatched the prompt
+	// frame (HandlePrompt queued it and the worker reached the blocking tool)
+	// before we send the next line.
+
+	writeFrame(t, inW, map[string]any{"type": "abort"})
+
+	waitDone := make(chan struct{})
+	go func() {
+		eng.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("engine never finished its turn after an abort frame was written to stdin; " +
+			"Frontend.Run's reader loop did not dispatch it")
+	}
+
+	if err := inW.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Frontend.Run returned an error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Frontend.Run did not return after stdin closed")
+	}
+
+	assertFrameTypes(t, out.String(), []string{
+		"message_start", "message_end", // user echo: "go"
+		"agent_start",
+		"message_start", "message_update", "message_end", // assistant turn (tool_use)
+		"tool_execution_start", "tool_execution_end", // isError: the tool observed the abort
+		"agent_end", "agent_settled",
+	})
 }

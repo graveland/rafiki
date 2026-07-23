@@ -199,9 +199,17 @@ func (e *Engine) runTurn(text string) {
 
 	switch {
 	case err != nil && aborted:
-		// TODO(task 10): repair the aborted turn's orphaned tool_use blocks via
-		// RepairOrphans so the next turn's request is API-valid.
-		slog.Info("agent: turn cancelled", "conversation", e.conv.ID, "error", err)
+		// A cancelled turn can leave the trailing assistant message's tool_use
+		// blocks unresolved (no tool_result yet appended); the next turn's
+		// request would then carry that dangling tool_use and the API would
+		// reject it outright. Repair on baseCtx, not the turn's own (already
+		// cancelled) ctx — the repair itself must not be aborted by the very
+		// cancellation it exists to clean up after.
+		repaired, rErr := RepairOrphans(e.baseCtx, e.conv)
+		if rErr != nil {
+			slog.Error("agent: orphan repair failed after abort", "conversation", e.conv.ID, "error", rErr)
+		}
+		slog.Info("agent: turn cancelled", "conversation", e.conv.ID, "error", err, "orphans_repaired", repaired)
 	case err != nil:
 		slog.Error("agent: turn failed", "conversation", e.conv.ID, "error", err)
 		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
