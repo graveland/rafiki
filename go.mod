@@ -25,7 +25,7 @@ require (
 )
 
 require (
-	git.graveland.dev/brent/rafiki v0.0.0-20260721185716-e83c9a2b2899
+	git.graveland.dev/brent/rafiki v0.0.0-20260723150858-7e64b5872993
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/rivo/uniseg v0.4.7 // indirect
