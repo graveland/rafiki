@@ -39,18 +39,20 @@ func clampQueryLimit(limit int) int {
 // Query does NOT parse or sanitize sqlText itself — the caller MUST pass a
 // validate func that guarantees the statement is a read-only SELECT constrained
 // to the conversations schema (the server injects a pg_query-backed validator so
-// this package carries no cgo dependency). validate may be nil only when the
-// caller has already validated sqlText out of band.
+// this package carries no cgo dependency). A nil validate is refused: this
+// runs caller-supplied SQL, so it fails closed rather than trusting that
+// out-of-band validation happened.
 //
 // Defence in depth: the statement runs inside a read-only transaction with a
 // 30s statement_timeout, so a statement that slips past the validator still
 // cannot write and cannot run unbounded. truncated reports that the row cap or
 // the byte budget (maxResultBytes) stopped the scan before all rows were read.
 func (i *Insights) Query(ctx context.Context, sqlText string, limit int, validate func(string) error) (rows []map[string]any, truncated bool, err error) {
-	if validate != nil {
-		if err := validate(sqlText); err != nil {
-			return nil, false, fmt.Errorf("query rejected: %w", err)
-		}
+	if validate == nil {
+		return nil, false, fmt.Errorf("insights: Query requires a validator")
+	}
+	if err := validate(sqlText); err != nil {
+		return nil, false, fmt.Errorf("query rejected: %w", err)
 	}
 	limit = clampQueryLimit(limit)
 

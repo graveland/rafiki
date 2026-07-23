@@ -135,3 +135,12 @@ func TestQuery_ByteBudgetTruncates(t *testing.T) {
 		t.Errorf("rows = %d, want 1 (byte budget stops after the first row)", len(rows))
 	}
 }
+
+func TestQuery_NilValidatorRefused(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	_, _, err := New(pool).Query(ctx, "SELECT 1", 10, nil)
+	if err == nil || !strings.Contains(err.Error(), "requires a validator") {
+		t.Fatalf("Query with nil validator err = %v, want fail-closed refusal", err)
+	}
+}
