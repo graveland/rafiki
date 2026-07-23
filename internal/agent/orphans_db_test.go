@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -21,7 +22,12 @@ import (
 // testPool): connect an admin pool from RAFIKI_TEST_DSN, CREATE DATABASE a
 // uniquely-named scratch db, register cleanup to drop it, reconnect scoped to
 // that database, and migrate it. Never touches the DSN's own database.
-func dbTestPool(t *testing.T) *pgxpool.Pool {
+//
+// It also returns the scratch database's own DSN: resume_test.go needs it to
+// drive TWO independent Config.BuildEngine calls (simulating a process
+// restart) against the very same database, which requires a connection
+// string rather than an already-open pool.
+func dbTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
@@ -47,12 +53,12 @@ func dbTestPool(t *testing.T) *pgxpool.Pool {
 		}
 	})
 
-	cfg, err := pgxpool.ParseConfig(dsn)
+	scratchDSN, err := withDatabase(dsn, name)
 	if err != nil {
-		t.Fatalf("parse DSN: %v", err)
+		t.Fatalf("build scratch db dsn: %v", err)
 	}
-	cfg.ConnConfig.Database = name
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+
+	pool, err := pgxpool.New(ctx, scratchDSN)
 	if err != nil {
 		t.Fatalf("connect scratch db %s: %v", name, err)
 	}
@@ -61,7 +67,20 @@ func dbTestPool(t *testing.T) *pgxpool.Pool {
 	if err := store.Migrate(ctx, pool); err != nil {
 		t.Fatalf("migrate scratch db %s: %v", name, err)
 	}
-	return pool
+	return pool, scratchDSN
+}
+
+// withDatabase returns dsn (a postgres:// URL) with its path replaced by
+// dbName, so callers that need a connection STRING rather than an
+// already-open pool (e.g. Config.DBURL, which opens its own pgxpool.Pool)
+// can target the same scratch database dbTestPool just created.
+func withDatabase(dsn, dbName string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", fmt.Errorf("parse dsn: %w", err)
+	}
+	u.Path = "/" + dbName
+	return u.String(), nil
 }
 
 // cancelOnExecuteTools is an agentloop.ToolSet with one tool ("bash",
@@ -102,7 +121,7 @@ func (c cancelOnExecuteTools) Execute(_ context.Context, name string, _ json.Raw
 // capturingSender's doc comment in orphans_test.go — the fake transport has
 // no capacity to reject a malformed request the way the real API would).
 func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
-	pool := dbTestPool(t)
+	pool, _ := dbTestPool(t)
 	background := context.Background()
 
 	// sampleResp (tool_use, id tu_1, tool "bash") drives the first Continue;

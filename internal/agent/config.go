@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -194,6 +195,30 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		shutdown()
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)
 	}
+
+	// Boot-time orphan repair: distinct from runTurn's abort-path repair
+	// (engine.go), which only ever cleans up a turn cancelled WITHIN this
+	// process. A DB-backed conversation reattached via ByExternalRef (see
+	// convOpts above) can carry a dangling tool_use left by a PREVIOUS
+	// process that crashed or was killed mid-turn — before that process's
+	// own abort handling ever ran. Repair here, once, before the engine's
+	// worker can execute any turn (NewEngine has already started it, but
+	// nothing wakes it until cmd/fundi's Frontend.Run reads its first
+	// inbound frame, which happens strictly after BuildEngine returns).
+	// In-memory mode (c.DBURL == "") has nothing to reattach — Conversation
+	// always mints a fresh "mem-..." id — so this is a clean no-op there,
+	// not an error.
+	if c.DBURL != "" {
+		repairCtx, repairCancel := context.WithTimeout(context.Background(), repairTimeout)
+		repaired, rErr := RepairOrphans(repairCtx, eng.conv)
+		repairCancel()
+		if rErr != nil {
+			slog.Error("agent: boot-time orphan repair failed", "conversation", eng.conv.ID, "error", rErr)
+		} else {
+			slog.Info("agent: boot-time orphan repair", "conversation", eng.conv.ID, "repaired", repaired)
+		}
+	}
+
 	return eng, shutdown, nil
 }
 
