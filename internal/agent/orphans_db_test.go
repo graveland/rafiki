@@ -25,7 +25,10 @@ func dbTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		t.Skip("RAFIKI_TEST_DSN not set; skipping DB-backed orphan repair test")
+		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
+			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
+		}
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
@@ -94,14 +97,19 @@ func (c cancelOnExecuteTools) Execute(_ context.Context, name string, _ json.Raw
 // turn's own context mid-execution, so the subsequent persist of the tool's
 // result genuinely fails and leaves a real dangling tool_use — not one
 // pre-seeded by the test. It then proves RepairOrphans fixes the API-shape
-// invariant: after repair, a follow-up Continue succeeds.
+// invariant by asserting on the OUTGOING request shape of the follow-up
+// Continue, not merely that the scripted call succeeded (see
+// capturingSender's doc comment in orphans_test.go — the fake transport has
+// no capacity to reject a malformed request the way the real API would).
 func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	pool := dbTestPool(t)
 	background := context.Background()
 
 	// sampleResp (tool_use, id tu_1, tool "bash") drives the first Continue;
-	// sampleEndTurn drives the follow-up Continue after repair.
-	sender := scriptedSender(t, sampleResp, sampleEndTurn)
+	// sampleEndTurn drives the follow-up Continue after repair. capturingSender
+	// records every request's params so the post-repair assertion can check
+	// the actual shape sent, not just that the call returned successfully.
+	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
 	client, err := llm.NewClient(
 		llm.WithUpstream(llm.UpstreamAnthropic, sender),
 		llm.WithStore(pool),
@@ -191,10 +199,6 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 		t.Fatal("synthesized tool_result is not marked IsError")
 	}
 
-	// The real proof of the API-shape invariant: without repair, this
-	// Continue would carry a dangling tool_use and the real Anthropic API
-	// would reject it outright. With repair applied, the request is
-	// well-formed and the (scripted) call succeeds.
 	resp, err := conv.Continue(background)
 	if err != nil {
 		t.Fatalf("Continue after RepairOrphans failed: %v", err)
@@ -202,4 +206,10 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	if resp.StopReason != "end_turn" {
 		t.Fatalf("post-repair Continue stop_reason = %q, want end_turn", resp.StopReason)
 	}
+
+	// The real proof of the API-shape invariant: assert on the shape of the
+	// request this Continue actually sent. Without repair, the assistant
+	// message carrying tu_1 would have no follow-up tool_result — exactly
+	// what the real Anthropic API rejects. With repair applied, it does.
+	assertToolResultFollowsToolUse(t, sender.lastParams(t).Messages, "tu_1")
 }

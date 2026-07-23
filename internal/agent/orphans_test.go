@@ -2,12 +2,112 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"git.graveland.dev/brent/rafiki/llm"
 )
+
+// capturingSender is a scripted llm.Sender (same replay-in-order contract as
+// fakeSender/scriptedSender) that additionally records the
+// anthropic.MessageNewParams of every New call it serves. It is the seam
+// that lets a test assert on the OUTGOING REQUEST SHAPE rather than merely
+// observing that a scripted call "succeeded" — fakeSender.New ignores params
+// entirely (see faketurns.go), so a successful Continue proves nothing about
+// whether the request it sent was well-formed. The shape the real Anthropic
+// API actually enforces — a tool_use block always followed by a matching
+// tool_result — is exactly what assertToolResultFollowsToolUse checks against
+// a captured request's Messages.
+type capturingSender struct {
+	mu       sync.Mutex
+	next     int
+	turns    []*anthropic.Message
+	captured []anthropic.MessageNewParams
+}
+
+// newCapturingSender scripts bodies (raw JSON anthropic.Message values) to be
+// replayed in call order, mirroring scriptedSender/LoadFakeSender.
+func newCapturingSender(t *testing.T, bodies ...string) *capturingSender {
+	t.Helper()
+	s := &capturingSender{}
+	for i, b := range bodies {
+		var msg anthropic.Message
+		if err := json.Unmarshal([]byte(b), &msg); err != nil {
+			t.Fatalf("capturingSender: unmarshal scripted body %d: %v", i, err)
+		}
+		s.turns = append(s.turns, &msg)
+	}
+	return s
+}
+
+// New records params, then returns the next scripted message.
+func (s *capturingSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.captured = append(s.captured, params)
+	if s.next >= len(s.turns) {
+		return nil, errors.New("agent: capturingSender: scripted turns exhausted")
+	}
+	msg := s.turns[s.next]
+	s.next++
+	return msg, nil
+}
+
+// lastParams returns the params of the most recent New call, failing the
+// test if New was never called.
+func (s *capturingSender) lastParams(t *testing.T) anthropic.MessageNewParams {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.captured) == 0 {
+		t.Fatal("capturingSender: New was never called")
+	}
+	return s.captured[len(s.captured)-1]
+}
+
+// assertToolResultFollowsToolUse asserts that msgs (a captured request's
+// Messages) contains an assistant message with a tool_use block matching
+// toolUseID, IMMEDIATELY followed by a user message carrying a tool_result
+// block for that same id. This is the exact shape the real Anthropic API
+// validates and rejects a request for lacking — the invariant RepairOrphans
+// exists to restore.
+func assertToolResultFollowsToolUse(t *testing.T, msgs []anthropic.MessageParam, toolUseID string) {
+	t.Helper()
+	for i, m := range msgs {
+		if m.Role != anthropic.MessageParamRoleAssistant {
+			continue
+		}
+		var hasToolUse bool
+		for _, block := range m.Content {
+			if tu := block.OfToolUse; tu != nil && tu.ID == toolUseID {
+				hasToolUse = true
+				break
+			}
+		}
+		if !hasToolUse {
+			continue
+		}
+		if i+1 >= len(msgs) {
+			t.Fatalf("request has %d messages; the assistant message with tool_use %q is the last one — no follow-up tool_result",
+				len(msgs), toolUseID)
+		}
+		next := msgs[i+1]
+		if next.Role != anthropic.MessageParamRoleUser {
+			t.Fatalf("message after tool_use %q has role %v, want user", toolUseID, next.Role)
+		}
+		for _, block := range next.Content {
+			if tr := block.OfToolResult; tr != nil && tr.ToolUseID == toolUseID {
+				return
+			}
+		}
+		t.Fatalf("message after tool_use %q carries no matching tool_result block; content: %+v", toolUseID, next.Content)
+	}
+	t.Fatalf("request has no assistant message with a tool_use block id %q", toolUseID)
+}
 
 // testConversation builds a store-less (in-memory) rafiki conversation driven
 // by a scripted sender — orphans_test.go's building block, mirroring
@@ -143,11 +243,25 @@ func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
 // conversation via a scripted sender that returns a tool_use response,
 // "cancel before the tool completes" (i.e. never append a result for it —
 // exactly the shape an aborted mid-tool-execution turn leaves behind), call
-// RepairOrphans, then prove the API-shape invariant end to end: a follow-up
-// Continue that would previously have sent a malformed request (a tool_use
-// with no matching tool_result) now succeeds.
+// RepairOrphans, then prove the API-shape invariant end to end by asserting
+// on the OUTGOING request shape of the follow-up Continue: the assistant
+// message carrying tool_use tu_1 must be immediately followed by a
+// tool_result for tu_1. That is the shape the real Anthropic API validates;
+// a scripted call merely succeeding proves nothing (see capturingSender's
+// doc comment) since the fake transport can't reject a malformed request the
+// way the real API would.
 func TestRepairOrphansRoundTrip(t *testing.T) {
-	conv := testConversation(t, sampleResp, sampleEndTurn)
+	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
+	client, err := llm.NewClient(
+		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithDefaultModel("claude-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := client.Conversation(context.Background(), llm.NewConversation("fundi", "agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	// sampleResp is a tool_use response (id tu_1); the tool it names never
@@ -177,12 +291,11 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 		t.Fatalf("trailing row's block = %+v, want a tool_result for tu_1", last.Param.Content[0])
 	}
 
-	// The real proof: without repair this Continue would carry a dangling
-	// tool_use and the (real) API would reject it. Our scripted sender can't
-	// enforce that itself, so what we're actually proving is that the
-	// conversation's stored shape is once again request-ready and the
-	// scripted end_turn call is reachable — the request that repair unblocks.
 	if _, err := conv.Continue(ctx); err != nil {
 		t.Fatalf("Continue after RepairOrphans failed: %v", err)
 	}
+
+	// The real proof: assert on the shape of the request Continue actually
+	// sent, not just that the scripted call returned successfully.
+	assertToolResultFollowsToolUse(t, sender.lastParams(t).Messages, "tu_1")
 }
