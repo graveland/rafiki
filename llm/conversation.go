@@ -207,10 +207,11 @@ func UserText(s string) []anthropic.ContentBlockParamUnion {
 }
 
 type sendConfig struct {
-	maxTokens int64
-	tools     []anthropic.ToolUnionParam
-	source    string
-	author    string
+	maxTokens  int64
+	tools      []anthropic.ToolUnionParam
+	source     string
+	author     string
+	toolChoice string
 }
 
 type SendOption func(*sendConfig)
@@ -233,6 +234,11 @@ func WithSource(src string) SendOption { return func(s *sendConfig) { s.source =
 
 // WithAuthor stamps the per-turn author identity.
 func WithAuthor(a string) SendOption { return func(s *sendConfig) { s.author = a } }
+
+// WithToolChoice forces the named tool for this send only.
+func WithToolChoice(name string) SendOption {
+	return func(s *sendConfig) { s.toolChoice = name }
+}
 
 // Send appends userContent to the conversation and gets the assistant's
 // reply: load history → persist the user message (write-ahead) → assemble →
@@ -489,6 +495,11 @@ func (conv *Conversation) assemble(reqMsgs []Message, scfg sendConfig) anthropic
 	params.Messages = withMessageBreakpoints(reqMsgs, policy)
 	if len(scfg.tools) > 0 {
 		params.Tools = scfg.tools
+	}
+	if scfg.toolChoice != "" {
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{
+			OfTool: &anthropic.ToolChoiceToolParam{Name: scfg.toolChoice},
+		}
 	}
 	if conv.cfg.temperature != nil {
 		params.Temperature = anthropic.Float(*conv.cfg.temperature)

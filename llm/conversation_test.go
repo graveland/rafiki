@@ -411,3 +411,56 @@ func TestBlockWithCacheControl_CoversEveryCacheableUnionMember(t *testing.T) {
 		t.Fatalf("only %d cacheable union members found; reflection walk is broken", tested)
 	}
 }
+
+func TestConversationWithToolChoice(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("tool choice test"),
+		respondText("tool choice test 2"),
+	}}
+	c := testClient(t, pool, sender)
+
+	conv, err := c.Conversation(ctx,
+		NewConversation("brent", "test"),
+		Model("sonnet-latest"),
+		SystemText("you are a test"))
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+
+	tools := []anthropic.ToolUnionParam{
+		anthropic.ToolUnionParamOfTool(
+			anthropic.ToolInputSchemaParam{Type: "object"},
+			"report_findings",
+		),
+	}
+
+	resp, err := conv.Send(ctx, UserText("test"), WithTools(tools), WithToolChoice("report_findings"))
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if resp.Content[0].Text != "tool choice test" {
+		t.Fatalf("unexpected response: %q", resp.Content[0].Text)
+	}
+
+	if sender.lastReq[0].ToolChoice.OfTool == nil {
+		t.Fatalf("ToolChoice.OfTool is nil, expected tool choice to be set")
+	}
+	if sender.lastReq[0].ToolChoice.OfTool.Name != "report_findings" {
+		t.Errorf("ToolChoice.OfTool.Name = %q, want report_findings", sender.lastReq[0].ToolChoice.OfTool.Name)
+	}
+
+	// Send without WithToolChoice should have zero ToolChoice
+	resp2, err := conv.Send(ctx, UserText("test 2"))
+	if err != nil {
+		t.Fatalf("Send 2: %v", err)
+	}
+	if resp2.Content[0].Text != "tool choice test 2" {
+		t.Fatalf("unexpected response 2: %q", resp2.Content[0].Text)
+	}
+
+	if sender.lastReq[1].ToolChoice.OfTool != nil {
+		t.Errorf("ToolChoice.OfTool should be nil when WithToolChoice not used, got %v", sender.lastReq[1].ToolChoice.OfTool)
+	}
+}
