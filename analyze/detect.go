@@ -87,7 +87,7 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 	md := renderTranscriptMarkdown(t)
 
 	resp, err := conv.Send(ctx, llm.UserText(md),
-		llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+		llm.WithMaxTokens(analyzeMaxOutputTokens), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: detect: %w", err)
 	}
@@ -97,7 +97,7 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 		retry := fmt.Sprintf("Your report_findings call could not be used: %v\n\n"+
 			"Call report_findings again with input that satisfies the schema.", perr)
 		resp, err = conv.Send(ctx, retryContent(resp, retry),
-			llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+			llm.WithMaxTokens(analyzeMaxOutputTokens), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 		if err != nil {
 			return nil, fmt.Errorf("analyze: detect retry: %w", err)
 		}

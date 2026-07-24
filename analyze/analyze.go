@@ -1,5 +1,11 @@
 package analyze
 
+// analyzeMaxOutputTokens is the output budget for the forced-tool stages.
+// Reasoning-heavy models (kimi, o-series style) can burn the llm default of
+// 4096 tokens on preamble before completing the tool call, failing with
+// stop_reason=max_tokens; the forced-tool JSON itself is small.
+const analyzeMaxOutputTokens = 16384
+
 const DetectorVersion = 1 // bump when the detector prompt or Finding schema changes
 
 type TurnCite struct {
