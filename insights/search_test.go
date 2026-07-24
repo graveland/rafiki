@@ -257,3 +257,48 @@ func TestSearch_TurnFiltersRequireOneMatchingTurn(t *testing.T) {
 		t.Fatalf("search model+source = %+v, want only the conversation with both on one turn", rows)
 	}
 }
+
+func TestSearch_FiltersByEntrypoint(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	// Create a conversation with 'test' entrypoint (default from insertConversation)
+	testConv := seedConversation(t, pool, "client", "alice")
+
+	// Create a conversation with 'analyze' entrypoint
+	analyzeConv := seedConversation(t, pool, "client", "bob")
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET origin_entrypoint = 'analyze' WHERE id = $1::uuid`,
+		analyzeConv); err != nil {
+		t.Fatalf("update entrypoint: %v", err)
+	}
+
+	ins := New(pool)
+
+	// Filter by Entrypoint='analyze' should return only analyzeConv
+	byEntrypoint, err := ins.Search(ctx, SearchFilter{Entrypoint: "analyze"})
+	if err != nil {
+		t.Fatalf("search by entrypoint: %v", err)
+	}
+	if len(byEntrypoint) != 1 || byEntrypoint[0].ID != analyzeConv {
+		t.Fatalf("entrypoint filter = %+v, want one analyze conversation", byEntrypoint)
+	}
+
+	// ExcludeEntrypoint='analyze' should return only testConv
+	exclude, err := ins.Search(ctx, SearchFilter{ExcludeEntrypoint: "analyze"})
+	if err != nil {
+		t.Fatalf("search exclude entrypoint: %v", err)
+	}
+	if len(exclude) != 1 || exclude[0].ID != testConv {
+		t.Fatalf("exclude entrypoint filter = %+v, want one test conversation", exclude)
+	}
+
+	// Zero-value filter returns both
+	all, err := ins.Search(ctx, SearchFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("search all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unfiltered results = %d, want 2", len(all))
+	}
+}

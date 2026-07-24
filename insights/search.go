@@ -15,16 +15,18 @@ import (
 // window, not conversation creation time) — the same population
 // GlobalStats selects with the same filter.
 type SearchFilter struct {
-	Since, Until *time.Time
-	Owner        string
-	Persona      string
-	Source       string
-	Model        string
-	Status       string
-	Path         Path
-	MinTokens    int64  // minimum total (input+output) tokens across the conversation's turns
-	Text         string // ILIKE substring match against the first user message snippet
-	Limit        int    // defaults to 50 when <= 0
+	Since, Until      *time.Time
+	Owner             string
+	Persona           string
+	Source            string
+	Model             string
+	Status            string
+	Path              Path
+	MinTokens         int64  // minimum total (input+output) tokens across the conversation's turns
+	Text              string // ILIKE substring match against the first user message snippet
+	Entrypoint        string // match conversations by origin_entrypoint
+	ExcludeEntrypoint string // drop conversations with this origin_entrypoint
+	Limit             int    // defaults to 50 when <= 0
 }
 
 // ConversationSummary is one row of Search: the conversation plus a cheap
@@ -78,6 +80,12 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 	}
 	if f.Status != "" {
 		convConds = append(convConds, "c.status = "+a.next(f.Status))
+	}
+	if f.Entrypoint != "" {
+		convConds = append(convConds, "c.origin_entrypoint = "+a.next(f.Entrypoint))
+	}
+	if f.ExcludeEntrypoint != "" {
+		convConds = append(convConds, "c.origin_entrypoint IS DISTINCT FROM "+a.next(f.ExcludeEntrypoint))
 	}
 	// Model, Source, and Since/Until filter on PER-TURN values via ONE shared
 	// EXISTS — a single turn must satisfy all of them, matching the population
