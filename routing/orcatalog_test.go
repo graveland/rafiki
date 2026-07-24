@@ -168,6 +168,14 @@ func TestResolveModel(t *testing.T) {
 	// ~anthropic/claude-<fam>-latest.
 	mustResolve("haiku-latest", "~anthropic/claude-sonnet-latest", "claude-sonnet-5")
 
+	// An "anthropic/<x>" id names the native/direct Anthropic sender: the prefix
+	// is stripped and <x> resolved exactly as a bare id, so the concrete result
+	// has NO slash and downstream slash-routing keeps it on the Anthropic path.
+	mustResolve("haiku-latest", "anthropic/sonnet-latest", "claude-sonnet-5")       // alias, same as bare sonnet-latest
+	mustResolve("haiku-latest", "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5") // concrete id, prefix stripped, passthrough
+	// A non-anthropic provider prefix stays an OpenRouter-native slash id, unchanged.
+	mustResolve("haiku-latest", "deepseek/deepseek-chat", "deepseek/deepseek-chat")
+
 	// Short model aliases resolve to the line's newest OR id (slash form, so
 	// downstream slash routing sends them to OpenRouter). An empty request
 	// resolves through a model-alias default too.
@@ -187,6 +195,11 @@ func TestResolveModel(t *testing.T) {
 	}
 	if _, err := ResolveModel(nil, "", "kimi-k3"); err == nil {
 		t.Error("nil catalog + model alias must error")
+	}
+	// No requested model AND no default must error loudly — there is no hardcoded
+	// silent default (haiku or otherwise) to paper over an unset model.
+	if _, err := ResolveModel(c, "", ""); err == nil {
+		t.Error("empty model + empty default must error, not silently pick a model")
 	}
 }
 

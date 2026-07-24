@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -17,6 +18,21 @@ import (
 )
 
 const openRouterModelsURL = "https://openrouter.ai/api/v1/models"
+
+// NativeAnthropicPrefix marks a model id as targeting the native/direct
+// Anthropic sender under the shared "provider/model" naming convention.
+// Stripping it yields a bare id that resolves — and routes — exactly as an
+// unprefixed Anthropic id does.
+const NativeAnthropicPrefix = "anthropic/"
+
+// StripNativeAnthropicPrefix removes a leading bare "anthropic/" prefix,
+// reporting whether it was present. It deliberately does NOT touch the
+// "~anthropic/..." OpenRouter auto-latest form (that stays an OpenRouter id).
+// Shared by ResolveModel (resolution) and the send path (routing) so the
+// native-Anthropic marker is understood identically at both entry points.
+func StripNativeAnthropicPrefix(model string) (string, bool) {
+	return strings.CutPrefix(model, NativeAnthropicPrefix)
+}
 
 // latestFamilies are the Anthropic family names for which "<family>-latest"
 // resolves. This is a set of family *names*, not model versions: it changes only
@@ -88,15 +104,28 @@ func ModelAliases() []string {
 }
 
 // ResolveModel maps a requested model to the concrete id to send upstream:
-// empty -> defaultModel; a "<family>-latest" alias -> the catalog's newest for
-// that family; a short model alias (kimi-k3) -> the catalog's newest release
-// of that model line; anything else (a concrete Anthropic id or a slash
-// OpenRouter id) unchanged. An alias errors when the catalog can't resolve it
-// (nil catalog, or offline with a cold cache) rather than sending an unusable
-// alias upstream — there is no hardcoded fallback list.
+// empty -> defaultModel (and empty with no default is an error — there is no
+// hardcoded silent default); an "anthropic/<x>" prefix -> the native-Anthropic
+// marker, stripped and <x> resolved as a bare id; a "<family>-latest" alias ->
+// the catalog's newest for that family; a short model alias (kimi-k3) -> the
+// catalog's newest release of that model line; anything else (a concrete
+// Anthropic id or a slash OpenRouter id) unchanged. An alias errors when the
+// catalog can't resolve it (nil catalog, or offline with a cold cache) rather
+// than sending an unusable alias upstream — there is no hardcoded fallback list.
 func ResolveModel(cat *ModelCatalog, defaultModel, requested string) (string, error) {
 	if requested == "" {
 		requested = defaultModel
+	}
+	if requested == "" {
+		return "", errors.New("no model specified: set a per-conversation model or a default (WithDefaultModel)")
+	}
+	// An "anthropic/<x>" id names the native Anthropic sender under the shared
+	// "provider/model" convention: strip the prefix and resolve <x> exactly as a
+	// bare id, so the concrete result has no slash and downstream slash-routing
+	// leaves it on the direct Anthropic path. ("~anthropic/..." starts with "~",
+	// is untouched here, and is handled below as a latest alias / slash id.)
+	if stripped, ok := StripNativeAnthropicPrefix(requested); ok {
+		requested = stripped
 	}
 	if fam, ok := LatestAlias(requested); ok {
 		if cat != nil {

@@ -284,6 +284,115 @@ func TestSendParamsSlashModelWithoutOpenRouterErrors(t *testing.T) {
 	}
 }
 
+// TestSendParamsAnthropicPrefixRoutesNative proves the "anthropic/<x>" native
+// marker reaches the direct Anthropic sender (prefix stripped on the wire),
+// while a non-anthropic provider slash id still routes to OpenRouter — covering
+// the second entry point where callers build params directly (bypassing
+// ResolveModel).
+func TestSendParamsAnthropicPrefixRoutesNative(t *testing.T) {
+	anthropicSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("from anthropic"),
+	}}
+	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("from openrouter"),
+	}}
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, anthropicSender),
+		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// "anthropic/" prefix -> native Anthropic sender, prefix stripped on the wire.
+	params := anthropic.MessageNewParams{Model: "anthropic/sonnet-latest", MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+	resp, err := c.SendParams(context.Background(), SendMeta{}, params)
+	if err != nil {
+		t.Fatalf("SendParams(anthropic/...): %v", err)
+	}
+	if resp.Content[0].Text != "from anthropic" {
+		t.Errorf("response = %q, want from anthropic", resp.Content[0].Text)
+	}
+	if openrouter.calls != 0 {
+		t.Errorf("openrouter called %d times, want 0 (anthropic/ is native)", openrouter.calls)
+	}
+	if got := string(anthropicSender.lastReq[0].Model); got != "sonnet-latest" {
+		t.Errorf("anthropic wire model = %q, want prefix-stripped sonnet-latest", got)
+	}
+
+	// A non-anthropic provider slash id still routes to OpenRouter, unchanged.
+	params2 := anthropic.MessageNewParams{Model: "deepseek/deepseek-chat", MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+	resp2, err := c.SendParams(context.Background(), SendMeta{}, params2)
+	if err != nil {
+		t.Fatalf("SendParams(deepseek/...): %v", err)
+	}
+	if resp2.Content[0].Text != "from openrouter" {
+		t.Errorf("response = %q, want from openrouter", resp2.Content[0].Text)
+	}
+	if got := string(openrouter.lastReq[0].Model); got != "deepseek/deepseek-chat" {
+		t.Errorf("openrouter wire model = %q, want deepseek/deepseek-chat untranslated", got)
+	}
+	if anthropicSender.calls != 1 {
+		t.Errorf("anthropic called %d times, want 1 (deepseek must not touch it)", anthropicSender.calls)
+	}
+}
+
+// TestConversationAnthropicPrefixResolvesNative is the end-to-end check: an
+// "anthropic/<family>-latest" model set on a conversation resolves (via
+// ResolveModel at creation) to the concrete catalog id with the prefix gone,
+// and the turn reaches the native Anthropic sender — never OpenRouter.
+func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
+	anthropicSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("native"),
+	}}
+	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("openrouter"),
+	}}
+	c := newMemClient(t,
+		WithUpstream(UpstreamAnthropic, anthropicSender),
+		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithCatalog(seededCatalog(t)),
+	)
+	conv, err := c.Conversation(context.Background(),
+		NewConversation("t", "test"), Model("anthropic/sonnet-latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conv.Send(context.Background(), UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if anthropicSender.calls != 1 {
+		t.Errorf("anthropic called %d times, want 1", anthropicSender.calls)
+	}
+	if openrouter.calls != 0 {
+		t.Errorf("openrouter called %d times, want 0 (anthropic/ resolves native)", openrouter.calls)
+	}
+	if got := string(anthropicSender.lastReq[0].Model); got != "claude-sonnet-5" {
+		t.Errorf("resolved wire model = %q, want concrete claude-sonnet-5 (prefix stripped, alias pinned)", got)
+	}
+}
+
+// TestConversationNoModelNoDefaultErrors proves the hardcoded haiku default is
+// gone: with no per-conversation model and no WithDefaultModel, creation errors
+// loudly rather than silently selecting a model.
+func TestConversationNoModelNoDefaultErrors(t *testing.T) {
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, &scriptedSender{}),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Conversation(context.Background(), NewConversation("t", "test")); err == nil {
+		t.Fatal("no per-conversation model + no default must error, not silently pick haiku")
+	}
+}
+
 func TestSendParamsNoFallbackBypassesBreaker(t *testing.T) {
 	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondErr(overloadedErr()), // trips via the WITH-fallback send

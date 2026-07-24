@@ -59,6 +59,7 @@ func testClient(t *testing.T, pool *pgxpool.Pool, sender Sender) *Client {
 		WithUpstream(UpstreamAnthropic, sender),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
+		WithDefaultModel("haiku-latest"), // conversations created without Model() intend this default
 		WithLogger(testLogger(t)),
 	)
 	if err != nil {

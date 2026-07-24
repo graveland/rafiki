@@ -74,7 +74,8 @@ func WithLogger(l *tslogs.Logger) ClientOption {
 }
 
 // WithDefaultModel sets the model used when a conversation doesn't specify
-// one. Defaults to "haiku-latest".
+// one. There is no built-in default: without this option and with no
+// per-conversation model, resolution errors rather than silently picking one.
 func WithDefaultModel(m string) ClientOption {
 	return func(c *Client) { c.defaultModel = m }
 }
@@ -88,9 +89,8 @@ func WithTracerProvider(tp trace.TracerProvider) ClientOption {
 
 func NewClient(opts ...ClientOption) (*Client, error) {
 	c := &Client{
-		senders:      map[Upstream]Sender{},
-		breakers:     map[Upstream]*routing.Breaker{},
-		defaultModel: "haiku-latest",
+		senders:  map[Upstream]Sender{},
+		breakers: map[Upstream]*routing.Breaker{},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -164,6 +164,14 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		primary = UpstreamAnthropic
 	}
 	fallbacks := meta.Fallback
+	// An "anthropic/<x>" id explicitly names the native Anthropic sender: strip
+	// the prefix so it isn't caught by the generic slash->OpenRouter rule below,
+	// and so the native API receives a bare id. This covers callers that build
+	// params directly (bypassing ResolveModel); it's idempotent for the resolved
+	// Conversation path, where the prefix is already gone.
+	if stripped, ok := routing.StripNativeAnthropicPrefix(string(params.Model)); ok {
+		params.Model = anthropic.Model(stripped)
+	}
 	if strings.Contains(string(params.Model), "/") {
 		// A slash id is OpenRouter-native: route directly to OpenRouter rather
 		// than defaulting to upstream anthropic. Keeps things compatible with
