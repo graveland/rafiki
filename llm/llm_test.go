@@ -10,7 +10,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"github.com/timescale/rafiki/routing"
+	"git.graveland.dev/brent/rafiki/routing"
 
 	"github.com/timescale/savannah-common/go/tslogs"
 )

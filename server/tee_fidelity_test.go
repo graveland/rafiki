@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"git.graveland.dev/brent/rafiki/routing"
+	"git.graveland.dev/brent/rafiki/store"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/timescale/rafiki/routing"
-	"github.com/timescale/rafiki/store"
 	"github.com/timescale/savannah-common/go/tslogs"
 )
 

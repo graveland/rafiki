@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/timescale/rafiki/insights"
+	"git.graveland.dev/brent/rafiki/insights"
 )
 
 func block(v any) map[string]any {

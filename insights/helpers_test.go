@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/timescale/rafiki/store"
+	"git.graveland.dev/brent/rafiki/store"
 )
 
 // Integration tests need a real TimescaleDB (>= 2.22, PostgreSQL 18 for

@@ -15,8 +15,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/timescale/rafiki/routing"
-	"github.com/timescale/rafiki/store"
+	"git.graveland.dev/brent/rafiki/routing"
+	"git.graveland.dev/brent/rafiki/store"
 
 	"github.com/timescale/savannah-common/go/tslogs"
 )
@@ -84,7 +84,7 @@ func WithDefaultModel(m string) ClientOption {
 // installs a global provider: embedded mode passes the host's provider,
 // the standalone binary constructs one from OTLP env vars. Omitted = no-op.
 func WithTracerProvider(tp trace.TracerProvider) ClientOption {
-	return func(c *Client) { c.tracer = tp.Tracer("github.com/timescale/rafiki/llm") }
+	return func(c *Client) { c.tracer = tp.Tracer("git.graveland.dev/brent/rafiki/llm") }
 }
 
 func NewClient(opts ...ClientOption) (*Client, error) {
@@ -106,7 +106,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		c.logger = logger
 	}
 	if c.tracer == nil {
-		c.tracer = noop.NewTracerProvider().Tracer("github.com/timescale/rafiki/llm")
+		c.tracer = noop.NewTracerProvider().Tracer("git.graveland.dev/brent/rafiki/llm")
 	}
 	if c.catalog == nil {
 		c.catalog = routing.NewModelCatalog(http.DefaultClient, time.Hour, c.logger)

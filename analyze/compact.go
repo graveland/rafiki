@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/timescale/rafiki/insights"
+	"git.graveland.dev/brent/rafiki/insights"
 )
 
 // Compact reduces a transcript to fit within p's byte budgets. It never

@@ -14,8 +14,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/timescale/rafiki/llm"
-	"github.com/timescale/rafiki/store"
+	"git.graveland.dev/brent/rafiki/llm"
+	"git.graveland.dev/brent/rafiki/store"
 
 	"github.com/timescale/savannah-common/go/tslogs"
 )

@@ -14,8 +14,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/timescale/rafiki/routing"
-	"github.com/timescale/rafiki/store"
+	"git.graveland.dev/brent/rafiki/routing"
+	"git.graveland.dev/brent/rafiki/store"
 )
 
 // Conversation is the core library object: DB-backed message history plus

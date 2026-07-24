@@ -3,8 +3,8 @@ package server
 import (
 	"time"
 
+	"git.graveland.dev/brent/rafiki/routing"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/timescale/rafiki/routing"
 )
 
 // Metrics is the server's Prometheus instrumentation: turn outcomes by

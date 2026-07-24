@@ -8,9 +8,9 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"github.com/timescale/rafiki/insights"
-	"github.com/timescale/rafiki/llm"
-	"github.com/timescale/rafiki/routing"
+	"git.graveland.dev/brent/rafiki/insights"
+	"git.graveland.dev/brent/rafiki/llm"
+	"git.graveland.dev/brent/rafiki/routing"
 )
 
 // fakeSender is a minimal llm.Sender stub: it returns queued canned

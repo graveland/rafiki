@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/timescale/rafiki/routing"
-	"github.com/timescale/rafiki/store"
+	"git.graveland.dev/brent/rafiki/routing"
+	"git.graveland.dev/brent/rafiki/store"
 	"github.com/timescale/savannah-common/go/tslogs"
 )
 

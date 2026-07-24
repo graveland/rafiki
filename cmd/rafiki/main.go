@@ -27,10 +27,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 
-	"github.com/timescale/rafiki/llm"
-	"github.com/timescale/rafiki/routing"
-	"github.com/timescale/rafiki/server"
-	"github.com/timescale/rafiki/store"
+	"git.graveland.dev/brent/rafiki/llm"
+	"git.graveland.dev/brent/rafiki/routing"
+	"git.graveland.dev/brent/rafiki/server"
+	"git.graveland.dev/brent/rafiki/store"
 
 	"github.com/timescale/savannah-common/go/tslogs"
 )

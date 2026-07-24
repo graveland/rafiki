@@ -8,8 +8,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"github.com/timescale/rafiki/insights"
-	"github.com/timescale/rafiki/llm"
+	"git.graveland.dev/brent/rafiki/insights"
+	"git.graveland.dev/brent/rafiki/llm"
 )
 
 // builtinDetectorPrompt is the default system prompt for Detect, judging a

@@ -1,4 +1,4 @@
-module github.com/timescale/rafiki
+module git.graveland.dev/brent/rafiki
 
 go 1.26.4
 
