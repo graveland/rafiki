@@ -643,3 +643,98 @@ func TestConcurrentResume(t *testing.T) {
 		}
 	}
 }
+
+// ---- Task 2 primitives: tool-call ids + PendingUser steer hook ------------
+
+// newMemConv builds a store-less (in-memory) conversation: full loop
+// semantics, no DB — the fast path for exercising drive() without a store.
+func newMemConv(t *testing.T, sender llm.Sender) *llm.Conversation {
+	t.Helper()
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	c, err := llm.NewClient(
+		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithLogger(logger),
+		llm.WithDefaultModel("claude-test"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := c.Conversation(context.Background(), llm.NewConversation("brent", "loop-test"),
+		llm.Model("claude-test"), llm.SystemText("test system"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conv
+}
+
+// recordingTools exposes a single "echo" tool that records the ToolCallID it
+// sees on its execution context.
+type recordingTools struct {
+	ctxID string
+}
+
+func (r *recordingTools) Definitions() []anthropic.ToolUnionParam {
+	return []anthropic.ToolUnionParam{
+		{OfTool: &anthropic.ToolParam{Name: "echo", InputSchema: anthropic.ToolInputSchemaParam{Type: "object"}}},
+	}
+}
+
+func (r *recordingTools) Execute(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
+	r.ctxID = ToolCallID(ctx)
+	return "ok", nil
+}
+
+const respEchoTool = `{"id":"msg_t","type":"message","role":"assistant","model":"m",
+	"content":[{"type":"tool_use","id":"tu_1","name":"echo","input":{}}],
+	"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}}`
+
+func TestOnToolStartEndCarryID(t *testing.T) {
+	conv := newMemConv(t, &scriptedSender{scripts: []string{respEchoTool, respEndTurn}})
+	tools := &recordingTools{}
+	var startID, endID string
+	ev := &Events{
+		OnToolStart: func(id, _ string, _ json.RawMessage) { startID = id },
+		OnToolEnd:   func(id, _, _ string, _ error) { endID = id },
+	}
+	if _, err := Run(context.Background(), conv, tools, ev, llm.UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if startID != "tu_1" || endID != "tu_1" || tools.ctxID != "tu_1" {
+		t.Fatalf("ids: start=%q end=%q ctx=%q, want tu_1", startID, endID, tools.ctxID)
+	}
+}
+
+func TestPendingUserInjectedBetweenIterations(t *testing.T) {
+	conv := newMemConv(t, &scriptedSender{scripts: []string{respEchoTool, respEndTurn}})
+	injected := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("steer!")}
+	ev := &Events{PendingUser: func() []anthropic.ContentBlockParamUnion {
+		out := injected
+		injected = nil // fire once
+		return out
+	}}
+	if _, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	hist, err := conv.History(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHistoryContainsUserText(t, hist, "steer!")
+}
+
+// assertHistoryContainsUserText fails unless some user row's text content
+// contains want.
+func assertHistoryContainsUserText(t *testing.T, hist []store.Message, want string) {
+	t.Helper()
+	for _, m := range hist {
+		if m.Param.Role != anthropic.MessageParamRoleUser {
+			continue
+		}
+		for _, b := range m.Param.Content {
+			if b.OfText != nil && strings.Contains(b.OfText.Text, want) {
+				return
+			}
+		}
+	}
+	t.Fatalf("history has no user message containing %q", want)
+}

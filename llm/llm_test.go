@@ -568,3 +568,66 @@ func TestWithMessageBreakpoints(t *testing.T) {
 func UserTextMessages(s string) []Message {
 	return []Message{anthropic.NewUserMessage(anthropic.NewTextBlock(s))}
 }
+
+// ---- Task 2 primitives: Primary + ThinkingBudget conv options -------------
+
+// newMemClient builds a store-less (in-memory) client for unit tests: full
+// loop semantics, no DB. Callers add their own WithUpstream options.
+func newMemClient(t *testing.T, opts ...ClientOption) *Client {
+	t.Helper()
+	base := []ClientOption{WithLogger(testLogger(t)), WithDefaultModel("claude-test")}
+	c, err := NewClient(append(base, opts...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestPrimaryOptionRoutesUpstream(t *testing.T) {
+	anthropicSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("from anthropic"),
+	}}
+	openrouterSender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("from openrouter"),
+	}}
+	c := newMemClient(t,
+		WithUpstream(UpstreamAnthropic, anthropicSender),
+		WithUpstream(UpstreamOpenRouter, openrouterSender),
+	)
+	conv, err := c.Conversation(context.Background(),
+		NewConversation("t", "test"), Model("claude-test"), Primary(UpstreamOpenRouter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conv.Send(context.Background(), UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if openrouterSender.calls != 1 {
+		t.Fatalf("openrouter (declared primary) called %d times, want 1", openrouterSender.calls)
+	}
+	if anthropicSender.calls != 0 {
+		t.Fatalf("anthropic called %d times, want 0 (openrouter is primary)", anthropicSender.calls)
+	}
+}
+
+func TestThinkingBudgetSetsParam(t *testing.T) {
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("ok"),
+	}}
+	c := newMemClient(t, WithUpstream(UpstreamAnthropic, sender))
+	conv, err := c.Conversation(context.Background(),
+		NewConversation("t", "test"), Model("claude-test"), ThinkingBudget(8192))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conv.Send(context.Background(), UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.lastReq) == 0 {
+		t.Fatal("sender captured no request")
+	}
+	last := sender.lastReq[len(sender.lastReq)-1]
+	if last.Thinking.OfEnabled == nil || last.Thinking.OfEnabled.BudgetTokens != 8192 {
+		t.Fatalf("thinking budget not set: %+v", last.Thinking)
+	}
+}

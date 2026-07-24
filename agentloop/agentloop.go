@@ -58,6 +58,15 @@ type Events struct {
 	// OnTurn fires after each LLM call with its usage, duration and error —
 	// the host metrics hook (sc's ObserveClaudeRequest/RecordClaudeTokens).
 	OnTurn func(resp *anthropic.Message, dur time.Duration, err error)
+	// OnToolStart/OnToolEnd mirror OnToolCall/OnToolResult but carry the
+	// tool_use id, so hosts can correlate execution events with the assistant
+	// message's tool_use blocks.
+	OnToolStart func(id, name string, input json.RawMessage)
+	OnToolEnd   func(id, name, result string, err error)
+	// PendingUser, when non-nil, is polled after each tool batch's results are
+	// persisted and before the next Continue. Non-empty returned content is
+	// appended as an additional user message — the mid-turn steer seam.
+	PendingUser func() []anthropic.ContentBlockParamUnion
 }
 
 func (e *Events) text(t string) {
@@ -76,6 +85,27 @@ func (e *Events) toolResult(name, result string, err error) {
 	if e != nil && e.OnToolResult != nil {
 		e.OnToolResult(name, result, err)
 	}
+}
+
+func (e *Events) toolStart(id, name string, input json.RawMessage) {
+	if e != nil && e.OnToolStart != nil {
+		e.OnToolStart(id, name, input)
+	}
+}
+
+func (e *Events) toolEnd(id, name, result string, err error) {
+	if e != nil && e.OnToolEnd != nil {
+		e.OnToolEnd(id, name, result, err)
+	}
+}
+
+type toolCallIDKey struct{}
+
+// ToolCallID returns the tool_use id of the call being executed on this
+// context, or "" when called outside a tool execution.
+func ToolCallID(ctx context.Context) string {
+	id, _ := ctx.Value(toolCallIDKey{}).(string)
+	return id
 }
 
 func (e *Events) turn(resp *anthropic.Message, dur time.Duration, err error) {
@@ -293,6 +323,15 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 					return &Result{Stats: stats}, fmt.Errorf("agentloop: persist tool result: %w", err)
 				}
 			}
+			// Mid-turn steer seam: inject any pending user content after the
+			// batch's results are persisted, before the next Continue.
+			if ev != nil && ev.PendingUser != nil {
+				if extra := ev.PendingUser(); len(extra) > 0 {
+					if err := conv.AppendUser(ctx, extra); err != nil {
+						return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content: %w", err)
+					}
+				}
+			}
 
 		default:
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: unexpected stop reason %q", resp.StopReason)
@@ -340,9 +379,11 @@ func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse
 		g.Go(func() error {
 			emitMu.Lock()
 			ev.toolCall(use.name, use.input)
+			ev.toolStart(use.id, use.name, use.input)
 			emitMu.Unlock()
 
-			result, err := tools.Execute(gctx, use.name, use.input)
+			tctx := context.WithValue(gctx, toolCallIDKey{}, use.id)
+			result, err := tools.Execute(tctx, use.name, use.input)
 			if err != nil && result == "" {
 				result = fmt.Sprintf("Error executing tool: %v", err)
 			}
@@ -350,6 +391,7 @@ func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse
 
 			emitMu.Lock()
 			ev.toolResult(use.name, result, err)
+			ev.toolEnd(use.id, use.name, result, err)
 			emitMu.Unlock()
 
 			results[i] = anthropic.NewToolResultBlock(use.id, result, err != nil)

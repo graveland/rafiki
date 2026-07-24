@@ -45,15 +45,17 @@ type convConfig struct {
 	persona     string
 
 	// send defaults
-	model       string // resolved to a concrete id at Conversation()
-	fallback    []Upstream
-	system      []anthropic.TextBlockParam
-	temperature *float64
-	topK        *int64
-	maxTokens   int64
-	trim        TrimPolicy
-	authorKind  string
-	cache       *CachePolicy
+	model          string // resolved to a concrete id at Conversation()
+	primary        Upstream
+	thinkingBudget int64
+	fallback       []Upstream
+	system         []anthropic.TextBlockParam
+	temperature    *float64
+	topK           *int64
+	maxTokens      int64
+	trim           TrimPolicy
+	authorKind     string
+	cache          *CachePolicy
 }
 
 type ConvOption func(*convConfig)
@@ -86,6 +88,16 @@ func Model(m string) ConvOption { return func(c *convConfig) { c.model = m } }
 // Fallback sets the upstream fallback chain consulted on retryable primary
 // failures.
 func Fallback(u ...Upstream) ConvOption { return func(c *convConfig) { c.fallback = u } }
+
+// Primary selects the upstream used first for every send in this conversation
+// (empty = UpstreamAnthropic, the default). The Fallback chain still applies.
+func Primary(u Upstream) ConvOption { return func(c *convConfig) { c.primary = u } }
+
+// ThinkingBudget enables extended thinking with the given token budget
+// (0 = disabled, the default).
+func ThinkingBudget(tokens int64) ConvOption {
+	return func(c *convConfig) { c.thinkingBudget = tokens }
+}
 
 // Temperature sets the sampling temperature default.
 func Temperature(t float64) ConvOption { return func(c *convConfig) { c.temperature = &t } }
@@ -441,6 +453,7 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		Source:           scfg.source,
 		Author:           scfg.author,
 		AuthorKind:       conv.cfg.authorKind,
+		Primary:          conv.cfg.primary,
 		Fallback:         conv.cfg.fallback,
 	}
 	for attempt := 0; attempt < 3; attempt++ {
@@ -506,6 +519,9 @@ func (conv *Conversation) assemble(reqMsgs []Message, scfg sendConfig) anthropic
 	}
 	if conv.cfg.topK != nil {
 		params.TopK = anthropic.Int(*conv.cfg.topK)
+	}
+	if conv.cfg.thinkingBudget > 0 {
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(conv.cfg.thinkingBudget)
 	}
 	return params
 }
