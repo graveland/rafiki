@@ -1,0 +1,22 @@
+# dev/testing profiles for model comparison — not distributed; drop into
+# ~/.config/sc/analyzer/profiles.yaml or use as a corpus-mode local override.
+
+compare-sonnet:
+  detector_model: claude-sonnet-5
+  draft_model: claude-sonnet-5
+
+compare-haiku:
+  detector_model: claude-haiku-4-5
+  draft_model: claude-sonnet-5
+
+compare-ds-flash:
+  detector_model: deepseek/deepseek-v4-flash
+  draft_model: claude-sonnet-5
+
+compare-ds-pro:
+  detector_model: deepseek/deepseek-v4-pro
+  draft_model: claude-sonnet-5
+
+compare-kimi:
+  detector_model: "~moonshotai/kimi-latest"
+  draft_model: claude-sonnet-5

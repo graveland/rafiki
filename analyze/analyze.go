@@ -1,6 +1,6 @@
 package analyze
 
-const DetectorVersion = 1 // bump when the detector prompt or Finding schema changes
+const DetectorVersion = 2 // bump when the detector prompt or Finding schema changes
 
 type TurnCite struct {
 	Ordinal int    `json:"ordinal"`
@@ -8,7 +8,7 @@ type TurnCite struct {
 }
 
 type Recommendation struct {
-	Kind      string `json:"kind"` // new-skill | skill-edit | memory | none
+	Kind      string `json:"kind"` // new-skill | skill-edit | memory | mcp-tool | none
 	SkillName string `json:"skill_name,omitempty"`
 	Summary   string `json:"summary"`
 }
@@ -70,10 +70,45 @@ type Profile struct {
 	Compact       CompactPolicy     `yaml:"compact" json:"compact"`
 	Filters       map[string]string `yaml:"filters" json:"filters"` // search-filter fields (since, persona, ...)
 
+	// MaxOutputTokens is the output budget for the forced-tool Detect/Draft
+	// calls; 0 = default 16384 (applied by Defaults). Reasoning-heavy models
+	// (kimi, o-series style) can burn the llm default of 4096 tokens on
+	// preamble before completing the tool call, failing with
+	// stop_reason=max_tokens, and need headroom above 16384 (kimi observed
+	// 8,871 alone). Models with a low output cap or slow throughput need it
+	// lowered instead (opus-4 line must stay <=8192 per the anthropic-sdk-go
+	// non-streaming 10-minute guard).
+	MaxOutputTokens int `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
+
 	// Prompt knobs: *Prompt fully replaces the built-in stage prompt;
 	// *PromptExtra appends to whichever base is active.
 	DetectorPrompt      string `yaml:"detector_prompt" json:"detector_prompt"`
 	DetectorPromptExtra string `yaml:"detector_prompt_extra" json:"detector_prompt_extra"`
 	DraftPrompt         string `yaml:"draft_prompt" json:"draft_prompt"`
 	DraftPromptExtra    string `yaml:"draft_prompt_extra" json:"draft_prompt_extra"`
+
+	// *PromptFile / *PromptExtraFile: yaml-only sugar, resolved by
+	// LoadAnalyzerDir into the corresponding inline field above (paths are
+	// relative to the analyzer directory; the _file field is zeroed once
+	// resolved, so it never appears on the wire). LoadProfiles (the
+	// server's single-file dev loader) rejects these as unsupported.
+	DetectorPromptFile      string `yaml:"detector_prompt_file,omitempty" json:"-"`
+	DetectorPromptExtraFile string `yaml:"detector_prompt_extra_file,omitempty" json:"-"`
+	DraftPromptFile         string `yaml:"draft_prompt_file,omitempty" json:"-"`
+	DraftPromptExtraFile    string `yaml:"draft_prompt_extra_file,omitempty" json:"-"`
+
+	// *PromptBase: the analyzer directory's detector.md/draft.md BASE
+	// prompts, attached by a resolution layer (not by LoadAnalyzerDir
+	// itself — see its doc comment for why). Never read from profiles.yaml
+	// (yaml:"-"), but travels on the wire (json) so every consumer — CLI
+	// inline, corpus, server — resolves the same effective prompt.
+	DetectorPromptBase string `yaml:"-" json:"detector_prompt_base,omitempty"`
+	DraftPromptBase    string `yaml:"-" json:"draft_prompt_base,omitempty"`
 }
+
+// BuiltinDetectorPrompt and BuiltinDraftPrompt expose the compiled-in stage
+// prompts — the last-resort base when no analyzer directory supplies
+// detector.md/draft.md (e.g. corpus mode on a machine that has never
+// synced). Embedders use them to render effective-prompt reports.
+func BuiltinDetectorPrompt() string { return builtinDetectorPrompt }
+func BuiltinDraftPrompt() string    { return builtinDraftPrompt }
