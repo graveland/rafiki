@@ -162,6 +162,25 @@ func TestDetectWellFormedToolUse(t *testing.T) {
 	}
 }
 
+func TestDetectSendsProfileMaxOutputTokens(t *testing.T) {
+	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondToolUse(t, wellFormedInput),
+	}}
+	c := testDetectClient(t, sender)
+	p := &Profile{DetectorModel: "claude-haiku-4-5", MaxOutputTokens: 8871}
+
+	if _, err := Detect(context.Background(), c, fixtureTranscript(), p, "brent", nil); err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	if len(sender.lastReq) != 1 {
+		t.Fatalf("requests sent = %d, want 1", len(sender.lastReq))
+	}
+	if got := sender.lastReq[0].MaxTokens; got != 8871 {
+		t.Errorf("MaxTokens = %d, want 8871", got)
+	}
+}
+
 func TestDetectRecordsPromptHash(t *testing.T) {
 	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondToolUse(t, wellFormedInput),

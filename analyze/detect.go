@@ -27,7 +27,11 @@ Axes:
    kind "skill-edit", improving the skill's trigger/description). A gap with
    no matching skill at all — the agent improvised a multi-step procedure
    that would recur — is a NEW-SKILL finding (recommendation kind
-   "new-skill").
+   "new-skill"). Also consider the TOOLING: when the gap is really an MCP
+   tool that misbehaved, lacked a filter/capability, had misleading output,
+   or simply doesn't exist (the agent hand-rolled queries or shell work a
+   tool should own), report recommendation kind "mcp-tool" — name the tool
+   (or the tool to create) and the concrete fix/enhancement in the summary.
 2. knowledge-to-persist — A fact the agent derived only after real,
    expensive work (multiple tool calls, a long investigation, trial and
    error) that would be cheap to recall next time and durable (not
@@ -38,7 +42,8 @@ Axes:
    prefix), or many turns producing tiny output. Estimate grind_tokens as
    your best guess at tokens that a smarter approach would have avoided.
    Recommendation kind is usually "none" (grind is diagnostic, not always
-   actionable) unless the fix is a clear skill-edit or memory item.
+   actionable) unless the fix is a clear skill-edit, memory, or mcp-tool
+   item (e.g. a tool whose output forced repeated re-processing).
 
 Rules:
 - Cite only ordinals you actually saw content for. If the transcript
@@ -87,7 +92,7 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 	md := renderTranscriptMarkdown(t)
 
 	resp, err := conv.Send(ctx, llm.UserText(md),
-		llm.WithMaxTokens(analyzeMaxOutputTokens), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+		llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: detect: %w", err)
 	}
@@ -97,7 +102,7 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 		retry := fmt.Sprintf("Your report_findings call could not be used: %v\n\n"+
 			"Call report_findings again with input that satisfies the schema.", perr)
 		resp, err = conv.Send(ctx, retryContent(resp, retry),
-			llm.WithMaxTokens(analyzeMaxOutputTokens), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
+			llm.WithMaxTokens(int64(p.MaxOutputTokens)), llm.WithTools(tools), llm.WithToolChoice("report_findings"), llm.WithSource("analyze"))
 		if err != nil {
 			return nil, fmt.Errorf("analyze: detect retry: %w", err)
 		}
@@ -181,7 +186,7 @@ func validateDetectorOutput(out *detectorOutput) error {
 			return fmt.Errorf("finding %q has invalid axis %q", f.Title, f.Axis)
 		}
 		switch f.Recommendation.Kind {
-		case "new-skill", "skill-edit", "memory", "none":
+		case "new-skill", "skill-edit", "memory", "mcp-tool", "none":
 		default:
 			return fmt.Errorf("finding %q has invalid recommendation.kind %q", f.Title, f.Recommendation.Kind)
 		}
@@ -205,7 +210,7 @@ func reportFindingsTool() anthropic.ToolUnionParam {
 	recommendation := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"kind":       map[string]any{"type": "string", "enum": []string{"new-skill", "skill-edit", "memory", "none"}},
+			"kind":       map[string]any{"type": "string", "enum": []string{"new-skill", "skill-edit", "memory", "mcp-tool", "none"}},
 			"skill_name": map[string]any{"type": "string"},
 			"summary":    map[string]any{"type": "string"},
 		},

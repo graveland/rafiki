@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -78,6 +79,9 @@ func TestDefaults(t *testing.T) {
 	if p.Limit != 50 {
 		t.Errorf("expected Limit=50, got %d", p.Limit)
 	}
+	if p.MaxOutputTokens != 16384 {
+		t.Errorf("expected MaxOutputTokens=16384, got %d", p.MaxOutputTokens)
+	}
 	if p.Compact.MaxToolResultBytes != 2048 {
 		t.Errorf("expected MaxToolResultBytes=2048, got %d", p.Compact.MaxToolResultBytes)
 	}
@@ -94,9 +98,10 @@ func TestDefaults(t *testing.T) {
 
 func TestDefaultsPreservesExisting(t *testing.T) {
 	p := &Profile{
-		DetectorModel: "claude-opus-4-20250805",
-		DraftModel:    "claude-opus-4-20250805",
-		Limit:         75,
+		DetectorModel:   "claude-opus-4-20250805",
+		DraftModel:      "claude-opus-4-20250805",
+		Limit:           75,
+		MaxOutputTokens: 8192,
 		Compact: CompactPolicy{
 			MaxToolResultBytes: 4096,
 			MaxTranscriptBytes: 500 * 1024,
@@ -108,6 +113,9 @@ func TestDefaultsPreservesExisting(t *testing.T) {
 
 	if p.Limit != 75 {
 		t.Errorf("expected Limit=75 (preserved), got %d", p.Limit)
+	}
+	if p.MaxOutputTokens != 8192 {
+		t.Errorf("expected MaxOutputTokens=8192 (preserved), got %d", p.MaxOutputTokens)
 	}
 	if p.Compact.MaxToolResultBytes != 4096 {
 		t.Errorf("expected MaxToolResultBytes=4096 (preserved), got %d", p.Compact.MaxToolResultBytes)
@@ -203,6 +211,177 @@ test:
 	}
 }
 
+func TestLoadAnalyzerDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "profiles.yaml", `
+default:
+  detector_model: claude-sonnet-5
+  draft_model: claude-sonnet-5
+`)
+	writeFile(t, dir, "detector.md", "detector base text")
+	writeFile(t, dir, "draft.md", "draft base text")
+
+	cfg, err := LoadAnalyzerDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DetectorBase != "detector base text" {
+		t.Errorf("expected DetectorBase=%q, got %q", "detector base text", cfg.DetectorBase)
+	}
+	if cfg.DraftBase != "draft base text" {
+		t.Errorf("expected DraftBase=%q, got %q", "draft base text", cfg.DraftBase)
+	}
+	p, ok := cfg.Profiles["default"]
+	if !ok {
+		t.Fatal("expected 'default' profile")
+	}
+	if p.Name != "default" {
+		t.Errorf("expected Name='default', got %q", p.Name)
+	}
+	// LoadAnalyzerDir must not itself attach the bases to profiles — that's
+	// a resolution-layer concern.
+	if p.DetectorPromptBase != "" || p.DraftPromptBase != "" {
+		t.Errorf("expected LoadAnalyzerDir to leave *PromptBase unset on profiles, got %q / %q",
+			p.DetectorPromptBase, p.DraftPromptBase)
+	}
+}
+
+func TestLoadAnalyzerDirMissingMdFilesOK(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "profiles.yaml", `
+default:
+  detector_model: claude-sonnet-5
+  draft_model: claude-sonnet-5
+`)
+
+	cfg, err := LoadAnalyzerDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DetectorBase != "" {
+		t.Errorf("expected empty DetectorBase, got %q", cfg.DetectorBase)
+	}
+	if cfg.DraftBase != "" {
+		t.Errorf("expected empty DraftBase, got %q", cfg.DraftBase)
+	}
+}
+
+func TestLoadAnalyzerDirMissingProfilesYAML(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadAnalyzerDir(dir); err == nil {
+		t.Fatal("expected error for missing profiles.yaml")
+	}
+}
+
+func TestLoadAnalyzerDirPromptFileResolution(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "profiles.yaml", `
+custom:
+  detector_model: claude-sonnet-5
+  draft_model: claude-sonnet-5
+  detector_prompt_file: prompts/detector.txt
+  detector_prompt_extra_file: prompts/detector-extra.txt
+  draft_prompt_file: prompts/draft.txt
+  draft_prompt_extra_file: prompts/draft-extra.txt
+`)
+	writeFile(t, dir, "prompts/detector.txt", "custom detector prompt")
+	writeFile(t, dir, "prompts/detector-extra.txt", "custom detector extra")
+	writeFile(t, dir, "prompts/draft.txt", "custom draft prompt")
+	writeFile(t, dir, "prompts/draft-extra.txt", "custom draft extra")
+
+	cfg, err := LoadAnalyzerDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Profiles["custom"]
+	if p.DetectorPrompt != "custom detector prompt" {
+		t.Errorf("expected DetectorPrompt resolved from file, got %q", p.DetectorPrompt)
+	}
+	if p.DetectorPromptExtra != "custom detector extra" {
+		t.Errorf("expected DetectorPromptExtra resolved from file, got %q", p.DetectorPromptExtra)
+	}
+	if p.DraftPrompt != "custom draft prompt" {
+		t.Errorf("expected DraftPrompt resolved from file, got %q", p.DraftPrompt)
+	}
+	if p.DraftPromptExtra != "custom draft extra" {
+		t.Errorf("expected DraftPromptExtra resolved from file, got %q", p.DraftPromptExtra)
+	}
+	if p.DetectorPromptFile != "" || p.DetectorPromptExtraFile != "" ||
+		p.DraftPromptFile != "" || p.DraftPromptExtraFile != "" {
+		t.Error("expected all *_file fields cleared after resolution")
+	}
+}
+
+func TestLoadAnalyzerDirBothSetError(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "profiles.yaml", `
+custom:
+  detector_model: claude-sonnet-5
+  draft_model: claude-sonnet-5
+  detector_prompt: inline prompt
+  detector_prompt_file: prompts/detector.txt
+`)
+	writeFile(t, dir, "prompts/detector.txt", "file prompt")
+
+	_, err := LoadAnalyzerDir(dir)
+	if err == nil {
+		t.Fatal("expected error when both inline and _file are set")
+	}
+}
+
+func TestLoadAnalyzerDirRejectsTraversal(t *testing.T) {
+	cases := []string{
+		"/etc/passwd",
+		"../outside.txt",
+		"prompts/../../outside.txt",
+		`prompts\detector.txt`,
+	}
+	for _, ref := range cases {
+		t.Run(ref, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "profiles.yaml", fmt.Sprintf(`
+custom:
+  detector_model: claude-sonnet-5
+  draft_model: claude-sonnet-5
+  detector_prompt_file: %q
+`, ref))
+			if _, err := LoadAnalyzerDir(dir); err == nil {
+				t.Fatalf("expected error for path %q", ref)
+			}
+		})
+	}
+}
+
+func TestLoadProfilesRejectsFileFields(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "profiles.yaml")
+	if err := os.WriteFile(yamlPath, []byte(`
+custom:
+  detector_model: claude-sonnet-5
+  draft_model: claude-sonnet-5
+  detector_prompt_file: detector.txt
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadProfiles(yamlPath); err == nil {
+		t.Fatal("expected LoadProfiles to reject *_prompt_file fields")
+	}
+}
+
+// writeFile writes content to a file at dir/rel, creating parent
+// directories as needed.
+func writeFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	full := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEffectiveDetectorPrompt(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -248,6 +427,32 @@ func TestEffectiveDetectorPrompt(t *testing.T) {
 				DetectorPromptExtra: "addition",
 			},
 			expected: "base text\n\naddition",
+		},
+		{
+			name:    "DetectorPromptBase takes precedence over builtin",
+			builtin: "builtin prompt",
+			profile: Profile{
+				DetectorPromptBase: "analyzer-dir base",
+			},
+			expected: "analyzer-dir base",
+		},
+		{
+			name:    "DetectorPrompt replacement takes precedence over DetectorPromptBase",
+			builtin: "builtin prompt",
+			profile: Profile{
+				DetectorPromptBase: "analyzer-dir base",
+				DetectorPrompt:     "profile replacement",
+			},
+			expected: "profile replacement",
+		},
+		{
+			name:    "extra appends to DetectorPromptBase",
+			builtin: "builtin prompt",
+			profile: Profile{
+				DetectorPromptBase:  "analyzer-dir base",
+				DetectorPromptExtra: "extra text",
+			},
+			expected: "analyzer-dir base\n\nextra text",
 		},
 	}
 
@@ -298,6 +503,32 @@ func TestEffectiveDraftPrompt(t *testing.T) {
 				DraftPromptExtra: "extra text",
 			},
 			expected: "custom prompt\n\nextra text",
+		},
+		{
+			name:    "DraftPromptBase takes precedence over builtin",
+			builtin: "builtin prompt",
+			profile: Profile{
+				DraftPromptBase: "analyzer-dir base",
+			},
+			expected: "analyzer-dir base",
+		},
+		{
+			name:    "DraftPrompt replacement takes precedence over DraftPromptBase",
+			builtin: "builtin prompt",
+			profile: Profile{
+				DraftPromptBase: "analyzer-dir base",
+				DraftPrompt:     "profile replacement",
+			},
+			expected: "profile replacement",
+		},
+		{
+			name:    "extra appends to DraftPromptBase",
+			builtin: "builtin prompt",
+			profile: Profile{
+				DraftPromptBase:  "analyzer-dir base",
+				DraftPromptExtra: "extra text",
+			},
+			expected: "analyzer-dir base\n\nextra text",
 		},
 	}
 
@@ -360,6 +591,32 @@ func TestPromptHash(t *testing.T) {
 			},
 			isEmpty: false,
 		},
+		{
+			name: "DetectorPromptBase alone is non-empty",
+			profile: Profile{
+				DetectorPromptBase: "base text",
+			},
+			isEmpty: false,
+		},
+		{
+			name: "DraftPromptBase alone is non-empty",
+			profile: Profile{
+				DraftPromptBase: "base text",
+			},
+			isEmpty: false,
+		},
+		{
+			name: "all six non-empty",
+			profile: Profile{
+				DetectorPromptBase:  "detector base",
+				DetectorPrompt:      "detector",
+				DetectorPromptExtra: "detector extra",
+				DraftPromptBase:     "draft base",
+				DraftPrompt:         "draft",
+				DraftPromptExtra:    "draft extra",
+			},
+			isEmpty: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -397,5 +654,17 @@ func TestPromptHash(t *testing.T) {
 	}
 	if p1.PromptHash() == p3.PromptHash() {
 		t.Error("expected different profiles to produce different hashes")
+	}
+
+	// A base-only change (e.g. an analyzer-dir detector.md edit) must alter
+	// the hash — that's the whole point of hashing the bases too.
+	withBase := Profile{DetectorPromptBase: "detector.md v1"}
+	withEditedBase := Profile{DetectorPromptBase: "detector.md v2"}
+	if withBase.PromptHash() == withEditedBase.PromptHash() {
+		t.Error("expected a base-only edit to change the hash")
+	}
+	empty := Profile{}
+	if withBase.PromptHash() == empty.PromptHash() {
+		t.Error("expected a base-only profile to differ from an all-empty profile")
 	}
 }
