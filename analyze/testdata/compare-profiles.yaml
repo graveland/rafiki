@@ -1,5 +1,9 @@
 # dev/testing profiles for model comparison — not distributed; drop into
 # ~/.config/sc/analyzer/profiles.yaml or use as a corpus-mode local override.
+#
+# To exercise these with `rafiki agent analyze`, copy (or symlink) this file
+# to <dir>/profiles.yaml and pass --analyzer-dir <dir> --profile <name>, e.g.
+# --analyzer-dir DIR --profile compare-haiku. See docs/agent-cli.md.
 
 compare-sonnet:
   detector_model: claude-sonnet-5
