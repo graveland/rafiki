@@ -9,6 +9,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"github.com/timescale/rafiki/insights"
 	"github.com/timescale/rafiki/llm"
 )
 
@@ -54,7 +55,13 @@ type draftOutput struct {
 // On a malformed, unparseable, or schema-invalid propose_skill_edit call,
 // Draft retries ONCE, appending the parse error as a follow-up user turn and
 // re-forcing the tool. A second failure returns the error.
-func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillFile, p *Profile, owner string) (*SkillEdit, error) {
+//
+// pricer prices the returned SkillEdit's InputTokens/OutputTokens/CostUSD
+// against the response's actually-served model (resp.Model, which a
+// catalog-mediated failover can differ from p.DraftModel) — mirroring
+// Detect's own pricer parameter and detectCost helper exactly. nil is safe
+// (CostUSD stays 0).
+func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillFile, p *Profile, owner string, pricer insights.Pricer) (*SkillEdit, error) {
 	model := p.DraftModel
 	sys := p.EffectiveDraftPrompt(builtinDraftPrompt)
 
@@ -87,10 +94,14 @@ func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillF
 		}
 	}
 
+	servedModel := string(resp.Model)
 	return &SkillEdit{
 		FindingTitle: f.Title,
 		Files:        out.Files,
 		Rationale:    out.Rationale,
+		InputTokens:  resp.Usage.InputTokens,
+		OutputTokens: resp.Usage.OutputTokens,
+		CostUSD:      detectCost(pricer, servedModel, resp.Usage),
 	}, nil
 }
 

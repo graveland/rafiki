@@ -145,16 +145,18 @@ func AnalyzedSet(ctx context.Context, pool *pgxpool.Pool, convIDs []string, dete
 	return out, rows.Err()
 }
 
-// FindingRow is one conversations.analysis_finding row.
+// FindingRow is one conversations.analysis_finding row. Tags use the same
+// snake_case wire shape as agentcli.Summary/Progress, so `findings -j` and
+// any other JSON-emitting path share one consistent finding representation.
 type FindingRow struct {
-	ID                    string
-	AnalysisID            string
-	Axis                  string
-	TopicKey              string
-	SkillName             string
-	Title                 string
-	ExpectedSavingsTokens int64
-	Status                string
+	ID                    string `json:"id"`
+	AnalysisID            string `json:"analysis_id"`
+	Axis                  string `json:"axis"`
+	TopicKey              string `json:"topic_key"`
+	SkillName             string `json:"skill_name,omitempty"`
+	Title                 string `json:"title"`
+	ExpectedSavingsTokens int64  `json:"expected_savings_tokens"`
+	Status                string `json:"status"`
 }
 
 // ReplaceFindings replaces analysisID's findings with rows, atomically: a

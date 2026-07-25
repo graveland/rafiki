@@ -52,6 +52,18 @@ type SkillEdit struct {
 	FindingTitle string      `json:"finding_title"`
 	Files        []SkillFile `json:"files"` // full proposed contents
 	Rationale    string      `json:"rationale"`
+
+	// InputTokens/OutputTokens/CostUSD are the drafting call's own usage,
+	// mirroring Analysis's identically-named fields — without these, a
+	// SkillEdit's LLM cost was invisible to any caller folding it into a
+	// run-wide total (rankAndDraft sums Detect's Totals well before Draft
+	// ever runs). Populated from the served response's usage (resp.Usage),
+	// priced against resp.Model — the model actually served, which a
+	// catalog-mediated failover can differ from the requested one — same
+	// as Detect's own detectCost helper.
+	InputTokens  int64   `json:"input_tokens,omitempty"`
+	OutputTokens int64   `json:"output_tokens,omitempty"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
 }
 
 type CompactPolicy struct {
