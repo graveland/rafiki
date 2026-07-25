@@ -6,6 +6,7 @@
 //	rafiki serve --db postgres://localhost/rafiki --config rafiki.yaml
 //	rafiki serve --db postgres://localhost/rafiki --dev   # token "dev", :8035
 //	rafiki migrate --db postgres://localhost/rafiki
+//	rafiki agent stats --db postgres://localhost/rafiki
 package main
 
 import (
@@ -37,7 +38,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: rafiki <serve|migrate> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: rafiki <serve|migrate|agent> [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -46,8 +47,10 @@ func main() {
 		err = serveCmd(os.Args[2:])
 	case "migrate":
 		err = migrateCmd(os.Args[2:])
+	case "agent":
+		err = agentCmd(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (want serve or migrate)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (want serve, migrate or agent)", os.Args[1])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rafiki:", err)
