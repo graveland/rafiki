@@ -94,6 +94,18 @@ psql 'postgres://postgres:postgres@localhost:5433/rafiki_live' \
 isn't up; `RAFIKI_URL`/`RAFIKI_TOKEN` retarget it (any Anthropic-protocol
 client works the same way via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`).
 
+## `rafiki agent`
+
+`rafiki agent <stats|search|export|analyze|findings>` is a DSN-backed CLI
+over the captured `conversations` schema: read-only insights, the
+LLM-driven skill-gap detector, and finding triage. See
+[`docs/agent-cli.md`](docs/agent-cli.md) for every verb, flag, and the dev
+loop.
+
+```bash
+rafiki agent analyze --corpus DIR --compact --out DIR   # no DSN, no credentials
+```
+
 ## Schema ownership
 
 This repo owns the `conversations` schema. The migration chain baselines at

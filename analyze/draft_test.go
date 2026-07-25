@@ -57,7 +57,7 @@ func TestDraftEditPathCarriesSamePathAndFindingTitle(t *testing.T) {
 	}}
 	f := fixtureRankedFinding()
 
-	edit, err := Draft(context.Background(), c, f, current, p, "brent")
+	edit, err := Draft(context.Background(), c, f, current, p, "brent", nil)
 	if err != nil {
 		t.Fatalf("Draft: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestDraftNewSkillPathInstructsSkillsDirLayout(t *testing.T) {
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
 	f := fixtureRankedFinding()
-	edit, err := Draft(context.Background(), c, f, nil, p, "brent")
+	edit, err := Draft(context.Background(), c, f, nil, p, "brent", nil)
 	if err != nil {
 		t.Fatalf("Draft: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestDraftRetriesOnceOnMalformedResponse(t *testing.T) {
 	c := testDetectClient(t, sender)
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
-	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent")
+	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
 	if err != nil {
 		t.Fatalf("Draft: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestDraftFailsAfterTwoMalformedResponses(t *testing.T) {
 	c := testDetectClient(t, sender)
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
-	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent")
+	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
 	if err == nil {
 		t.Fatal("Draft: want error after two malformed responses, got nil")
 	}
@@ -200,7 +200,7 @@ func TestDraftRejectsAbsolutePathAndRetries(t *testing.T) {
 	c := testDetectClient(t, sender)
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
-	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent")
+	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
 	if err != nil {
 		t.Fatalf("Draft: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestDraftRejectsBackslashPathAndRetries(t *testing.T) {
 	c := testDetectClient(t, sender)
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
-	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent")
+	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
 	if err != nil {
 		t.Fatalf("Draft: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestDraftRejectsNormalizedTraversalPathAndFailsAfterRetry(t *testing.T) {
 	c := testDetectClient(t, sender)
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
-	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent")
+	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
 	if err == nil {
 		t.Fatal("Draft: want error, got nil")
 	}
@@ -315,7 +315,7 @@ func TestDraftRejectsDotDotPathAndFailsAfterRetry(t *testing.T) {
 	c := testDetectClient(t, sender)
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
-	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent")
+	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
 	if err == nil {
 		t.Fatal("Draft: want error, got nil")
 	}
