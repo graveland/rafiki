@@ -129,7 +129,9 @@ func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profi
 }
 
 // detectCost prices resp's usage via pricer, returning 0 when pricer is nil
-// or has no entry for model.
+// or has no entry for model. The arithmetic lives on routing.ModelPricing so
+// every cost consumer (here, and the agent runtimes that price per turn) shares
+// one formula.
 func detectCost(pricer insights.Pricer, model string, usage anthropic.Usage) float64 {
 	if pricer == nil {
 		return 0
@@ -138,10 +140,7 @@ func detectCost(pricer insights.Pricer, model string, usage anthropic.Usage) flo
 	if !ok {
 		return 0
 	}
-	return float64(usage.InputTokens)*price.PromptUSD +
-		float64(usage.OutputTokens)*price.CompletionUSD +
-		float64(usage.CacheReadInputTokens)*price.CacheReadUSD +
-		float64(usage.CacheCreationInputTokens)*price.CacheWriteUSD
+	return price.Cost(usage).Total
 }
 
 // parseReportFindings finds the report_findings tool_use block in resp,
