@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"os"
 	"path/filepath"
 )
@@ -14,16 +15,16 @@ type unsupportedBackend struct{}
 
 func newServiceBackend() serviceBackend { return &unsupportedBackend{} }
 
-func (b *unsupportedBackend) Install(_ serviceSpec) error        { return errUnsupportedOS }
-func (b *unsupportedBackend) Uninstall() error                   { return errUnsupportedOS }
-func (b *unsupportedBackend) Start() error                       { return errUnsupportedOS }
-func (b *unsupportedBackend) Stop() error                        { return errUnsupportedOS }
-func (b *unsupportedBackend) Restart() error                     { return errUnsupportedOS }
+func (b *unsupportedBackend) Install(_ serviceSpec) error { return errUnsupportedOS }
+func (b *unsupportedBackend) Uninstall() error            { return errUnsupportedOS }
+func (b *unsupportedBackend) Start() error                { return errUnsupportedOS }
+func (b *unsupportedBackend) Stop() error                 { return errUnsupportedOS }
+func (b *unsupportedBackend) Restart() error              { return errUnsupportedOS }
 func (b *unsupportedBackend) Status() (serviceStatus, error) {
 	return serviceStatus{}, errUnsupportedOS
 }
 
 func (b *unsupportedBackend) LogPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pi", "run", "controller.log")
+	return paths.ServiceLogPath()
 }

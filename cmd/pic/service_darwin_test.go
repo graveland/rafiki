@@ -12,6 +12,7 @@ func testSpec() serviceSpec {
 	return serviceSpec{
 		DaemonBinary: "/usr/local/bin/pi-controller",
 		HomeEnv:      "/Users/testuser",
+		LogPath:      "/Users/testuser/.local/state/fundi/controller.log",
 		PathEnv:      "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
 	}
 }

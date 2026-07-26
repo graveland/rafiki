@@ -1,15 +1,13 @@
 package main
 
 import (
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func activeFilePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pi", "run", "active")
-}
+func activeFilePath() string { return paths.ActiveFile() }
 
 // setActive writes childID to the active file atomically (best-effort).
 // Callers should ignore the returned error — this is a UX convenience,

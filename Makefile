@@ -83,8 +83,23 @@ $(PI_MODULES): $(PI_DIR)/package-lock.json
 	@touch $@
 
 $(PI_PKG)/package.json:
-	@echo "vendor/pi is not initialised. Run 'make bootstrap' (fresh clone)" >&2
-	@echo "or 'git submodule update --init --recursive'." >&2
+	@$(MAKE) --no-print-directory pi-not-initialised
+
+# $(PI_MODULES) depends on the lockfile, which has no rule of its own — so an
+# uninitialised submodule died with make's raw "No rule to make target
+# 'pi/package-lock.json'" before ever reaching the friendly message above. Both
+# entry points now route to the same explanation.
+$(PI_DIR)/package-lock.json:
+	@$(MAKE) --no-print-directory pi-not-initialised
+
+.PHONY: pi-not-initialised
+pi-not-initialised:
+	@echo "The pi submodule at ./$(PI_DIR) is not initialised." >&2
+	@echo "Run 'make bootstrap' (fresh clone), or:" >&2
+	@echo "    git submodule update --init --recursive" >&2
+	@echo >&2
+	@echo "Only the pic-attach TUI needs it — 'make build-controller' and" >&2
+	@echo "'make build-pic' work without it." >&2
 	@exit 1
 
 pi-build: $(PI_DIST) # Recompile the pi submodule's TypeScript to dist

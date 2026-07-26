@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
 // serviceBackend abstracts per-OS service management operations.
@@ -30,7 +32,12 @@ type serviceSpec struct {
 	DaemonBinary string
 	PathEnv      string
 	HomeEnv      string
-	ExtraEnv     map[string]string
+	// LogPath is where the unit sends the daemon's stdout/stderr. Resolved at
+	// install time and baked in as an absolute path: launchd and systemd do not
+	// inherit the interactive shell's XDG_* variables, so a unit that referenced
+	// them would resolve differently from every CLI invocation.
+	LogPath  string
+	ExtraEnv map[string]string
 }
 
 // serviceStatus describes the current state of the installed service.
@@ -283,6 +290,7 @@ func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
 		return spec, fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	spec.HomeEnv = home
+	spec.LogPath = paths.ServiceLogPath()
 
 	if v, _ := cmd.Flags().GetString("path-env"); v != "" {
 		spec.PathEnv = v

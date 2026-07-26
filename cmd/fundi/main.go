@@ -14,10 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"git.graveland.dev/brent/fundi/internal/persist"
-	"git.graveland.dev/brent/fundi/protocol"
 	"git.graveland.dev/brent/fundi/internal/server"
 	"git.graveland.dev/brent/fundi/internal/store"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 func main() {
@@ -30,22 +31,29 @@ func main() {
 		os.Exit(runAgent(os.Args[2:]))
 	}
 
+	// The daemon takes no flags, so without this `fundi -h` fell through into
+	// startup and failed on the controller socket instead of printing anything.
+	// Help goes to stdout and exits 0 — it was asked for, it isn't an error.
+	if len(os.Args) > 1 && isHelpArg(os.Args[1]) {
+		printRootUsage(os.Stdout)
+		os.Exit(0)
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		slog.Error("user home dir", "error", err)
-		os.Exit(1)
-	}
+	// XDG locations, NOT ~/.pi — that is pi's own directory, and sharing its
+	// run dir meant fundi and pi-controller claimed the same controller socket
+	// ("socket in use by a live process" whenever both were up).
+	stateDir := paths.RecordsDir()
+	logsDir := paths.LogsDir()
+	socketPath := paths.SocketPath()
 
-	runDir := filepath.Join(home, ".pi", "run")
-	stateDir := filepath.Join(runDir, "state")
-	logsDir := filepath.Join(runDir, "logs")
-	socketPath := filepath.Join(runDir, "controller.sock")
-
-	for _, dir := range []string{stateDir, logsDir} {
+	// The socket's directory is created separately: it comes from
+	// XDG_RUNTIME_DIR when that is set, which is a different tree from the data
+	// and state dirs, so creating those would not create it.
+	for _, dir := range []string{stateDir, logsDir, filepath.Dir(socketPath)} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			slog.Error("mkdir", "dir", dir, "error", err)
 			os.Exit(1)

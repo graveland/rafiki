@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 
 	"git.graveland.dev/brent/fundi/client"
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"git.graveland.dev/brent/fundi/protocol"
 	"github.com/spf13/cobra"
 )
@@ -84,8 +85,7 @@ func runLogs(cmd *cobra.Command, args []string) error {
 
 	wantPath, _ := cmd.Flags().GetBool("path")
 	if wantPath {
-		home, _ := os.UserHomeDir()
-		fmt.Println(filepath.Join(home, ".pi", "run", "logs", childID))
+		fmt.Println(filepath.Join(paths.LogsDir(), childID))
 		return nil
 	}
 
@@ -186,8 +186,7 @@ func dumpRawStreams(ctx context.Context, c *client.Client, childID string, wantI
 }
 
 func dumpDiskStreams(childID string, wantIn, wantErr, wantAll bool) error {
-	home, _ := os.UserHomeDir()
-	logsDir := filepath.Join(home, ".pi", "run", "logs", childID)
+	logsDir := filepath.Join(paths.LogsDir(), childID)
 	if _, err := os.Stat(logsDir); errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("no logs at %s (child alive but capture unavailable, or persistence mode is `never`)", logsDir)
 	}

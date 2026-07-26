@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,8 +30,8 @@ RestartSec=2
 # (compaction, summarisation) before exiting.  Match the daemon's internal
 # 180s global shutdown bound.
 TimeoutStopSec=200
-StandardOutput=append:{{.HomeEnv}}/.pi/run/controller.log
-StandardError=append:{{.HomeEnv}}/.pi/run/controller.log
+StandardOutput=append:{{.LogPath}}
+StandardError=append:{{.LogPath}}
 Environment=HOME={{.HomeEnv}}
 Environment=PATH={{.PathEnv}}
 
@@ -65,7 +66,7 @@ func (b *linuxBackend) unitPath() (string, error) {
 
 func (b *linuxBackend) LogPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pi", "run", "controller.log")
+	return paths.ServiceLogPath()
 }
 
 func (b *linuxBackend) Install(spec serviceSpec) error {
@@ -75,7 +76,7 @@ func (b *linuxBackend) Install(spec serviceSpec) error {
 	}
 
 	// Ensure the log directory exists before the daemon tries to write.
-	logDir := filepath.Join(spec.HomeEnv, ".pi", "run")
+	logDir := filepath.Dir(spec.LogPath)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("create log directory %s: %w", logDir, err)
 	}

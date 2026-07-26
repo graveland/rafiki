@@ -11,10 +11,10 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"git.graveland.dev/brent/fundi/protocol"
 )
 
@@ -23,8 +23,8 @@ import (
 // in-flight requests by id.
 type Client struct {
 	conn    net.Conn
-	encMu   sync.Mutex                           // serializes writes
-	pending sync.Map                             // map[string]chan *protocol.Response
+	encMu   sync.Mutex // serializes writes
+	pending sync.Map   // map[string]chan *protocol.Response
 	nextID  atomic.Uint64
 	closed  atomic.Bool
 	closeCh chan struct{}
@@ -38,7 +38,8 @@ type Client struct {
 }
 
 // Dial opens a connection to the UDS at path. If path is empty,
-// resolves to $PI_CONTROLLER_SOCKET or ~/.pi/run/controller.sock.
+// resolves to $PI_CONTROLLER_SOCKET or the XDG default (see
+// DefaultSocketPath).
 func Dial(path string) (*Client, error) {
 	if path == "" {
 		path = DefaultSocketPath()
@@ -56,13 +57,15 @@ func Dial(path string) (*Client, error) {
 	return c, nil
 }
 
-// DefaultSocketPath returns the conventional socket location.
+// DefaultSocketPath returns the controller socket location: an explicit
+// $PI_CONTROLLER_SOCKET wins (the daemon sets it for spawned children), else the
+// XDG runtime path. This MUST agree with the daemon's own paths.SocketPath, or
+// every client dials a socket nobody is listening on.
 func DefaultSocketPath() string {
 	if p := os.Getenv("PI_CONTROLLER_SOCKET"); p != "" {
 		return p
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pi", "run", "controller.sock")
+	return paths.SocketPath()
 }
 
 // Request sends a typed request and waits for the matching response.

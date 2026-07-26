@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,9 +38,9 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	<key>ExitTimeOut</key>
 	<integer>200</integer>
 	<key>StandardOutPath</key>
-	<string>{{.HomeEnv}}/.pi/run/controller.log</string>
+	<string>{{.LogPath}}</string>
 	<key>StandardErrorPath</key>
-	<string>{{.HomeEnv}}/.pi/run/controller.log</string>
+	<string>{{.LogPath}}</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
@@ -92,8 +93,7 @@ func (b *darwinBackend) domainTarget() string {
 }
 
 func (b *darwinBackend) LogPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".pi", "run", "controller.log")
+	return paths.ServiceLogPath()
 }
 
 func (b *darwinBackend) Install(spec serviceSpec) error {
@@ -103,7 +103,7 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 	}
 
 	// Ensure the log directory exists before the daemon tries to write.
-	logDir := filepath.Join(spec.HomeEnv, ".pi", "run")
+	logDir := filepath.Dir(spec.LogPath)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("create log directory %s: %w", logDir, err)
 	}
