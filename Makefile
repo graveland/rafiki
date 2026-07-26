@@ -1,6 +1,6 @@
 .PHONY: help build update build-controller build-pic build-attach \
         bootstrap pi-build pi-install pi-update pi-refresh-catalogs \
-        test test-race vet fmt clean
+        test test-race test-ci test-both vet fmt clean
 
 GO      ?= go
 BIN_DIR := bin
@@ -107,6 +107,15 @@ test: # Run the Go test suite
 
 test-race: # Run the Go test suite with the race detector
 	$(if $(PKGS),$(GO) test -race $(PKGS),@echo "(no Go packages yet)")
+
+# go.work resolves ../rafiki off disk, so a plain `make test` never exercises
+# the pinned module in go.mod — nor its go.sum entries. That gap hid a broken CI
+# build for all of M1: the pin resolved locally while `GOWORK=off` failed on
+# missing go.sum entries. Run this after any rafiki re-pin.
+test-ci: # Run the suite against the PINNED rafiki (GOWORK=off, what CI does)
+	$(if $(PKGS),GOWORK=off $(GO) build ./... && GOWORK=off $(GO) vet ./... && GOWORK=off $(GO) test ./...,@echo "(no Go packages yet)")
+
+test-both: test test-ci # Run the suite both ways: go.work (local) and pinned (CI)
 
 vet: # Run go vet over all packages
 	$(if $(PKGS),$(GO) vet $(PKGS),@echo "(no Go packages yet)")
