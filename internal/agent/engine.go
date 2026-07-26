@@ -14,6 +14,7 @@ import (
 
 	"git.graveland.dev/brent/rafiki/agentloop"
 	"git.graveland.dev/brent/rafiki/llm"
+	"git.graveland.dev/brent/rafiki/routing"
 )
 
 // repairTimeout bounds the post-abort orphan-repair call (see runTurn) — it
@@ -95,7 +96,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		conv:    conv,
 		tools:   cfg.Tools,
 		fe:      fe,
-		em:      NewEmitter(fe, cfg.Provider),
+		em:      NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
 		baseCtx: baseCtx,
 		state: StateData{
 			SessionID:   conv.ID,
@@ -112,8 +113,38 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	// itself.
 	fe.handler = e
 	go e.worker()
+	// Warm the model catalog off the hot path. Pricing a turn resolves the
+	// served model through the catalog, and a cold catalog resolves it with a
+	// SYNCHRONOUS OpenRouter fetch — that would land inside the first
+	// AssistantTurn's emit, delaying the frame. Best-effort: a failed fetch is
+	// logged by the catalog and simply leaves that turn's cost at 0.
+	if cat := catalogOf(cfg.Client); cat != nil {
+		go cat.Warm()
+	}
 	slog.Info("agent: engine started", "conversation", conv.ID, "provider", cfg.Provider, "model", cfg.ModelID)
 	return e, nil
+}
+
+// catalogOf returns c's model catalog, or nil when there is no client. Split
+// from pricerFor so the caller can both warm the catalog and price through it
+// without reaching into the client twice.
+func catalogOf(c *llm.Client) *routing.ModelCatalog {
+	if c == nil {
+		return nil
+	}
+	return c.Catalog()
+}
+
+// pricerFor derives the turn pricer from the client's model catalog.
+// llm.NewClient always defaults a catalog in when the caller supplies none, so
+// this is non-nil in practice; it stays nil-tolerant because tests construct
+// Engines with hand-built Configs.
+func pricerFor(c *llm.Client) Pricer {
+	cat := catalogOf(c)
+	if cat == nil {
+		return nil
+	}
+	return cat.Pricing
 }
 
 // HandlePrompt queues text as a turn and returns immediately — the Handler

@@ -9,6 +9,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"git.graveland.dev/brent/fundi/internal/child"
+	"git.graveland.dev/brent/rafiki/routing"
 )
 
 // Emitter converts Anthropic SDK messages and tool-execution events into pi
@@ -27,15 +28,25 @@ import (
 type Emitter struct {
 	fe       *Frontend
 	provider string
+	pricer   Pricer
 
 	messages []json.RawMessage
 	usage    child.PiUsage
 }
 
+// Pricer resolves a model id to its per-token list price, mirroring rafiki's
+// insights.Pricer. routing.ModelCatalog.Pricing has this exact signature and is
+// assignable directly, so the catalog's resolution rules (including its
+// fallback from a dated Anthropic snapshot id to the base model, which
+// OpenRouter doesn't list) apply for free. A nil Pricer, or one returning
+// ok=false, leaves cost zero.
+type Pricer func(model string) (routing.ModelPricing, bool)
+
 // NewEmitter constructs an Emitter that writes pi frames through fe, tagging
-// assistant messages with provider.
-func NewEmitter(fe *Frontend, provider string) *Emitter {
-	return &Emitter{fe: fe, provider: provider}
+// assistant messages with provider and pricing each turn's usage via pricer
+// (nil = report tokens with zero cost).
+func NewEmitter(fe *Frontend, provider string, pricer Pricer) *Emitter {
+	return &Emitter{fe: fe, provider: provider, pricer: pricer}
 }
 
 // AgentStart emits {"type":"agent_start"}.
@@ -58,7 +69,7 @@ func (e *Emitter) UserMessage(text string) {
 // message_start/message_update/message_end, accumulating the mapped message
 // and folding its usage into the turn total.
 func (e *Emitter) AssistantTurn(resp *anthropic.Message) {
-	msg := MapAssistantMessage(resp, e.provider)
+	msg := MapAssistantMessage(resp, e.provider, e.pricer)
 	e.fe.Emit(child.PiMessageStart(msg, ""))
 	e.fe.Emit(child.PiMessageUpdate(msg, ""))
 	e.fe.Emit(child.PiMessageEnd(msg, ""))
@@ -116,21 +127,54 @@ func (e *Emitter) accumulate(msg any) {
 	e.messages = append(e.messages, b)
 }
 
-// addUsage folds an assistant turn's usage into the turn total reported on
-// agent_end. Cost is left zero (unknown at this layer).
+// addUsage folds an assistant turn's usage — tokens and cost — into the turn
+// total reported on agent_end. Cost is summed per component rather than
+// recomputed, so the total stays consistent with the per-message costs even
+// across a turn whose messages were served by different models.
 func (e *Emitter) addUsage(u child.PiUsage) {
 	e.usage.Input += u.Input
 	e.usage.Output += u.Output
 	e.usage.CacheRead += u.CacheRead
 	e.usage.CacheWrite += u.CacheWrite
 	e.usage.TotalTokens += u.TotalTokens
+	e.usage.Cost.Input += u.Cost.Input
+	e.usage.Cost.Output += u.Cost.Output
+	e.usage.Cost.CacheRead += u.Cost.CacheRead
+	e.usage.Cost.CacheWrite += u.Cost.CacheWrite
+	e.usage.Cost.Total += u.Cost.Total
+}
+
+// costOf prices usage for the model that actually served the response, using
+// rafiki's shared per-component formula (routing.ModelPricing.Cost) so this
+// runtime and rafiki's analyze pipeline can never drift on the arithmetic.
+//
+// Zero is returned when there is no pricer or the model is unpriced — both are
+// normal (a fake sender in tests, a catalog that hasn't loaded, a model
+// OpenRouter doesn't list), which is why an unpriced turn reports cost 0 rather
+// than failing the turn.
+func costOf(pricer Pricer, model string, usage anthropic.Usage) child.PiCost {
+	if pricer == nil {
+		return child.PiCost{}
+	}
+	price, ok := pricer(model)
+	if !ok {
+		return child.PiCost{}
+	}
+	c := price.Cost(usage)
+	return child.PiCost{
+		Input:      c.Input,
+		Output:     c.Output,
+		CacheRead:  c.CacheRead,
+		CacheWrite: c.CacheWrite,
+		Total:      c.Total,
+	}
 }
 
 // MapAssistantMessage maps an Anthropic SDK response message onto the pi
 // AssistantMessage wire shape, tagging it with provider and this layer's
 // fixed API identifier ("anthropic-messages"). Timestamp is captured at map
 // time (time.Now().UnixMilli()).
-func MapAssistantMessage(resp *anthropic.Message, provider string) child.PiAssistantMessage {
+func MapAssistantMessage(resp *anthropic.Message, provider string, pricer Pricer) child.PiAssistantMessage {
 	// Non-nil (rather than a nil slice growing via append) so a response with
 	// no mappable blocks still marshals content as [] and not JSON null — the
 	// pi TUI expects an array here, matching the nil-coercion precedent
@@ -179,6 +223,7 @@ func MapAssistantMessage(resp *anthropic.Message, provider string) child.PiAssis
 		CacheWrite: int(u.CacheCreationInputTokens),
 	}
 	usage.TotalTokens = usage.Input + usage.Output + usage.CacheRead + usage.CacheWrite
+	usage.Cost = costOf(pricer, string(resp.Model), u)
 
 	return child.PiAssistantMessage{
 		Role:       "assistant",

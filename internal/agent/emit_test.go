@@ -36,7 +36,7 @@ func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 	}
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
-	em := NewEmitter(fe, "anthropic")
+	em := NewEmitter(fe, "anthropic", nil)
 	em.AgentStart()
 	em.UserMessage("go")
 	em.AssistantTurn(&resp)
@@ -108,7 +108,7 @@ func TestMapAssistantMessageEmptyContentIsEmptyArray(t *testing.T) {
 	if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 		t.Fatal(err)
 	}
-	mapped := MapAssistantMessage(&msg, "anthropic")
+	mapped := MapAssistantMessage(&msg, "anthropic", nil)
 	b, err := json.Marshal(mapped)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestMapAssistantMessageEmptyContentIsEmptyArray(t *testing.T) {
 func TestUserMessageAssignsUniqueID(t *testing.T) {
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
-	em := NewEmitter(fe, "anthropic")
+	em := NewEmitter(fe, "anthropic", nil)
 	em.UserMessage("first")
 	// A real turn always separates two UserMessage calls by at least one LLM
 	// round trip; sleep to guarantee distinct millisecond timestamps rather
@@ -188,7 +188,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 			t.Fatal(err)
 		}
-		mapped := MapAssistantMessage(&msg, "anthropic")
+		mapped := MapAssistantMessage(&msg, "anthropic", nil)
 		if len(mapped.Content) != 1 {
 			t.Fatalf("content = %+v, want 1 block", mapped.Content)
 		}
@@ -221,7 +221,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 			t.Fatal(err)
 		}
-		mapped := MapAssistantMessage(&msg, "anthropic")
+		mapped := MapAssistantMessage(&msg, "anthropic", nil)
 		if mapped.StopReason != "length" {
 			t.Fatalf("stopReason = %q, want length", mapped.StopReason)
 		}
@@ -237,7 +237,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 			t.Fatal(err)
 		}
-		mapped := MapAssistantMessage(&msg, "anthropic")
+		mapped := MapAssistantMessage(&msg, "anthropic", nil)
 		if mapped.Usage.Input != 7 || mapped.Usage.Output != 11 {
 			t.Fatalf("input/output = %d/%d, want 7/11", mapped.Usage.Input, mapped.Usage.Output)
 		}
@@ -263,7 +263,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 			t.Fatal(err)
 		}
-		mapped := MapAssistantMessage(&msg, "some-custom-provider")
+		mapped := MapAssistantMessage(&msg, "some-custom-provider", nil)
 		if mapped.API != "anthropic-messages" {
 			t.Fatalf("API = %q, want anthropic-messages", mapped.API)
 		}
@@ -282,7 +282,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 			t.Fatal(err)
 		}
-		mapped := MapAssistantMessage(&msg, "anthropic")
+		mapped := MapAssistantMessage(&msg, "anthropic", nil)
 		c := mapped.Usage.Cost
 		if c.Input != 0 || c.Output != 0 || c.CacheRead != 0 || c.CacheWrite != 0 || c.Total != 0 {
 			t.Fatalf("cost = %+v, want all-zero (unknown at this layer)", c)
@@ -300,7 +300,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 			t.Fatal(err)
 		}
-		mapped := MapAssistantMessage(&msg, "anthropic")
+		mapped := MapAssistantMessage(&msg, "anthropic", nil)
 		if len(mapped.Content) != 1 || mapped.Content[0].Type != "toolCall" {
 			t.Fatalf("content = %+v, want one toolCall block", mapped.Content)
 		}
@@ -329,7 +329,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
 			t.Fatal(err)
 		}
-		mapped := MapAssistantMessage(&msg, "anthropic")
+		mapped := MapAssistantMessage(&msg, "anthropic", nil)
 		if len(mapped.Content) != 1 {
 			t.Fatalf("content = %+v, want exactly the 1 non-empty text block", mapped.Content)
 		}
@@ -346,7 +346,7 @@ func TestToolStart_RawFallback(t *testing.T) {
 	silenceSlog(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
-	em := NewEmitter(fe, "anthropic")
+	em := NewEmitter(fe, "anthropic", nil)
 	em.ToolStart("tu_x", "mytool", json.RawMessage("not-json"))
 
 	line := strings.TrimSpace(out.String())
