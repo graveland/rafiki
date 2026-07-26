@@ -81,6 +81,21 @@ vet: ## Run go vet.
 lint: ## Run golangci-lint.
 	golangci-lint run ./...
 
+# Sources .env the same way `run` does, so the DB-backed tests actually run
+# outside a direnv-hooked shell. Without this they skip on a missing
+# RAFIKI_TEST_DSN and the run still reports success — ~94 tests silently not
+# run, which is indistinguishable from a clean pass. The guard below makes that
+# state loud instead: an unset DSN is announced, not inferred from a test count
+# nobody checks. Use test-nodb when you deliberately want the short run.
 .PHONY: test
-test: ## Run tests with -race (integration tests need RAFIKI_TEST_DSN).
+test: ## Run tests with -race, sourcing .env so DB-backed tests run.
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$${RAFIKI_TEST_DSN}" ]; then \
+		echo "WARNING: RAFIKI_TEST_DSN unset (no .env?) — every DB-backed test will SKIP."; \
+		echo "         A green result here does NOT mean the store/insights code was exercised."; \
+	fi; \
 	go test -race ./...
+
+.PHONY: test-nodb
+test-nodb: ## Run only the DSN-free tests (explicitly skips DB-backed ones).
+	RAFIKI_TEST_DSN= go test -race ./...
