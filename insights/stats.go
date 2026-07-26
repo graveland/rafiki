@@ -65,11 +65,10 @@ type TokenStats struct {
 }
 
 // CostRow is a per-model token rollup. CostUSD is best-effort, from OpenRouter
-// list prices via the injected Pricer: input*prompt + output*completion +
-// cache_read*cache_read + cache_creation*cache_write. Cache writes are priced at
-// the base (5m) rate, so 1h-TTL writes are undercounted ~2x — we can't
-// distinguish the TTL per turn. 0 means unpriced (no Pricer, or the model has no
-// resolvable price).
+// list prices via the injected Pricer, priced by routing.ModelPricing.CostOf
+// (the one shared formula — see it for the cache-TTL caveat: 1h-TTL writes are
+// undercounted ~2x because a stored turn doesn't record the TTL). 0 means
+// unpriced (no Pricer, or the model has no resolvable price).
 type CostRow struct {
 	Model               string  `json:"model"`
 	Turns               int64   `json:"turns"`
@@ -339,10 +338,7 @@ func (i *Insights) cost(ctx context.Context, sc statsScope, s *Stats) error {
 	for idx := range s.Cost {
 		r := &s.Cost[idx]
 		if p, ok := i.pricer(r.Model); ok {
-			r.CostUSD = float64(r.InputTokens)*p.PromptUSD +
-				float64(r.OutputTokens)*p.CompletionUSD +
-				float64(r.CacheReadTokens)*p.CacheReadUSD +
-				float64(r.CacheCreationTokens)*p.CacheWriteUSD
+			r.CostUSD = p.CostOf(r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens).Total
 		}
 	}
 	return nil
