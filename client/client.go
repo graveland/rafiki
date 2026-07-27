@@ -1,4 +1,5 @@
-// Package client provides a JSONL client for the pi-controller daemon.
+// Package client provides a JSONL client for the fundi daemon (which speaks the
+// pi-controller protocol).
 // It connects over a Unix domain socket and multiplexes request/response
 // correlation by id so multiple concurrent callers can share one connection.
 package client
@@ -18,7 +19,7 @@ import (
 	"git.graveland.dev/brent/fundi/protocol"
 )
 
-// Client is a connected JSONL client to the pi-controller daemon.
+// Client is a connected JSONL client to the fundi daemon.
 // Safe for concurrent use; the request/response correlator multiplexes
 // in-flight requests by id.
 type Client struct {

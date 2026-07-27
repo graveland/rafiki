@@ -22,8 +22,8 @@ func main() {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "pic",
-		Short:         "Control the pi-controller daemon",
-		Long:          "pic is the command-line client for the pi-controller daemon.\nIt speaks the JSONL protocol over the daemon's UDS socket.",
+		Short:         "Control the fundi daemon",
+		Long:          "pic is the command-line client for the fundi daemon.\nIt speaks the JSONL protocol over the daemon's UDS socket.",
 		Version:       version.String(),
 		SilenceUsage:  true, // don't print usage on RunE errors
 		SilenceErrors: true, // main() prints errors itself

@@ -1,4 +1,5 @@
-// Package main is the pi-controller daemon entry point. It sets up
+// Package main is the fundi daemon entry point (a pi-controller successor,
+// speaking the same protocol). It sets up
 // directories, loads persisted state, starts the UDS server, and blocks
 // until a signal triggers graceful shutdown.
 package main
@@ -83,7 +84,7 @@ func main() {
 		slog.Error("listen", "socket", socketPath, "error", err)
 		os.Exit(1)
 	}
-	slog.Info("pi-controller listening", "socket", socketPath)
+	slog.Info("fundi daemon listening", "socket", socketPath)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
