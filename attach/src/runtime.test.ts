@@ -312,16 +312,16 @@ describe("resolveTailLimit", () => {
 
 describe("connect scrollback bound", () => {
     function withTailEnv(value: string | undefined, fn: () => Promise<void>): Promise<void> {
-        const prev = process.env["PIC_ATTACH_TAIL"];
-        if (value === undefined) delete process.env["PIC_ATTACH_TAIL"];
-        else process.env["PIC_ATTACH_TAIL"] = value;
+        const prev = process.env["FUNDI_ATTACH_TAIL"];
+        if (value === undefined) delete process.env["FUNDI_ATTACH_TAIL"];
+        else process.env["FUNDI_ATTACH_TAIL"] = value;
         return fn().finally(() => {
-            if (prev === undefined) delete process.env["PIC_ATTACH_TAIL"];
-            else process.env["PIC_ATTACH_TAIL"] = prev;
+            if (prev === undefined) delete process.env["FUNDI_ATTACH_TAIL"];
+            else process.env["FUNDI_ATTACH_TAIL"] = prev;
         });
     }
 
-    it("connect with PIC_ATTACH_TAIL unset — every ctrl_get_recent carries the default limit", async () => {
+    it("connect with FUNDI_ATTACH_TAIL unset — every ctrl_get_recent carries the default limit", async () => {
         await withTailEnv(undefined, async () => {
             const captured: Array<Record<string, unknown>> = [];
             const srv = await startServer(makeHandler(captured));
@@ -342,7 +342,7 @@ describe("connect scrollback bound", () => {
         });
     });
 
-    it("connect with PIC_ATTACH_TAIL=25 — the claude seed fetch honors it", async () => {
+    it("connect with FUNDI_ATTACH_TAIL=25 — the claude seed fetch honors it", async () => {
         await withTailEnv("25", async () => {
             const captured: Array<Record<string, unknown>> = [];
             const srv = await startServer(makeHandler(captured));
@@ -363,7 +363,7 @@ describe("connect scrollback bound", () => {
         });
     });
 
-    it("connect with PIC_ATTACH_TAIL=0 — no history is fetched at all", async () => {
+    it("connect with FUNDI_ATTACH_TAIL=0 — no history is fetched at all", async () => {
         await withTailEnv("0", async () => {
             const captured: Array<Record<string, unknown>> = [];
             const srv = await startServer(makeHandler(captured));

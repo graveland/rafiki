@@ -139,10 +139,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 // runResumeFromPiSession spawns a new child continuing any pi session, whether
 // or not that session was ever managed by fundi.  It reads cwd, model, and
 // thinking level from the session.jsonl and merges them with the usual sources
-// (flags, PIC_DEFAULT_MODEL, PIC_DEFAULT_LABELS, preset).
+// (flags, FUNDI_DEFAULT_MODEL, FUNDI_DEFAULT_LABELS, preset).
 //
 // Priority for model:
-//   --model flag > PIC_DEFAULT_MODEL env var > jsonl model_change > error
+//   --model flag > FUNDI_DEFAULT_MODEL env var > jsonl model_change > error
 //
 // Priority for cwd:
 //   --cwd flag > jsonl session header
@@ -155,8 +155,8 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 		return err
 	}
 
-	// buildSpawnRequest merges --model > PIC_DEFAULT_MODEL > "" and handles
-	// --label, PIC_DEFAULT_LABELS, --forward-env, and all other spawn flags.
+	// buildSpawnRequest merges --model > FUNDI_DEFAULT_MODEL > "" and handles
+	// --label, FUNDI_DEFAULT_LABELS, --forward-env, and all other spawn flags.
 	// We pass no positional args — there's no name argument in this path.
 	req, err := buildSpawnRequest(cmd, nil)
 	if err != nil {
@@ -168,13 +168,13 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 		req.Cwd = info.Cwd
 	}
 
-	// model/provider: jsonl is the fallback when neither --model nor PIC_DEFAULT_MODEL
+	// model/provider: jsonl is the fallback when neither --model nor FUNDI_DEFAULT_MODEL
 	// set a value.  Only set Provider when we're also taking Model from the jsonl,
 	// since the --model flag embeds the provider as a prefix ("anthropic/model").
 	if req.Model == "" {
 		if info.Model == "" {
 			return fmt.Errorf(
-				"model required: session %s has no model_change events; set --model or PIC_DEFAULT_MODEL",
+				"model required: session %s has no model_change events; set --model or FUNDI_DEFAULT_MODEL",
 				input,
 			)
 		}

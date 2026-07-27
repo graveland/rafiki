@@ -21,7 +21,7 @@ func newPresetsCmd() *cobra.Command {
 		Long: `List named presets from ~/.pi/agent/fundi-presets.json.
 
 Presets bundle a model and label defaults that can be applied at spawn time
-with --preset NAME or the PIC_DEFAULT_PRESET environment variable.
+with --preset NAME or the FUNDI_DEFAULT_PRESET environment variable.
 
 Label filters narrow the output using the same AND-match semantics as
 'fundi list --label': every --label k=v pair must appear in the preset's labels,

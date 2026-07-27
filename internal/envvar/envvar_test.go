@@ -13,17 +13,32 @@ func TestGetPrefersCurrentName(t *testing.T) {
 
 // The whole point of the fallback: an existing shell export under the old name
 // must keep working rather than silently resolving to "".
+//
+// Driven off the deprecated map itself rather than a hand-maintained copy, so a
+// newly migrated variable is covered the moment it is added.
 func TestGetFallsBackToDeprecatedName(t *testing.T) {
-	for current, old := range map[string]string{
-		Socket:     "PI_CONTROLLER_SOCKET",
-		ChildID:    "PI_CONTROLLER_CHILD_ID",
-		GraceHours: "PI_CONTROLLER_GRACE_HOURS",
-		PiBinary:   "PI_BINARY",
-	} {
+	for current, old := range deprecated {
 		t.Setenv(current, "")
 		t.Setenv(old, "from-old")
 		if got := Get(current); got != "from-old" {
 			t.Errorf("Get(%s) = %q, want fallback to %s", current, got, old)
+		}
+	}
+}
+
+// A deprecated spelling must differ from the name that replaced it. If they are
+// equal the fallback silently becomes a no-op — and worse, any "the old variable
+// is still set" diagnostic built on it starts firing on the current one. This is
+// not hypothetical: a mechanical rename across the tree produced exactly this
+// collision twice during the fundi rename (once here, once in the presets
+// filename constant), because the substitution also rewrote the legacy literal.
+func TestDeprecatedNamesDifferFromCurrent(t *testing.T) {
+	for current, old := range deprecated {
+		if current == old {
+			t.Errorf("deprecated[%s] == %s: a rename sweep clobbered the legacy spelling", current, old)
+		}
+		if len(old) >= 6 && old[:6] == "FUNDI_" {
+			t.Errorf("deprecated[%s] = %q, which is already FUNDI_-prefixed and cannot be the old name", current, old)
 		}
 	}
 }
@@ -50,9 +65,26 @@ func TestGetUnmappedNameIsSafe(t *testing.T) {
 
 // Every owned variable must carry the FUNDI_ prefix — that is the rename.
 func TestAllOwnedNamesAreFundiPrefixed(t *testing.T) {
-	for _, n := range []string{Socket, ChildID, GraceHours, PiBinary, AgentDB} {
+	names := []string{AgentDB}
+	for current := range deprecated {
+		names = append(names, current)
+	}
+	for _, n := range names {
 		if len(n) < 6 || n[:6] != "FUNDI_" {
 			t.Errorf("%q is not FUNDI_-prefixed", n)
+		}
+	}
+}
+
+// Guards against a migrated variable being declared but never wired into the
+// deprecated map, which would drop its fallback without any visible symptom.
+func TestEveryMigratedVariableHasAFallback(t *testing.T) {
+	for _, n := range []string{
+		Socket, ChildID, GraceHours, PiBinary,
+		NoAutoInstallHelpers, DefaultModel, DefaultPreset, DefaultLabels, AttachTail,
+	} {
+		if _, ok := deprecated[n]; !ok {
+			t.Errorf("%s has no entry in deprecated: an existing export under its old name would silently stop working", n)
 		}
 	}
 }

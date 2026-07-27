@@ -12,6 +12,7 @@
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { envValue } from "./env.ts";
 
 // ─── Socket resolution ────────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ const APP_NAME = "fundi";
  * pre-rename $PI_CONTROLLER_SOCKET spelling is still honoured.
  */
 export function defaultSocketPath(): string {
-    const explicit = process.env["FUNDI_SOCKET"] || process.env["PI_CONTROLLER_SOCKET"];
+    const explicit = envValue("FUNDI_SOCKET", "PI_CONTROLLER_SOCKET");
     if (explicit) return explicit;
     return path.join(runtimeDir(), "controller.sock");
 }

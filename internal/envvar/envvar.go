@@ -38,10 +38,38 @@ const (
 	NoAutoInstallHelpers    = "FUNDI_NO_AUTO_INSTALL_HELPERS"
 	noAutoInstallHelpersOld = "PIC_NO_AUTO_INSTALL_HELPERS"
 
+	// DefaultModel supplies the model when `fundi create` gets no --model.
+	DefaultModel    = "FUNDI_DEFAULT_MODEL"
+	defaultModelOld = "PIC_DEFAULT_MODEL"
+
+	// DefaultPreset supplies the preset name when --preset is not given.
+	DefaultPreset    = "FUNDI_DEFAULT_PRESET"
+	defaultPresetOld = "PIC_DEFAULT_PRESET"
+
+	// DefaultLabels is a comma-separated "k=v,k2=v2" set of label defaults,
+	// merged before any --label flags.
+	DefaultLabels    = "FUNDI_DEFAULT_LABELS"
+	defaultLabelsOld = "PIC_DEFAULT_LABELS"
+
+	// AttachTail bounds the scrollback fundi-attach replays into the TUI. Set by
+	// `fundi attach --tail` for the TUI process; read on the TypeScript side.
+	AttachTail    = "FUNDI_ATTACH_TAIL"
+	attachTailOld = "PIC_ATTACH_TAIL"
+
 	// AgentDB was always fundi-named; listed here so every owned variable has
 	// one home.
 	AgentDB = "FUNDI_AGENT_DB"
 )
+
+// Variables consumed only by the TypeScript side (fundi-attach and the
+// fundi-helpers pi extension) are named here so this file stays the one
+// inventory of what fundi reads from the environment, even though Go does not
+// read them. Their TS readers accept the old spelling the same way Get does.
+//
+//	FUNDI_ATTACH_TUI       (was PIC_ATTACH_TUI)       set by fundi-attach, read by fundi-helpers
+//	FUNDI_ATTACH_CHILD_ID  (was PIC_ATTACH_CHILD_ID)  set by fundi-attach, read by fundi-helpers
+//	FUNDI_ATTACH_DEBUG     (was PIC_ATTACH_DEBUG)     user-set, read by fundi-attach
+//	FUNDI_KILL_ON_EXIT     (was PIC_KILL_ON_EXIT)     user-set, read by fundi-attach
 
 // deprecated maps each current name to the spelling it replaced.
 var deprecated = map[string]string{
@@ -50,6 +78,10 @@ var deprecated = map[string]string{
 	GraceHours:           graceHoursOld,
 	PiBinary:             piBinaryOld,
 	NoAutoInstallHelpers: noAutoInstallHelpersOld,
+	DefaultModel:         defaultModelOld,
+	DefaultPreset:        defaultPresetOld,
+	DefaultLabels:        defaultLabelsOld,
+	AttachTail:           attachTailOld,
 }
 
 // Get returns the value of name, falling back to its deprecated spelling. A

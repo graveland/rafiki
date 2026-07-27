@@ -97,7 +97,7 @@ func TestRecordWriter_LabelsRoundTrip(t *testing.T) {
 		ChildID: "c_label_test",
 		Cwd:     "/tmp",
 		Labels: map[string]string{
-			"env":       "prod",
+			"env":         "prod",
 			"fundi/model": "claude-sonnet-4",
 		},
 	}

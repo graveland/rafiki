@@ -14,8 +14,8 @@
  *   # Expect: /reload appears in the completion list
  */
 
-import { describe, expect, it, beforeEach } from "bun:test";
-import { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/fundi/helpersembed/fundi-helpers/index.ts";
+import { describe, expect, it, beforeEach, afterEach } from "bun:test";
+import extensionFactory, { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/fundi/helpersembed/fundi-helpers/index.ts";
 
 // ─── Inline AutocompleteProvider type (mirrors @earendil-works/pi-tui) ────────
 
@@ -88,7 +88,7 @@ const fakeOpts = { signal: fakeSignal };
  * base provider, producing the wrapped AutocompleteProvider.
  *
  * Pre-loads the daemon command cache via `cachedCommands` by bypassing the
- * real UDS fetch (the fetch will fail / be skipped because PIC_ATTACH_CHILD_ID
+ * real UDS fetch (the fetch will fail / be skipped because FUNDI_ATTACH_CHILD_ID
  * and PI_CONTROLLER_SOCKET are not set or the daemon isn't running in tests).
  *
  * To inject commands: after calling registerProvider, mutate the returned
@@ -124,7 +124,7 @@ describe("setupTuiAutocomplete", () => {
                 called = true;
             });
             // Provider is always registered; the daemon fetch is skipped when
-            // PIC_ATTACH_CHILD_ID is not set (which is the case in unit tests).
+            // FUNDI_ATTACH_CHILD_ID is not set (which is the case in unit tests).
             expect(called).toBe(true);
         });
 
@@ -349,5 +349,88 @@ describe("setupTuiAutocomplete", () => {
                 }
             });
         }
+    });
+});
+
+// ─── daemon-child context detection ───────────────────────────────────────────
+
+/**
+ * The extension's default export registers /reload only when it decides it is
+ * running inside the daemon's pi child. That decision reads an env var the *Go*
+ * daemon sets, so it is a cross-language contract — and it silently broke once:
+ * the Go side migrated PI_CONTROLLER_CHILD_ID to FUNDI_CHILD_ID, this file kept
+ * checking only the old name, and the condition became permanently false. No
+ * error, no log; /reload simply stopped existing, which is the extension's only
+ * job on the daemon side.
+ */
+describe("extension factory: daemon-child detection", () => {
+    const VARS = [
+        "FUNDI_CHILD_ID",
+        "PI_CONTROLLER_CHILD_ID",
+        "FUNDI_ATTACH_TUI",
+        "PIC_ATTACH_TUI",
+    ] as const;
+    let saved: Record<string, string | undefined> = {};
+
+    /** Collects the commands the extension registers. */
+    function fakePi(): { registered: string[]; api: Parameters<typeof extensionFactory>[0] } {
+        const registered: string[] = [];
+        const api = {
+            registerCommand(name: string) {
+                registered.push(name);
+            },
+        } as unknown as Parameters<typeof extensionFactory>[0];
+        return { registered, api };
+    }
+
+    beforeEach(() => {
+        saved = {};
+        for (const k of VARS) {
+            saved[k] = process.env[k];
+            delete process.env[k];
+        }
+    });
+
+    afterEach(() => {
+        for (const k of VARS) {
+            if (saved[k] === undefined) delete process.env[k];
+            else process.env[k] = saved[k];
+        }
+    });
+
+    it("registers /reload under FUNDI_CHILD_ID — the name the daemon sets today", () => {
+        process.env["FUNDI_CHILD_ID"] = "child-1";
+        const { registered, api } = fakePi();
+        extensionFactory(api);
+        expect(registered).toEqual(["reload"]);
+    });
+
+    it("still registers /reload under the pre-rename PI_CONTROLLER_CHILD_ID", () => {
+        process.env["PI_CONTROLLER_CHILD_ID"] = "child-1";
+        const { registered, api } = fakePi();
+        extensionFactory(api);
+        expect(registered).toEqual(["reload"]);
+    });
+
+    it("registers nothing in the TUI process, which has its own autocomplete path", () => {
+        process.env["FUNDI_CHILD_ID"] = "child-1";
+        process.env["FUNDI_ATTACH_TUI"] = "1";
+        const { registered, api } = fakePi();
+        extensionFactory(api);
+        expect(registered).toEqual([]);
+    });
+
+    it("honours the pre-rename PIC_ATTACH_TUI opt-out too", () => {
+        process.env["FUNDI_CHILD_ID"] = "child-1";
+        process.env["PIC_ATTACH_TUI"] = "1";
+        const { registered, api } = fakePi();
+        extensionFactory(api);
+        expect(registered).toEqual([]);
+    });
+
+    it("registers nothing under a bare interactive pi — no child id in the environment", () => {
+        const { registered, api } = fakePi();
+        extensionFactory(api);
+        expect(registered).toEqual([]);
     });
 });

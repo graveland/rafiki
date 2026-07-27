@@ -186,11 +186,11 @@ func TestFormatLabels_Truncation(t *testing.T) {
 	}
 }
 
-func TestFormatLabels_HidesPicPrefixByDefault(t *testing.T) {
+func TestFormatLabels_HidesAutoLabelPrefixByDefault(t *testing.T) {
 	labels := map[string]string{
 		"fundi/cwd":   "/home/foo",
 		"fundi/model": "claude-opus-4",
-		"context":   "work",
+		"context":     "work",
 	}
 	got := formatLabels(labels, 0, false)
 	if got != "context=work" {
@@ -198,10 +198,10 @@ func TestFormatLabels_HidesPicPrefixByDefault(t *testing.T) {
 	}
 }
 
-func TestFormatLabels_IncludesPicPrefixWhenRequested(t *testing.T) {
+func TestFormatLabels_IncludesAutoLabelPrefixWhenRequested(t *testing.T) {
 	labels := map[string]string{
 		"fundi/cwd": "/home/foo",
-		"context": "work",
+		"context":   "work",
 	}
 	got := formatLabels(labels, 0, true)
 	if !strings.Contains(got, "fundi/cwd=/home/foo") {
@@ -212,7 +212,7 @@ func TestFormatLabels_IncludesPicPrefixWhenRequested(t *testing.T) {
 	}
 }
 
-func TestFormatLabels_AllPicHiddenReturnsDash(t *testing.T) {
+func TestFormatLabels_AllAutoLabelsHiddenReturnsDash(t *testing.T) {
 	labels := map[string]string{
 		"fundi/cwd":   "/home/foo",
 		"fundi/model": "claude",

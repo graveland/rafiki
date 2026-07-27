@@ -35,6 +35,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ReplacedSessionContext } from "./session.ts";
 import { Client } from "./client.ts";
 import { RemoteAgentSession } from "./session.ts";
+import { envFlag, envValue } from "./env.ts";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -93,9 +94,9 @@ export class RemoteAgentSessionRuntime {
         const modelRegistry = await buildLocalModelRegistry(settingsManager);
         let sessionManager = await buildLocalSessionManager(meta.sessionFile);
 
-        // Scrollback bound: PIC_ATTACH_TAIL (set by `fundi attach --tail`),
+        // Scrollback bound: FUNDI_ATTACH_TAIL (set by `fundi attach --tail`),
         // -1 = all. Applied to both the claude seed fetch and primeHistory.
-        const tail = resolveTailLimit(process.env["PIC_ATTACH_TAIL"]);
+        const tail = resolveTailLimit(envValue("FUNDI_ATTACH_TAIL", "PIC_ATTACH_TAIL"));
 
         // For children with no pi-format session file (claude), the manager is
         // empty and pi's renderInitialMessages() — which paints from
@@ -109,7 +110,7 @@ export class RemoteAgentSessionRuntime {
                     sessionManager = seeded;
                 }
             } catch (err) {
-                if (process.env["PIC_ATTACH_DEBUG"] === "1") {
+                if (envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
                     console.error("[fundi-attach] scrollback seed failed:", err);
                 }
             }
@@ -367,13 +368,13 @@ export class RemoteAgentSessionRuntime {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Default scrollback replay when PIC_ATTACH_TAIL is unset (direct fundi-attach
+/** Default scrollback replay when FUNDI_ATTACH_TAIL is unset (direct fundi-attach
  * invocation). Bounded — an unbounded fetch of a large history produced a
  * ctrl_get_recent response past the 16 MiB frame cap and killed the connect. */
 export const DEFAULT_TAIL_LIMIT = 500;
 
 /**
- * Parse a PIC_ATTACH_TAIL value: N > 0 = last N events, 0 = none, -1 = all.
+ * Parse a FUNDI_ATTACH_TAIL value: N > 0 = last N events, 0 = none, -1 = all.
  * Unset/empty/garbage falls back to DEFAULT_TAIL_LIMIT.
  */
 export function resolveTailLimit(raw: string | undefined): number {

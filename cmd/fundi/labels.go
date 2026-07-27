@@ -91,7 +91,7 @@ func parseLabelFilterKeys(keys []string) ([]string, error) {
 	return keys, nil
 }
 
-// parseEnvLabels parses a comma-separated "k=v,k2=v2" string (e.g. PIC_DEFAULT_LABELS).
+// parseEnvLabels parses a comma-separated "k=v,k2=v2" string (e.g. FUNDI_DEFAULT_LABELS).
 // Empty parts are silently skipped.
 func parseEnvLabels(s string) (map[string]string, error) {
 	if s == "" {
@@ -125,17 +125,17 @@ func mergeLabels(maps ...map[string]string) map[string]string {
 // formatLabels returns a compact "k=v,k2=v2" string for table display.
 // Keys are sorted for deterministic output. Truncates to maxLen if non-zero.
 //
-// When includePicLabels is false (default for `fundi list`), labels whose key
+// When includeAutoLabels is false (default for `fundi list`), labels whose key
 // starts with the reserved "fundi/" prefix are omitted — they're auto-derived
 // from data already shown in adjacent columns (MODEL, etc.) or in `fundi get`,
 // and they otherwise dominate the column width and crowd out user labels.
-func formatLabels(labels map[string]string, maxLen int, includePicLabels bool) string {
+func formatLabels(labels map[string]string, maxLen int, includeAutoLabels bool) string {
 	if len(labels) == 0 {
 		return "-"
 	}
 	keys := make([]string, 0, len(labels))
 	for k := range labels {
-		if !includePicLabels && strings.HasPrefix(k, "fundi/") {
+		if !includeAutoLabels && strings.HasPrefix(k, "fundi/") {
 			continue
 		}
 		keys = append(keys, k)

@@ -152,10 +152,10 @@ func TestAvailablePresets_Empty(t *testing.T) {
 // We test this via buildSpawnRequest + manual preset merge (as runCreate does it).
 func TestPreset_MergeOrder(t *testing.T) {
 	// Preset: model=preset-model, labels: tier=smart, env=from-preset
-	// PIC_DEFAULT_LABELS: env=from-env (overrides preset env)
+	// FUNDI_DEFAULT_LABELS: env=from-env (overrides preset env)
 	// --label: tier=override (overrides preset tier)
-	t.Setenv("PIC_DEFAULT_LABELS", "env=from-env")
-	os.Unsetenv("PIC_DEFAULT_MODEL")
+	t.Setenv("FUNDI_DEFAULT_LABELS", "env=from-env")
+	os.Unsetenv("FUNDI_DEFAULT_MODEL")
 
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
@@ -186,7 +186,7 @@ func TestPreset_MergeOrder(t *testing.T) {
 	if req.Model != "preset-model" {
 		t.Errorf("Model = %q, want preset-model", req.Model)
 	}
-	// PIC_DEFAULT_LABELS wins over preset for 'env'.
+	// FUNDI_DEFAULT_LABELS wins over preset for 'env'.
 	if req.Labels["env"] != "from-env" {
 		t.Errorf("Labels[env] = %q, want from-env (env-var wins over preset)", req.Labels["env"])
 	}

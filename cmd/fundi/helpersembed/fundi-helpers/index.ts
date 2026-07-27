@@ -34,12 +34,12 @@ interface ExtensionAPI {
  *
  * Three contexts, gated on env vars set by the controller / fundi-attach:
  *
- * - Daemon's pi child (PI_CONTROLLER_CHILD_ID set, PIC_ATTACH_TUI unset):
+ * - Daemon's pi child (FUNDI_CHILD_ID set, FUNDI_ATTACH_TUI unset):
  *   registers /reload.  Pi's interactive /reload builtin is TUI-only — in
  *   --mode rpc there's no builtin handler, so an extension command is the
  *   only way for fundi-attach to trigger ctx.reload() server-side.
  *
- * - fundi-attach TUI (PIC_ATTACH_TUI=1): factory is a no-op.
+ * - fundi-attach TUI (FUNDI_ATTACH_TUI=1): factory is a no-op.
  *   RemoteAgentSession.bindExtensions() calls setupTuiAutocomplete()
  *   directly to register an autocomplete provider that queries the daemon
  *   for available slash commands.
@@ -57,9 +57,15 @@ interface ExtensionAPI {
  * both the daemon and the fundi-attach build contexts.
  */
 export default function (pi: ExtensionAPI): void {
+    // The child-id variable is set by the daemon, so it must be read under the
+    // name the daemon actually sets. This test was checking only
+    // PI_CONTROLLER_CHILD_ID, which the daemon stopped setting when the Go side
+    // migrated to FUNDI_CHILD_ID — so inDaemonChild was permanently false and
+    // /reload was never registered at all. Accept both spellings, exactly as
+    // internal/envvar.Get does.
     const inDaemonChild =
-        process.env["PI_CONTROLLER_CHILD_ID"] !== undefined &&
-        process.env["PIC_ATTACH_TUI"] !== "1";
+        envIsSet("FUNDI_CHILD_ID", "PI_CONTROLLER_CHILD_ID") &&
+        !envFlag("FUNDI_ATTACH_TUI", "PIC_ATTACH_TUI");
     if (inDaemonChild) {
         registerDaemonChildCommands(pi);
     }
@@ -118,12 +124,29 @@ interface AutocompleteProvider {
     ): boolean;
 }
 
-// ─── Socket resolution ────────────────────────────────────────────────────────
+// ─── Environment and socket resolution ───────────────────────────────────────
 //
-// Deliberately duplicated from attach/src/client.ts rather than imported: this
-// file is loaded via jiti inside the daemon's pi child, where attach/'s modules
-// are not resolvable (see the header note). Keep the two in step, and both in
-// step with the Go side's internal/paths.
+// Deliberately duplicated from attach/src/{env,client}.ts rather than imported:
+// this file is loaded via jiti inside the daemon's pi child, where attach/'s
+// modules are not resolvable (see the header note). Keep these in step with
+// those, and all of them in step with the Go side's internal/{envvar,paths}.
+
+/** Mirrors envvar.Get: current name wins, old spelling still honoured. */
+function envValue(name: string, legacy?: string): string | undefined {
+    const current = process.env[name];
+    if (current !== undefined && current !== "") return current;
+    if (legacy === undefined) return undefined;
+    const old = process.env[legacy];
+    return old !== undefined && old !== "" ? old : undefined;
+}
+
+function envFlag(name: string, legacy?: string): boolean {
+    return envValue(name, legacy) === "1";
+}
+
+function envIsSet(name: string, legacy?: string): boolean {
+    return envValue(name, legacy) !== undefined;
+}
 
 /** The per-application leaf every XDG base directory gets. Mirrors paths.appName. */
 const APP_NAME = "fundi";
@@ -136,7 +159,7 @@ const APP_NAME = "fundi";
  * the wrong daemon whenever the socket path was not exported explicitly.
  */
 function defaultSocketPath(): string {
-    const explicit = process.env["FUNDI_SOCKET"] || process.env["PI_CONTROLLER_SOCKET"];
+    const explicit = envValue("FUNDI_SOCKET", "PI_CONTROLLER_SOCKET");
     if (explicit) return explicit;
 
     // paths.RuntimeDir(): $XDG_RUNTIME_DIR/fundi when absolute, else the state
@@ -205,7 +228,7 @@ export function slashCommandsToCommandInfo(names: string[]): CommandInfo[] {
  * Wire the TUI autocomplete provider into the ExtensionUIContext.
  *
  * Called by RemoteAgentSession.bindExtensions() when uiContext is available.
- * Reads PIC_ATTACH_CHILD_ID and PI_CONTROLLER_SOCKET from the environment
+ * Reads FUNDI_ATTACH_CHILD_ID and FUNDI_SOCKET from the environment
  * (both set by main.ts before the TUI starts). Fetches slash commands from
  * the daemon's pi child once at startup and caches them for the session.
  *
@@ -218,7 +241,7 @@ export function setupTuiAutocomplete(
     addProvider: (factory: (current: unknown) => unknown) => void
 ): { refresh: () => Promise<void> } {
     const socketPath = defaultSocketPath();
-    const childId = process.env["PIC_ATTACH_CHILD_ID"] ?? "";
+    const childId = envValue("FUNDI_ATTACH_CHILD_ID", "PIC_ATTACH_CHILD_ID") ?? "";
 
     let cachedCommands: CommandInfo[] = [];
 

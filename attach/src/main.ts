@@ -3,6 +3,7 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { RemoteAgentSessionRuntime } from "./runtime.ts";
 import { restoreTerminal } from "./session.ts";
+import { envFlag } from "./env.ts";
 
 const VERSION = "0.1.0";
 
@@ -15,10 +16,12 @@ function usage(): void {
     console.error("usage: fundi-attach <childId>");
     console.error("");
     console.error("env vars:");
-    console.error("  FUNDI_SOCKET          override default socket path");
-    console.error("  PIC_KILL_ON_EXIT      set to 1 to terminate the daemon's child");
-    console.error("                        when the TUI quits (fallback for direct invocation;");
-    console.error("                        when launched via fundi, kill/keep is decided by fundi)");
+    console.error("  FUNDI_SOCKET        override default socket path");
+    console.error("  FUNDI_KILL_ON_EXIT  set to 1 to terminate the daemon's child");
+    console.error("                      when the TUI quits (fallback for direct invocation;");
+    console.error("                      when launched via fundi, kill/keep is decided by fundi)");
+    console.error("  FUNDI_ATTACH_TAIL   scrollback events to replay (-1 all, 0 none)");
+    console.error("  FUNDI_ATTACH_DEBUG  set to 1 to log every received event to stderr");
 }
 
 const args = process.argv.slice(2);
@@ -35,14 +38,16 @@ const childId = args[0];
 
 // Signal to extensions that they're running inside fundi-attach's TUI process.
 // fundi-helpers/index.ts reads these to register the autocomplete provider instead
-// of the daemon-side /reload command.
-process.env.PIC_ATTACH_TUI = "1";
-process.env.PIC_ATTACH_CHILD_ID = childId;
+// of the daemon-side /reload command. Only the current spellings are set; the
+// extension accepts the pre-rename ones so an out-of-date on-disk copy still
+// works until the next install.
+process.env.FUNDI_ATTACH_TUI = "1";
+process.env.FUNDI_ATTACH_CHILD_ID = childId;
 
-// PIC_KILL_ON_EXIT is a fallback for users invoking fundi-attach directly.
+// FUNDI_KILL_ON_EXIT is a fallback for users invoking fundi-attach directly.
 // When launched via `fundi create` / `fundi attach`, fundi handles the kill/keep
 // decision after this process exits; the env var is not set.
-const killOnExit = process.env.PIC_KILL_ON_EXIT === "1";
+const killOnExit = envFlag("FUNDI_KILL_ON_EXIT", "PIC_KILL_ON_EXIT");
 // Socket resolution is client.ts's job (defaultSocketPath): one place that has
 // to agree with the Go side's internal/paths, rather than two that can drift.
 
@@ -106,7 +111,7 @@ try {
 }
 
 // Normal exit (TUI quit naturally via Ctrl+D or /quit).
-// Dispose here closes the UDS connection (and kills if PIC_KILL_ON_EXIT=1).
+// Dispose here closes the UDS connection (and kills if FUNDI_KILL_ON_EXIT=1).
 // The kill/keep decision for fundi-managed sessions is made by fundi (Go side)
 // after this process exits.
 if (!shuttingDown) {

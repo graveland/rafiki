@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/protocol"
 )
 
@@ -64,7 +65,7 @@ func runAttach(cmd *cobra.Command, args []string) error {
 	}
 
 	tailN, _ := cmd.Flags().GetInt("tail")
-	os.Setenv("PIC_ATTACH_TAIL", strconv.Itoa(tailN))
+	os.Setenv(envvar.AttachTail, strconv.Itoa(tailN))
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
 	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")

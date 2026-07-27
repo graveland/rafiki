@@ -140,13 +140,13 @@ func TestRenderPresets_EmptySlice(t *testing.T) {
 	}
 }
 
-// ─── PIC_DEFAULT_PRESET ───────────────────────────────────────────────────────
+// ─── FUNDI_DEFAULT_PRESET ───────────────────────────────────────────────────────
 
-// TestPICDefaultPreset_AppliedWhenFlagUnset checks that PIC_DEFAULT_PRESET
+// TestFundiDefaultPreset_AppliedWhenFlagUnset checks that FUNDI_DEFAULT_PRESET
 // is read in runCreate when --preset is not passed.  We test this by calling
 // the preset-resolution block inline (as runCreate does) rather than spinning
 // up a real daemon.
-func TestPICDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
+func TestFundiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 	// Write a minimal presets file into a temp home dir.
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, ".pi", "agent")
@@ -166,12 +166,12 @@ func TestPICDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", dir)
-	t.Setenv("PIC_DEFAULT_PRESET", "mypreset")
-	os.Unsetenv("PIC_DEFAULT_MODEL")
-	os.Unsetenv("PIC_DEFAULT_LABELS")
+	t.Setenv("FUNDI_DEFAULT_PRESET", "mypreset")
+	os.Unsetenv("FUNDI_DEFAULT_MODEL")
+	os.Unsetenv("FUNDI_DEFAULT_LABELS")
 
 	// Simulate what runCreate does: read --preset flag (unset → ""), then
-	// fall back to PIC_DEFAULT_PRESET.
+	// fall back to FUNDI_DEFAULT_PRESET.
 	cmd := newCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -181,11 +181,8 @@ func TestPICDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 		t.Fatalf("buildSpawnRequest: %v", err)
 	}
 
-	// Inline preset resolution (mirrors runCreate logic).
-	presetName, _ := cmd.Flags().GetString("preset")
-	if presetName == "" {
-		presetName = os.Getenv("PIC_DEFAULT_PRESET")
-	}
+	// Use the same resolution runCreate does, not a copy of it.
+	presetName := resolvePresetName(cmd)
 	if presetName != "mypreset" {
 		t.Fatalf("presetName = %q, want mypreset", presetName)
 	}
@@ -213,9 +210,9 @@ func TestPICDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 	}
 }
 
-func TestPICDefaultPreset_FlagWinsOverEnvVar(t *testing.T) {
-	// When --preset is set explicitly, PIC_DEFAULT_PRESET should be ignored.
-	t.Setenv("PIC_DEFAULT_PRESET", "envpreset")
+func TestFundiDefaultPreset_FlagWinsOverEnvVar(t *testing.T) {
+	// When --preset is set explicitly, FUNDI_DEFAULT_PRESET should be ignored.
+	t.Setenv("FUNDI_DEFAULT_PRESET", "envpreset")
 
 	cmd := newCreateCmd()
 	// Read the flag value — should be the default (empty), not the env var.
@@ -229,14 +226,9 @@ func TestPICDefaultPreset_FlagWinsOverEnvVar(t *testing.T) {
 	if err := cmd.Flags().Set("preset", "flagpreset"); err != nil {
 		t.Fatal(err)
 	}
-	flagVal, _ = cmd.Flags().GetString("preset")
-
-	// runCreate reads the flag first; if non-empty, env var is skipped.
-	presetName := flagVal
-	if presetName == "" {
-		presetName = os.Getenv("PIC_DEFAULT_PRESET")
-	}
-	if presetName != "flagpreset" {
+	// The flag wins and the env var is skipped — asserted through the real
+	// resolution rather than a copy of it.
+	if presetName := resolvePresetName(cmd); presetName != "flagpreset" {
 		t.Errorf("presetName = %q, want flagpreset (flag wins over env var)", presetName)
 	}
 }

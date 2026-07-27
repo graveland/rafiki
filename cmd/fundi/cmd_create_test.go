@@ -164,7 +164,7 @@ func TestBuildSpawnRequest_LabelFlag(t *testing.T) {
 }
 
 func TestBuildSpawnRequest_PICDefaultModel(t *testing.T) {
-	t.Setenv("PIC_DEFAULT_MODEL", "anthropic/claude-haiku-4-5")
+	t.Setenv("FUNDI_DEFAULT_MODEL", "anthropic/claude-haiku-4-5")
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestBuildSpawnRequest_PICDefaultModel(t *testing.T) {
 }
 
 func TestBuildSpawnRequest_PICDefaultModelOverriddenByFlag(t *testing.T) {
-	t.Setenv("PIC_DEFAULT_MODEL", "env-model")
+	t.Setenv("FUNDI_DEFAULT_MODEL", "env-model")
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func TestBuildSpawnRequest_PICDefaultModelOverriddenByFlag(t *testing.T) {
 }
 
 func TestBuildSpawnRequest_PICDefaultLabels(t *testing.T) {
-	t.Setenv("PIC_DEFAULT_LABELS", "context=work,env=prod")
+	t.Setenv("FUNDI_DEFAULT_LABELS", "context=work,env=prod")
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -209,13 +209,13 @@ func TestBuildSpawnRequest_PICDefaultLabels(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if req.Labels["context"] != "work" || req.Labels["env"] != "prod" {
-		t.Errorf("Labels from PIC_DEFAULT_LABELS: %v", req.Labels)
+		t.Errorf("Labels from FUNDI_DEFAULT_LABELS: %v", req.Labels)
 	}
 }
 
 func TestBuildSpawnRequest_FlagLabelWinsOverEnv(t *testing.T) {
-	// Explicit --label should override PIC_DEFAULT_LABELS on the same key.
-	t.Setenv("PIC_DEFAULT_LABELS", "env=staging")
+	// Explicit --label should override FUNDI_DEFAULT_LABELS on the same key.
+	t.Setenv("FUNDI_DEFAULT_LABELS", "env=staging")
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)

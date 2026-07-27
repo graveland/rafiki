@@ -149,6 +149,7 @@ export type ReplacedSessionContext = ExtensionCommandContext & {
 
 import type { Client } from "./client.ts";
 import { setupTuiAutocomplete } from "../../cmd/fundi/helpersembed/fundi-helpers/index.ts";
+import { envFlag } from "./env.ts";
 
 // ─── Local type definitions (not exported from main package index) ────────────
 
@@ -383,7 +384,7 @@ export class RemoteAgentSession {
             // surface via the unhandled-rejection path which we log.
             abort(): void {
                 void self.abort().catch((err) => {
-                    if (process.env.PIC_ATTACH_DEBUG === "1") {
+                    if (envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
                         console.error("[fundi-attach] agent.abort forward failed:", err);
                     }
                 });
@@ -419,7 +420,7 @@ export class RemoteAgentSession {
     private async consumeEvents(): Promise<void> {
         // _eventIter was registered in the constructor.
         if (!this._eventIter) this._eventIter = this._client.subscribe();
-        const debug = process.env.PIC_ATTACH_DEBUG === "1";
+        const debug = envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG");
 
         try {
             for await (const frame of this._eventIter) {
@@ -508,7 +509,7 @@ export class RemoteAgentSession {
         try {
             frames = await this._client.getRecent(this._childId, limit);
         } catch (err) {
-            if (process.env.PIC_ATTACH_DEBUG === "1") {
+            if (envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
                 console.error("[fundi-attach] primeHistory failed:", err);
             }
             return;
@@ -1166,7 +1167,7 @@ export class RemoteAgentSession {
      */
     async bindExtensions(bindings: ExtensionBindings): Promise<void> {
         if (bindings.uiContext) {
-            // setupTuiAutocomplete reads PIC_ATTACH_CHILD_ID and PI_CONTROLLER_SOCKET
+            // setupTuiAutocomplete reads FUNDI_ATTACH_CHILD_ID and FUNDI_SOCKET
             // from the environment (set by main.ts before TUI construction).
             const { refresh } = setupTuiAutocomplete(
                 // Cast to satisfy ExtensionUIContext.addAutocompleteProvider which expects

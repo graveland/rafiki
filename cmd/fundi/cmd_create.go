@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"git.graveland.dev/brent/fundi/client"
+	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/protocol"
 )
 
@@ -34,9 +35,9 @@ The child runs in the background; reattach later with 'fundi attach <name>'.
 --cwd defaults to the current directory. Specify explicitly to override.
 
 Environment variable defaults (applied before explicit flags; lowest priority):
-  PIC_DEFAULT_PRESET  preset name from ~/.pi/agent/fundi-presets.json
-  PIC_DEFAULT_MODEL   fallback model string
-  PIC_DEFAULT_LABELS  comma-separated k=v label defaults
+  FUNDI_DEFAULT_PRESET  preset name from ~/.pi/agent/fundi-presets.json
+  FUNDI_DEFAULT_MODEL   fallback model string
+  FUNDI_DEFAULT_LABELS  comma-separated k=v label defaults
 
 (Note: fundi create replaces the earlier ` + "`fundi spawn`" + ` subcommand. For
 scripting / AFK workflows, use --detached.)`,
@@ -49,7 +50,7 @@ scripting / AFK workflows, use --detached.)`,
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the fundi-helpers pi extension")
-	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/fundi-presets.json (also settable via PIC_DEFAULT_PRESET)")
+	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/fundi-presets.json (also settable via FUNDI_DEFAULT_PRESET)")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort: silently empty list when presets file is missing or malformed.
 		pf, err := loadPresets()
@@ -71,7 +72,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("kind", "pi", "Agent kind: pi (default) or claude (Claude Code)")
 	cmd.Flags().String("config-dir", "", "For --kind claude: CLAUDE_CONFIG_DIR selecting the claude profile (plugins/hooks/MCP/settings)")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
-	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via PIC_DEFAULT_MODEL")
+	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via FUNDI_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
 	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")
@@ -80,7 +81,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
-	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see PIC_DEFAULT_LABELS")
+	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see FUNDI_DEFAULT_LABELS")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
@@ -98,12 +99,23 @@ func addSpawnFlags(cmd *cobra.Command) {
 	})
 }
 
+// resolvePresetName returns the preset to apply: the --preset flag if given,
+// else $FUNDI_DEFAULT_PRESET (the pre-rename PIC_DEFAULT_PRESET still works).
+// Extracted so tests exercise this resolution rather than reimplementing it —
+// an inlined copy in a test passes no matter what the real command reads.
+func resolvePresetName(cmd *cobra.Command) string {
+	if name, _ := cmd.Flags().GetString("preset"); name != "" {
+		return name
+	}
+	return envvar.Get(envvar.DefaultPreset)
+}
+
 // buildSpawnRequest constructs a SpawnRequest from the spawn flags, env-var
 // defaults, and positional args. Returns an error if required flags are invalid.
 //
 // Env-var defaults are read lazily here (not at process start) for test isolation:
-//   - PIC_DEFAULT_MODEL: used when --model is not set
-//   - PIC_DEFAULT_LABELS: comma-separated k=v pairs merged before --label flags
+//   - FUNDI_DEFAULT_MODEL: used when --model is not set
+//   - FUNDI_DEFAULT_LABELS: comma-separated k=v pairs merged before --label flags
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
@@ -117,10 +129,10 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute (got %q)", cwd)
 	}
 
-	// PIC_DEFAULT_MODEL: fallback when --model not given.
+	// FUNDI_DEFAULT_MODEL: fallback when --model not given.
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
-		model = os.Getenv("PIC_DEFAULT_MODEL")
+		model = envvar.Get(envvar.DefaultModel)
 	}
 
 	kind, _ := cmd.Flags().GetString("kind")
@@ -136,10 +148,10 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	extraArgs, _ := cmd.Flags().GetStringSlice("extra-arg")
 
-	// PIC_DEFAULT_LABELS: parsed lazily and merged before --label flags.
-	envLabels, err := parseEnvLabels(os.Getenv("PIC_DEFAULT_LABELS"))
+	// FUNDI_DEFAULT_LABELS: parsed lazily and merged before --label flags.
+	envLabels, err := parseEnvLabels(envvar.Get(envvar.DefaultLabels))
 	if err != nil {
-		return protocol.SpawnRequest{}, fmt.Errorf("PIC_DEFAULT_LABELS: %w", err)
+		return protocol.SpawnRequest{}, fmt.Errorf("FUNDI_DEFAULT_LABELS: %w", err)
 	}
 
 	flagLabelPairs, _ := cmd.Flags().GetStringArray("label")
@@ -238,11 +250,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// Apply preset (lowest priority: preset < env-var defaults < explicit flags).
 	// buildSpawnRequest has already merged env-var defaults and --label flags;
 	// preset fills in any keys/model that weren't set by higher-priority sources.
-	presetName, _ := cmd.Flags().GetString("preset")
-	// PIC_DEFAULT_PRESET: fallback when --preset is not set explicitly.
-	if presetName == "" {
-		presetName = os.Getenv("PIC_DEFAULT_PRESET")
-	}
+	presetName := resolvePresetName(cmd)
 	if presetName != "" {
 		pf, err := loadPresets()
 		if err != nil {
@@ -252,7 +260,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		if !ok {
 			return fmt.Errorf("--preset: unknown preset %q (available: %s)", presetName, availablePresets(pf))
 		}
-		// Preset model is the fallback when neither flag nor PIC_DEFAULT_MODEL set it.
+		// Preset model is the fallback when neither flag nor FUNDI_DEFAULT_MODEL set it.
 		if req.Model == "" && preset.Model != "" {
 			req.Model = preset.Model
 		}
