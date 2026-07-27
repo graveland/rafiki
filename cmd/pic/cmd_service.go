@@ -301,27 +301,34 @@ func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
 	return spec, nil
 }
 
+// daemonBinaryName is the daemon's executable name. It must NOT be the client's
+// own name: the client is `fundi` and the daemon is `fundid`, and both normally
+// sit in the same directory, so a sibling lookup for "fundi" finds the client
+// and happily installs a service unit pointing at it. That fails at launch, not
+// at install, which is the worst place for it to fail.
+const daemonBinaryName = "fundid"
+
 // findDaemonBinary locates the fundi daemon binary. It first looks for a
-// sibling next to the running pic executable, then falls back to PATH.
+// sibling next to the running client executable, then falls back to PATH.
 func findDaemonBinary() (string, error) {
 	self, _ := os.Executable()
 	return findDaemonBinaryFrom(self)
 }
 
 // findDaemonBinaryFrom is the testable inner function; self is the
-// path of the running executable (typically the pic binary).
+// path of the running executable (typically the client binary).
 func findDaemonBinaryFrom(self string) (string, error) {
 	if self != "" {
-		sibling := filepath.Join(filepath.Dir(self), "fundi")
+		sibling := filepath.Join(filepath.Dir(self), daemonBinaryName)
 		if _, err := os.Stat(sibling); err == nil {
 			return sibling, nil
 		}
 	}
-	path, err := exec.LookPath("fundi")
+	path, err := exec.LookPath(daemonBinaryName)
 	if err == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("fundi binary not found: not next to pic, and not on PATH; use --daemon-binary to specify a path")
+	return "", fmt.Errorf("%s binary not found: not next to the client, and not on PATH; use --daemon-binary to specify a path", daemonBinaryName)
 }
 
 // buildPathEnv builds the PATH string for the service environment. It

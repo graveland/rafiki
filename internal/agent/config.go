@@ -38,7 +38,7 @@ func ThinkingBudgetFor(level string) (int64, error) {
 }
 
 // Config is the fully-resolved input to BuildEngine. Every field is either a
-// flag value taken as-is, or something cmd/fundi has already produced via
+// flag value taken as-is, or something cmd/fundid has already produced via
 // I/O (env lookups, file reads, the assembled tool registry) before calling
 // BuildEngine - BuildEngine itself parses no flags and does no filesystem
 // discovery beyond opening the optional DB pool.
@@ -46,15 +46,15 @@ func ThinkingBudgetFor(level string) (int64, error) {
 // Tools is a pre-built agentloop.ToolSet rather than something BuildEngine
 // assembles itself: internal/agent/tools imports this package (for
 // SkillMeta, in the skill tool), so this package can never import
-// internal/agent/tools without an import cycle. cmd/fundi is where both
-// sides meet - see cmd/fundi/agent.go, which builds the Registry (file
+// internal/agent/tools without an import cycle. cmd/fundid is where both
+// sides meet - see cmd/fundid/agent.go, which builds the Registry (file
 // tools, bash, skills, MCP) and hands it in here.
 type Config struct {
 	// Model is the provider-qualified model id, e.g. "anthropic/sonnet-latest"
 	// or "deepseek/deepseek-chat". rafiki routes on this id alone: an
 	// "anthropic/" prefix resolves through the native Anthropic sender
 	// (prefix stripped, remainder resolved as an alias or concrete id);
-	// anything else routes to OpenRouter. cmd/fundi requires --model to be
+	// anything else routes to OpenRouter. cmd/fundid requires --model to be
 	// provider-qualified (see parseAgentFlags) - BuildEngine itself does not
 	// re-validate that, so a bare id here (as some pre-redesign unit tests
 	// still use) is passed straight to rafiki uninterpreted.
@@ -93,14 +93,14 @@ type Config struct {
 	FakeTurns string
 
 	// AnthropicAPIKey / OpenRouterAPIKey are read from the environment by
-	// cmd/fundi and passed in explicitly - rather than BuildEngine reading
+	// cmd/fundid and passed in explicitly - rather than BuildEngine reading
 	// os.Getenv itself - so tests can exercise the missing-key error path
 	// without mutating the process environment.
 	AnthropicAPIKey  string
 	OpenRouterAPIKey string
 
 	// Tools is the assembled tool registry (file tools + bash + skills +
-	// MCP), built by cmd/fundi before calling BuildEngine.
+	// MCP), built by cmd/fundid before calling BuildEngine.
 	Tools agentloop.ToolSet
 }
 
@@ -112,8 +112,8 @@ type Config struct {
 //
 // The returned shutdown func closes the DB pool (a no-op when DBURL was
 // empty). It does NOT close MCP sessions or the Engine's worker goroutine -
-// those are cmd/fundi's to own (ConnectMCP's shutdown, Engine.Close) since
-// this package cannot import internal/agent/tools. cmd/fundi/agent.go
+// those are cmd/fundid's to own (ConnectMCP's shutdown, Engine.Close) since
+// this package cannot import internal/agent/tools. cmd/fundid/agent.go
 // combines all three on its shutdown path.
 func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(), error) {
 	if c.Tools == nil {
@@ -192,7 +192,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	// process that crashed or was killed mid-turn — before that process's
 	// own abort handling ever ran. Repair here, once, before the engine's
 	// worker can execute any turn (NewEngine has already started it, but
-	// nothing wakes it until cmd/fundi's Frontend.Run reads its first
+	// nothing wakes it until cmd/fundid's Frontend.Run reads its first
 	// inbound frame, which happens strictly after BuildEngine returns).
 	// In-memory mode (c.DBURL == "") has nothing to reattach — Conversation
 	// always mints a fresh "mem-..." id — so this is a clean no-op there,

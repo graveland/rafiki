@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// `fundi agent -h` must print usage. It previously exited 0 having printed
+// `fundid agent -h` must print usage. It previously exited 0 having printed
 // NOTHING: parseAgentFlags sets the FlagSet output to io.Discard so runAgent can
 // report parse errors itself, which also silently swallowed the -h usage text.
 func TestPrintAgentUsageListsFlags(t *testing.T) {
@@ -25,7 +25,7 @@ func TestPrintAgentUsageListsFlags(t *testing.T) {
 			t.Errorf("usage missing flag %q; got:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "fundi agent") {
+	if !strings.Contains(out, "fundid agent") {
 		t.Errorf("usage should name the command; got:\n%s", out)
 	}
 }
@@ -54,8 +54,8 @@ func errorsIsHelp(err error) bool {
 	return false
 }
 
-// The top-level binary has two modes (the daemon, and `fundi agent`), so its
-// usage must name both — `fundi -h` used to fall through into daemon startup
+// The top-level binary has two modes (the daemon, and `fundid agent`), so its
+// usage must name both — `fundid -h` used to fall through into daemon startup
 // and fail on the controller socket instead of printing anything.
 func TestPrintRootUsageCoversBothModes(t *testing.T) {
 	var buf bytes.Buffer
@@ -69,6 +69,15 @@ func TestPrintRootUsageCoversBothModes(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("root usage missing %q; got:\n%s", want, out)
 		}
+	}
+
+	// The daemon must call itself fundid. Usage that still said "fundi" would
+	// tell users to run the client binary to start the daemon.
+	if !strings.Contains(out, "fundid") {
+		t.Errorf("root usage does not name the fundid binary; got:\n%s", out)
+	}
+	if strings.Contains(out, "fundi ") {
+		t.Errorf("root usage refers to `fundi ` as if it were the daemon; got:\n%s", out)
 	}
 }
 

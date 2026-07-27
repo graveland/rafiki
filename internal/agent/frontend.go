@@ -133,7 +133,7 @@ func (f *Frontend) Run() error {
 		default:
 			if hdr.ID != "" { // request-shaped: answer so clients don't hang
 				f.Emit(map[string]any{"type": "response", "command": hdr.Type,
-					"id": hdr.ID, "success": false, "error": "unsupported by fundi agent"})
+					"id": hdr.ID, "success": false, "error": "unsupported by fundid agent"})
 			}
 		}
 	}

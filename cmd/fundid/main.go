@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	// Dispatch `fundi agent ...` before any daemon setup below - it is a
+	// Dispatch `fundid agent ...` before any daemon setup below - it is a
 	// separate process mode (a single agent child speaking pi's rpc
 	// protocol on stdio) and must not fall through into the daemon's own
 	// flag-less startup. Every other invocation (including no args) runs the
@@ -32,7 +32,7 @@ func main() {
 		os.Exit(runAgent(os.Args[2:]))
 	}
 
-	// The daemon takes no flags, so without this `fundi -h` fell through into
+	// The daemon takes no flags, so without this `fundid -h` fell through into
 	// startup and failed on the controller socket instead of printing anything.
 	// Help goes to stdout and exits 0 — it was asked for, it isn't an error.
 	if len(os.Args) > 1 && isHelpArg(os.Args[1]) {

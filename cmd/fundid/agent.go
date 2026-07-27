@@ -46,7 +46,7 @@ type agentFlags struct {
 	fakeTurns          string
 }
 
-// parseAgentFlags parses the fundi agent flag set. It is a pure function of
+// parseAgentFlags parses the fundid agent flag set. It is a pure function of
 // args plus the environment defaults ($FUNDI_CHILD_ID for --ref,
 // $FUNDI_AGENT_DB for --db) so it can be exercised directly by tests without
 // a running agent.
@@ -64,7 +64,7 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 	return f, nil
 }
 
-// runAgent is cmd/fundi's other entry point: `fundi agent ...` runs a single
+// runAgent is cmd/fundid's other entry point: `fundid agent ...` runs a single
 // agent child speaking pi's rpc protocol on stdio, in place of Claude Code.
 // It owns everything internal/agent.Config cannot build itself (env/flag
 // parsing, filesystem discovery, and the tool registry - see Config's doc

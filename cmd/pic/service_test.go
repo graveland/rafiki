@@ -7,16 +7,16 @@ import (
 	"testing"
 )
 
-// TestFindDaemonBinaryFromSibling verifies that a pi-controller binary sitting
-// next to the specified "self" path is returned without falling through to PATH.
+// TestFindDaemonBinaryFromSibling verifies that a daemon binary sitting next to
+// the specified "self" path is returned without falling through to PATH.
 func TestFindDaemonBinaryFromSibling(t *testing.T) {
 	dir := t.TempDir()
-	sibling := filepath.Join(dir, "fundi")
+	sibling := filepath.Join(dir, "fundid")
 	if err := os.WriteFile(sibling, []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := findDaemonBinaryFrom(filepath.Join(dir, "pic"))
+	got, err := findDaemonBinaryFrom(filepath.Join(dir, "fundi"))
 	if err != nil {
 		t.Fatalf("expected sibling lookup to succeed: %v", err)
 	}
@@ -25,20 +25,46 @@ func TestFindDaemonBinaryFromSibling(t *testing.T) {
 	}
 }
 
+// TestFindDaemonBinaryNeverPicksTheClient is the regression test for the one
+// way this rename could break silently.
+//
+// The client is `fundi` and the daemon is `fundid`, and `make install` puts
+// both in the same directory. A sibling lookup for the wrong name therefore
+// always succeeds — it finds the client — and `service install` writes a unit
+// pointing the service at the CLI. Nothing fails until launchd or systemd
+// actually starts it, long after the command that caused it returned 0.
+func TestFindDaemonBinaryNeverPicksTheClient(t *testing.T) {
+	dir := t.TempDir()
+	client := filepath.Join(dir, "fundi")
+	if err := os.WriteFile(client, []byte("fake client"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the client exists. The lookup must not settle for it — it either
+	// finds a real fundid on PATH or fails.
+	got, err := findDaemonBinaryFrom(client)
+	if err == nil && got == client {
+		t.Fatalf("findDaemonBinaryFrom returned the client binary %q as the daemon", got)
+	}
+	if err == nil && filepath.Base(got) != "fundid" {
+		t.Errorf("resolved daemon %q is not named fundid", got)
+	}
+}
+
 // TestFindDaemonBinaryNoSibling verifies that when no sibling exists, the
 // function either succeeds via PATH or returns a clear "not found" error.
 func TestFindDaemonBinaryNoSibling(t *testing.T) {
-	dir := t.TempDir() // empty — no pi-controller binary here
+	dir := t.TempDir() // empty — no daemon binary here
 
-	got, err := findDaemonBinaryFrom(filepath.Join(dir, "pic"))
+	got, err := findDaemonBinaryFrom(filepath.Join(dir, "fundi"))
 	if err != nil {
-		// Expected when pi-controller is not on PATH.
+		// Expected when the daemon is not on PATH.
 		if !strings.Contains(err.Error(), "not found") {
 			t.Errorf("unexpected error message: %v", err)
 		}
 		return
 	}
-	// If it succeeded (pi-controller is on PATH), the result must be absolute.
+	// If it succeeded (the daemon is on PATH), the result must be absolute.
 	if !filepath.IsAbs(got) {
 		t.Errorf("expected absolute path, got %s", got)
 	}

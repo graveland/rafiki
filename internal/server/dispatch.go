@@ -65,7 +65,7 @@ type ControllerStatus = protocol.StatusResponseData
 // ─── Controller interface ─────────────────────────────────────────────────────
 
 // Controller is the surface dispatch needs from the rest of the daemon.
-// The real implementation lives in cmd/fundi; tests use a fake.
+// The real implementation lives in cmd/fundid; tests use a fake.
 type Controller interface {
 	// Read-only queries.
 	List(filter protocol.ListFilter) []store.Snapshot

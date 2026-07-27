@@ -20,7 +20,7 @@ const (
 	socketOld = "PI_CONTROLLER_SOCKET"
 
 	// ChildID is set by the daemon on each child so the child knows its own id;
-	// `fundi agent` uses it as the default --ref.
+	// `fundid agent` uses it as the default --ref.
 	ChildID    = "FUNDI_CHILD_ID"
 	childIDOld = "PI_CONTROLLER_CHILD_ID"
 

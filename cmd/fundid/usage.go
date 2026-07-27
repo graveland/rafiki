@@ -10,10 +10,10 @@ import (
 )
 
 // isHelpArg reports whether arg is a request for usage. Consulted by main
-// BEFORE any daemon setup: the daemon takes no flags, so `fundi -h` used to fall
-// through into startup and fail on the controller socket instead of printing
-// anything. Only the conventional spellings count — treating an unrecognised
-// argument as help would silently refuse to start the daemon.
+// BEFORE any daemon setup: the daemon takes no flags, so `fundid -h` used to
+// fall through into startup and fail on the controller socket instead of
+// printing anything. Only the conventional spellings count — treating an
+// unrecognised argument as help would silently refuse to start the daemon.
 func isHelpArg(arg string) bool {
 	switch arg {
 	case "-h", "--help", "help":
@@ -22,18 +22,20 @@ func isHelpArg(arg string) bool {
 	return false
 }
 
-// printRootUsage documents both process modes. fundi is one binary with two
-// entry points — the controller daemon (no flags) and `fundi agent`, a single
+// printRootUsage documents both process modes. fundid is one binary with two
+// entry points — the controller daemon (no flags) and `fundid agent`, a single
 // agent child speaking pi's rpc protocol on stdio — so usage that mentioned only
 // one of them would hide the other entirely.
 func printRootUsage(w io.Writer) {
-	fmt.Fprint(w, `fundi — coding-agent controller daemon and native agent runtime.
+	fmt.Fprint(w, `fundid — coding-agent controller daemon and native agent runtime.
 
 Usage:
-  fundi                 Run the controller daemon (takes no flags).
-  fundi agent [flags]   Run one agent child on stdio (pi rpc protocol).
-                        Spawned by the daemon; see 'fundi agent -h'.
-  fundi -h | --help     Show this help.
+  fundid                 Run the controller daemon (takes no flags).
+  fundid agent [flags]   Run one agent child on stdio (pi rpc protocol).
+                         Spawned by the daemon; see 'fundid agent -h'.
+  fundid -h | --help     Show this help.
+
+The command-line client is a separate binary, `+"`fundi`"+`.
 
 The daemon listens on a unix socket and stores its state under the XDG base
 directories (override with the standard XDG_* variables):
@@ -47,12 +49,12 @@ and any child it spawns.
 `)
 }
 
-// printAgentUsage writes `fundi agent` usage. It exists because
+// printAgentUsage writes `fundid agent` usage. It exists because
 // parseAgentFlags points its FlagSet at io.Discard so runAgent can report parse
-// errors itself — which also swallowed the -h output, making `fundi agent -h`
+// errors itself — which also swallowed the -h output, making `fundid agent -h`
 // exit 0 having printed nothing.
 func printAgentUsage(w io.Writer) {
-	fmt.Fprint(w, `Usage: fundi agent [flags]
+	fmt.Fprint(w, `Usage: fundid agent [flags]
 
 Runs a single agent child speaking pi's rpc protocol on stdio, in place of
 Claude Code. Normally spawned by the fundi daemon rather than invoked directly.
@@ -65,7 +67,7 @@ Flags:
 	fs.PrintDefaults()
 }
 
-// newAgentFlagSet registers `fundi agent`'s flags. Shared by parseAgentFlags and
+// newAgentFlagSet registers `fundid agent`'s flags. Shared by parseAgentFlags and
 // printAgentUsage so the documented flags cannot drift from the parsed ones.
 //
 // Output goes to io.Discard: runAgent reports parse errors itself, and

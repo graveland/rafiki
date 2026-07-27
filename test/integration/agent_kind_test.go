@@ -126,10 +126,10 @@ func childStatusPredicate(childID, status string) func(json.RawMessage) bool {
 }
 
 // TestIntegration_AgentKind_AbortPreservesProcess is the Task 16 keystone
-// test: it spawns a real `fundi agent` child (kind="agent", self-exec via
+// test: it spawns a real `fundid agent` child (kind="agent", self-exec via
 // os.Executable() - this is why it lives in the subprocess harness rather
-// than cmd/fundi's in-process tests, which run inside a go-test binary whose
-// own os.Executable() would re-exec the test binary, not cmd/fundi's real
+// than cmd/fundid's in-process tests, which run inside a go-test binary whose
+// own os.Executable() would re-exec the test binary, not cmd/fundid's real
 // main()), drives a prompt into a scripted tool_use turn that blocks on a
 // FIFO read the test never satisfies, aborts mid-turn, and proves the abort
 // landed in-band (no process restart) via PID identity - the same
@@ -177,7 +177,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		ID:   "spawn1",
 		Kind: "agent",
 		Cwd:  t.TempDir(),
-		// --model is required by `fundi agent` (parseAgentFlags) since the
+		// --model is required by `fundid agent` (parseAgentFlags) since the
 		// provider/model redesign; --fake-turns replaces the sender, so the
 		// value itself is inert here beyond being provider-qualified.
 		Model:     "anthropic/claude-x",

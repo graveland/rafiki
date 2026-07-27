@@ -31,7 +31,7 @@ type fakeSender struct {
 // zero messages (including an empty file, e.g. /dev/null) is not itself an
 // error: it produces a sender that is immediately "exhausted", which is
 // exactly right for driving a session that only ever needs get_state/no LLM
-// call at all (see cmd/fundi agent --fake-turns's manual acceptance gate).
+// call at all (see cmd/fundid agent --fake-turns's manual acceptance gate).
 func LoadFakeSender(path string) (llm.Sender, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -50,8 +50,10 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(binDir)
 
+	// Both binaries land in the same directory, so their names must differ:
+	// fundid is the daemon, fundi the client.
 	for _, cmd := range []struct{ bin, pkg string }{
-		{"fundi", "./cmd/fundi"},
+		{"fundid", "./cmd/fundid"},
 		{"pic", "./cmd/pic"},
 	} {
 		out := filepath.Join(binDir, cmd.bin)
@@ -62,7 +64,7 @@ func TestMain(m *testing.M) {
 			log.Fatalf("build %s: %v", cmd.bin, err)
 		}
 		switch cmd.bin {
-		case "fundi":
+		case "fundid":
 			binaryPath = out
 		case "pic":
 			piCtlPath = out

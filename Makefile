@@ -29,13 +29,13 @@ PI_SRC := $(shell find $(PI_DIR)/packages/*/src -type f \( -name '*.ts' -o -name
 # Evaluated fresh on each invocation; empty when no .go files exist yet.
 PKGS := $(shell $(GO) list ./... 2>/dev/null)
 
-build: build-controller build-pic build-attach # Build fundi, pic, and pic-attach
+build: build-controller build-pic build-attach # Build fundid, pic, and pic-attach
 
 update: build pi-install # Build everything AND install the global pi backend
 
-build-controller: # Build the daemon binary (bin/fundi)
+build-controller: # Build the daemon binary (bin/fundid)
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/fundi ./cmd/fundi
+	$(GO) build -o $(BIN_DIR)/fundid ./cmd/fundid
 
 build-pic: # Build the pic CLI (bin/pic)
 	mkdir -p $(BIN_DIR)

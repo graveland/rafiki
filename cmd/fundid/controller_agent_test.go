@@ -81,7 +81,7 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 // the redesign's required-model invariant: an "agent" kind spawn with no
 // resolvable model (neither SpawnRequest.Model nor a --model in ExtraArgs) is
 // rejected at spawn time with a clean control-plane error, rather than
-// exec'ing a child that immediately dies on `fundi agent`'s own flag-parse
+// exec'ing a child that immediately dies on `fundid agent`'s own flag-parse
 // error.
 func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: "agent"}

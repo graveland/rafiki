@@ -77,7 +77,7 @@ func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }
 // ~/.cache/fundi.
 func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
 
-// SpillDir is where a standalone `fundi agent` writes clipped tool output. Cache
+// SpillDir is where a standalone `fundid agent` writes clipped tool output. Cache
 // rather than data: it is large, disposable, and reconstructible from the
 // conversation. No "fundi-" prefix on the leaf — the directory is already
 // namespaced, unlike the os.TempDir() location this replaced, where the prefix

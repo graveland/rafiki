@@ -2000,13 +2000,13 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		bin, err = resolvePiBinary(req.PiBinary)
 		return bin, buildArgv(req), child.PiProvider{}, err
 	case "agent":
-		// The agent runtime is `fundi agent ...`: the daemon re-execs itself
+		// The agent runtime is `fundid agent ...`: the daemon re-execs itself
 		// rather than shelling out to a separate binary. It speaks pi's rpc
 		// protocol natively (internal/agent/frontend.go), so no translator is
 		// needed - child.PiProvider{} is the correct identity, same as the
 		// "pi" case above.
 		//
-		// --model is a required flag for `fundi agent` (parseAgentFlags):
+		// --model is a required flag for `fundid agent` (parseAgentFlags):
 		// reject an unresolvable model here, at spawn time, rather than
 		// exec'ing a child that immediately dies on the flag-parse error.
 		if !agentSpawnHasModel(req) {
@@ -2015,7 +2015,7 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		// Unlike pi/claude, the agent kind carries its provider inside the
 		// model id itself (e.g. "anthropic/sonnet-latest" - see
 		// internal/agent/config.go's senderOptions); there is no separate
-		// --provider flag for `fundi agent` to consume. A caller-supplied
+		// --provider flag for `fundid agent` to consume. A caller-supplied
 		// req.Provider here would silently be dropped were it not for this
 		// check, or worse, get double-prefixed onto the reported model - so
 		// reject it explicitly rather than exec'ing a child whose model
@@ -2048,7 +2048,7 @@ func agentSpillDir(stateDir, childID string) string {
 // (buildAgentArgv appends ExtraArgs last, so an ExtraArgs --model can stand
 // in for req.Model even though req.Model itself is required by
 // parseAgentFlags). Checked by resolveSpawnPlan before ever building the
-// argv/exec'ing the child - `fundi agent` treats a missing --model as a hard
+// argv/exec'ing the child - `fundid agent` treats a missing --model as a hard
 // flag-parse error, and a spawn-time rejection here is a far cleaner failure
 // than a child that execs and immediately dies.
 //
@@ -2072,9 +2072,9 @@ func agentSpawnHasModel(req protocol.SpawnRequest) bool {
 	return false
 }
 
-// buildAgentArgv converts a SpawnRequest into the `fundi agent` CLI argument
+// buildAgentArgv converts a SpawnRequest into the `fundid agent` CLI argument
 // list (excluding the binary itself), mirroring Task 14's flag contract
-// (cmd/fundi/agent.go's parseAgentFlags). The leading "agent" token is
+// (cmd/fundid/agent.go's parseAgentFlags). The leading "agent" token is
 // required so main.go's `os.Args[1] == "agent"` dispatch fires on re-exec.
 //
 // --spill-dir is always pinned to agentSpillDir(stateDir, childID) so the
@@ -2147,7 +2147,7 @@ func claudeEnv(configDir string) []string {
 //
 // Note on API key propagation for the "agent" kind: unlike pi/claude, `fundi
 // agent` has no --api-key flag (internal/agent.Config.AnthropicAPIKey /
-// OpenRouterAPIKey are read from the environment by cmd/fundi/agent.go's
+// OpenRouterAPIKey are read from the environment by cmd/fundid/agent.go's
 // runAgent, deliberately, so tests can exercise the missing-key path without
 // mutating the process env - see internal/agent/config.go's Config doc
 // comment). Two paths feed the child those vars: (1) when EnvOverride is
@@ -2158,7 +2158,7 @@ func claudeEnv(configDir string) []string {
 // explicitly (the same field pi/claude thread via --api-key), this function
 // translates it into the correctly-named var below so it isn't silently
 // dropped for agent kind. Which var name to use is decided the same way
-// `fundi agent` itself decides routing (internal/agent/config.go's
+// `fundid agent` itself decides routing (internal/agent/config.go's
 // senderOptions): an "anthropic/" prefixed model needs ANTHROPIC_API_KEY,
 // anything else needs OPENROUTER_API_KEY - there is no separate --provider
 // concept any more.
