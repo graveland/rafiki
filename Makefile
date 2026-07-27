@@ -1,15 +1,25 @@
-.PHONY: help build update build-controller build-pic build-attach \
+.PHONY: help build update build-daemon build-cli build-attach \
+        build-controller build-pic install \
         bootstrap pi-build pi-install pi-update pi-refresh-catalogs \
         test test-race test-ci test-both vet fmt clean
 
 GO      ?= go
 BIN_DIR := bin
 
+# Where `make install` puts the binaries. ~/.local/bin is the XDG counterpart to
+# the internal/paths locations, and sidesteps a ~/bin that may already hold a
+# pi-controller install.
+DESTDIR ?= $(HOME)/.local/bin
+
+DAEMON_BIN := fundid
+CLI_BIN    := fundi
+ATTACH_BIN := fundi-attach
+
 BOLD   := \033[1m
 NORMAL := \033[0m
 GREEN  := \033[1;32m
 
-.DEFAULT_GOAL := update
+.DEFAULT_GOAL := help
 HELP_TARGET_DEPTH ?= \#
 help: # Show available targets
 	@printf "make targets (e.g. $(BOLD)make build$(NORMAL)):\n\n"
@@ -29,17 +39,21 @@ PI_SRC := $(shell find $(PI_DIR)/packages/*/src -type f \( -name '*.ts' -o -name
 # Evaluated fresh on each invocation; empty when no .go files exist yet.
 PKGS := $(shell $(GO) list ./... 2>/dev/null)
 
-build: build-controller build-pic build-attach # Build fundid, fundi, and fundi-attach
+build: build-daemon build-cli build-attach # Build fundid, fundi, and fundi-attach
 
 update: build pi-install # Build everything AND install the global pi backend
 
-build-controller: # Build the daemon binary (bin/fundid)
+build-daemon: # Build the daemon binary (bin/fundid)
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/fundid ./cmd/fundid
+	$(GO) build -o $(BIN_DIR)/$(DAEMON_BIN) ./cmd/fundid
 
-build-pic: # Build the fundi CLI (bin/fundi)
+build-cli: # Build the CLI client (bin/fundi)
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/fundi ./cmd/fundi
+	$(GO) build -o $(BIN_DIR)/$(CLI_BIN) ./cmd/fundi
+
+# Kept for one cycle: muscle memory, and the M1 smoke checklist names them.
+build-controller: build-daemon # Deprecated alias for build-daemon
+build-pic: build-cli           # Deprecated alias for build-cli
 
 # fundi-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
 # must be built first. Fail loudly if the submodule isn't initialised.
@@ -49,6 +63,42 @@ build-attach: $(PI_MODULES) $(PI_DIST) # Bundle the fundi-attach TUI binary (rec
 	else \
 	    echo "skipping fundi-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
 	fi
+
+# ─── install ──────────────────────────────────────────────────────────────────
+
+# Copies the built binaries to $(DESTDIR) (default ~/.local/bin), then checks
+# whether that is actually the copy $PATH will find.
+#
+# The shadowing check is not paranoia: this is a fork of pi-controller, whose own
+# install may already have put a `pi-controller` (and historically a `pic`) on
+# $PATH ahead of ~/.local/bin. Installing successfully and then running a
+# different binary than the one you just built is a genuinely confusing failure,
+# so say so at install time.
+#
+# fundi-attach is copied only when it has been built — build-attach needs bun and
+# the pi submodule, and skips itself when bun is absent.
+install: build-daemon build-cli # Install fundid + fundi (+ fundi-attach if built) to $(DESTDIR)
+	@mkdir -p "$(DESTDIR)"
+	@for b in $(DAEMON_BIN) $(CLI_BIN); do \
+	    cp "$(BIN_DIR)/$$b" "$(DESTDIR)/$$b" || exit 1; \
+	    echo "installed $(DESTDIR)/$$b"; \
+	done
+	@if [ -x "$(BIN_DIR)/$(ATTACH_BIN)" ]; then \
+	    cp "$(BIN_DIR)/$(ATTACH_BIN)" "$(DESTDIR)/$(ATTACH_BIN)" || exit 1; \
+	    echo "installed $(DESTDIR)/$(ATTACH_BIN)"; \
+	else \
+	    echo "note: $(BIN_DIR)/$(ATTACH_BIN) not built — run 'make build-attach' (needs bun + the pi submodule)"; \
+	fi
+	@for b in $(DAEMON_BIN) $(CLI_BIN); do \
+	    found=$$(command -v "$$b" 2>/dev/null || true); \
+	    if [ -z "$$found" ]; then \
+	        echo "warning: $$b is not on \$$PATH at all — add $(DESTDIR) to it"; \
+	    elif [ "$$found" != "$(DESTDIR)/$$b" ]; then \
+	        echo "warning: \$$PATH finds a different $$b first:"; \
+	        echo "           $$found"; \
+	        echo "         shadowing the one just installed at $(DESTDIR)/$$b"; \
+	    fi; \
+	done
 
 # ─── pi submodule lifecycle ───────────────────────────────────────────────────
 # fundi-attach links against the bundled pi tree at $(PI_DIR), and the daemon
@@ -98,8 +148,8 @@ pi-not-initialised:
 	@echo "Run 'make bootstrap' (fresh clone), or:" >&2
 	@echo "    git submodule update --init --recursive" >&2
 	@echo >&2
-	@echo "Only the fundi-attach TUI needs it — 'make build-controller' and" >&2
-	@echo "'make build-pic' work without it." >&2
+	@echo "Only the fundi-attach TUI needs it — 'make build-daemon' and" >&2
+	@echo "'make build-cli' work without it." >&2
 	@exit 1
 
 pi-build: $(PI_DIST) # Recompile the pi submodule's TypeScript to dist
