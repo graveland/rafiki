@@ -7,15 +7,15 @@
  * factory registered via addAutocompleteProvider.
  *
  * Manual smoke test (requires a running daemon):
- *   make build                          # rebuild pic-attach binary
- *   ./bin/pic install-extension --force # refresh on-disk pic-helpers
- *   pic create test --no-extensions     # start a session
+ *   make build                          # rebuild fundi-attach binary
+ *   ./bin/fundi install-extension --force # refresh on-disk pic-helpers
+ *   fundi create test --no-extensions     # start a session
  *   # In TUI: type "/" then Tab
  *   # Expect: /reload appears in the completion list
  */
 
 import { describe, expect, it, beforeEach } from "bun:test";
-import { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/pic/picembed/pic-helpers/index.ts";
+import { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/fundi/picembed/pic-helpers/index.ts";
 
 // ─── Inline AutocompleteProvider type (mirrors @earendil-works/pi-tui) ────────
 

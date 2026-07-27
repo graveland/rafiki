@@ -29,7 +29,7 @@ PI_SRC := $(shell find $(PI_DIR)/packages/*/src -type f \( -name '*.ts' -o -name
 # Evaluated fresh on each invocation; empty when no .go files exist yet.
 PKGS := $(shell $(GO) list ./... 2>/dev/null)
 
-build: build-controller build-pic build-attach # Build fundid, pic, and pic-attach
+build: build-controller build-pic build-attach # Build fundid, fundi, and fundi-attach
 
 update: build pi-install # Build everything AND install the global pi backend
 
@@ -37,21 +37,21 @@ build-controller: # Build the daemon binary (bin/fundid)
 	mkdir -p $(BIN_DIR)
 	$(GO) build -o $(BIN_DIR)/fundid ./cmd/fundid
 
-build-pic: # Build the pic CLI (bin/pic)
+build-pic: # Build the fundi CLI (bin/fundi)
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/pic ./cmd/pic
+	$(GO) build -o $(BIN_DIR)/fundi ./cmd/fundi
 
-# pic-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
+# fundi-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
 # must be built first. Fail loudly if the submodule isn't initialised.
-build-attach: $(PI_MODULES) $(PI_DIST) # Bundle the pic-attach TUI binary (recompiles pi dist first)
+build-attach: $(PI_MODULES) $(PI_DIST) # Bundle the fundi-attach TUI binary (recompiles pi dist first)
 	@if command -v bun >/dev/null 2>&1; then \
 	    cd attach && bun install --silent && bun run build; \
 	else \
-	    echo "skipping pic-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
+	    echo "skipping fundi-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
 	fi
 
 # ─── pi submodule lifecycle ───────────────────────────────────────────────────
-# pic-attach links against the bundled pi tree at $(PI_DIR), and the daemon
+# fundi-attach links against the bundled pi tree at $(PI_DIR), and the daemon
 # spawns the matching pi binary off PATH. `pi-install` keeps the global install
 # in lock-step with the submodule pin.
 
@@ -98,7 +98,7 @@ pi-not-initialised:
 	@echo "Run 'make bootstrap' (fresh clone), or:" >&2
 	@echo "    git submodule update --init --recursive" >&2
 	@echo >&2
-	@echo "Only the pic-attach TUI needs it — 'make build-controller' and" >&2
+	@echo "Only the fundi-attach TUI needs it — 'make build-controller' and" >&2
 	@echo "'make build-pic' work without it." >&2
 	@exit 1
 

@@ -1,6 +1,6 @@
 # pic-helpers
 
-A pi extension that exposes pic-attach-aware slash commands.
+A pi extension that exposes fundi-attach-aware slash commands.
 
 ## Installed commands
 

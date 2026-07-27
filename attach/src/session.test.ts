@@ -724,7 +724,7 @@ describe("RemoteAgentSession", () => {
 
     it("stubs: executeBash throws v1-error with actionable message", async () => {
         await expect(session.executeBash("ls")).rejects.toThrow(
-            "Bash execution (! prefix) is not supported in pic-attach v1"
+            "Bash execution (! prefix) is not supported in fundi-attach v1"
         );
     });
 
@@ -770,13 +770,13 @@ describe("RemoteAgentSession", () => {
 
     it("stubs: navigateTree throws with actionable v1 message", async () => {
         await expect(session.navigateTree("some-id")).rejects.toThrow(
-            "/tree and /fork navigation are not supported in pic-attach v1"
+            "/tree and /fork navigation are not supported in fundi-attach v1"
         );
     });
 
     it("stubs: exportToHtml throws with actionable v1 message", async () => {
         await expect(session.exportToHtml()).rejects.toThrow(
-            "/export and /share are not supported in pic-attach v1"
+            "/export and /share are not supported in fundi-attach v1"
         );
     });
 
@@ -804,7 +804,7 @@ describe("RemoteAgentSession", () => {
 
     it("sendCustomMessage: throws with standard v1-error format", async () => {
         await expect(session.sendCustomMessage({ type: "custom" })).rejects.toThrow(
-            "sendCustomMessage is not supported in pic-attach v1."
+            "sendCustomMessage is not supported in fundi-attach v1."
         );
     });
 

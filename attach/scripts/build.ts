@@ -1,5 +1,5 @@
 /**
- * build.ts — compile pic-attach for the host platform.
+ * build.ts — compile fundi-attach for the host platform.
  *
  * bun's `--compile --target` names map exactly onto Node's process.platform
  * (darwin|linux) and process.arch (arm64|x64), so the target is derived from the
@@ -13,7 +13,7 @@ const target = `bun-${process.platform}-${process.arch}`;
 
 const { status } = spawnSync(
     "bun",
-    ["build", "--compile", `--target=${target}`, "./src/main.ts", "--outfile", "../bin/pic-attach"],
+    ["build", "--compile", `--target=${target}`, "./src/main.ts", "--outfile", "../bin/fundi-attach"],
     { stdio: "inherit" },
 );
 
@@ -21,4 +21,4 @@ if (status !== 0) {
     process.exit(status ?? 1);
 }
 
-console.log(`✓ Compiled pic-attach (${target})`);
+console.log(`✓ Compiled fundi-attach (${target})`);

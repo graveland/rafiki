@@ -1,4 +1,4 @@
-# pic-attach
+# fundi-attach
 
 A thin TUI client for pi-controller-managed children. Bundles pi's native
 `InteractiveMode` with a `RemoteAgentSessionRuntime` that proxies all agent
@@ -22,7 +22,7 @@ bun install
 bun run build
 ```
 
-Produces `bin/pic-attach`.
+Produces `bin/fundi-attach`.
 
 ## Usage
 
@@ -36,7 +36,7 @@ pic attach my-session
 
 ## Scrollback
 
-On attach, pic-attach replays the child's retained history into the TUI so you
+On attach, fundi-attach replays the child's retained history into the TUI so you
 see the prior transcript, then follows live. Control how much is replayed with
 `-n/--tail` (default `-1` = all retained, `0` = none):
 

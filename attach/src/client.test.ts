@@ -16,7 +16,7 @@ import { Client, FrameSplitter, defaultSocketPath } from "./client.ts";
 
 /** Creates a temp socket path that doesn't exist yet. */
 function tempSock(): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pic-test-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fundi-test-"));
     return path.join(dir, "ctrl.sock");
 }
 
@@ -170,7 +170,7 @@ describe("Client", () => {
 
     // 2. dial_failure_throws
     it("dial_failure_throws", async () => {
-        const badPath = "/tmp/pic-test-nonexistent-" + Date.now() + ".sock";
+        const badPath = "/tmp/fundi-test-nonexistent-" + Date.now() + ".sock";
         await expect(Client.dial({ socket: badPath })).rejects.toThrow();
     });
 

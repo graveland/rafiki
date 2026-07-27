@@ -18,7 +18,7 @@ import { DEFAULT_TAIL_LIMIT, RemoteAgentSessionRuntime, resolveTailLimit } from 
 // ─── Server harness (mirrors client.test.ts) ──────────────────────────────────
 
 function tempSock(): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pic-rt-test-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fundi-rt-test-"));
     return path.join(dir, "ctrl.sock");
 }
 

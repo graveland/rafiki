@@ -8,7 +8,7 @@
  * ─── Kill-on-exit ────────────────────────────────────────────────────────────
  *
  * Default dispose() behaviour: close the UDS connection.  The daemon's child
- * keeps running; the user can re-attach via `pic attach`.
+ * keeps running; the user can re-attach via `fundi attach`.
  *
  * When constructed with killOnExit=true (set by CLI flag `--kill-on-exit`):
  * dispose() sends ctrl_kill to the daemon first, then closes the connection.
@@ -93,7 +93,7 @@ export class RemoteAgentSessionRuntime {
         const modelRegistry = await buildLocalModelRegistry(settingsManager);
         let sessionManager = await buildLocalSessionManager(meta.sessionFile);
 
-        // Scrollback bound: PIC_ATTACH_TAIL (set by `pic attach --tail`),
+        // Scrollback bound: PIC_ATTACH_TAIL (set by `fundi attach --tail`),
         // -1 = all. Applied to both the claude seed fetch and primeHistory.
         const tail = resolveTailLimit(process.env["PIC_ATTACH_TAIL"]);
 
@@ -110,7 +110,7 @@ export class RemoteAgentSessionRuntime {
                 }
             } catch (err) {
                 if (process.env["PIC_ATTACH_DEBUG"] === "1") {
-                    console.error("[pic-attach] scrollback seed failed:", err);
+                    console.error("[fundi-attach] scrollback seed failed:", err);
                 }
             }
         }
@@ -248,7 +248,7 @@ export class RemoteAgentSessionRuntime {
         }
         if (this.rebindSession) {
             // TODO (Task 8): re-fetch metadata and rebuild RemoteAgentSession.
-            console.warn("switch_session: rebind not fully implemented in pic-attach v1");
+            console.warn("switch_session: rebind not fully implemented in fundi-attach v1");
         }
         return { cancelled: false };
     }
@@ -296,21 +296,21 @@ export class RemoteAgentSessionRuntime {
     }
 
     /**
-     * Not supported in pic-attach v1.  Use `pic create --resume <file> --detached` instead.
+     * Not supported in fundi-attach v1.  Use `fundi create --resume <file> --detached` instead.
      */
     async importFromJsonl(
         _inputPath: string,
         _cwdOverride?: string
     ): Promise<{ cancelled: boolean }> {
         throw new Error(
-            "importFromJsonl: not supported in pic-attach v1 — use `pic create --resume <file> --detached` instead"
+            "importFromJsonl: not supported in fundi-attach v1 — use `fundi create --resume <file> --detached` instead"
         );
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /**
-     * Send ctrl_kill to the daemon for this child. Used by pic-attach when the
+     * Send ctrl_kill to the daemon for this child. Used by fundi-attach when the
      * user opts to terminate the session at TUI exit. Does NOT close the
      * connection — call dispose() after.
      */
@@ -321,7 +321,7 @@ export class RemoteAgentSessionRuntime {
                 childId: this._session.childId,
             });
         } catch (err) {
-            console.error("[pic-attach] kill-child failed:", err);
+            console.error("[fundi-attach] kill-child failed:", err);
         }
     }
 
@@ -367,7 +367,7 @@ export class RemoteAgentSessionRuntime {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Default scrollback replay when PIC_ATTACH_TAIL is unset (direct pic-attach
+/** Default scrollback replay when PIC_ATTACH_TAIL is unset (direct fundi-attach
  * invocation). Bounded — an unbounded fetch of a large history produced a
  * ctrl_get_recent response past the 16 MiB frame cap and killed the connect. */
 export const DEFAULT_TAIL_LIMIT = 500;

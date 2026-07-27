@@ -47,7 +47,7 @@ func (pw *linePrefixWriter) Write(p []byte) (int, error) {
 //
 // Pi writes responses to its stdout firehose alongside events, and the daemon
 // fans the entire stream to all subscribers — so 'fundi tail' sees responses
-// to other connections' RPC calls (e.g. pic-attach's autocomplete
+// to other connections' RPC calls (e.g. fundi-attach's autocomplete
 // get_commands fetch).  These are internal plumbing the user usually does
 // not care about, so we suppress them by default.  `--verbose` (verbose=true)
 // includes them with pretty-printed JSON.

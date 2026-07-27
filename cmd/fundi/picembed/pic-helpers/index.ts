@@ -7,7 +7,7 @@ import * as path from "node:path";
 // pic-helpers is loaded in two contexts:
 //   - daemon's pi child (via jiti): @earendil-works/pi-coding-agent available
 //     through VIRTUAL_MODULES but NOT through normal module resolution.
-//   - pic-attach build (via bun import in session.ts): node_modules live in
+//   - fundi-attach build (via bun import in session.ts): node_modules live in
 //     attach/ which is a sibling, not a parent, of this file's location.
 //
 // Defining the types we need inline keeps pic-helpers self-contained and avoids
@@ -32,14 +32,14 @@ interface ExtensionAPI {
 /**
  * pic-helpers — context-aware pi extension.
  *
- * Three contexts, gated on env vars set by the controller / pic-attach:
+ * Three contexts, gated on env vars set by the controller / fundi-attach:
  *
  * - Daemon's pi child (PI_CONTROLLER_CHILD_ID set, PIC_ATTACH_TUI unset):
  *   registers /reload.  Pi's interactive /reload builtin is TUI-only — in
  *   --mode rpc there's no builtin handler, so an extension command is the
- *   only way for pic-attach to trigger ctx.reload() server-side.
+ *   only way for fundi-attach to trigger ctx.reload() server-side.
  *
- * - pic-attach TUI (PIC_ATTACH_TUI=1): factory is a no-op.
+ * - fundi-attach TUI (PIC_ATTACH_TUI=1): factory is a no-op.
  *   RemoteAgentSession.bindExtensions() calls setupTuiAutocomplete()
  *   directly to register an autocomplete provider that queries the daemon
  *   for available slash commands.
@@ -48,13 +48,13 @@ interface ExtensionAPI {
  *   ~/.pi/agent/extensions/ directory): factory is a no-op.  Don't shadow
  *   pi's interactive /reload builtin.
  *
- * Single source file, three roles. pic-attach relative-imports this file at
- * compile time via attach/src/session.ts. `pic install-extension` writes it
+ * Single source file, three roles. fundi-attach relative-imports this file at
+ * compile time via attach/src/session.ts. `fundi install-extension` writes it
  * to disk for the daemon's pi child to auto-discover.
  *
  * Type note: all types are defined inline above — no @earendil-works imports —
  * to keep pic-helpers self-contained and avoid module-resolution issues in
- * both the daemon and the pic-attach build contexts.
+ * both the daemon and the fundi-attach build contexts.
  */
 export default function (pi: ExtensionAPI): void {
     const inDaemonChild =
@@ -75,7 +75,7 @@ function registerDaemonChildCommands(pi: ExtensionAPI): void {
     });
 }
 
-// ─── TUI autocomplete (pic-attach context only) ───────────────────────────────
+// ─── TUI autocomplete (fundi-attach context only) ───────────────────────────────
 
 /** Minimal command info shape — mirrors RpcSlashCommand from pi's RPC types. */
 interface CommandInfo {

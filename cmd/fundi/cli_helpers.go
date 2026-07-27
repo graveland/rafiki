@@ -125,23 +125,23 @@ func resolvedSocket(cmd *cobra.Command) string {
 	return client.DefaultSocketPath()
 }
 
-// findPicAttach returns the absolute path to the pic-attach binary.
+// findFundiAttach returns the absolute path to the fundi-attach binary.
 // Looks first in the same directory as the running fundi executable, then on PATH.
-func findPicAttach() (string, error) {
+func findFundiAttach() (string, error) {
 	self, err := os.Executable()
 	if err == nil {
-		sibling := filepath.Join(filepath.Dir(self), "pic-attach")
+		sibling := filepath.Join(filepath.Dir(self), "fundi-attach")
 		if _, statErr := os.Stat(sibling); statErr == nil {
 			return sibling, nil
 		}
 	}
-	if path, lookErr := exec.LookPath("pic-attach"); lookErr == nil {
+	if path, lookErr := exec.LookPath("fundi-attach"); lookErr == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("pic-attach binary not found (expected sibling of fundi or on PATH); install bun and run 'make build-attach'")
+	return "", fmt.Errorf("fundi-attach binary not found (expected sibling of fundi or on PATH); install bun and run 'make build-attach'")
 }
 
-// attachEnv is the environment pic-attach is spawned with: ours, plus an
+// attachEnv is the environment fundi-attach is spawned with: ours, plus an
 // explicit socket path so the TUI cannot resolve a different default than the
 // one this process is talking to.
 //
@@ -151,19 +151,19 @@ func attachEnv(socket string) []string {
 	return append(os.Environ(), envvar.Socket+"="+socket)
 }
 
-// execPicAttach spawns pic-attach <childID> with stdio inherited and waits
-// for it to exit. Returns when pic-attach exits. If pic-attach exits with a
+// execFundiAttach spawns fundi-attach <childID> with stdio inherited and waits
+// for it to exit. Returns when fundi-attach exits. If fundi-attach exits with a
 // non-zero code, os.Exit is called directly so the exit code propagates
-// without extra error noise (pic-attach has already printed to stderr).
+// without extra error noise (fundi-attach has already printed to stderr).
 //
-// socket is passed down explicitly in the environment. Letting pic-attach
+// socket is passed down explicitly in the environment. Letting fundi-attach
 // resolve its own default was a live bug: the TS side never learned about the
 // XDG move and fell back to ~/.pi/run/controller.sock, which is
 // pi-controller's socket — so the TUI dialled the wrong daemon (or nothing)
 // unless the user happened to export the socket path by hand. It also means
 // --socket now reaches the TUI, which it previously did not.
-func execPicAttach(childID, socket string) error {
-	bin, err := findPicAttach()
+func execFundiAttach(childID, socket string) error {
+	bin, err := findFundiAttach()
 	if err != nil {
 		return err
 	}
@@ -174,35 +174,35 @@ func execPicAttach(childID, socket string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = attachEnv(socket)
 	if runErr := cmd.Run(); runErr != nil {
-		// pic-attach already wrote to stderr; just propagate the exit code.
+		// fundi-attach already wrote to stderr; just propagate the exit code.
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		return fmt.Errorf("pic-attach: %w", runErr)
+		return fmt.Errorf("fundi-attach: %w", runErr)
 	}
 	return nil
 }
 
-// attachAndDecide runs pic-attach and, after it exits normally, prompts the
+// attachAndDecide runs fundi-attach and, after it exits normally, prompts the
 // user to keep or kill the session (unless overridden by flags or non-TTY
 // stdin). SIGINT/SIGTERM during the subprocess skip the prompt — the user
 // is forcibly exiting and the session should keep running (default keep).
 func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit bool) error {
 	// Install handler before spawning so we catch any signal that kills both
-	// fundi and pic-attach. Buffer=1 so the send never blocks.
+	// fundi and fundi-attach. Buffer=1 so the send never blocks.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	if err := execPicAttach(childID, resolvedSocket(cmd)); err != nil {
-		// Even on subprocess error, defensively reset the terminal — pic-attach
+	if err := execFundiAttach(childID, resolvedSocket(cmd)); err != nil {
+		// Even on subprocess error, defensively reset the terminal — fundi-attach
 		// may have crashed mid-render with raw mode / alt screen / kitty
 		// keyboard protocol active, and the user is about to see Go-side output.
 		resetTerminal()
 		return err
 	}
 
-	// Defensively reset the terminal regardless of pic-attach's exit path.
+	// Defensively reset the terminal regardless of fundi-attach's exit path.
 	// Pi-tui's own teardown should handle this, but races on hard exit paths
 	// (daemon broadcast, signal-driven shutdown, uncaught throws) have left
 	// the terminal in advanced modes (kitty keyboard, modifyOtherKeys, etc.)
@@ -227,7 +227,7 @@ func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit 
 		return nil
 	}
 
-	// Re-dial: pic-attach's connection has already closed when it exited.
+	// Re-dial: fundi-attach's connection has already closed when it exited.
 	c := mustDial(cmd)
 	defer c.Close()
 
@@ -360,7 +360,7 @@ func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
 
 // resetTerminal writes a comprehensive set of escape sequences to restore the
 // terminal to a sane interactive state.  Called by attachAndDecide after the
-// pic-attach subprocess returns — a safety net in case the TS-side
+// fundi-attach subprocess returns — a safety net in case the TS-side
 // restoreTerminal missed something (kitty keyboard protocol races, etc.).
 //
 // Mirrors what `reset(1)` does for advanced terminal modes pi-tui activates:
@@ -373,7 +373,7 @@ func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
 //   - >4;0m                → disable xterm modifyOtherKeys
 //   - 0m                   → reset SGR attributes
 //
-// All writes go to stdout (where the TUI was) regardless of pic-attach's
+// All writes go to stdout (where the TUI was) regardless of fundi-attach's
 // stdout direction — fundi's stdout is the terminal in this caller path.
 func resetTerminal() {
 	if !term.IsTerminal(int(os.Stdout.Fd())) {

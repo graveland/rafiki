@@ -148,7 +148,7 @@ export type ReplacedSessionContext = ExtensionCommandContext & {
 };
 
 import type { Client } from "./client.ts";
-import { setupTuiAutocomplete } from "../../cmd/pic/picembed/pic-helpers/index.ts";
+import { setupTuiAutocomplete } from "../../cmd/fundi/picembed/pic-helpers/index.ts";
 
 // ─── Local type definitions (not exported from main package index) ────────────
 
@@ -280,16 +280,16 @@ function makeExtensionRunnerStub(): ExtensionRunner {
         // setUIContext is a no-op — we have no terminal UI in the daemon
         setUIContext: () => {},
         getUIContext: (): ExtensionUIContext => {
-            throw new Error("extensionRunner.getUIContext: not available in pic-attach v1");
+            throw new Error("extensionRunner.getUIContext: not available in fundi-attach v1");
         },
         bindCore: () => {},
         bindCommandContext: () => {},
         shutdown: () => {},
         createContext: (): ExtensionContext => {
-            throw new Error("extensionRunner.createContext: not available in pic-attach v1");
+            throw new Error("extensionRunner.createContext: not available in fundi-attach v1");
         },
         createCommandContext: (): ExtensionCommandContext => {
-            throw new Error("extensionRunner.createCommandContext: not available in pic-attach v1");
+            throw new Error("extensionRunner.createCommandContext: not available in fundi-attach v1");
         },
         emit: () => Promise.resolve(undefined),
         emitMessageEnd: () => Promise.resolve(undefined),
@@ -322,7 +322,7 @@ export class RemoteAgentSession {
     private _disposed = false;
 
     // Dedup window for the subscribe↔getRecent overlap (mirrors
-    // cmd/pic/history.go). Frames already shown via primeHistory must not be
+    // cmd/fundi/history.go). Frames already shown via primeHistory must not be
     // re-emitted to listeners when they also arrive live.
     private _primedKeys: Set<string> | undefined;
     private _dedupWindowOpen = false;
@@ -384,7 +384,7 @@ export class RemoteAgentSession {
             abort(): void {
                 void self.abort().catch((err) => {
                     if (process.env.PIC_ATTACH_DEBUG === "1") {
-                        console.error("[pic-attach] agent.abort forward failed:", err);
+                        console.error("[fundi-attach] agent.abort forward failed:", err);
                     }
                 });
             },
@@ -428,7 +428,7 @@ export class RemoteAgentSession {
                     // Check before the per-child filter so it's never skipped.
                     if (frame["type"] === "ctrl_daemon_shutdown") {
                         const reason = (frame as { reason?: string }).reason ?? "unknown";
-                        console.error(`[pic-attach] daemon shutting down (reason: ${reason})`);
+                        console.error(`[fundi-attach] daemon shutting down (reason: ${reason})`);
                         // Self-signal SIGTERM instead of process.exit().  Signal
                         // delivery preempts the event loop — important here
                         // because pi's TUI is typically blocked on stdin and
@@ -447,7 +447,7 @@ export class RemoteAgentSession {
 
                     if (this._dedupWindowOpen && this._primedKeys) {
                         // drop the brief subscribe↔getRecent overlap already shown
-                        // by primeHistory (mirrors cmd/pic/history.go dedup window)
+                        // by primeHistory (mirrors cmd/fundi/history.go dedup window)
                         const key = JSON.stringify(inner);
                         if (this._primedKeys.has(key)) {
                             this._primedKeys.delete(key);
@@ -461,7 +461,7 @@ export class RemoteAgentSession {
 
                     if (debug) {
                         console.error(
-                            `[pic-attach] event: type=${ev.type} listeners=${this._listeners.size}`
+                            `[fundi-attach] event: type=${ev.type} listeners=${this._listeners.size}`
                         );
                     }
 
@@ -470,7 +470,7 @@ export class RemoteAgentSession {
                 } catch (err) {
                     // Per-event error: log and continue. One bad event must not kill the loop.
                     console.error(
-                        "[pic-attach] event processing error:",
+                        "[fundi-attach] event processing error:",
                         err instanceof Error ? err.message : String(err),
                         "\n  frame type:", frame["type"],
                         "\n  childId:", frame["childId"],
@@ -487,7 +487,7 @@ export class RemoteAgentSession {
             // Log regardless — even a noisy shutdown log beats silent data loss.
             if (!this._disposed) {
                 console.error(
-                    "[pic-attach] event iterator terminated unexpectedly:",
+                    "[fundi-attach] event iterator terminated unexpectedly:",
                     err instanceof Error ? err.message : String(err)
                 );
             }
@@ -509,7 +509,7 @@ export class RemoteAgentSession {
             frames = await this._client.getRecent(this._childId, limit);
         } catch (err) {
             if (process.env.PIC_ATTACH_DEBUG === "1") {
-                console.error("[pic-attach] primeHistory failed:", err);
+                console.error("[fundi-attach] primeHistory failed:", err);
             }
             return;
         }
@@ -1087,12 +1087,12 @@ export class RemoteAgentSession {
         _message: unknown,
         _options?: unknown
     ): Promise<void> {
-        throw new Error("sendCustomMessage is not supported in pic-attach v1.");
+        throw new Error("sendCustomMessage is not supported in fundi-attach v1.");
     }
 
     /**
      * Returns undefined — model cycling requires navigating the local model
-     * registry, which pic-attach v1 does not have.  The TUI handles undefined
+     * registry, which fundi-attach v1 does not have.  The TUI handles undefined
      * by showing "Only one model available" status, which is benign.
      * Use the model selector (Ctrl+M) or setModel() to change models.
      */
@@ -1216,7 +1216,7 @@ export class RemoteAgentSession {
     }
 
     /**
-     * Bash execution (! prefix) is not supported in pic-attach v1.  The
+     * Bash execution (! prefix) is not supported in fundi-attach v1.  The
      * daemon executes bash in its own session; there is no streaming chunk
      * relay from daemon to client.  The TUI catches this error and shows it
      * via showError(), so the user sees an actionable message rather than a
@@ -1228,7 +1228,7 @@ export class RemoteAgentSession {
         _options?: unknown
     ): Promise<BashResult> {
         throw new Error(
-            "Bash execution (! prefix) is not supported in pic-attach v1. Run bash commands in the daemon session instead."
+            "Bash execution (! prefix) is not supported in fundi-attach v1. Run bash commands in the daemon session instead."
         );
     }
 
@@ -1248,8 +1248,8 @@ export class RemoteAgentSession {
 
     /**
      * Not supported in v1: /tree and /fork tree navigation require session
-     * branching support that pic-attach does not yet implement.
-     * Use `pic` shell commands to manage sessions.
+     * branching support that fundi-attach does not yet implement.
+     * Use `fundi` shell commands to manage sessions.
      */
     async navigateTree(
         _targetId: string,
@@ -1260,7 +1260,7 @@ export class RemoteAgentSession {
         aborted?: boolean;
         summaryEntry?: BranchSummaryEntry;
     }> {
-        throw new Error("/tree and /fork navigation are not supported in pic-attach v1. Use `pic` shell commands to manage sessions.");
+        throw new Error("/tree and /fork navigation are not supported in fundi-attach v1. Use `fundi` shell commands to manage sessions.");
     }
 
     /** Stub: fork selector requires session JSONL tailing (Task 5). */
@@ -1273,19 +1273,19 @@ export class RemoteAgentSession {
         return undefined;
     }
 
-    /** /export and /share are not supported in pic-attach v1 — the session data lives in the daemon. */
+    /** /export and /share are not supported in fundi-attach v1 — the session data lives in the daemon. */
     async exportToHtml(_outputPath?: string): Promise<string> {
-        throw new Error("/export and /share are not supported in pic-attach v1. Export directly from the daemon session.");
+        throw new Error("/export and /share are not supported in fundi-attach v1. Export directly from the daemon session.");
     }
 
-    /** /export is not supported in pic-attach v1 — the session data lives in the daemon. */
+    /** /export is not supported in fundi-attach v1 — the session data lives in the daemon. */
     exportToJsonl(_outputPath?: string): string {
-        throw new Error("/export is not supported in pic-attach v1. Export directly from the daemon session.");
+        throw new Error("/export is not supported in fundi-attach v1. Export directly from the daemon session.");
     }
 
     /** Not supported in v1: session branching is managed by the daemon. */
     createReplacedSessionContext(): ReplacedSessionContext {
-        throw new Error("createReplacedSessionContext is not supported in pic-attach v1. Use `pic` shell commands to manage sessions.");
+        throw new Error("createReplacedSessionContext is not supported in fundi-attach v1. Use `fundi` shell commands to manage sessions.");
     }
 
     /**
