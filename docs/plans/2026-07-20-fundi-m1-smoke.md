@@ -4,10 +4,23 @@
 this is the real-model, real-daemon, Zoe-end-to-end verification the automated
 tests can't do. Record results inline as you go.
 
-Branch state (nothing pushed except rafiki):
-- `~/home/fundi` @ `m1-agent-runtime` (9c3409e) — the runtime + daemon `kind=agent`.
-- `~/home/rafiki` main (0e2a26e) — provider/model routing; already pushed.
+Branch state (updated 2026-07-27):
+- `~/home/fundi` **main** @ `abd4702` — M1 merged linearly; branch + worktree deleted. NOT pushed (40 commits ahead).
+- `~/home/rafiki` main @ `a12fdbb` — pushed.
 - `~/home/sentinel-plugins` @ `fundi-agent-kind` (5b7f9e3) — pi-plugin `agent` kind; not pushed.
+
+**fundi is now a SEPARATE daemon from pi-controller, not a replacement for the
+running one.** It listens on its own socket and has its own service identity, so
+both run at once — do NOT stop pi-controller for this gate:
+
+| | fundi | pi-controller |
+|---|---|---|
+| socket | `~/.local/state/fundi/controller.sock` | `~/.pi/run/controller.sock` |
+| service | `dev.graveland.fundi` | `dev.graveland.pi-controller` |
+
+`pic` built from THIS repo defaults to fundi's socket. A `pic` from elsewhere on
+`$PATH` will talk to pi-controller — check which one you are running. Override
+with `FUNDI_SOCKET` (the old `PI_CONTROLLER_SOCKET` still works but warns).
 
 Model ids are now **single provider-qualified knobs**: `anthropic/sonnet-latest`,
 `deepseek/deepseek-chat`. There is no `--provider`. `anthropic/…` → native
@@ -15,15 +28,23 @@ Anthropic SDK; anything else → OpenRouter. An unset/bare model errors.
 
 ## Steps
 
-- [ ] **1. Build + install.** `cd ~/home/fundi && go build -o ~/bin/fundi ./cmd/fundi`
-  (or the repo install target). Restart the daemon with the new binary. Confirm
-  `pic` still talks to it and existing `claude`/`pi` children are unaffected.
+- [ ] **1. Build + start.** `cd ~/home/fundi && make build-controller build-pic`.
+  Start `./bin/fundi` in a terminal (foreground is easiest for this gate — no
+  service install needed). Confirm the log says **"fundi daemon listening"** on
+  the XDG socket, that `./bin/pic ls` reaches it, and that the running
+  pi-controller and its children are untouched.
 
 - [ ] **2. Real-model spawn (native Anthropic).** `ANTHROPIC_API_KEY` in the daemon env.
   `pic spawn --kind agent --model anthropic/sonnet-latest --cwd /tmp/fundi-smoke`
   Prompt: "Create hello.txt containing 'hi', then run `wc -c hello.txt` and report
   the byte count." Verify: file exists; frames render live in `pic attach`;
-  the per-turn usage frame carries non-zero tokens.
+  the per-turn usage frame carries non-zero tokens **and non-zero cost**.
+
+  > Cost is the one thing no automated test can prove: pricing resolves the
+  > served model id against OpenRouter's live catalog, so a stub pricer verifies
+  > the arithmetic but not that the model has a catalog entry. An unpriced model
+  > reports cost 0 by design, which looks identical to a free turn — so check for
+  > a non-zero `cost.total` on `agent_end` explicitly.
 
 - [ ] **3. Steer mid-turn.** Give a multi-step task, `pic send --steer` an extra
   instruction while a turn is in flight. Verify the steer lands within the turn.
@@ -50,7 +71,10 @@ Anthropic SDK; anything else → OpenRouter. An unset/bare model errors.
   (dot normalized to `_`) and is callable — this is the T13 fix that only got
   its independent review post-hoc; a real-server check is worth it.
 
-- [ ] **8. Zoe end-to-end.** From Zoe: `subagent_spawn` with `kind=agent` +
+- [ ] **8. Zoe end-to-end.** First point the pi-plugin entry's `socket` config at
+  fundi: `~/.local/state/fundi/controller.sock`. Its default still resolves to
+  pi-controller's socket, and since BOTH daemons are alive it will silently talk
+  to the wrong one. Then from Zoe: `subagent_spawn` with `kind=agent` +
   `model=anthropic/sonnet-latest`. Verify the `_fleet` line and signal batching
   behave as with claude children.
 
@@ -67,7 +91,8 @@ Anthropic SDK; anything else → OpenRouter. An unset/bare model errors.
 - **rafiki** (0e2a26e): already on main + pushed. It's backward-compatible and
   upstream-bound; consider the upstream PR separately. One rafiki follow-up noted:
   malformed bare `anthropic/` (nothing after) resolves to "" instead of erroring.
-- **fundi** `m1-agent-runtime` → merge to fundi main when smoke passes.
+- **fundi**: already merged to main (linear). Remaining after this gate: push
+  main, merge sentinel-plugins `fundi-agent-kind`, then the default-kind flip.
 - **sentinel-plugins** `fundi-agent-kind` → its own PR/merge (separate repo).
 
 ## Deferred follow-ups (tracked, non-blocking — see .superpowers/sdd/progress.md)
