@@ -118,6 +118,41 @@ interface AutocompleteProvider {
     ): boolean;
 }
 
+// ─── Socket resolution ────────────────────────────────────────────────────────
+//
+// Deliberately duplicated from attach/src/client.ts rather than imported: this
+// file is loaded via jiti inside the daemon's pi child, where attach/'s modules
+// are not resolvable (see the header note). Keep the two in step, and both in
+// step with the Go side's internal/paths.
+
+/** The per-application leaf every XDG base directory gets. Mirrors paths.appName. */
+const APP_NAME = "fundi";
+
+/**
+ * Resolve the daemon socket path the way the Go side does.
+ *
+ * This used to fall back to ~/.pi/run/controller.sock — pi-controller's socket.
+ * fundi moved to XDG precisely so the two can coexist, so that fallback reached
+ * the wrong daemon whenever the socket path was not exported explicitly.
+ */
+function defaultSocketPath(): string {
+    const explicit = process.env["FUNDI_SOCKET"] || process.env["PI_CONTROLLER_SOCKET"];
+    if (explicit) return explicit;
+
+    // paths.RuntimeDir(): $XDG_RUNTIME_DIR/fundi when absolute, else the state
+    // dir — XDG_RUNTIME_DIR is a Linux/systemd convention, normally unset on
+    // macOS. Relative values are ignored, as the spec requires.
+    const runtime = process.env["XDG_RUNTIME_DIR"];
+    if (runtime && path.isAbsolute(runtime)) {
+        return path.join(runtime, APP_NAME, "controller.sock");
+    }
+    const state = process.env["XDG_STATE_HOME"];
+    if (state && path.isAbsolute(state)) {
+        return path.join(state, APP_NAME, "controller.sock");
+    }
+    return path.join(os.homedir(), ".local", "state", APP_NAME, "controller.sock");
+}
+
 /**
  * Pure helper: apply daemon command filtering to autocomplete suggestions.
  *
@@ -182,9 +217,7 @@ export function slashCommandsToCommandInfo(names: string[]): CommandInfo[] {
 export function setupTuiAutocomplete(
     addProvider: (factory: (current: unknown) => unknown) => void
 ): { refresh: () => Promise<void> } {
-    const socketPath =
-        process.env["PI_CONTROLLER_SOCKET"] ??
-        path.join(os.homedir(), ".pi", "run", "controller.sock");
+    const socketPath = defaultSocketPath();
     const childId = process.env["PIC_ATTACH_CHILD_ID"] ?? "";
 
     let cachedCommands: CommandInfo[] = [];

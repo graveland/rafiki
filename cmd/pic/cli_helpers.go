@@ -16,12 +16,14 @@ import (
 	"golang.org/x/term"
 
 	"git.graveland.dev/brent/fundi/client"
+	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // mustDial connects to the daemon's UDS using the --socket flag value
-// (default ~/.pi/run/controller.sock). Exits with code 2 on failure so
-// connection errors are distinguishable from user-input errors (exit 1).
+// (default: client.DefaultSocketPath, the XDG runtime path). Exits with code 2
+// on failure so connection errors are distinguishable from user-input errors
+// (exit 1).
 func mustDial(cmd *cobra.Command) *client.Client {
 	socket, _ := cmd.Flags().GetString("socket")
 	c, err := client.Dial(socket)
@@ -111,6 +113,18 @@ func socketFromCmd(cmd *cobra.Command) string {
 	return s
 }
 
+// resolvedSocket returns the concrete socket path this invocation talks to:
+// the --socket flag if given, else whatever Dial would have picked. Unlike
+// socketFromCmd it never returns "" — callers that must hand the path to
+// another process cannot pass along "resolve it yourself", because that other
+// process may resolve it differently.
+func resolvedSocket(cmd *cobra.Command) string {
+	if s := socketFromCmd(cmd); s != "" {
+		return s
+	}
+	return client.DefaultSocketPath()
+}
+
 // findPicAttach returns the absolute path to the pic-attach binary.
 // Looks first in the same directory as the running pic executable, then on PATH.
 func findPicAttach() (string, error) {
@@ -127,11 +141,28 @@ func findPicAttach() (string, error) {
 	return "", fmt.Errorf("pic-attach binary not found (expected sibling of pic or on PATH); install bun and run 'make build-attach'")
 }
 
+// attachEnv is the environment pic-attach is spawned with: ours, plus an
+// explicit socket path so the TUI cannot resolve a different default than the
+// one this process is talking to.
+//
+// Appending is enough to win over an inherited value: os/exec deduplicates
+// Env and keeps the last entry for a repeated key.
+func attachEnv(socket string) []string {
+	return append(os.Environ(), envvar.Socket+"="+socket)
+}
+
 // execPicAttach spawns pic-attach <childID> with stdio inherited and waits
 // for it to exit. Returns when pic-attach exits. If pic-attach exits with a
 // non-zero code, os.Exit is called directly so the exit code propagates
 // without extra error noise (pic-attach has already printed to stderr).
-func execPicAttach(childID string) error {
+//
+// socket is passed down explicitly in the environment. Letting pic-attach
+// resolve its own default was a live bug: the TS side never learned about the
+// XDG move and fell back to ~/.pi/run/controller.sock, which is
+// pi-controller's socket — so the TUI dialled the wrong daemon (or nothing)
+// unless the user happened to export the socket path by hand. It also means
+// --socket now reaches the TUI, which it previously did not.
+func execPicAttach(childID, socket string) error {
 	bin, err := findPicAttach()
 	if err != nil {
 		return err
@@ -141,7 +172,7 @@ func execPicAttach(childID string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = attachEnv(socket)
 	if runErr := cmd.Run(); runErr != nil {
 		// pic-attach already wrote to stderr; just propagate the exit code.
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
@@ -163,7 +194,7 @@ func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit 
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	if err := execPicAttach(childID); err != nil {
+	if err := execPicAttach(childID, resolvedSocket(cmd)); err != nil {
 		// Even on subprocess error, defensively reset the terminal — pic-attach
 		// may have crashed mid-render with raw mode / alt screen / kitty
 		// keyboard protocol active, and the user is about to see Go-side output.

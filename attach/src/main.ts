@@ -15,7 +15,7 @@ function usage(): void {
     console.error("usage: pic-attach <childId>");
     console.error("");
     console.error("env vars:");
-    console.error("  PI_CONTROLLER_SOCKET  override default socket path");
+    console.error("  FUNDI_SOCKET          override default socket path");
     console.error("  PIC_KILL_ON_EXIT      set to 1 to terminate the daemon's child");
     console.error("                        when the TUI quits (fallback for direct invocation;");
     console.error("                        when launched via pic, kill/keep is decided by pic)");
@@ -43,7 +43,8 @@ process.env.PIC_ATTACH_CHILD_ID = childId;
 // When launched via `pic create` / `pic attach`, pic handles the kill/keep
 // decision after this process exits; the env var is not set.
 const killOnExit = process.env.PIC_KILL_ON_EXIT === "1";
-const socket = process.env.PI_CONTROLLER_SOCKET;
+// Socket resolution is client.ts's job (defaultSocketPath): one place that has
+// to agree with the Go side's internal/paths, rather than two that can drift.
 
 // Startup banner.
 const childLabel = childId;
@@ -53,7 +54,6 @@ process.stderr.write(`[pic-attach] ${"─".repeat(60)}\n`);
 let runtime: RemoteAgentSessionRuntime;
 try {
     runtime = await RemoteAgentSessionRuntime.connect({
-        socket,
         childId,
         killOnExit,
     });

@@ -5,12 +5,12 @@
  * then tears down cleanly.
  */
 
-import { describe, expect, it, afterEach } from "bun:test";
+import { describe, expect, it, afterEach, beforeEach } from "bun:test";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Client, FrameSplitter } from "./client.ts";
+import { Client, FrameSplitter, defaultSocketPath } from "./client.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -360,5 +360,68 @@ describe("Client", () => {
         expect(results).toHaveLength(0);
 
         await srv.close();
+    });
+});
+
+describe("defaultSocketPath", () => {
+    const SOCKET_VARS = [
+        "FUNDI_SOCKET",
+        "PI_CONTROLLER_SOCKET",
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+    ] as const;
+
+    let saved: Record<string, string | undefined> = {};
+
+    beforeEach(() => {
+        saved = {};
+        for (const k of SOCKET_VARS) {
+            saved[k] = process.env[k];
+            delete process.env[k];
+        }
+    });
+
+    afterEach(() => {
+        for (const k of SOCKET_VARS) {
+            if (saved[k] === undefined) delete process.env[k];
+            else process.env[k] = saved[k];
+        }
+    });
+
+    it("prefers FUNDI_SOCKET", () => {
+        process.env["FUNDI_SOCKET"] = "/tmp/explicit.sock";
+        process.env["PI_CONTROLLER_SOCKET"] = "/tmp/old.sock";
+        expect(defaultSocketPath()).toBe("/tmp/explicit.sock");
+    });
+
+    it("still honours the pre-rename PI_CONTROLLER_SOCKET spelling", () => {
+        process.env["PI_CONTROLLER_SOCKET"] = "/tmp/old.sock";
+        expect(defaultSocketPath()).toBe("/tmp/old.sock");
+    });
+
+    it("treats an empty override as unset", () => {
+        process.env["FUNDI_SOCKET"] = "";
+        process.env["XDG_STATE_HOME"] = "/tmp/state";
+        expect(defaultSocketPath()).toBe("/tmp/state/fundi/controller.sock");
+    });
+
+    it("uses XDG_RUNTIME_DIR ahead of XDG_STATE_HOME", () => {
+        process.env["XDG_RUNTIME_DIR"] = "/run/user/1000";
+        process.env["XDG_STATE_HOME"] = "/tmp/state";
+        expect(defaultSocketPath()).toBe("/run/user/1000/fundi/controller.sock");
+    });
+
+    it("ignores a relative XDG value, as the spec requires", () => {
+        process.env["XDG_RUNTIME_DIR"] = "relative/path";
+        process.env["XDG_STATE_HOME"] = "/tmp/state";
+        expect(defaultSocketPath()).toBe("/tmp/state/fundi/controller.sock");
+    });
+
+    // The regression this whole function exists for: the old fallback was
+    // ~/.pi/run/controller.sock, which is pi-controller's socket, not fundi's.
+    it("falls back to the XDG state dir, never ~/.pi", () => {
+        const got = defaultSocketPath();
+        expect(got).toBe(path.join(os.homedir(), ".local", "state", "fundi", "controller.sock"));
+        expect(got).not.toContain(`${path.sep}.pi${path.sep}`);
     });
 });

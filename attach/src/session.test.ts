@@ -241,10 +241,14 @@ describe("RemoteAgentSession", () => {
         expect(received).toHaveLength(0);
     });
 
-    it("ctrl_daemon_shutdown: calls process.exit(0)", async () => {
-        // Mock process.exit so the test process does not actually terminate.
-        const exitSpy = spyOn(process, "exit").mockImplementation(
-            (_code?: number | string) => undefined as never
+    it("ctrl_daemon_shutdown: self-signals SIGTERM", async () => {
+        // session.ts self-signals SIGTERM rather than calling process.exit, so
+        // that signal delivery can preempt a TUI blocked on stdin. Mock
+        // process.kill, not process.exit: this test used to spy on exit, which
+        // meant the real SIGTERM reached the test runner and killed it — taking
+        // every later test file in the suite down with it, unreported.
+        const killSpy = spyOn(process, "kill").mockImplementation(
+            (_pid: number, _signal?: string | number) => true
         );
 
         try {
@@ -254,9 +258,9 @@ describe("RemoteAgentSession", () => {
             });
             await tick();
 
-            expect(exitSpy).toHaveBeenCalledWith(0);
+            expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGTERM");
         } finally {
-            exitSpy.mockRestore();
+            killSpy.mockRestore();
         }
     });
 

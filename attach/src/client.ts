@@ -13,10 +13,48 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
+// ─── Socket resolution ────────────────────────────────────────────────────────
+
+/** The per-application leaf every XDG base directory gets. Mirrors paths.appName. */
+const APP_NAME = "fundi";
+
+/**
+ * Resolve the daemon socket path the way the Go side does.
+ *
+ * This MUST agree with internal/paths.SocketPath and client.DefaultSocketPath,
+ * or the TUI dials a socket nobody is listening on. It previously fell back to
+ * ~/.pi/run/controller.sock — which is *pi-controller's* socket. fundi moved to
+ * XDG specifically so the two could coexist, and this half never got the memo,
+ * so attaching without an explicitly exported socket path reached the wrong
+ * daemon (or none at all).
+ *
+ * $FUNDI_SOCKET wins; fundi's CLI injects it when it spawns this process. The
+ * pre-rename $PI_CONTROLLER_SOCKET spelling is still honoured.
+ */
+export function defaultSocketPath(): string {
+    const explicit = process.env["FUNDI_SOCKET"] || process.env["PI_CONTROLLER_SOCKET"];
+    if (explicit) return explicit;
+    return path.join(runtimeDir(), "controller.sock");
+}
+
+/**
+ * Mirrors paths.RuntimeDir(): $XDG_RUNTIME_DIR/fundi when that is set to an
+ * absolute path, else the state dir. XDG_RUNTIME_DIR is a Linux/systemd
+ * convention and normally unset on macOS, hence the fallback rather than a
+ * path outside the spec. A relative value is ignored, as the spec requires.
+ */
+function runtimeDir(): string {
+    const runtime = process.env["XDG_RUNTIME_DIR"];
+    if (runtime && path.isAbsolute(runtime)) return path.join(runtime, APP_NAME);
+    const state = process.env["XDG_STATE_HOME"];
+    if (state && path.isAbsolute(state)) return path.join(state, APP_NAME);
+    return path.join(os.homedir(), ".local", "state", APP_NAME);
+}
+
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 export interface ClientOptions {
-    /** Defaults to $PI_CONTROLLER_SOCKET or ~/.pi/run/controller.sock */
+    /** Defaults to defaultSocketPath(): $FUNDI_SOCKET, else the XDG runtime path. */
     socket?: string;
     /** Default 30 000 ms */
     requestTimeoutMs?: number;
@@ -352,12 +390,8 @@ export class Client {
     // ─── Options resolution ───────────────────────────────────────────────────
 
     private static resolveOpts(opts?: ClientOptions): Required<ClientOptions> {
-        const socket =
-            opts?.socket ??
-            process.env["PI_CONTROLLER_SOCKET"] ??
-            path.join(os.homedir(), ".pi", "run", "controller.sock");
         return {
-            socket,
+            socket: opts?.socket ?? defaultSocketPath(),
             requestTimeoutMs: opts?.requestTimeoutMs ?? 30_000,
             maxFrameBytes: opts?.maxFrameBytes ?? 16 << 20,
         };
