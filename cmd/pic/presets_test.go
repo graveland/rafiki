@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// writePresetsFile writes a pic-presets.json into dir and returns the path.
+// writePresetsFile writes a fundi-presets.json into dir and returns the path.
 func writePresetsFile(t *testing.T, dir string, content any) string {
 	t.Helper()
-	path := filepath.Join(dir, "pic-presets.json")
+	path := filepath.Join(dir, "fundi-presets.json")
 	b, err := json.Marshal(content)
 	if err != nil {
 		t.Fatalf("marshal presets: %v", err)
@@ -35,8 +35,35 @@ func TestLoadPresets_MissingFile(t *testing.T) {
 		t.Fatal("expected non-empty error message")
 	}
 	// Error must mention the expected path.
-	if !containsAll(err.Error(), "pic-presets.json") {
-		t.Errorf("error %q should mention pic-presets.json", err.Error())
+	if !containsAll(err.Error(), "fundi-presets.json") {
+		t.Errorf("error %q should mention fundi-presets.json", err.Error())
+	}
+}
+
+// TestLoadPresets_LegacyFileIsNotReadButIsReported covers the rename from
+// pic-presets.json: the old name is deliberately NOT a fallback, but failing
+// with a bare "not found" while the user's presets sit on disk under the old
+// spelling would read like data loss.
+func TestLoadPresets_LegacyFileIsNotReadButIsReported(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, ".pi", "agent")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(agentDir, legacyPresetsFileName)
+	if err := os.WriteFile(legacy, []byte(`{"presets":{"old":{"model":"m"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+
+	// The legacy file must not be loaded.
+	pf, err := loadPresets()
+	if err == nil {
+		t.Fatalf("legacy presets file was read; got %+v, want an error", pf)
+	}
+	// But the error must point at it, and at the fix.
+	if !containsAll(err.Error(), legacyPresetsFileName, PresetsFileName, "mv ") {
+		t.Errorf("error %q should name the legacy file, the new file, and the mv to run", err.Error())
 	}
 }
 
@@ -47,7 +74,7 @@ func TestLoadPresets_MalformedJSON(t *testing.T) {
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "pic-presets.json"), []byte("{not valid json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "fundi-presets.json"), []byte("{not valid json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", dir)

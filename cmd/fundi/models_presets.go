@@ -33,20 +33,25 @@ func (c *Controller) ListModels(ctx context.Context, provider string) ([]protoco
 	return out, nil
 }
 
-// picPreset is the JSON shape of one entry in pic-presets.json.
+// presetsFileName is the presets file inside pi's agent directory. Must match
+// the client's PresetsFileName in cmd/pic/presets.go — the two read the same
+// file. The pre-rename spelling (pic-presets.json) is not read.
+const presetsFileName = "fundi-presets.json"
+
+// presetEntry is the JSON shape of one entry in the presets file.
 // The full Preset struct lives in cmd/pic/presets.go; this is a minimal copy
 // to avoid cross-package coupling in v1.
-type picPreset struct {
+type presetEntry struct {
 	Model  string            `json:"model,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
-// picPresetsFile is the JSON shape of the top-level pic-presets.json object.
-type picPresetsFile struct {
-	Presets map[string]picPreset `json:"presets"`
+// presetsFile is the JSON shape of the top-level presets object.
+type presetsFile struct {
+	Presets map[string]presetEntry `json:"presets"`
 }
 
-// ListPresets reads ~/.pi/agent/pic-presets.json and returns presets that
+// ListPresets reads ~/.pi/agent/fundi-presets.json and returns presets that
 // satisfy the label filter.  labels and hasLabel use the same AND-match
 // semantics as ctrl_list: every k=v in labels must match the preset's labels
 // map, and every key in hasLabel must be present.
@@ -58,17 +63,17 @@ func (c *Controller) ListPresets(labels map[string]string, hasLabel []string) ([
 	if err != nil {
 		return []protocol.PresetInfo{}, nil
 	}
-	path := filepath.Join(home, ".pi", "agent", "pic-presets.json")
+	path := filepath.Join(home, ".pi", "agent", presetsFileName)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []protocol.PresetInfo{}, nil
 		}
-		return nil, fmt.Errorf("read pic-presets.json: %w", err)
+		return nil, fmt.Errorf("read %s: %w", presetsFileName, err)
 	}
-	var pf picPresetsFile
+	var pf presetsFile
 	if err := json.Unmarshal(b, &pf); err != nil {
-		return nil, fmt.Errorf("parse pic-presets.json: %w", err)
+		return nil, fmt.Errorf("parse %s: %w", presetsFileName, err)
 	}
 
 	// Sort preset names for deterministic output.

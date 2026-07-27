@@ -609,7 +609,7 @@ type ModelInfo struct {
 
 // ─── ctrl_list_presets ───────────────────────────────────────────────────────
 
-// ListPresetsRequest enumerates presets from ~/.pi/agent/pic-presets.json.
+// ListPresetsRequest enumerates presets from ~/.pi/agent/fundi-presets.json.
 // Labels and HasLabel filter results with the same AND-match semantics as
 // ctrl_list: all Labels k=v pairs must match and all HasLabel keys must be
 // present on the preset's labels map.

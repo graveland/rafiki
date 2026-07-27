@@ -162,7 +162,7 @@ func TestPICDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(content)
-	if err := os.WriteFile(filepath.Join(agentDir, "pic-presets.json"), b, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "fundi-presets.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", dir)

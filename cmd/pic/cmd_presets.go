@@ -17,8 +17,8 @@ func newPresetsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "presets",
 		Aliases: []string{"preset"},
-		Short:   "List presets from ~/.pi/agent/pic-presets.json",
-		Long: `List named presets from ~/.pi/agent/pic-presets.json.
+		Short:   "List presets from ~/.pi/agent/fundi-presets.json",
+		Long: `List named presets from ~/.pi/agent/fundi-presets.json.
 
 Presets bundle a model and label defaults that can be applied at spawn time
 with --preset NAME or the PIC_DEFAULT_PRESET environment variable.
