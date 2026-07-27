@@ -118,8 +118,22 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 	if chAfter.PID() == pidBefore {
 		t.Fatal("expected a new process after interrupt+resume")
 	}
-	if got := chAfter.Metadata().SessionID; got != "got-fresh" {
-		t.Fatalf("resumed session id = %q, want got-fresh (proves --resume <id> was threaded)", got)
+
+	// SessionID arrives on a later frame than the pid/status transition the loop
+	// above waits for, so it needs its own wait. Asserting it immediately made
+	// this test flaky under load: it would break out of the loop as soon as the
+	// child was idle with a new pid, then fail on a session id that had simply
+	// not been delivered yet ("resumed session id = \"\"").
+	var gotSession string
+	sessionDeadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(sessionDeadline) {
+		if gotSession = chAfter.Metadata().SessionID; gotSession != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if gotSession != "got-fresh" {
+		t.Fatalf("resumed session id = %q, want got-fresh (proves --resume <id> was threaded)", gotSession)
 	}
 }
 
