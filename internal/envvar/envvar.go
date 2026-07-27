@@ -33,6 +33,11 @@ const (
 	PiBinary    = "FUNDI_PI_BINARY"
 	piBinaryOld = "PI_BINARY"
 
+	// NoAutoInstallHelpers, when non-empty, stops `fundi create` from installing
+	// or updating the bundled fundi-helpers pi extension.
+	NoAutoInstallHelpers    = "FUNDI_NO_AUTO_INSTALL_HELPERS"
+	noAutoInstallHelpersOld = "PIC_NO_AUTO_INSTALL_HELPERS"
+
 	// AgentDB was always fundi-named; listed here so every owned variable has
 	// one home.
 	AgentDB = "FUNDI_AGENT_DB"
@@ -40,10 +45,11 @@ const (
 
 // deprecated maps each current name to the spelling it replaced.
 var deprecated = map[string]string{
-	Socket:     socketOld,
-	ChildID:    childIDOld,
-	GraceHours: graceHoursOld,
-	PiBinary:   piBinaryOld,
+	Socket:               socketOld,
+	ChildID:              childIDOld,
+	GraceHours:           graceHoursOld,
+	PiBinary:             piBinaryOld,
+	NoAutoInstallHelpers: noAutoInstallHelpersOld,
 }
 
 // Get returns the value of name, falling back to its deprecated spelling. A

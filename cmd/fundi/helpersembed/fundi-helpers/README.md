@@ -1,4 +1,4 @@
-# pic-helpers
+# fundi-helpers
 
 A pi extension that exposes fundi-attach-aware slash commands.
 
@@ -14,7 +14,7 @@ A pi extension that exposes fundi-attach-aware slash commands.
 pic install-extension
 ```
 
-This copies the extension to `~/.pi/agent/extensions/pic-helpers/`. Pi auto-discovers it from there for every run (daemon-managed or native).
+This copies the extension to `~/.pi/agent/extensions/fundi-helpers/`. Pi auto-discovers it from there for every run (daemon-managed or native).
 
 ## Uninstall
 
@@ -34,4 +34,4 @@ Should reload extensions, skills, prompts, and themes (per pi's docs on `ctx.rel
 
 ## Note
 
-If you start pi with `--no-extensions`, pic-helpers will not load and `/reload` will not be available.
+If you start pi with `--no-extensions`, fundi-helpers will not load and `/reload` will not be available.

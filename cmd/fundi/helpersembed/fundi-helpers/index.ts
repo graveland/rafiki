@@ -4,13 +4,13 @@ import * as path from "node:path";
 
 // ─── Inline type stubs ────────────────────────────────────────────────────────
 //
-// pic-helpers is loaded in two contexts:
+// fundi-helpers is loaded in two contexts:
 //   - daemon's pi child (via jiti): @earendil-works/pi-coding-agent available
 //     through VIRTUAL_MODULES but NOT through normal module resolution.
 //   - fundi-attach build (via bun import in session.ts): node_modules live in
 //     attach/ which is a sibling, not a parent, of this file's location.
 //
-// Defining the types we need inline keeps pic-helpers self-contained and avoids
+// Defining the types we need inline keeps fundi-helpers self-contained and avoids
 // module-resolution issues in both contexts.
 
 interface ExtensionCommandContext {
@@ -30,7 +30,7 @@ interface ExtensionAPI {
 }
 
 /**
- * pic-helpers — context-aware pi extension.
+ * fundi-helpers — context-aware pi extension.
  *
  * Three contexts, gated on env vars set by the controller / fundi-attach:
  *
@@ -53,7 +53,7 @@ interface ExtensionAPI {
  * to disk for the daemon's pi child to auto-discover.
  *
  * Type note: all types are defined inline above — no @earendil-works imports —
- * to keep pic-helpers self-contained and avoid module-resolution issues in
+ * to keep fundi-helpers self-contained and avoid module-resolution issues in
  * both the daemon and the fundi-attach build contexts.
  */
 export default function (pi: ExtensionAPI): void {
@@ -247,7 +247,7 @@ export function setupTuiAutocomplete(
             }
         } catch (err: unknown) {
             console.error(
-                "[pic-helpers] failed to refresh daemon commands:",
+                "[fundi-helpers] failed to refresh daemon commands:",
                 err instanceof Error ? err.message : String(err)
             );
         }

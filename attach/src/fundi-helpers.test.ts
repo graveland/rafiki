@@ -1,5 +1,5 @@
 /**
- * Tests for the TUI autocomplete logic in pic-helpers/index.ts.
+ * Tests for the TUI autocomplete logic in fundi-helpers/index.ts.
  *
  * We test the suggestion-filtering behaviour by constructing a minimal
  * "recorded-call" harness: a fake base AutocompleteProvider that
@@ -8,14 +8,14 @@
  *
  * Manual smoke test (requires a running daemon):
  *   make build                          # rebuild fundi-attach binary
- *   ./bin/fundi install-extension --force # refresh on-disk pic-helpers
+ *   ./bin/fundi install-extension --force # refresh on-disk fundi-helpers
  *   fundi create test --no-extensions     # start a session
  *   # In TUI: type "/" then Tab
  *   # Expect: /reload appears in the completion list
  */
 
 import { describe, expect, it, beforeEach } from "bun:test";
-import { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/fundi/picembed/pic-helpers/index.ts";
+import { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/fundi/helpersembed/fundi-helpers/index.ts";
 
 // ─── Inline AutocompleteProvider type (mirrors @earendil-works/pi-tui) ────────
 

@@ -11,22 +11,85 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/fundi/cmd/fundi/picembed"
+	"git.graveland.dev/brent/fundi/cmd/fundi/helpersembed"
+	"git.graveland.dev/brent/fundi/internal/envvar"
 )
+
+// legacyHelpersDir is the pre-rename extension directory. pi-controller's own
+// client installs an extension of the same name to the same path, so a stale
+// directory here may well be *its* working install, not our leftovers — and
+// there is no way to tell them apart. It is therefore only ever reported, never
+// removed. See warnAboutLegacyHelpers.
+const legacyHelpersDir = "pic-helpers"
+
+// piExtensionsDir is pi's own extensions directory. Deliberately not resolved
+// through internal/paths: that package covers what fundi owns, and this is pi's
+// contract — writing extensions here is how pi discovers them.
+func piExtensionsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home dir: %w", err)
+	}
+	return filepath.Join(home, ".pi", "agent", "extensions"), nil
+}
+
+// helpersDestDir is where the bundled extension installs to.
+func helpersDestDir() (string, error) {
+	dir, err := piExtensionsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, helpersembed.Dir), nil
+}
+
+// warnAboutLegacyHelpers reports a surviving pic-helpers/ directory without
+// touching it.
+//
+// pi loads *every* extension in its extensions directory, so leaving both
+// installed means the same slash commands get registered twice — that is
+// breakage, not untidiness. But the directory cannot safely be deleted either:
+// pi-controller installs an artifact with the identical name to the identical
+// path, so a pic-helpers/ we find may be its working install. We cannot
+// distinguish its copy from our own leftovers, and silently deleting a working
+// pi-controller extension is far worse than asking for one manual command.
+// Same principle as leaving pi-controller's launchd label alone.
+func warnAboutLegacyHelpers() {
+	dir, err := piExtensionsDir()
+	if err != nil {
+		return
+	}
+	legacy := filepath.Join(dir, legacyHelpersDir)
+	if _, statErr := os.Stat(legacy); statErr != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, `
+warning: an old %s extension is still installed at
+  %s
+pi loads every extension in that directory, so if that copy is fundi's, its
+slash commands are now registered twice. It is NOT removed automatically
+because pi-controller installs an extension of the same name to the same path,
+and the two are indistinguishable. If you do not use pi-controller, remove it:
+    rm -rf %s
+`, legacyHelpersDir, legacy, legacy)
+}
 
 func newInstallExtensionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install-extension",
-		Short: "Install (or update) the pic-helpers pi extension",
-		Long: `Install or update the pic-helpers extension at
-~/.pi/agent/extensions/pic-helpers/.
+		Short: "Install (or update) the fundi-helpers pi extension",
+		Long: `Install or update the fundi-helpers extension at
+~/.pi/agent/extensions/fundi-helpers/.
 
 fundi create also runs this automatically (use --no-install-helpers there to
 skip). Running explicitly is useful if you want it installed without
 spawning a child.
 
-If pic-helpers is already installed at the bundled version, this is a
-no-op (use --force to reinstall anyway). Use --remove to uninstall.`,
+If fundi-helpers is already installed at the bundled version, this is a
+no-op (use --force to reinstall anyway). Use --remove to uninstall.
+
+A pre-rename pic-helpers/ directory is reported but never removed: it may
+belong to pi-controller, which installs the same artifact name to the same
+path.`,
 		Args: cobra.NoArgs,
 		RunE: runInstallExtension,
 	}
@@ -37,16 +100,18 @@ no-op (use --force to reinstall anyway). Use --remove to uninstall.`,
 }
 
 func runInstallExtension(cmd *cobra.Command, _ []string) error {
-	home, err := os.UserHomeDir()
+	destDir, err := helpersDestDir()
 	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
+		return err
 	}
-	destDir := filepath.Join(home, ".pi", "agent", "extensions", "pic-helpers")
 
 	remove, _ := cmd.Flags().GetBool("remove")
 	if remove {
+		// Only ever removes fundi-helpers. A legacy pic-helpers/ is left alone
+		// even here \u2014 we cannot tell it apart from pi-controller's.
 		if _, err := os.Stat(destDir); errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "pic-helpers is not installed at", destDir)
+			fmt.Fprintf(os.Stderr, "%s is not installed at %s\n", helpersembed.Dir, destDir)
+			warnAboutLegacyHelpers()
 			return nil
 		}
 		if err := os.RemoveAll(destDir); err != nil {
@@ -63,7 +128,11 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 
 	force, _ := cmd.Flags().GetBool("force")
 	if installed != "" && installed == bundled && !force {
-		fmt.Fprintf(os.Stderr, "pic-helpers is up to date (version %s) at %s\n", installed, destDir)
+		fmt.Fprintf(os.Stderr, "%s is up to date (version %s) at %s\n", helpersembed.Dir, installed, destDir)
+		// Warn even on the no-op path: this is the command a user runs to ask
+		// "is my extension healthy?", and a duplicate registration is exactly
+		// the kind of unhealthy it cannot see for itself.
+		warnAboutLegacyHelpers()
 		return nil
 	}
 
@@ -76,32 +145,32 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 	}
 	switch {
 	case installed == "":
-		fmt.Fprintln(os.Stderr, "installed pic-helpers to", destDir)
+		fmt.Fprintf(os.Stderr, "installed %s to %s\n", helpersembed.Dir, destDir)
 	case installed != bundled:
-		fmt.Fprintf(os.Stderr, "updated pic-helpers %s \u2192 %s at %s\n", installed, bundled, destDir)
+		fmt.Fprintf(os.Stderr, "updated %s %s \u2192 %s at %s\n", helpersembed.Dir, installed, bundled, destDir)
 	default:
-		fmt.Fprintf(os.Stderr, "reinstalled pic-helpers (version %s) at %s\n", bundled, destDir)
+		fmt.Fprintf(os.Stderr, "reinstalled %s (version %s) at %s\n", helpersembed.Dir, bundled, destDir)
 	}
 	fmt.Fprintln(os.Stderr, "pi will auto-discover this extension on next run")
+	warnAboutLegacyHelpers()
 	return nil
 }
 
-// ensurePicHelpersInstalled installs or updates pic-helpers to match the
+// ensureHelpersInstalled installs or updates fundi-helpers to match the
 // version bundled in this fundi binary. Silent on success. Returns nil if
 // skipped due to opt-out env var.
 //
 // If install fails for any reason (permissions, disk full, etc.), the
-// caller should log a warning and continue — pic-helpers is a nice-to-have.
-func ensurePicHelpersInstalled() error {
-	if os.Getenv("PIC_NO_AUTO_INSTALL_HELPERS") != "" {
+// caller should log a warning and continue — fundi-helpers is a nice-to-have.
+func ensureHelpersInstalled() error {
+	if envvar.Get(envvar.NoAutoInstallHelpers) != "" {
 		return nil
 	}
 
-	home, err := os.UserHomeDir()
+	destDir, err := helpersDestDir()
 	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
+		return err
 	}
-	destDir := filepath.Join(home, ".pi", "agent", "extensions", "pic-helpers")
 
 	bundled, err := readBundledHelpersVersion()
 	if err != nil {
@@ -111,7 +180,7 @@ func ensurePicHelpersInstalled() error {
 	installed, err := readInstalledHelpersVersion(destDir)
 	switch {
 	case err == nil && installed == bundled:
-		return nil // up to date
+		return nil // up to date — stay silent, this runs on every create
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("read installed version: %w", err)
 	}
@@ -120,18 +189,24 @@ func ensurePicHelpersInstalled() error {
 		return fmt.Errorf("create parent dir: %w", err)
 	}
 	_ = os.RemoveAll(destDir)
-	return installFromEmbed(destDir)
+	if err := installFromEmbed(destDir); err != nil {
+		return err
+	}
+	// Only warn on the path that actually wrote something. The up-to-date
+	// branch above returns early, so `fundi create` does not repeat this on
+	// every single spawn.
+	warnAboutLegacyHelpers()
+	return nil
 }
 
-// helpersVersionCheck returns (bundled, installed, error). If pic-helpers
+// helpersVersionCheck returns (bundled, installed, error). If fundi-helpers
 // is not installed, installed is "" and error is nil. Used by both
 // auto-install and the explicit install-extension command.
 func helpersVersionCheck() (bundled, installed string, err error) {
-	home, herr := os.UserHomeDir()
-	if herr != nil {
-		return "", "", herr
+	destDir, derr := helpersDestDir()
+	if derr != nil {
+		return "", "", derr
 	}
-	destDir := filepath.Join(home, ".pi", "agent", "extensions", "pic-helpers")
 
 	bundled, err = readBundledHelpersVersion()
 	if err != nil {
@@ -146,7 +221,7 @@ func helpersVersionCheck() (bundled, installed string, err error) {
 }
 
 func readBundledHelpersVersion() (string, error) {
-	f, err := picembed.PicHelpers.Open("pic-helpers/package.json")
+	f, err := helpersembed.Helpers.Open(helpersembed.Dir + "/package.json")
 	if err != nil {
 		return "", err
 	}
@@ -176,17 +251,17 @@ func extractPkgJSONVersion(r io.Reader) (string, error) {
 	return pkg.Version, nil
 }
 
-// installFromEmbed walks the embedded pic-helpers tree and writes every file
+// installFromEmbed walks the embedded extension tree and writes every file
 // into destDir, preserving the relative structure.
 //
-// The embed.FS roots all entries at "pic-helpers/..." — strip that prefix
-// when computing the destination path.
+// The embed.FS roots all entries at "<Dir>/..." — strip that prefix when
+// computing the destination path.
 func installFromEmbed(destDir string) error {
-	return fs.WalkDir(picembed.PicHelpers, "pic-helpers", func(path string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(helpersembed.Helpers, helpersembed.Dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel("pic-helpers", path)
+		rel, err := filepath.Rel(helpersembed.Dir, path)
 		if err != nil {
 			return err
 		}
@@ -199,7 +274,7 @@ func installFromEmbed(destDir string) error {
 }
 
 func writeEmbedded(srcPath, dstPath string) error {
-	src, err := picembed.PicHelpers.Open(srcPath)
+	src, err := helpersembed.Helpers.Open(srcPath)
 	if err != nil {
 		return err
 	}

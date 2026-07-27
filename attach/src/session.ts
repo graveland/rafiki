@@ -148,7 +148,7 @@ export type ReplacedSessionContext = ExtensionCommandContext & {
 };
 
 import type { Client } from "./client.ts";
-import { setupTuiAutocomplete } from "../../cmd/fundi/picembed/pic-helpers/index.ts";
+import { setupTuiAutocomplete } from "../../cmd/fundi/helpersembed/fundi-helpers/index.ts";
 
 // ─── Local type definitions (not exported from main package index) ────────────
 
@@ -350,7 +350,7 @@ export class RemoteAgentSession {
     private readonly _resourceLoader: ResourceLoader;
     private readonly _extensionRunner: ExtensionRunner;
 
-    // Refresh handle from pic-helpers; called after /reload so the autocomplete
+    // Refresh handle from fundi-helpers; called after /reload so the autocomplete
     // cache picks up newly-added skills/extensions/prompts.
     private _refreshAutocomplete?: () => Promise<void>;
 
@@ -1160,7 +1160,7 @@ export class RemoteAgentSession {
      * Bind TUI-side extensions.
      *
      * When uiContext is present (interactive mode), calls setupTuiAutocomplete
-     * from pic-helpers to register the slash-command completion provider. This
+     * from fundi-helpers to register the slash-command completion provider. This
      * is the only local extension we load; all other extension work happens in
      * the daemon's pi child.
      */

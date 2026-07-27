@@ -34,7 +34,7 @@ if (args[0] === "--version" || args[0] === "-V") {
 const childId = args[0];
 
 // Signal to extensions that they're running inside fundi-attach's TUI process.
-// pic-helpers/index.ts reads these to register the autocomplete provider instead
+// fundi-helpers/index.ts reads these to register the autocomplete provider instead
 // of the daemon-side /reload command.
 process.env.PIC_ATTACH_TUI = "1";
 process.env.PIC_ATTACH_CHILD_ID = childId;

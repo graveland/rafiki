@@ -1,6 +1,6 @@
 {
-    "name": "@graveland/pic-helpers",
-    "version": "0.1.2",
+    "name": "@graveland/fundi-helpers",
+    "version": "0.1.3",
     "type": "module",
     "private": true,
     "description": "Pi extension that exposes fundi-attach-aware slash commands",

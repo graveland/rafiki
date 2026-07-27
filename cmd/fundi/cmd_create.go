@@ -19,10 +19,10 @@ func newCreateCmd() *cobra.Command {
 		Short: "Spawn a new pi child and attach a local TUI to it",
 		Long: `Spawn a new pi child via the controller, then open the pi TUI driving it.
 
-The pic-helpers pi extension is auto-installed (or upgraded) into
-~/.pi/agent/extensions/pic-helpers/ before spawning, so slash commands
+The fundi-helpers pi extension is auto-installed (or upgraded) into
+~/.pi/agent/extensions/fundi-helpers/ before spawning, so slash commands
 like /reload work inside the TUI. Use --no-install-helpers or set
-PIC_NO_AUTO_INSTALL_HELPERS=1 to skip.
+FUNDI_NO_AUTO_INSTALL_HELPERS=1 to skip.
 
 When the TUI quits (Ctrl+D, /quit), fundi asks whether to terminate the session
 or leave it running. Use --kill-on-exit or --keep-on-exit to skip the prompt
@@ -48,7 +48,7 @@ scripting / AFK workflows, use --detached.)`,
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the pic-helpers pi extension")
+	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the fundi-helpers pi extension")
 	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/fundi-presets.json (also settable via PIC_DEFAULT_PRESET)")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort: silently empty list when presets file is missing or malformed.
@@ -218,14 +218,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	c := mustDial(cmd)
 	defer c.Close()
 
-	// claude children have no pi extension system, so the pic-helpers pi
+	// claude children have no pi extension system, so the fundi-helpers pi
 	// extension is meaningless for them (the helper frame would just be
 	// dropped). Skip the auto-install entirely for --kind claude.
 	kind, _ := cmd.Flags().GetString("kind")
 	noInstall, _ := cmd.Flags().GetBool("no-install-helpers")
 	if !noInstall && kind != "claude" {
-		if err := ensurePicHelpersInstalled(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: pic-helpers auto-install failed: %v\n", err)
+		if err := ensureHelpersInstalled(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: fundi-helpers auto-install failed: %v\n", err)
 			// proceed anyway
 		}
 	}
