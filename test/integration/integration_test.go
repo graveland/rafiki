@@ -92,11 +92,14 @@ func findModuleRoot() (string, error) {
 
 // ─── daemon harness ───────────────────────────────────────────────────────────
 
-// daemon wraps a running pi-controller subprocess with a temp HOME directory.
+// daemon wraps a running fundi daemon subprocess with a temp HOME directory.
 type daemon struct {
 	socketPath string
 	proc       *exec.Cmd
 	homeDir    string
+	// logsDir is the daemon's per-child log tree. Derived once here rather than
+	// rebuilt at each use site, so a future layout move has one place to change.
+	logsDir string
 }
 
 // bootDaemon starts the binary with a fresh temp HOME and fake-pi.sh as the
@@ -110,12 +113,19 @@ func bootDaemon(t *testing.T) *daemon {
 	if runtime.GOOS == "darwin" {
 		base = "/tmp"
 	}
-	homeDir, err := os.MkdirTemp(base, "pic")
+	homeDir, err := os.MkdirTemp(base, "fundi-it")
 	if err != nil {
 		t.Fatalf("mkdirtemp: %v", err)
 	}
 
-	socketPath := filepath.Join(homeDir, ".pi", "run", "controller.sock")
+	// The daemon resolves every location through internal/paths, which is XDG —
+	// deliberately NOT ~/.pi, which belongs to pi itself. Pin all three XDG bases
+	// at the temp HOME so everything it writes lands inside the tree we clean up.
+	// Setting HOME alone would also work (paths falls back to ~/.local/…) but
+	// buries the socket three directories deeper, and sun_path has ~104 bytes to
+	// spend. These must stay in step with internal/paths.
+	appDir := filepath.Join(homeDir, "fundi") // paths.base() appends the app leaf
+	socketPath := filepath.Join(appDir, "controller.sock")
 	if len(socketPath) > 100 {
 		os.RemoveAll(homeDir)
 		t.Fatalf("socket path too long (%d bytes) for UDS: %s", len(socketPath), socketPath)
@@ -124,6 +134,9 @@ func bootDaemon(t *testing.T) *daemon {
 	cmd := exec.Command(binaryPath)
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
+		"XDG_RUNTIME_DIR="+homeDir,
+		"XDG_STATE_HOME="+homeDir,
+		"XDG_DATA_HOME="+homeDir,
 		"PI_BINARY="+fakePiPath,
 	)
 	// Uncomment to stream daemon logs during debugging:
@@ -134,7 +147,12 @@ func bootDaemon(t *testing.T) *daemon {
 		t.Fatalf("start daemon: %v", err)
 	}
 
-	d := &daemon{socketPath: socketPath, proc: cmd, homeDir: homeDir}
+	d := &daemon{
+		socketPath: socketPath,
+		proc:       cmd,
+		homeDir:    homeDir,
+		logsDir:    filepath.Join(appDir, "logs"), // paths.LogsDir() == StateDir/logs
+	}
 
 	// Poll until the socket file appears (daemon creates it when ready).
 	deadline := time.Now().Add(10 * time.Second)
@@ -718,7 +736,8 @@ func TestIntegration_PerChildStatusEvents(t *testing.T) {
 }
 
 // TestIntegration_LogDumpOnExit verifies that all four log files are written
-// under ~/.pi/run/logs/<childId>/ when a child exits (Fix 3 / spec §11.3).
+// under the daemon's logs dir (paths.LogsDir()/<childId>/) when a child exits
+// (Fix 3 / spec §11.3).
 func TestIntegration_LogDumpOnExit(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
@@ -738,7 +757,7 @@ func TestIntegration_LogDumpOnExit(t *testing.T) {
 	// exit, but handleChildExit runs in monitorChild which is concurrent).
 	// Poll for err.log.gz — the last file Dump writes — to avoid a race where
 	// meta.json appears before the gz files are flushed.
-	childLogDir := filepath.Join(d.homeDir, ".pi", "run", "logs", childID)
+	childLogDir := filepath.Join(d.logsDir, childID)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(filepath.Join(childLogDir, "err.log.gz")); err == nil {
