@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/cmd/pic/picembed"
+	"git.graveland.dev/brent/fundi/cmd/fundi/picembed"
 )
 
 func TestPicHelpers_EmbedHasExpectedFiles(t *testing.T) {

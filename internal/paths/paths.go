@@ -69,7 +69,7 @@ func LogsDir() string { return filepath.Join(StateDir(), "logs") }
 // stdout and stderr.
 func ServiceLogPath() string { return filepath.Join(StateDir(), "controller.log") }
 
-// ActiveFile records the child id `pic` treats as the current one. Runtime
+// ActiveFile records the child id `fundi` treats as the current one. Runtime
 // state, so it sits beside the socket rather than with the persisted records.
 func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }
 

@@ -10,7 +10,7 @@ func newCompletionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:                   "completion [bash|zsh|fish|powershell]",
 		Short:                 "Generate shell completion script",
-		Long:                  "Generate a shell completion script.\n\nTo enable completions:\n  source <(pic completion bash)\n  pic completion zsh > \"${fpath[1]}/_pic\"",
+		Long:                  "Generate a shell completion script.\n\nTo enable completions:\n  source <(fundi completion bash)\n  fundi completion zsh > \"${fpath[1]}/_pic\"",
 		DisableFlagsInUseLine: true,
 		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
 		Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),

@@ -24,8 +24,8 @@ func newTailCmd() *cobra.Command {
 By default, token-by-token message_update deltas are suppressed (--no-deltas=true).
 Use --profile to select a named filter preset, or --include/--exclude to customize.
 
-In per-child mode, pic tail exits automatically when the child exits.
-In label-filtered mode (--label/--has-label), pic tail streams from all matching
+In per-child mode, fundi tail exits automatically when the child exits.
+In label-filtered mode (--label/--has-label), fundi tail streams from all matching
 children and exits only on SIGINT/SIGTERM.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runTail,

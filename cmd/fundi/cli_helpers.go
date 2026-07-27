@@ -60,7 +60,7 @@ func resolveTarget(ctx context.Context, c *client.Client, input string) (string,
 	if input == "" {
 		input = getActive()
 		if input == "" {
-			return "", fmt.Errorf("no child specified and no active marker; run `pic list` to see options")
+			return "", fmt.Errorf("no child specified and no active marker; run `fundi list` to see options")
 		}
 	}
 	return c.Resolve(ctx, input)
@@ -126,7 +126,7 @@ func resolvedSocket(cmd *cobra.Command) string {
 }
 
 // findPicAttach returns the absolute path to the pic-attach binary.
-// Looks first in the same directory as the running pic executable, then on PATH.
+// Looks first in the same directory as the running fundi executable, then on PATH.
 func findPicAttach() (string, error) {
 	self, err := os.Executable()
 	if err == nil {
@@ -138,7 +138,7 @@ func findPicAttach() (string, error) {
 	if path, lookErr := exec.LookPath("pic-attach"); lookErr == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("pic-attach binary not found (expected sibling of pic or on PATH); install bun and run 'make build-attach'")
+	return "", fmt.Errorf("pic-attach binary not found (expected sibling of fundi or on PATH); install bun and run 'make build-attach'")
 }
 
 // attachEnv is the environment pic-attach is spawned with: ours, plus an
@@ -189,7 +189,7 @@ func execPicAttach(childID, socket string) error {
 // is forcibly exiting and the session should keep running (default keep).
 func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit bool) error {
 	// Install handler before spawning so we catch any signal that kills both
-	// pic and pic-attach. Buffer=1 so the send never blocks.
+	// fundi and pic-attach. Buffer=1 so the send never blocks.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
@@ -231,8 +231,8 @@ func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit 
 	c := mustDial(cmd)
 	defer c.Close()
 
-	// Use the same kill+forget policy as `pic kill` so a confirmed
-	// terminate also removes the child from `pic list` on clean exit.
+	// Use the same kill+forget policy as `fundi kill` so a confirmed
+	// terminate also removes the child from `fundi list` on clean exit.
 	res, err := killAndMaybeForget(cmdCtx(cmd), c, childID, 0, 0, false)
 	if err != nil {
 		return fmt.Errorf("kill: %w", err)
@@ -296,7 +296,7 @@ func isStdinTTY() bool {
 }
 
 // completeLabelPairs returns "k=v" completions from all currently-known
-// children, skipping pic/ auto-labels.  Used for --label flag completion.
+// children, skipping fundi/ auto-labels.  Used for --label flag completion.
 func completeLabelPairs(cmd *cobra.Command, toComplete string) []string {
 	c, err := client.Dial(socketFromCmd(cmd))
 	if err != nil {
@@ -311,7 +311,7 @@ func completeLabelPairs(cmd *cobra.Command, toComplete string) []string {
 	var out []string
 	for _, ch := range children {
 		for k, v := range ch.Labels {
-			if strings.HasPrefix(k, "pic/") {
+			if strings.HasPrefix(k, "fundi/") {
 				continue
 			}
 			pair := k + "=" + v
@@ -328,7 +328,7 @@ func completeLabelPairs(cmd *cobra.Command, toComplete string) []string {
 }
 
 // completeLabelKeys returns label key completions from all currently-known
-// children, skipping pic/ auto-labels.  Used for --has-label flag completion.
+// children, skipping fundi/ auto-labels.  Used for --has-label flag completion.
 func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
 	c, err := client.Dial(socketFromCmd(cmd))
 	if err != nil {
@@ -343,7 +343,7 @@ func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
 	var out []string
 	for _, ch := range children {
 		for k := range ch.Labels {
-			if strings.HasPrefix(k, "pic/") {
+			if strings.HasPrefix(k, "fundi/") {
 				continue
 			}
 			if _, ok := seen[k]; ok {
@@ -374,7 +374,7 @@ func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
 //   - 0m                   → reset SGR attributes
 //
 // All writes go to stdout (where the TUI was) regardless of pic-attach's
-// stdout direction — pic's stdout is the terminal in this caller path.
+// stdout direction — fundi's stdout is the terminal in this caller path.
 func resetTerminal() {
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		return

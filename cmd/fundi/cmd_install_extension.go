@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/fundi/cmd/pic/picembed"
+	"git.graveland.dev/brent/fundi/cmd/fundi/picembed"
 )
 
 func newInstallExtensionCmd() *cobra.Command {
@@ -21,7 +21,7 @@ func newInstallExtensionCmd() *cobra.Command {
 		Long: `Install or update the pic-helpers extension at
 ~/.pi/agent/extensions/pic-helpers/.
 
-pic create also runs this automatically (use --no-install-helpers there to
+fundi create also runs this automatically (use --no-install-helpers there to
 skip). Running explicitly is useful if you want it installed without
 spawning a child.
 
@@ -87,7 +87,7 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 }
 
 // ensurePicHelpersInstalled installs or updates pic-helpers to match the
-// version bundled in this pic binary. Silent on success. Returns nil if
+// version bundled in this fundi binary. Silent on success. Returns nil if
 // skipped due to opt-out env var.
 //
 // If install fails for any reason (permissions, disk full, etc.), the

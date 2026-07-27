@@ -98,7 +98,7 @@ func TestRecordWriter_LabelsRoundTrip(t *testing.T) {
 		Cwd:     "/tmp",
 		Labels: map[string]string{
 			"env":       "prod",
-			"pic/model": "claude-sonnet-4",
+			"fundi/model": "claude-sonnet-4",
 		},
 	}
 	if err := w.Write(rec); err != nil {
@@ -112,8 +112,8 @@ func TestRecordWriter_LabelsRoundTrip(t *testing.T) {
 	if got.Labels["env"] != "prod" {
 		t.Errorf("env label: got %q, want %q", got.Labels["env"], "prod")
 	}
-	if got.Labels["pic/model"] != "claude-sonnet-4" {
-		t.Errorf("pic/model label: got %q", got.Labels["pic/model"])
+	if got.Labels["fundi/model"] != "claude-sonnet-4" {
+		t.Errorf("fundi/model label: got %q", got.Labels["fundi/model"])
 	}
 }
 

@@ -9,13 +9,13 @@ import (
 	"time"
 )
 
-// TestCLI_Status verifies that `pic status` returns a JSON object containing
+// TestCLI_Status verifies that `fundi status` returns a JSON object containing
 // a "version" field.
 func TestCLI_Status(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
 
-	cmd := exec.Command(piCtlPath, "--socket", d.socketPath, "--output", "json", "status")
+	cmd := exec.Command(cliPath, "--socket", d.socketPath, "--output", "json", "status")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("status failed: %v\noutput: %s", err, out)
@@ -33,7 +33,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 
 	// create --detached
 	var createStderr bytes.Buffer
-	createCmd := exec.Command(piCtlPath,
+	createCmd := exec.Command(cliPath,
 		"--socket", d.socketPath,
 		"--output", "json",
 		"create", "smoke",
@@ -61,7 +61,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	}
 
 	// list — child should be present
-	listCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "--output", "json", "list")
+	listCmd := exec.Command(cliPath, "--socket", d.socketPath, "--output", "json", "list")
 	out, err = listCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("list failed: %v\n%s", err, out)
@@ -71,7 +71,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	}
 
 	// kill
-	killCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "kill", "smoke")
+	killCmd := exec.Command(cliPath, "--socket", d.socketPath, "kill", "smoke")
 	out, err = killCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("kill failed: %v\n%s", err, out)
@@ -80,7 +80,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	// poll until status=exited (up to 5 seconds)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		getCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "--output", "json", "get", "smoke")
+		getCmd := exec.Command(cliPath, "--socket", d.socketPath, "--output", "json", "get", "smoke")
 		out, _ = getCmd.CombinedOutput()
 		if strings.Contains(string(out), `"status":"exited"`) {
 			break
@@ -88,9 +88,9 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// `pic kill` auto-forgets on clean exit (commit 995a7e1), so `smoke`
+	// `fundi kill` auto-forgets on clean exit (commit 995a7e1), so `smoke`
 	// should already be gone from the store.  Verify by attempting to get it.
-	getCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "get", "smoke")
+	getCmd := exec.Command(cliPath, "--socket", d.socketPath, "get", "smoke")
 	out, _ = getCmd.CombinedOutput()
 	if !strings.Contains(string(out), "no child matches") {
 		t.Fatalf("expected child to be auto-forgotten after kill; get output: %s", out)
@@ -104,7 +104,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 //	sleep 1
 //
 //	# Spawn a child interactively (attaches a TUI)
-//	./bin/pic create demo --cwd /tmp --no-extensions \
+//	./bin/fundi create demo --cwd /tmp --no-extensions \
 //	    --model anthropic/claude-haiku-4-5
 //
 //	# In the TUI:
@@ -114,34 +114,34 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 //	- Press Ctrl+D to detach
 //
 //	# In another shell, verify the child is still alive:
-//	./bin/pic list
+//	./bin/fundi list
 //	# status should be "idle" (the agent finished its turn)
 //
 //	# Reattach
-//	./bin/pic attach demo
+//	./bin/fundi attach demo
 //	# Verify the TUI re-renders the conversation history
 //
 //	# Quit with native semantics
-//	./bin/pic attach demo --kill-on-exit
+//	./bin/fundi attach demo --kill-on-exit
 //	# Press Ctrl+D
-//	./bin/pic list
+//	./bin/fundi list
 //	# demo should now be "exited"
 //
-//	./bin/pic forget demo
+//	./bin/fundi forget demo
 //	pkill pi-controller
 
-// TestCLI_CreateDetached verifies that `pic create --detached` spawns a child
+// TestCLI_CreateDetached verifies that `fundi create --detached` spawns a child
 // and returns JSON containing a childId, then confirms the child appears in
-// `pic list`. Cleans up via kill + forget.
+// `fundi list`. Cleans up via kill + forget.
 func TestCLI_CreateDetached(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
 
 	// create --detached: should spawn the child and print JSON without attaching.
-	// Capture stdout and stderr separately — pic may emit a best-effort warning
+	// Capture stdout and stderr separately — fundi may emit a best-effort warning
 	// on stderr (e.g. active-marker directory not found) that we don't want to
 	// confuse with the JSON payload on stdout.
-	createCmd := exec.Command(piCtlPath,
+	createCmd := exec.Command(cliPath,
 		"--socket", d.socketPath,
 		"create", "test-detached",
 		"--cwd", "/tmp",
@@ -169,7 +169,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	}
 
 	// list — child should appear.
-	listCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "--output", "json", "list")
+	listCmd := exec.Command(cliPath, "--socket", d.socketPath, "--output", "json", "list")
 	out, err = listCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("list failed: %v\n%s", err, out)
@@ -179,7 +179,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	}
 
 	// kill
-	killCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "kill", "test-detached")
+	killCmd := exec.Command(cliPath, "--socket", d.socketPath, "kill", "test-detached")
 	out, err = killCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("kill failed: %v\n%s", err, out)
@@ -188,7 +188,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	// poll until status=exited (up to 5 seconds).
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		getCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "--output", "json", "get", "test-detached")
+		getCmd := exec.Command(cliPath, "--socket", d.socketPath, "--output", "json", "get", "test-detached")
 		out, _ = getCmd.CombinedOutput()
 		if strings.Contains(string(out), `"status":"exited"`) {
 			break
@@ -196,21 +196,21 @@ func TestCLI_CreateDetached(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// `pic kill` auto-forgets on clean exit (commit 995a7e1), so the child
+	// `fundi kill` auto-forgets on clean exit (commit 995a7e1), so the child
 	// should already be gone from the store.
-	getCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "get", "test-detached")
+	getCmd := exec.Command(cliPath, "--socket", d.socketPath, "get", "test-detached")
 	out, _ = getCmd.CombinedOutput()
 	if !strings.Contains(string(out), "no child matches") {
 		t.Fatalf("expected child to be auto-forgotten after kill; get output: %s", out)
 	}
 }
 
-// TestCLI_AttachHelp verifies that `pic attach --help` exits cleanly and
+// TestCLI_AttachHelp verifies that `fundi attach --help` exits cleanly and
 // documents the --kill-on-exit flag.
 func TestCLI_AttachHelp(t *testing.T) {
 	t.Parallel()
 
-	cmd := exec.Command(piCtlPath, "attach", "--help")
+	cmd := exec.Command(cliPath, "attach", "--help")
 	out, err := cmd.CombinedOutput()
 	// cobra exits 0 for --help.
 	if err != nil {
@@ -221,12 +221,12 @@ func TestCLI_AttachHelp(t *testing.T) {
 	}
 }
 
-// TestCLI_CreateHelp verifies that `pic create --help` exits cleanly and
+// TestCLI_CreateHelp verifies that `fundi create --help` exits cleanly and
 // documents both --detached and --kill-on-exit flags.
 func TestCLI_CreateHelp(t *testing.T) {
 	t.Parallel()
 
-	cmd := exec.Command(piCtlPath, "create", "--help")
+	cmd := exec.Command(cliPath, "create", "--help")
 	out, err := cmd.CombinedOutput()
 	// cobra exits 0 for --help.
 	if err != nil {
@@ -247,7 +247,7 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	d := bootDaemon(t)
 
 	var createStderr bytes.Buffer
-	createCmd := exec.Command(piCtlPath,
+	createCmd := exec.Command(cliPath,
 		"--socket", d.socketPath,
 		"--output", "json",
 		"create", "afk-impl",
@@ -264,7 +264,7 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	}
 
 	// resolve by prefix "afk"
-	getCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "--output", "json", "get", "afk")
+	getCmd := exec.Command(cliPath, "--socket", d.socketPath, "--output", "json", "get", "afk")
 	out, err = getCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("get with prefix failed: %v\n%s", err, out)
@@ -274,6 +274,6 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	}
 
 	// cleanup: kill before test exits to avoid leftover processes
-	killCmd := exec.Command(piCtlPath, "--socket", d.socketPath, "kill", "afk-impl")
+	killCmd := exec.Command(cliPath, "--socket", d.socketPath, "kill", "afk-impl")
 	_, _ = killCmd.CombinedOutput()
 }

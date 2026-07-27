@@ -16,17 +16,17 @@ func newResumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "resume [id|name]",
 		Short: "Resume an exited child, or spawn a new child from any pi session file",
-		Long: `Resume a pic-managed child that has exited, or spawn a fresh child continuing
-any pi session — including sessions that were never managed by pic — by pointing
+		Long: `Resume a fundi-managed child that has exited, or spawn a fresh child continuing
+any pi session — including sessions that were never managed by fundi — by pointing
 directly at the session's .jsonl file.
 
 Standard resume (existing behaviour):
-  pic resume [id|name]
+  fundi resume [id|name]
 
 Resume from a pi session file (new):
-  pic resume --pi-session <uuid-or-path>
+  fundi resume --pi-session <uuid-or-path>
 
-With --pi-session, pic reads the session's .jsonl to extract cwd, model, and
+With --pi-session, fundi reads the session's .jsonl to extract cwd, model, and
 thinking level, then spawns a new child via ctrl_spawn (NOT ctrl_resume).
 
 The --pi-session argument may be:
@@ -34,7 +34,7 @@ The --pi-session argument may be:
   - A path starting with ~ (tilde is expanded to $HOME)
   - A bare UUID, resolved by globbing ~/.pi/agent/sessions/*/
 
-After spawning, pic attaches the TUI to the new child, identical to 'pic create'.
+After spawning, fundi attaches the TUI to the new child, identical to 'fundi create'.
 Use --detached to skip attaching.`,
 		Args: cobra.MaximumNArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
@@ -61,13 +61,13 @@ Use --detached to skip attaching.`,
 	// buildSpawnRequest handles env-var defaults, labels, and forward-env.
 	addSpawnFlags(cmd)
 
-	// Attach-mode flags (same semantics as pic create).
+	// Attach-mode flags (same semantics as fundi create).
 	cmd.Flags().Bool("detached", false, "Spawn without attaching (--pi-session path only)")
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 
-	// Preset support (same semantics as pic create).
+	// Preset support (same semantics as fundi create).
 	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/fundi-presets.json")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		pf, err := loadPresets()
@@ -137,7 +137,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 }
 
 // runResumeFromPiSession spawns a new child continuing any pi session, whether
-// or not that session was ever managed by pic.  It reads cwd, model, and
+// or not that session was ever managed by fundi.  It reads cwd, model, and
 // thinking level from the session.jsonl and merges them with the usual sources
 // (flags, PIC_DEFAULT_MODEL, PIC_DEFAULT_LABELS, preset).
 //
@@ -214,9 +214,9 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 	}
 
 	// Tell the daemon to attach the reserved traceability auto-label
-	// `pic/resumed-from-session=<uuid>`.  Sent here rather than in req.Labels
+	// `fundi/resumed-from-session=<uuid>`.  Sent here rather than in req.Labels
 	// because the daemon (correctly) rejects user-supplied labels in the
-	// reserved pic/ namespace.
+	// reserved fundi/ namespace.
 	req.ResumedFromSession = info.SessionID
 
 	// Send ctrl_spawn to the daemon.

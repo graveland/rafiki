@@ -88,7 +88,7 @@ type Controller interface {
 	Send(childID string, frame json.RawMessage) error
 
 	// SetLabels mutates labels on the named child. Returns the full post-mutation
-	// map. Rejects keys with the pic/ prefix and invalid key characters.
+	// map. Rejects keys with the fundi/ prefix and invalid key characters.
 	SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error)
 
 	// ListModels enumerates LLM models from all configured sources (user-config,

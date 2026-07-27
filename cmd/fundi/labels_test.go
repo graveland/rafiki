@@ -45,15 +45,15 @@ func TestValidateCLILabelKey_Invalid(t *testing.T) {
 }
 
 func TestValidateCLILabelKey_ReservedPrefix(t *testing.T) {
-	keys := []string{"pic/model", "pic/provider", "pic/cwd", "pic/", "pic/x"}
+	keys := []string{"fundi/model", "fundi/provider", "fundi/cwd", "fundi/", "fundi/x"}
 	for _, k := range keys {
 		err := validateCLILabelKey(k)
 		if err == nil {
 			t.Errorf("validateCLILabelKey(%q): expected reserved-prefix error, got nil", k)
 			continue
 		}
-		if !strings.Contains(err.Error(), "pic/") {
-			t.Errorf("validateCLILabelKey(%q): error %q should mention pic/", k, err.Error())
+		if !strings.Contains(err.Error(), "fundi/") {
+			t.Errorf("validateCLILabelKey(%q): error %q should mention fundi/", k, err.Error())
 		}
 	}
 }
@@ -104,9 +104,9 @@ func TestParseLabelPairs_BadKey(t *testing.T) {
 }
 
 func TestParseLabelPairs_ReservedKey(t *testing.T) {
-	_, err := parseLabelPairs([]string{"pic/model=evil"})
+	_, err := parseLabelPairs([]string{"fundi/model=evil"})
 	if err == nil {
-		t.Fatal("expected error for pic/ prefix")
+		t.Fatal("expected error for fundi/ prefix")
 	}
 }
 
@@ -188,24 +188,24 @@ func TestFormatLabels_Truncation(t *testing.T) {
 
 func TestFormatLabels_HidesPicPrefixByDefault(t *testing.T) {
 	labels := map[string]string{
-		"pic/cwd":   "/home/foo",
-		"pic/model": "claude-opus-4",
+		"fundi/cwd":   "/home/foo",
+		"fundi/model": "claude-opus-4",
 		"context":   "work",
 	}
 	got := formatLabels(labels, 0, false)
 	if got != "context=work" {
-		t.Errorf("got %q, want only user labels (pic/* hidden)", got)
+		t.Errorf("got %q, want only user labels (fundi/* hidden)", got)
 	}
 }
 
 func TestFormatLabels_IncludesPicPrefixWhenRequested(t *testing.T) {
 	labels := map[string]string{
-		"pic/cwd": "/home/foo",
+		"fundi/cwd": "/home/foo",
 		"context": "work",
 	}
 	got := formatLabels(labels, 0, true)
-	if !strings.Contains(got, "pic/cwd=/home/foo") {
-		t.Errorf("got %q, expected pic/cwd to be included", got)
+	if !strings.Contains(got, "fundi/cwd=/home/foo") {
+		t.Errorf("got %q, expected fundi/cwd to be included", got)
 	}
 	if !strings.Contains(got, "context=work") {
 		t.Errorf("got %q, expected context=work to be included", got)
@@ -214,10 +214,10 @@ func TestFormatLabels_IncludesPicPrefixWhenRequested(t *testing.T) {
 
 func TestFormatLabels_AllPicHiddenReturnsDash(t *testing.T) {
 	labels := map[string]string{
-		"pic/cwd":   "/home/foo",
-		"pic/model": "claude",
+		"fundi/cwd":   "/home/foo",
+		"fundi/model": "claude",
 	}
 	if got := formatLabels(labels, 0, false); got != "-" {
-		t.Errorf("got %q, want - when only pic/* labels present", got)
+		t.Errorf("got %q, want - when only fundi/* labels present", got)
 	}
 }

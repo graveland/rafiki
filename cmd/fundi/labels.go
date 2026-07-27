@@ -11,7 +11,7 @@ import (
 var cliLabelKeyRE = regexp.MustCompile(`^[a-zA-Z0-9_./-]+$`)
 
 // validateCLILabelKey validates a single label key from CLI input.
-// Rejects empty keys, disallowed characters, and the reserved pic/ prefix.
+// Rejects empty keys, disallowed characters, and the reserved fundi/ prefix.
 func validateCLILabelKey(k string) error {
 	if k == "" {
 		return fmt.Errorf("label key must not be empty")
@@ -19,8 +19,8 @@ func validateCLILabelKey(k string) error {
 	if !cliLabelKeyRE.MatchString(k) {
 		return fmt.Errorf("label key %q contains invalid characters (allowed: a-z A-Z 0-9 _ . / -)", k)
 	}
-	if strings.HasPrefix(k, "pic/") {
-		return fmt.Errorf("labels with 'pic/' prefix are reserved (got: %s)", k)
+	if strings.HasPrefix(k, "fundi/") {
+		return fmt.Errorf("labels with 'fundi/' prefix are reserved (got: %s)", k)
 	}
 	return nil
 }
@@ -48,8 +48,8 @@ func parseLabelPairs(pairs []string) (map[string]string, error) {
 }
 
 // parseLabelFilterPairs parses "k=v" strings for use in label filter queries
-// (e.g. pic tail --label).  Unlike parseLabelPairs, this does NOT reject the
-// pic/ prefix, since filtering by auto-labels (e.g. pic/model=...) is valid.
+// (e.g. fundi tail --label).  Unlike parseLabelPairs, this does NOT reject the
+// fundi/ prefix, since filtering by auto-labels (e.g. fundi/model=...) is valid.
 func parseLabelFilterPairs(pairs []string) (map[string]string, error) {
 	if len(pairs) == 0 {
 		return nil, nil
@@ -74,8 +74,8 @@ func parseLabelFilterPairs(pairs []string) (map[string]string, error) {
 }
 
 // parseLabelFilterKeys validates keys for label filter queries (--has-label).
-// Allows any valid key including the pic/ prefix, since filtering by
-// auto-labels (e.g. --has-label pic/model) is valid.
+// Allows any valid key including the fundi/ prefix, since filtering by
+// auto-labels (e.g. --has-label fundi/model) is valid.
 func parseLabelFilterKeys(keys []string) ([]string, error) {
 	if len(keys) == 0 {
 		return nil, nil
@@ -125,9 +125,9 @@ func mergeLabels(maps ...map[string]string) map[string]string {
 // formatLabels returns a compact "k=v,k2=v2" string for table display.
 // Keys are sorted for deterministic output. Truncates to maxLen if non-zero.
 //
-// When includePicLabels is false (default for `pic list`), labels whose key
-// starts with the reserved "pic/" prefix are omitted — they're auto-derived
-// from data already shown in adjacent columns (MODEL, etc.) or in `pic get`,
+// When includePicLabels is false (default for `fundi list`), labels whose key
+// starts with the reserved "fundi/" prefix are omitted — they're auto-derived
+// from data already shown in adjacent columns (MODEL, etc.) or in `fundi get`,
 // and they otherwise dominate the column width and crowd out user labels.
 func formatLabels(labels map[string]string, maxLen int, includePicLabels bool) string {
 	if len(labels) == 0 {
@@ -135,7 +135,7 @@ func formatLabels(labels map[string]string, maxLen int, includePicLabels bool) s
 	}
 	keys := make([]string, 0, len(labels))
 	for k := range labels {
-		if !includePicLabels && strings.HasPrefix(k, "pic/") {
+		if !includePicLabels && strings.HasPrefix(k, "fundi/") {
 			continue
 		}
 		keys = append(keys, k)

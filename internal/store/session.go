@@ -91,7 +91,7 @@ type Session struct {
 	ExitedRenderRing []ring.Event
 
 	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
-	// Keys with the "pic/" prefix are reserved for auto-labels set by the daemon.
+	// Keys with the "fundi/" prefix are reserved for auto-labels set by the daemon.
 	Labels map[string]string
 
 	// SlashCommands is the claude child's advertised slash-command list (names),

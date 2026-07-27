@@ -19,7 +19,7 @@ import (
 // are capped at 104 bytes; t.TempDir() names exceed this for long test names).
 func testSocketDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "pic")
+	dir, err := os.MkdirTemp("", "fundi")
 	if err != nil {
 		t.Fatalf("mkdirtemp: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestIntegration_SetLabels_Success(t *testing.T) {
 	}
 }
 
-// TestIntegration_SetLabels_ReservedPrefix verifies that pic/ keys are rejected.
+// TestIntegration_SetLabels_ReservedPrefix verifies that fundi/ keys are rejected.
 func TestIntegration_SetLabels_ReservedPrefix(t *testing.T) {
 	t.Parallel()
 
@@ -238,7 +238,7 @@ func TestIntegration_SetLabels_ReservedPrefix(t *testing.T) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 
-	frame := `{"type":"ctrl_set_labels","id":"lbl-2","childId":"c_reserved","set":{"pic/model":"evil"}}` + "\n"
+	frame := `{"type":"ctrl_set_labels","id":"lbl-2","childId":"c_reserved","set":{"fundi/model":"evil"}}` + "\n"
 	if _, err := conn.Write([]byte(frame)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestIntegration_SetLabels_ReservedPrefix(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if resp.Success {
-		t.Fatal("expected error for pic/ prefix, got success")
+		t.Fatal("expected error for fundi/ prefix, got success")
 	}
 	if resp.Error == nil || resp.Error.Code != protocol.ErrInvalidArgs {
 		t.Errorf("expected invalid_args, got %+v", resp.Error)

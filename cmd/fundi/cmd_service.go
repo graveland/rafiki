@@ -76,7 +76,7 @@ func newServiceInstallCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  runServiceInstall,
 	}
-	cmd.Flags().String("daemon-binary", "", "Path to the fundi daemon binary (default: auto-detect next to pic, then PATH)")
+	cmd.Flags().String("daemon-binary", "", "Path to the fundi daemon binary (default: auto-detect next to fundi, then PATH)")
 	cmd.Flags().String("path-env", "", "PATH value for the service environment (default: auto-detect)")
 	return cmd
 }

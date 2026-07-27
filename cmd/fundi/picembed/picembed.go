@@ -1,4 +1,4 @@
-// Package picembed bundles static assets embedded into the pic binary.
+// Package picembed bundles static assets embedded into the fundi binary.
 package picembed
 
 import "embed"

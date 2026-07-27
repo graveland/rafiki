@@ -72,7 +72,7 @@ func TestServer_LiveSocketRejected(t *testing.T) {
 func TestServer_Broadcast(t *testing.T) {
 	// Use os.MkdirTemp (not t.TempDir) — macOS UDS paths are capped at 104 bytes
 	// and t.TempDir embeds the full test name which can exceed that limit.
-	dir, err := os.MkdirTemp("", "pic")
+	dir, err := os.MkdirTemp("", "fundi")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestServer_Broadcast(t *testing.T) {
 // TestServer_BroadcastAfterClose_Safe verifies that Broadcast after Close
 // does not panic and returns 0 (all connections deregistered by wg.Wait).
 func TestServer_BroadcastAfterClose_Safe(t *testing.T) {
-	dir, err := os.MkdirTemp("", "pic")
+	dir, err := os.MkdirTemp("", "fundi")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -300,11 +300,11 @@ func TestBuildSpawnRequest_ReservedLabelKey(t *testing.T) {
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Flags().Set("label", "pic/model=evil"); err != nil {
+	if err := cmd.Flags().Set("label", "fundi/model=evil"); err != nil {
 		t.Fatal(err)
 	}
 	_, err := buildSpawnRequest(cmd, nil)
 	if err == nil {
-		t.Fatal("expected error for pic/ prefix")
+		t.Fatal("expected error for fundi/ prefix")
 	}
 }

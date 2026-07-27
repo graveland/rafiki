@@ -51,6 +51,29 @@ func TestFindDaemonBinaryNeverPicksTheClient(t *testing.T) {
 	}
 }
 
+// TestFindDaemonBinaryPrefersDaemonWhenBothPresent covers the layout `make
+// install` actually produces: both binaries side by side in one directory.
+// That is the arrangement nearly every real user ends up with, so it is the
+// one the lookup most has to get right.
+func TestFindDaemonBinaryPrefersDaemonWhenBothPresent(t *testing.T) {
+	dir := t.TempDir()
+	client := filepath.Join(dir, "fundi")
+	daemon := filepath.Join(dir, "fundid")
+	for _, p := range []string{client, daemon} {
+		if err := os.WriteFile(p, []byte("fake"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := findDaemonBinaryFrom(client)
+	if err != nil {
+		t.Fatalf("expected sibling lookup to succeed: %v", err)
+	}
+	if got != daemon {
+		t.Errorf("got %s, want %s (the daemon, not the client)", got, daemon)
+	}
+}
+
 // TestFindDaemonBinaryNoSibling verifies that when no sibling exists, the
 // function either succeeds via PATH or returns a clear "not found" error.
 func TestFindDaemonBinaryNoSibling(t *testing.T) {

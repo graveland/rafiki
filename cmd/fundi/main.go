@@ -21,15 +21,15 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "pic",
+		Use:           "fundi",
 		Short:         "Control the fundi daemon",
-		Long:          "pic is the command-line client for the fundi daemon.\nIt speaks the JSONL protocol over the daemon's UDS socket.",
+		Long:          "fundi is the command-line client for the fundid daemon.\nIt speaks the JSONL protocol over the daemon's UDS socket.",
 		Version:       version.String(),
 		SilenceUsage:  true, // don't print usage on RunE errors
 		SilenceErrors: true, // main() prints errors itself
 	}
 
-	root.PersistentFlags().String("socket", "", "controller socket path (default ~/.pi/run/controller.sock)")
+	root.PersistentFlags().String("socket", "", "controller socket path (default: $FUNDI_SOCKET, else the XDG runtime path)")
 	root.PersistentFlags().String("output", "auto", "output format for list/tail: auto|json|table (other commands always emit JSON)")
 	root.PersistentFlags().String("color", "auto", "color output: auto|always|never")
 

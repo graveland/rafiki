@@ -21,7 +21,7 @@ import (
 var errDaemonShutdown = errors.New("daemon_shutdown")
 
 // linePrefixWriter is an io.Writer that prepends Prefix to each non-empty,
-// non-blank Write call.  It is used by pic tail in label-filtered mode to
+// non-blank Write call.  It is used by fundi tail in label-filtered mode to
 // prefix each event line with the source child's short ID.  The Prefix field
 // is updated between events — safe because tail's render loop is single-
 // threaded with respect to writes.
@@ -46,7 +46,7 @@ func (pw *linePrefixWriter) Write(p []byte) (int, error) {
 // It handles the ctrl_event wrapper (pi events) and ctrl_child_* lifecycle events.
 //
 // Pi writes responses to its stdout firehose alongside events, and the daemon
-// fans the entire stream to all subscribers — so 'pic tail' sees responses
+// fans the entire stream to all subscribers — so 'fundi tail' sees responses
 // to other connections' RPC calls (e.g. pic-attach's autocomplete
 // get_commands fetch).  These are internal plumbing the user usually does
 // not care about, so we suppress them by default.  `--verbose` (verbose=true)
@@ -142,7 +142,7 @@ func (r *tailRenderer) render(frame []byte) error {
 				}
 			}
 		}
-		// In a streaming tail, show ALL labels including pic/* — user is
+		// In a streaming tail, show ALL labels including fundi/* — user is
 		// actively observing changes and likely wants the full picture.
 		r.printDim(fmt.Sprintf("[labels] %s", formatLabels(hdr.Labels, 60, true)))
 

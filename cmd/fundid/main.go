@@ -117,8 +117,8 @@ func main() {
 	//
 	// The 180s global bound matches the platform stop-timeout we install; if
 	// users have an older plist/unit (default 20s on launchd, 90s on systemd),
-	// the platform will SIGKILL us first — they should re-run `pic service
-	// uninstall && pic service install` to pick up the new timeouts.
+	// the platform will SIGKILL us first — they should re-run `fundi service
+	// uninstall && fundi service install` to pick up the new timeouts.
 	const (
 		childShutdownTimeout = 120 * time.Second
 		childKillTimeout     = 30 * time.Second

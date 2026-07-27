@@ -408,7 +408,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		}
 	}
 
-	// Validate user-supplied labels: no invalid keys, no pic/ prefix.
+	// Validate user-supplied labels: no invalid keys, no fundi/ prefix.
 	if err := validateUserLabelKeys(req.Labels); err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
@@ -467,14 +467,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	if initLabels == nil {
 		initLabels = make(map[string]string)
 	}
-	initLabels["pic/cwd"] = req.Cwd
-	initLabels["pic/pid"] = strconv.Itoa(ch.PID())
-	initLabels["pic/kind"] = spawnKindLabel(req.Kind)
+	initLabels["fundi/cwd"] = req.Cwd
+	initLabels["fundi/pid"] = strconv.Itoa(ch.PID())
+	initLabels["fundi/kind"] = spawnKindLabel(req.Kind)
 	if req.ConfigDir != "" {
-		initLabels["pic/config_dir"] = req.ConfigDir
+		initLabels["fundi/config_dir"] = req.ConfigDir
 	}
 	if req.ResumedFromSession != "" {
-		initLabels["pic/resumed-from-session"] = req.ResumedFromSession
+		initLabels["fundi/resumed-from-session"] = req.ResumedFromSession
 	}
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
@@ -628,14 +628,14 @@ func (c *Controller) activateLiveChild(
 				s.Labels = make(map[string]string)
 			}
 			if provider != "" {
-				s.Labels["pic/provider"] = provider
+				s.Labels["fundi/provider"] = provider
 			} else {
-				delete(s.Labels, "pic/provider")
+				delete(s.Labels, "fundi/provider")
 			}
 			if model != "" {
-				s.Labels["pic/model"] = model
+				s.Labels["fundi/model"] = model
 			} else {
-				delete(s.Labels, "pic/model")
+				delete(s.Labels, "fundi/model")
 			}
 		})
 		if err := c.writeRecord(childID); err != nil {
@@ -673,21 +673,21 @@ func (c *Controller) activateLiveChild(
 	if resumeLabels == nil {
 		resumeLabels = make(map[string]string)
 	}
-	resumeLabels["pic/cwd"] = snap.Cwd
-	resumeLabels["pic/pid"] = strconv.Itoa(ch.PID())
-	resumeLabels["pic/kind"] = spawnKindLabel(snap.Kind)
+	resumeLabels["fundi/cwd"] = snap.Cwd
+	resumeLabels["fundi/pid"] = strconv.Itoa(ch.PID())
+	resumeLabels["fundi/kind"] = spawnKindLabel(snap.Kind)
 	if snap.ConfigDir != "" {
-		resumeLabels["pic/config_dir"] = snap.ConfigDir
+		resumeLabels["fundi/config_dir"] = snap.ConfigDir
 	}
 	if provider != "" {
-		resumeLabels["pic/provider"] = provider
+		resumeLabels["fundi/provider"] = provider
 	} else {
-		delete(resumeLabels, "pic/provider")
+		delete(resumeLabels, "fundi/provider")
 	}
 	if model != "" {
-		resumeLabels["pic/model"] = model
+		resumeLabels["fundi/model"] = model
 	} else {
-		delete(resumeLabels, "pic/model")
+		delete(resumeLabels, "fundi/model")
 	}
 
 	sess := &store.Session{
@@ -1116,7 +1116,7 @@ func (c *Controller) Forget(childID string) error {
 	// cm.Remove(childID).  Without this wait, our delete can race with the
 	// atomic-rename: writeRecord's .tmp is in-progress when Forget runs
 	// os.Remove(.json) — finds nothing — then writeRecord completes the
-	// rename, leaving an orphan .json that pic ls picks up on the next
+	// rename, leaving an orphan .json that fundi ls picks up on the next
 	// daemon restart via loadOrphans.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1142,7 +1142,7 @@ func (c *Controller) Forget(childID string) error {
 }
 
 // deleteLogDump removes the per-child log dump directory at ~/.pi/run/logs/<childID>.
-// Forget calls this so 'pic forget' fully removes the child's footprint rather
+// Forget calls this so 'fundi forget' fully removes the child's footprint rather
 // than leaving orphan dumps to accumulate forever.  Missing directory is not
 // an error (no dump was written, e.g. for a child that crashed pre-Idle).
 func (c *Controller) deleteLogDump(childID string) error {
@@ -1158,7 +1158,7 @@ func (c *Controller) deleteLogDump(childID string) error {
 
 // deleteSpillDir removes an agent-kind child's clipped-tool-output spill
 // directory (see buildAgentArgv/agentSpillDir). Forget/ForgetAllExited call
-// this for "agent" kind children so 'pic forget' fully removes the child's
+// this for "agent" kind children so 'fundi forget' fully removes the child's
 // footprint, mirroring deleteLogDump. Missing directory is not an error (the
 // child may have exited before writing any spilled output).
 func (c *Controller) deleteSpillDir(childID string) error {
@@ -1197,7 +1197,7 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 	return count, nil
 }
 
-// SetLabels mutates labels on the named child. Rejects keys with the pic/
+// SetLabels mutates labels on the named child. Rejects keys with the fundi/
 // prefix or invalid characters. Emits ctrl_child_labeled to subscribers.
 func (c *Controller) SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error) {
 	if _, ok := c.st.Get(childID); !ok {
@@ -1664,7 +1664,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 }
 
 // handleModelChange updates the store's Provider/Model fields and the
-// pic/model + pic/provider auto-labels when the sniffer detects a model change
+// fundi/model + fundi/provider auto-labels when the sniffer detects a model change
 // via set_model or cycle_model responses. Emits ctrl_child_labeled.
 func (c *Controller) handleModelChange(childID, modelStr string) {
 	provider, model := splitModel(modelStr)
@@ -1675,14 +1675,14 @@ func (c *Controller) handleModelChange(childID, modelStr string) {
 			s.Labels = make(map[string]string)
 		}
 		if provider != "" {
-			s.Labels["pic/provider"] = provider
+			s.Labels["fundi/provider"] = provider
 		} else {
-			delete(s.Labels, "pic/provider")
+			delete(s.Labels, "fundi/provider")
 		}
 		if model != "" {
-			s.Labels["pic/model"] = model
+			s.Labels["fundi/model"] = model
 		} else {
-			delete(s.Labels, "pic/model")
+			delete(s.Labels, "fundi/model")
 		}
 	})
 	snap, ok := c.st.Get(childID)
@@ -2119,7 +2119,7 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 }
 
 // spawnKindLabel normalizes a SpawnRequest/snapshot Kind into the value used for
-// the pic/kind auto-label. Empty defaults to "pi" (the implicit default kind),
+// the fundi/kind auto-label. Empty defaults to "pi" (the implicit default kind),
 // matching resolveSpawnPlan's kind handling.
 func spawnKindLabel(kind string) string {
 	if kind == "" {

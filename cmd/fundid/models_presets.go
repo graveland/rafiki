@@ -34,12 +34,12 @@ func (c *Controller) ListModels(ctx context.Context, provider string) ([]protoco
 }
 
 // presetsFileName is the presets file inside pi's agent directory. Must match
-// the client's PresetsFileName in cmd/pic/presets.go — the two read the same
+// the client's PresetsFileName in cmd/fundi/presets.go — the two read the same
 // file. The pre-rename spelling (pic-presets.json) is not read.
 const presetsFileName = "fundi-presets.json"
 
 // presetEntry is the JSON shape of one entry in the presets file.
-// The full Preset struct lives in cmd/pic/presets.go; this is a minimal copy
+// The full Preset struct lives in cmd/fundi/presets.go; this is a minimal copy
 // to avoid cross-package coupling in v1.
 type presetEntry struct {
 	Model  string            `json:"model,omitempty"`

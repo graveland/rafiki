@@ -15,7 +15,7 @@ func newAttachCmd() *cobra.Command {
 		Short: "Attach the pi TUI to an existing child",
 		Long: `Open the pi TUI driving an existing daemon-managed child.
 
-When the TUI quits (Ctrl+D, /quit), pic asks whether to terminate the session
+When the TUI quits (Ctrl+D, /quit), fundi asks whether to terminate the session
 or leave it running. Use --kill-on-exit or --keep-on-exit to skip the prompt
 and choose explicitly.`,
 		Args: cobra.MaximumNArgs(1),

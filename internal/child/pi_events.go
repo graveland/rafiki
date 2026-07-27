@@ -128,7 +128,7 @@ func PiAgentStart() any { return piAgentStart{Type: "agent_start"} }
 // piMessageEnvelope carries an assistant message_start/message_end frame.
 // parentToolUseId is set (to the spawning Task tool call's id) for frames
 // produced by a sub-agent, so consumers can attribute and indent them; it is a
-// pic extension to the pi vocabulary (omitted, and ignored by pi's TUI, when
+// fundi extension to the pi vocabulary (omitted, and ignored by pi's TUI, when
 // the frame is from the top-level agent).
 type piMessageEnvelope struct {
 	Type            string             `json:"type"`
@@ -242,7 +242,7 @@ type piAgentEnd struct {
 // PiAgentEnd builds the terminal agent_end frame carrying the FULL accumulated
 // messages[] and willRetry:false. messages is pre-marshalled (each entry is a
 // user / assistant / toolResult message) so a heterogeneous slice round-trips
-// without an interface tag. usage (a pic extension to the pi vocabulary,
+// without an interface tag. usage (a fundi extension to the pi vocabulary,
 // ignored by pi's TUI) carries the turn's token/cost totals when known.
 func PiAgentEnd(messages []json.RawMessage, usage *PiUsage) any {
 	if messages == nil {

@@ -25,7 +25,7 @@ func newLogsCmd() *cobra.Command {
 		Long: `logs == tail; -f follows. Rendered by default; --raw for verbatim bytes.
 
 Filter the rendered out stream with --profile (a named preset) or
---include/--exclude (specific event types), same as pic tail. Note --profile
+--include/--exclude (specific event types), same as fundi tail. Note --profile
 applies only to the live follow stream, not the backfill.
 
 Only the out stream can be followed; --in/--err are snapshots (live stderr is
@@ -41,7 +41,7 @@ unavailable — captured to disk on exit) and ignore the filter flags.`,
 	cmd.Flags().Bool("all", false, "Print all three streams with separator headers")
 	cmd.Flags().Bool("path", false, "Print just the log directory path")
 	cmd.Flags().IntP("tail", "n", -1, "Show the last N events (-1 = all, 0 = none)")
-	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new output after catching up (≡ pic tail)")
+	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new output after catching up (≡ fundi tail)")
 	cmd.Flags().Bool("raw", false, "Emit raw stream bytes/JSONL instead of the rendered view")
 	cmd.Flags().Bool("no-deltas", true, "Suppress token-by-token message_update deltas in the rendered view (default true)")
 	cmd.Flags().BoolP("verbose", "v", false, "Include internal RPC/lifecycle frames")
@@ -175,7 +175,7 @@ func dumpRawStreams(ctx context.Context, c *client.Client, childID string, wantI
 				if len(data.Err) > 0 {
 					os.Stdout.Write(data.Err)
 				} else {
-					fmt.Fprintln(os.Stderr, "note: stderr is not captured while the child is running; it is written to disk on exit (run `pic logs --err <child>` after it exits)")
+					fmt.Fprintln(os.Stderr, "note: stderr is not captured while the child is running; it is written to disk on exit (run `fundi logs --err <child>` after it exits)")
 				}
 			}
 			return nil

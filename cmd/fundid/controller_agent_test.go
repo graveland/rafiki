@@ -183,7 +183,7 @@ func TestBuildAgentArgv_SpillDirPinnedBeforeExtraArgs(t *testing.T) {
 	}
 }
 
-// TestSpawnKindLabel_Agent covers the pic/kind auto-label for the new kind.
+// TestSpawnKindLabel_Agent covers the fundi/kind auto-label for the new kind.
 func TestSpawnKindLabel_Agent(t *testing.T) {
 	if got := spawnKindLabel("agent"); got != "agent" {
 		t.Fatalf("spawnKindLabel(\"agent\") = %q, want \"agent\"", got)
@@ -229,7 +229,7 @@ func TestForget_RemovesAgentSpillDir(t *testing.T) {
 }
 
 // TestForgetAllExited_RemovesAgentSpillDir covers the same cleanup via the
-// bulk sweep path (ForgetAllExited), used by the sweeper and 'pic forget
+// bulk sweep path (ForgetAllExited), used by the sweeper and 'fundi forget
 // --all'.
 func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 	ctrl := newTestController(t)

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Preset defines default model and label values applied by pic create --preset NAME.
+// Preset defines default model and label values applied by fundi create --preset NAME.
 type Preset struct {
 	Model  string            `json:"model,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
@@ -27,7 +27,10 @@ const PresetsFileName = "fundi-presets.json"
 
 // legacyPresetsFileName is the pre-rename spelling. It is deliberately NOT read
 // as a fallback — it is only probed to turn "no presets file" into an error that
-// says what to do about it.
+// says what to do about it. It must NOT equal PresetsFileName; if it does, the
+// "legacy file still exists" branch fires on the current file and reports that
+// the user's own presets are stale. TestLoadPresets_LegacyFileIsNotReadButIsReported
+// catches that.
 const legacyPresetsFileName = "pic-presets.json"
 
 // presetsPath returns the presets file location: ~/.pi/agent/<name>.

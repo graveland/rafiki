@@ -20,17 +20,17 @@ func newKillCmd() *cobra.Command {
 		Long: `Stop one or more running children gracefully, escalating to SIGKILL only if necessary.
 
 On a clean exit (exit code 0, no signal, no timeout escalation), the child
-is also forgotten from the daemon's in-memory store (removed from pic list).
+is also forgotten from the daemon's in-memory store (removed from fundi list).
 Disk artifacts (logs, state record) are not affected.
 
-Use --no-forget to keep exited children visible in pic list even after a
+Use --no-forget to keep exited children visible in fundi list even after a
 clean exit (e.g. for /tree navigation or inspection).`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runKill,
 	}
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
-	cmd.Flags().Bool("no-forget", false, "Keep children in pic list even after a clean exit")
+	cmd.Flags().Bool("no-forget", false, "Keep children in fundi list even after a clean exit")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
 			return ch.Status != string(protocol.StatusExited)
@@ -106,7 +106,7 @@ type killAndForgetResult struct {
 // (exitCode 0, no signal, not escalated) and when noForget is false, follows
 // up with ctrl_forget. Returns the kill result and whether forget ran.
 //
-// Shared between `pic kill` and `pic create`/`pic attach`'s post-detach
+// Shared between `fundi kill` and `fundi create`/`fundi attach`'s post-detach
 // terminate prompt so both code paths apply the same auto-forget policy.
 func killAndMaybeForget(ctx context.Context, c *client.Client, childID string, st, kt time.Duration, noForget bool) (killAndForgetResult, error) {
 	var res killAndForgetResult

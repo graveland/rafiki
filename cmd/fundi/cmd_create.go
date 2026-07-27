@@ -24,12 +24,12 @@ The pic-helpers pi extension is auto-installed (or upgraded) into
 like /reload work inside the TUI. Use --no-install-helpers or set
 PIC_NO_AUTO_INSTALL_HELPERS=1 to skip.
 
-When the TUI quits (Ctrl+D, /quit), pic asks whether to terminate the session
+When the TUI quits (Ctrl+D, /quit), fundi asks whether to terminate the session
 or leave it running. Use --kill-on-exit or --keep-on-exit to skip the prompt
 and choose explicitly.
 
-With --detached, pic create spawns the child and exits without attaching.
-The child runs in the background; reattach later with 'pic attach <name>'.
+With --detached, fundi create spawns the child and exits without attaching.
+The child runs in the background; reattach later with 'fundi attach <name>'.
 
 --cwd defaults to the current directory. Specify explicitly to override.
 
@@ -38,7 +38,7 @@ Environment variable defaults (applied before explicit flags; lowest priority):
   PIC_DEFAULT_MODEL   fallback model string
   PIC_DEFAULT_LABELS  comma-separated k=v label defaults
 
-(Note: pic create replaces the earlier ` + "`pic spawn`" + ` subcommand. For
+(Note: fundi create replaces the earlier ` + "`fundi spawn`" + ` subcommand. For
 scripting / AFK workflows, use --detached.)`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runCreate,

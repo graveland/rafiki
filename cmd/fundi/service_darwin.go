@@ -15,7 +15,7 @@ import (
 )
 
 // Distinct from pi-controller's own "dev.graveland.pi-controller": sharing the
-// label meant `pic service uninstall` from a fundi checkout unloaded and deleted
+// label meant a `service uninstall` from a fundi checkout unloaded and deleted
 // the running pi-controller service, and install overwrote its plist.
 const launchdLabel = "dev.graveland.fundi"
 

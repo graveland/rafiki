@@ -22,28 +22,28 @@ func validateLabelKey(k string) error {
 }
 
 // validateUserLabelKeys checks that all keys in m are syntactically valid and
-// do not use the reserved pic/ prefix.
+// do not use the reserved fundi/ prefix.
 func validateUserLabelKeys(m map[string]string) error {
 	for k := range m {
 		if err := validateLabelKey(k); err != nil {
 			return err
 		}
-		if strings.HasPrefix(k, "pic/") {
-			return fmt.Errorf("labels with 'pic/' prefix are reserved (got: %s)", k)
+		if strings.HasPrefix(k, "fundi/") {
+			return fmt.Errorf("labels with 'fundi/' prefix are reserved (got: %s)", k)
 		}
 	}
 	return nil
 }
 
 // validateUserRemoveKeys checks that all keys in remove are syntactically
-// valid and do not target the reserved pic/ namespace.
+// valid and do not target the reserved fundi/ namespace.
 func validateUserRemoveKeys(keys []string) error {
 	for _, k := range keys {
 		if err := validateLabelKey(k); err != nil {
 			return err
 		}
-		if strings.HasPrefix(k, "pic/") {
-			return fmt.Errorf("labels with 'pic/' prefix are reserved (got: %s)", k)
+		if strings.HasPrefix(k, "fundi/") {
+			return fmt.Errorf("labels with 'fundi/' prefix are reserved (got: %s)", k)
 		}
 	}
 	return nil

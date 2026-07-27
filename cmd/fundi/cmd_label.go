@@ -20,8 +20,8 @@ func newLabelCmd() *cobra.Command {
 Labels are arbitrary key=value metadata. Specify k=v pairs as positional
 arguments to set or update labels. Use --remove to delete existing keys.
 
-The pic/ prefix is reserved for auto-labels set by the daemon (pic/model,
-pic/cwd, etc.) and cannot be set or removed via this command.`,
+The fundi/ prefix is reserved for auto-labels set by the daemon (fundi/model,
+fundi/cwd, etc.) and cannot be set or removed via this command.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runLabel,
 	}

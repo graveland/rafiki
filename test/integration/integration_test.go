@@ -30,7 +30,7 @@ import (
 
 var (
 	binaryPath  string
-	piCtlPath   string
+	cliPath   string
 	fakePiPath  string
 	repoRoot    string
 )
@@ -44,7 +44,7 @@ func TestMain(m *testing.M) {
 
 	fakePiPath = filepath.Join(root, "test", "integration", "fake-pi.sh")
 
-	binDir, err := os.MkdirTemp("", "pic-build")
+	binDir, err := os.MkdirTemp("", "fundi-build")
 	if err != nil {
 		log.Fatalf("mkdirtemp for build: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestMain(m *testing.M) {
 	// fundid is the daemon, fundi the client.
 	for _, cmd := range []struct{ bin, pkg string }{
 		{"fundid", "./cmd/fundid"},
-		{"pic", "./cmd/pic"},
+		{"fundi", "./cmd/fundi"},
 	} {
 		out := filepath.Join(binDir, cmd.bin)
 		build := exec.Command("go", "build", "-o", out, cmd.pkg)
@@ -66,8 +66,8 @@ func TestMain(m *testing.M) {
 		switch cmd.bin {
 		case "fundid":
 			binaryPath = out
-		case "pic":
-			piCtlPath = out
+		case "fundi":
+			cliPath = out
 		}
 	}
 
