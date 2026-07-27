@@ -17,9 +17,11 @@ both run at once — do NOT stop pi-controller for this gate:
 |---|---|---|
 | socket | `~/.local/state/fundi/controller.sock` | `~/.pi/run/controller.sock` |
 | service | `dev.graveland.fundi` | `dev.graveland.pi-controller` |
+| daemon | `fundid` | `pi-controller` |
+| client | `fundi` | `pic` |
 
-`pic` built from THIS repo defaults to fundi's socket. A `pic` from elsewhere on
-`$PATH` will talk to pi-controller — check which one you are running. Override
+The binaries no longer collide, so there is nothing to disambiguate: a `pic` on
+`$PATH` is pi-controller's client, and fundi's is `fundi`. Override the socket
 with `FUNDI_SOCKET` (the old `PI_CONTROLLER_SOCKET` still works but warns).
 
 Model ids are now **single provider-qualified knobs**: `anthropic/sonnet-latest`,
@@ -28,16 +30,16 @@ Anthropic SDK; anything else → OpenRouter. An unset/bare model errors.
 
 ## Steps
 
-- [ ] **1. Build + start.** `cd ~/home/fundi && make build-controller build-pic`.
-  Start `./bin/fundi` in a terminal (foreground is easiest for this gate — no
+- [ ] **1. Build + start.** `cd ~/home/fundi && make build-daemon build-cli`.
+  Start `./bin/fundid` in a terminal (foreground is easiest for this gate — no
   service install needed). Confirm the log says **"fundi daemon listening"** on
-  the XDG socket, that `./bin/pic ls` reaches it, and that the running
+  the XDG socket, that `./bin/fundi ls` reaches it, and that the running
   pi-controller and its children are untouched.
 
 - [ ] **2. Real-model spawn (native Anthropic).** `ANTHROPIC_API_KEY` in the daemon env.
-  `pic spawn --kind agent --model anthropic/sonnet-latest --cwd /tmp/fundi-smoke`
+  `fundi create --kind agent --model anthropic/sonnet-latest --cwd /tmp/fundi-smoke`
   Prompt: "Create hello.txt containing 'hi', then run `wc -c hello.txt` and report
-  the byte count." Verify: file exists; frames render live in `pic attach`;
+  the byte count." Verify: file exists; frames render live in `fundi attach`;
   the per-turn usage frame carries non-zero tokens **and non-zero cost**.
 
   > Cost is the one thing no automated test can prove: pricing resolves the
@@ -46,17 +48,17 @@ Anthropic SDK; anything else → OpenRouter. An unset/bare model errors.
   > reports cost 0 by design, which looks identical to a free turn — so check for
   > a non-zero `cost.total` on `agent_end` explicitly.
 
-- [ ] **3. Steer mid-turn.** Give a multi-step task, `pic send --steer` an extra
+- [ ] **3. Steer mid-turn.** Give a multi-step task, `fundi send --steer` an extra
   instruction while a turn is in flight. Verify the steer lands within the turn.
 
 - [ ] **4. In-band abort (the keystone, live).** Abort mid-turn. Verify the turn
-  settles WITHOUT a process restart (`pic get` → same PID, status idle) and a
+  settles WITHOUT a process restart (`fundi get` → same PID, status idle) and a
   follow-up prompt works on the same child. (Automated `-race` proof exists; this
   confirms it against a real model.)
 
 - [ ] **5. Skill + cheap OpenRouter worker.** Drop a test `SKILL.md` under the cwd's
   `.claude/skills/`. `OPENROUTER_API_KEY` in the daemon env.
-  `pic spawn --kind agent --model deepseek/deepseek-chat` and prompt it to use the
+  `fundi create --kind agent --model deepseek/deepseek-chat` and prompt it to use the
   skill. Verify: skill inventory in the system prompt + invocation works, AND the
   OpenRouter routing path works (this exercises the non-anthropic model branch).
 
@@ -78,9 +80,9 @@ Anthropic SDK; anything else → OpenRouter. An unset/bare model errors.
   `model=anthropic/sonnet-latest`. Verify the `_fleet` line and signal batching
   behave as with claude children.
 
-- [ ] **9. pic rendering eyeball.** `go-runewidth` jumped 0.0.16→0.0.23 (several
-  width-table releases) as a DIRECT dep of `cmd/pic/render_tail.go` with no test.
-  Eyeball `pic attach` / `pic tail` rendering (wide chars, box drawing) for
+- [ ] **9. CLI rendering eyeball.** `go-runewidth` jumped 0.0.16→0.0.23 (several
+  width-table releases) as a DIRECT dep of `cmd/fundi/render_tail.go` with no test.
+  Eyeball `fundi attach` / `fundi tail` rendering (wide chars, box drawing) for
   regressions.
 
 - [ ] **10. Record results here; commit this doc.** Then the **default-kind flip**

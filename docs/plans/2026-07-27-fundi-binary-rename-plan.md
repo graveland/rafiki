@@ -1,7 +1,48 @@
 # fundi binary rename + install target + pic-helpers migration
 
-**Status:** planned, not started. Written 2026-07-27 at the end of a long session;
-the findings below were all verified live, but no code has moved yet.
+**Status:** IMPLEMENTED 2026-07-27 on branch `binary-rename`. Every task below
+landed as described. The sizing and the load-bearing warnings were all accurate —
+in particular the `findDaemonBinary` trap, which is now covered by
+`TestFindDaemonBinaryNeverPicksTheClient` and
+`TestFindDaemonBinaryPrefersDaemonWhenBothPresent`.
+
+### Additions beyond this plan
+
+Five things the plan did not cover, each decided explicitly:
+
+1. **The integration harness was broken before any of this started.** All 14
+   tests in `test/integration` failed on `main`, waiting for a socket at
+   `$HOME/.pi/run/controller.sock` that the XDG migration had moved. Since
+   "`make test-both` green" is this plan's own verification gate, fixing it came
+   first.
+2. **`pic attach` dialled pi-controller's socket.** The client never told
+   `pic-attach` which socket to use, and the TS side fell back to
+   `~/.pi/run/controller.sock`. Row 1 of the table above, on the half the XDG
+   migration missed. Fixed, with the resolver now mirrored on both sides.
+3. **The `PIC_*` environment variables** (nine, not ten — `PIC_API_KEY` was a
+   grep artefact of `ANTHRO`**`PIC_API_KEY`**) migrated to `FUNDI_*` through the
+   existing `internal/envvar` deprecation mechanism. This also uncovered a dead
+   `/reload`: the extension tested `PI_CONTROLLER_CHILD_ID`, which the daemon had
+   already stopped setting.
+4. **`~/.pi/agent/pic-presets.json` → `fundi-presets.json`** — a fifth shared
+   namespace this plan's table missed. Renamed with **no** read fallback (decided
+   explicitly); the old path is probed only to make the failure legible.
+5. **The reserved `pic/` auto-label prefix → `fundi/`**, with **no**
+   compatibility (decided explicitly). Consequence accepted: auto-labels on
+   sessions recorded before this render as ordinary user labels, and `pic/*`
+   filters no longer match new sessions.
+
+### Note on the pic-helpers plan below
+
+The uninstall flag is `--remove`, not `--uninstall`. The detect-and-warn fires on
+install, on `--remove`, and on the explicit `install-extension` no-op, but *not*
+on the auto-install fast path — that returns early when up to date, so warning
+there would repeat on every `fundi create` forever.
+
+---
+
+**Original status:** planned, not started. Written 2026-07-27 at the end of a long
+session; the findings below were all verified live, but no code has moved yet.
 
 ## Why
 

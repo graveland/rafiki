@@ -1,8 +1,12 @@
 # fundi-attach
 
-A thin TUI client for pi-controller-managed children. Bundles pi's native
+A thin TUI client for fundi-managed children. Bundles pi's native
 `InteractiveMode` with a `RemoteAgentSessionRuntime` that proxies all agent
-operations to the pi-controller daemon over its UDS socket.
+operations to the `fundid` daemon over its UDS socket.
+
+Normally spawned by `fundi create` / `fundi attach` rather than run directly.
+`fundi` injects the resolved socket path when it spawns this, so `$FUNDI_SOCKET`
+only matters for direct invocation against a non-default socket.
 
 ## Build
 
@@ -27,10 +31,10 @@ Produces `bin/fundi-attach`.
 ## Usage
 
 ```bash
-pic create my-session --cwd /path/to/project
+fundi create my-session --cwd /path/to/project
 # (auto-attaches; Ctrl+D detaches)
 
-pic attach my-session
+fundi attach my-session
 # (reattach later)
 ```
 
@@ -41,14 +45,14 @@ see the prior transcript, then follows live. Control how much is replayed with
 `-n/--tail` (default `-1` = all retained, `0` = none):
 
 ```bash
-pic attach my-session -n 0    # no scrollback, live only (old behaviour)
-pic attach my-session -n 50   # last 50 retained events, then live
+fundi attach my-session -n 0    # no scrollback, live only (old behaviour)
+fundi attach my-session -n 50   # last 50 retained events, then live
 ```
 
 Scrollback renders the conversation for both pi and claude children: the daemon
 captures the normalized (pi-vocabulary) bus stream into a per-child render-ring
 (persisted to `render.jsonl.gz` so it survives a daemon restart), and the TUI
-primes from that. The raw backend stream is still available via `pic logs --raw`.
+primes from that. The raw backend stream is still available via `fundi logs --raw`.
 
 ## Slash-command autocomplete
 
@@ -59,20 +63,20 @@ from its init frame and served from the daemon's store.
 ## Exit semantics
 
 By default, exiting the TUI (Ctrl+D, /quit, terminal close) **detaches** —
-the daemon's pi child keeps running. Use `pic attach <name>` to reopen the
-TUI, or `pic kill <name>` from any shell to terminate the session.
+the daemon's pi child keeps running. Use `fundi attach <name>` to reopen the
+TUI, or `fundi kill <name>` from any shell to terminate the session.
 
-Pass `--kill-on-exit` to pic create / pic attach for native-pi exit
+Pass `--kill-on-exit` to fundi create / fundi attach for native-pi exit
 semantics (quitting the TUI terminates the session).
 
 ## Debugging
 
-Set `PIC_ATTACH_DEBUG=1` to log every event the TUI receives to stderr:
+Set `FUNDI_ATTACH_DEBUG=1` to log every event the TUI receives to stderr:
 
 ```bash
-PIC_ATTACH_DEBUG=1 pic attach my-session
+FUNDI_ATTACH_DEBUG=1 fundi attach my-session
 ```
 
 This prints the event type, listener count, and full stack traces for any
 event-processing errors — useful for diagnosing events that appear in
-`pic tail` but don't render in the TUI.
+`fundi tail` but don't render in the TUI.
