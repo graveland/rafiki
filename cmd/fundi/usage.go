@@ -4,8 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 
+	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
@@ -42,7 +42,7 @@ directories (override with the standard XDG_* variables):
 	fmt.Fprintf(w, "  records  %s\n", paths.RecordsDir())
 	fmt.Fprintf(w, "  logs     %s\n", paths.LogsDir())
 	fmt.Fprint(w, `
-$PI_CONTROLLER_SOCKET overrides the socket path for both the daemon's clients
+$FUNDI_SOCKET overrides the socket path for both the daemon's clients
 and any child it spawns.
 `)
 }
@@ -83,15 +83,11 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")
 	fs.BoolVar(&f.noSkills, "no-skills", false, "disable skill discovery and the skill tool entirely")
 	fs.StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present)")
-	fs.StringVar(&f.ref, "ref", envOr("PI_CONTROLLER_CHILD_ID"), "external ref correlating the conversation across restarts")
-	fs.StringVar(&f.db, "db", envOr("FUNDI_AGENT_DB"), "postgres url for conversation persistence (empty: in-memory)")
-	fs.StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: os.TempDir()/fundi-spill-<ref>)")
+	fs.StringVar(&f.ref, "ref", envvar.Get(envvar.ChildID), "external ref correlating the conversation across restarts")
+	fs.StringVar(&f.db, "db", envvar.Get(envvar.AgentDB), "postgres url for conversation persistence (empty: in-memory)")
+	fs.StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: <XDG_CACHE_HOME>/fundi/spill/<ref>)")
 	fs.StringVar(&f.name, "name", "", "session name reported through get_state")
 	fs.StringVar(&f.fakeTurns, "fake-turns", "", "hidden test seam: path to a LoadFakeSender scripted-turns file")
 
 	return fs
 }
-
-// envOr reads an environment variable, used for the flag defaults that fall
-// back to the daemon-provided environment.
-func envOr(key string) string { return os.Getenv(key) }

@@ -14,6 +14,7 @@ import (
 
 	"git.graveland.dev/brent/fundi/internal/agent"
 	"git.graveland.dev/brent/fundi/internal/agent/tools"
+	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
 // stringSliceFlag implements flag.Value for a repeatable flag (--skills-dir).
@@ -46,7 +47,7 @@ type agentFlags struct {
 }
 
 // parseAgentFlags parses the fundi agent flag set. It is a pure function of
-// args plus the environment defaults ($PI_CONTROLLER_CHILD_ID for --ref,
+// args plus the environment defaults ($FUNDI_CHILD_ID for --ref,
 // $FUNDI_AGENT_DB for --db) so it can be exercised directly by tests without
 // a running agent.
 func parseAgentFlags(args []string) (agentFlags, error) {
@@ -111,7 +112,7 @@ func runAgent(args []string) int {
 	}
 	spillDir := f.spillDir
 	if spillDir == "" {
-		spillDir = filepath.Join(os.TempDir(), "fundi-spill-"+childID)
+		spillDir = paths.SpillDir(childID)
 	}
 	outputPolicy := tools.OutputPolicy{SpillDir: spillDir}
 

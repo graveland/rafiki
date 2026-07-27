@@ -21,6 +21,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"git.graveland.dev/brent/fundi/internal/child"
+	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/internal/intercept"
 	"git.graveland.dev/brent/fundi/internal/persist"
 	"git.graveland.dev/brent/fundi/internal/ring"
@@ -50,10 +51,10 @@ type Controller struct {
 //
 // dumper may be nil; when nil, no log dumps are written on child exit.
 // The grace window defaults to 7 days but can be overridden with the
-// PI_CONTROLLER_GRACE_HOURS environment variable.
+// FUNDI_GRACE_HOURS environment variable (PI_CONTROLLER_GRACE_HOURS still works).
 func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper) *Controller {
 	gw := 7 * 24 * time.Hour
-	if h := os.Getenv("PI_CONTROLLER_GRACE_HOURS"); h != "" {
+	if h := envvar.Get(envvar.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
 			gw = time.Duration(n * float64(time.Hour))
 		}
@@ -1837,7 +1838,7 @@ func resolvePiBinary(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	if env := os.Getenv("PI_BINARY"); env != "" {
+	if env := envvar.Get(envvar.PiBinary); env != "" {
 		return env, nil
 	}
 	return exec.LookPath("pi")
@@ -2167,8 +2168,8 @@ func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 		env = append(env, k+"="+v)
 	}
 	env = append(env,
-		"PI_CONTROLLER_CHILD_ID="+childID,
-		"PI_CONTROLLER_SOCKET="+socketPath,
+		envvar.ChildID+"="+childID,
+		envvar.Socket+"="+socketPath,
 	)
 	if req.Kind == "agent" && req.APIKey != "" {
 		envVar := "OPENROUTER_API_KEY"

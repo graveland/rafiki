@@ -72,3 +72,17 @@ func ServiceLogPath() string { return filepath.Join(StateDir(), "controller.log"
 // ActiveFile records the child id `pic` treats as the current one. Runtime
 // state, so it sits beside the socket rather than with the persisted records.
 func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }
+
+// CacheDir is disposable, regenerable data: $XDG_CACHE_HOME/fundi, else
+// ~/.cache/fundi.
+func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
+
+// SpillDir is where a standalone `fundi agent` writes clipped tool output. Cache
+// rather than data: it is large, disposable, and reconstructible from the
+// conversation. No "fundi-" prefix on the leaf — the directory is already
+// namespaced, unlike the os.TempDir() location this replaced, where the prefix
+// was the only thing keeping it out of another tool's way.
+//
+// A daemon-spawned child does not use this: the controller pins --spill-dir
+// under its own state directory so Forget can find it deterministically.
+func SpillDir(ref string) string { return filepath.Join(CacheDir(), "spill", ref) }

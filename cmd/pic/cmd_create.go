@@ -190,8 +190,13 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 }
 
 // collectCallerEnv snapshots the calling process's environment for inclusion
-// in a SpawnRequest.  Reserved PI_CONTROLLER_* keys are stripped so they
-// can't override what the daemon injects per-child.
+// in a SpawnRequest. Reserved keys are stripped so they can't override what the
+// daemon injects per-child — notably the socket and child id, which the child
+// trusts to identify itself and to call home.
+//
+// BOTH prefixes are stripped: the FUNDI_* names and the PI_CONTROLLER_* ones
+// they replaced. Dropping the old prefix while envvar.Get still honours it as a
+// fallback would reopen exactly the override this guards against.
 func collectCallerEnv() map[string]string {
 	environ := os.Environ()
 	out := make(map[string]string, len(environ))
@@ -201,7 +206,7 @@ func collectCallerEnv() map[string]string {
 			continue
 		}
 		k := kv[:eq]
-		if strings.HasPrefix(k, "PI_CONTROLLER_") {
+		if strings.HasPrefix(k, "FUNDI_") || strings.HasPrefix(k, "PI_CONTROLLER_") {
 			continue
 		}
 		out[k] = kv[eq+1:]
