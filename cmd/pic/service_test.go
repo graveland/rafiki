@@ -11,7 +11,7 @@ import (
 // next to the specified "self" path is returned without falling through to PATH.
 func TestFindDaemonBinaryFromSibling(t *testing.T) {
 	dir := t.TempDir()
-	sibling := filepath.Join(dir, "pi-controller")
+	sibling := filepath.Join(dir, "fundi")
 	if err := os.WriteFile(sibling, []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}

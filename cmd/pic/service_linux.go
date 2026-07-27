@@ -14,18 +14,19 @@ import (
 	"text/template"
 )
 
-const systemdUnitName = "pi-controller"
+// Distinct from pi-controller's unit name — see launchdLabel in service_darwin.go.
+const systemdUnitName = "fundi"
 
-// unitTemplate is the systemd user service unit for the pi-controller daemon.
+// unitTemplate is the systemd user service unit for the fundi daemon.
 const unitTemplate = `[Unit]
-Description=pi-controller daemon
+Description=fundi daemon
 After=default.target
 
 [Service]
 ExecStart={{.DaemonBinary}}
 Restart=on-failure
 RestartSec=2
-# systemd default TimeoutStopSec is 90s.  pi-controller's own graceful
+# systemd default TimeoutStopSec is 90s.  the daemon's own graceful
 # shutdown needs longer because pi children may do final LLM calls
 # (compaction, summarisation) before exiting.  Match the daemon's internal
 # 180s global shutdown bound.

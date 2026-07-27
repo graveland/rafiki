@@ -10,7 +10,7 @@ import (
 // testSpec returns a minimal serviceSpec for template rendering tests.
 func testSpec() serviceSpec {
 	return serviceSpec{
-		DaemonBinary: "/usr/local/bin/pi-controller",
+		DaemonBinary: "/usr/local/bin/fundi",
 		HomeEnv:      "/Users/testuser",
 		LogPath:      "/Users/testuser/.local/state/fundi/controller.log",
 		PathEnv:      "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
@@ -24,7 +24,7 @@ func TestRenderPlist_ContainsSpecFields(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"/usr/local/bin/pi-controller",
+		"/usr/local/bin/fundi",
 		"/Users/testuser",
 		"/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
 		"controller.log",
@@ -44,7 +44,7 @@ func TestRenderPlist_Format(t *testing.T) {
 	checks := []string{
 		"<?xml version=\"1.0\"",
 		"<plist version=\"1.0\">",
-		"dev.graveland.pi-controller",
+		"dev.graveland.fundi",
 		"<key>Label</key>",
 		"<key>RunAtLoad</key>",
 		"<true/>",

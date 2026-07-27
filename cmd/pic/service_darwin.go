@@ -14,9 +14,12 @@ import (
 	"text/template"
 )
 
-const launchdLabel = "dev.graveland.pi-controller"
+// Distinct from pi-controller's own "dev.graveland.pi-controller": sharing the
+// label meant `pic service uninstall` from a fundi checkout unloaded and deleted
+// the running pi-controller service, and install overwrote its plist.
+const launchdLabel = "dev.graveland.fundi"
 
-// plistTemplate is the launchd property list for the pi-controller daemon.
+// plistTemplate is the launchd property list for the fundi daemon.
 const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -31,7 +34,7 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
-	<!-- launchd default ExitTimeOut is 20s.  pi-controller's own graceful
+	<!-- launchd default ExitTimeOut is 20s.  the daemon's own graceful
 	     shutdown needs longer because pi children may do final LLM calls
 	     (compaction, summarisation) before exiting.  Match the daemon's
 	     internal 180s global shutdown bound. -->

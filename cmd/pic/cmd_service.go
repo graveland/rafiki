@@ -52,8 +52,8 @@ func newServiceCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "service",
 		Aliases: []string{"svc"},
-		Short:   "Manage the pi-controller daemon as a system service",
-		Long: `Install, start, stop, and inspect the pi-controller daemon as a per-user system service.
+		Short:   "Manage the fundi daemon as a system service",
+		Long: `Install, start, stop, and inspect the fundi daemon as a per-user system service.
 
 On macOS this uses launchd (launchctl); on Linux it uses systemd --user.`,
 	}
@@ -72,11 +72,11 @@ On macOS this uses launchd (launchctl); on Linux it uses systemd --user.`,
 func newServiceInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Install and start the pi-controller service",
+		Short: "Install and start the fundi service",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceInstall,
 	}
-	cmd.Flags().String("daemon-binary", "", "Path to pi-controller binary (default: auto-detect next to pic, then PATH)")
+	cmd.Flags().String("daemon-binary", "", "Path to the fundi daemon binary (default: auto-detect next to pic, then PATH)")
 	cmd.Flags().String("path-env", "", "PATH value for the service environment (default: auto-detect)")
 	return cmd
 }
@@ -84,7 +84,7 @@ func newServiceInstallCmd() *cobra.Command {
 func newServiceUninstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall",
-		Short: "Stop and remove the pi-controller service",
+		Short: "Stop and remove the fundi service",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceUninstall,
 	}
@@ -93,7 +93,7 @@ func newServiceUninstallCmd() *cobra.Command {
 func newServiceStartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
-		Short: "Start the pi-controller service",
+		Short: "Start the fundi service",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceStart,
 	}
@@ -102,7 +102,7 @@ func newServiceStartCmd() *cobra.Command {
 func newServiceStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop the pi-controller service",
+		Short: "Stop the fundi service",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceStop,
 	}
@@ -111,7 +111,7 @@ func newServiceStopCmd() *cobra.Command {
 func newServiceRestartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "restart",
-		Short: "Restart the pi-controller service",
+		Short: "Restart the fundi service",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceRestart,
 	}
@@ -120,7 +120,7 @@ func newServiceRestartCmd() *cobra.Command {
 func newServiceStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show installation and running state of the pi-controller service",
+		Short: "Show installation and running state of the fundi service",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceStatus,
 	}
@@ -129,8 +129,8 @@ func newServiceStatusCmd() *cobra.Command {
 func newServiceLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Show the pi-controller daemon log",
-		Long:  "Show the pi-controller daemon log. Follows by default; use --follow=false to print and exit.",
+		Short: "Show the fundi daemon log",
+		Long:  "Show the fundi daemon log. Follows by default; use --follow=false to print and exit.",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceLogs,
 	}
@@ -149,7 +149,7 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	if err := b.Install(spec); err != nil {
 		return fmt.Errorf("install service: %w", err)
 	}
-	fmt.Printf("pi-controller service installed.\nLog: %s\n", b.LogPath())
+	fmt.Printf("fundi service installed.\nLog: %s\n", b.LogPath())
 	return nil
 }
 
@@ -158,7 +158,7 @@ func runServiceUninstall(_ *cobra.Command, _ []string) error {
 	if err := b.Uninstall(); err != nil {
 		return fmt.Errorf("uninstall service: %w", err)
 	}
-	fmt.Println("pi-controller service uninstalled.")
+	fmt.Println("fundi service uninstalled.")
 	return nil
 }
 
@@ -167,7 +167,7 @@ func runServiceStart(_ *cobra.Command, _ []string) error {
 	if err := b.Start(); err != nil {
 		return fmt.Errorf("start service: %w", err)
 	}
-	fmt.Println("pi-controller service started.")
+	fmt.Println("fundi service started.")
 	return nil
 }
 
@@ -176,7 +176,7 @@ func runServiceStop(_ *cobra.Command, _ []string) error {
 	if err := b.Stop(); err != nil {
 		return fmt.Errorf("stop service: %w", err)
 	}
-	fmt.Println("pi-controller service stopped.")
+	fmt.Println("fundi service stopped.")
 	return nil
 }
 
@@ -185,7 +185,7 @@ func runServiceRestart(_ *cobra.Command, _ []string) error {
 	if err := b.Restart(); err != nil {
 		return fmt.Errorf("restart service: %w", err)
 	}
-	fmt.Println("pi-controller service restarted.")
+	fmt.Println("fundi service restarted.")
 	return nil
 }
 
@@ -209,7 +209,7 @@ func runServiceStatus(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	fmt.Println("pi-controller service:")
+	fmt.Println("fundi service:")
 	fmt.Printf("  Installed: %s\n", installed)
 	fmt.Printf("  Running:   %s\n", running)
 	fmt.Printf("  Log:       %s\n", b.LogPath())
@@ -301,7 +301,7 @@ func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
 	return spec, nil
 }
 
-// findDaemonBinary locates the pi-controller binary. It first looks for a
+// findDaemonBinary locates the fundi daemon binary. It first looks for a
 // sibling next to the running pic executable, then falls back to PATH.
 func findDaemonBinary() (string, error) {
 	self, _ := os.Executable()
@@ -312,16 +312,16 @@ func findDaemonBinary() (string, error) {
 // path of the running executable (typically the pic binary).
 func findDaemonBinaryFrom(self string) (string, error) {
 	if self != "" {
-		sibling := filepath.Join(filepath.Dir(self), "pi-controller")
+		sibling := filepath.Join(filepath.Dir(self), "fundi")
 		if _, err := os.Stat(sibling); err == nil {
 			return sibling, nil
 		}
 	}
-	path, err := exec.LookPath("pi-controller")
+	path, err := exec.LookPath("fundi")
 	if err == nil {
 		return path, nil
 	}
-	return "", fmt.Errorf("pi-controller binary not found: not next to pic, and not on PATH; use --daemon-binary to specify a path")
+	return "", fmt.Errorf("fundi binary not found: not next to pic, and not on PATH; use --daemon-binary to specify a path")
 }
 
 // buildPathEnv builds the PATH string for the service environment. It
