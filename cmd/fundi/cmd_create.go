@@ -69,7 +69,7 @@ scripting / AFK workflows, use --detached.)`,
 // addSpawnFlags registers the shared spawn-related flags on cmd.
 func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
-	cmd.Flags().String("kind", "pi", "Agent kind: pi (default) or claude (Claude Code)")
+	cmd.Flags().String("kind", "pi", "Agent kind: pi (default), agent (native fundi runtime; needs a provider-qualified --model), or claude (Claude Code)")
 	cmd.Flags().String("config-dir", "", "For --kind claude: CLAUDE_CONFIG_DIR selecting the claude profile (plugins/hooks/MCP/settings)")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
 	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via FUNDI_DEFAULT_MODEL")
