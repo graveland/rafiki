@@ -94,7 +94,11 @@ func (p *ChatCompletionsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("Authorization", "Bearer "+up.APIKey)
-	if sid := r.Header.Get("x-session-id"); sid != "" {
+	sid := r.Header.Get("x-session-id")
+	if sid == "" {
+		sid = cr.convID // fall back to rafiki's own conversation id so pinning is always present
+	}
+	if sid != "" {
 		upReq.Header.Set("x-session-id", sid) // OpenRouter session pinning
 	}
 

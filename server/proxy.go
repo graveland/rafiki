@@ -104,23 +104,30 @@ func (p *MessagesProxy) SetFallback(orKey, orURL string, b *routing.Breaker) {
 // headers. bearer selects the auth scheme: Anthropic's API takes the key in
 // x-api-key, OpenRouter takes it in Authorization: Bearer.
 func (p *MessagesProxy) doUpstream(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request) (*http.Response, error) {
-	return p.buildAndDo(ctx, url, key, bearer, reqBody, r, false)
+	return p.buildAndDo(ctx, url, key, bearer, reqBody, r, false, "")
 }
 
 // upstreamRequest is the OpenRouter variant: additionally forwards
-// x-session-id (OpenRouter session pinning — sentinel relies on it; the
-// Anthropic primary never sees it).
-func (p *MessagesProxy) upstreamRequest(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request) (*http.Response, error) {
-	return p.buildAndDo(ctx, url, key, bearer, reqBody, r, true)
+// x-session-id (OpenRouter session pinning). A caller-supplied value (e.g.
+// sentinel's own session) always wins; otherwise convID (rafiki's own
+// conversation id) is used, so OpenRouter-routed traffic that never sets the
+// header (Claude Code) still gets a stable, correlatable pin. The Anthropic
+// primary never sees this header at all.
+func (p *MessagesProxy) upstreamRequest(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
+	return p.buildAndDo(ctx, url, key, bearer, reqBody, r, true, convID)
 }
 
-func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request, forwardSession bool) (*http.Response, error) {
+func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request, forwardSession bool, convID string) (*http.Response, error) {
 	up, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/v1/messages", bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, err
 	}
 	if forwardSession {
-		if sid := r.Header.Get("x-session-id"); sid != "" {
+		sid := r.Header.Get("x-session-id")
+		if sid == "" {
+			sid = convID
+		}
+		if sid != "" {
 			up.Header.Set("x-session-id", sid)
 		}
 	}
@@ -144,7 +151,7 @@ func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer 
 // direct path for user-requested slash (OpenRouter-native) models. OpenRouter
 // authenticates via Authorization: Bearer (its universal convention), not
 // Anthropic's x-api-key.
-func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *http.Request) (*http.Response, error) {
+func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(reqBody, &payload); err != nil {
 		return nil, err
@@ -167,7 +174,7 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *htt
 	if err != nil {
 		return nil, err
 	}
-	resp, err := p.upstreamRequest(ctx, p.orURL, p.orKey, true /* bearer */, rewritten, r)
+	resp, err := p.upstreamRequest(ctx, p.orURL, p.orKey, true /* bearer */, rewritten, r, convID)
 	return resp, err
 }
 
@@ -384,7 +391,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			http.Error(w, "openrouter not configured for model "+model, http.StatusBadGateway)
 			return nil, "", nil, true
 		}
-		resp, err = p.doOpenRouter(r.Context(), reqBody, r)
+		resp, err = p.doOpenRouter(r.Context(), reqBody, r, cr.convID)
 		return resp, "openrouter", err, false
 	}
 	now := time.Now()
@@ -423,7 +430,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		if resp != nil {
 			resp.Body.Close()
 		}
-		resp, err = p.doOpenRouter(r.Context(), reqBody, r)
+		resp, err = p.doOpenRouter(r.Context(), reqBody, r, cr.convID)
 		return resp, "openrouter", err, false
 	}
 	if p.orKey == "" {
@@ -431,7 +438,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		http.Error(w, "no upstream available", http.StatusBadGateway)
 		return nil, "", nil, true
 	}
-	resp, err = p.doOpenRouter(r.Context(), reqBody, r)
+	resp, err = p.doOpenRouter(r.Context(), reqBody, r, cr.convID)
 	return resp, "openrouter", err, false
 }
 
