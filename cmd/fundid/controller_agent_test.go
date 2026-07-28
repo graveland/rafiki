@@ -135,6 +135,58 @@ func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
 	}
 }
 
+// TestResumeRequestFromSnapshotAgentRejoinsModel is the other half of
+// TestResolveSpawnPlanAgentKindRejectsProvider, and the pairing is the whole
+// point: the rejection above was tested, but nothing tested the resume path
+// that FEEDS resolveSpawnPlan, so `fundi resume` was broken for every
+// agent-kind child while both halves looked covered.
+//
+// At spawn time the controller splits the child-reported model with splitModel
+// and stores the halves separately (snap.Provider="anthropic",
+// snap.Model="sonnet-latest"). The agent kind requires the opposite shape: the
+// provider folded into Model, and Provider empty. So the snapshot must be
+// rejoined on the way back out, or resume dies with "agent kind does not
+// accept a separate Provider".
+//
+// The load-bearing assertion is the last one: the rebuilt request must be
+// something resolveSpawnPlan actually ACCEPTS. That holds regardless of how
+// the rejoin is implemented, so it still catches a future re-break.
+func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
+	snap := store.Snapshot{
+		Kind:     "agent",
+		Cwd:      "/tmp/fundi-smoke",
+		Name:     "smoke6",
+		Provider: "anthropic",
+		Model:    "sonnet-latest",
+	}
+
+	req := resumeRequestFromSnapshot(snap, "")
+
+	if req.Provider != "" {
+		t.Errorf("Provider = %q, want empty: the agent kind takes no separate provider", req.Provider)
+	}
+	if req.Model != "anthropic/sonnet-latest" {
+		t.Errorf("Model = %q, want %q (provider rejoined onto the model id)", req.Model, "anthropic/sonnet-latest")
+	}
+	if _, _, _, err := resolveSpawnPlan(req, "c_resume", "/var/fundi-state"); err != nil {
+		t.Fatalf("resolveSpawnPlan(resumed agent request): %v\nresume must produce a request the spawn planner accepts", err)
+	}
+}
+
+// TestResumeRequestFromSnapshotAgentBareModel covers the degenerate snapshot
+// where no provider was ever recorded: joinModel must leave the model alone
+// rather than emitting a leading "/", which would resolve to a bogus provider.
+func TestResumeRequestFromSnapshotAgentBareModel(t *testing.T) {
+	snap := store.Snapshot{Kind: "agent", Model: "sonnet-latest"}
+	req := resumeRequestFromSnapshot(snap, "")
+	if req.Model != "sonnet-latest" {
+		t.Errorf("Model = %q, want %q unchanged", req.Model, "sonnet-latest")
+	}
+	if req.Provider != "" {
+		t.Errorf("Provider = %q, want empty", req.Provider)
+	}
+}
+
 // TestBuildAgentArgv_NoSkillsAndDefaults confirms the no-skills / minimal
 // request path emits only --spill-dir plus whatever ExtraArgs were given, with
 // none of the optional flags present when the request leaves them empty.

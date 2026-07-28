@@ -804,6 +804,21 @@ func resumeRequestFromSnapshot(snap store.Snapshot, apiKey string) protocol.Spaw
 	} else {
 		req.ResumeSession = snap.SessionFile
 	}
+	if snap.Kind == "agent" {
+		// The agent kind carries its provider inside the model id and
+		// resolveSpawnPlan rejects a separate Provider outright - but the
+		// snapshot stores the two halves split, because splitModel took them
+		// apart at spawn time. Rejoin them or resume fails for every
+		// agent-kind child.
+		//
+		// ResumeSession stays empty on purpose: an agent child has no pi
+		// session file to reopen. It reattaches its stored conversation by
+		// external ref instead - `fundid agent --ref` defaults to
+		// $FUNDI_CHILD_ID, and resume reuses the same childID, so the
+		// conversation is found without a resume token.
+		req.Provider = ""
+		req.Model = joinModel(snap.Provider, snap.Model)
+	}
 	return req
 }
 
