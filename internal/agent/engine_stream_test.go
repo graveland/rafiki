@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
@@ -377,6 +378,166 @@ func TestEngine_NonStreamingFallbackProducesWellFormedFrameSequence(t *testing.T
 		"message_start", "message_end", // user echo
 		"agent_start",
 		"message_start", "message_update", "message_end", // assistant turn, non-streaming fallback
+		"agent_end", "agent_settled",
+	})
+}
+
+// ---- mid-flight timing fixtures (Task B5) ----
+//
+// The four tests above all assert on frame TYPES and COUNTS, which are
+// identical whether the engine streams deltas as they arrive or buffers the
+// whole turn and flushes it in one burst right before message_end/agent_end.
+// blockingStreamDecoder exists to pin down TIMING instead: it replays a
+// prefix of events, then blocks (holding the conv.Continue call, and with it
+// the engine's turn goroutine, hostage) until the test releases it, then
+// replays the rest. That lets a test observe the frontend mid-turn and prove
+// something already arrived before the turn could possibly have finished.
+
+// blockingStreamDecoder is fakeStreamDecoder's sibling: same replay
+// mechanics, but Next() blocks on release once prefix is exhausted, before
+// ever starting suffix. Modeled on fakeStreamDecoder above (only the
+// blocking behavior differs), so it satisfies the same ssestream.Decoder
+// shape.
+type blockingStreamDecoder struct {
+	prefix  []ssestream.Event
+	suffix  []ssestream.Event
+	release <-chan struct{}
+
+	idx     int
+	blocked bool
+}
+
+func (d *blockingStreamDecoder) Next() bool {
+	if d.idx < len(d.prefix) {
+		d.idx++
+		return true
+	}
+	if !d.blocked {
+		d.blocked = true
+		<-d.release
+	}
+	si := d.idx - len(d.prefix)
+	if si >= len(d.suffix) {
+		return false
+	}
+	d.idx++
+	return true
+}
+
+func (d *blockingStreamDecoder) Event() ssestream.Event {
+	i := d.idx - 1
+	if i < len(d.prefix) {
+		return d.prefix[i]
+	}
+	return d.suffix[i-len(d.prefix)]
+}
+func (d *blockingStreamDecoder) Close() error { return nil }
+func (d *blockingStreamDecoder) Err() error   { return nil }
+
+// blockingStreamingSender implements llm.StreamingSender with exactly one
+// NewStreaming call, backed by a blockingStreamDecoder. New must never be
+// called — see scriptedStreamingSender's doc for why that's a hard test bug,
+// not a fallback path, given a stream handler is always set.
+type blockingStreamingSender struct {
+	prefix  []ssestream.Event
+	suffix  []ssestream.Event
+	release <-chan struct{}
+}
+
+func (s *blockingStreamingSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+	return nil, errors.New("blockingStreamingSender: New called; want NewStreaming (a stream handler is always set)")
+}
+
+func (s *blockingStreamingSender) NewStreaming(_ context.Context, _ anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
+	return ssestream.NewStream[anthropic.MessageStreamEventUnion](
+		&blockingStreamDecoder{prefix: s.prefix, suffix: s.suffix, release: s.release}, nil), nil
+}
+
+// waitFor polls cond every millisecond until it reports true, failing the
+// test if timeout elapses first. There is no channel that fires the instant
+// a frame lands in the frontend's buffer (it's a plain mutex-guarded
+// io.Writer, not a channel), so this is the deadline-bounded poll the mid-turn
+// assertions below need in place of a synchronizing time.Sleep.
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.After(timeout)
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatal("condition not met before deadline")
+		}
+	}
+}
+
+// TestEngine_StreamsMessageUpdateBeforeTurnCompletes is the load-bearing
+// streaming regression the four tests above cannot catch (see this file's
+// doc comment above blockingStreamDecoder): they assert on frame types and
+// counts alone, which come out identical whether the engine streams deltas
+// progressively or buffers the whole response and flushes it in one burst
+// right before message_end. This test instead asserts on TIMING: at least
+// one message_update must reach the frontend WHILE the turn is still in
+// flight — i.e. strictly before message_end/agent_end. The scripted stream
+// delivers one real text delta, then blocks before its closing events, so a
+// batched implementation (accumulate everything, emit only from OnTurn) has
+// nothing to emit until the whole turn completes and cannot make this
+// assertion pass; only genuine progressive streaming can.
+func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
+	release := make(chan struct{})
+	sender := &blockingStreamingSender{
+		prefix: []ssestream.Event{
+			streamMessageStart("claude-x"),
+			streamTextBlockStart(0),
+			streamTextDelta(0, "Hel"), // must surface to the frontend before we ever unblock
+		},
+		suffix: []ssestream.Event{
+			streamTextDelta(0, "lo"),
+			streamBlockStop(0),
+			streamMessageDelta("end_turn", 2),
+			streamMessageStop(),
+		},
+		release: release,
+	}
+	ts := fakeToolSet{}
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi") // queues and returns immediately; the turn runs on Engine's own worker goroutine
+
+	waitFor(t, 5*time.Second, func() bool {
+		return countOfType(frameTypes(t, out.String()), "message_update") >= 1
+	})
+
+	// The turn must still be in flight at this point: message_end (and
+	// therefore agent_end, which always follows it) cannot have been emitted
+	// yet, because the scripted stream is parked inside blockingStreamDecoder
+	// and conv.Continue has not returned. This is exactly the assertion a
+	// batched implementation fails.
+	if n := countOfType(frameTypes(t, out.String()), "agent_end"); n != 0 {
+		t.Fatalf("agent_end already emitted (%d) after only a message_update was observed and before the stream "+
+			"was released — deltas are being batched and flushed at turn end, not streamed progressively as they arrive", n)
+	}
+
+	close(release)
+	eng.Wait()
+
+	// Once released, the rest of the scripted turn plays out normally: the
+	// full frame sequence matches the same shape
+	// TestEngine_StreamsDeltasAndPricesFinalMessageOnce asserts for an
+	// equivalent (unblocked) two-delta turn — 5 message_update frames, one
+	// per content-bearing stream event (the "Hel" delta, the "lo" delta,
+	// content_block_stop, message_delta, message_stop all re-emit the
+	// accumulated message).
+	assertFrameTypes(t, out.String(), []string{
+		"message_start", "message_end", // user echo
+		"agent_start",
+		"message_start",
+		"message_update", "message_update", "message_update", "message_update", "message_update",
+		"message_end",
 		"agent_end", "agent_settled",
 	})
 }
