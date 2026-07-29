@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
+	"github.com/timescale/rafiki/store"
 	"github.com/timescale/savannah-common/go/tslogs"
+	"golang.org/x/sync/singleflight"
 )
 
 const openRouterModelsURL = "https://openrouter.ai/api/v1/models"
@@ -308,6 +308,9 @@ func (c *ModelCatalog) saveCache() {
 // under load would fire N parallel GETs to OpenRouter. A fetch error is logged
 // and the previous snapshot is kept (best-effort).
 func (c *ModelCatalog) refresh() {
+	if c == nil {
+		return
+	}
 	if c.fresh() || c.backingOff() {
 		return
 	}
@@ -334,8 +337,16 @@ func (c *ModelCatalog) backingOff() bool {
 // populated before it's needed — narrowing the cold-cache window in which a
 // "<family>-latest" default can't resolve. A fetch failure is logged and left
 // for the next lazy refresh; there is deliberately no hardcoded fallback.
+//
+// Nil-receiver safe, like entryFor: Warm is reached through the
+// store.PriceSource interface, where a typed-nil *ModelCatalog makes the
+// interface value itself non-nil, so the caller's `src == nil` check cannot
+// catch it. The sync runs in a bare goroutine with no recover, so a panic here
+// would take the server down.
 func (c *ModelCatalog) Warm() { c.refresh() }
 
+// fresh and backingOff need no nil guard of their own: refresh is their only
+// caller and returns before reaching them on a nil receiver.
 func (c *ModelCatalog) fresh() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -502,7 +513,12 @@ func (c *ModelCatalog) normalizeTilde(id string) (string, bool) {
 // AllIDs returns every catalog model id (leading "~" auto-alias marker
 // stripped, for shell-safe completion; the proxy re-adds it at routing time via
 // normalizeTilde), sorted + de-duplicated. Empty if the catalog hasn't loaded.
+// Nil-receiver safe for the same reason Warm is: it is reached through
+// store.PriceSource, where a typed nil arrives as a non-nil interface.
 func (c *ModelCatalog) AllIDs() []string {
+	if c == nil {
+		return nil
+	}
 	c.refresh()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -545,6 +561,86 @@ func (c *ModelCatalog) Pricing(model string) (ModelPricing, bool) {
 	}
 	return pricingFromOR(m.Pricing)
 }
+
+// ResolveID returns the OpenRouter id a requested model resolves to, using the
+// same rules as Pricing and ContextWindow. Callers that need to record which
+// catalog entry a model string mapped to should use this rather than
+// OpenRouterModel, which is Anthropic-specific and best-effort: it would turn an
+// unknown "gpt-5.6" into "anthropic/gpt-5.6". ok is false when the model does
+// not resolve to an entry in the current snapshot.
+func (c *ModelCatalog) ResolveID(model string) (string, bool) {
+	m, found := c.entryFor(model)
+	if !found {
+		return "", false
+	}
+	return m.ID, true
+}
+
+// Price reports the catalog's list price in the shape store.SyncModelPricing
+// consumes. Unlike Pricing it reads the raw entry, so it can distinguish a
+// cache price OpenRouter omitted from one it reports as zero — see
+// optionalPrice. ok is false under the same conditions as Pricing.
+func (c *ModelCatalog) Price(model string) (store.ModelPrice, bool) {
+	m, found := c.entryFor(model)
+	if !found {
+		return store.ModelPrice{}, false
+	}
+	return priceFromEntry(m)
+}
+
+// Lookup resolves a model once and reports everything store.SyncModelPricing
+// records about it, letting *ModelCatalog satisfy store.PriceSource directly.
+// It is one entryFor call by design: the syncer runs over every catalog id plus
+// every observed model string, and each entryFor locks and scans a snapshot
+// shared with the live proxy's request path, so separate id/price accessors
+// multiplied that cost per key.
+func (c *ModelCatalog) Lookup(model string) (store.ModelInfo, bool) {
+	m, found := c.entryFor(model)
+	if !found {
+		return store.ModelInfo{}, false
+	}
+	price, priced := priceFromEntry(m)
+	return store.ModelInfo{ORID: m.ID, Price: price, Priced: priced}, true
+}
+
+// priceFromEntry projects a catalog entry's raw price strings into the store
+// shape. ok=false unless both base prices parse (a model with no usable base
+// price is unpriced), matching pricingFromOR; the cache prices differ in
+// keeping absent distinct from zero.
+func priceFromEntry(m orModel) (store.ModelPrice, bool) {
+	prompt, err := strconv.ParseFloat(m.Pricing.Prompt, 64)
+	if err != nil {
+		return store.ModelPrice{}, false
+	}
+	completion, err := strconv.ParseFloat(m.Pricing.Completion, 64)
+	if err != nil {
+		return store.ModelPrice{}, false
+	}
+	return store.ModelPrice{
+		PromptUSD:     prompt,
+		CompletionUSD: completion,
+		CacheReadUSD:  optionalPrice(m.Pricing.InputCacheRead),
+		CacheWriteUSD: optionalPrice(m.Pricing.InputCacheWrite),
+	}, true
+}
+
+// optionalPrice parses a price OpenRouter omits for models without prompt
+// caching, returning nil when the field is empty or unparseable. The pointer
+// exists so "the source does not price this" cannot be recorded as a zero
+// price: a zero cache-read price makes the dashboard's cache savings the cache
+// tokens at full prompt price, overstating it by the whole discount.
+func optionalPrice(s string) *float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
+// var _ store.PriceSource ensures *ModelCatalog keeps satisfying the interface
+// store.SyncModelPricing depends on; a signature drift here fails the build
+// instead of surfacing as a runtime type error in Task 3's caller.
+var _ store.PriceSource = (*ModelCatalog)(nil)
 
 // entryFor resolves a requested model to its catalog orModel, shared by
 // ContextWindow and Pricing so both apply identical resolution and staleness
@@ -651,9 +747,9 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 			c.models[i].Pricing = orPricing{
 				Prompt:            formatPrice(e.Pricing.PromptUSD),
 				Completion:        formatPrice(e.Pricing.CompletionUSD),
-				InputCacheRead:    formatPrice(e.Pricing.CacheReadUSD),
-				InputCacheWrite:   formatPrice(e.Pricing.CacheWriteUSD),
-				InputCacheWrite1h: formatPrice(e.Pricing.CacheWrite1hUSD),
+				InputCacheRead:    optionalPriceString(e.Pricing.CacheReadUSD),
+				InputCacheWrite:   optionalPriceString(e.Pricing.CacheWriteUSD),
+				InputCacheWrite1h: optionalPriceString(e.Pricing.CacheWrite1hUSD),
 			}
 		}
 	}
@@ -661,3 +757,15 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 }
 
 func formatPrice(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
+
+// optionalPriceString seeds a cache price the way OpenRouter sends it: omitted
+// (empty) for a model that doesn't price it. A zero in a CatalogEntry therefore
+// seeds an ABSENT cache price, which is what lets a test exercise the
+// absent-vs-zero distinction Price preserves. A genuine zero cache rate is not
+// a thing OpenRouter publishes, so nothing needs to seed one.
+func optionalPriceString(v float64) string {
+	if v == 0 {
+		return ""
+	}
+	return formatPrice(v)
+}
