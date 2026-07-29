@@ -91,9 +91,8 @@ func TestEveryMigratedVariableHasAFallback(t *testing.T) {
 
 func TestNewVarsHaveNoDeprecatedSpelling(t *testing.T) {
 	for _, name := range []string{Instructions, SkillsDirs, MCPConfig} {
-		t.Setenv(name, "/from/new/name")
-		if got := Get(name); got != "/from/new/name" {
-			t.Fatalf("Get(%s) = %q, want /from/new/name", name, got)
+		if _, ok := deprecated[name]; ok {
+			t.Errorf("%s has a deprecated-map entry; these are new names with no pre-rename spelling", name)
 		}
 	}
 }
