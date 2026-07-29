@@ -13,6 +13,9 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"strings"
+
+	"git.graveland.dev/brent/fundi/internal/envvar"
 )
 
 // appName is the per-application leaf every base directory gets.
@@ -86,3 +89,50 @@ func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
 // A daemon-spawned child does not use this: the controller pins --spill-dir
 // under its own state directory so Forget can find it deterministically.
 func SpillDir(ref string) string { return filepath.Join(CacheDir(), "spill", ref) }
+
+// InstructionsFile is the user-global instruction file: $FUNDI_INSTRUCTIONS,
+// else <ConfigDir>/instructions.md. Deliberately not ~/.claude/CLAUDE.md —
+// that directory belongs to Claude Code, and fundi reads its own configuration
+// from its own directory. Point the variable at a Claude profile to use one.
+func InstructionsFile() string {
+	if v := envvar.Get(envvar.Instructions); v != "" {
+		return v
+	}
+	return filepath.Join(ConfigDir(), "instructions.md")
+}
+
+// SkillsDirs is the ordered skill search path: $FUNDI_SKILLS_DIRS split on the
+// OS path-list separator, else [<ConfigDir>/skills]. Order is
+// lowest-to-highest precedence, matching agent.DiscoverSkills. Empty segments
+// are dropped so a leading, trailing, or doubled separator is not read as the
+// current directory.
+func SkillsDirs() []string {
+	v := envvar.Get(envvar.SkillsDirs)
+	if v == "" {
+		return []string{filepath.Join(ConfigDir(), "skills")}
+	}
+	var out []string
+	for _, d := range strings.Split(v, string(os.PathListSeparator)) {
+		if d != "" {
+			out = append(out, d)
+		}
+	}
+	if len(out) == 0 {
+		return []string{filepath.Join(ConfigDir(), "skills")}
+	}
+	return out
+}
+
+// PresetsFile is the presets file: <ConfigDir>/presets.json. It used to live at
+// ~/.pi/agent/fundi-presets.json — fundi's own file inside pi's directory.
+func PresetsFile() string { return filepath.Join(ConfigDir(), "presets.json") }
+
+// GlobalMCPConfig is the machine-wide .mcp.json: $FUNDI_MCP_CONFIG, else
+// <ConfigDir>/mcp.json. The per-cwd .mcp.json remains the primary source and
+// takes precedence; this is the fallback for servers you want everywhere.
+func GlobalMCPConfig() string {
+	if v := envvar.Get(envvar.MCPConfig); v != "" {
+		return v
+	}
+	return filepath.Join(ConfigDir(), "mcp.json")
+}

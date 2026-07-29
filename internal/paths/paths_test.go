@@ -1,7 +1,9 @@
 package paths
 
 import (
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -114,5 +116,55 @@ func TestDerivedPathsNestUnderBases(t *testing.T) {
 	}
 	if got, want := ServiceLogPath(), filepath.Join("/tmp/s/fundi", "controller.log"); got != want {
 		t.Errorf("ServiceLogPath = %q, want %q", got, want)
+	}
+}
+
+func TestSkillsDirs_DefaultIsConfigDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
+	t.Setenv("FUNDI_SKILLS_DIRS", "")
+	got := SkillsDirs()
+	want := []string{"/tmp/cfg/fundi/skills"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SkillsDirs() = %v, want %v", got, want)
+	}
+}
+
+func TestSkillsDirs_SplitsPathList(t *testing.T) {
+	t.Setenv("FUNDI_SKILLS_DIRS", "/a"+string(os.PathListSeparator)+"/b")
+	got := SkillsDirs()
+	want := []string{"/a", "/b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SkillsDirs() = %v, want %v", got, want)
+	}
+}
+
+func TestSkillsDirs_DropsEmptySegments(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	t.Setenv("FUNDI_SKILLS_DIRS", sep+"/a"+sep+sep+"/b"+sep)
+	got := SkillsDirs()
+	want := []string{"/a", "/b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SkillsDirs() = %v, want %v", got, want)
+	}
+}
+
+func TestInstructionsFile_EnvWins(t *testing.T) {
+	t.Setenv("FUNDI_INSTRUCTIONS", "/custom/inst.md")
+	if got := InstructionsFile(); got != "/custom/inst.md" {
+		t.Fatalf("InstructionsFile() = %q, want /custom/inst.md", got)
+	}
+}
+
+func TestNoClaudeOrPiPathsLeak(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
+	for _, env := range []string{"FUNDI_INSTRUCTIONS", "FUNDI_SKILLS_DIRS", "FUNDI_MCP_CONFIG"} {
+		t.Setenv(env, "")
+	}
+	all := append(SkillsDirs(),
+		InstructionsFile(), PresetsFile(), GlobalMCPConfig())
+	for _, p := range all {
+		if strings.Contains(p, "/.claude") || strings.Contains(p, "/.pi/") {
+			t.Errorf("fundi config path leaks into a foreign tool's directory: %s", p)
+		}
 	}
 }
