@@ -1,0 +1,31 @@
+version: "2"
+
+# fundi lints with the standard set, deliberately NOT `default: all`.
+#
+# This file exists so golangci-lint stops walking up to ~/.golangci.yml, which
+# is a different project's configuration and is not part of this repo. A config
+# outside the repo makes lint results depend on the machine, which is the same
+# class of mistake as reading fundi's runtime configuration out of ~/.claude.
+#
+# The gate must be meaningful: it should fail only on problems THIS change
+# introduced. `default: all` reports 535 findings on the existing tree, so a
+# task could never satisfy it and the signal would be discarded as noise.
+# Widen this set deliberately, one linter at a time, each with its backlog
+# cleared first.
+linters:
+  default: standard
+  settings:
+    errcheck:
+      check-blank: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
