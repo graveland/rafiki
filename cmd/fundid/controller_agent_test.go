@@ -235,6 +235,42 @@ func TestBuildAgentArgv_SpillDirPinnedBeforeExtraArgs(t *testing.T) {
 	}
 }
 
+// TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig covers task A6: --skills-dir
+// and --mcp-config, previously reachable only via --extra-arg, now render
+// straight from their own SpawnRequest fields.
+func TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig(t *testing.T) {
+	req := protocol.SpawnRequest{
+		Kind:       "agent",
+		Model:      "anthropic/claude-sonnet-5",
+		SkillsDirs: []string{"/a/skills", "/b/skills"},
+		MCPConfig:  "/cfg/.mcp.json",
+	}
+	argv := buildAgentArgv(req, "child-1", "/state")
+	joined := strings.Join(argv, " ")
+
+	if strings.Count(joined, "--skills-dir") != 2 {
+		t.Errorf("want one --skills-dir per entry, got: %v", argv)
+	}
+	if !strings.Contains(joined, "--skills-dir /a/skills") ||
+		!strings.Contains(joined, "--skills-dir /b/skills") {
+		t.Errorf("skills dirs missing from argv: %v", argv)
+	}
+	if !strings.Contains(joined, "--mcp-config /cfg/.mcp.json") {
+		t.Errorf("mcp config missing from argv: %v", argv)
+	}
+}
+
+// TestBuildAgentArgv_OmitsUnsetKnobs confirms --skills-dir/--mcp-config are
+// omitted entirely when the request leaves them unset, matching the rest of
+// buildAgentArgv's "only emit what's set" convention.
+func TestBuildAgentArgv_OmitsUnsetKnobs(t *testing.T) {
+	req := protocol.SpawnRequest{Kind: "agent", Model: "anthropic/claude-sonnet-5"}
+	joined := strings.Join(buildAgentArgv(req, "child-1", "/state"), " ")
+	if strings.Contains(joined, "--skills-dir") || strings.Contains(joined, "--mcp-config") {
+		t.Errorf("unset knobs must not appear: %s", joined)
+	}
+}
+
 // TestSpawnKindLabel_Agent covers the fundi/kind auto-label for the new kind.
 func TestSpawnKindLabel_Agent(t *testing.T) {
 	if got := spawnKindLabel("agent"); got != "agent" {

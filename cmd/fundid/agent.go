@@ -163,11 +163,8 @@ func runAgent(args []string) int {
 	}
 
 	mcpShutdown := func() {}
-	mcpConfigPath := f.mcpConfig
-	explicitMCPConfig := mcpConfigPath != ""
-	if mcpConfigPath == "" {
-		mcpConfigPath = filepath.Join(cwd, ".mcp.json")
-	}
+	explicitMCPConfig := f.mcpConfig != ""
+	mcpConfigPath := resolveMCPConfig(f.mcpConfig, cwd)
 	if _, statErr := os.Stat(mcpConfigPath); statErr == nil {
 		mcpCfg, lerr := tools.LoadMCPConfig(mcpConfigPath)
 		if lerr != nil {

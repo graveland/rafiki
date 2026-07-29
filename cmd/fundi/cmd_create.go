@@ -70,7 +70,7 @@ scripting / AFK workflows, use --detached.)`,
 func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
 	cmd.Flags().String("kind", "pi", "Agent kind: pi (default), agent (native fundi runtime; needs a provider-qualified --model), or claude (Claude Code)")
-	cmd.Flags().String("config-dir", "", "For --kind claude: CLAUDE_CONFIG_DIR selecting the claude profile (plugins/hooks/MCP/settings)")
+	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind agent and --kind pi")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
 	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via FUNDI_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
@@ -81,6 +81,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
+	cmd.Flags().StringSlice("skills-dir", nil, "Additional skills directory for --kind agent (repeatable)")
+	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind agent (default: <cwd>/.mcp.json)")
 	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see FUNDI_DEFAULT_LABELS")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 
@@ -147,6 +149,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	exts, _ := cmd.Flags().GetStringSlice("extension")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	extraArgs, _ := cmd.Flags().GetStringSlice("extra-arg")
+	skillsDirs, _ := cmd.Flags().GetStringSlice("skills-dir")
+	mcpConfig, _ := cmd.Flags().GetString("mcp-config")
 
 	// FUNDI_DEFAULT_LABELS: parsed lazily and merged before --label flags.
 	envLabels, err := parseEnvLabels(envvar.Get(envvar.DefaultLabels))
@@ -190,6 +194,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		Extensions:         exts,
 		Verbose:            verbose,
 		ExtraArgs:          extraArgs,
+		SkillsDirs:         skillsDirs,
+		MCPConfig:          mcpConfig,
 		Labels:             labels,
 		Env:                env,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;

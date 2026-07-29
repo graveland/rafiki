@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -78,6 +80,67 @@ func TestPrintRootUsageCoversBothModes(t *testing.T) {
 	}
 	if strings.Contains(out, "fundi ") {
 		t.Errorf("root usage refers to `fundi ` as if it were the daemon; got:\n%s", out)
+	}
+}
+
+// TestMCPConfigPrecedence_CwdBeatsGlobal covers task A6 step 4: a project's
+// own .mcp.json must win over the machine-wide $FUNDI_MCP_CONFIG fallback —
+// getting this backwards would silently apply the wrong MCP servers to a
+// project.
+//
+// Both the cwd file AND the global file are created and left existing: a
+// version of resolveMCPConfig that checks global-first-then-cwd, gated only
+// on the global file's existence, would still pass this test if the global
+// file were absent (as in the plan's originally prescribed test, which never
+// wrote a global.json). Writing both is what actually forces the ordering to
+// matter.
+func TestMCPConfigPrecedence_CwdBeatsGlobal(t *testing.T) {
+	cwd := t.TempDir()
+	cwdCfg := filepath.Join(cwd, ".mcp.json")
+	if err := os.WriteFile(cwdCfg, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(t.TempDir(), "global.json")
+	if err := os.WriteFile(global, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FUNDI_MCP_CONFIG", global)
+
+	if got := resolveMCPConfig("", cwd); got != cwdCfg {
+		t.Fatalf("resolveMCPConfig = %q, want the cwd file %q", got, cwdCfg)
+	}
+}
+
+// TestMCPConfigPrecedence_GlobalUsedWhenNoCwdFile covers the fallback half of
+// the same precedence: paths.GlobalMCPConfig() (Task A2) was dead code until
+// this wiring, so this proves it is actually reachable.
+func TestMCPConfigPrecedence_GlobalUsedWhenNoCwdFile(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "global.json")
+	if err := os.WriteFile(global, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FUNDI_MCP_CONFIG", global)
+
+	if got := resolveMCPConfig("", t.TempDir()); got != global {
+		t.Fatalf("resolveMCPConfig = %q, want the global file %q", got, global)
+	}
+}
+
+// TestMCPConfigPrecedence_ExplicitFlagWinsOutright confirms an explicit
+// --mcp-config value is never second-guessed against either fallback, even
+// when neither the cwd file nor the flag's own path exists — resolveMCPConfig
+// does no existence check on an explicit value; runAgent's caller-side
+// os.Stat handles "explicit but missing" as an error.
+func TestMCPConfigPrecedence_ExplicitFlagWinsOutright(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, ".mcp.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FUNDI_MCP_CONFIG", filepath.Join(t.TempDir(), "global.json"))
+
+	explicit := "/explicit/.mcp.json"
+	if got := resolveMCPConfig(explicit, cwd); got != explicit {
+		t.Fatalf("resolveMCPConfig = %q, want the explicit flag value %q", got, explicit)
 	}
 }
 

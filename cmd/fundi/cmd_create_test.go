@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,6 +60,57 @@ func TestBuildSpawnRequest_RelativeCwdRejected(t *testing.T) {
 	_, err := buildSpawnRequest(cmd, nil)
 	if err == nil {
 		t.Fatal("expected error for relative --cwd, got nil")
+	}
+}
+
+// TestBuildSpawnRequest_SkillsDirAndMCPConfig covers task A6: --skills-dir
+// (repeatable) and --mcp-config, previously reachable only via --extra-arg,
+// now flow straight into their own SpawnRequest fields.
+func TestBuildSpawnRequest_SkillsDirAndMCPConfig(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("skills-dir", "/a/skills"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("skills-dir", "/b/skills"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("mcp-config", "/cfg/.mcp.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := []string{"/a/skills", "/b/skills"}; !slices.Equal(req.SkillsDirs, want) {
+		t.Errorf("SkillsDirs = %v, want %v", req.SkillsDirs, want)
+	}
+	if req.MCPConfig != "/cfg/.mcp.json" {
+		t.Errorf("MCPConfig = %q, want /cfg/.mcp.json", req.MCPConfig)
+	}
+}
+
+// TestBuildSpawnRequest_SkillsDirAndMCPConfigOmittedByDefault confirms the
+// new fields stay unset (so buildAgentArgv emits neither flag) when the
+// caller never touches them — matching every other optional spawn flag.
+func TestBuildSpawnRequest_SkillsDirAndMCPConfigOmittedByDefault(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(req.SkillsDirs) != 0 {
+		t.Errorf("SkillsDirs = %v, want empty", req.SkillsDirs)
+	}
+	if req.MCPConfig != "" {
+		t.Errorf("MCPConfig = %q, want empty", req.MCPConfig)
 	}
 }
 

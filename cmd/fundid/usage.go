@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/internal/paths"
@@ -92,4 +94,29 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.StringVar(&f.fakeTurns, "fake-turns", "", "hidden test seam: path to a LoadFakeSender scripted-turns file")
 
 	return fs
+}
+
+// resolveMCPConfig determines the effective .mcp.json path for an agent
+// child, in precedence order: an explicit --mcp-config value always wins;
+// otherwise <cwd>/.mcp.json if it exists (a project's own MCP servers must
+// win over a machine-wide default); otherwise paths.GlobalMCPConfig() (Task
+// A2's $FUNDI_MCP_CONFIG-or-<ConfigDir>/mcp.json fallback, unused until this
+// wiring).
+//
+// The returned path is not guaranteed to exist when it comes from the cwd or
+// global fallback — runAgent's own os.Stat decides whether to load it or
+// silently skip it, mirroring the pre-existing default behaviour. Only an
+// explicit flagValue is exempt from that "may not exist" contract in the
+// sense that its absence is a hard startup error, not a skip — but that
+// distinction is enforced by the caller (runAgent), not here: this function
+// stays pure aside from the one os.Stat needed to test cwd-file existence.
+func resolveMCPConfig(flagValue, cwd string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	cwdCfg := filepath.Join(cwd, ".mcp.json")
+	if _, err := os.Stat(cwdCfg); err == nil {
+		return cwdCfg
+	}
+	return paths.GlobalMCPConfig()
 }

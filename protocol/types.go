@@ -179,13 +179,18 @@ type SpawnRequest struct {
 	ForkSession   string `json:"forkSession,omitempty"`
 
 	// Tool / extension / skill scoping.
-	Tools             string   `json:"tools,omitempty"` // comma-joined
-	NoTools           bool     `json:"noTools,omitempty"`
-	NoBuiltinTools    bool     `json:"noBuiltinTools,omitempty"`
-	Extensions        []string `json:"extensions,omitempty"`
-	NoExtensions      bool     `json:"noExtensions,omitempty"`
-	Skills            []string `json:"skills,omitempty"`
-	NoSkills          bool     `json:"noSkills,omitempty"`
+	Tools          string   `json:"tools,omitempty"` // comma-joined
+	NoTools        bool     `json:"noTools,omitempty"`
+	NoBuiltinTools bool     `json:"noBuiltinTools,omitempty"`
+	Extensions     []string `json:"extensions,omitempty"`
+	NoExtensions   bool     `json:"noExtensions,omitempty"`
+	Skills         []string `json:"skills,omitempty"`
+	NoSkills       bool     `json:"noSkills,omitempty"`
+	// SkillsDirs are additional skill directories for an agent-kind child,
+	// appended after the configured and project dirs (highest precedence).
+	SkillsDirs []string `json:"skills_dirs,omitempty"`
+	// MCPConfig overrides the .mcp.json path for an agent-kind child.
+	MCPConfig         string   `json:"mcp_config,omitempty"`
 	PromptTemplates   []string `json:"promptTemplates,omitempty"`
 	NoPromptTemplates bool     `json:"noPromptTemplates,omitempty"`
 	Themes            []string `json:"themes,omitempty"`
