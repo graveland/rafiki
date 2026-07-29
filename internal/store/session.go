@@ -97,12 +97,6 @@ type Session struct {
 	// SlashCommands is the claude child's advertised slash-command list (names),
 	// captured from its init frame. Empty for pi children.
 	SlashCommands []string
-
-	// Handles into the live Child. Set by store.Insert from
-	// Child setup; nil for sessions in "exited" state without an
-	// associated Child.
-	cmdCh chan<- []byte
-	done  <-chan struct{}
 }
 
 // Snapshot is a defensive copy used at every boundary.

@@ -24,14 +24,6 @@ func (c *collectConn) Deliver(frame []byte) {
 	c.frames = append(c.frames, frame)
 }
 
-func (c *collectConn) received() [][]byte {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([][]byte, len(c.frames))
-	copy(out, c.frames)
-	return out
-}
-
 func (c *collectConn) count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

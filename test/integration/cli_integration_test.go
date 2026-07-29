@@ -258,14 +258,13 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 		"--detached",
 	)
 	createCmd.Stderr = &createStderr
-	out, err := createCmd.Output() // stdout only
-	if err != nil {
+	if _, err := createCmd.Output(); err != nil { // stdout only
 		t.Fatalf("create --detached failed: %v\nstderr: %s", err, createStderr.String())
 	}
 
 	// resolve by prefix "afk"
 	getCmd := exec.Command(cliPath, "--socket", d.socketPath, "--output", "json", "get", "afk")
-	out, err = getCmd.CombinedOutput()
+	out, err := getCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("get with prefix failed: %v\n%s", err, out)
 	}

@@ -293,7 +293,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	}
 
 	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusStreaming)), 5*time.Second)
-	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusIdle)), 5*time.Second)
+	_, _ = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusIdle)), 5*time.Second)
 
 	// Final PID check: still the same process throughout the second prompt.
 	raw = d.request(t, getJSON)

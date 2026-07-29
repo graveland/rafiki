@@ -9,9 +9,6 @@ import (
 	"git.graveland.dev/brent/fundi/protocol"
 )
 
-// intPtr is a test helper for *int fields.
-func intPtr(n int) *int { return &n }
-
 func TestListRequest_RoundTrip(t *testing.T) {
 	req := protocol.ListRequest{
 		Type: protocol.TypeCtrlList,
