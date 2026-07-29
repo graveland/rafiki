@@ -153,3 +153,74 @@ func TestAgentEndSumsCostAcrossTurns(t *testing.T) {
 		t.Errorf("agent_end input tokens = %d, want 2000", end.Usage.Input)
 	}
 }
+
+// agentEndCostAndCount extracts the agent_end frame's usage.cost.total and
+// len(messages) from a stream of emitted ndjson frames, used to compare the
+// streaming and non-streaming emission paths below.
+func agentEndCostAndCount(t *testing.T, out string) (total float64, messages int) {
+	t.Helper()
+	var end struct {
+		Usage struct {
+			Cost struct{ Total float64 } `json:"cost"`
+		} `json:"usage"`
+		Messages []json.RawMessage `json:"messages"`
+	}
+	var found bool
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		var probe struct{ Type string }
+		if err := json.Unmarshal([]byte(l), &probe); err != nil {
+			t.Fatalf("bad frame %q: %v", l, err)
+		}
+		if probe.Type == "agent_end" {
+			if err := json.Unmarshal([]byte(l), &end); err != nil {
+				t.Fatalf("agent_end unmarshal: %v", err)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no agent_end frame emitted")
+	}
+	return end.Usage.Cost.Total, len(end.Messages)
+}
+
+// TestStreamEndFoldsCostIdenticallyToAssistantTurn locks down the invariant
+// that StreamEnd's bookkeeping (accumulate + addUsage) matches AssistantTurn's
+// exactly: a turn driven through StreamStart/StreamEnd must report the same
+// agent_end cost total and the same accumulated message count as the
+// equivalent turn driven through the non-streaming AssistantTurn. If these two
+// paths diverge, per-turn cost silently differs depending on whether streaming
+// was used.
+func TestStreamEndFoldsCostIdenticallyToAssistantTurn(t *testing.T) {
+	resp := mustCostResp(t)
+	pricer := stubPricer(t, "claude-sonnet-4-5-20250929", nil)
+
+	var outA bytes.Buffer
+	feA := NewFrontend(strings.NewReader(""), &outA, &fakeHandler{})
+	emA := NewEmitter(feA, "anthropic", pricer)
+	emA.AgentStart()
+	emA.AssistantTurn(resp)
+	emA.AgentEnd()
+
+	var outB bytes.Buffer
+	feB := NewFrontend(strings.NewReader(""), &outB, &fakeHandler{})
+	emB := NewEmitter(feB, "anthropic", pricer)
+	msg := MapAssistantMessage(resp, "anthropic", pricer)
+	emB.AgentStart()
+	emB.StreamStart(msg)
+	emB.StreamEnd(msg)
+	emB.AgentEnd()
+
+	totalA, messagesA := agentEndCostAndCount(t, outA.String())
+	totalB, messagesB := agentEndCostAndCount(t, outB.String())
+
+	if totalA != totalB {
+		t.Fatalf("cost total diverges between paths: AssistantTurn=%v StreamStart/StreamEnd=%v", totalA, totalB)
+	}
+	if totalA == 0 {
+		t.Fatal("test is vacuous: expected a nonzero priced cost total")
+	}
+	if messagesA != messagesB {
+		t.Fatalf("accumulated message count diverges between paths: AssistantTurn=%d StreamStart/StreamEnd=%d", messagesA, messagesB)
+	}
+}

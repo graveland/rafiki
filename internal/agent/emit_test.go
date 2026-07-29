@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"git.graveland.dev/brent/fundi/internal/child"
 )
 
 // silenceSlog swaps the default slog logger for a discard handler for the
@@ -366,5 +368,109 @@ func TestToolStart_RawFallback(t *testing.T) {
 	}
 	if raw != "not-json" {
 		t.Fatalf("_raw = %v, want %q", raw, "not-json")
+	}
+}
+
+// countOfType counts how many entries in types equal want. types is produced
+// by engine_test.go's frameTypes(t, out string) helper, reused here rather
+// than duplicated (there is no fakeFrontend in this package — tests drive a
+// real Frontend backed by a bytes.Buffer).
+func countOfType(types []string, want string) int {
+	n := 0
+	for _, ty := range types {
+		if ty == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestStreamStart_EmitsOnlyOnce locks down the §0.2 idempotency guard: a
+// second StreamStart before StreamEnd must not emit a second message_start,
+// or a sendWithTrim-style retry that calls StreamStart again would duplicate
+// the frame in an attached TUI.
+func TestStreamStart_EmitsOnlyOnce(t *testing.T) {
+	var out bytes.Buffer
+	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+	e := NewEmitter(fe, "anthropic", nil)
+	msg := child.PiAssistantMessage{Role: "assistant"}
+
+	e.StreamStart(msg)
+	e.StreamStart(msg)
+
+	types := frameTypes(t, out.String())
+	if n := countOfType(types, "message_start"); n != 1 {
+		t.Fatalf("message_start emitted %d times, want 1: %v", n, types)
+	}
+}
+
+// TestStreamEnd_ResetsSoNextTurnStartsAgain locks down that StreamEnd resets
+// the started guard: a StreamStart in a later turn (after a StreamEnd) must
+// emit again, or every turn after the first would silently lose its
+// message_start.
+func TestStreamEnd_ResetsSoNextTurnStartsAgain(t *testing.T) {
+	var out bytes.Buffer
+	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+	e := NewEmitter(fe, "anthropic", nil)
+	msg := child.PiAssistantMessage{Role: "assistant"}
+
+	e.StreamStart(msg)
+	e.StreamEnd(msg)
+	e.StreamStart(msg)
+
+	types := frameTypes(t, out.String())
+	if n := countOfType(types, "message_start"); n != 2 {
+		t.Fatalf("message_start emitted %d times across two turns, want 2: %v", n, types)
+	}
+}
+
+// TestStreamSequence_OrdersStartUpdatesEnd locks down frame ordering: a
+// StreamStart, N StreamDeltas, then StreamEnd must produce exactly
+// message_start, N message_update, message_end in that order.
+func TestStreamSequence_OrdersStartUpdatesEnd(t *testing.T) {
+	var out bytes.Buffer
+	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+	e := NewEmitter(fe, "anthropic", nil)
+	msg := child.PiAssistantMessage{Role: "assistant"}
+
+	e.StreamStart(msg)
+	e.StreamDelta(msg)
+	e.StreamDelta(msg)
+	e.StreamEnd(msg)
+
+	assertFrameTypes(t, out.String(), []string{"message_start", "message_update", "message_update", "message_end"})
+}
+
+// TestStreamDelta_DoesNotAccumulateOrFoldUsage guards against a delta being
+// mistaken for the terminal message: only StreamEnd's message may end up in
+// agent_end's messages[] and usage total, or a multi-delta turn would
+// over-count both.
+func TestStreamDelta_DoesNotAccumulateOrFoldUsage(t *testing.T) {
+	var out bytes.Buffer
+	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+	e := NewEmitter(fe, "anthropic", nil)
+	msg := child.PiAssistantMessage{Role: "assistant", Usage: child.PiUsage{Input: 10, Output: 5, TotalTokens: 15}}
+
+	e.AgentStart()
+	e.StreamStart(msg)
+	e.StreamDelta(msg)
+	e.StreamDelta(msg)
+	e.StreamDelta(msg)
+	e.StreamEnd(msg)
+	e.AgentEnd()
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var ae struct {
+		Messages []json.RawMessage `json:"messages"`
+		Usage    child.PiUsage     `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-2]), &ae); err != nil {
+		t.Fatalf("unmarshal agent_end frame: %v", err)
+	}
+	if len(ae.Messages) != 1 {
+		t.Fatalf("agent_end messages = %d, want 1 (only StreamEnd's message)", len(ae.Messages))
+	}
+	if ae.Usage.TotalTokens != 15 {
+		t.Fatalf("agent_end totalTokens = %d, want 15 (folded once, not once per delta)", ae.Usage.TotalTokens)
 	}
 }

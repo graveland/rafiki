@@ -32,6 +32,15 @@ type Emitter struct {
 
 	messages []json.RawMessage
 	usage    child.PiUsage
+
+	// started guards StreamStart so it is idempotent within a turn. The
+	// caller invokes StreamStart on the first CONTENT event of a streamed
+	// response, not on the API's own message_start, so that a retry (e.g.
+	// rafiki's sendWithTrim, which resends up to 3 times on a
+	// prompt-too-large error) that fails before any content arrives cannot
+	// leave an orphaned message_start — and hence abandoned text — in an
+	// attached TUI. Reset by StreamEnd so the next turn starts again.
+	started bool
 }
 
 // Pricer resolves a model id to its per-token list price, mirroring rafiki's
@@ -75,6 +84,39 @@ func (e *Emitter) AssistantTurn(resp *anthropic.Message) {
 	e.fe.Emit(child.PiMessageEnd(msg, ""))
 	e.accumulate(msg)
 	e.addUsage(msg.Usage)
+}
+
+// StreamStart emits message_start for a streaming assistant turn. It is
+// idempotent within the turn: a second call before StreamEnd is a no-op, so
+// the caller can invoke it unconditionally on the first content event of a
+// streamed response (rather than on the API's own message_start) without
+// risking a duplicate frame. See the started field doc for why that timing
+// matters.
+func (e *Emitter) StreamStart(msg child.PiAssistantMessage) {
+	if e.started {
+		return
+	}
+	e.started = true
+	e.fe.Emit(child.PiMessageStart(msg, ""))
+}
+
+// StreamDelta emits one message_update carrying the message accumulated so
+// far. Unlike StreamEnd, it does not accumulate or fold usage — only the
+// final message represents the turn.
+func (e *Emitter) StreamDelta(msg child.PiAssistantMessage) {
+	e.fe.Emit(child.PiMessageUpdate(msg, ""))
+}
+
+// StreamEnd emits message_end for the finished message, accumulates it for
+// the eventual agent_end frame, and folds its usage into the turn total —
+// the same bookkeeping AssistantTurn does, so per-turn cost cannot silently
+// diverge depending on whether the turn was streamed. It also resets the
+// started guard so the next turn's StreamStart fires again.
+func (e *Emitter) StreamEnd(msg child.PiAssistantMessage) {
+	e.fe.Emit(child.PiMessageEnd(msg, ""))
+	e.accumulate(msg)
+	e.addUsage(msg.Usage)
+	e.started = false
 }
 
 // ToolStart emits tool_execution_start for a tool call about to run.
