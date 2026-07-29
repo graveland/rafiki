@@ -29,11 +29,13 @@ type skillFrontmatter struct {
 // the skill - and returns the merged, filtered result sorted by name.
 //
 // Later entries in dirs override earlier ones on name collision: callers
-// build dirs as [~/.claude/skills, <cwd>/.claude/skills, ...--skills-dir
-// extras], so a project-level skill shadows a user-level one of the same
-// name. Note the project-level dir is keyed off the child's cwd, not its git
-// root (see cmd/fundid/agent.go) - so a skill dir living at the repo root is
-// only found when the child's cwd IS the repo root.
+// build dirs as [paths.SkillsDirs()..., <cwd>/.claude/skills,
+// <cwd>/.fundi/skills, ...--skills-dir extras] (see
+// cmd/fundid/agent.go:assembleSkillDirs), so a project-level skill shadows a
+// user-level one of the same name, and .fundi/skills shadows .claude/skills
+// of the same name. Note the project-level dirs are keyed off the child's
+// cwd, not its git root - so a skill dir living at the repo root is only
+// found when the child's cwd IS the repo root.
 // only, when non-nil, restricts the result to those names
 // (SpawnRequest.Skills); nil means "all discovered skills".
 //

@@ -106,6 +106,13 @@ func InstructionsFile() string {
 // lowest-to-highest precedence, matching agent.DiscoverSkills. Empty segments
 // are dropped so a leading, trailing, or doubled separator is not read as the
 // current directory.
+//
+// Deliberately not ~/.claude/skills — that directory belongs to Claude Code,
+// and fundi reads its own configuration from its own directory. Point
+// $FUNDI_SKILLS_DIRS at a Claude skills tree (or a plugin cache) to use one.
+// This only covers the user-global dir: a per-project <cwd>/.claude/skills is
+// still searched by cmd/fundid/agent.go's assembleSkillDirs, alongside
+// fundi's own <cwd>/.fundi/skills, so existing per-repo skills keep working.
 func SkillsDirs() []string {
 	v := envvar.Get(envvar.SkillsDirs)
 	if v == "" {

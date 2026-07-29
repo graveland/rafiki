@@ -64,6 +64,21 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 	return f, nil
 }
 
+// assembleSkillDirs builds the skill search path, lowest precedence first:
+// the configured dirs (paths.SkillsDirs, which is fundi's own config
+// location - see that function's doc comment for why it is not
+// ~/.claude/skills), then the project's existing <cwd>/.claude/skills (kept
+// so a repo that already has one doesn't silently lose its skills), then the
+// project's own <cwd>/.fundi/skills (which wins on name collision with
+// .claude/skills - agent.DiscoverSkills lets later entries override
+// earlier ones), then any --skills-dir flags. Pure so it is testable.
+func assembleSkillDirs(cwd string, flagDirs []string) []string {
+	dirs := paths.SkillsDirs()
+	dirs = append(dirs, filepath.Join(cwd, ".claude", "skills"))
+	dirs = append(dirs, filepath.Join(cwd, ".fundi", "skills"))
+	return append(dirs, flagDirs...)
+}
+
 // runAgent is cmd/fundid's other entry point: `fundid agent ...` runs a single
 // agent child speaking pi's rpc protocol on stdio, in place of Claude Code.
 // It owns everything internal/agent.Config cannot build itself (env/flag
@@ -127,16 +142,7 @@ func runAgent(args []string) int {
 
 	var skills []agent.SkillMeta
 	if !f.noSkills {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			slog.Warn("agent: could not resolve home directory; skipping user-global skills dir", "error", herr)
-		}
-		var dirs []string
-		if home != "" {
-			dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
-		}
-		dirs = append(dirs, filepath.Join(cwd, ".claude", "skills"))
-		dirs = append(dirs, f.skillsDir...)
+		dirs := assembleSkillDirs(cwd, f.skillsDir)
 
 		var only []string
 		if f.skills != "" {

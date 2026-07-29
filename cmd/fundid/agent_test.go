@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"git.graveland.dev/brent/fundi/internal/agent"
@@ -106,5 +109,91 @@ func TestParseAgentFlagsNoSkillsAndNoContextFiles(t *testing.T) {
 	}
 	if !f.noSkills || !f.noContextFiles {
 		t.Errorf("noSkills=%v noContextFiles=%v, want both true", f.noSkills, f.noContextFiles)
+	}
+}
+
+// TestAssembleSkillDirs_NoClaudeHomeDir locks down the config-ownership
+// invariant this task exists for: fundi must never read skills out of the
+// user's home Claude profile (~/.claude/skills). It deliberately does NOT
+// forbid a per-project .claude/skills dir - a repo that already has one
+// keeps working, per the ruling in task-A4-brief.md's override. The project
+// .fundi/skills dir comes after .claude/skills so it wins on name collision.
+func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
+	t.Setenv("HOME", "/home/testuser")
+	t.Setenv("FUNDI_SKILLS_DIRS", "")
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
+
+	dirs := assembleSkillDirs("/work/repo", nil)
+
+	for _, d := range dirs {
+		if strings.HasPrefix(d, "/home/testuser") {
+			t.Errorf("skill dir must not be under the user's home Claude profile: %s", d)
+		}
+	}
+	if len(dirs) != 3 {
+		t.Fatalf("dirs = %v, want 3 entries", dirs)
+	}
+	if dirs[0] != "/tmp/cfg/fundi/skills" {
+		t.Errorf("dirs[0] = %q, want /tmp/cfg/fundi/skills", dirs[0])
+	}
+	if dirs[1] != "/work/repo/.claude/skills" {
+		t.Errorf("dirs[1] = %q, want /work/repo/.claude/skills (existing per-project skills keep working)", dirs[1])
+	}
+	if dirs[2] != "/work/repo/.fundi/skills" {
+		t.Errorf("dirs[2] = %q, want /work/repo/.fundi/skills (fundi's own per-project dir, overrides .claude)", dirs[2])
+	}
+}
+
+func TestAssembleSkillDirs_FlagsWinLast(t *testing.T) {
+	t.Setenv("FUNDI_SKILLS_DIRS", "/env/skills")
+	dirs := assembleSkillDirs("/work/repo", []string{"/flag/skills"})
+	if dirs[len(dirs)-1] != "/flag/skills" {
+		t.Errorf("--skills-dir must have highest precedence, got %v", dirs)
+	}
+}
+
+// TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision proves the whole
+// point of reading both per-project dirs: when a skill of the same name
+// exists under both .claude/skills and .fundi/skills, the .fundi one wins.
+// This exercises the real merge in agent.DiscoverSkills (later dir wins),
+// not just the ordering of assembleSkillDirs's output slice.
+func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
+	repo := t.TempDir()
+	claudeSkillDir := filepath.Join(repo, ".claude", "skills", "demo")
+	fundiSkillDir := filepath.Join(repo, ".fundi", "skills", "demo")
+	if err := os.MkdirAll(claudeSkillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll .claude skill: %v", err)
+	}
+	if err := os.MkdirAll(fundiSkillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll .fundi skill: %v", err)
+	}
+	claudeFrontmatter := "---\nname: demo\ndescription: from .claude\n---\n"
+	fundiFrontmatter := "---\nname: demo\ndescription: from .fundi\n---\n"
+	if err := os.WriteFile(filepath.Join(claudeSkillDir, "SKILL.md"), []byte(claudeFrontmatter), 0o644); err != nil {
+		t.Fatalf("WriteFile .claude SKILL.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fundiSkillDir, "SKILL.md"), []byte(fundiFrontmatter), 0o644); err != nil {
+		t.Fatalf("WriteFile .fundi SKILL.md: %v", err)
+	}
+
+	t.Setenv("FUNDI_SKILLS_DIRS", "") // isolate from the invoking user's real config dir
+
+	dirs := assembleSkillDirs(repo, nil)
+	skills, err := agent.DiscoverSkills(dirs, nil)
+	if err != nil {
+		t.Fatalf("DiscoverSkills: %v", err)
+	}
+
+	var demo *agent.SkillMeta
+	for i := range skills {
+		if skills[i].Name == "demo" {
+			demo = &skills[i]
+		}
+	}
+	if demo == nil {
+		t.Fatalf("skill %q not found in %v", "demo", skills)
+	}
+	if demo.Description != "from .fundi" {
+		t.Errorf("demo.Description = %q, want %q (.fundi/skills must win over .claude/skills on name collision)", demo.Description, "from .fundi")
 	}
 }
