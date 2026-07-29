@@ -23,6 +23,18 @@ import (
 // cancelled the turn in the first place.
 const repairTimeout = 10 * time.Second
 
+// streamFlushInterval is the coalescing cadence for streamed message_update
+// frames: at most one flush per interval, regardless of how many SDK stream
+// events arrive. Each frame carries the WHOLE accumulated message (see
+// events' doc), so emitting one per SDK event makes wire volume O(response²)
+// — a 16 KB reply at realistic 15-50 char chunks is 330-1100 frames
+// averaging ~8 KB, 2.6-8.8 MB for a single LLM call, and agentloop allows 20
+// iterations per turn. 250ms is ~4 frames/second: imperceptible for a
+// reading surface, a ~25x reduction in both frame count and bytes. Chosen
+// deliberately over a smaller interval — this is not a game that needs
+// realtime updates.
+const streamFlushInterval = 250 * time.Millisecond
+
 // EngineConfig is the wiring for one agent child: the rafiki client and the
 // conversation options that identify its conversation, the tools it may call,
 // and the identity it reports through get_state.
@@ -317,6 +329,7 @@ func (e *Engine) runTurn(text string) {
 func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 	var acc anthropic.Message
 	var streamed bool
+	var lastFlush time.Time
 
 	handler := func(ev anthropic.MessageStreamEventUnion) {
 		if err := acc.Accumulate(ev); err != nil {
@@ -330,6 +343,27 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			return
 		}
 		streamed = true
+		// Coalesce: one frame per streamFlushInterval, not one per SDK event.
+		// Each frame carries the whole accumulated message, so emitting per
+		// event makes wire volume O(response^2) — thousands of multi-KB
+		// frames per turn, which saturates the per-subscriber bus buffer and
+		// evicts the ring (see streamFlushInterval's doc). The handler is
+		// synchronous on the send goroutine (rafiki guarantees it is never
+		// called concurrently and never after Send returns), so comparing
+		// against lastFlush inline needs no lock, timer, or goroutine.
+		// lastFlush is zero at the start of every iteration (reset in OnTurn
+		// below), so the first content-bearing event of a turn always
+		// flushes immediately regardless of the interval — otherwise a short
+		// turn could emit nothing before StreamEnd. The final partial is
+		// never lost to this gate: StreamEnd (from OnTurn) always emits the
+		// fully accumulated message regardless of when the last flush here
+		// landed, so there is no need (and no correctness reason) to force a
+		// flush at end-of-stream from inside this handler.
+		now := time.Now()
+		if !lastFlush.IsZero() && now.Sub(lastFlush) < streamFlushInterval {
+			return
+		}
+		lastFlush = now
 		msg := e.em.mapMessage(&acc)
 		e.em.StreamStart(msg)
 		e.em.StreamDelta(msg)
@@ -339,9 +373,14 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 		OnTurn: func(resp *anthropic.Message, _ time.Duration, err error) {
 			// Reset for the next iteration regardless of outcome, BEFORE any
 			// early return below, so a failed or non-streamed iteration never
-			// leaks state into the next conv.Continue call.
+			// leaks state into the next conv.Continue call. lastFlush resets
+			// alongside acc/streamed for the same reason: agentloop runs
+			// Continue once per tool-calling iteration, reusing this same
+			// closure (see this method's doc), so each iteration must start
+			// its own coalescing window rather than inheriting the previous
+			// iteration's lastFlush and suppressing its own first flush.
 			wasStreamed := streamed
-			acc, streamed = anthropic.Message{}, false
+			acc, streamed, lastFlush = anthropic.Message{}, false, time.Time{}
 			if err != nil {
 				return // a failed call has no assistant message to render
 			}

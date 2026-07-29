@@ -525,19 +525,108 @@ func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
 	close(release)
 	eng.Wait()
 
-	// Once released, the rest of the scripted turn plays out normally: the
-	// full frame sequence matches the same shape
-	// TestEngine_StreamsDeltasAndPricesFinalMessageOnce asserts for an
-	// equivalent (unblocked) two-delta turn — 5 message_update frames, one
-	// per content-bearing stream event (the "Hel" delta, the "lo" delta,
-	// content_block_stop, message_delta, message_stop all re-emit the
-	// accumulated message).
+	// Once released, the rest of the scripted turn plays out normally. Task
+	// D3 coalesces message_update frames to at most one per
+	// streamFlushInterval (250ms): the "Hel" delta above triggered the
+	// turn's only flush (lastFlush was zero, so it flushed immediately), and
+	// every subsequent content-bearing event ("lo", content_block_stop,
+	// message_delta, message_stop) lands well inside that same window in
+	// this test's unblocked-real-time replay, so none of them flushes again.
+	// Only one message_update reaches the wire before the final message_end
+	// (emitted unconditionally by StreamEnd from OnTurn, carrying the fully
+	// accumulated "Hello" regardless of the coalescing gate — see
+	// TestEngine_CoalescingStillDeliversFinalContent for that guarantee in
+	// isolation).
 	assertFrameTypes(t, out.String(), []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
 		"message_start",
-		"message_update", "message_update", "message_update", "message_update", "message_update",
+		"message_update",
 		"message_end",
 		"agent_end", "agent_settled",
 	})
+}
+
+// ---- coalescing tests (Task D3) ----
+
+// lastAssistantText returns the text content of the LAST message_end frame
+// in out — the assistant turn's final message (the user echo also emits a
+// message_end, but it always precedes the assistant turn's in these
+// single-turn tests, so "last" picks the assistant one).
+func lastAssistantText(t *testing.T, out string) string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var f struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &f); err != nil {
+			t.Fatalf("bad frame %q: %v", lines[i], err)
+		}
+		if f.Type != "message_end" {
+			continue
+		}
+		var b strings.Builder
+		for _, c := range f.Message.Content {
+			if c.Type == "text" {
+				b.WriteString(c.Text)
+			}
+		}
+		return b.String()
+	}
+	t.Fatalf("no message_end frame found in output: %q", out)
+	return ""
+}
+
+// TestEngine_CoalescingStillDeliversFinalContent proves coalescing must not
+// drop the tail: whatever the flush cadence, the final state of the message
+// has to reach the wire, or the TUI renders a truncated reply. Five text
+// deltas spelling "Hello" are scripted with no artificial delay, so they all
+// land inside a single streamFlushInterval window — meaning at most one
+// message_update fires mid-stream — but StreamEnd (from OnTurn) must still
+// emit the fully accumulated text regardless.
+func TestEngine_CoalescingStillDeliversFinalContent(t *testing.T) {
+	ts := fakeToolSet{}
+	sender := newScriptedStreamingSender(streamScript{
+		events: textTurnEvents("claude-x", "H", "e", "l", "l", "o"),
+	})
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi")
+	eng.Wait()
+
+	if got := lastAssistantText(t, out.String()); got != "Hello" {
+		t.Fatalf("final assistant text = %q, want %q — coalescing dropped the tail", got, "Hello")
+	}
+}
+
+// TestEngine_CoalescesManyDeltasIntoFewFrames proves the actual point of
+// coalescing: 200 single-character deltas (arriving with no artificial
+// delay, so all inside one streamFlushInterval window) must NOT produce 200
+// message_update frames. The threshold of 10 is generous — a working
+// coalescing gate produces exactly 1 in this scenario — but avoids the test
+// itself becoming a timing assertion.
+func TestEngine_CoalescesManyDeltasIntoFewFrames(t *testing.T) {
+	ev := []ssestream.Event{streamMessageStart("claude-x"), streamTextBlockStart(0)}
+	for i := 0; i < 200; i++ {
+		ev = append(ev, streamTextDelta(0, "x"))
+	}
+	ev = append(ev, streamBlockStop(0), streamMessageDelta("end_turn", 200), streamMessageStop())
+
+	ts := fakeToolSet{}
+	sender := newScriptedStreamingSender(streamScript{events: ev})
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi")
+	eng.Wait()
+
+	if n := countOfType(frameTypes(t, out.String()), "message_update"); n > 10 {
+		t.Fatalf("200 deltas produced %d message_update frames; coalescing is not engaging", n)
+	}
 }
