@@ -136,26 +136,20 @@ func runResume(cmd *cobra.Command, args []string) error {
 	return enc.Encode(json.RawMessage(resp.Data))
 }
 
-// runResumeFromPiSession spawns a new child continuing any pi session, whether
-// or not that session was ever managed by fundi.  It reads cwd, model, and
-// thinking level from the session.jsonl and merges them with the usual sources
-// (flags, FUNDI_DEFAULT_MODEL, FUNDI_DEFAULT_LABELS, preset).
-//
-// Priority for model:
-//
-//	--model flag > FUNDI_DEFAULT_MODEL env var > jsonl model_change > error
-//
-// Priority for cwd:
-//
-//	--cwd flag > jsonl session header
-//
-// Priority for thinking:
-//
-//	--thinking flag > jsonl thinking_level_change > "" (pi default)
-func runResumeFromPiSession(cmd *cobra.Command, input string) error {
+// buildResumeFromPiSessionRequest builds the SpawnRequest for the --pi-session
+// resume path: it resolves the session file, merges it with buildSpawnRequest's
+// flag/env-derived request, and applies the preset and resumed-from-session
+// label. Pulled out of runResumeFromPiSession as a pure function (no daemon
+// dial) so the request construction is testable without a live daemon —
+// runResumeFromPiSession already overwrites several request fields after
+// buildSpawnRequest returns (Cwd, Model, Provider, Thinking, Type,
+// ResumeSession, ResumedFromSession), and every one of those overwrite sites
+// is a place a future field could be silently clobbered the same way
+// SkillsDirs/MCPConfig were.
+func buildResumeFromPiSessionRequest(cmd *cobra.Command, input string) (protocol.SpawnRequest, error) {
 	info, err := resolvePiSession(input)
 	if err != nil {
-		return err
+		return protocol.SpawnRequest{}, err
 	}
 
 	// buildSpawnRequest merges --model > FUNDI_DEFAULT_MODEL > "" and handles
@@ -163,7 +157,7 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 	// We pass no positional args — there's no name argument in this path.
 	req, err := buildSpawnRequest(cmd, nil)
 	if err != nil {
-		return err
+		return protocol.SpawnRequest{}, err
 	}
 
 	// cwd: jsonl value is the default; an explicit --cwd flag overrides it.
@@ -176,7 +170,7 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 	// since the --model flag embeds the provider as a prefix ("anthropic/model").
 	if req.Model == "" {
 		if info.Model == "" {
-			return fmt.Errorf(
+			return protocol.SpawnRequest{}, fmt.Errorf(
 				"model required: session %s has no model_change events; set --model or FUNDI_DEFAULT_MODEL",
 				input,
 			)
@@ -202,11 +196,11 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 	if presetName != "" {
 		pf, pErr := loadPresets()
 		if pErr != nil {
-			return fmt.Errorf("--preset: %w", pErr)
+			return protocol.SpawnRequest{}, fmt.Errorf("--preset: %w", pErr)
 		}
 		preset, ok := pf.Presets[presetName]
 		if !ok {
-			return fmt.Errorf("--preset: unknown preset %q (available: %s)", presetName, availablePresets(pf))
+			return protocol.SpawnRequest{}, fmt.Errorf("--preset: unknown preset %q (available: %s)", presetName, availablePresets(pf))
 		}
 		if req.Model == "" && preset.Model != "" {
 			req.Model = preset.Model
@@ -221,6 +215,31 @@ func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 	// because the daemon (correctly) rejects user-supplied labels in the
 	// reserved fundi/ namespace.
 	req.ResumedFromSession = info.SessionID
+
+	return req, nil
+}
+
+// runResumeFromPiSession spawns a new child continuing any pi session, whether
+// or not that session was ever managed by fundi.  It reads cwd, model, and
+// thinking level from the session.jsonl and merges them with the usual sources
+// (flags, FUNDI_DEFAULT_MODEL, FUNDI_DEFAULT_LABELS, preset).
+//
+// Priority for model:
+//
+//	--model flag > FUNDI_DEFAULT_MODEL env var > jsonl model_change > error
+//
+// Priority for cwd:
+//
+//	--cwd flag > jsonl session header
+//
+// Priority for thinking:
+//
+//	--thinking flag > jsonl thinking_level_change > "" (pi default)
+func runResumeFromPiSession(cmd *cobra.Command, input string) error {
+	req, err := buildResumeFromPiSessionRequest(cmd, input)
+	if err != nil {
+		return err
+	}
 
 	// Send ctrl_spawn to the daemon.
 	c := mustDial(cmd)

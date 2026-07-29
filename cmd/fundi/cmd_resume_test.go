@@ -1,23 +1,33 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
 
-// TestResumeCmd_ForwardsSkillsDirAndMCPConfig proves fundi resume's --pi-session
-// path actually READS the --skills-dir/--mcp-config flags it registers (via
-// the shared addSpawnFlags) and forwards them into the SpawnRequest, rather
-// than merely accepting them on the command line and dropping them on the
-// floor. runResumeFromPiSession builds its request with exactly this call —
-// buildSpawnRequest(cmd, nil) — before overlaying jsonl-derived cwd/model/
-// thinking, so exercising that call against a real newResumeCmd() is the
-// same path production takes.
-func TestResumeCmd_ForwardsSkillsDirAndMCPConfig(t *testing.T) {
-	cmd := newResumeCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
+// TestResumeFromPiSessionRequest_ForwardsSkillsDirAndMCPConfig proves the
+// --pi-session resume path actually carries --skills-dir/--mcp-config through
+// to the SpawnRequest it sends to the daemon. It drives
+// buildResumeFromPiSessionRequest — the exact function runResumeFromPiSession
+// calls before dialing the daemon — rather than buildSpawnRequest directly:
+// runResumeFromPiSession overwrites several request fields AFTER
+// buildSpawnRequest returns (Cwd, Model, Provider, Thinking, Type,
+// ResumeSession, ResumedFromSession), so a test that stops at buildSpawnRequest
+// would pass even if one of those overwrites clobbered SkillsDirs/MCPConfig on
+// its way out.
+func TestResumeFromPiSessionRequest_ForwardsSkillsDirAndMCPConfig(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "session.jsonl")
+	content := `{"type":"session","id":"test-uuid-skills","cwd":"/some/project"}
+{"type":"model_change","provider":"anthropic","modelId":"claude-haiku-4-5"}
+`
+	if err := os.WriteFile(sessionPath, []byte(content), 0600); err != nil {
+		t.Fatalf("write session file: %v", err)
 	}
+
+	cmd := newResumeCmd()
 	if err := cmd.Flags().Set("skills-dir", "/a/skills"); err != nil {
 		t.Fatal(err)
 	}
@@ -28,14 +38,14 @@ func TestResumeCmd_ForwardsSkillsDirAndMCPConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := buildSpawnRequest(cmd, nil)
+	req, err := buildResumeFromPiSessionRequest(cmd, sessionPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if want := []string{"/a/skills", "/b/skills"}; !slices.Equal(req.SkillsDirs, want) {
-		t.Errorf("SkillsDirs = %v, want %v", req.SkillsDirs, want)
+		t.Errorf("SkillsDirs = %v, want %v — --pi-session resume silently loses its skill dirs", req.SkillsDirs, want)
 	}
 	if req.MCPConfig != "/cfg/.mcp.json" {
-		t.Errorf("MCPConfig = %q, want /cfg/.mcp.json", req.MCPConfig)
+		t.Errorf("MCPConfig = %q, want /cfg/.mcp.json — --pi-session resume silently loses its MCP servers", req.MCPConfig)
 	}
 }

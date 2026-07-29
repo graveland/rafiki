@@ -19,26 +19,31 @@ import (
 // Record mirrors §11.5. Field names and JSON tags match the spec exactly.
 // Optional fields use omitempty. APIKey is always null on disk.
 type Record struct {
-	ChildID            string   `json:"childId"`
-	Name               string   `json:"name,omitempty"`
-	Cwd                string   `json:"cwd"`
-	Kind               string   `json:"kind,omitempty"`
-	ConfigDir          string   `json:"configDir,omitempty"`
-	Provider           string   `json:"provider,omitempty"`
-	Model              string   `json:"model,omitempty"`
-	Thinking           string   `json:"thinking,omitempty"`
-	APIKey             *string  `json:"apiKey"` // always null on disk — never persisted
-	SessionFile        string   `json:"sessionFile,omitempty"`
-	SessionID          string   `json:"sessionId,omitempty"`
-	SessionDir         string   `json:"sessionDir,omitempty"`
-	NoSession          bool     `json:"noSession,omitempty"`
-	Tools              []string `json:"tools,omitempty"`
-	NoTools            bool     `json:"noTools,omitempty"`
-	NoBuiltinTools     bool     `json:"noBuiltinTools,omitempty"`
-	Extensions         []string `json:"extensions,omitempty"`
-	NoExtensions       bool     `json:"noExtensions,omitempty"`
-	Skills             []string `json:"skills,omitempty"`
-	NoSkills           bool     `json:"noSkills,omitempty"`
+	ChildID        string   `json:"childId"`
+	Name           string   `json:"name,omitempty"`
+	Cwd            string   `json:"cwd"`
+	Kind           string   `json:"kind,omitempty"`
+	ConfigDir      string   `json:"configDir,omitempty"`
+	Provider       string   `json:"provider,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	Thinking       string   `json:"thinking,omitempty"`
+	APIKey         *string  `json:"apiKey"` // always null on disk — never persisted
+	SessionFile    string   `json:"sessionFile,omitempty"`
+	SessionID      string   `json:"sessionId,omitempty"`
+	SessionDir     string   `json:"sessionDir,omitempty"`
+	NoSession      bool     `json:"noSession,omitempty"`
+	Tools          []string `json:"tools,omitempty"`
+	NoTools        bool     `json:"noTools,omitempty"`
+	NoBuiltinTools bool     `json:"noBuiltinTools,omitempty"`
+	Extensions     []string `json:"extensions,omitempty"`
+	NoExtensions   bool     `json:"noExtensions,omitempty"`
+	Skills         []string `json:"skills,omitempty"`
+	NoSkills       bool     `json:"noSkills,omitempty"`
+	// SkillsDirs and MCPConfig are additive fields (Task C1). Records written
+	// before their introduction lack these keys, which deserialise to the zero
+	// value (nil slice / empty string) — the same as never having set them.
+	SkillsDirs         []string `json:"skillsDirs,omitempty"`
+	MCPConfig          string   `json:"mcpConfig,omitempty"`
 	PromptTemplates    []string `json:"promptTemplates,omitempty"`
 	NoPromptTemplates  bool     `json:"noPromptTemplates,omitempty"`
 	Themes             []string `json:"themes,omitempty"`

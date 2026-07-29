@@ -160,3 +160,49 @@ func TestDeleteRecord(t *testing.T) {
 		t.Fatalf("second delete errored: %v", err)
 	}
 }
+
+// TestReadRecord_OldRecordWithoutSkillsDirsOrMCPConfig proves a record written
+// before Task C1 introduced SkillsDirs/MCPConfig (i.e. one whose JSON has no
+// "skillsDirs"/"mcpConfig" keys at all) still loads cleanly, decoding those
+// fields to their zero values rather than erroring. This is the compatibility
+// concern called out for adding fields to a persisted record: an old file on
+// disk must not become unreadable after an upgrade.
+func TestReadRecord_OldRecordWithoutSkillsDirsOrMCPConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c_old.json")
+	old := `{
+		"childId": "c_old",
+		"cwd": "/tmp",
+		"kind": "agent",
+		"provider": "anthropic",
+		"model": "sonnet-latest",
+		"apiKey": null,
+		"skills": ["a", "b"],
+		"spawnedAt": 1000,
+		"lastSeenAlive": 1000,
+		"pid": 42,
+		"lastStatus": "exited"
+	}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := persist.ReadRecord(path)
+	if err != nil {
+		t.Fatalf("ReadRecord on a pre-C1 record errored: %v", err)
+	}
+	if got.ChildID != "c_old" {
+		t.Fatalf("ChildID = %q, want c_old", got.ChildID)
+	}
+	if got.SkillsDirs != nil {
+		t.Errorf("SkillsDirs = %v, want nil (absent key decodes to zero value)", got.SkillsDirs)
+	}
+	if got.MCPConfig != "" {
+		t.Errorf("MCPConfig = %q, want empty string", got.MCPConfig)
+	}
+	// Fields that WERE present must still decode correctly alongside the new
+	// zero-valued ones.
+	if len(got.Skills) != 2 || got.Skills[0] != "a" || got.Skills[1] != "b" {
+		t.Errorf("Skills = %v, want [a b]", got.Skills)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,26 @@ func TestResumeRequestFromSnapshotAgentBareModel(t *testing.T) {
 	}
 	if req.Provider != "" {
 		t.Errorf("Provider = %q, want empty", req.Provider)
+	}
+}
+
+// TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig covers I4: a
+// resumed agent-kind child must rejoin with the same skill inventory and MCP
+// tool set it was spawned with, not a silently shrunk one.
+func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
+	snap := store.Snapshot{
+		Kind:       "agent",
+		Model:      "anthropic/claude-sonnet-5",
+		SkillsDirs: []string{"/work/skills", "/other/skills"},
+		MCPConfig:  "/work/.mcp.json",
+	}
+	req := resumeRequestFromSnapshot(snap, "")
+
+	if !reflect.DeepEqual(req.SkillsDirs, snap.SkillsDirs) {
+		t.Errorf("SkillsDirs = %v, want %v — a resumed child silently loses its skill dirs", req.SkillsDirs, snap.SkillsDirs)
+	}
+	if req.MCPConfig != snap.MCPConfig {
+		t.Errorf("MCPConfig = %q, want %q — a resumed child silently loses its MCP servers", req.MCPConfig, snap.MCPConfig)
 	}
 }
 

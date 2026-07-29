@@ -56,14 +56,20 @@ type Session struct {
 
 	// ForkSession is an absolute path to an existing session.jsonl that the
 	// child should fork from via pi's --fork flag.
-	ForkSession        string
-	Tools              []string
-	NoTools            bool
-	NoBuiltinTools     bool
-	Extensions         []string
-	NoExtensions       bool
-	Skills             []string
-	NoSkills           bool
+	ForkSession    string
+	Tools          []string
+	NoTools        bool
+	NoBuiltinTools bool
+	Extensions     []string
+	NoExtensions   bool
+	Skills         []string
+	NoSkills       bool
+	// SkillsDirs are extra skill directories for an agent-kind child, so a
+	// resumed child rejoins with the same skill inventory it was spawned with.
+	SkillsDirs []string
+	// MCPConfig is the .mcp.json path for an agent-kind child, carried across
+	// resume for the same reason.
+	MCPConfig          string
 	PromptTemplates    []string
 	NoPromptTemplates  bool
 	Themes             []string
@@ -133,6 +139,8 @@ type Snapshot struct {
 	NoExtensions       bool
 	Skills             []string
 	NoSkills           bool
+	SkillsDirs         []string
+	MCPConfig          string
 	PromptTemplates    []string
 	NoPromptTemplates  bool
 	Themes             []string
@@ -193,6 +201,8 @@ func (s *Session) Snapshot() Snapshot {
 		NoExtensions:      s.NoExtensions,
 		Skills:            copyStrings(s.Skills),
 		NoSkills:          s.NoSkills,
+		SkillsDirs:        copyStrings(s.SkillsDirs),
+		MCPConfig:         s.MCPConfig,
 		PromptTemplates:   copyStrings(s.PromptTemplates),
 		NoPromptTemplates: s.NoPromptTemplates,
 		Themes:            copyStrings(s.Themes),
