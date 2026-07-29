@@ -30,7 +30,9 @@ func TestServer_AcceptsAndEchoes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := conn.Write([]byte(`{"type":"ping"}` + "\n")); err != nil {
 		t.Fatal(err)
@@ -94,7 +96,9 @@ func TestServer_Broadcast(t *testing.T) {
 			t.Fatalf("dial client %d: %v", i, err)
 		}
 		defer c.Close()
-		c.SetDeadline(time.Now().Add(3 * time.Second))
+		if err := c.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatalf("set deadline client %d: %v", i, err)
+		}
 		clients[i] = c
 	}
 

@@ -64,11 +64,17 @@ func TestScanRecords_LoadsAndIgnoresJunk(t *testing.T) {
 	dir := t.TempDir()
 	w := persist.NewRecordWriter(dir)
 	for i := 0; i < 3; i++ {
-		w.Write(persist.Record{ChildID: "c_" + string(rune('a'+i)), PID: i})
+		if err := w.Write(persist.Record{ChildID: "c_" + string(rune('a'+i)), PID: i}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// Write garbage that should be skipped.
-	os.WriteFile(filepath.Join(dir, "garbage.json"), []byte("not json"), 0o600)
-	os.WriteFile(filepath.Join(dir, "other.txt"), []byte("ignore"), 0o600)
+	if err := os.WriteFile(filepath.Join(dir, "garbage.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("ignore"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	recs, err := persist.ScanRecords(dir)
 	if err != nil {
@@ -140,7 +146,9 @@ func TestRecordWriter_LabelsNilRoundTrip(t *testing.T) {
 func TestDeleteRecord(t *testing.T) {
 	dir := t.TempDir()
 	w := persist.NewRecordWriter(dir)
-	w.Write(persist.Record{ChildID: "c_1", PID: 1})
+	if err := w.Write(persist.Record{ChildID: "c_1", PID: 1}); err != nil {
+		t.Fatal(err)
+	}
 	if err := persist.DeleteRecord(dir, "c_1"); err != nil {
 		t.Fatal(err)
 	}

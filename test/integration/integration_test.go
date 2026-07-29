@@ -189,7 +189,9 @@ func (d *daemon) request(t *testing.T, frame string) []byte {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	if _, err := fmt.Fprintln(conn, frame); err != nil {
 		t.Fatalf("write frame: %v", err)
@@ -261,7 +263,12 @@ func (sc *subConn) readLoop() {
 		var hdr struct {
 			Type string `json:"type"`
 		}
-		json.Unmarshal(frame, &hdr)
+		if err := json.Unmarshal(frame, &hdr); err != nil {
+			// Logf, not Fatal: this runs in a background goroutine, and
+			// FailNow-family calls are only safe from the test's own
+			// goroutine.
+			sc.t.Logf("subConn readLoop: malformed frame %q: %v", frame, err)
+		}
 
 		sc.mu.Lock()
 		if hdr.Type == "ctrl_response" {
@@ -276,7 +283,9 @@ func (sc *subConn) readLoop() {
 // send writes a JSONL frame to the connection.
 func (sc *subConn) send(frame string) {
 	sc.t.Helper()
-	sc.conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := sc.conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		sc.t.Fatalf("subConn set deadline: %v", err)
+	}
 	if _, err := fmt.Fprintln(sc.conn, frame); err != nil {
 		sc.t.Fatalf("subConn write: %v", err)
 	}
@@ -293,7 +302,9 @@ func (sc *subConn) nextResponse(t *testing.T, timeout time.Duration) protocol.Re
 			sc.responses = sc.responses[1:]
 			sc.mu.Unlock()
 			var resp protocol.Response
-			json.Unmarshal(raw, &resp)
+			if err := json.Unmarshal(raw, &resp); err != nil {
+				t.Fatalf("unmarshal ctrl_response: %v\ndata: %s", err, raw)
+			}
 			return resp
 		}
 		sc.mu.Unlock()
@@ -335,11 +346,14 @@ func mustUnmarshal(t *testing.T, data []byte, v any) {
 	}
 }
 
-func frameType(f json.RawMessage) string {
+func frameType(t *testing.T, f json.RawMessage) string {
+	t.Helper()
 	var hdr struct {
 		Type string `json:"type"`
 	}
-	json.Unmarshal(f, &hdr)
+	if err := json.Unmarshal(f, &hdr); err != nil {
+		t.Fatalf("unmarshal frame type: %v\ndata: %s", err, f)
+	}
 	return hdr.Type
 }
 
@@ -455,7 +469,9 @@ func TestIntegration_SubscribeEvents(t *testing.T) {
 		var inner struct {
 			Type string `json:"type"`
 		}
-		json.Unmarshal(env.Event, &inner)
+		if err := json.Unmarshal(env.Event, &inner); err != nil {
+			t.Fatalf("unmarshal ctrl_event inner event: %v\ndata: %s", err, env.Event)
+		}
 		return inner.Type == "agent_start"
 	}, 5*time.Second)
 }
@@ -617,7 +633,9 @@ func TestIntegration_InterceptionNewSession(t *testing.T) {
 			Type    string `json:"type"`
 			Command string `json:"command"`
 		}
-		json.Unmarshal(env.Event, &inner)
+		if err := json.Unmarshal(env.Event, &inner); err != nil {
+			t.Fatalf("unmarshal ctrl_event inner event: %v\ndata: %s", err, env.Event)
+		}
 		return inner.Type == "response" && inner.Command == "new_session"
 	}, 5*time.Second)
 }
@@ -651,7 +669,9 @@ func TestIntegration_GetRecent(t *testing.T) {
 			Type    string `json:"type"`
 			Command string `json:"command"`
 		}
-		json.Unmarshal(ev, &hdr)
+		if err := json.Unmarshal(ev, &hdr); err != nil {
+			t.Fatalf("unmarshal ring buffer event: %v\ndata: %s", err, ev)
+		}
 		if hdr.Type == "response" && hdr.Command == "get_state" {
 			foundBootstrap = true
 		}
@@ -685,7 +705,7 @@ func TestIntegration_GetRecent(t *testing.T) {
 
 		// Any returned events must match the include filter.
 		for _, ev := range fd.Events {
-			if tp := frameType(ev); tp != "agent_start" {
+			if tp := frameType(t, ev); tp != "agent_start" {
 				t.Errorf("filtered get_recent returned unexpected type %q", tp)
 			}
 		}
@@ -838,7 +858,9 @@ func TestIntegration_GetRecentExited(t *testing.T) {
 			Type    string `json:"type"`
 			Command string `json:"command"`
 		}
-		json.Unmarshal(ev, &hdr)
+		if err := json.Unmarshal(ev, &hdr); err != nil {
+			t.Fatalf("unmarshal ring snapshot event: %v\ndata: %s", err, ev)
+		}
 		if hdr.Type == "response" && hdr.Command == "get_state" {
 			foundBootstrap = true
 		}
@@ -887,7 +909,9 @@ func TestIntegration_ResumeEmitsSpawned(t *testing.T) {
 			Type    string `json:"type"`
 			ChildID string `json:"childId"`
 		}
-		json.Unmarshal(f, &ev)
+		if json.Unmarshal(f, &ev) != nil {
+			return false
+		}
 		return ev.Type == protocol.TypeCtrlChildSpawned && ev.ChildID == childID
 	}, 5*time.Second)
 }

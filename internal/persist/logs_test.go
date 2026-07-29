@@ -48,7 +48,9 @@ func TestLogDump_OnFailure_SkipsCleanExit(t *testing.T) {
 	dir := t.TempDir()
 	d := persist.NewLogDumper(dir, persist.ModeOnFailure)
 	exitInfo := persist.ExitInfo{ExitCode: 0}
-	d.Dump("c_1", nil, nil, nil, nil, persist.Meta{ChildID: "c_1"}, exitInfo)
+	if e := d.Dump("c_1", nil, nil, nil, nil, persist.Meta{ChildID: "c_1"}, exitInfo); e != nil {
+		t.Fatal(e)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "c_1")); !os.IsNotExist(err) {
 		t.Fatalf("dir created on clean exit in ModeOnFailure: %v", err)
 	}
@@ -58,8 +60,10 @@ func TestLogDump_OnFailure_DumpsBadExit(t *testing.T) {
 	dir := t.TempDir()
 	d := persist.NewLogDumper(dir, persist.ModeOnFailure)
 	exitInfo := persist.ExitInfo{ExitCode: 1}
-	d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil, nil,
-		persist.Meta{ChildID: "c_1"}, exitInfo)
+	if e := d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil, nil,
+		persist.Meta{ChildID: "c_1"}, exitInfo); e != nil {
+		t.Fatal(e)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "c_1", "out.jsonl.gz")); err != nil {
 		t.Fatalf("expected dump on bad exit: %v", err)
 	}
@@ -68,8 +72,10 @@ func TestLogDump_OnFailure_DumpsBadExit(t *testing.T) {
 func TestLogDump_NeverMode(t *testing.T) {
 	dir := t.TempDir()
 	d := persist.NewLogDumper(dir, persist.ModeNever)
-	d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil, nil,
-		persist.Meta{ChildID: "c_1"}, persist.ExitInfo{ExitCode: 1})
+	if e := d.Dump("c_1", nil, [][]byte{[]byte(`{}`)}, nil, nil,
+		persist.Meta{ChildID: "c_1"}, persist.ExitInfo{ExitCode: 1}); e != nil {
+		t.Fatal(e)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "c_1")); !os.IsNotExist(err) {
 		t.Fatal("ModeNever wrote to disk")
 	}

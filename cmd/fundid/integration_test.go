@@ -52,7 +52,9 @@ func TestIntegration_CtrlStatus(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	frame := `{"type":"ctrl_status","id":"integration-1"}` + "\n"
 	if _, err := conn.Write([]byte(frame)); err != nil {
@@ -110,7 +112,9 @@ func TestIntegration_CtrlList(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	if _, err := conn.Write([]byte(`{"type":"ctrl_list","id":"list-1"}` + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -173,7 +177,9 @@ func TestIntegration_SetLabels_Success(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	frame := `{"type":"ctrl_set_labels","id":"lbl-1","childId":"c_label_integ","set":{"env":"prod","tier":"fast"}}` + "\n"
 	if _, err := conn.Write([]byte(frame)); err != nil {
@@ -236,7 +242,9 @@ func TestIntegration_SetLabels_ReservedPrefix(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	frame := `{"type":"ctrl_set_labels","id":"lbl-2","childId":"c_reserved","set":{"fundi/model":"evil"}}` + "\n"
 	if _, err := conn.Write([]byte(frame)); err != nil {
@@ -284,7 +292,9 @@ func TestIntegration_SetLabels_InvalidKey(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	// Key with space is invalid.
 	frame := `{"type":"ctrl_set_labels","id":"lbl-3","childId":"c_badkey","set":{"bad key":"v"}}` + "\n"
@@ -338,7 +348,9 @@ func TestIntegration_List_LabelFilter(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	// Filter by env=prod: should return only c_a.
 	frame := `{"type":"ctrl_list","id":"lbl-list-1","filter":{"labels":{"env":"prod"}}}` + "\n"
@@ -389,7 +401,9 @@ func TestIntegration_MultipleCommands(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	cmds := []string{
 		`{"type":"ctrl_status","id":"m-1"}`,
@@ -451,7 +465,9 @@ func TestIntegration_Subscribe_LabelFiltered(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 
 	br := bufio.NewReader(conn)
 

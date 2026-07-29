@@ -99,9 +99,11 @@ func TestStore_VerifyOnRead_FiltersStaleIndex(t *testing.T) {
 	// the old-name lookup returns nothing (verify-on-read filters it).
 	s := store.New()
 	s.Insert(newSess("c_1", "old", "/x"))
-	s.Update("c_1", func(sess *store.Session) {
+	if err := s.Update("c_1", func(sess *store.Session) {
 		sess.Name = "new" // bypasses the index update intentionally for this test
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	got := s.FindByName("old")
 	if len(got) != 0 {
 		t.Fatalf("verify-on-read failed: %v", got)
