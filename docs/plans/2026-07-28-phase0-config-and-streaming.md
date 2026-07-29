@@ -20,6 +20,7 @@
 - **Do not touch `~/.pi/agent/extensions/`.** That is pi's genuine discovery contract and stays.
 - **No `git add -A` / `git add .`.** Stage files by name. Run `git diff --cached --stat` and confirm only intended files are staged.
 - **No `Co-Authored-By` trailers.**
+- **A test must fail when the invariant it guards breaks — prove it, don't assume it.** Before committing any test described as locking something down, break the thing deliberately, watch the test fail, then restore. A test that passes either way is a defect and will be reviewed as one, no matter which document prescribed it. (Task A1 shipped exactly this defect from this plan's own prescribed code: the test drove the invariant through `envvar.Get()`, which early-returns on the primary variable and never reaches the branch under test.) If a test's assertion path cannot reach the behavior it names, fix the test rather than transcribing it.
 - **Test helpers in this plan are illustrative of intent, not verified to exist.** Fakes and assertion helpers (`fakeFrontend`, `countOfType`, `typeSequence`, `framesOfType`, `lastOfType`, `newFakeStreamingSender`, `newTestEngine`, `newTestConversation`, `waitFor`) may need writing or adapting — check the existing `_test.go` files in the package first and follow whatever is already there. `internal/agent/faketurns.go` is the established scripted-turn seam; extend it rather than inventing a parallel one. Constructor signatures shown (e.g. `NewEmitter`) must be checked against the real code before use.
 
 ---
@@ -40,11 +41,15 @@ These are new names with no pre-rename spelling, so they get **no** `deprecated`
 - [ ] **Step 1: Write the failing test**
 
 ```go
+// Assert on the map directly. Going through Get() would NOT work: Get checks
+// os.Getenv(name) first and returns immediately when it is non-empty, so a test
+// that sets the primary variable never reaches the deprecated-map branch and
+// would pass even after someone added deprecated[Instructions] = "PIC_...".
+// This test must be an in-package test (package envvar) to see `deprecated`.
 func TestNewVarsHaveNoDeprecatedSpelling(t *testing.T) {
-	for _, name := range []string{envvar.Instructions, envvar.SkillsDirs, envvar.MCPConfig} {
-		t.Setenv(name, "/from/new/name")
-		if got := envvar.Get(name); got != "/from/new/name" {
-			t.Fatalf("Get(%s) = %q, want /from/new/name", name, got)
+	for _, name := range []string{Instructions, SkillsDirs, MCPConfig} {
+		if _, ok := deprecated[name]; ok {
+			t.Errorf("%s has a deprecated-map entry; these are new names with no pre-rename spelling", name)
 		}
 	}
 }
