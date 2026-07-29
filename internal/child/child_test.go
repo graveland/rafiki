@@ -2,8 +2,10 @@ package child_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"syscall"
 	"testing"
@@ -293,4 +295,105 @@ func TestChild_InterruptAfterExitIsNoOp(t *testing.T) {
 	if err := ch.Interrupt(); err != nil {
 		t.Fatalf("Interrupt() on exited child = %v, want nil", err)
 	}
+}
+
+// message_update frames are redundant with the message_end that follows them,
+// but at streaming volume they evict everything else from the bounded ring —
+// which is what attach primes scrollback from. This drives frames through the
+// real readStdout path (a spawned child's actual stdout), not ring.Append
+// directly, so it proves the filter that's wired into production, not just a
+// helper function in isolation.
+func TestRingSkipsMessageUpdateButKeepsEverythingElse(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake.sh")
+	body := "#!/bin/bash\n" +
+		"printf '%s\\n' '{\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}'\n" +
+		"printf '%s\\n' '{\"type\":\"message_update\",\"message\":{\"role\":\"assistant\"}}'\n" +
+		"printf '%s\\n' '{\"type\":\"message_update\",\"message\":{\"role\":\"assistant\"}}'\n" +
+		"printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\"}}'\n" +
+		"printf '%s\\n' '{\"type\":\"tool_execution_start\",\"toolCallId\":\"t1\"}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	// No Provider set: defaults to PiProvider{}, the identity provider, so the
+	// raw stdout lines above land in the ring exactly as printed.
+	c, err := child.Spawn(context.Background(), child.SpawnSpec{
+		ChildID:  "c_ring_filter",
+		Cwd:      dir,
+		PiBinary: script,
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond) })
+
+	// The script never reads stdin and exits after emitting its frames, so
+	// Done() closes once readStdout drains EOF and the process is reaped.
+	select {
+	case <-c.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("child did not exit")
+	}
+
+	got := typesOf(c.RingSnapshot())
+	want := []string{"message_start", "message_end", "tool_execution_start"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ring contents = %v, want %v — message_update must not consume ring capacity", got, want)
+	}
+}
+
+// A frame the type-sniffing json.Unmarshal can't parse must still land in the
+// ring — a parse failure is not grounds for silently dropping a child's
+// output. Exercises the isMessageUpdate false-on-error path through the real
+// readStdout path, not by calling it directly.
+func TestRingKeepsUnparseableFrame(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake.sh")
+	body := "#!/bin/bash\n" +
+		"printf '%s\\n' 'this is not json'\n" +
+		"printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\"}}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	c, err := child.Spawn(context.Background(), child.SpawnSpec{
+		ChildID:  "c_ring_unparseable",
+		Cwd:      dir,
+		PiBinary: script,
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond) })
+
+	select {
+	case <-c.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("child did not exit")
+	}
+
+	frames := c.RingSnapshot()
+	if len(frames) != 2 {
+		t.Fatalf("ring has %d frames, want 2 (unparseable frame must not be dropped): %v", len(frames), typesOf(frames))
+	}
+	if string(frames[0]) != "this is not json" {
+		t.Fatalf("frames[0] = %q, want the unparseable line preserved verbatim", frames[0])
+	}
+}
+
+// typesOf extracts the top-level "type" field from each ring frame, in order.
+func typesOf(frames [][]byte) []string {
+	out := make([]string, 0, len(frames))
+	for _, f := range frames {
+		var hdr struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(f, &hdr); err != nil {
+			out = append(out, "<unparseable>")
+			continue
+		}
+		out = append(out, hdr.Type)
+	}
+	return out
 }

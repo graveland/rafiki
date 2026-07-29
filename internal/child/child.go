@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -462,7 +463,19 @@ func (c *Child) readStdout() {
 		// forensically real); the bus carries the provider's normalized pi
 		// AgentSessionEvent frames. For pi these are identical (identity
 		// provider); for claude the provider translates raw → pi vocabulary.
-		c.ring.Append(line, ts)
+		//
+		// message_update frames are excluded from the ring on purpose. At
+		// streaming volume a single turn emits hundreds of them, each carrying
+		// the whole accumulated message, which would evict the entire
+		// conversation from the bounded ring — and attach's primeHistory skips
+		// message_update anyway, so it would prime blank scrollback from them.
+		// Nothing is lost: the message_end that follows carries everything the
+		// deltas built up. Only delta timing is dropped. The bus is unaffected:
+		// BusFrames/publishBus below still see and publish every frame, so live
+		// subscribers keep getting every delta.
+		if !isMessageUpdate(line) {
+			c.ring.Append(line, ts)
+		}
 		for _, f := range c.provider.BusFrames(line, ts) {
 			c.publishBus(f, ts)
 		}
@@ -486,6 +499,23 @@ func (c *Child) readStdout() {
 	c.mu.Unlock()
 
 	close(c.processDone)
+}
+
+// isMessageUpdate reports whether line is a message_update frame. It runs on
+// every frame from every child, so it decodes only the type field via a
+// minimal struct — the same cheap-extraction approach cmd/fundid's
+// eventPassesFilter uses for subscriber filtering — rather than fully
+// unmarshaling the (potentially multi-KB) message payload. An unparseable
+// frame returns false so it is still appended to the ring: a parse failure is
+// not grounds for silently dropping a child's output.
+func isMessageUpdate(line []byte) bool {
+	var hdr struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(line, &hdr); err != nil {
+		return false
+	}
+	return hdr.Type == "message_update"
 }
 
 // handleFrame routes one stdout line through the child's ProtocolProvider and
