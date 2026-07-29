@@ -242,7 +242,8 @@ func (e *Engine) runTurn(text string) {
 	e.em.UserMessage(text)
 	e.em.AgentStart()
 
-	_, err := agentloop.Run(ctx, e.conv, e.tools, e.events(), llm.UserText(text))
+	events, streamOpt := e.events()
+	_, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserText(text), streamOpt)
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
 	// otherwise make every failure look like an abort.
 	aborted := errors.Is(ctx.Err(), context.Canceled)
@@ -289,14 +290,64 @@ func (e *Engine) runTurn(text string) {
 	}
 }
 
-// events wires the agent loop's observation callbacks to the pi emitter. Every
-// callback fires on the loop's own goroutine or under its callback mutex, so
-// the Emitter (single-goroutine by contract) is never driven concurrently.
-func (e *Engine) events() *agentloop.Events {
-	return &agentloop.Events{
+// events wires the agent loop's observation callbacks to the pi emitter, and
+// returns the llm.SendOption that must ride along on every conv.Continue call
+// of THIS turn so the loop actually streams.
+//
+// The stream handler and OnTurn are built together, sharing one accumulator,
+// because of how agentloop.drive is structured: it builds its sendOpts ONCE
+// (llm.WithTools(defs) plus whatever this method returns) and reuses that
+// same slice — and therefore this same handler closure — for every iteration
+// of the turn's tool-use loop (drive calls conv.Continue once per iteration,
+// stopping only at end_turn). Both stream events and OnTurn fire on the
+// loop's own goroutine, and the handler for iteration N is always fully done
+// (conv.Continue has returned) before OnTurn(N) runs and before
+// conv.Continue(N+1) can start — so it's safe for OnTurn to consume and reset
+// the closure's accumulator with no locking, but the reset is mandatory:
+// without it, iteration N+1's deltas would accumulate onto iteration N's
+// stale content.
+//
+// OnTurn also has to decide, per iteration, whether anything actually
+// streamed: a Sender that doesn't implement llm.StreamingSender (every
+// fake-turn child, and any pre-delivery failover handoff) makes the handler
+// never fire at all. Unconditionally calling StreamEnd there would emit a
+// message_end with no preceding message_start — so streamed tracks whether
+// the handler ran (past the hasContent gate) THIS iteration, and OnTurn
+// falls back to the plain AssistantTurn triple when it didn't.
+func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
+	var acc anthropic.Message
+	var streamed bool
+
+	handler := func(ev anthropic.MessageStreamEventUnion) {
+		if err := acc.Accumulate(ev); err != nil {
+			slog.Warn("agent: accumulate stream event", "error", err)
+			return
+		}
+		// Emit only once content actually exists: a trim-retry fails before
+		// any content event, so this keeps message_start off the wire until
+		// the attempt is real. See hasContent's doc.
+		if !hasContent(&acc) {
+			return
+		}
+		streamed = true
+		msg := e.em.mapMessage(&acc)
+		e.em.StreamStart(msg)
+		e.em.StreamDelta(msg)
+	}
+
+	ev := &agentloop.Events{
 		OnTurn: func(resp *anthropic.Message, _ time.Duration, err error) {
+			// Reset for the next iteration regardless of outcome, BEFORE any
+			// early return below, so a failed or non-streamed iteration never
+			// leaks state into the next conv.Continue call.
+			wasStreamed := streamed
+			acc, streamed = anthropic.Message{}, false
 			if err != nil {
 				return // a failed call has no assistant message to render
+			}
+			if wasStreamed {
+				e.em.StreamEnd(e.em.mapMessage(resp))
+				return
 			}
 			e.em.AssistantTurn(resp)
 		},
@@ -308,6 +359,24 @@ func (e *Engine) events() *agentloop.Events {
 		},
 		PendingUser: e.drainSteers,
 	}
+	return ev, llm.WithStreamHandler(handler)
+}
+
+// hasContent reports whether any content block has arrived yet. Guards the
+// first emission: sendWithTrim can retry a prompt-too-large failure, and that
+// failure lands before any content event, so gating on this keeps an
+// abandoned attempt from putting a message_start (and therefore text) into an
+// attached TUI. See spec §0.2.
+func hasContent(m *anthropic.Message) bool {
+	for _, b := range m.Content {
+		switch {
+		case b.Type == "text" && b.Text != "":
+			return true
+		case b.Type == "tool_use":
+			return true
+		}
+	}
+	return false
 }
 
 // drainSteers is the loop's mid-turn steer seam: it takes everything buffered
