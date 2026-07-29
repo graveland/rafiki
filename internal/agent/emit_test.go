@@ -424,6 +424,34 @@ func TestStreamEnd_ResetsSoNextTurnStartsAgain(t *testing.T) {
 	}
 }
 
+// TestAgentEndResetsStartedSoNextTurnEmitsMessageStart locks down that
+// AgentEnd resets the started guard, not just StreamEnd: a stream that fails
+// or is aborted AFTER content has been emitted never reaches StreamEnd (see
+// engine.go's OnTurn, which returns on err before calling StreamEnd), so
+// AgentEnd is the only place left in that path to reset it. If `started`
+// survives AgentEnd, the next turn's StreamStart silently no-ops and the
+// emitter is permanently one message_start in debt.
+func TestAgentEndResetsStartedSoNextTurnEmitsMessageStart(t *testing.T) {
+	var out bytes.Buffer
+	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+	e := NewEmitter(fe, "anthropic", nil)
+	msg := child.PiAssistantMessage{Role: "assistant"}
+
+	// Turn 1: content streamed, then the turn tears down without StreamEnd
+	// (mid-stream abort or a post-content failure).
+	e.StreamStart(msg)
+	e.StreamDelta(msg)
+	e.AgentEnd()
+
+	// Turn 2: a completely healthy streamed turn.
+	e.StreamStart(msg)
+
+	types := frameTypes(t, out.String())
+	if n := countOfType(types, "message_start"); n != 2 {
+		t.Fatalf("message_start emitted %d times across two turns, want 2 — `started` leaked past AgentEnd", n)
+	}
+}
+
 // TestStreamSequence_OrdersStartUpdatesEnd locks down frame ordering: a
 // StreamStart, N StreamDeltas, then StreamEnd must produce exactly
 // message_start, N message_update, message_end in that order.

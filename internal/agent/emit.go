@@ -161,6 +161,10 @@ func (e *Emitter) AgentEnd() {
 	e.fe.Emit(child.PiAgentSettled())
 	e.messages = nil
 	e.usage = child.PiUsage{}
+	// Also reset the streaming guard: a stream that failed or was aborted
+	// after content arrived never reaches StreamEnd, and a surviving
+	// `started` would suppress the NEXT turn's message_start entirely.
+	e.started = false
 }
 
 // accumulate marshals msg and appends it to the turn's message log. A
