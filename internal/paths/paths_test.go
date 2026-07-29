@@ -148,6 +148,18 @@ func TestSkillsDirs_DropsEmptySegments(t *testing.T) {
 	}
 }
 
+func TestSkillsDirs_AllEmptySegmentsFallsBackToDefault(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
+	sep := string(os.PathListSeparator)
+	t.Setenv("FUNDI_SKILLS_DIRS", sep+sep+sep)
+
+	got := SkillsDirs()
+	want := []string{"/tmp/cfg/fundi/skills"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SkillsDirs() = %v, want %v — a variable of only separators must fall back to the default, not yield an empty slice", got, want)
+	}
+}
+
 func TestInstructionsFile_EnvWins(t *testing.T) {
 	t.Setenv("FUNDI_INSTRUCTIONS", "/custom/inst.md")
 	if got := InstructionsFile(); got != "/custom/inst.md" {
