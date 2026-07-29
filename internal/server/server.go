@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"git.graveland.dev/brent/fundi/protocol"
 )
@@ -24,8 +25,9 @@ import (
 // such as subscription registries, so callers must pass the same object
 // for the lifetime of a connection.
 type Connection interface {
-	// Deliver pushes frame to the client. Errors are silently discarded
-	// (connection may already be closing).
+	// Deliver pushes frame to the client, bounded by deliverWriteTimeout.
+	// Errors (including timeouts) are logged, not discarded — see
+	// netConn.Deliver.
 	Deliver(frame []byte)
 }
 
@@ -137,10 +139,27 @@ func (s *Server) acceptLoop() {
 // netConn wraps a net.Conn and implements Connection.
 type netConn struct{ conn net.Conn }
 
+// deliverWriteTimeout bounds a single frame write. A subscriber that has
+// stopped reading (a suspended terminal, `fundi tail` into a pager) would
+// otherwise block this write forever — and Deliver runs on monitorChild's
+// goroutine, which also drives status transitions, rename detection and
+// child-exit handling. Blocking it stalls the child's whole bookkeeping and
+// fills the bus buffer until Publish starts dropping terminal frames
+// (agent_settled, message_end), which hangs an attached TUI permanently.
+const deliverWriteTimeout = 5 * time.Second
+
 func (c *netConn) Deliver(frame []byte) {
-	// Errors here are silently discarded — the connection may be closing and
-	// the per-frame read loop will detect that on the next read.
-	_ = protocol.WriteFrame(c.conn, frame)
+	if err := c.conn.SetWriteDeadline(time.Now().Add(deliverWriteTimeout)); err != nil {
+		slog.Warn("server: set write deadline", "error", err)
+		// Fall through: a write without a deadline is still better than no frame.
+	}
+	if err := protocol.WriteFrame(c.conn, frame); err != nil {
+		// The connection may simply be closing, which the read loop will
+		// notice on its next read — but a timeout here means a live
+		// subscriber is not draining, and silence would make the resulting
+		// frame loss unattributable.
+		slog.Warn("server: deliver frame", "error", err, "bytes", len(frame))
+	}
 }
 
 func (s *Server) handleConn(conn net.Conn) {
