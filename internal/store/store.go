@@ -5,9 +5,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v4"
-	"git.graveland.dev/brent/fundi/protocol"
 	"git.graveland.dev/brent/fundi/internal/ring"
+	"git.graveland.dev/brent/fundi/protocol"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 // ErrNotFound is returned when the requested ChildID does not exist.

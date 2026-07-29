@@ -1,10 +1,11 @@
 package main
 
 import (
-	"git.graveland.dev/brent/fundi/internal/paths"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
 func activeFilePath() string { return paths.ActiveFile() }

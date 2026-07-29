@@ -5,9 +5,9 @@ import (
 	"sync"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/protocol"
 	"git.graveland.dev/brent/fundi/internal/server"
 	"git.graveland.dev/brent/fundi/internal/store"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // ─── fake Connection ──────────────────────────────────────────────────────────

@@ -29,10 +29,10 @@ import (
 // ─── TestMain: build binary once for all tests ────────────────────────────────
 
 var (
-	binaryPath  string
-	cliPath   string
-	fakePiPath  string
-	repoRoot    string
+	binaryPath string
+	cliPath    string
+	fakePiPath string
+	repoRoot   string
 )
 
 func TestMain(m *testing.M) {
@@ -336,7 +336,9 @@ func mustUnmarshal(t *testing.T, data []byte, v any) {
 }
 
 func frameType(f json.RawMessage) string {
-	var hdr struct{ Type string `json:"type"` }
+	var hdr struct {
+		Type string `json:"type"`
+	}
 	json.Unmarshal(f, &hdr)
 	return hdr.Type
 }
@@ -450,7 +452,9 @@ func TestIntegration_SubscribeEvents(t *testing.T) {
 		if json.Unmarshal(f, &env) != nil || env.Type != "ctrl_event" || env.ChildID != childID {
 			return false
 		}
-		var inner struct{ Type string `json:"type"` }
+		var inner struct {
+			Type string `json:"type"`
+		}
 		json.Unmarshal(env.Event, &inner)
 		return inner.Type == "agent_start"
 	}, 5*time.Second)

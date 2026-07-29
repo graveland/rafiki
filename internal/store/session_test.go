@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/protocol"
 	"git.graveland.dev/brent/fundi/internal/store"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 func TestSession_Snapshot_CopiesFields(t *testing.T) {

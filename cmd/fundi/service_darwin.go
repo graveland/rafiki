@@ -5,13 +5,14 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"git.graveland.dev/brent/fundi/internal/paths"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
+
+	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
 // Distinct from pi-controller's own "dev.graveland.pi-controller": sharing the

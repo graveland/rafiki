@@ -24,12 +24,12 @@ const (
 	SourceUserConfig Source = "user-config" // ~/.pi/agent/models.json
 	SourceBuiltin    Source = "builtin"     // hardcoded common list
 	SourceOllama     Source = "ollama"      // live Ollama server
-	SourceLMStudio   Source = "lmstudio"   // live LM Studio server
+	SourceLMStudio   Source = "lmstudio"    // live LM Studio server
 )
 
 // Model is a single enumerated model entry.
 type Model struct {
-	ID       string `json:"id"`             // "provider/model"
+	ID       string `json:"id"` // "provider/model"
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Name     string `json:"name,omitempty"` // display name from models.json

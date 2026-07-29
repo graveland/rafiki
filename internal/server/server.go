@@ -47,7 +47,7 @@ type ConnectionLifecycleHandler interface {
 type FuncHandler FrameHandler
 
 func (f FuncHandler) HandleFrame(conn Connection, frame []byte) []byte { return f(conn, frame) }
-func (f FuncHandler) HandleClose(_ Connection)                          {}
+func (f FuncHandler) HandleClose(_ Connection)                         {}
 
 // Server is a running Unix-domain-socket listener. Call Close to stop it.
 type Server struct {

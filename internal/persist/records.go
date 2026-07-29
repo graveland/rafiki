@@ -50,10 +50,10 @@ type Record struct {
 	PiBinary           string   `json:"piBinary,omitempty"`
 	ExtraArgs          []string `json:"extraArgs,omitempty"`
 
-	SpawnedAt     int64             `json:"spawnedAt"`
-	LastSeenAlive int64             `json:"lastSeenAlive"`
-	PID           int               `json:"pid"`
-	LastStatus    string            `json:"lastStatus"`
+	SpawnedAt     int64  `json:"spawnedAt"`
+	LastSeenAlive int64  `json:"lastSeenAlive"`
+	PID           int    `json:"pid"`
+	LastStatus    string `json:"lastStatus"`
 
 	// Exit info — populated when LastStatus is "exited".  Missing fields
 	// deserialise to zero values, which the renderer treats as "unknown".

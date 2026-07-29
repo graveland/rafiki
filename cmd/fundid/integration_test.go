@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/protocol"
 	"git.graveland.dev/brent/fundi/internal/server"
 	"git.graveland.dev/brent/fundi/internal/store"
 	"git.graveland.dev/brent/fundi/internal/version"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // testSocketDir returns a temp directory with a short path (macOS UDS paths

@@ -547,9 +547,9 @@ func (r *tailRenderer) printDim(s string)    { fmt.Fprintln(r.w, r.applyColor(di
 func (r *tailRenderer) printRed(s string)    { fmt.Fprintln(r.w, r.applyColor(red, s)) }
 func (r *tailRenderer) printYellow(s string) { fmt.Fprintln(r.w, r.applyColor(yellow, s)) }
 
-func (r *tailRenderer) red(s string) string    { return r.applyColor(red, s) }
-func (r *tailRenderer) green(s string) string  { return r.applyColor(green, s) }
-func (r *tailRenderer) cyan(s string) string   { return r.applyColor(cyan, s) }
+func (r *tailRenderer) red(s string) string   { return r.applyColor(red, s) }
+func (r *tailRenderer) green(s string) string { return r.applyColor(green, s) }
+func (r *tailRenderer) cyan(s string) string  { return r.applyColor(cyan, s) }
 
 func (r *tailRenderer) applyColor(fn func(string) string, s string) string {
 	if r.useColor {

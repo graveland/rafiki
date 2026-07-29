@@ -5,8 +5,8 @@ import (
 	"sync"
 
 	"git.graveland.dev/brent/fundi/internal/child"
-	"git.graveland.dev/brent/fundi/protocol"
 	"git.graveland.dev/brent/fundi/internal/server"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // connSub is a registered per-child subscriber: a connection and an optional
@@ -301,7 +301,9 @@ func eventPassesFilter(frame []byte, f protocol.SubscribeFilter) bool {
 	// after the wrapper was applied in monitorChild.
 	effectiveType := hdr.Type
 	if hdr.Type == protocol.TypeCtrlEvent && len(hdr.Event) > 0 {
-		var inner struct{ Type string `json:"type"` }
+		var inner struct {
+			Type string `json:"type"`
+		}
 		if json.Unmarshal(hdr.Event, &inner) == nil && inner.Type != "" {
 			effectiveType = inner.Type
 		}

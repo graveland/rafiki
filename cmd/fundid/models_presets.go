@@ -115,5 +115,3 @@ func matchesPresetLabelFilter(presetLabels, required map[string]string, hasLabel
 	}
 	return true
 }
-
-

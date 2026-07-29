@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/protocol"
 	"git.graveland.dev/brent/fundi/internal/store"
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 func newSess(id, name, cwd string) *store.Session {

@@ -142,13 +142,16 @@ func runResume(cmd *cobra.Command, args []string) error {
 // (flags, FUNDI_DEFAULT_MODEL, FUNDI_DEFAULT_LABELS, preset).
 //
 // Priority for model:
-//   --model flag > FUNDI_DEFAULT_MODEL env var > jsonl model_change > error
+//
+//	--model flag > FUNDI_DEFAULT_MODEL env var > jsonl model_change > error
 //
 // Priority for cwd:
-//   --cwd flag > jsonl session header
+//
+//	--cwd flag > jsonl session header
 //
 // Priority for thinking:
-//   --thinking flag > jsonl thinking_level_change > "" (pi default)
+//
+//	--thinking flag > jsonl thinking_level_change > "" (pi default)
 func runResumeFromPiSession(cmd *cobra.Command, input string) error {
 	info, err := resolvePiSession(input)
 	if err != nil {
