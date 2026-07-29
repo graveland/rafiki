@@ -41,14 +41,14 @@ pi-controller install instead of competing for its `~/.pi/run` socket:
 | socket | `~/.local/state/fundi/controller.sock` | `$XDG_RUNTIME_DIR`, or `$FUNDI_SOCKET` |
 | records | `~/.local/share/fundi/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/fundi/logs` | `$XDG_STATE_HOME` |
+| config | `~/.config/fundi` (instructions, skills, `mcp.json`, `presets.json`) | `$XDG_CONFIG_HOME` |
 
 Its launchd/systemd service identity is `dev.graveland.fundi` / `fundi`, again
 distinct from pi-controller's.
 
 The one thing fundi writes outside its own directories is the `fundi-helpers`
 pi extension, into `~/.pi/agent/extensions/` — that is pi's contract, and how
-pi discovers extensions. Presets are read from `~/.pi/agent/fundi-presets.json`
-for the same reason.
+pi discovers extensions.
 
 ## Environment
 
@@ -65,6 +65,10 @@ fundi's variables are `FUNDI_`-prefixed. The pre-rename `PIC_*` and
 | `FUNDI_ATTACH_TAIL` | scrollback the TUI replays (`-1` all, `0` none) |
 | `FUNDI_ATTACH_DEBUG` | `1` logs every event the TUI receives to stderr |
 | `FUNDI_KILL_ON_EXIT` | `1` terminates the child when a directly-invoked TUI quits |
+| `FUNDI_INSTRUCTIONS` | user-global instruction file (default `~/.config/fundi/instructions.md`) |
+| `FUNDI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/fundi/skills`) |
+| `FUNDI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/fundi/mcp.json`) |
+| `FUNDI_AGENT_DB` | postgres URL for conversation persistence; **required for cost accounting** |
 
 ## Build
 

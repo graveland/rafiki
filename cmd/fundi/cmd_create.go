@@ -82,7 +82,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
 	cmd.Flags().StringSlice("skills-dir", nil, "Additional skills directory for --kind agent (repeatable)")
-	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind agent (default: <cwd>/.mcp.json)")
+	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind agent (default: <cwd>/.mcp.json, else $FUNDI_MCP_CONFIG or <config dir>/mcp.json)")
 	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see FUNDI_DEFAULT_LABELS")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 

@@ -1,5 +1,5 @@
 .PHONY: help build update build-daemon build-cli build-attach \
-        build-controller build-pic install \
+        build-controller build-pic install print-config \
         bootstrap pi-build pi-install pi-update pi-refresh-catalogs \
         test test-race test-ci test-both vet fmt clean
 
@@ -50,6 +50,12 @@ build-daemon: # Build the daemon binary (bin/fundid)
 build-cli: # Build the CLI client (bin/fundi)
 	mkdir -p $(BIN_DIR)
 	$(GO) build -o $(BIN_DIR)/$(CLI_BIN) ./cmd/fundi
+
+print-config: build-cli # Show the resolved agent config paths
+	@printf "instructions : %s\n" "$${FUNDI_INSTRUCTIONS:-~/.config/fundi/instructions.md}"
+	@printf "skills       : %s\n" "$${FUNDI_SKILLS_DIRS:-~/.config/fundi/skills}"
+	@printf "mcp          : %s\n" "$${FUNDI_MCP_CONFIG:-~/.config/fundi/mcp.json}"
+	@printf "agent db     : %s\n" "$${FUNDI_AGENT_DB:-<unset — NO COST DATA>}"
 
 # Kept for one cycle: muscle memory, and the M1 smoke checklist names them.
 build-controller: build-daemon # Deprecated alias for build-daemon
