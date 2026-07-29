@@ -283,6 +283,8 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   "noExtensions":        false,
   "skills":              [],               // --skill <path> per entry
   "noSkills":            false,
+  "skillsDirs":          [],               // --skills-dir <dir> per entry; kind=agent only
+  "mcpConfig":           null,             // --mcp-config <path>; kind=agent only
   "promptTemplates":     [],               // --prompt-template <path>
   "noPromptTemplates":   false,
   "themes":              [],               // --theme <path>

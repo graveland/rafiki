@@ -54,6 +54,8 @@ func TestSpawnRequest_RoundTrip(t *testing.T) {
 		NoExtensions:       true,
 		Skills:             []string{"/skill/a"},
 		NoSkills:           true,
+		SkillsDirs:         []string{"/skill-dir/a", "/skill-dir/b"},
+		MCPConfig:          "/c/.mcp.json",
 		PromptTemplates:    []string{"/tpl/a"},
 		NoPromptTemplates:  true,
 		Themes:             []string{"/theme/dark"},
@@ -68,6 +70,53 @@ func TestSpawnRequest_RoundTrip(t *testing.T) {
 		ExtraArgs:          []string{"--debug", "--log-level=trace"},
 	}
 	roundTrip(t, req, &protocol.SpawnRequest{})
+}
+
+// TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip locks down that
+// SkillsDirs/MCPConfig follow the protocol's camelCase convention, matching
+// every other SpawnRequest field and the wire spec (tasks/pi-controller-protocol.md §6.3).
+func TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip(t *testing.T) {
+	req := protocol.SpawnRequest{
+		SkillsDirs: []string{"/a", "/b"},
+		MCPConfig:  "/c/.mcp.json",
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for _, want := range []string{`"skillsDirs"`, `"mcpConfig"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marshalled SpawnRequest missing %s; protocol is camelCase and the wire spec documents it that way: %s", want, got)
+		}
+	}
+	for _, bad := range []string{`"skills_dirs"`, `"mcp_config"`} {
+		if strings.Contains(got, bad) {
+			t.Errorf("marshalled SpawnRequest still contains snake_case %s", bad)
+		}
+	}
+
+	var back protocol.SpawnRequest
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back.SkillsDirs, req.SkillsDirs) || back.MCPConfig != req.MCPConfig {
+		t.Errorf("round-trip lost data: %+v", back)
+	}
+}
+
+// TestSpawnRequestNewFieldsOmitWhenEmpty locks down omitempty so an older
+// daemon that predates these fields sees a request it fully understands.
+func TestSpawnRequestNewFieldsOmitWhenEmpty(t *testing.T) {
+	b, err := json.Marshal(protocol.SpawnRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, absent := range []string{"skillsDirs", "mcpConfig"} {
+		if strings.Contains(string(b), absent) {
+			t.Errorf("%s must be omitempty so older daemons ignore it: %s", absent, b)
+		}
+	}
 }
 
 func TestResumeRequest_RoundTrip(t *testing.T) {
@@ -344,7 +393,7 @@ func TestSpawnRequest_OmitEmpty(t *testing.T) {
 		`"id"`, `"name"`, `"provider"`, `"model"`, `"thinking"`, `"apiKey"`,
 		`"noSession"`, `"sessionDir"`, `"resumeSession"`, `"forkSession"`,
 		`"tools"`, `"noTools"`, `"noBuiltinTools"`, `"extensions"`, `"noExtensions"`,
-		`"skills"`, `"noSkills"`, `"promptTemplates"`, `"noPromptTemplates"`,
+		`"skills"`, `"noSkills"`, `"skillsDirs"`, `"mcpConfig"`, `"promptTemplates"`, `"noPromptTemplates"`,
 		`"themes"`, `"noThemes"`, `"noContextFiles"`,
 		`"systemPrompt"`, `"appendSystemPrompt"`, `"verbose"`,
 		`"piBinary"`, `"env"`, `"envOverride"`, `"extraArgs"`,

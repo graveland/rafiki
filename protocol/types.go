@@ -188,9 +188,9 @@ type SpawnRequest struct {
 	NoSkills       bool     `json:"noSkills,omitempty"`
 	// SkillsDirs are additional skill directories for an agent-kind child,
 	// appended after the configured and project dirs (highest precedence).
-	SkillsDirs []string `json:"skills_dirs,omitempty"`
+	SkillsDirs []string `json:"skillsDirs,omitempty"`
 	// MCPConfig overrides the .mcp.json path for an agent-kind child.
-	MCPConfig         string   `json:"mcp_config,omitempty"`
+	MCPConfig         string   `json:"mcpConfig,omitempty"`
 	PromptTemplates   []string `json:"promptTemplates,omitempty"`
 	NoPromptTemplates bool     `json:"noPromptTemplates,omitempty"`
 	Themes            []string `json:"themes,omitempty"`
