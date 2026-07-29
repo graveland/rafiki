@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
 // includeLine matches a line that is nothing but an @-include reference, per
@@ -26,11 +28,11 @@ func missingIncludeMarker(ref string) string {
 }
 
 // LoadContextFiles returns the concatenated instruction-file content for cwd:
-// ~/.claude/CLAUDE.md (user-global) first, then CLAUDE.md and AGENTS.md at
-// the git root, then CLAUDE.md and AGENTS.md at cwd itself - deduped when the
-// git root and cwd are the same directory. Files that don't exist are
-// skipped silently (most directories have neither); the returned sections
-// are joined with a blank line between them.
+// the user-global instruction file (paths.InstructionsFile) first, then
+// CLAUDE.md and AGENTS.md at the git root, then CLAUDE.md and AGENTS.md at cwd
+// itself - deduped when the git root and cwd are the same directory. Files
+// that don't exist are skipped silently (most directories have neither); the
+// returned sections are joined with a blank line between them.
 //
 // Within a file, a line matching ^@(\S+)$ is replaced by the referenced
 // file's content, resolved relative to the including file's own directory,
@@ -41,9 +43,7 @@ func missingIncludeMarker(ref string) string {
 func LoadContextFiles(cwd string) (string, error) {
 	var sections []string
 
-	if home, err := os.UserHomeDir(); err != nil {
-		slog.Warn("agent: could not resolve home directory; skipping user-global CLAUDE.md", "error", err)
-	} else if s := loadInstructionFile(filepath.Join(home, ".claude", "CLAUDE.md")); s != "" {
+	if s := loadInstructionFile(paths.InstructionsFile()); s != "" {
 		sections = append(sections, s)
 	}
 
