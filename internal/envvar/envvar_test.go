@@ -88,3 +88,25 @@ func TestEveryMigratedVariableHasAFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestNewVarsHaveNoDeprecatedSpelling(t *testing.T) {
+	for _, name := range []string{Instructions, SkillsDirs, MCPConfig} {
+		t.Setenv(name, "/from/new/name")
+		if got := Get(name); got != "/from/new/name" {
+			t.Fatalf("Get(%s) = %q, want /from/new/name", name, got)
+		}
+	}
+}
+
+func TestNewVarNamesAreFundiPrefixed(t *testing.T) {
+	want := map[string]string{
+		Instructions: "FUNDI_INSTRUCTIONS",
+		SkillsDirs:   "FUNDI_SKILLS_DIRS",
+		MCPConfig:    "FUNDI_MCP_CONFIG",
+	}
+	for got, expect := range want {
+		if got != expect {
+			t.Errorf("constant = %q, want %q", got, expect)
+		}
+	}
+}

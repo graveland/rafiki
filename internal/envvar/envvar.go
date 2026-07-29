@@ -59,6 +59,21 @@ const (
 	// AgentDB was always fundi-named; listed here so every owned variable has
 	// one home.
 	AgentDB = "FUNDI_AGENT_DB"
+
+	// Instructions is the user-global instruction file. fundi's own config, so
+	// it is NOT ~/.claude/CLAUDE.md — see internal/paths for why fundi does not
+	// read its configuration out of another tool's directory. Point it at a
+	// Claude profile explicitly if that is what you want.
+	Instructions = "FUNDI_INSTRUCTIONS"
+
+	// SkillsDirs is an OS-path-list of skill directories ($PATH convention:
+	// ":" on unix). Ordered lowest-to-highest precedence, matching
+	// agent.DiscoverSkills, so a later entry overrides an earlier one on name
+	// collision. Non-existent entries are skipped, not errors.
+	SkillsDirs = "FUNDI_SKILLS_DIRS"
+
+	// MCPConfig is the path to a global .mcp.json, merged under the per-cwd one.
+	MCPConfig = "FUNDI_MCP_CONFIG"
 )
 
 // Variables consumed only by the TypeScript side (fundi-attach and the
