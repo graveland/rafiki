@@ -97,7 +97,7 @@ type Controller interface {
 	// sources return no entries rather than errors.
 	ListModels(ctx context.Context, provider string) ([]protocol.ModelInfo, error)
 
-	// ListPresets enumerates presets from ~/.pi/agent/fundi-presets.json.
+	// ListPresets enumerates presets from <config dir>/presets.json (paths.PresetsFile()).
 	// labels and hasLabel apply the same AND-match filter semantics as ctrl_list.
 	ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error)
 

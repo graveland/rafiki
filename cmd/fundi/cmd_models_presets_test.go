@@ -147,10 +147,10 @@ func TestRenderPresets_EmptySlice(t *testing.T) {
 // the preset-resolution block inline (as runCreate does) rather than spinning
 // up a real daemon.
 func TestFundiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
-	// Write a minimal presets file into a temp home dir.
+	// Write a minimal presets file into a temp home dir's fundi config dir.
 	dir := t.TempDir()
-	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+	configDir := setPresetsHome(t, dir)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	content := map[string]any{
@@ -162,10 +162,9 @@ func TestFundiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(content)
-	if err := os.WriteFile(filepath.Join(agentDir, "fundi-presets.json"), b, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "presets.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", dir)
 	t.Setenv("FUNDI_DEFAULT_PRESET", "mypreset")
 	os.Unsetenv("FUNDI_DEFAULT_MODEL")
 	os.Unsetenv("FUNDI_DEFAULT_LABELS")

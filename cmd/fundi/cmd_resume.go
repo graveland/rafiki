@@ -68,7 +68,7 @@ Use --detached to skip attaching.`,
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 
 	// Preset support (same semantics as fundi create).
-	cmd.Flags().String("preset", "", "Apply a named preset from ~/.pi/agent/fundi-presets.json")
+	cmd.Flags().String("preset", "", "Apply a named preset from <config dir>/presets.json")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		pf, err := loadPresets()
 		if err != nil || pf == nil {

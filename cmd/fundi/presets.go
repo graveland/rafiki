@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
 // Preset defines default model and label values applied by fundi create --preset NAME.
@@ -20,58 +22,50 @@ type PresetsFile struct {
 	Presets map[string]Preset `json:"presets"`
 }
 
-// PresetsFileName is the presets file's name inside pi's agent directory. The
-// file is fundi's, so it carries fundi's name; the directory is pi's, which is
-// why it is not resolved through internal/paths.
-const PresetsFileName = "fundi-presets.json"
-
-// legacyPresetsFileName is the pre-rename spelling. It is deliberately NOT read
-// as a fallback — it is only probed to turn "no presets file" into an error that
-// says what to do about it. It must NOT equal PresetsFileName; if it does, the
-// "legacy file still exists" branch fires on the current file and reports that
-// the user's own presets are stale. TestLoadPresets_LegacyFileIsNotReadButIsReported
-// catches that.
-const legacyPresetsFileName = "pic-presets.json"
-
-// presetsPath returns the presets file location: ~/.pi/agent/<name>.
-func presetsPath(name string) (string, error) {
+// legacyPresetsPaths are pre-move locations. They are probed only to turn "no
+// presets file" into an error that says what to do; they are never read and
+// never deleted. ~/.pi/agent held fundi's own presets file inside pi's
+// directory; the pic- spelling predates the binary rename. Neither may equal
+// paths.PresetsFile(), or the "legacy file still exists" branch would fire
+// against the user's actual current file and report their own presets as
+// stale — TestLoadPresets_LegacyFileIsNotReadButIsReported guards this.
+func legacyPresetsPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("get home dir: %w", err)
+		return nil
 	}
-	return filepath.Join(home, ".pi", "agent", name), nil
+	return []string{
+		filepath.Join(home, ".pi", "agent", "fundi-presets.json"),
+		filepath.Join(home, ".pi", "agent", "pic-presets.json"),
+	}
 }
 
-// loadPresets reads ~/.pi/agent/fundi-presets.json.
+// loadPresets reads the presets file at paths.PresetsFile().
 // Returns a specific error when the file is missing; otherwise wraps read/parse errors.
 func loadPresets() (*PresetsFile, error) {
-	path, err := presetsPath(PresetsFileName)
-	if err != nil {
-		return nil, err
-	}
+	path := paths.PresetsFile()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, missingPresetsError(path)
 		}
-		return nil, fmt.Errorf("read %s: %w", PresetsFileName, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var pf PresetsFile
 	if err := json.Unmarshal(b, &pf); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", PresetsFileName, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &pf, nil
 }
 
-// missingPresetsError reports the absent presets file, and says so explicitly
-// when the pre-rename file is sitting right next to it. The old name is not
-// read — but failing with a bare "not found" while the user's presets are on
-// disk under the previous spelling would look like data loss.
+// missingPresetsError reports the absent presets file, naming any pre-move file
+// still on disk. Failing with a bare "not found" while the user's presets sit
+// at the old path would look like data loss.
 func missingPresetsError(path string) error {
-	if legacy, err := presetsPath(legacyPresetsFileName); err == nil {
+	for _, legacy := range legacyPresetsPaths() {
 		if _, statErr := os.Stat(legacy); statErr == nil {
-			return fmt.Errorf("no presets file at %s; %s still exists and is no longer read — rename it:\n    mv %s %s",
-				path, legacyPresetsFileName, legacy, path)
+			return fmt.Errorf("no presets file at %s; %s still exists and is no longer read — move it:\n    mkdir -p %s && mv %s %s",
+				path, legacy, filepath.Dir(path), legacy, path)
 		}
 	}
 	return fmt.Errorf("no presets file at %s", path)

@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"git.graveland.dev/brent/fundi/internal/paths"
 )
 
-// writePresetsFile writes a fundi-presets.json into dir and returns the path.
+// writePresetsFile writes a presets.json into dir and returns the path.
 func writePresetsFile(t *testing.T, dir string, content any) string {
 	t.Helper()
-	path := filepath.Join(dir, "fundi-presets.json")
+	path := filepath.Join(dir, "presets.json")
 	b, err := json.Marshal(content)
 	if err != nil {
 		t.Fatalf("marshal presets: %v", err)
@@ -21,11 +24,21 @@ func writePresetsFile(t *testing.T, dir string, content any) string {
 	return path
 }
 
+// setPresetsHome points HOME at dir and clears XDG_CONFIG_HOME so
+// paths.PresetsFile() resolves deterministically to dir/.config/fundi/presets.json,
+// same as TestDefaultsFollowXDGSpec in internal/paths.
+func setPresetsHome(t *testing.T, dir string) string {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	return filepath.Join(dir, ".config", "fundi")
+}
+
 // TestLoadPresets_MissingFile checks the specific error for a missing file.
 func TestLoadPresets_MissingFile(t *testing.T) {
 	// Point home to an empty temp dir so there's definitely no presets file.
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setPresetsHome(t, dir)
 
 	_, err := loadPresets()
 	if err == nil {
@@ -35,49 +48,96 @@ func TestLoadPresets_MissingFile(t *testing.T) {
 		t.Fatal("expected non-empty error message")
 	}
 	// Error must mention the expected path.
-	if !containsAll(err.Error(), "fundi-presets.json") {
-		t.Errorf("error %q should mention fundi-presets.json", err.Error())
+	if !containsAll(err.Error(), "presets.json") {
+		t.Errorf("error %q should mention presets.json", err.Error())
 	}
 }
 
-// TestLoadPresets_LegacyFileIsNotReadButIsReported covers the rename from
-// pic-presets.json: the old name is deliberately NOT a fallback, but failing
-// with a bare "not found" while the user's presets sit on disk under the old
-// spelling would read like data loss.
-func TestLoadPresets_LegacyFileIsNotReadButIsReported(t *testing.T) {
-	dir := t.TempDir()
-	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
-		t.Fatal(err)
+// TestPresetsPath_IsUnderFundiConfigDir locks down that fundi's presets file
+// lives under fundi's own config directory, not inside pi's.
+func TestPresetsPath_IsUnderFundiConfigDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
+	got := paths.PresetsFile()
+	if got != "/tmp/cfg/fundi/presets.json" {
+		t.Fatalf("presets path = %q, want /tmp/cfg/fundi/presets.json", got)
 	}
-	legacy := filepath.Join(agentDir, legacyPresetsFileName)
-	if err := os.WriteFile(legacy, []byte(`{"presets":{"old":{"model":"m"}}}`), 0o600); err != nil {
-		t.Fatal(err)
+	if strings.Contains(got, "/.pi/") {
+		t.Error("presets must not live in pi's directory")
 	}
-	t.Setenv("HOME", dir)
+}
 
-	// The legacy file must not be loaded.
-	pf, err := loadPresets()
-	if err == nil {
-		t.Fatalf("legacy presets file was read; got %+v, want an error", pf)
+// TestMissingPresets_ReportsLegacyPiLocation covers the move out of pi's
+// directory: the legacy file (fundi's own presets, formerly inside ~/.pi/agent)
+// is deliberately NOT read as a fallback, but failing with a bare "not found"
+// while the user's presets sit on disk under the old path would look like data
+// loss.
+func TestMissingPresets_ReportsLegacyPiLocation(t *testing.T) {
+	home := t.TempDir()
+	setPresetsHome(t, home)
+
+	legacyDir := filepath.Join(home, ".pi", "agent")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	// But the error must point at it, and at the fix.
-	if !containsAll(err.Error(), legacyPresetsFileName, PresetsFileName, "mv ") {
-		t.Errorf("error %q should name the legacy file, the new file, and the mv to run", err.Error())
+	legacy := filepath.Join(legacyDir, "fundi-presets.json")
+	if err := os.WriteFile(legacy, []byte(`{"presets":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadPresets()
+	if err == nil {
+		t.Fatal("expected an error for a missing presets file")
+	}
+	if !strings.Contains(err.Error(), legacy) {
+		t.Errorf("error must name the legacy file so it does not look like data loss; got: %v", err)
+	}
+	if _, statErr := os.Stat(legacy); statErr != nil {
+		t.Error("the legacy file must never be deleted")
+	}
+}
+
+// TestLoadPresets_LegacyFileIsNotReadButIsReported covers both pre-move
+// locations: ~/.pi/agent/fundi-presets.json (fundi's own file, inside pi's
+// directory) and ~/.pi/agent/pic-presets.json (the pre-rename spelling).
+// Neither is a fallback — they are only probed to turn "no presets file" into
+// an error that says what to do about it.
+func TestLoadPresets_LegacyFileIsNotReadButIsReported(t *testing.T) {
+	for _, legacyName := range []string{"fundi-presets.json", "pic-presets.json"} {
+		t.Run(legacyName, func(t *testing.T) {
+			dir := t.TempDir()
+			agentDir := filepath.Join(dir, ".pi", "agent")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			legacy := filepath.Join(agentDir, legacyName)
+			if err := os.WriteFile(legacy, []byte(`{"presets":{"old":{"model":"m"}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			setPresetsHome(t, dir)
+
+			// The legacy file must not be loaded.
+			pf, err := loadPresets()
+			if err == nil {
+				t.Fatalf("legacy presets file was read; got %+v, want an error", pf)
+			}
+			// But the error must point at it, and at the fix.
+			if !containsAll(err.Error(), legacy, paths.PresetsFile(), "mv ") {
+				t.Errorf("error %q should name the legacy file, the new file, and the mv to run", err.Error())
+			}
+		})
 	}
 }
 
 // TestLoadPresets_MalformedJSON checks that bad JSON returns a helpful error.
 func TestLoadPresets_MalformedJSON(t *testing.T) {
 	dir := t.TempDir()
-	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+	configDir := setPresetsHome(t, dir)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "fundi-presets.json"), []byte("{not valid json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "presets.json"), []byte("{not valid json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", dir)
 
 	_, err := loadPresets()
 	if err == nil {
@@ -88,8 +148,8 @@ func TestLoadPresets_MalformedJSON(t *testing.T) {
 // TestLoadPresets_ValidFile checks normal load.
 func TestLoadPresets_ValidFile(t *testing.T) {
 	dir := t.TempDir()
-	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+	configDir := setPresetsHome(t, dir)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	content := map[string]any{
@@ -103,8 +163,7 @@ func TestLoadPresets_ValidFile(t *testing.T) {
 			},
 		},
 	}
-	writePresetsFile(t, agentDir, content)
-	t.Setenv("HOME", dir)
+	writePresetsFile(t, configDir, content)
 
 	pf, err := loadPresets()
 	if err != nil {

@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"git.graveland.dev/brent/fundi/internal/models"
+	"git.graveland.dev/brent/fundi/internal/paths"
 	"git.graveland.dev/brent/fundi/protocol"
 )
 
@@ -33,11 +33,6 @@ func (c *Controller) ListModels(ctx context.Context, provider string) ([]protoco
 	return out, nil
 }
 
-// presetsFileName is the presets file inside pi's agent directory. Must match
-// the client's PresetsFileName in cmd/fundi/presets.go — the two read the same
-// file. The pre-rename spelling (pic-presets.json) is not read.
-const presetsFileName = "fundi-presets.json"
-
 // presetEntry is the JSON shape of one entry in the presets file.
 // The full Preset struct lives in cmd/fundi/presets.go; this is a minimal copy
 // to avoid cross-package coupling in v1.
@@ -51,29 +46,25 @@ type presetsFile struct {
 	Presets map[string]presetEntry `json:"presets"`
 }
 
-// ListPresets reads ~/.pi/agent/fundi-presets.json and returns presets that
-// satisfy the label filter.  labels and hasLabel use the same AND-match
-// semantics as ctrl_list: every k=v in labels must match the preset's labels
-// map, and every key in hasLabel must be present.
+// ListPresets reads the presets file at paths.PresetsFile() and returns
+// presets that satisfy the label filter. labels and hasLabel use the same
+// AND-match semantics as ctrl_list: every k=v in labels must match the
+// preset's labels map, and every key in hasLabel must be present.
 //
 // An absent or empty presets file returns an empty slice (not an error) so
 // callers always get a well-formed response.
 func (c *Controller) ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return []protocol.PresetInfo{}, nil
-	}
-	path := filepath.Join(home, ".pi", "agent", presetsFileName)
+	path := paths.PresetsFile()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []protocol.PresetInfo{}, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", presetsFileName, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var pf presetsFile
 	if err := json.Unmarshal(b, &pf); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", presetsFileName, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
 	// Sort preset names for deterministic output.
