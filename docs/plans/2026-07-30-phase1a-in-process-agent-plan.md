@@ -1948,6 +1948,17 @@ git commit -m "docs(plans): record phase 1a verification outcomes"
 Both are consequences of the design, not defects, but they are user-visible and must be in the phase's release notes.
 
 1. **`fundi logs --err <agent-child>` returns empty.** An in-process agent has no separate stderr; its diagnostics are daemon log lines tagged with the child id. `err.log.gz` is no longer written for agent children. pi and claude are unaffected. The design intends this — `logs` becomes a query in phase 2 — but between the two phases there is a real gap in agent-child diagnostics, and the workaround is reading the daemon log.
+3. **A forwarded environment no longer reaches an agent child, except the two provider keys.**
+   `fundi create` sets `--forward-env` true by default and `collectCallerEnv` snapshots the
+   caller's whole environment, which the subprocess path passed through `spec.Env`. An
+   in-process child inherits nothing, and Go has no per-goroutine environment, so only
+   `ANTHROPIC_API_KEY` and `OPENROUTER_API_KEY` are re-established explicitly (overlaid onto
+   `RuntimeOptions`, precedence: daemon env < forwarded env < explicit `--api-key`). Everything
+   else — `http_proxy`, `XDG_*`, and anything the agent's own tool subprocesses would have
+   inherited — is unrecoverable and is logged by name at spawn rather than dropped silently.
+   This is inherent to the goroutine model, not a defect, but it is a real capability loss
+   versus the subprocess it replaces.
+
 2. **`fundi get <agent-child>` reports `pid: 0`.** There is no process. `loadOrphans` already guards with `if rec.PID > 0`, so nothing tries to signal it, but any external tooling that treats pid 0 as an error needs updating.
 
 ## Out of scope for this plan
