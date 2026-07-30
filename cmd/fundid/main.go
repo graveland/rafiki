@@ -172,6 +172,18 @@ func main() {
 	// in-process agent's own shutdown (e.g. flushing conversation state) runs
 	// before this point, so closing earlier could pull the pool out from
 	// under a child still finishing its own graceful stop.
+	//
+	// baseCancel is called explicitly here, ahead of its own defer, rather
+	// than left to fire whenever main() eventually returns: pgxpool.Pool.Close
+	// blocks until every acquired connection is released, and
+	// ShutdownAllChildren can still return at its 180s global bound with a
+	// child's shutdown ladder mid-flight (still holding a connection).
+	// Cancelling baseCtx first unblocks that straggler's own ctx-derived work
+	// so it releases its connection promptly, bounding pool.Close()'s wait
+	// instead of leaving it to block on a child that is never coming back.
+	// CancelFunc is idempotent, so the deferred baseCancel() at the top of
+	// main is a harmless no-op once this fires.
+	baseCancel()
 	if pool != nil {
 		pool.Close()
 		slog.Info("agent database pool closed")

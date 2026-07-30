@@ -23,7 +23,6 @@ import (
 
 	"git.graveland.dev/brent/fundi/internal/child"
 	"git.graveland.dev/brent/fundi/internal/envvar"
-	"git.graveland.dev/brent/fundi/internal/inproc"
 	"git.graveland.dev/brent/fundi/internal/intercept"
 	"git.graveland.dev/brent/fundi/internal/persist"
 	"git.graveland.dev/brent/fundi/internal/ring"
@@ -98,34 +97,6 @@ func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper
 		pool:        pool,
 		baseCtx:     baseCtx,
 	}
-}
-
-// agentRunner builds the in-process runner for an agent child. Returns a nil
-// Runner (and nil error) for every other kind, which leaves SpawnSpec on the
-// subprocess path unchanged.
-//
-// argv is built the same way for every spawn path (buildAgentArgv, the single
-// source of per-child agent config) and then parsed back with parseAgentFlags
-// — see agent_runtime.go's toRuntimeOptions doc comment for why this is not a
-// hand-written SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string) (child.Runner, error) {
-	if req.Kind != "agent" {
-		return nil, nil
-	}
-	argv := appendDaemonRef(buildAgentArgv(req, childID, c.stateDir), childID)
-	f, err := parseAgentFlags(argv[1:]) // argv[0] is the "agent" subcommand
-	if err != nil {
-		return nil, fmt.Errorf("agent flags: %w", err)
-	}
-	ro, err := f.toRuntimeOptions(req.Cwd, c.pool)
-	if err != nil {
-		return nil, fmt.Errorf("agent runtime options: %w", err)
-	}
-	return inproc.New(inproc.Options{
-		ChildID: childID,
-		Parent:  c.baseCtx,
-		Runtime: ro,
-	}), nil
 }
 
 // startSweeper launches a background goroutine that periodically forgets

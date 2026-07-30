@@ -4,8 +4,144 @@ import (
 	"strings"
 	"testing"
 
+	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/protocol"
 )
+
+// TestAgentRunnerKind proves agentRunner only builds an in-process Runner for
+// Kind: "agent" and leaves every other kind on the subprocess path (nil
+// Runner, nil error) unchanged.
+func TestAgentRunnerKind(t *testing.T) {
+	c := newTestController(t)
+	for _, kind := range []string{"pi", "claude"} {
+		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
+		runner, err := c.agentRunner(req, "c_"+kind)
+		if err != nil {
+			t.Fatalf("agentRunner(kind=%s): %v", kind, err)
+		}
+		if runner != nil {
+			t.Errorf("agentRunner(kind=%s) returned a non-nil Runner, want nil", kind)
+		}
+	}
+
+	req := protocol.SpawnRequest{Kind: "agent", Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5"}
+	runner, err := c.agentRunner(req, "c_agent")
+	if err != nil {
+		t.Fatalf("agentRunner(kind=agent): %v", err)
+	}
+	if runner == nil {
+		t.Error("agentRunner(kind=agent) returned a nil Runner, want non-nil")
+	}
+}
+
+// TestAgentRunnerRefWinsOverExtraArgs is the agentRunner-level counterpart to
+// TestAgentRefIsDaemonControlled: it goes through the full agentRunner path
+// (not just buildAgentArgv/parseAgentFlags/toRuntimeOptions directly), so it
+// is the test that actually catches a dropped appendDaemonRef call inside
+// agentRunner/agentRuntimeOptions itself — the earlier tests call
+// appendDaemonRef directly and would keep passing even if agentRunner forgot
+// to call it.
+func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
+	c := newTestController(t)
+	req := protocol.SpawnRequest{
+		Kind:      "agent",
+		Cwd:       t.TempDir(),
+		Model:     "anthropic/claude-sonnet-4-5",
+		ExtraArgs: []string{"--ref", "spoofed-child-id"},
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_authoritative")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.Ref != "c_authoritative" {
+		t.Errorf("Ref = %q, want the daemon's child id to win over a competing ExtraArgs --ref", ro.Ref)
+	}
+}
+
+// TestAgentRunnerAPIKeyOverlay proves req.APIKey reaches RuntimeOptions for an
+// in-process child. buildEnv is how the subprocess path delivers this (via
+// ANTHROPIC_API_KEY/OPENROUTER_API_KEY env injection), which an in-process
+// child never receives since child.Spawn skips spec.Env when spec.Runner !=
+// nil - so agentRuntimeOptions must overlay it directly onto RuntimeOptions,
+// or it is silently dropped.
+func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
+	c := newTestController(t)
+
+	anthropicReq := protocol.SpawnRequest{
+		Kind:   "agent",
+		Cwd:    t.TempDir(),
+		Model:  "anthropic/claude-sonnet-4-5",
+		APIKey: "sk-ant-test-key",
+	}
+	ro, err := c.agentRuntimeOptions(anthropicReq, "c_key_anthropic")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.AnthropicAPIKey != anthropicReq.APIKey {
+		t.Errorf("AnthropicAPIKey = %q, want %q", ro.AnthropicAPIKey, anthropicReq.APIKey)
+	}
+	if ro.OpenRouterAPIKey != "" {
+		t.Errorf("OpenRouterAPIKey = %q, want empty for an anthropic/ model", ro.OpenRouterAPIKey)
+	}
+
+	openrouterReq := protocol.SpawnRequest{
+		Kind:   "agent",
+		Cwd:    t.TempDir(),
+		Model:  "deepseek/deepseek-chat",
+		APIKey: "sk-or-test-key",
+	}
+	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.OpenRouterAPIKey != openrouterReq.APIKey {
+		t.Errorf("OpenRouterAPIKey = %q, want %q", ro.OpenRouterAPIKey, openrouterReq.APIKey)
+	}
+	if ro.AnthropicAPIKey != "" {
+		t.Errorf("AnthropicAPIKey = %q, want empty for a non-anthropic model", ro.AnthropicAPIKey)
+	}
+}
+
+// TestAgentRunnerRejectsExplicitDB proves an explicit --db in req.ExtraArgs is
+// rejected rather than silently discarded: the in-process path always uses
+// the daemon's own shared pool (c.pool), so honoring a caller's own DSN would
+// require opening a second pool this code never does.
+func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
+	c := newTestController(t)
+	for _, extraArgs := range [][]string{
+		{"--db", "postgres://caller-supplied"},
+		{"--db=postgres://caller-supplied"},
+	} {
+		req := protocol.SpawnRequest{
+			Kind:      "agent",
+			Cwd:       t.TempDir(),
+			Model:     "anthropic/claude-sonnet-4-5",
+			ExtraArgs: extraArgs,
+		}
+		if _, err := c.agentRuntimeOptions(req, "c_explicit_db"); err == nil {
+			t.Errorf("agentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
+		}
+	}
+}
+
+// TestAgentRunnerIgnoresEnvDefaultedDB proves the daemon's own
+// $FUNDI_AGENT_DB (read as agentFlags.db's default by newAgentFlagSet, with
+// zero ExtraArgs involved) is NOT treated as an explicit --db and does not
+// trip the rejection above — it names the same database the shared pool
+// already points at, so an ordinary deployment with a configured database
+// must still be able to spawn agent children.
+func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
+	t.Setenv(envvar.AgentDB, "postgres://daemons-own-pool")
+	c := newTestController(t)
+	req := protocol.SpawnRequest{
+		Kind:  "agent",
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+	if _, err := c.agentRuntimeOptions(req, "c_env_default_db"); err != nil {
+		t.Errorf("agentRuntimeOptions with only $FUNDI_AGENT_DB set (no explicit --db): got error %v, want nil", err)
+	}
+}
 
 // TestArgvRoundTripsIntoRuntimeOptions is the anti-drop guard for this task.
 // buildAgentArgv is the single place per-child config is expressed; parsing it
