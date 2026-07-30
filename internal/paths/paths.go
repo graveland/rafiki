@@ -11,15 +11,29 @@
 package paths
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"git.graveland.dev/brent/fundi/internal/envvar"
 )
 
 // appName is the per-application leaf every base directory gets.
 const appName = "fundi"
+
+// homeDirWarnOnce guards the warning below against spam. base() is called on
+// every path resolution — once per incoming request in a long-lived fundid —
+// so logging unconditionally would flood the log with the same fact on every
+// call. A single fired warning already says "every path from here on is
+// wrong, relative to the wrong directory": os.UserHomeDir() only reads $HOME
+// (no getpwuid fallback on Unix), and nothing in this process calls
+// os.Setenv("HOME", ...), so the failure is a static property of how the
+// process was launched, not a transient condition that could later clear or
+// recur differently. If that assumption ever stops holding, this needs a
+// rate-limited warn instead of a one-shot.
+var homeDirWarnOnce sync.Once
 
 // base returns $envVar/fundi when envVar is set, else $HOME/<fallback>/fundi.
 // The spec says a relative or empty value must be ignored in favour of the
@@ -31,7 +45,15 @@ func base(envVar string, fallback ...string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		// Nothing sensible to fall back to; a relative path at least keeps the
-		// process running rather than panicking at init.
+		// process running rather than panicking at init. But a relative path
+		// resolves against whatever the current working directory happens to
+		// be at each call site — the daemon's cwd for SocketPath(), a child's
+		// project cwd for InstructionsFile() — silently landing state in the
+		// wrong place. That must not pass without a trace in the log.
+		homeDirWarnOnce.Do(func() {
+			slog.Warn("cannot determine home directory; falling back to a path relative to the current working directory",
+				"error", err, "envVar", envVar)
+		})
 		return filepath.Join(append(fallback, appName)...)
 	}
 	return filepath.Join(append([]string{home}, append(fallback, appName)...)...)

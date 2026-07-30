@@ -1,10 +1,13 @@
 package paths
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -178,5 +181,52 @@ func TestNoClaudeOrPiPathsLeak(t *testing.T) {
 		if strings.Contains(p, "/.claude") || strings.Contains(p, "/.pi/") {
 			t.Errorf("fundi config path leaks into a foreign tool's directory: %s", p)
 		}
+	}
+}
+
+// When HOME cannot be resolved, base() must not silently hand back a relative
+// path with no trace anywhere — that silence is exactly the I10 defect this
+// pins down. Setting HOME to the empty string is enough to force the failure
+// deterministically: os.UserHomeDir on Unix reads only $HOME (no getpwuid
+// fallback), so this never touches the real HOME outside the test.
+func TestBase_HomeDirUnresolvable_FallsBackToRelativePath(t *testing.T) {
+	homeDirWarnOnce = sync.Once{}
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	got := ConfigDir()
+	want := filepath.Join(".config", "fundi")
+	if got != want {
+		t.Fatalf("ConfigDir() = %q, want %q", got, want)
+	}
+	if filepath.IsAbs(got) {
+		t.Fatalf("ConfigDir() = %q, must be relative to the caller's cwd when home cannot be resolved — that is the pre-existing fallback behaviour this task makes observable, not a new one", got)
+	}
+}
+
+// The invariant is two-sided: the failure must be observable in the log, and
+// it must not spam — base() runs on every path resolution (SocketPath(),
+// InstructionsFile(), etc.), so logging unconditionally would flood a
+// long-lived fundid with the same fact on every request.
+func TestBase_HomeDirUnresolvable_WarnsExactlyOnceAcrossRepeatedCalls(t *testing.T) {
+	homeDirWarnOnce = sync.Once{}
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	// Three distinct call sites, all funnelling through base(): the guard must
+	// be process-wide, not re-armed per envVar or per exported function.
+	_ = ConfigDir()
+	_ = DataDir()
+	_ = StateDir()
+
+	if got := strings.Count(buf.String(), "cannot determine home directory"); got != 1 {
+		t.Fatalf("warning logged %d times across 3 calls, want exactly 1 (sync.Once must guard the whole process, not fire per call or per envVar)\nlog output:\n%s", got, buf.String())
 	}
 }
