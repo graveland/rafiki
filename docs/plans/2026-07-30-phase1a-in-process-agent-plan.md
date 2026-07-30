@@ -218,6 +218,10 @@ import (
 
 // fakeRuntimeOptions returns options that build a working engine with no API
 // credentials and no database: FakeTurns replaces the upstream sender.
+//
+// NOTE: Config.FakeTurns is a PATH to a newline-delimited-JSON file of
+// anthropic.Message values (loaded by LoadFakeSender), NOT literal reply text.
+// Build it with this package's existing writeFakeTurns/sampleEndTurn helpers.
 func fakeRuntimeOptions(t *testing.T, cwd string) RuntimeOptions {
 	t.Helper()
 	return RuntimeOptions{
@@ -225,7 +229,7 @@ func fakeRuntimeOptions(t *testing.T, cwd string) RuntimeOptions {
 		Cwd:            cwd,
 		Ref:            "test-ref",
 		SpillDir:       t.TempDir(),
-		FakeTurns:      "the fake reply",
+		FakeTurns:      writeFakeTurns(t, sampleEndTurn),
 		NoSkills:       true,
 		NoContextFiles: true,
 	}
@@ -330,7 +334,7 @@ import (
 // daemon must not install per-child signal handlers.
 type RuntimeOptions struct {
 	Model                string
-	ThinkingBudget       int
+	ThinkingBudget       int64 // int64: agent.ThinkingBudgetFor returns int64
 	SystemPromptOverride string
 	AppendSystemPrompt   string
 	Cwd                  string // must be absolute
@@ -902,15 +906,50 @@ Create `internal/inproc/runner_test.go`:
 package inproc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"git.graveland.dev/brent/fundi/internal/agent"
 )
+
+// sampleEndTurn is one scripted assistant message: a completed turn whose text
+// the test asserts on. Mirrors internal/agent/engine_test.go's fixture of the
+// same name — that one is an unexported const in package agent, so it cannot be
+// imported here.
+const sampleEndTurn = `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x",` +
+	`"stop_reason":"end_turn","content":[{"type":"text","text":"the fake reply"}],` +
+	`"usage":{"input_tokens":4,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
+
+// writeFakeTurns writes scripted assistant messages as one ndjson file and
+// returns its path.
+//
+// Config.FakeTurns is a PATH to a newline-delimited-JSON file of
+// anthropic.Message values (loaded by agent.LoadFakeSender) — NOT literal reply
+// text. package agent has its own writeFakeTurns helper, but it is an
+// unexported test helper in another package, so this test needs its own.
+func writeFakeTurns(t *testing.T, bodies ...string) string {
+	t.Helper()
+	lines := make([]string, 0, len(bodies))
+	for _, b := range bodies {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, []byte(b)); err != nil {
+			t.Fatalf("compact scripted body: %v", err)
+		}
+		lines = append(lines, compact.String())
+	}
+	path := filepath.Join(t.TempDir(), "turns.ndjson")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write scripted turns: %v", err)
+	}
+	return path
+}
 
 // readFramesUntil reads newline-delimited JSON frames from r until it sees one
 // whose "type" equals want, or until r hits EOF. Returns every frame read.
@@ -951,7 +990,7 @@ func TestRunnerDrivesAFakeTurn(t *testing.T) {
 			Cwd:            t.TempDir(),
 			Ref:            "c_inproc",
 			SpillDir:       t.TempDir(),
-			FakeTurns:      "the fake reply",
+			FakeTurns:      writeFakeTurns(t, sampleEndTurn),
 			NoSkills:       true,
 			NoContextFiles: true,
 		},
