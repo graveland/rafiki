@@ -154,11 +154,26 @@ type SendMeta struct {
 	Fallback []Upstream // tried in order on retryable primary failure
 }
 
-// SendParams write-aheads the turn, routes the call through the primary's
-// breaker with fallback, and completes/fails the turn. Capture is
-// best-effort: a broken store degrades to pass-through, never blocks the
-// call. Every invocation inserts its own turn row and always resolves it.
-func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+// prepareSend is the ONE place that decides how a request is routed. Every
+// send path (SendParams, sendStreaming) calls it first and MUST NOT
+// re-derive any of this itself — a second copy would silently drift (e.g.
+// streaming requests reaching a different upstream than non-streaming ones
+// for the same model id). It:
+//
+//  1. Strips a native "anthropic/<x>" prefix so it isn't caught by the slash
+//     rule below and so the native API receives a bare id.
+//  2. Forces primary/fallbacks to (UpstreamOpenRouter, nil) for any
+//     remaining slash id — an OpenRouter-native id must not default to
+//     upstream anthropic.
+//  3. Applies OpenRouter provider preferences when primary is OpenRouter,
+//     BEFORE capture so the recorded request matches the wire.
+//  4. Opens the "llm.send" tracing span (model/primary attributes) and
+//     records current breaker state.
+//
+// Returns the span-carrying ctx, the span (caller must End it), the
+// resolved primary/fallbacks, and params with any routing-driven mutation
+// (prefix strip, provider prefs) applied.
+func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, Upstream, []Upstream, anthropic.MessageNewParams) {
 	primary := meta.Primary
 	if primary == "" {
 		primary = UpstreamAnthropic
@@ -186,10 +201,31 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		attribute.String("rafiki.model", string(params.Model)),
 		attribute.String("rafiki.primary", string(primary)),
 	))
-	defer span.End()
 	if b := c.breakers[primary]; b != nil {
 		span.SetAttributes(attribute.Bool("rafiki.breaker.open", b.Open()))
 	}
+	return ctx, span, primary, fallbacks, params
+}
+
+// failTurn best-effort fails a captured turn; a no-op when capturing is
+// false. Shared by SendParams and sendStreaming so the capture-failure log
+// line stays in one place.
+func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, turnCreatedAt time.Time, err error) {
+	if !capturing {
+		return
+	}
+	if ferr := c.capture.FailTurn(ctx, turnID, turnCreatedAt, err.Error()); ferr != nil {
+		c.logger.Warn("capture: fail-turn write failed", "error", ferr)
+	}
+}
+
+// SendParams write-aheads the turn, routes the call through the primary's
+// breaker with fallback, and completes/fails the turn. Capture is
+// best-effort: a broken store degrades to pass-through, never blocks the
+// call. Every invocation inserts its own turn row and always resolves it.
+func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	ctx, span, primary, fallbacks, params := c.prepareSend(ctx, meta, params)
+	defer span.End()
 
 	turnID, turnCreatedAt, capturing := c.beginTurn(ctx, meta, params)
 
@@ -200,11 +236,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 
 	if err != nil {
 		span.RecordError(err)
-		if capturing {
-			if ferr := c.capture.FailTurn(ctx, turnID, turnCreatedAt, err.Error()); ferr != nil {
-				c.logger.Warn("capture: fail-turn write failed", "error", ferr)
-			}
-		}
+		c.failTurn(ctx, capturing, turnID, turnCreatedAt, err)
 		return nil, err
 	}
 
@@ -221,6 +253,288 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	return resp, nil
 }
 
+// sendStreaming issues params through the streaming path when the resolved
+// primary sender implements StreamingSender, invoking handler once per event
+// AS IT ARRIVES and accumulating the events into the returned message via
+// anthropic.Message.Accumulate (the same accumulation pattern the SDK docs
+// use for a caller driving stream.Next() itself).
+//
+// attempted reports whether the CALLER must fall back to SendParams itself:
+//   - false means the caller must call SendParams — either no request was
+//     sent at all here (the resolved sender doesn't implement
+//     StreamingSender: no turn row, no side effect), or a request WAS sent
+//     and failed, but delivered is also false (see below), so SendParams
+//     retrying the whole send — including its full breaker/fallback chain
+//     — is safe.
+//   - true means the result here is final: either it succeeded, or it
+//     failed after already delivering at least one event, in which case a
+//     retry is never safe and the caller must surface err directly.
+//
+// delivered reports whether AT LEAST ONE event reached handler during this
+// call. This is the structural guard sendWithTrim's trim-retry loop (and,
+// transitively, sendAttempt's own-package caller) relies on: once delivered
+// is true, retrying — here or in SendParams — is never safe, because a
+// retry opens a brand new, independent request and the caller has no way to
+// know the previous one already delivered partial output to handler. This
+// holds regardless of what the resulting error turns out to be; nothing
+// here or in sendWithTrim assumes a particular failure shape delivers
+// before content.
+//
+// Failover: unlike an earlier version of this method, sendStreaming DOES
+// engage even when a fallback chain and an active breaker are configured —
+// it no longer bails out of streaming entirely just because both are set.
+// A concrete consumer (fundi) enables Fallback(UpstreamOpenRouter) and
+// WithBreaker together whenever an OpenRouter key is configured, which is
+// the common case, not an edge case; bailing out of streaming there made
+// WithStreamHandler silently a no-op for exactly the deployment this was
+// built for.
+//
+// Breaker gate AND result recording both genuinely apply here, via the same
+// primaryGate/recordPrimaryResult helpers callModel itself uses — this used
+// to only be true of the gate (an earlier version of this comment claimed
+// the breaker's semantics were "mirrored" while only the len(fallbacks) != 0
+// && c.breakers[primary] != nil shape was reused, and the actual UsePrimary
+// decision plus RecordResult bookkeeping were skipped entirely, so an open
+// breaker never stopped a streaming send from reaching the dead primary and
+// a streamed failure/success never updated breaker state). Concretely:
+//   - Before issuing anything, primaryGate(primary, fallbacks, now) is
+//     consulted. When it says NOT to use primary (breaker open, no probe
+//     slot available), sendStreaming issues NOTHING — no request, no turn
+//     row — and reports attempted=false so the caller's SendParams call
+//     runs the complete breaker-gated fallback chain non-streamed, exactly
+//     the handoff shape already used when the resolved sender lacks
+//     streaming capability at all.
+//   - When primaryGate does say to use primary, the returned breaker (nil
+//     when bypassed — no fallback configured, or breakers disabled) is used
+//     to recordPrimaryResult once the attempt resolves: success closes it,
+//     a retryable failure trips/extends it, a non-retryable failure is left
+//     alone — the identical rule callModel applies to its own sender.New()
+//     call. EXCEPTION: recording is skipped exactly on the two pre-delivery
+//     hand-off paths below (breaker != nil, nothing delivered yet) — the
+//     caller's own follow-up callModel attempt is what records there, and
+//     it runs moments later. Recording in both places would double-record
+//     one logical failure and pre-emptively trip the breaker before that
+//     retry ever gets a chance to run — this is not an oversight, it is
+//     enforced per-branch below and is exactly the failure mode the
+//     TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure and
+//     TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent
+//     regression tests exist to catch if this "simplifies" back to an
+//     unconditional call.
+//   - breaker (the second primaryGate return, non-nil only when a fallback
+//     chain AND an active breaker both genuinely apply) is ALSO still used,
+//     as before, to decide what a PRE-delivery failure (delivered still
+//     false) should report:
+//   - breaker != nil: nothing has reached handler yet, so nothing can be
+//     double-delivered by a retry. sendStreaming reports attempted=false;
+//     the caller's subsequent SendParams call re-tries primary (subject to
+//     the SAME breaker gate — see above) and, on a retryable failure, runs
+//     the complete breaker-gated fallback chain non-streamed.
+//   - breaker == nil (no fallback configured, or no breaker — the same
+//     shape callModel itself would call directly with no failover to
+//     offer): bouncing to SendParams would only re-issue to the identical
+//     primary sender, wasting a request. sendStreaming instead reports
+//     attempted=true so the caller's own retry logic (sendWithTrim's
+//     trim-retry loop) can re-attempt via a fresh streaming call, exactly
+//     as it always has.
+//
+// A MID-stream failure (delivered already true) is never safe to hand off
+// regardless of breaker — see above — so sendStreaming always reports
+// attempted=true there and the error surfaces directly, with no failover.
+//
+// Turn bookkeeping on a breaker-eligible pre-delivery handoff: this method still
+// calls beginTurn before issuing the request and failTurn on the resulting
+// error, so the streaming attempt's own turn row is written and correctly
+// marked failed, even though attempted=false. The caller's subsequent
+// SendParams call then begins and resolves ITS OWN, separate turn row for
+// its own (possibly multi-upstream, via callModel) request. This is not an
+// orphan or a duplicate: it is the same one-row-per-invocation convention
+// sendWithTrim's own trim-retry loop already relies on (each retry attempt
+// is its own SendParams call and so its own turn row) — two real requests
+// were made here (one streamed and rejected, one non-streamed and
+// resolved), so two rows accurately reflect that.
+func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
+	ctx, span, primary, fallbacks, params := c.prepareSend(ctx, meta, params)
+	defer span.End()
+
+	sender := c.senders[primary]
+	streamer, canStream := sender.(StreamingSender)
+	if !canStream {
+		return nil, false, false, nil
+	}
+
+	now := time.Now()
+	usePrimary, breaker := c.primaryGate(primary, fallbacks, now)
+	if !usePrimary {
+		// The breaker is open and holds no probe slot right now: the primary
+		// is known-bad. Issue nothing at all — no request, no turn row, the
+		// same shape as the capability-bypass case above — so the caller's
+		// SendParams call runs the complete breaker-gated fallback chain
+		// non-streamed instead of burning a full timeout on a dead primary.
+		c.logger.Warn("breaker open; stepping aside from streaming primary", "primary", string(primary))
+		return nil, false, false, nil
+	}
+
+	turnID, turnCreatedAt, capturing := c.beginTurn(ctx, meta, params)
+	start := time.Now()
+
+	stream, serr := streamer.NewStreaming(ctx, params)
+	// The defer is registered BEFORE the error checks below, and guarded on
+	// stream != nil rather than serr == nil: the SDK's own sdkSender.NewStreaming
+	// never returns a non-nil error (see its doc), but StreamingSender's
+	// contract does not forbid a third-party implementation from returning
+	// (non-nil stream, non-nil err). Registering the defer only after those
+	// checks would leak that stream's decoder and response body on exactly
+	// that path — this is what TestSendStreaming_ClosesStreamEvenWhenNewStreamingReturnsBothStreamAndError
+	// pins down.
+	if stream != nil {
+		defer func() {
+			if cerr := stream.Close(); cerr != nil {
+				c.logger.Warn("llm: close stream failed", "error", cerr)
+			}
+		}()
+	}
+	if serr != nil {
+		span.RecordError(serr)
+		c.failTurn(ctx, capturing, turnID, turnCreatedAt, serr)
+		if breaker != nil {
+			// Nothing delivered yet and a real fallback exists: hand off
+			// WITHOUT recording here. SendParams's callModel is about to make
+			// its OWN authoritative attempt against primary and will record
+			// THAT result; recording this pre-delivery failure too would
+			// pre-emptively trip the breaker and make callModel skip the very
+			// retry this handoff exists to give it.
+			return nil, false, false, serr
+		}
+		// No fallback to offer: breaker is nil here (primaryGate's bypass
+		// case), so there's nothing to record — report attempted=true so
+		// sendWithTrim's own retry loop (not SendParams) re-attempts via
+		// streaming again, instead of wastefully re-issuing to the same
+		// primary sender.
+		return nil, true, false, serr
+	}
+
+	acc := anthropic.Message{}
+	for stream.Next() {
+		ev := stream.Current()
+		// Only content-bearing events count as delivered. message_start
+		// carries no text, so treating it as delivery would make the failover
+		// branch below unreachable for the common "connected, then died before
+		// any output" failure — which the non-streaming path recovers from.
+		if eventDeliversContent(ev) {
+			delivered = true
+		}
+		handler(ev)
+		if aerr := acc.Accumulate(ev); aerr != nil {
+			wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
+			span.RecordError(wrapped)
+			c.failTurn(ctx, capturing, turnID, turnCreatedAt, wrapped)
+			recordPrimaryResult(breaker, now, wrapped)
+			return nil, true, delivered, wrapped
+		}
+	}
+	if serr := stream.Err(); serr != nil {
+		span.RecordError(serr)
+		c.failTurn(ctx, capturing, turnID, turnCreatedAt, serr)
+		if !delivered && breaker != nil {
+			// Hand off WITHOUT recording, for the same reason as the
+			// NewStreaming-error branch above: callModel's own imminent
+			// primary retry is the authoritative attempt and will record its
+			// own result. Recording this one too would trip the breaker
+			// before that retry runs at all.
+			return nil, false, false, serr
+		}
+		// Either something was already delivered (no handoff is possible
+		// regardless of breaker state) or breaker is nil (bypass, no handoff
+		// exists to defer to): this IS the final result, so record it.
+		recordPrimaryResult(breaker, now, serr)
+		return nil, true, delivered, serr
+	}
+
+	recordPrimaryResult(breaker, now, nil)
+	latency := int(time.Since(start).Milliseconds())
+	span.SetAttributes(
+		attribute.String("rafiki.upstream", string(primary)),
+		attribute.Int64("rafiki.tokens.input", acc.Usage.InputTokens),
+		attribute.Int64("rafiki.tokens.output", acc.Usage.OutputTokens),
+		attribute.Int64("rafiki.tokens.cache_read", acc.Usage.CacheReadInputTokens),
+		attribute.Int64("rafiki.tokens.cache_creation", acc.Usage.CacheCreationInputTokens),
+	)
+	if capturing {
+		c.completeTurn(ctx, turnID, turnCreatedAt, &acc, primary, latency)
+	}
+	return &acc, true, delivered, nil
+}
+
+// eventDeliversContent reports whether ev is one of the content-bearing
+// stream event variants — content_block_start/delta/stop — as opposed to
+// message-envelope bookkeeping (message_start/delta/stop). A "ping"
+// keep-alive never reaches here in the first place: the SDK's
+// ssestream.Stream.Next() filters it out before Current() ever surfaces it.
+//
+// Uses the SDK's typed AsAny() discriminator (a switch on the real event
+// struct type) rather than string-matching ev.Type, so this can't drift from
+// the SDK's own variant set. AsAny() only returns one of the six known
+// MessageStreamEventUnion variants for this SDK version (v1.37.0); the
+// default case treats anything else (e.g. a variant added by a future SDK
+// bump we haven't taught this switch about yet) as content-bearing —
+// erring toward the ORIGINAL bug's safe direction (over-counting as
+// delivered, which only narrows the failover window) rather than the
+// unsafe one (under-counting, which risks double-delivery on retry).
+func eventDeliversContent(ev anthropic.MessageStreamEventUnion) bool {
+	switch ev.AsAny().(type) {
+	case anthropic.ContentBlockStartEvent, anthropic.ContentBlockDeltaEvent, anthropic.ContentBlockStopEvent:
+		return true
+	case anthropic.MessageStartEvent, anthropic.MessageDeltaEvent, anthropic.MessageStopEvent:
+		return false
+	default:
+		return true
+	}
+}
+
+// primaryGate is the ONE place that decides whether a send should issue to
+// the primary right now. Both callModel and sendStreaming MUST consult it
+// (and only it) instead of separately reasoning about c.breakers[primary] —
+// two independent copies of this decision drifting apart is exactly the bug
+// class this fixes (C3: streaming read the breaker only to compute a
+// display-only bool, never the live decision).
+//
+// A send with NO fallback configured — or breakers disabled entirely —
+// bypasses the breaker altogether: primary is always used and breaker is nil
+// (so the caller knows not to record a result either). This mirrors the
+// routing core's fallback-less behavior; per the design, an empty Fallback
+// chain is how a consumer opts out of being pinned.
+//
+// Otherwise the breaker's own live state is consulted via UsePrimary(now) —
+// NOT whether a breaker merely exists — so an open breaker with no probe slot
+// available correctly says "don't use primary" rather than always issuing
+// because one is configured.
+func (c *Client) primaryGate(primary Upstream, fallbacks []Upstream, now time.Time) (usePrimary bool, breaker *routing.Breaker) {
+	b := c.breakers[primary]
+	if len(fallbacks) == 0 || b == nil {
+		return true, nil
+	}
+	return b.UsePrimary(now), b
+}
+
+// recordPrimaryResult mirrors callModel's post-attempt breaker bookkeeping so
+// both the non-streaming and streaming send paths learn from the SAME rule:
+// success closes an open breaker; a retryable failure trips/extends it; a
+// non-retryable failure (bad auth, malformed request) is left alone since it
+// says nothing about whether the primary itself is healthy. No-op when
+// breaker is nil (the bypass case from primaryGate).
+func recordPrimaryResult(breaker *routing.Breaker, now time.Time, err error) {
+	if breaker == nil {
+		return
+	}
+	if err == nil {
+		breaker.RecordResult(now, false)
+		return
+	}
+	if routing.Retryable(err) {
+		breaker.RecordResult(now, true)
+	}
+}
+
 // callModel routes primary-with-breaker then the fallback chain. Fallback
 // sends rewrite the model via the catalog (Anthropic id → OpenRouter id when
 // the fallback is OpenRouter). A send with NO fallback configured bypasses
@@ -232,24 +546,23 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 	if sender == nil {
 		return nil, primary, fmt.Errorf("llm: upstream %q not configured", primary)
 	}
-	breaker := c.breakers[primary]
 	now := time.Now()
+	usePrimary, breaker := c.primaryGate(primary, fallbacks, now)
 
-	if len(fallbacks) == 0 || breaker == nil {
+	if breaker == nil {
 		resp, err := sender.New(ctx, params)
 		return resp, primary, err
 	}
 
-	if breaker.UsePrimary(now) {
+	if usePrimary {
 		resp, err := sender.New(ctx, params)
+		recordPrimaryResult(breaker, now, err)
 		if err == nil {
-			breaker.RecordResult(now, false)
 			return resp, primary, nil
 		}
 		if !routing.Retryable(err) {
 			return nil, primary, err // non-retryable: don't fail over or trip
 		}
-		breaker.RecordResult(now, true)
 		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", err.Error())))
 		c.logger.Warn("primary failed; failing over", "primary", string(primary), "error", err)
 	}

@@ -219,14 +219,44 @@ func UserText(s string) []anthropic.ContentBlockParamUnion {
 }
 
 type sendConfig struct {
-	maxTokens  int64
-	tools      []anthropic.ToolUnionParam
-	source     string
-	author     string
-	toolChoice string
+	maxTokens     int64
+	tools         []anthropic.ToolUnionParam
+	source        string
+	author        string
+	toolChoice    string
+	streamHandler StreamHandler
 }
 
 type SendOption func(*sendConfig)
+
+// StreamHandler receives each streaming event as it arrives.
+type StreamHandler func(ev anthropic.MessageStreamEventUnion)
+
+// WithStreamHandler streams the response, invoking h once per event as it
+// arrives, and returns the accumulated message exactly as an unstreamed call
+// would.
+//
+// h is ignored (never invoked, and the call transparently falls back to the
+// non-streamed path) in two cases: when the resolved sender does not
+// implement StreamingSender, or when the primary's circuit breaker is open.
+// In both cases the send behaves exactly as if WithStreamHandler had not
+// been passed at all — a caller never has to branch on sender capability,
+// but it also means a caller relying on h firing must not assume it always
+// will.
+//
+// h is called synchronously on the calling goroutine: never concurrently
+// with itself, and never after Send/Continue returns. No locking is
+// required in h.
+//
+// IMPORTANT: h may be invoked one or more times and the call may STILL
+// return an error — a stream can die after delivering content (see
+// sendStreaming's doc for the delivered/attempted bookkeeping this drives).
+// A consumer rendering h's output must be prepared for a torn, incomplete
+// message and must not treat "h fired" as "the turn succeeded". Completion
+// is signalled only by Send/Continue returning a nil error.
+func WithStreamHandler(h StreamHandler) SendOption {
+	return func(s *sendConfig) { s.streamHandler = h }
+}
 
 // WithMaxTokens overrides the output cap for this send only.
 func WithMaxTokens(n int64) SendOption { return func(s *sendConfig) { s.maxTokens = n } }
@@ -458,9 +488,19 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		params := conv.assemble(reqMsgs, scfg)
-		resp, err := conv.client.SendParams(ctx, meta, params)
+		resp, delivered, err := conv.sendAttempt(ctx, meta, params, scfg.streamHandler)
 		if err == nil {
 			return resp, nil
+		}
+		if delivered {
+			// Structural trim-retry guard: at least one event already reached
+			// scfg.streamHandler for THIS attempt. Retrying now would open a
+			// second, independent stream for the same logical send with no way
+			// for the caller to know the first was abandoned mid-flight — never
+			// safe, regardless of what err turns out to be (isPromptTooLarge or
+			// not). So this is checked before, and independent of, the
+			// isPromptTooLarge check below.
+			return nil, err
 		}
 		if !isPromptTooLarge(err) {
 			return nil, err
@@ -479,6 +519,25 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		reqMsgs = trimmed
 	}
 	return nil, errors.New("llm: prompt still too large after trim retries")
+}
+
+// sendAttempt issues ONE request attempt, streaming through handler when set
+// and the resolved sender supports it, and transparently falling back to the
+// plain (non-streaming) path otherwise — the caller (sendWithTrim) never
+// branches on sender capability. delivered reports whether any event reached
+// handler during this attempt; see sendStreaming's doc for why the
+// trim-retry loop treats that as an absolute "never retry" signal.
+func (conv *Conversation) sendAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (resp *anthropic.Message, delivered bool, err error) {
+	if handler == nil {
+		resp, err = conv.client.SendParams(ctx, meta, params)
+		return resp, false, err
+	}
+	resp, attempted, delivered, err := conv.client.sendStreaming(ctx, meta, params, handler)
+	if !attempted {
+		resp, err = conv.client.SendParams(ctx, meta, params)
+		return resp, false, err
+	}
+	return resp, delivered, err
 }
 
 // assemble builds the wire request and places prompt-cache breakpoints per
