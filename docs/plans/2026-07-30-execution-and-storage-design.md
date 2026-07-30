@@ -240,7 +240,31 @@ remains useful for debugging a single agent standalone, and preserves the remote
 - **Nothing, for remote children.** The framed-stream seam is what lets in-memory, stdio, and
   TCP coexist as transports; the 2026-07-20 design's reverse-dial path is unaffected.
 
-## Phase 2 — the database as source of truth
+### Phase 1a end-to-end verification (2026-07-30)
+
+Verified against a live daemon built from this branch (full results in
+`.superpowers/sdd/2026-07-30-phase1a-in-process-agent-plan/task-6-report.md`). Two items worth
+carrying into phase 2 planning so they are not rediscovered:
+
+- **`--db` persistence is confirmed live, both directions.** With `FUNDI_AGENT_DB` unset the
+  daemon logs the in-memory warning and a new agent child's `sessionId` is `mem-…`. Restarted
+  with `FUNDI_AGENT_DB` pointed at the local rafiki database, the daemon logs `"agent database
+  pool opened"` and a new child's `sessionId` is a UUIDv7 (e.g.
+  `019fb4ff-a29d-7811-b164-bc1251673ecb` — version nibble `7` in the third group). That single
+  character is the whole tell, and it is easy to miss in casual testing.
+- **The forwarded-environment warning was confirmed to log names only, never values** — the
+  `dropped_env_names` field in `overlayAgentEnv`'s log line was inspected directly against a
+  caller environment carrying live credentials (`HASS_TOKEN`, `MQTT_PASSWORD`,
+  `LOKI_PASSWORD`, etc.); only the names appeared. This is the one place a phase-2 refactor of
+  the same log line must not regress, since the map it iterates routinely holds secrets.
+- **`forget`'s undocumented artifact deletion (already flagged above under "Invariant: process
+  lifecycle never deletes a conversation") was reproduced live, not just read in code.** `fundi
+  kill` on a clean exit auto-forgets by default, which deletes the log dump — a pi child's
+  `err.log.gz` was gone by the time `fundi logs --err` was run against it, requiring a re-run
+  with `--no-forget` to observe pi's real stderr content. Phase 2's `done`/`close` design must
+  not inherit this: a conversation being marked complete must never imply its artifacts vanish.
+
+
 
 ### Read paths bind to rafiki's existing API
 
@@ -318,10 +342,25 @@ lifecycle. Ship and verify 1a before starting 1b.
 2. **Does `renderRing` survive?** It exists because claude's native frames must be re-rendered
    for backfill (`docs/plans/2026-06-15-claude-rendered-backfill-design.md`). Normalized
    messages from `Messages.Load` may remove the need.
+   **Settled by phase 1a verification (2026-07-30): untouched, as expected.** `renderRing` is
+   wired only for the claude kind, which stayed a subprocess in phase 1a. The diff against
+   `main` touches `internal/child/child.go` (28 insertions / 65 deletions, from the
+   process/in-process `Runner` seam) but has zero lines touching `internal/child/child.go`'s
+   `renderRing`/`RenderRing` symbols, `internal/store/session.go`, or `internal/store/store.go`.
+   This question is still open for phase 2 on its original terms — normalized `Messages.Load`
+   output may still remove the need — phase 1a simply confirms it did not accidentally resolve
+   itself as a side effect of the in-process agent work.
 3. **Which `DrivenBy`?** `Messages.Load` and `UnfinishedConversations` are scoped to
    `DrivenByServer` "by callers per the design". fundi's conversations must match that scoping.
 4. **Spill directories.** `--spill-dir` is per-child today. Whether it stays per-child or
    becomes per-conversation depends on step 1b.
+   **Settled by phase 1a verification (2026-07-30): still per-child, unconditionally.**
+   `Controller.agentRuntimeOptions` (`cmd/fundid/agent_runtime.go`) builds the in-process child's
+   `RuntimeOptions` by calling the *same* `buildAgentArgv` the subprocess path uses and parsing
+   the result back with `parseAgentFlags` — so `--spill-dir` is pinned to
+   `agentSpillDir(stateDir, childID)` identically for both `processChild` and `inProcessChild`.
+   Phase 1a introduced no new spill-dir keying; the per-child-vs-per-conversation question
+   remains exactly as open as before, deferred to step 1b, per the original note.
 5. **Retention policy** for the child registry, replacing `FUNDI_GRACE_HOURS`.
 
 ## Evidence
