@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"git.graveland.dev/brent/fundi/protocol"
@@ -148,17 +149,54 @@ type netConn struct{ conn net.Conn }
 // (agent_settled, message_end), which hangs an attached TUI permanently.
 const deliverWriteTimeout = 5 * time.Second
 
+// isRoutineConnClose reports whether err is one of the errors a normal,
+// unremarkable connection teardown produces on this server's Unix-domain-
+// socket transport: the local conn already closed (net.ErrClosed — e.g.
+// handleConn's deferred Close racing Broadcast's outside-lock Deliver call,
+// or server shutdown), or the peer already gone (syscall.EPIPE — e.g. a
+// client process exiting or disconnecting). Both are things the read loop
+// will notice on its own next read; neither implies lost frames the way a
+// write-deadline timeout does.
+//
+// io.EOF is not included: net.Conn.Write never returns it (EOF is a
+// read-exhaustion sentinel). io.ErrClosedPipe is not included either: this
+// server only ever constructs netConn around a real net.UnixConn from
+// Listen's Accept loop, never a net.Pipe, so it would indicate an unexpected
+// caller rather than a routine close. syscall.ECONNRESET is not included:
+// Unix-domain sockets have no RST/reset semantics, so it does not occur on
+// this transport even with unread data buffered at close.
+func isRoutineConnClose(err error) bool {
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE)
+}
+
+// logDeliverErr logs a Deliver-path error at debug if it is a routine
+// connection close (see isRoutineConnClose) and at warn otherwise. An
+// unrecognized error stays at warn: silently downgrading something we can't
+// classify would recreate the original silent-discard problem in a subtler
+// form.
+func logDeliverErr(msg string, err error, args ...any) {
+	args = append([]any{"error", err}, args...)
+	if isRoutineConnClose(err) {
+		slog.Debug("server: "+msg, args...)
+		return
+	}
+	slog.Warn("server: "+msg, args...)
+}
+
 func (c *netConn) Deliver(frame []byte) {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(deliverWriteTimeout)); err != nil {
-		slog.Warn("server: set write deadline", "error", err)
+		logDeliverErr("set write deadline", err)
 		// Fall through: a write without a deadline is still better than no frame.
 	}
 	if err := protocol.WriteFrame(c.conn, frame); err != nil {
-		// The connection may simply be closing, which the read loop will
-		// notice on its next read — but a timeout here means a live
-		// subscriber is not draining, and silence would make the resulting
+		// A closed/closing connection is routine — the client went away or
+		// the conn already tore down, and the read loop will notice on its
+		// next read; logDeliverErr logs that at debug. A write-deadline
+		// timeout means a live subscriber is not draining, which is exactly
+		// what deliverWriteTimeout exists to catch, so it (and anything else
+		// unrecognized) stays at warn — silence would make the resulting
 		// frame loss unattributable.
-		slog.Warn("server: deliver frame", "error", err, "bytes", len(frame))
+		logDeliverErr("deliver frame", err, "bytes", len(frame))
 	}
 }
 
