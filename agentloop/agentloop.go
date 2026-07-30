@@ -132,8 +132,18 @@ type Result struct {
 
 // Run drives a fresh tool-use loop: append userContent, then iterate
 // Continue → execute tools → persist results until end_turn or the
-// iteration cap.
-func Run(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, userContent []anthropic.ContentBlockParamUnion) (*Result, error) {
+// iteration cap. opts are additional llm.SendOptions (e.g.
+// llm.WithStreamHandler) forwarded to every conv.Continue call in the loop,
+// after llm.WithTools(defs) — so a caller-supplied option can override tools
+// if it ever needs to, but never displaces them by omission.
+//
+// opts are forwarded to EVERY Continue call in the loop, not just the first.
+// A tool-calling run therefore delivers several assistant turns through one
+// llm.WithStreamHandler with no boundary event between them; a consumer
+// that concatenates handler output will glue one turn's prose onto the
+// next. Use Events.OnTurn, which fires once per LLM call (see drive), as
+// the turn boundary.
+func Run(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, userContent []anthropic.ContentBlockParamUnion, opts ...llm.SendOption) (*Result, error) {
 	before, err := conv.History(ctx)
 	if err != nil {
 		return nil, err
@@ -145,7 +155,7 @@ func Run(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events,
 	if err := conv.AppendUser(ctx, userContent); err != nil {
 		return nil, err
 	}
-	result, err := drive(ctx, conv, tools, ev)
+	result, err := drive(ctx, conv, tools, ev, opts...)
 	if err != nil && llm.IsPromptTooLarge(err) {
 		// The very first call overflowed even after the library's own trim
 		// retries (a too-large FIRST message is structurally untrimmable).
@@ -175,8 +185,9 @@ func Run(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events,
 //     CONSECUTIVE failed recoveries, not lifetime interruptions.
 //
 // Each Resume bumps the conversation's attempt counter; past DefaultResumeCap
-// the conversation is marked failed and ErrResumeCapExceeded returned.
-func Resume(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events) (*Result, error) {
+// the conversation is marked failed and ErrResumeCapExceeded returned. opts
+// are forwarded to drive exactly as in Run.
+func Resume(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, opts ...llm.SendOption) (*Result, error) {
 	attempts, err := conv.IncrementResumeAttempts(ctx)
 	if err != nil {
 		return nil, err
@@ -214,7 +225,7 @@ func Resume(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Even
 		resetAttempts(ctx, conv)
 		return &Result{Text: *lastAssistantClean}, nil
 	}
-	result, err := drive(ctx, conv, tools, ev)
+	result, err := drive(ctx, conv, tools, ev, opts...)
 	if err == nil {
 		resetAttempts(ctx, conv)
 	}
@@ -284,14 +295,18 @@ func analyzeOrphans(history []store.Message) ([]orphan, *string) {
 
 // drive is the shared loop body: Continue with tools, execute any requested
 // batch, persist results per tool in tool_use order, repeat until end_turn.
-func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events) (*Result, error) {
+// opts are extra llm.SendOptions forwarded to every Continue call, after
+// llm.WithTools(defs) (built once, loop-invariant, matching defs above it) so
+// a caller-supplied option can override tools if it ever needs to.
+func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, opts ...llm.SendOption) (*Result, error) {
 	defs := tools.Definitions()
+	sendOpts := append([]llm.SendOption{llm.WithTools(defs)}, opts...)
 	var stats Stats
 
 	for iteration := 1; iteration <= maxIterations; iteration++ {
 		stats.Iterations = iteration
 		start := time.Now()
-		resp, err := conv.Continue(ctx, llm.WithTools(defs))
+		resp, err := conv.Continue(ctx, sendOpts...)
 		ev.turn(resp, time.Since(start), err)
 		if err != nil {
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: iteration %d: %w", iteration, err)

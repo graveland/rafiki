@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"git.graveland.dev/brent/rafiki/llm"
@@ -737,4 +738,174 @@ func assertHistoryContainsUserText(t *testing.T, hist []store.Message, want stri
 		}
 	}
 	t.Fatalf("history has no user message containing %q", want)
+}
+
+// ---- Task B2.5: llm.SendOption threaded through Run/Resume ----------------
+
+// trackingSender mirrors scriptedSender but also records every
+// MessageNewParams it is handed, so a test can assert on what Continue
+// actually sent upstream (e.g. that Tools survived extra caller opts).
+type trackingSender struct {
+	mu      sync.Mutex
+	calls   int
+	scripts []string
+	params  []anthropic.MessageNewParams
+}
+
+func (s *trackingSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.params = append(s.params, params)
+	i := s.calls
+	if i >= len(s.scripts) {
+		i = len(s.scripts) - 1
+	}
+	s.calls++
+	var m anthropic.Message
+	if err := json.Unmarshal([]byte(s.scripts[i]), &m); err != nil {
+		panic(err)
+	}
+	return &m, nil
+}
+
+// allParams returns every MessageNewParams recorded so far, in call order.
+func (s *trackingSender) allParams() []anthropic.MessageNewParams {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]anthropic.MessageNewParams{}, s.params...)
+}
+
+// TestDriveKeepsToolsWhenExtraSendOptionsPassed guards against a regression
+// where threading extra llm.SendOptions into drive's Continue call displaces
+// llm.WithTools(defs) instead of merely following it. drive builds sendOpts
+// as append([]llm.SendOption{llm.WithTools(defs)}, opts...), so a caller's own
+// llm.WithTools MUST win (later options win — see llm.Continue's
+// "for _, opt := range opts { opt(&scfg) }"). The extra option here is
+// itself llm.WithTools(differentDefs) — not an unrelated field like
+// llm.WithSource — so swapping drive's construction to
+// append(opts, llm.WithTools(defs)) (defs re-asserted last, silently
+// clobbering the caller's override) is caught: the recorded request would
+// carry alpha/beta instead of the caller's def.
+//
+// The script drives TWO iterations (a tool call, then end-turn) so a
+// regression that only surfaces after the first Continue call — e.g. opts
+// being applied on iteration 1 but silently dropped (reverting to bare
+// llm.WithTools(defs)) on later iterations — is also caught: this test
+// asserts on the Tools field of EVERY recorded call, not just the last.
+// (Verified: literally relocating the `sendOpts := append(...)` line inside
+// the loop, unchanged, is NOT such a regression — it re-evaluates to the
+// identical value each iteration since llm.SendOption closures carry no
+// mutable shared state, so that specific rewrite is behavior-preserving and
+// this test correctly still passes against it.)
+func TestDriveKeepsToolsWhenExtraSendOptionsPassed(t *testing.T) {
+	// differentDefs stands in for a caller override: a single tool distinct
+	// from fakeTools' alpha/beta pair, so any leakage of drive's own defs
+	// into the wire request is unambiguous.
+	differentDefs := []anthropic.ToolUnionParam{
+		{OfTool: &anthropic.ToolParam{Name: "override", InputSchema: anthropic.ToolInputSchemaParam{Type: "object"}}},
+	}
+	sender := &trackingSender{scripts: []string{respTwoTools, respEndTurn}}
+	tools := &fakeTools{}
+	conv := newMemConv(t, sender)
+
+	if _, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
+		llm.WithTools(differentDefs)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	all := sender.allParams()
+	if len(all) != 2 {
+		t.Fatalf("Continue calls = %d, want 2 (two-iteration script didn't drive both turns)", len(all))
+	}
+	for i, params := range all {
+		got := params.Tools
+		if len(got) != 1 || got[0].OfTool == nil || got[0].OfTool.Name != "override" {
+			t.Fatalf("iteration %d Tools = %+v, want exactly the caller's override def (caller's llm.WithTools must win over drive's llm.WithTools(defs))", i+1, got)
+		}
+	}
+}
+
+// streamFakeDecoder replays a fixed event slice — the minimal ssestream.Decoder
+// a StreamingSender fake needs (mirrors llm package's own fakeDecoder, which
+// is unexported and so not reusable across packages).
+type streamFakeDecoder struct {
+	events []ssestream.Event
+	idx    int
+}
+
+func (d *streamFakeDecoder) Next() bool {
+	if d.idx >= len(d.events) {
+		return false
+	}
+	d.idx++
+	return true
+}
+func (d *streamFakeDecoder) Event() ssestream.Event { return d.events[d.idx-1] }
+func (d *streamFakeDecoder) Close() error           { return nil }
+func (d *streamFakeDecoder) Err() error             { return nil }
+
+func sseEv(typ, raw string) ssestream.Event { return ssestream.Event{Type: typ, Data: []byte(raw)} }
+
+// endTurnStreamEvents is a minimal, valid single-text-block streaming
+// response (message_start..message_stop) for the given text.
+func endTurnStreamEvents(text string) []ssestream.Event {
+	return []ssestream.Event{
+		sseEv("message_start", `{"type":"message_start","message":{"id":"msg_stream","type":"message",
+			"role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}`),
+		sseEv("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		sseEv("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`+text+`"}}`),
+		sseEv("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		sseEv("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`),
+		sseEv("message_stop", `{"type":"message_stop"}`),
+	}
+}
+
+// streamingOnlySender implements llm.StreamingSender, replaying a canned
+// text stream. New panics: this proves the test's llm.WithStreamHandler
+// engaged the STREAMING path rather than silently falling through to New,
+// which would make the test pass even if opts never reached conv.Continue.
+type streamingOnlySender struct {
+	events      []ssestream.Event
+	streamCalls int
+}
+
+func (s *streamingOnlySender) New(context.Context, anthropic.MessageNewParams) (*anthropic.Message, error) {
+	panic("streamingOnlySender.New called; caller-supplied llm.WithStreamHandler must engage NewStreaming")
+}
+
+func (s *streamingOnlySender) NewStreaming(_ context.Context, _ anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
+	s.streamCalls++
+	return ssestream.NewStream[anthropic.MessageStreamEventUnion](&streamFakeDecoder{events: s.events}, nil), nil
+}
+
+// TestRunThreadsCallerSendOptionToContinue proves a caller-supplied
+// llm.SendOption (here llm.WithStreamHandler) actually reaches conv.Continue
+// from agentloop.Run — the seam this task adds. Asserted via an observable
+// effect (the handler firing with the streamed text), not internals.
+func TestRunThreadsCallerSendOptionToContinue(t *testing.T) {
+	sender := &streamingOnlySender{events: endTurnStreamEvents("streamed hello")}
+	tools := &fakeTools{}
+	conv := newMemConv(t, sender)
+
+	var seen strings.Builder
+	handler := func(ev anthropic.MessageStreamEventUnion) {
+		if ev.Type == "content_block_delta" && ev.Delta.Type == "text_delta" {
+			seen.WriteString(ev.Delta.Text)
+		}
+	}
+
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
+		llm.WithStreamHandler(handler))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if seen.String() != "streamed hello" {
+		t.Fatalf("stream handler saw %q, want %q (opts never reached conv.Continue)", seen.String(), "streamed hello")
+	}
+	if sender.streamCalls != 1 {
+		t.Fatalf("streamCalls = %d, want 1", sender.streamCalls)
+	}
+	if result.Text != "streamed hello" {
+		t.Errorf("Text = %q", result.Text)
+	}
 }
