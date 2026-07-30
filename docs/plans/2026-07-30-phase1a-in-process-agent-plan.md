@@ -1773,6 +1773,90 @@ caller-supplied override."
 
 ---
 
+### Task 7: Restore the abort-restart guard that this plan defanged
+
+**Why this task exists.** `test/integration/agent_kind_test.go`'s
+`TestIntegration_AgentKind_AbortPreservesProcess` proves that aborting a turn does **not**
+restart the child, and it proves it via PID identity: `*after.PID != pidBefore`. In-process
+children have no process, so `Runner.PID()` returns 0 and `ChildSummary.PID` is a non-nil
+pointer to 0 while alive -- the comparison is `0 != 0` and can never fire. The assertion is
+degenerate, so the guard is gone for the agent kind, leaving only `after.Status != exited`.
+
+This is the plan's own doing and it must not ship. It is also the third instance in this plan
+of a test that did not guard what its name claimed -- the difference is that this one was
+*created* by the change rather than written wrong.
+
+The docstring is now actively wrong too: it explains the test lives in the subprocess harness
+because the agent kind "self-execs via `os.Executable()`", which stopped being true in Task 5.
+
+**Files:**
+- Modify: `test/integration/agent_kind_test.go`
+
+**Interfaces:**
+- Consumes: `inproc.Runner.PID() == 0` (Task 3), the wiring from Task 5.
+- Produces: nothing other tasks depend on.
+
+- [ ] **Step 1: Prove the assertion is currently degenerate**
+
+Add a temporary `t.Logf("pidBefore=%d afterPID=%v", pidBefore, after.PID)` and run the test.
+Expected: both are `0`, demonstrating the comparison cannot fail. Record the output, then
+remove the log line. Do not skip this -- the point of the task is that the guard silently
+stopped working, and the evidence belongs in the report rather than being taken on faith.
+
+- [ ] **Step 2: Replace PID identity with a restart witness that works for both kinds**
+
+A restart necessarily produces a new child *generation*, so witness that instead of the pid.
+Prefer, in order:
+
+1. Assert no spawn/lifecycle frame arrives between the abort and the subsequent idle. The test
+   already subscribes to the child's event stream, so this needs no new plumbing and it states
+   "it was not restarted" directly.
+2. If no such frame exists, assert the child's sniffed `sessionId` is unchanged across the
+   abort -- a respawn would establish a new conversation.
+
+Keep the existing `after.Status != exited` assertion; it is weak but not wrong. Keep the pid
+comparison **only** if you gate it on `pidBefore != 0`, so it still guards the pi and claude
+kinds rather than silently passing for all three.
+
+- [ ] **Step 3: Prove the new witness bites**
+
+Temporarily make the abort path respawn the child (or simulate it), confirm the test **FAILS**,
+then revert and confirm it passes. Report both transcripts. A restart guard never observed
+failing is exactly what this task exists to fix.
+
+- [ ] **Step 4: Correct the docstring**
+
+It claims the agent kind self-execs via `os.Executable()` and that this is why the test lives in
+the subprocess harness. Both halves are now false. State what is true: the agent kind runs
+in-process, has no pid, and this test witnesses restart by lifecycle rather than process
+identity.
+
+- [ ] **Step 5: Verify and commit**
+
+```bash
+go test ./test/integration/ -run TestIntegration_AgentKind -v > /tmp/t7.log 2>&1; echo "exit=$?"
+grep -E '=== RUN|--- (PASS|FAIL)' /tmp/t7.log
+go test ./... -v > /tmp/t7all.log 2>&1; echo "test exit=$?"
+grep -E '^(FAIL|--- FAIL)' /tmp/t7all.log || echo "no failures"
+grep -cE '^(\s+)?--- SKIP' /tmp/t7all.log
+```
+
+Skip count must still be 3.
+
+```bash
+git add test/integration/agent_kind_test.go
+git diff --cached --stat
+git commit -m "test(integration): witness abort-restart by lifecycle, not pid
+
+In-process children have no pid, so Runner.PID() returns 0 and this test's
+keystone assertion compared 0 != 0 -- it could never fail, leaving the agent
+kind with no restart guard at all. Witness the child generation instead, and
+gate the pid comparison on a non-zero pid so it still guards pi and claude.
+Docstring corrected: the agent kind no longer self-execs."
+```
+
+---
+
 ### Task 6: End-to-end verification
 
 No new production code. This proves the phase against a live daemon and re-runs the checks that caught the streaming bugs, because every one of those shipped with a green suite.
