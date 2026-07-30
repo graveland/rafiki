@@ -23,10 +23,9 @@ import (
 // uniquely-named scratch db, register cleanup to drop it, reconnect scoped to
 // that database, and migrate it. Never touches the DSN's own database.
 //
-// It also returns the scratch database's own DSN: resume_test.go needs it to
-// drive TWO independent Config.BuildEngine calls (simulating a process
-// restart) against the very same database, which requires a connection
-// string rather than an already-open pool.
+// It also returns the scratch database's own DSN, kept for callers that need
+// a connection string rather than an already-open pool (e.g. to open a second,
+// independent pool against the same scratch database).
 func dbTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -72,8 +71,8 @@ func dbTestPool(t *testing.T) (*pgxpool.Pool, string) {
 
 // withDatabase returns dsn (a postgres:// URL) with its path replaced by
 // dbName, so callers that need a connection STRING rather than an
-// already-open pool (e.g. Config.DBURL, which opens its own pgxpool.Pool)
-// can target the same scratch database dbTestPool just created.
+// already-open pool can target the same scratch database dbTestPool just
+// created.
 func withDatabase(dsn, dbName string) (string, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {

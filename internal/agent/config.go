@@ -39,9 +39,9 @@ func ThinkingBudgetFor(level string) (int64, error) {
 
 // Config is the fully-resolved input to BuildEngine. Every field is either a
 // flag value taken as-is, or something cmd/fundid has already produced via
-// I/O (env lookups, file reads, the assembled tool registry) before calling
-// BuildEngine - BuildEngine itself parses no flags and does no filesystem
-// discovery beyond opening the optional DB pool.
+// I/O (env lookups, file reads, the assembled tool registry, the shared DB
+// pool) before calling BuildEngine - BuildEngine itself parses no flags and
+// does no filesystem or network discovery.
 //
 // Tools is a pre-built agentloop.ToolSet so callers can assemble a registry
 // (file tools, bash, skills, MCP) and hand it in; this decouples BuildEngine
@@ -82,10 +82,13 @@ type Config struct {
 	// Name is the session name reported through get_state.
 	Name string
 
-	// DBURL, when non-empty, is a postgres connection string: BuildEngine
-	// opens a pgxpool.Pool and wires llm.WithStore. Empty means an
-	// in-memory (capture-less) conversation.
-	DBURL string
+	// Pool is the database pool backing conversation persistence, supplied by
+	// the owning process. A nil Pool means an in-memory (capture-less)
+	// conversation, exactly as an empty DBURL used to behave. BuildEngine
+	// never opens or closes a pool itself — one daemon can share a single
+	// Pool across N engines, and only the owner (cmd/fundid's standalone CLI
+	// path, or the daemon in Task 5) may open or close it.
+	Pool *pgxpool.Pool
 
 	// FakeTurns, when non-empty, is a path to a LoadFakeSender script that
 	// replaces the real upstream sender(s). This is the hidden --fake-turns
@@ -105,16 +108,18 @@ type Config struct {
 	Tools agentloop.ToolSet
 }
 
-// BuildEngine constructs the llm.Client (and, when DBURL is set, its backing
-// pgxpool.Pool), assembles the conversation options, and wires the Engine to
-// fe. ctx becomes the Engine's BaseCtx - the root every turn's cancellable
+// BuildEngine constructs the llm.Client (wiring c.Pool via llm.WithStore when
+// non-nil), assembles the conversation options, and wires the Engine to fe.
+// ctx becomes the Engine's BaseCtx - the root every turn's cancellable
 // context derives from, so a caller deriving ctx from signal.NotifyContext
 // gets SIGINT/SIGTERM cancellation of in-flight turns for free.
 //
-// The returned shutdown func closes the DB pool (a no-op when DBURL was
-// empty). It does NOT close MCP sessions or the Engine's worker goroutine -
-// those are cmd/fundid's to own (ConnectMCP's shutdown, Engine.Close).
-// cmd/fundid/agent.go combines all three on its shutdown path.
+// BuildEngine never opens or closes c.Pool - the owning process does, so N
+// engines in one daemon can share one pool. The returned shutdown func is
+// therefore a no-op today, kept for signature stability; it does NOT close
+// MCP sessions or the Engine's worker goroutine either - those are
+// cmd/fundid's to own (ConnectMCP's shutdown, Engine.Close). cmd/fundid/agent.go
+// combines all three (plus its own pool.Close()) on its shutdown path.
 func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(), error) {
 	if c.Tools == nil {
 		return nil, nil, errors.New("agent: Config.Tools is required")
@@ -125,23 +130,14 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		return nil, nil, err
 	}
 
-	var pool *pgxpool.Pool
-	if c.DBURL != "" {
-		pool, err = pgxpool.New(ctx, c.DBURL)
-		if err != nil {
-			return nil, nil, fmt.Errorf("agent: connect --db: %w", err)
-		}
+	pool := c.Pool
+	if pool != nil {
 		clientOpts = append(clientOpts, llm.WithStore(pool))
 	}
-	shutdown := func() {
-		if pool != nil {
-			pool.Close()
-		}
-	}
+	shutdown := func() {}
 
 	client, err := llm.NewClient(clientOpts...)
 	if err != nil {
-		shutdown()
 		return nil, nil, fmt.Errorf("agent: build llm client: %w", err)
 	}
 
@@ -181,7 +177,6 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		BaseCtx:  ctx,
 	}, fe)
 	if err != nil {
-		shutdown()
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)
 	}
 
@@ -194,10 +189,10 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	// worker can execute any turn (NewEngine has already started it, but
 	// nothing wakes it until cmd/fundid's Frontend.Run reads its first
 	// inbound frame, which happens strictly after BuildEngine returns).
-	// In-memory mode (c.DBURL == "") has nothing to reattach — Conversation
+	// In-memory mode (c.Pool == nil) has nothing to reattach — Conversation
 	// always mints a fresh "mem-..." id — so this is a clean no-op there,
 	// not an error.
-	if c.DBURL != "" {
+	if pool != nil {
 		repairCtx, repairCancel := context.WithTimeout(context.Background(), repairTimeout)
 		repaired, rErr := RepairOrphans(repairCtx, eng.conv)
 		repairCancel()

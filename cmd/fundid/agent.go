@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"git.graveland.dev/brent/fundi/internal/agent"
 	"git.graveland.dev/brent/fundi/internal/paths"
 )
@@ -133,6 +135,20 @@ func runAgent(args []string) int {
 		mcpPath = "" // defaulted path absent: skip MCP, as before
 	}
 
+	// The standalone CLI owns its pool: BuildRuntime/BuildEngine never open
+	// or close one themselves (see Config.Pool's doc comment), so a daemon
+	// can share a single pool across N engines. A nil pool here (--db unset)
+	// means an in-memory conversation, matching the old empty-DBURL behaviour.
+	var pool *pgxpool.Pool
+	if f.db != "" {
+		pool, err = pgxpool.New(ctx, f.db)
+		if err != nil {
+			slog.Error("agent: open database", "error", err)
+			return 1
+		}
+		defer pool.Close()
+	}
+
 	opts := agent.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
@@ -150,6 +166,7 @@ func runAgent(args []string) int {
 		FakeTurns:            f.fakeTurns,
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
+		Pool:                 pool,
 	}
 
 	fe := agent.NewFrontend(os.Stdin, os.Stdout, nil)

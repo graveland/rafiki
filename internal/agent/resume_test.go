@@ -42,7 +42,7 @@ import (
 // repair before returning.
 func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	silenceSlog(t)
-	pool, dsn := dbTestPool(t)
+	pool, _ := dbTestPool(t)
 	ctx := context.Background()
 	const ref = "resume-test-ref"
 
@@ -93,7 +93,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	cfg := Config{
 		Model:     "anthropic/claude-x",
 		Ref:       ref,
-		DBURL:     dsn,
+		Pool:      pool,
 		FakeTurns: writeFakeTurns(t, sampleEndTurn),
 		Tools:     fakeToolSet{},
 	}
@@ -171,7 +171,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 // conversation again via a real id.
 func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
 	silenceSlog(t)
-	_, dsn := dbTestPool(t)
+	pool, _ := dbTestPool(t)
 	ctx := context.Background()
 
 	inR, inW := io.Pipe()
@@ -180,7 +180,7 @@ func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
 	cfg := Config{
 		Model:     "anthropic/claude-x",
 		Ref:       "resume-test-get-state",
-		DBURL:     dsn,
+		Pool:      pool,
 		FakeTurns: writeFakeTurns(t, sampleEndTurn),
 		Tools:     fakeToolSet{},
 	}

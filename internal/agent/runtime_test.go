@@ -110,6 +110,25 @@ func TestBuildRuntimeRejectsRelativeCwd(t *testing.T) {
 	}
 }
 
+// TestBuildRuntimeNilPoolIsInMemory pins the contract Task 5 depends on: no
+// pool means an in-memory conversation, and BuildRuntime must never open one.
+// A BuildRuntime that dialled a database here would make every unit test in
+// this package require postgres.
+func TestBuildRuntimeNilPoolIsInMemory(t *testing.T) {
+	opts := fakeRuntimeOptions(t, t.TempDir())
+	opts.Pool = nil
+
+	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+	if err != nil {
+		t.Fatalf("BuildRuntime with a nil pool: %v", err)
+	}
+	defer shutdown()
+	if eng == nil {
+		t.Fatal("nil engine")
+	}
+}
+
 // TestBuildRuntimeMissingMCPConfigIsAnError pins the contract cmd/fundid relies
 // on: BuildRuntime errors on any MCPConfig path that does not exist. The
 // "silently skip a defaulted <cwd>/.mcp.json" behaviour stays in cmd/fundid,

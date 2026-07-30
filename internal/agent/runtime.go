@@ -38,7 +38,7 @@ type RuntimeOptions struct {
 
 	// Pool is the shared database pool. A nil Pool means an in-memory
 	// conversation. BuildRuntime never opens a pool itself, so a unit test does
-	// not need postgres. Read by BuildEngine as of Task 4.
+	// not need postgres.
 	Pool *pgxpool.Pool
 }
 
@@ -134,6 +134,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		FakeTurns:            opts.FakeTurns,
 		AnthropicAPIKey:      opts.AnthropicAPIKey,
 		OpenRouterAPIKey:     opts.OpenRouterAPIKey,
+		Pool:                 opts.Pool,
 		Tools:                registry,
 	}
 
