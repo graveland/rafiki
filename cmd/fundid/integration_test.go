@@ -38,7 +38,7 @@ func TestIntegration_CtrlStatus(t *testing.T) {
 	logsDir := filepath.Join(dir, "logs")
 
 	st := store.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath, nil)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, t.Context())
 
 	handler := server.NewDispatch(ctrl)
 	srv, err := server.Listen(socketPath, handler)
@@ -98,7 +98,7 @@ func TestIntegration_CtrlList(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil, nil, t.Context())
 
 	handler := server.NewDispatch(ctrl)
 	srv, err := server.Listen(socketPath, handler)
@@ -153,7 +153,7 @@ func TestIntegration_SetLabels_Success(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil, nil, t.Context())
 
 	// Insert a session manually.
 	now := time.Now()
@@ -225,7 +225,7 @@ func TestIntegration_SetLabels_ReservedPrefix(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil, nil, t.Context())
 
 	now := time.Now()
 	st.Insert(&store.Session{ChildID: "c_reserved", Status: "idle", Cwd: "/tmp", StartedAt: now})
@@ -275,7 +275,7 @@ func TestIntegration_SetLabels_InvalidKey(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil, nil, t.Context())
 
 	now := time.Now()
 	st.Insert(&store.Session{ChildID: "c_badkey", Status: "idle", Cwd: "/tmp", StartedAt: now})
@@ -326,7 +326,7 @@ func TestIntegration_List_LabelFilter(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil, nil, t.Context())
 
 	now := time.Now()
 	sessA := &store.Session{ChildID: "c_a", Status: "idle", Cwd: "/a", StartedAt: now,
@@ -387,7 +387,7 @@ func TestIntegration_MultipleCommands(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil, nil, t.Context())
 
 	handler := server.NewDispatch(ctrl)
 	srv, err := server.Listen(socketPath, handler)
@@ -451,7 +451,7 @@ func TestIntegration_Subscribe_LabelFiltered(t *testing.T) {
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	st := store.New()
-	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"), socketPath, nil, nil, t.Context())
 
 	handler := server.NewDispatch(ctrl)
 	srv, err := server.Listen(socketPath, handler)

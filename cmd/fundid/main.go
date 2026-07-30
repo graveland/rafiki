@@ -15,6 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"git.graveland.dev/brent/fundi/internal/envvar"
 	"git.graveland.dev/brent/fundi/internal/paths"
 	"git.graveland.dev/brent/fundi/internal/persist"
 	"git.graveland.dev/brent/fundi/internal/server"
@@ -70,9 +73,39 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// baseCtx is the daemon's own lifetime context, threaded into every
+	// in-process agent child (Controller.baseCtx -> agent.RuntimeOptions) so a
+	// hard daemon exit cancels them too. It is deliberately a SEPARATE context
+	// from ctx/cancel above: ctx is cancelled early (below, "stop the
+	// background sweeper") well before ShutdownAllChildren runs, and reusing
+	// it here would abort every in-flight in-process turn before
+	// ShutdownAllChildren's graceful stdin-close ladder (mirrored by
+	// inproc.Runner.Terminate/Kill for in-process children) gets a chance to
+	// run. baseCancel only fires when main() itself returns — strictly after
+	// ShutdownAllChildren has already had its full timeout window.
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	defer baseCancel()
+
+	// The agent kind's in-process children share one pool across the whole
+	// daemon (agent.RuntimeOptions.Pool); BuildEngine/BuildRuntime never open
+	// or close one themselves. A nil pool (FUNDI_AGENT_DB unset) means every
+	// agent conversation is in-memory, matching `fundid agent --db` unset.
+	var pool *pgxpool.Pool
+	if dsn := envvar.Get(envvar.AgentDB); dsn != "" {
+		pool, err = pgxpool.New(baseCtx, dsn)
+		if err != nil {
+			slog.Error("open agent database", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("agent database pool opened")
+	} else {
+		slog.Warn("no agent database configured; agent conversations are in-memory and no cost data will be recorded",
+			"env", envvar.AgentDB)
+	}
+
 	st := store.New()
 	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
-	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, baseCtx)
 	ctrl.loadOrphans(records)
 	ctrl.startSweeper(ctx)
 
@@ -134,5 +167,15 @@ func main() {
 	if err := srv.Close(); err != nil {
 		slog.Warn("server close", "error", err)
 	}
+
+	// Close the pool only after ShutdownAllChildren has returned: every
+	// in-process agent's own shutdown (e.g. flushing conversation state) runs
+	// before this point, so closing earlier could pull the pool out from
+	// under a child still finishing its own graceful stop.
+	if pool != nil {
+		pool.Close()
+		slog.Info("agent database pool closed")
+	}
+
 	slog.Info("done")
 }

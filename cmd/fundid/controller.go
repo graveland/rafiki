@@ -18,10 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
 	"git.graveland.dev/brent/fundi/internal/child"
 	"git.graveland.dev/brent/fundi/internal/envvar"
+	"git.graveland.dev/brent/fundi/internal/inproc"
 	"git.graveland.dev/brent/fundi/internal/intercept"
 	"git.graveland.dev/brent/fundi/internal/persist"
 	"git.graveland.dev/brent/fundi/internal/ring"
@@ -45,6 +47,17 @@ type Controller struct {
 	graceWindow time.Duration
 	sweeperWg   sync.WaitGroup
 
+	// pool is the daemon's shared database pool, handed to every in-process
+	// agent child (agent.RuntimeOptions.Pool). Nil means every agent
+	// conversation is in-memory. Owned and closed by main.go, not here.
+	pool *pgxpool.Pool
+
+	// baseCtx is the daemon's own context, threaded into inproc.Options.Parent
+	// so cancelling it stops every in-process agent child at once. Distinct
+	// from the per-request ctx passed to Spawn/Resume/RespawnChild, which only
+	// bounds the spawn call itself.
+	baseCtx context.Context
+
 	// spawnClaims serializes Resume and RespawnChild per childID. Both methods
 	// share the same check-then-act shape (read exited status, fork a real OS
 	// process, then replace the store record) and both operate on a childID
@@ -60,7 +73,12 @@ type Controller struct {
 // dumper may be nil; when nil, no log dumps are written on child exit.
 // The grace window defaults to 7 days but can be overridden with the
 // FUNDI_GRACE_HOURS environment variable (PI_CONTROLLER_GRACE_HOURS still works).
-func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper) *Controller {
+//
+// pool is the shared database pool for in-process agent children (nil means
+// in-memory conversations); baseCtx is the daemon's own context, threaded into
+// every in-process child so cancelling it stops them all at once. Both are
+// owned by main.go — this constructor only stores them.
+func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, baseCtx context.Context) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := envvar.Get(envvar.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -77,7 +95,37 @@ func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper
 		logsDir:     logsDir,
 		stateDir:    stateDir,
 		graceWindow: gw,
+		pool:        pool,
+		baseCtx:     baseCtx,
 	}
+}
+
+// agentRunner builds the in-process runner for an agent child. Returns a nil
+// Runner (and nil error) for every other kind, which leaves SpawnSpec on the
+// subprocess path unchanged.
+//
+// argv is built the same way for every spawn path (buildAgentArgv, the single
+// source of per-child agent config) and then parsed back with parseAgentFlags
+// — see agent_runtime.go's toRuntimeOptions doc comment for why this is not a
+// hand-written SpawnRequest-to-RuntimeOptions mapping.
+func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string) (child.Runner, error) {
+	if req.Kind != "agent" {
+		return nil, nil
+	}
+	argv := appendDaemonRef(buildAgentArgv(req, childID, c.stateDir), childID)
+	f, err := parseAgentFlags(argv[1:]) // argv[0] is the "agent" subcommand
+	if err != nil {
+		return nil, fmt.Errorf("agent flags: %w", err)
+	}
+	ro, err := f.toRuntimeOptions(req.Cwd, c.pool)
+	if err != nil {
+		return nil, fmt.Errorf("agent runtime options: %w", err)
+	}
+	return inproc.New(inproc.Options{
+		ChildID: childID,
+		Parent:  c.baseCtx,
+		Runtime: ro,
+	}), nil
 }
 
 // startSweeper launches a background goroutine that periodically forgets
@@ -441,6 +489,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
+	runner, err := c.agentRunner(req, childID)
+	if err != nil {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "agent runner: " + err.Error(),
+		}
+	}
+
 	spec := child.SpawnSpec{
 		ChildID:     childID,
 		Cwd:         req.Cwd,
@@ -449,6 +505,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 		Env:         env,
 		EnvOverride: req.EnvOverride,
 		Provider:    prov,
+		Runner:      runner,
+	}
+	if runner != nil {
+		// The agent kind's argv is parsed into RuntimeOptions above, not
+		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
+		spec.PiBinary = ""
+		spec.Argv = nil
 	}
 
 	now := time.Now()
@@ -962,6 +1025,14 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
+	runner, err := c.agentRunner(req, childID)
+	if err != nil {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "agent runner: " + err.Error(),
+		}
+	}
+
 	spec := child.SpawnSpec{
 		ChildID:     childID,
 		Cwd:         req.Cwd,
@@ -970,6 +1041,11 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		Env:         env,
 		EnvOverride: req.EnvOverride,
 		Provider:    prov,
+		Runner:      runner,
+	}
+	if runner != nil {
+		spec.PiBinary = ""
+		spec.Argv = nil
 	}
 
 	ch, err := child.Spawn(ctx, spec)
@@ -1033,56 +1109,56 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		}
 	}
 
-	req := protocol.SpawnRequest{
-		Name:     snap.Name,
-		Cwd:      snap.Cwd,
-		Provider: snap.Provider,
-		Model:    snap.Model,
-		Thinking: snap.Thinking,
-		// Session: fresh start (no --no-session, no --fork).
-		// sessionPath non-empty adds --session <sessionPath>.
-		NoSession:          false,
-		SessionDir:         snap.SessionDir,
-		ResumeSession:      sessionPath,
-		ForkSession:        "",
-		Tools:              strings.Join(snap.Tools, ","),
-		NoTools:            snap.NoTools,
-		NoBuiltinTools:     snap.NoBuiltinTools,
-		Extensions:         snap.Extensions,
-		NoExtensions:       snap.NoExtensions,
-		Skills:             snap.Skills,
-		NoSkills:           snap.NoSkills,
-		SkillsDirs:         snap.SkillsDirs,
-		MCPConfig:          snap.MCPConfig,
-		PromptTemplates:    snap.PromptTemplates,
-		NoPromptTemplates:  snap.NoPromptTemplates,
-		Themes:             snap.Themes,
-		NoThemes:           snap.NoThemes,
-		NoContextFiles:     snap.NoContextFiles,
-		SystemPrompt:       snap.SystemPrompt,
-		AppendSystemPrompt: snap.AppendSystemPrompt,
-		Verbose:            snap.Verbose,
-		PiBinary:           snap.PiBinary,
-		ExtraArgs:          snap.ExtraArgs,
+	// Reconstruct the same SpawnRequest Resume feeds to resolveSpawnPlan
+	// (rather than a separately hand-built one) so every kind — not just
+	// "pi" — resolves through the correct dispatch branch, and so no field
+	// (e.g. Kind itself, agent's split Provider/Model) can drift between the
+	// two respawn paths. Then apply RespawnChild's own session-continuity
+	// override: fresh start (no --no-session, no --fork), sessionPath
+	// non-empty adds --session <sessionPath>.
+	req := resumeRequestFromSnapshot(snap, "")
+	req.NoSession = false
+	req.ResumeSession = sessionPath
+	req.ForkSession = ""
+
+	kind := snap.Kind
+	if kind == "" {
+		kind = "pi"
 	}
 
-	piBin, err := resolvePiBinary(req.PiBinary)
+	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
 	if err != nil {
 		return server.SpawnResult{}, &server.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
-			Message: "pi binary not found: " + err.Error(),
+			Message: "spawn plan: " + err.Error(),
 		}
 	}
 
-	argv := buildArgv(req)
 	env := buildEnv(req, childID, c.socketPath)
+	if kind == "claude" {
+		env = append(env, claudeEnv(req.ConfigDir)...)
+	}
+
+	runner, err := c.agentRunner(req, childID)
+	if err != nil {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "agent runner: " + err.Error(),
+		}
+	}
 
 	spec := child.SpawnSpec{
 		ChildID:  childID,
 		Cwd:      req.Cwd,
-		PiBinary: piBin,
+		PiBinary: bin,
 		Argv:     argv,
 		Env:      env,
+		Provider: prov,
+		Runner:   runner,
+	}
+	if runner != nil {
+		spec.PiBinary = ""
+		spec.Argv = nil
 	}
 
 	ch, err := child.Spawn(ctx, spec)
@@ -1101,7 +1177,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// Session from snap with RespawnChild's session-continuity values (fresh
 	// start: noSession=false, resumeSession=sessionPath, forkSession=""),
 	// inserts, adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
-	return c.activateLiveChild(childID, ch, piBin, protocol.SpawnRequest{}, &snap,
+	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
 		false, sessionPath, "")
 }
 

@@ -321,7 +321,7 @@ func TestDeliverToMatching_LabelChangeStopsDelivery(t *testing.T) {
 
 func TestConnectionClose_CleansUpLabeledSubs(t *testing.T) {
 	st := store.New()
-	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil)
+	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil, nil, t.Context())
 
 	conn := &collectConn{}
 	if err := ctrl.SubscribeLabeled(conn, map[string]string{"env": "prod"}, nil, protocol.SubscribeFilter{}); err != nil {
@@ -351,7 +351,7 @@ func TestConnectionClose_CleansUpLabeledSubs(t *testing.T) {
 // stored as nil (no unnecessary allocation) by SubscribeLabeled.
 func TestSubscribeLabeled_NilFilterStored(t *testing.T) {
 	st := store.New()
-	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil)
+	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil, nil, t.Context())
 	conn := &collectConn{}
 
 	if err := ctrl.SubscribeLabeled(conn, map[string]string{"x": "y"}, nil, protocol.SubscribeFilter{}); err != nil {
@@ -375,7 +375,7 @@ func TestSubscribeLabeled_NilFilterStored(t *testing.T) {
 // preserved as a non-nil pointer.
 func TestSubscribeLabeled_NonEmptyFilterStored(t *testing.T) {
 	st := store.New()
-	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil)
+	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil, nil, t.Context())
 	conn := &collectConn{}
 
 	f := protocol.SubscribeFilter{Include: []string{"agent_start"}}
