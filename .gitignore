@@ -37,3 +37,6 @@ go.work
 go.work.sum
 .env
 .env-*
+
+# ephemeral docs:
+/tasks/
