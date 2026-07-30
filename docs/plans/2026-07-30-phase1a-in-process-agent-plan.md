@@ -1931,7 +1931,7 @@ Expected: a non-zero pid. The pi and claude kinds must still be subprocesses; a 
 
 - [ ] **Step 6: Update the design doc**
 
-Record against the design's open questions: whether `renderRing` was affected (expected: untouched, since claude is still a subprocess), and the spill-dir scoping this phase settled. Note the two known behaviour changes from the section below so phase 2 does not rediscover them.
+Record against the design's open questions: whether `renderRing` was affected (expected: untouched, since claude is still a subprocess), and the spill-dir scoping this phase settled. Note the known behaviour changes from the section below so phase 2 does not rediscover them.
 
 - [ ] **Step 7: Commit**
 
@@ -1945,9 +1945,12 @@ git commit -m "docs(plans): record phase 1a verification outcomes"
 
 ## Known behaviour changes
 
-Both are consequences of the design, not defects, but they are user-visible and must be in the phase's release notes.
+These are consequences of the design, not defects, but they are user-visible and must be in the phase's release notes.
 
-1. **`fundi logs --err <agent-child>` returns empty.** An in-process agent has no separate stderr; its diagnostics are daemon log lines tagged with the child id. `err.log.gz` is no longer written for agent children. pi and claude are unaffected. The design intends this — `logs` becomes a query in phase 2 — but between the two phases there is a real gap in agent-child diagnostics, and the workaround is reading the daemon log.
+1. **`fundi logs --err <agent-child>` returns empty output.** An in-process agent has no separate stderr; its diagnostics are daemon log lines tagged with the child id. Note precisely what this does *not* mean: `err.log.gz` **is still written**. `persist.logs.go` calls `writeGzBytes` unconditionally, and that produces a valid, empty gzip for zero bytes. So the artifact is present-but-empty and `fundi logs --err` returns empty output rather than an error — tooling must not treat a *missing* file as the signal. pi and claude are unaffected. The design intends this — `logs` becomes a query in phase 2 — but between the two phases there is a real gap in agent-child diagnostics, and the workaround is reading the daemon log.
+
+2. **`fundi get <agent-child>` reports `pid: 0`.** There is no process. `loadOrphans` already guards with `if rec.PID > 0`, so nothing tries to signal it, but any external tooling that treats pid 0 as an error needs updating. Corollary: the `fundi/pid` auto-label is now the literal string `"0"` for every agent child, so `fundi list -l fundi/pid=…` selectors behave differently for them.
+
 3. **A forwarded environment no longer reaches an agent child, except the two provider keys.**
    `fundi create` sets `--forward-env` true by default and `collectCallerEnv` snapshots the
    caller's whole environment, which the subprocess path passed through `spec.Env`. An
@@ -1959,13 +1962,55 @@ Both are consequences of the design, not defects, but they are user-visible and 
    This is inherent to the goroutine model, not a defect, but it is a real capability loss
    versus the subprocess it replaces.
 
-2. **`fundi get <agent-child>` reports `pid: 0`.** There is no process. `loadOrphans` already guards with `if rec.PID > 0`, so nothing tries to signal it, but any external tooling that treats pid 0 as an error needs updating.
+4. **`FUNDI_CHILD_ID` and `FUNDI_SOCKET` no longer reach the agent, or its tool subprocesses.**
+   This is *not* covered by item 3: those two are daemon-**injected** reserved variables that
+   `collectCallerEnv` deliberately strips from the forwarded set, so they travelled by a
+   different route (`buildEnv`) and are lost for a different reason. `bash.go` sets no
+   `cmd.Env`, so an agent's tool subprocesses now inherit the **daemon's** environment rather
+   than a per-child one. Anything that called back into fundi via `$FUNDI_SOCKET`, or
+   self-identified via `$FUNDI_CHILD_ID`, is broken. `req.APIKey` used to reach every bash
+   subprocess the same way and now lives only in `RuntimeOptions`.
+
+5. **An `ExtraArgs --ref` is silently overridden by the daemon's child id.** `appendDaemonRef`
+   appends the authoritative `--ref` last, and last-flag-wins means a caller-supplied one never
+   takes effect. This is a deliberate security fix — `--ref` selects which stored conversation
+   the child reattaches, so honouring a caller value points one child at another's history —
+   but unlike the `--db` rejection it is silent rather than an error.
+
+6. **`--db` in an agent spawn's `ExtraArgs` is now a spawn failure.** The daemon owns one shared
+   pool for every in-process child, so a caller-supplied DSN cannot be honoured and is refused
+   rather than ignored. Consequence for existing state: an agent child **persisted by an older
+   daemon** with `--db` in its recorded `ExtraArgs` can no longer be **resumed** — the same
+   rejection fires on the resume path.
+
+7. **Agent flag errors now fail the spawn RPC instead of producing a broken child.** A bad flag
+   used to spawn a child that immediately exited with `exitCode: 2` and `stalled: true`; it now
+   returns `ErrSpawnFailed` with no child record at all. Better, but different — anything that
+   polled for an exited child to discover the failure sees an RPC error instead. Corollary: exit
+   code 2 is now reachable **only** via a contained panic.
+
+8. **Claude `new_session` / `switch_session` now works, where it used to produce a dead child.**
+   Routing `RespawnChild` through `resolveSpawnPlan` fixed a pre-existing bug: the old path
+   exec'd the claude binary with *pi* argv and no `CLAUDE_CONFIG_DIR`. Newly reachable
+   behaviour, previously unrecorded. (For the **agent** kind the same two commands are now
+   rejected outright — see below.)
+
+9. **`new_session` / `switch_session` are rejected for agent children.** An agent conversation is
+   identified by the child id itself: `buildAgentArgv` ignores `ResumeSession` and
+   `appendDaemonRef` pins `--ref` to the unchanged childID, so a respawn would silently
+   reattach the whole prior conversation while reporting success. The commands fail with
+   `invalid_args` until agent conversations have an identity of their own.
+
+10. **New startup and per-spawn warnings.** A daemon with no `FUNDI_AGENT_DB` logs an
+    unconditional WARN at startup that agent conversations are in-memory. A spawn carrying
+    forwarded environment variables an in-process child cannot receive logs a WARN naming them
+    (names only — that map routinely holds credentials).
 
 ## Out of scope for this plan
 
 Each is its own plan.
 
-- **Step 1b — deleting the serialization.** The `io.Pipe` stays. Removing the JSON round-trip, the 2× payload duplication, and the `JSON.raw` bug class comes after 1a is verified in real use.
+- **Step 1b — deleting the serialization.** The pipe stays — as a pair of real `os.Pipe`s, which Task 3 substituted for the planned `io.Pipe` deliberately: an unbuffered `io.Pipe` blocks the writer inside `Frontend.Emit`'s mutex whenever the reader isn't consuming in lockstep, freezing *all* emission for that child, whereas a kernel-buffered OS pipe reproduces the slack a real subprocess's stdio gives the daemon. Removing the JSON round-trip, the 2× payload duplication, and the `JSON.raw` bug class comes after 1a is verified in real use.
 - **Telemetry wiring.** In-process execution *enables* per-conversation OTLP spans and Prometheus gauges; it does not add them. The design lists them as unlocked benefits, not deliverables.
 - **Phase 2 — the database as source of truth.** The ring, `renderRing`, `exitedRing`, `persist.Record`, the grace sweeper, and `childClaimSet` all survive untouched. `forget` keeps its current meaning.
 - **Making the database mandatory.** A nil pool still means an in-memory conversation. The `mem-…` fallback and the service-template env passthrough are phase 2.

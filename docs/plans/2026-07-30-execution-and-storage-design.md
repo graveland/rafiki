@@ -202,18 +202,28 @@ coupling to being a separate process is one line — `cmd/fundid/agent.go:203`,
 `agent.NewFrontend(os.Stdin, os.Stdout, nil)` — because `Frontend` takes an `io.Reader` and an
 `io.Writer`.
 
-**Step 1a — same protocol, in-memory transport.** `Child` becomes an interface with two
-implementations: `processChild` (exec, unchanged) and `inProcessChild` (an `Engine` goroutine
-with `Frontend` wired to an `io.Pipe`). The daemon's frame reader at `child.go:477` is
-untouched. `BuildEngine` stops creating a pool and accepts one.
+**Step 1a — same protocol, in-memory transport.** Execution moves behind an injected
+`child.Runner` seam with two implementations: `processRunner` (exec, unchanged) and
+`inproc.Runner` (an `Engine` goroutine with `Frontend` wired to a pair of pipes). `Child` itself
+stays a single concrete type rather than becoming an interface — the seam sits one level lower,
+which is what leaves the supervise and `readStdout` loops literally unchanged.
+
+As built, the transport is a pair of **`os.Pipe`s, not an `io.Pipe`**. An unbuffered `io.Pipe`
+blocks any write the reader does not immediately consume, and `Frontend.Emit` holds its mutex
+across both of its writes — so one stalled read freezes *all* emission for that child, with no
+error and no timeout. A real subprocess's stdio gives the daemon a kernel-buffered pipe; an
+`os.Pipe` reproduces that same slack, which is what makes the two execution models actually
+interchangeable. `BuildEngine` stops creating a pool and accepts one.
 
 This yields, for the agent kind: no process spawn, one shared pool instead of 1+N, no
 `ShutdownAllChildren` budget, no `loadOrphans` SIGTERM, per-conversation OTLP spans nesting
 under the daemon's trace, per-conversation Prometheus gauges, and no separate stderr stream —
-child diagnostics become daemon structured logs with a `conversation_id` field, so `err.log.gz`
-and `fundi logs --err` become a query rather than a gzip read.
+child diagnostics become daemon structured logs with a `conversation_id` field. Note that
+`err.log.gz` is still *written* for an agent child (`persist` writes it unconditionally, and
+zero bytes is a valid gzip); it is simply always empty, so `fundi logs --err` returns empty
+output rather than an error. Turning that into a query is phase 2.
 
-**Step 1b — delete the serialization.** Replace the pipe with direct calls or channels. This
+**Step 1b — delete the serialization.** Replace the `os.Pipe` pair with direct calls or channels. This
 removes an entire bug class that exists only because two halves of one program speak a wire
 format: the `JSON.raw`-versus-struct-field divergence that made every streamed frame empty, the
 2× payload duplication where `message` and `assistantMessageEvent.message` are byte-identical,

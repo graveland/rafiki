@@ -18,7 +18,7 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 
 | Binary | Role |
 |---|---|
-| `fundid` | the daemon. Also `fundid agent`, which is this binary re-exec'd as a single agent child |
+| `fundid` | the daemon. It runs `agent`-kind children as goroutines inside itself; `pi` and `claude` children remain subprocesses. `fundid agent` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
 | `fundi` | the CLI client — the one you type |
 | `fundi-attach` | the TUI, spawned by `fundi create` / `fundi attach` |
 
@@ -26,7 +26,8 @@ Note that a `pic` on your `$PATH` is *pi-controller's* client, not fundi's.
 
 ## Layout
 
-- `cmd/fundid` — the daemon, plus `fundid agent` (one agent child on stdio)
+- `cmd/fundid` — the daemon (which hosts `agent`-kind children in-process), plus the standalone `fundid agent` mode (one agent child on stdio)
+- `internal/inproc` — the `child.Runner` that runs an agent child as a goroutine over a pair of OS pipes
 - `cmd/fundi` — the CLI client
 - `internal/agent` — the agent runtime: turn engine, tools, context and skill loading
 - `client` — Go client for the daemon's socket
