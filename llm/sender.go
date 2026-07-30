@@ -5,6 +5,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
 // Sender issues one Messages-API call. The SDK client is wrapped behind this
@@ -13,10 +14,34 @@ type Sender interface {
 	New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error)
 }
 
+// StreamingSender is an optional capability: a Sender that can also open a
+// streaming Messages call. Callers type-assert for it and fall back to New,
+// so a Sender that cannot stream (test fakes, custom transports) stays valid.
+// Kept separate from Sender so this remains an additive change upstream.
+// The error return exists for implementations other than sdkSender: the
+// Anthropic SDK's own Messages.NewStreaming never fails this way (see
+// sdkSender.NewStreaming below), so no first-party sender ever returns a
+// non-nil error here. A StreamingSender that does MAY also return a non-nil
+// stream alongside it — sendStreaming's caller is responsible for closing
+// that stream on every path, including this one, so implementations should
+// not assume an error return means nothing needs cleanup.
+type StreamingSender interface {
+	Sender
+	NewStreaming(ctx context.Context, params anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error)
+}
+
 type sdkSender struct{ client anthropic.Client }
 
 func (s sdkSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
 	return s.client.Messages.New(ctx, params)
+}
+
+// NewStreaming opens a streaming Messages call. The SDK's NewStreaming does
+// not itself return an error (errors surface as an error event on the stream
+// or from the stream's Err() after iteration), so the nil here is not a
+// stub — it matches the real signature.
+func (s sdkSender) NewStreaming(ctx context.Context, params anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
+	return s.client.Messages.NewStreaming(ctx, params), nil
 }
 
 // Anthropic returns a Sender for the Anthropic API.
