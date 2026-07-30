@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sort"
 	"sync"
 
@@ -78,13 +80,37 @@ func (r *Registry) Definitions() []anthropic.ToolUnionParam {
 // Execute runs the named tool's ToolFunc. An unknown name is a returned
 // error, not a panic — agentloop converts it to an is_error tool result the
 // model can see.
-func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
+//
+// A panic inside a ToolFunc is recovered here and converted into that same
+// returned error. This is the containment boundary for the ENTIRE tool
+// surface — the file tools, bash, skill, and every MCP tool, since all of
+// them are registered as ToolFuncs on this Registry — and it is the only
+// place that containment can live: agentloop runs each tool call on its own
+// errgroup goroutine (one g.Go per tool_use block) and errgroup deliberately
+// does not recover. Without this, a panic in any tool body unwinds a
+// goroutine nothing owns and kills the whole daemon, taking every unrelated
+// conversation with it.
+//
+// Converting the panic to an error rather than re-raising it is the right
+// shape, not a convenience: agentloop turns a tool error into an is_error
+// tool_result the model can see and react to, so the turn survives and the
+// model is told what happened. No partial result is preserved — a tool that
+// panicked mid-write has no output worth showing.
+func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (result string, err error) {
 	r.mu.RLock()
 	fn, ok := r.fns[name]
 	r.mu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+	defer func() {
+		if v := recover(); v != nil {
+			slog.Error("tools: tool panicked; reporting a failed tool result to the model",
+				"tool", name, "panic", v, "stack", string(debug.Stack()))
+			result = ""
+			err = fmt.Errorf("tool %q panicked: %v", name, v)
+		}
+	}()
 	return fn(ctx, input)
 }
 

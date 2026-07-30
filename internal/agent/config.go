@@ -106,6 +106,11 @@ type Config struct {
 	// Tools is the assembled tool registry (file tools + bash + skills +
 	// MCP), built by cmd/fundid before calling BuildEngine.
 	Tools agentloop.ToolSet
+
+	// OnFatal is handed straight to EngineConfig.OnFatal: the owner's hook for
+	// ending this child when a turn panics. See EngineConfig.OnFatal. Nil is
+	// legal (a standalone `fundid agent` process has nothing to hand back to).
+	OnFatal func(error)
 }
 
 // BuildEngine constructs the llm.Client (wiring c.Pool via llm.WithStore when
@@ -175,6 +180,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		ModelID:  modelID,
 		Name:     c.Name,
 		BaseCtx:  ctx,
+		OnFatal:  c.OnFatal,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)

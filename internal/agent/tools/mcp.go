@@ -278,6 +278,15 @@ func newMCPToolFunc(session *mcp.ClientSession, toolName, registeredName string,
 		if err != nil {
 			return "", fmt.Errorf("mcp: calling tool %q: %w", toolName, err)
 		}
+		// A third-party server is not obliged to behave: nothing in the SDK's
+		// signature rules out a nil result alongside a nil error, and res is
+		// dereferenced immediately below. Report it as a tool error the model
+		// can see rather than taking a nil-pointer panic out to a goroutine
+		// (agentloop runs each tool on its own errgroup goroutine) that would
+		// otherwise be contained only by Registry.Execute's recover.
+		if res == nil {
+			return "", fmt.Errorf("mcp: tool %q returned no result", toolName)
+		}
 
 		var text strings.Builder
 		for _, c := range res.Content {

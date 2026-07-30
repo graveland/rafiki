@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"git.graveland.dev/brent/fundi/internal/agent"
+	"git.graveland.dev/brent/fundi/internal/agent/tools"
 	"git.graveland.dev/brent/rafiki/llm"
 )
 
@@ -718,5 +720,207 @@ func TestRunnerStartIsSingleShot(t *testing.T) {
 	}
 	if code, sig := r.Wait(); code != 0 || sig != "" {
 		t.Errorf("Wait() = (%d, %q), want (0, \"\") - the rejected second Start must not have disturbed the first", code, sig)
+	}
+}
+
+// panicToolBuildFunc returns a BuildFunc whose engine is wired to a REAL
+// tools.Registry carrying one "bash" tool that panics. Using the real Registry
+// is the point: the containment under test lives in Registry.Execute, and a
+// hand-rolled ToolSet in this test would bypass it and prove nothing.
+//
+// It forwards ro.OnFatal to EngineConfig, exactly as agent.BuildRuntime does,
+// so the child-ending path stays wired for an injected build.
+func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
+	return func(ctx context.Context, fe *agent.Frontend, ro agent.RuntimeOptions) (*agent.Engine, func(), error) {
+		sender, err := agent.LoadFakeSender(fakeTurnsPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		client, err := llm.NewClient(
+			llm.WithUpstream(llm.UpstreamAnthropic, sender),
+			llm.WithDefaultModel("claude-x"))
+		if err != nil {
+			return nil, nil, err
+		}
+		reg := tools.NewRegistry()
+		reg.Register(tools.Def("bash", "panics on purpose", `{"type":"object"}`),
+			func(context.Context, json.RawMessage) (string, error) {
+				panic("tool exploded inside a real turn")
+			})
+		eng, err := agent.NewEngine(agent.EngineConfig{
+			Client:   client,
+			Tools:    reg,
+			Provider: "anthropic",
+			ModelID:  "claude-x",
+			Name:     "w1",
+			BaseCtx:  ctx,
+			OnFatal:  ro.OnFatal,
+			ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+		}, fe)
+		if err != nil {
+			return nil, nil, err
+		}
+		return eng, func() {}, nil
+	}
+}
+
+// TestRunnerSurvivesAPanickingTool proves the tool-execution boundary end to
+// end: a tool body that panics becomes a failed tool result on the wire, the
+// turn still completes, and the child is still alive and able to take another
+// prompt. Without the recover in tools.Registry.Execute this test does not
+// fail — it crashes the test binary, because agentloop runs the tool on an
+// errgroup goroutine that nothing recovers.
+func TestRunnerSurvivesAPanickingTool(t *testing.T) {
+	r := New(Options{
+		ChildID: "c_toolpanic",
+		Parent:  t.Context(),
+		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Build:   panicToolBuildFunc(writeFakeTurns(t, sampleToolUseResp, sampleEndTurn, sampleEndTurn)),
+	})
+
+	stdin, stdout, stderr, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := stderr.Close(); err != nil {
+		t.Errorf("close stderr: %v", err)
+	}
+	dec := json.NewDecoder(stdout)
+
+	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"go"}` + "\n")); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	first := strings.Join(decodeUntilWithTimeout(t, dec, "agent_end", 15*time.Second), "\n")
+	if !strings.Contains(first, "tool_execution_end") {
+		t.Errorf("no tool_execution_end after a panicking tool; got:\n%s", first)
+	}
+	if !strings.Contains(first, `"isError":true`) {
+		t.Errorf("the panicking tool did not produce an is_error result the model can see; got:\n%s", first)
+	}
+	if !strings.Contains(first, "tool exploded inside a real turn") {
+		t.Errorf("the tool result does not carry the panic value; got:\n%s", first)
+	}
+
+	// Still alive: a contained tool panic must not end the conversation.
+	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"second"}` + "\n")); err != nil {
+		t.Fatalf("write second prompt: %v", err)
+	}
+	second := strings.Join(decodeUntilWithTimeout(t, dec, "agent_end", 15*time.Second), "\n")
+	if !strings.Contains(second, "the fake reply") {
+		t.Errorf("the child did not serve a second prompt after a contained tool panic; got:\n%s", second)
+	}
+
+	if err := stdin.Close(); err != nil {
+		t.Errorf("close stdin: %v", err)
+	}
+	if code, sig := r.Wait(); code != 0 || sig != "" {
+		t.Errorf("Wait() = (%d, %q), want (0, \"\") - a contained tool panic is not a child failure", code, sig)
+	}
+}
+
+// panickingSender explodes on every send, standing in for the SDK sharp edges
+// the turn goroutine actually walks (acc.Accumulate / MapAssistantMessage over
+// model-supplied bytes). It panics on the turn goroutine, which is what makes
+// it the right injection point for the worker-path containment.
+type panickingSender struct{}
+
+func (panickingSender) New(context.Context, anthropic.MessageNewParams) (*anthropic.Message, error) {
+	panic("sdk exploded mid-turn")
+}
+
+// panickingTurnBuildFunc wires an engine whose every turn panics on the worker
+// goroutine.
+func panickingTurnBuildFunc() BuildFunc {
+	return func(ctx context.Context, fe *agent.Frontend, ro agent.RuntimeOptions) (*agent.Engine, func(), error) {
+		client, err := llm.NewClient(
+			llm.WithUpstream(llm.UpstreamAnthropic, panickingSender{}),
+			llm.WithDefaultModel("claude-x"))
+		if err != nil {
+			return nil, nil, err
+		}
+		eng, err := agent.NewEngine(agent.EngineConfig{
+			Client:   client,
+			Tools:    &blockingToolSet{started: make(chan struct{})},
+			Provider: "anthropic",
+			ModelID:  "claude-x",
+			Name:     "w1",
+			BaseCtx:  ctx,
+			OnFatal:  ro.OnFatal,
+			ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+		}, fe)
+		if err != nil {
+			return nil, nil, err
+		}
+		return eng, func() {}, nil
+	}
+}
+
+// TestRunnerPanicInTurnWorkerEndsTheChild covers the other half of the
+// containment story. A panic on the engine's turn worker is NOT on run()'s
+// goroutine, so run()'s recover cannot see it; agent.Engine.runTurnGuarded
+// catches it and routes it back through EngineConfig.OnFatal.
+//
+// The requirement is specifically that this ends the CHILD rather than
+// silently stopping the queue: stdout must reach a clean EOF (so the daemon's
+// readStdout runs its ordinary child-exit path) and the exit code must be
+// non-zero. A silently stopped queue would instead leave the child looking
+// healthy forever while every prompt vanished.
+func TestRunnerPanicInTurnWorkerEndsTheChild(t *testing.T) {
+	r := New(Options{
+		ChildID: "c_workerpanic",
+		Parent:  t.Context(),
+		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Build:   panickingTurnBuildFunc(),
+	})
+
+	stdin, stdout, stderr, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := stderr.Close(); err != nil {
+		t.Errorf("close stderr: %v", err)
+	}
+
+	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"go"}` + "\n")); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	// Deliberately never close stdin: the child must end on its own. If the
+	// panic only stopped the queue, this read would block until the test
+	// deadline instead of returning.
+	type readResult struct {
+		frames []byte
+		err    error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		b, rerr := io.ReadAll(stdout)
+		done <- readResult{frames: b, err: rerr}
+	}()
+
+	var got readResult
+	select {
+	case got = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("stdout never reached EOF after a turn-worker panic; the child is wedged, not ended")
+	}
+	if got.err != nil {
+		t.Errorf("stdout must EOF cleanly so the daemon runs its normal child-exit path, got: %v", got.err)
+	}
+	if !strings.Contains(string(got.frames), "agent_error") {
+		t.Errorf("no agent_error frame explaining why the child died; got:\n%s", got.frames)
+	}
+
+	code, sig := r.Wait()
+	if code == 0 {
+		t.Error("exit code = 0 after a turn-worker panic, want non-zero")
+	}
+	if sig != "" {
+		t.Errorf("signal = %q, want empty - a panic is an exit, not a signal", sig)
+	}
+
+	if err := stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Errorf("close stdin: %v", err)
 	}
 }

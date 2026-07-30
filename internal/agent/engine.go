@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,20 @@ type EngineConfig struct {
 	// signal.NotifyContext parent) into in-flight turns. Nil defaults to
 	// context.Background(), matching every pre-Task-14 caller.
 	BaseCtx context.Context
+
+	// OnFatal is called at most once, from the turn worker, when the engine
+	// has hit something it cannot continue past — today that means a panic
+	// escaped a turn. The engine has already stopped accepting work and
+	// released every outstanding Wait() count by the time it fires, so the
+	// owner's job is only to END THE CHILD: record a non-zero exit and unblock
+	// whatever is reading the child's stdin so its stdout closes and the
+	// daemon sees an ordinary EOF (inproc.Runner does exactly this).
+	//
+	// A nil OnFatal is legal and means "log it and stop taking turns", which
+	// is all a standalone `fundid agent` process can do; the in-process daemon
+	// path always supplies one, because a silently-stopped queue there is a
+	// wedged child that answers prompts forever and never runs one.
+	OnFatal func(error)
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -72,11 +87,13 @@ type Engine struct {
 	// derives from — the single seam for wiring process shutdown (a
 	// signal.NotifyContext parent) into in-flight turns.
 	baseCtx context.Context
+	onFatal func(error)
 
 	mu       sync.Mutex
 	pending  []string           // FIFO of queued prompts awaiting execution
 	cancel   context.CancelFunc // non-nil while a turn is running
 	steerBuf []string           // steers accepted during the running turn
+	dead     bool               // set by fatal(); the worker is gone, no more turns will run
 
 	// wake carries at most one pending "queue is non-empty" signal. Sends are
 	// non-blocking: a dropped send means a signal is already buffered, so the
@@ -110,6 +127,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		fe:      fe,
 		em:      NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
 		baseCtx: baseCtx,
+		onFatal: cfg.OnFatal,
 		state: StateData{
 			SessionID:   conv.ID,
 			SessionName: cfg.Name,
@@ -130,8 +148,23 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	// SYNCHRONOUS OpenRouter fetch — that would land inside the first
 	// AssistantTurn's emit, delaying the frame. Best-effort: a failed fetch is
 	// logged by the catalog and simply leaves that turn's cost at 0.
+	//
+	// It runs on its own goroutine, which nothing else covers, and its body is
+	// an HTTP GET plus a JSON decode of a third party's response — so it gets
+	// its own recover. Swallowing the panic with a log is correct HERE and
+	// nowhere else in this file: warming is already best-effort by
+	// construction (a failure costs a turn's cost figure, nothing more), so
+	// there is no child-ending decision to make.
 	if cat := catalogOf(cfg.Client); cat != nil {
-		go cat.Warm()
+		go func() {
+			defer func() {
+				if v := recover(); v != nil {
+					slog.Error("agent: model catalog warm panicked; pricing falls back to zero-cost",
+						"panic", v, "stack", string(debug.Stack()))
+				}
+			}()
+			cat.Warm()
+		}()
 	}
 	slog.Info("agent: engine started", "conversation", conv.ID, "provider", cfg.Provider, "model", cfg.ModelID)
 	return e, nil
@@ -161,9 +194,21 @@ func pricerFor(c *llm.Client) Pricer {
 
 // HandlePrompt queues text as a turn and returns immediately — the Handler
 // contract. Queued turns run in order, one at a time.
+//
+// A prompt arriving after fatal() is rejected rather than queued. The
+// alternative is worse than it looks: wg.Add on a dead worker is a count
+// nothing will ever Done, so the next Wait() (the owner's shutdown path)
+// would block forever. The Add is inside the lock for exactly that reason —
+// it has to be atomic with the dead check.
 func (e *Engine) HandlePrompt(text string) {
-	e.wg.Add(1)
 	e.mu.Lock()
+	if e.dead {
+		e.mu.Unlock()
+		slog.Warn("agent: prompt dropped; the turn worker is no longer running",
+			"conversation", e.conv.ID)
+		return
+	}
+	e.wg.Add(1)
 	e.pending = append(e.pending, text)
 	e.mu.Unlock()
 	select {
@@ -217,7 +262,8 @@ func (e *Engine) Wait() { e.wg.Wait() }
 // closed channel; the ordering above is what rules that race out.
 func (e *Engine) Close() { close(e.wake) }
 
-// worker drains the prompt queue serially for the engine's lifetime.
+// worker drains the prompt queue serially for the engine's lifetime, and
+// stops for good the first time a turn panics.
 func (e *Engine) worker() {
 	for range e.wake {
 		for {
@@ -230,10 +276,87 @@ func (e *Engine) worker() {
 			e.pending = e.pending[1:]
 			e.mu.Unlock()
 
-			e.runTurn(text)
-			e.wg.Done()
+			if !e.runTurnGuarded(text) {
+				return // fatal() has already been called; this child is ending
+			}
 		}
 	}
+}
+
+// runTurnGuarded runs one turn and reports whether the worker may continue.
+//
+// The recover lives here rather than in a top-level defer on the worker
+// goroutine so the WaitGroup accounting stays exact: wg.Done() for THIS turn
+// runs unconditionally, panic or not, and fatal() below then releases exactly
+// the turns still queued. A recover on the goroutine as a whole would have to
+// guess how many counts were outstanding, and guessing high trips "sync:
+// negative WaitGroup counter" — a second, worse panic on the recovery path.
+//
+// A turn panic ends the child rather than being swallowed and retried. The
+// panic can land anywhere in agentloop.Run — mid-stream inside
+// acc.Accumulate/MapAssistantMessage, or between a tool_use being emitted and
+// its tool_result being appended — so the conversation may now carry a
+// dangling tool_use that the API rejects outright on the next request. A child
+// that keeps accepting prompts and fails every one of them is worse than a
+// child that exits and can be resumed.
+func (e *Engine) runTurnGuarded(text string) (ok bool) {
+	defer func() {
+		// Unconditional, and deliberately before the recover: this turn is
+		// over either way, and nothing else will ever call Done for it.
+		e.wg.Done()
+		if v := recover(); v != nil {
+			slog.Error("agent: turn panicked; ending this conversation",
+				"conversation", e.conv.ID, "panic", v, "stack", string(debug.Stack()))
+			e.fatal(fmt.Errorf("agent turn panicked: %v", v))
+			ok = false
+		}
+	}()
+	e.runTurn(text)
+	return true
+}
+
+// fatal marks the engine dead, releases every outstanding Wait() count, and
+// hands the failure to the owner so the CHILD ends — not just the queue.
+//
+// Stopping the queue on its own would wedge the child: the Frontend keeps
+// reading frames and answering get_state, so the daemon still sees a healthy
+// idle child, and every prompt from that point on is accepted and never run.
+// The owner's OnFatal is what turns this into an ordinary child exit.
+func (e *Engine) fatal(err error) {
+	e.mu.Lock()
+	if e.dead { // fatal is once-only; the worker calls it and then returns
+		e.mu.Unlock()
+		return
+	}
+	e.dead = true
+	// The panicked turn may have died before runTurn's own cancel(), leaving
+	// its context registered on baseCtx forever. Release it here.
+	cancel := e.cancel
+	e.cancel = nil
+	// Queued-but-unstarted turns each hold a wg count that no worker will ever
+	// retire, and HandlePrompt refuses to add more now that dead is set — so
+	// this is the complete outstanding set, and Wait() can return.
+	queued := len(e.pending)
+	e.pending = nil
+	e.steerBuf = nil
+	onFatal := e.onFatal
+	e.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	for range queued {
+		e.wg.Done()
+	}
+
+	e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+
+	if onFatal == nil {
+		slog.Error("agent: engine is no longer running turns and has no OnFatal owner to end the child",
+			"conversation", e.conv.ID, "error", err)
+		return
+	}
+	onFatal(err)
 }
 
 // runTurn drives one prompt through the agent loop, emitting the pi frames
@@ -390,15 +513,38 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			}
 			e.em.AssistantTurn(resp)
 		},
+		// OnToolStart/OnToolEnd are the only callbacks here that do NOT run on
+		// the turn goroutine: agentloop invokes them from inside its per-tool
+		// errgroup goroutine (one g.Go per tool_use block), which nothing
+		// recovers — runTurnGuarded's recover cannot see them. Each therefore
+		// gets its own. Recovering INSIDE the closure also keeps agentloop's
+		// own emitMu discipline intact: the callback returns normally, so the
+		// Unlock on the far side of it still runs.
+		//
+		// Swallow-with-log is right for these two specifically: they are pure
+		// emission (a frame the TUI renders), the tool result itself is
+		// unaffected, and the turn is still perfectly able to finish.
 		OnToolStart: func(id, name string, input json.RawMessage) {
+			defer recoverEmit("OnToolStart", name)
 			e.em.ToolStart(id, name, input)
 		},
 		OnToolEnd: func(id, name, result string, err error) {
+			defer recoverEmit("OnToolEnd", name)
 			e.em.ToolEnd(id, name, result, err != nil)
 		},
 		PendingUser: e.drainSteers,
 	}
 	return ev, llm.WithStreamHandler(handler)
+}
+
+// recoverEmit contains a panic raised inside one of the observation callbacks
+// agentloop runs on a goroutine of its own (see events). Call it as
+// `defer recoverEmit(...)`, never as a bare call.
+func recoverEmit(callback, tool string) {
+	if v := recover(); v != nil {
+		slog.Error("agent: emit callback panicked; the tool result is unaffected",
+			"callback", callback, "tool", tool, "panic", v, "stack", string(debug.Stack()))
+	}
 }
 
 // hasContent reports whether any content block has arrived yet. Guards the

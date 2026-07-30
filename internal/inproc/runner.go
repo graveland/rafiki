@@ -40,6 +40,29 @@ type Options struct {
 	Build BuildFunc
 }
 
+// stopReason records why this runner is coming down, so run() can map a
+// Frontend.Run error onto the right exit contract instead of treating every
+// one of them as a generic failure.
+type stopReason int
+
+const (
+	// stopNone: nothing deliberate happened. A Frontend.Run error here is a
+	// genuine failure and exits 1.
+	stopNone stopReason = iota
+	// stopEngineFatal: the engine's turn worker hit a panic and asked to be
+	// ended (see Runner.engineFatal). The exit code is already recorded.
+	stopEngineFatal
+)
+
+func (s stopReason) String() string {
+	switch s {
+	case stopEngineFatal:
+		return "engine_fatal"
+	default:
+		return "none"
+	}
+}
+
 // Runner drives an agent.Engine in a goroutine. It satisfies child.Runner.
 type Runner struct {
 	opts Options
@@ -47,6 +70,7 @@ type Runner struct {
 
 	mu       sync.Mutex
 	started  bool
+	stop     stopReason
 	cancel   context.CancelFunc
 	exitCode int
 	eng      *agent.Engine
@@ -62,7 +86,53 @@ func New(opts Options) *Runner {
 	if opts.Parent == nil {
 		opts.Parent = context.Background()
 	}
-	return &Runner{opts: opts, done: make(chan struct{})}
+	r := &Runner{opts: opts, done: make(chan struct{})}
+	// The runner OWNS the engine's fatal hook, so it is installed here rather
+	// than accepted from the caller: this Runner is the only thing that can
+	// act on it (record the exit, unblock Frontend.Run so stdout closes and
+	// the daemon sees an EOF), and a caller-supplied hook would be silently
+	// pointing at nothing. A Build override in a test receives it on the
+	// RuntimeOptions it is handed and may forward it to EngineConfig.
+	r.opts.Runtime.OnFatal = r.engineFatal
+	return r
+}
+
+// engineFatal is EngineConfig.OnFatal for this child: the engine calls it when
+// a turn panicked and its worker has stopped for good. By contract the engine
+// has already released every outstanding Wait() count before calling, so
+// eng.Wait() in run() cannot block on the turn that died.
+//
+// Ending the child means unblocking Frontend.Run, which is parked in a read on
+// stdinR. Closing that read end is the only way to do it — the same mechanism
+// Kill uses, minus the stdout close, because on this path the engine is not
+// wedged in a write and the daemon should still receive the frames already
+// queued (including the agent_error the engine emits on its way out).
+func (r *Runner) engineFatal(err error) {
+	slog.Error("inproc: engine reported a fatal error; ending the child",
+		"child", r.opts.ChildID, "error", err)
+
+	r.mu.Lock()
+	r.stop = stopEngineFatal
+	r.exitCode = 2 // same code run()'s own recover records for a panic
+	cancel := r.cancel
+	stdinR := r.stdinR
+	r.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if stdinR != nil {
+		if cerr := stdinR.Close(); cerr != nil && !errors.Is(cerr, os.ErrClosed) {
+			slog.Warn("inproc: close stdin reader after engine fatal", "child", r.opts.ChildID, "error", cerr)
+		}
+	}
+}
+
+// stopReasonOf reports why this runner is stopping.
+func (r *Runner) stopReasonOf() stopReason {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stop
 }
 
 // Compile-time proof that Runner satisfies the seam it exists for.
@@ -146,10 +216,10 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 //     defer below has completed. This is what makes "r.done is closed" mean
 //     "shutdown() and Engine.Close() have already finished" to Wait's caller.
 //  2. the recover-and-close-stdout defer — runs after stdinR is closed but
-//     before close(r.done). It contains panic recovery (so a panicking Build
-//     or fe.Run doesn't crash the daemon) and unconditionally closes stdoutW,
-//     which is what turns a contained panic into an ordinary EOF for the
-//     daemon's reader.
+//     before close(r.done). It contains panic recovery and unconditionally
+//     closes stdoutW, which is what turns a contained panic into an ordinary
+//     EOF for the daemon's reader. Read the next paragraph before trusting it
+//     as a general containment boundary: it is not one.
 //  3. defer stdinR.Close() — registered BEFORE Build is called, deliberately.
 //     Being ahead of Build is precisely what makes it fire on the build-error
 //     return and on a panic raised inside Build itself; moving it after Build,
@@ -161,6 +231,34 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 // Net effect: shutdown() and Engine.Close() (called explicitly, near the end
 // of this function body) both complete before stdout closes, which is what
 // makes the EOF the daemon sees on stdout mean "this child is finished".
+//
+// # What this recover does and does not cover
+//
+// A recover only ever sees panics on ITS OWN goroutine. This one is on the
+// run() goroutine, so it covers exactly: Options.Build (including
+// agent.BuildRuntime and everything it constructs), fe.Run's reader loop and
+// the Handler dispatch it makes inline (HandlePrompt/HandleSteer/HandleAbort/
+// State — all of which return promptly by contract), eng.Wait, eng.Close, and
+// shutdown().
+//
+// It does NOT cover, and cannot:
+//
+//   - The engine's turn worker. Every turn — agentloop.Run, the streaming
+//     handler, message mapping — runs there. It has its OWN recover
+//     (agent.Engine.runTurnGuarded), which routes a panic back here through
+//     EngineConfig.OnFatal (see Runner.engineFatal) so the child ends with a
+//     non-zero exit and a clean stdout EOF.
+//   - agentloop's per-tool errgroup goroutines. errgroup does not recover.
+//     Covered instead at the two fundi-owned boundaries that run there:
+//     tools.Registry.Execute (the whole tool surface, MCP included) and the
+//     OnToolStart/OnToolEnd emit callbacks in agent.Engine.events.
+//   - The model-catalog warm goroutine, which recovers for itself in
+//     agent.NewEngine.
+//   - Goroutines inside dependencies, which no fundi-owned recover can reach:
+//     os/exec's stdio copy goroutines (bash and every other tool subprocess),
+//     the MCP client's session goroutines, and pgx's background pool
+//     goroutines. A panic in any of those still takes the daemon down. That is
+//     an accepted, unclosable gap in the in-process model, not an oversight.
 func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 	defer close(r.done)
 	defer func() {
@@ -221,8 +319,18 @@ func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 	// HandlePrompt/HandleSteer/HandleAbort can arrive afterwards — which is what
 	// makes Wait-then-Close race-free. Same ordering as cmd/fundid/agent.go.
 	if runErr := fe.Run(); runErr != nil {
-		slog.Error("inproc: frontend run", "child", r.opts.ChildID, "error", runErr)
-		r.setExit(1)
+		// An error here is not automatically a failure: a deliberate teardown
+		// closes stdinR out from under the parked read, so Frontend.Run
+		// surfaces os.ErrClosed rather than the EOF a clean stop produces.
+		// Attributing that to the child would report a failing exit for an
+		// action the daemon itself took.
+		if reason := r.stopReasonOf(); reason == stopNone {
+			slog.Error("inproc: frontend run", "child", r.opts.ChildID, "error", runErr)
+			r.setExit(1)
+		} else {
+			slog.Info("inproc: frontend run ended by a deliberate stop",
+				"child", r.opts.ChildID, "reason", reason, "error", runErr)
+		}
 	}
 	eng.Wait()
 	eng.Close()

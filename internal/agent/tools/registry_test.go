@@ -142,3 +142,73 @@ func TestRegistryConcurrentExecute(t *testing.T) {
 		}
 	}
 }
+
+// TestExecuteContainsAPanickingTool is the containment test for the entire
+// tool surface. agentloop runs each tool call on its own errgroup goroutine
+// and errgroup does not recover, so without the recover in Execute a panicking
+// tool body unwinds a goroutine nothing owns and kills the daemon — which,
+// in this test, means crashing the test binary rather than failing.
+//
+// The panic must come back as an ordinary tool error, because that is what
+// agentloop turns into an is_error tool_result the model can see and react to.
+func TestExecuteContainsAPanickingTool(t *testing.T) {
+	r := NewRegistry()
+	r.Register(Def("boom", "panics", `{"type":"object"}`),
+		func(context.Context, json.RawMessage) (string, error) {
+			panic("tool exploded")
+		})
+	r.Register(Def("fine", "works", `{"type":"object"}`),
+		func(context.Context, json.RawMessage) (string, error) {
+			return "still here", nil
+		})
+
+	out, err := r.Execute(context.Background(), "boom", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("Execute returned a nil error for a panicking tool; the panic was not converted")
+	}
+	if out != "" {
+		t.Errorf("Execute returned result %q for a panicking tool, want empty", out)
+	}
+	if !strings.Contains(err.Error(), "tool exploded") {
+		t.Errorf("error %q does not carry the panic value; the model would learn nothing", err)
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error %q does not name the tool that panicked", err)
+	}
+
+	// The registry must still be usable: containment is per-call, not a
+	// one-way trip to a poisoned Registry.
+	out, err = r.Execute(context.Background(), "fine", json.RawMessage(`{}`))
+	if err != nil || out != "still here" {
+		t.Errorf("Execute(fine) = (%q, %v) after a contained panic, want (\"still here\", nil)", out, err)
+	}
+}
+
+// TestExecuteContainsAPanicFromConcurrentTools mirrors how agentloop actually
+// calls Execute: several tools at once, each on its own goroutine. A recover
+// that lived anywhere but inside Execute would miss these entirely.
+func TestExecuteContainsAPanicFromConcurrentTools(t *testing.T) {
+	r := NewRegistry()
+	r.Register(Def("boom", "panics", `{"type":"object"}`),
+		func(context.Context, json.RawMessage) (string, error) {
+			panic("concurrent explosion")
+		})
+
+	const calls = 8
+	var wg sync.WaitGroup
+	errs := make([]error, calls)
+	for i := range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = r.Execute(context.Background(), "boom", json.RawMessage(`{}`))
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("concurrent call %d: nil error, want the contained panic", i)
+		}
+	}
+}
