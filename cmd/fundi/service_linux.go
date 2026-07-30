@@ -66,7 +66,6 @@ func (b *linuxBackend) unitPath() (string, error) {
 }
 
 func (b *linuxBackend) LogPath() string {
-	home, _ := os.UserHomeDir()
 	return paths.ServiceLogPath()
 }
 

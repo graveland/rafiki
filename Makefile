@@ -1,4 +1,4 @@
-.PHONY: help build update build-daemon build-cli build-attach \
+.PHONY: help build update build-daemon build-cli build-attach build-linux \
         build-controller build-pic install print-config \
         bootstrap pi-build pi-install pi-update pi-refresh-catalogs \
         test test-race test-ci test-both vet fmt clean
@@ -69,6 +69,16 @@ build-attach: $(PI_MODULES) $(PI_DIST) # Bundle the fundi-attach TUI binary (rec
 	else \
 	    echo "skipping fundi-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
 	fi
+
+# There is no CI in this repo, so nothing else exercises GOOS=linux — the
+# daemon and CLI silently bitrotted on Linux for an entire phase until this
+# target's absence was flagged in review. fundi-attach is excluded: it ships a
+# native binary via bun, which does not cross-compile from here.
+build-linux: # Cross-compile fundid + fundi for linux/amd64 (catches Linux-only build breaks; no CI runs this otherwise)
+	mkdir -p $(BIN_DIR)/linux
+	GOOS=linux GOARCH=amd64 $(GO) vet ./...
+	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(DAEMON_BIN) ./cmd/fundid
+	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(CLI_BIN) ./cmd/fundi
 
 # ─── install ──────────────────────────────────────────────────────────────────
 
