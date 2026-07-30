@@ -53,7 +53,139 @@ Per-child configuration is *not* re-mapped by hand. The daemon keeps building an
 
 ---
 
+### Task 0: Extract `internal/skills` to break the tools↔agent cycle
+
+**Why this task exists.** Task 1 puts `BuildRuntime` in `package agent` and has it call
+`tools.NewRegistry`. That cannot compile: `internal/agent/tools/skill.go` imports
+`internal/agent` for `SkillMeta`, so `agent` importing `tools` is a cycle. The architecture is
+deliberate and documented at `internal/agent/config.go:42-49` — `Config.Tools` is typed as
+rafiki's `agentloop.ToolSet` interface precisely to avoid it, and the comment concludes
+"cmd/fundid is where both sides meet."
+
+Rather than work around it, fix the cause. `internal/agent/skills.go` imports **only stdlib and
+`gopkg.in/yaml.v3`** — it has no dependency on the rest of `package agent`. It is already a leaf
+living in a non-leaf package, and that is what drags the whole runtime into `tools`. Moving it
+out breaks the cycle at its source and lets `internal/agent` assemble a whole conversation
+(skills, tools, system prompt) — which is what a runtime package is for.
+
+`internal/agent/tools` does **not** move. Once the dependency points one way, a parent importing
+its own subpackage is ordinary Go.
+
+**Files:**
+- Create: `internal/skills/skills.go` — moved verbatim from `internal/agent/skills.go`, package renamed
+- Create: `internal/skills/skills_test.go` — moved from `internal/agent/skills_test.go`
+- Delete: `internal/agent/skills.go`, `internal/agent/skills_test.go`
+- Modify: `internal/agent/config.go`, `internal/agent/sysprompt.go`, `internal/agent/tools/skill.go`, `cmd/fundid/agent.go`, and the tests referencing the moved identifiers (`internal/agent/sysprompt_test.go`, `internal/agent/tools/skill_test.go`, `cmd/fundid/agent_test.go`)
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: package `skills` at `git.graveland.dev/brent/fundi/internal/skills`, exporting
+  `SkillMeta`, `DiscoverSkills(dirs []string, only []string) ([]SkillMeta, error)`,
+  `SkillsInventory(skills []SkillMeta) string`, and `SkillBody(path string) (string, error)` —
+  same signatures as today, only the package qualifier changes. Task 1 imports this.
+
+- [ ] **Step 1: Confirm the cycle exists before changing anything**
+
+```bash
+cat > /tmp/cycle_probe.go <<'EOF'
+package agent
+
+import _ "git.graveland.dev/brent/fundi/internal/agent/tools"
+EOF
+cp /tmp/cycle_probe.go internal/agent/zz_cycle_probe.go
+go build ./internal/agent/ > /tmp/cycle.log 2>&1; echo "exit=$?"; cat /tmp/cycle.log
+rm internal/agent/zz_cycle_probe.go
+```
+
+Expected: a non-zero exit and `import cycle not allowed` naming `agent` → `tools` → `agent`.
+This is the failing state Task 0 fixes; record the exact output in your report.
+
+- [ ] **Step 2: Move the package**
+
+```bash
+mkdir -p internal/skills
+git mv internal/agent/skills.go internal/skills/skills.go
+git mv internal/agent/skills_test.go internal/skills/skills_test.go
+```
+
+Change the package clause in both files from `package agent` to `package skills`. Change nothing
+else in them — no renames, no signature changes, no new exports. `SkillMeta` stays `SkillMeta`
+(it becomes `skills.SkillMeta` at call sites); do **not** rename it to `skills.Meta`, because
+Tasks 1-5 and the existing call sites all use the current name.
+
+- [ ] **Step 3: Update every reference**
+
+Add `"git.graveland.dev/brent/fundi/internal/skills"` to the imports of each file below and
+qualify the moved identifiers:
+
+- `internal/agent/config.go` — `SkillsInventory`, `SkillMeta`
+- `internal/agent/sysprompt.go` and `internal/agent/sysprompt_test.go`
+- `internal/agent/tools/skill.go` and `internal/agent/tools/skill_test.go` — **this file's
+  `internal/agent` import must be removed entirely**; it was the cycle's second leg. If
+  `skill.go` imports `internal/agent` for anything besides the skills identifiers, stop and
+  report `BLOCKED` with what else it needs.
+- `cmd/fundid/agent.go` and `cmd/fundid/agent_test.go`
+
+Find them all rather than trusting this list:
+
+```bash
+grep -rln 'SkillMeta\|DiscoverSkills\|SkillsInventory\|SkillBody' --include='*.go' .
+```
+
+- [ ] **Step 4: Prove the cycle is gone**
+
+```bash
+cp /tmp/cycle_probe.go internal/agent/zz_cycle_probe.go
+go build ./internal/agent/ > /tmp/cycle2.log 2>&1; echo "exit=$?"; test -s /tmp/cycle2.log && cat /tmp/cycle2.log
+rm internal/agent/zz_cycle_probe.go
+```
+
+Expected: exit 0 and no output — `internal/agent` may now import `internal/agent/tools`. This is
+the precondition Task 1 depends on; if it still fails, Task 1 cannot proceed.
+
+- [ ] **Step 5: Full suite, unchanged behaviour**
+
+This task moves code without changing it, so every existing test must still pass and the skip
+count must not move.
+
+```bash
+go build ./... > /tmp/t0-build.log 2>&1; echo "build exit=$?"; test -s /tmp/t0-build.log && cat /tmp/t0-build.log
+go vet ./... > /tmp/t0-vet.log 2>&1; echo "vet exit=$?"; test -s /tmp/t0-vet.log && cat /tmp/t0-vet.log
+go test ./... -v > /tmp/t0-test.log 2>&1; echo "test exit=$?"
+grep -E '^(FAIL|--- FAIL)' /tmp/t0-test.log || echo "no failures"
+grep -cE '^(\s+)?--- SKIP' /tmp/t0-test.log
+GOOS=linux go build ./... && echo "linux build ok"
+```
+
+Expected: build and vet clean, no failures, **skip count exactly 3** (the recorded baseline),
+linux build ok.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/skills/skills.go internal/skills/skills_test.go internal/agent/config.go internal/agent/sysprompt.go internal/agent/sysprompt_test.go internal/agent/tools/skill.go internal/agent/tools/skill_test.go cmd/fundid/agent.go cmd/fundid/agent_test.go
+git status --short   # confirm the two deletions from internal/agent are staged
+git diff --cached --stat
+git commit -m "refactor: extract internal/skills to break the tools-agent cycle
+
+internal/agent/tools imported internal/agent for SkillMeta, so internal/agent
+could not import tools -- documented at config.go:42-49, which is why
+Config.Tools is an agentloop.ToolSet interface.
+
+skills.go depended on nothing else in package agent: it was a leaf in a
+non-leaf package, and that was what dragged the whole runtime into tools.
+Moved verbatim, signatures unchanged. internal/agent can now import tools and
+assemble a whole conversation, which the next task needs."
+```
+
+---
+
 ### Task 1: Extract the agent runtime builder
+
+**Depends on Task 0.** `BuildRuntime` lives in `package agent` and calls into
+`internal/agent/tools`, which is only legal once Task 0 has moved `SkillMeta` out. Every
+`SkillMeta` / `DiscoverSkills` / `SkillsInventory` reference in this task's code is
+`skills.SkillMeta` etc., imported from `git.graveland.dev/brent/fundi/internal/skills`.
 
 The daemon must build an `Engine` from a spawn request, but that assembly lives inline in `cmd/fundid/agent.go:126-215` and depends on two process globals a daemon must not touch per child: `os.Getwd()` and `signal.NotifyContext`.
 
@@ -189,6 +321,7 @@ import (
 
 	"git.graveland.dev/brent/fundi/internal/agent/tools"
 	"git.graveland.dev/brent/fundi/internal/paths"
+	"git.graveland.dev/brent/fundi/internal/skills"
 )
 
 // RuntimeOptions is everything BuildRuntime needs to assemble an Engine. It is
@@ -251,14 +384,16 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		}
 	}
 
-	var skills []SkillMeta
+	// NOTE: the local is `discovered`, not `skills` — a variable named `skills`
+	// would shadow the imported package of the same name.
+	var discovered []skills.SkillMeta
 	if !opts.NoSkills {
 		var only []string
 		if opts.Skills != "" {
 			only = strings.Split(opts.Skills, ",")
 		}
 		var err error
-		skills, err = DiscoverSkills(opts.SkillsDirs, only)
+		discovered, err = skills.DiscoverSkills(opts.SkillsDirs, only)
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: discover skills: %w", err)
 		}
@@ -267,8 +402,8 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	registry := tools.NewRegistry()
 	tools.RegisterFileTools(registry, tools.NewFileTracker())
 	tools.RegisterBash(registry, outputPolicy, opts.Cwd)
-	if len(skills) > 0 {
-		tools.RegisterSkillTool(registry, skills)
+	if len(discovered) > 0 {
+		tools.RegisterSkillTool(registry, discovered)
 	}
 
 	mcpShutdown := func() {}
@@ -292,7 +427,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		SystemPromptOverride: opts.SystemPromptOverride,
 		AppendSystemPrompt:   opts.AppendSystemPrompt,
 		ContextFiles:         contextFiles,
-		SkillsInventory:      SkillsInventory(skills),
+		SkillsInventory:      skills.SkillsInventory(discovered),
 		Cwd:                  opts.Cwd,
 		Ref:                  opts.Ref,
 		Name:                 opts.Name,
