@@ -12,6 +12,7 @@ package inproc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -49,6 +50,7 @@ type Runner struct {
 	exitCode int
 	eng      *agent.Engine
 	stdinR   *os.File
+	stdoutR  *os.File
 }
 
 // New returns a Runner for opts. Nothing runs until Start is called.
@@ -68,15 +70,23 @@ var _ child.Runner = (*Runner)(nil)
 // Start wires two pipes and launches the engine goroutine. The daemon writes
 // frames to the returned stdin and reads them from the returned stdout.
 //
-// These are real OS pipes (os.Pipe), not io.Pipe: io.Pipe is an unbuffered
-// synchronous rendezvous, and agent.Frontend.Emit does two separate Write
-// calls per frame (the JSON bytes, then a bare "\n"). Over io.Pipe, a reader
-// that decodes one complete JSON value and then stops reading — which is
-// exactly what a line/frame-oriented consumer does once it finds the frame it
-// wanted — leaves that second Write blocked forever, wedging the engine
-// goroutine and everything waiting on it. A real OS pipe has a kernel buffer
-// (tens of KB), matching what a subprocess's stdio actually gives the daemon,
-// so both Writes complete immediately regardless of reader pacing.
+// These are real OS pipes (os.Pipe), not io.Pipe: agent.Frontend.Emit issues
+// two separate Write calls per frame (the JSON bytes, then a bare "\n"), both
+// under the same mutex. Over an unbuffered io.Pipe, any Write that the reader
+// doesn't immediately and fully consume blocks — and because both Writes hold
+// Emit's mutex, one blocked Write freezes ALL further emission for this child,
+// with no error and no timeout, not just the one frame in flight. That
+// zero-slack lockstep between writer and reader pace is itself a divergence
+// from the subprocess model this package must be a drop-in for: a real
+// subprocess's stdio gives the daemon a kernel-buffered pipe (tens of KB), so
+// a slow or momentarily-stalled reader never blocks the child's writer. An
+// os.Pipe reproduces that same slack.
+//
+// Kill retains the read end of this stdout pipe (stdoutR) for exactly the
+// mirror-image reason: even a kernel buffer is finite, and if the daemon ever
+// stops reading stdout for good (see Kill's doc comment), the engine's next
+// Write blocks forever holding Emit's mutex. Closing stdoutR is what
+// guarantees Kill is always effective.
 func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
@@ -97,6 +107,7 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	r.mu.Lock()
 	r.cancel = cancel
 	r.stdinR = stdinR
+	r.stdoutR = stdoutR
 	r.mu.Unlock()
 
 	go r.run(ctx, stdinR, stdoutW)
@@ -107,10 +118,26 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	return stdinW, stdoutR, io.NopCloser(strings.NewReader("")), nil
 }
 
-// run owns the engine's whole lifetime. Deferred funcs are LIFO, so the
-// recover-and-close defer registered first runs last: shutdown() and
-// Engine.Close() complete before stdout closes, which is what makes the EOF the
-// daemon sees mean "this child is finished".
+// run owns the engine's whole lifetime. Its defers, in REGISTRATION order
+// (they execute in the reverse of this order):
+//
+//  1. close(r.done) — registered first, so it runs LAST, after every other
+//     defer below has completed. This is what makes "r.done is closed" mean
+//     "shutdown() and Engine.Close() have already finished" to Wait's caller.
+//  2. the recover-and-close-stdout defer — runs after stdinR is closed but
+//     before close(r.done). It contains panic recovery (so a panicking Build
+//     or fe.Run doesn't crash the daemon) and unconditionally closes stdoutW,
+//     which is what turns a contained panic into an ordinary EOF for the
+//     daemon's reader.
+//  3. defer stdinR.Close() — registered only once Build has run (it is a
+//     plain defer statement below, not conditional on success), so it always
+//     fires before #2 sees stdoutW close.
+//  4. defer shutdown() — registered only after Build succeeds, so it never
+//     runs on a build-error exit. Runs before #3's stdinR.Close().
+//
+// Net effect: shutdown() and Engine.Close() (called explicitly, near the end
+// of this function body) both complete before stdout closes, which is what
+// makes the EOF the daemon sees on stdout mean "this child is finished".
 func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 	defer close(r.done)
 	defer func() {
@@ -118,9 +145,15 @@ func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 			slog.Error("inproc: agent panicked",
 				"child", r.opts.ChildID, "panic", v, "stack", string(debug.Stack()))
 			r.setExit(2)
-			// The engine's turn worker may still be running; stop it. Its
-			// Close() is unreachable from here — an accepted leak on a path
-			// that should never execute.
+			// The engine's turn worker (if Build got far enough to create one)
+			// may still be running; cancelling ctx unblocks anything selecting
+			// on it. r.eng is readable here (under mu), but calling Close() on
+			// it is NOT safe: Close's contract requires Wait() to have already
+			// returned, and Wait() can block indefinitely on a genuinely wedged
+			// turn — exactly what we cannot risk doing from inside panic
+			// recovery, whose whole job is to return promptly. Left as an
+			// accepted, bounded leak (one goroutine) on a path that should
+			// never execute in practice.
 			r.mu.Lock()
 			cancel := r.cancel
 			r.mu.Unlock()
@@ -130,6 +163,11 @@ func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 		}
 		if err := stdoutW.Close(); err != nil {
 			slog.Warn("inproc: close stdout", "child", r.opts.ChildID, "error", err)
+		}
+	}()
+	defer func() {
+		if err := stdinR.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			slog.Warn("inproc: close stdin reader", "child", r.opts.ChildID, "error", err)
 		}
 	}()
 
@@ -187,19 +225,40 @@ func (r *Runner) Terminate() error {
 	return nil
 }
 
-// Kill cancels the context and closes the read end of stdin, forcing
-// Frontend.Run to return even if it is blocked on a read.
+// Kill cancels the context and closes the read end of both pipes, so that
+// Frontend.Run returns even if it is blocked on a read, AND — the case
+// Terminate alone cannot handle — an engine goroutine blocked inside a stdout
+// Write (agent.Frontend.Emit holds its mutex across that Write; see Start's
+// doc comment) unblocks too: closing stdoutR makes that Write fail with a
+// broken-pipe error instead of hanging forever. Without this, a daemon that
+// stops reading a child's stdout (e.g. after a frame-too-large error) can wedge
+// that child's run() goroutine permanently, and Kill would no longer be the
+// guaranteed-effective escalation the daemon's shutdown ladder depends on.
+//
+// Both closes tolerate an already-closed file (a second Kill call, or a race
+// with run()'s own stdinR close on ordinary EOF) rather than reporting it as
+// an error.
 func (r *Runner) Kill() error {
 	if err := r.Terminate(); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	stdinR := r.stdinR
+	stdoutR := r.stdoutR
 	r.mu.Unlock()
+
+	var errs []error
 	if stdinR != nil {
-		return stdinR.Close()
+		if err := stdinR.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			errs = append(errs, fmt.Errorf("close stdin reader: %w", err))
+		}
 	}
-	return nil
+	if stdoutR != nil {
+		if err := stdoutR.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			errs = append(errs, fmt.Errorf("close stdout reader: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Interrupt aborts the current turn without stopping the runner — the
