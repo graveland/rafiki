@@ -453,6 +453,73 @@ func (s *blockingStreamingSender) NewStreaming(_ context.Context, _ anthropic.Me
 		&blockingStreamDecoder{prefix: s.prefix, suffix: s.suffix, release: s.release}, nil), nil
 }
 
+// streamStage is one phase of a stagedStreamDecoder's replay: play events,
+// then (if release is non-nil) block until it closes before starting the
+// next stage. Generalizes blockingStreamDecoder's single prefix/release/suffix
+// shape to N stages, needed by a test that must control TWO separate flush
+// windows rather than one.
+type streamStage struct {
+	events  []ssestream.Event
+	release <-chan struct{}
+}
+
+// stagedStreamDecoder replays a sequence of streamStages in order, blocking
+// between stages exactly like blockingStreamDecoder does once, generalized to
+// however many gates the caller supplies.
+type stagedStreamDecoder struct {
+	stages []streamStage
+
+	sIdx   int // stage currently being drained
+	eIdx   int // next event index within that stage
+	waited bool
+
+	// curS/curE record which (stage, event) index the last successful Next()
+	// returned, since by the time Event() is called sIdx/eIdx may already have
+	// advanced past it (Next() eagerly advances to the next stage once the
+	// current one is exhausted, to decide whether to block).
+	curS, curE int
+}
+
+func (d *stagedStreamDecoder) Next() bool {
+	for {
+		if d.sIdx >= len(d.stages) {
+			return false
+		}
+		cur := d.stages[d.sIdx]
+		if d.eIdx < len(cur.events) {
+			d.curS, d.curE = d.sIdx, d.eIdx
+			d.eIdx++
+			return true
+		}
+		if cur.release != nil && !d.waited {
+			d.waited = true
+			<-cur.release
+		}
+		d.sIdx++
+		d.eIdx = 0
+		d.waited = false
+	}
+}
+
+func (d *stagedStreamDecoder) Event() ssestream.Event { return d.stages[d.curS].events[d.curE] }
+func (d *stagedStreamDecoder) Close() error           { return nil }
+func (d *stagedStreamDecoder) Err() error             { return nil }
+
+// stagedStreamingSender is blockingStreamingSender's N-gate sibling: exactly
+// one NewStreaming call, backed by a stagedStreamDecoder. New must never be
+// called, for the same reason blockingStreamingSender's New never is.
+type stagedStreamingSender struct {
+	stages []streamStage
+}
+
+func (s *stagedStreamingSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+	return nil, errors.New("stagedStreamingSender: New called; want NewStreaming (a stream handler is always set)")
+}
+
+func (s *stagedStreamingSender) NewStreaming(_ context.Context, _ anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error) {
+	return ssestream.NewStream[anthropic.MessageStreamEventUnion](&stagedStreamDecoder{stages: s.stages}, nil), nil
+}
+
 // waitFor polls cond every millisecond until it reports true, failing the
 // test if timeout elapses first. There is no channel that fires the instant
 // a frame lands in the frontend's buffer (it's a plain mutex-guarded
@@ -527,24 +594,147 @@ func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
 
 	// Once released, the rest of the scripted turn plays out normally. Task
 	// D3 coalesces message_update frames to at most one per
-	// streamFlushInterval (250ms): the "Hel" delta above triggered the
-	// turn's only flush (lastFlush was zero, so it flushed immediately), and
-	// every subsequent content-bearing event ("lo", content_block_stop,
-	// message_delta, message_stop) lands well inside that same window in
-	// this test's unblocked-real-time replay, so none of them flushes again.
-	// Only one message_update reaches the wire before the final message_end
-	// (emitted unconditionally by StreamEnd from OnTurn, carrying the fully
-	// accumulated "Hello" regardless of the coalescing gate — see
-	// TestEngine_CoalescingStillDeliversFinalContent for that guarantee in
-	// isolation).
-	assertFrameTypes(t, out.String(), []string{
+	// streamFlushInterval (250ms): the "Hel" delta above triggered the turn's
+	// first flush (lastFlush was zero, so it flushed immediately), and in
+	// this test's unblocked-real-time replay the remaining events ("lo",
+	// content_block_stop, message_delta, message_stop) USUALLY land well
+	// inside that same window, so USUALLY none of them flushes again — but
+	// that is a real-time race, not a guarantee: if the goroutine scheduler
+	// or test-machine load stalls delivery of "lo" past the 250ms boundary,
+	// a second, legitimate message_update fires. An exact single-update
+	// assertion here would then fail for a reason that has nothing to do
+	// with the invariant this test exists to check (see
+	// TestEngine_MessageUpdatesGrowAcrossFlushWindows below for the test that
+	// deliberately forces and asserts on that second window instead of
+	// treating it as noise). So this assertion is loosened to >=1
+	// message_update plus ordering, not an exact count.
+	types := frameTypes(t, out.String())
+	want := []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
 		"message_start",
-		"message_update",
-		"message_end",
-		"agent_end", "agent_settled",
+	}
+	if !strings.HasPrefix(strings.Join(types, ","), strings.Join(want, ",")) {
+		t.Fatalf("frame prefix = %v, want prefix %v", types, want)
+	}
+	rest := types[len(want):]
+	if len(rest) < 3 { // >=1 message_update, message_end, agent_end, agent_settled
+		t.Fatalf("assistant-turn+tail frames = %v, too short", rest)
+	}
+	tail := rest[len(rest)-3:]
+	if tail[0] != "message_end" || tail[1] != "agent_end" || tail[2] != "agent_settled" {
+		t.Fatalf("tail frames = %v, want [message_end agent_end agent_settled]", tail)
+	}
+	body := rest[:len(rest)-3]
+	if len(body) < 1 {
+		t.Fatalf("assistant turn body = %v, want >=1 message_update", body)
+	}
+	for _, ty := range body {
+		if ty != "message_update" {
+			t.Fatalf("assistant turn body = %v, want only message_update before the final message_end", body)
+		}
+	}
+}
+
+// TestEngine_MessageUpdatesGrowAcrossFlushWindows is I4: no prior test
+// asserts that message_update content GROWS across more than one frame.
+// 250ms coalescing plus microsecond-fast scripted fixtures means every other
+// streamed test here observes at most one real flush window, so an
+// implementation that flushes once per turn and never again (the exact bug
+// TestEngine_MessageUpdateCarriesPartialText's doc describes: "passed
+// twelve tests, nine independent reviews, and a whole-branch review") would
+// pass every one of them too, as long as that single flush carries partial
+// (non-empty) text. In an attached TUI this renders as one chunk, then a
+// jump straight to the full reply — the same shape as the bug Phase 0.6
+// fixed (assert the terminal value, miss the intermediate behaviour).
+//
+// This test uses stagedStreamDecoder's two gates to force two flushes more
+// than streamFlushInterval apart and asserts on the sequence directly: after
+// gate 1, exactly one message_update ("Hel"); only after real time
+// (streamFlushInterval, guaranteed by an explicit sleep, not a race) has
+// passed AND gate 2 opens does a second, strictly longer one appear
+// ("Hello"), and it must be a prefix of the eventual final text. A
+// once-per-turn implementation has nothing to emit at the first waitFor and
+// therefore cannot reach it before the test's deadline; an implementation
+// that emits but never grows the text (e.g. re-sending the same snapshot)
+// fails the strict length/prefix checks below.
+func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
+	release1 := make(chan struct{})
+	release2 := make(chan struct{})
+	sender := &stagedStreamingSender{stages: []streamStage{
+		{
+			events: []ssestream.Event{
+				streamMessageStart("claude-x"),
+				streamTextBlockStart(0),
+				streamTextDelta(0, "Hel"), // triggers the turn's first (immediate) flush
+			},
+			release: release1,
+		},
+		{
+			events:  []ssestream.Event{streamTextDelta(0, "lo")},
+			release: release2,
+		},
+		{
+			events: []ssestream.Event{
+				streamTextDelta(0, " world"),
+				streamBlockStop(0),
+				streamMessageDelta("end_turn", 3),
+				streamMessageStop(),
+			},
+		},
+	}}
+	ts := fakeToolSet{}
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi")
+
+	// First flush: "Hel" landed with lastFlush zero, so it flushes
+	// immediately regardless of timing.
+	waitFor(t, 5*time.Second, func() bool {
+		return countOfType(frameTypes(t, out.String()), "message_update") >= 1
 	})
+	texts := assistantUpdateTexts(t, out.String())
+	if len(texts) != 1 || texts[0] != "Hel" {
+		t.Fatalf("after gate 1, message_update texts = %q, want exactly [\"Hel\"]", texts)
+	}
+
+	// Sleep PAST streamFlushInterval before delivering "lo", so its flush
+	// check (now.Sub(lastFlush) >= streamFlushInterval) genuinely passes on
+	// elapsed wall-clock time — not a race with the scheduler. This is what
+	// makes the second gate's opening deterministic rather than a hope that
+	// the goroutine runs fast enough within one window.
+	time.Sleep(streamFlushInterval + 100*time.Millisecond)
+	close(release1)
+
+	waitFor(t, 5*time.Second, func() bool {
+		return countOfType(frameTypes(t, out.String()), "message_update") >= 2
+	})
+	texts = assistantUpdateTexts(t, out.String())
+	if len(texts) != 2 {
+		t.Fatalf("after gate 2 opened, message_update texts = %q, want exactly 2", texts)
+	}
+	if texts[0] != "Hel" || texts[1] != "Hello" {
+		t.Fatalf("message_update texts = %q, want [\"Hel\" \"Hello\"]", texts)
+	}
+	if len(texts[1]) <= len(texts[0]) {
+		t.Fatalf("second update %q is not strictly longer than the first %q", texts[1], texts[0])
+	}
+
+	const final = "Hello world"
+	for i, s := range texts {
+		if !strings.HasPrefix(final, s) {
+			t.Fatalf("message_update[%d] = %q is not a prefix of the final message %q", i, s, final)
+		}
+	}
+
+	close(release2)
+	eng.Wait()
+
+	// The final message_end (unconditional, from StreamEnd) must still carry
+	// the complete text regardless of the two mid-stream snapshots above.
+	if got := lastAssistantText(t, out.String()); got != final {
+		t.Fatalf("final assistant text = %q, want %q", got, final)
+	}
 }
 
 // ---- coalescing tests (Task D3) ----

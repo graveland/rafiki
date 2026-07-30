@@ -1047,6 +1047,15 @@ func TestStreamSequence_OrdersStartUpdatesEnd(t *testing.T) {
 Run: `cd ~/home/fundi && go test ./internal/agent/ -run TestStream -v`
 Expected: FAIL — `e.StreamStart undefined`
 
+> **2026-07-30 audit note (task H7):** as of this correction, `-run TestStream`
+> matches 5 tests in `internal/agent` (`TestStreamEndFoldsCostIdenticallyToAssistantTurn`,
+> `TestStreamStart_EmitsOnlyOnce`, `TestStreamEnd_ResetsSoNextTurnStartsAgain`,
+> `TestStreamSequence_OrdersStartUpdatesEnd`, `TestStreamDelta_DoesNotAccumulateOrFoldUsage`)
+> — two more than this step's own three, added by later work. Verified with
+> `-v`: every name prints `=== RUN` and `PASS`, so this is drift (over-broad),
+> not the silent zero-match failure this audit was looking for. No correction
+> needed; left as-is.
+
 - [ ] **Step 3: Implement**
 
 Add a `started bool` field to `Emitter`, then append to `internal/agent/emit.go`:
@@ -1162,6 +1171,12 @@ func TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates(t *testing.T) {
 Run: `cd ~/home/fundi && go test ./internal/agent/ -run TestEngine_Stream -v`
 Expected: FAIL — no `message_update` per delta (all three frames still fire at once).
 
+> **2026-07-30 audit note (task H7):** `-run TestEngine_Stream` still matches
+> `TestEngine_StreamsDeltasAndPricesFinalMessageOnce` and
+> `TestEngine_StreamsMessageUpdateBeforeTurnCompletes` today (both `=== RUN` +
+> `PASS`) — nonzero, just not exactly this step's original single test. Not the
+> silent zero-match failure; no correction needed.
+
 - [ ] **Step 3: Implement**
 
 At the engine's send site, replace the bare `conv.Send(...)` with a streaming variant:
@@ -1271,6 +1286,15 @@ func TestEngine_DeltasArriveBeforeTurnCompletes(t *testing.T) {
 
 Run: `cd ~/home/fundi && git stash && go test ./internal/agent/ -run DeltasArriveBefore -v; git stash pop`
 Expected: FAIL before B4, PASS after. If it passes both ways the test proves nothing — fix the test.
+
+> **2026-07-30 audit correction (task H7):** `TestEngine_DeltasArriveBeforeTurnCompletes`
+> was later renamed to `TestEngine_StreamsMessageUpdateBeforeTurnCompletes`
+> (`internal/agent/engine_stream_test.go`). `-run DeltasArriveBefore` now matches
+> zero tests and `go test` prints `ok`/exits 0 with no `=== RUN` line — exactly
+> the silent-pass failure this plan's own preamble warns about. Re-running this
+> proof step today requires `-run TestEngine_StreamsMessageUpdateBeforeTurnCompletes`.
+> Left the code block above as originally implemented (historical record); only
+> the run command is corrected.
 
 - [ ] **Step 3: Live verification**
 
