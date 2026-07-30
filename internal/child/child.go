@@ -422,6 +422,33 @@ func (c *Child) supervise() {
 	}
 cleanup:
 	wg.Wait()
+
+	// Release the daemon-side ends of the child's output streams. Until this
+	// existed, NOTHING in the daemon ever closed c.stdout or c.stderr: they
+	// were reclaimed only by os.File finalizers, and FD exhaustion does not
+	// trigger a GC — so a daemon churning children can hit EMFILE with a
+	// perfectly small heap. In-process children make that far more than
+	// theoretical, since self-exit (a failed Build, a frontend scan error, a
+	// contained panic) is their common case rather than an exception.
+	//
+	// Safe here and nowhere earlier: wg.Wait() above means readStdout and
+	// readStderr have both returned, so every read is complete, and readStdout
+	// only returns after runner.Wait() has reaped the child.
+	closeStream(c.ID, "stdout", c.stdout)
+	closeStream(c.ID, "stderr", c.stderr)
+}
+
+// closeStream closes one of the child's stream handles, logging any failure.
+// An already-closed handle is not a failure: Shutdown closes stdin on its own
+// path, and a runner (inproc.Runner.Kill) may have closed a read end to force
+// a wedged child down.
+func closeStream(childID, name string, s io.Closer) {
+	if s == nil {
+		return
+	}
+	if err := s.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		slog.Warn("close child stream", "child", childID, "stream", name, "error", err)
+	}
 }
 
 // readStdout reads JSONL frames from the child's stdout, publishes them to the
@@ -578,6 +605,14 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 	alreadyClosed := c.closed
 	c.mu.Unlock()
 
+	// Close stdin unconditionally, INCLUDING on the already-exited path. The
+	// early return below used to skip it, which left the daemon-side write end
+	// of an exited child's stdin open until an os.File finalizer happened to
+	// run — and FD exhaustion does not trigger a GC, so that is a real EMFILE
+	// path for a daemon churning children, not a tidiness point. Closing the
+	// write end of a pipe whose reader is gone is harmless.
+	closeStream(c.ID, "stdin", c.stdin)
+
 	if alreadyClosed {
 		// Process already exited; copy the stored result.
 		c.mu.Lock()
@@ -586,8 +621,6 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 		res.Duration = time.Since(start)
 		return res, nil
 	}
-
-	_ = c.stdin.Close()
 
 	// escalated is local state; only readStdout writes to c.exit (under c.mu).
 	// We read c.exit once below under the lock, then set Escalated/Duration on

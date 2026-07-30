@@ -102,3 +102,112 @@ func TestSpawnWithoutRunnerStillRequiresBinary(t *testing.T) {
 		t.Fatal("expected an error when neither Runner nor PiBinary is set")
 	}
 }
+
+// closeCounter wraps a stream and counts Close calls, so a test can assert on
+// the daemon's stream hygiene directly instead of inferring it from a process
+// file-descriptor count. An FD count cannot be the guard here: os.File
+// finalizers reclaim most of the leaked handles opportunistically during a
+// test run, so the observed delta is a fraction of the real leak and depends
+// on when the GC happened to run.
+type closeCounter struct {
+	io.Reader
+	io.Writer
+	mu     sync.Mutex
+	closes int
+}
+
+func (c *closeCounter) Close() error {
+	c.mu.Lock()
+	c.closes++
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *closeCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closes
+}
+
+// recordingRunner hands back streams that record their own closes.
+type recordingRunner struct {
+	stdin  *closeCounter
+	stdout *closeCounter
+	stderr *closeCounter
+}
+
+func newRecordingRunner(stdoutFrames string) *recordingRunner {
+	return &recordingRunner{
+		stdin:  &closeCounter{Writer: io.Discard},
+		stdout: &closeCounter{Reader: strings.NewReader(stdoutFrames)},
+		stderr: &closeCounter{Reader: strings.NewReader("")},
+	}
+}
+
+func (r *recordingRunner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
+	return r.stdin, r.stdout, r.stderr, nil
+}
+func (r *recordingRunner) Wait() (int, string) { return 0, "" }
+func (r *recordingRunner) PID() int            { return 0 }
+func (r *recordingRunner) Terminate() error    { return nil }
+func (r *recordingRunner) Kill() error         { return nil }
+func (r *recordingRunner) Interrupt() error    { return nil }
+
+// TestSuperviseClosesChildOutputStreams is the regression guard for the
+// daemon's FD hygiene. Until this existed, `c.stdin.Close()` in Shutdown was
+// the ONLY close of any daemon-side stream handle anywhere in the daemon;
+// c.stdout and c.stderr were never closed at all, left to os.File finalizers.
+//
+// Finalizers are not a backstop for this: FD exhaustion does not trigger a GC,
+// so a daemon churning children reaches EMFILE with a perfectly small heap.
+// In-process children make it far worse than theoretical, since self-exit (a
+// failed Build, a frontend scan error, a contained panic) is their common case
+// rather than an exception.
+func TestSuperviseClosesChildOutputStreams(t *testing.T) {
+	r := newRecordingRunner(`{"type":"agent_start"}` + "\n" + `{"type":"agent_end"}` + "\n")
+	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_fd", Cwd: t.TempDir(), Runner: r})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not finish within 5s")
+	}
+
+	if got := r.stdout.count(); got != 1 {
+		t.Errorf("stdout closed %d times, want exactly 1; supervise must release it after wg.Wait()", got)
+	}
+	if got := r.stderr.count(); got != 1 {
+		t.Errorf("stderr closed %d times, want exactly 1; supervise must release it after wg.Wait()", got)
+	}
+}
+
+// TestShutdownClosesStdinEvenWhenAlreadyExited covers the other half. The
+// already-exited early return in Shutdown used to skip the stdin close
+// entirely, so a child that ended on its own — the COMMON case for an
+// in-process agent child — leaked its stdin write end too.
+func TestShutdownClosesStdinEvenWhenAlreadyExited(t *testing.T) {
+	r := newRecordingRunner(`{"type":"agent_end"}` + "\n")
+	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_fd_stdin", Cwd: t.TempDir(), Runner: r})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// Done() closes only after readStdout has reaped and set closed=true, so
+	// Shutdown below is guaranteed to take the already-exited path.
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not finish within 5s")
+	}
+	if got := r.stdin.count(); got != 0 {
+		t.Fatalf("stdin was closed %d times before Shutdown; this test no longer covers the already-exited path", got)
+	}
+
+	if _, err := c.Shutdown(time.Second, time.Second); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if got := r.stdin.count(); got != 1 {
+		t.Errorf("stdin closed %d times after Shutdown on an already-exited child, want exactly 1", got)
+	}
+}
