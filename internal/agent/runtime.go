@@ -42,6 +42,35 @@ type RuntimeOptions struct {
 	Pool *pgxpool.Pool
 }
 
+// resolveContent loads the cwd-relative context files and discovers skills.
+// Split out of BuildRuntime so a test can assert both were resolved from
+// opts.Cwd and not from the process working directory — the regression this
+// function's caller exists to prevent, and one that is otherwise invisible
+// because LoadContextFiles skips absent files silently rather than erroring.
+func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skills.SkillMeta, err error) {
+	if !opts.NoContextFiles {
+		contextFiles, err = LoadContextFiles(opts.Cwd)
+		if err != nil {
+			return "", nil, fmt.Errorf("runtime: load context files: %w", err)
+		}
+	}
+
+	// NOTE: the local is `discovered`, not `skills` — a variable named `skills`
+	// would shadow the imported package of the same name.
+	if !opts.NoSkills {
+		var only []string
+		if opts.Skills != "" {
+			only = strings.Split(opts.Skills, ",")
+		}
+		discovered, err = skills.DiscoverSkills(opts.SkillsDirs, only)
+		if err != nil {
+			return "", nil, fmt.Errorf("runtime: discover skills: %w", err)
+		}
+	}
+
+	return contextFiles, discovered, nil
+}
+
 // BuildRuntime assembles the tool registry, skills, MCP connections, and the
 // Engine. The returned shutdown func releases MCP connections and engine
 // resources; call it exactly once.
@@ -65,28 +94,9 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 	outputPolicy := tools.OutputPolicy{SpillDir: spillDir}
 
-	var contextFiles string
-	if !opts.NoContextFiles {
-		var err error
-		contextFiles, err = LoadContextFiles(opts.Cwd)
-		if err != nil {
-			return nil, nil, fmt.Errorf("runtime: load context files: %w", err)
-		}
-	}
-
-	// NOTE: the local is `discovered`, not `skills` — a variable named `skills`
-	// would shadow the imported package of the same name.
-	var discovered []skills.SkillMeta
-	if !opts.NoSkills {
-		var only []string
-		if opts.Skills != "" {
-			only = strings.Split(opts.Skills, ",")
-		}
-		var err error
-		discovered, err = skills.DiscoverSkills(opts.SkillsDirs, only)
-		if err != nil {
-			return nil, nil, fmt.Errorf("runtime: discover skills: %w", err)
-		}
+	contextFiles, discovered, err := resolveContent(opts)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	registry := tools.NewRegistry()
