@@ -125,18 +125,50 @@ func childStatusPredicate(childID, status string) func(json.RawMessage) bool {
 	}
 }
 
+// assertNoRestartBetween scans sc's already-buffered events in the half-open
+// range [from, to) and fails the test if any of them is a ctrl_child_spawned
+// frame for childID. This is the restart witness for
+// TestIntegration_AgentKind_AbortPreservesProcess: whether a respawn is a
+// real subprocess re-exec (pi, claude) or an in-process respawn (agent, no
+// pid), activateLiveChild's Resume/RespawnChild path re-emits
+// ctrl_child_spawned for the SAME childID to per-child subscribers
+// (cmd/fundid/controller.go), so absence of that frame between the abort and
+// the following idle states "the child was not restarted" directly, instead
+// of inferring it from PID identity (which is degenerate for the agent kind
+// -- see the KEYSTONE ASSERTION comment below).
+func assertNoRestartBetween(t *testing.T, sc *subConn, from, to int, childID string) {
+	t.Helper()
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	for i := from; i < to && i < len(sc.events); i++ {
+		var ev struct {
+			Type    string `json:"type"`
+			ChildID string `json:"childId"`
+		}
+		if json.Unmarshal(sc.events[i], &ev) != nil {
+			continue
+		}
+		if ev.Type == protocol.TypeCtrlChildSpawned && ev.ChildID == childID {
+			t.Fatalf("child was restarted: unexpected %s frame for childId=%s between abort and idle: %s",
+				protocol.TypeCtrlChildSpawned, childID, sc.events[i])
+		}
+	}
+}
+
 // TestIntegration_AgentKind_AbortPreservesProcess is the Task 16 keystone
-// test: it spawns a real `fundid agent` child (kind="agent", self-exec via
-// os.Executable() - this is why it lives in the subprocess harness rather
-// than cmd/fundid's in-process tests, which run inside a go-test binary whose
-// own os.Executable() would re-exec the test binary, not cmd/fundid's real
-// main()), drives a prompt into a scripted tool_use turn that blocks on a
-// FIFO read the test never satisfies, aborts mid-turn, and proves the abort
-// landed in-band (no process restart) via PID identity - the same
-// forwarding path TestSend_PiAbortForwardedNatively proves in-process for
-// kind="pi" (Controller.Send only intercepts abort for kind=="claude"; both
-// "pi" and "agent" fall through to ch.Send, forwarded to the child's stdin
-// natively).
+// test: it spawns a real `fundid agent` child (kind="agent") against the
+// real daemon binary under test (this is why it lives in the subprocess
+// integration harness -- it exercises bootDaemon's real controller/store/
+// subscriber wiring end-to-end, not a property of the agent kind itself; as
+// of Task 5, the agent kind runs in-process inside fundid on a shared pool
+// rather than self-exec'ing via os.Executable(), and has no pid of its own),
+// drives a prompt into a scripted tool_use turn that blocks on a FIFO read
+// the test never satisfies, aborts mid-turn, and proves the abort landed
+// in-band (no restart) by witnessing the child's lifecycle events rather
+// than PID identity - the same forwarding path TestSend_PiAbortForwardedNatively
+// proves in-process for kind="pi" (Controller.Send only intercepts abort for
+// kind=="claude"; both "pi" and "agent" fall through to ch.Send, forwarded to
+// the child's stdin/inproc.Runner natively).
 //
 // Because the scripted tool cannot finish on its own (the FIFO is never
 // written to), reaching "idle" is possible ONLY through the abort
@@ -254,6 +286,11 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	// finish on its own, so there is no race to win.
 	waitForMarker(t, markerPath, 5*time.Second)
 
+	// Snapshot the event cursor immediately before the abort is sent, so the
+	// restart witness below can scan exactly the window between the abort and
+	// the following idle.
+	preAbortIdx := eventIdx
+
 	abortJSON := fmt.Sprintf(`{"type":"ctrl_send","id":"a1","childId":%q,"frame":{"type":"abort"}}`, childID)
 	raw = d.request(t, abortJSON)
 	mustUnmarshal(t, raw, &r)
@@ -263,9 +300,24 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 
 	// The turn must settle back to idle - RepairOrphans cleans up the
 	// dangling tool_use without consuming a second scripted LLM turn.
-	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusIdle)), 10*time.Second)
+	var idleIdx int
+	_, idleIdx = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusIdle)), 10*time.Second)
+	eventIdx = idleIdx
 
-	// KEYSTONE ASSERTION: the abort must NOT have restarted the process.
+	// KEYSTONE ASSERTION: the abort must NOT have restarted the child.
+	//
+	// In-process children (kind="agent") have no pid: Runner.PID() returns 0
+	// (Task 3), so ChildSummary.PID is a non-nil pointer to 0 for the entire
+	// life of the child. That made the old `*after.PID != pidBefore` check
+	// compare 0 != 0, which can never fail -- the agent kind ended up with no
+	// restart guard at all. Witness the restart directly instead: whether a
+	// respawn is a real subprocess re-exec (pi, claude) or an in-process
+	// respawn (agent), activateLiveChild's Resume/RespawnChild path re-emits
+	// ctrl_child_spawned for the SAME childID to per-child subscribers (see
+	// cmd/fundid/controller.go), so its absence between the abort and the
+	// following idle states "not restarted" without relying on pid identity.
+	assertNoRestartBetween(t, sc, preAbortIdx, idleIdx, childID)
+
 	raw = d.request(t, getJSON)
 	mustUnmarshal(t, raw, &r)
 	if !r.Success {
@@ -279,7 +331,11 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	if after.PID == nil {
 		t.Fatal("ctrl_get returned a nil PID for a live child after abort")
 	}
-	if *after.PID != pidBefore {
+	// Secondary check: kept for kinds that still have a real pid (pi,
+	// claude). Gated on pidBefore != 0 so it doesn't silently pass for the
+	// agent kind, whose pid is always 0 -- see the KEYSTONE ASSERTION above,
+	// which is what actually guards the agent kind now.
+	if pidBefore != 0 && *after.PID != pidBefore {
 		t.Fatalf("PID changed across abort: before=%d after=%d (abort must NOT restart the process)", pidBefore, *after.PID)
 	}
 
@@ -296,11 +352,17 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	_, _ = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusIdle)), 5*time.Second)
 
 	// Final PID check: still the same process throughout the second prompt.
+	// Gated on pidBefore != 0 for the same reason as the KEYSTONE ASSERTION
+	// above -- the agent kind's pid is always 0, so this only guards pi and
+	// claude.
 	raw = d.request(t, getJSON)
 	mustUnmarshal(t, raw, &r)
 	var final protocol.ChildSummary
 	mustUnmarshal(t, r.Data, &final)
-	if final.PID == nil || *final.PID != pidBefore {
-		t.Fatalf("PID changed after second prompt: want %d, got %v", pidBefore, final.PID)
+	if final.PID == nil {
+		t.Fatal("ctrl_get returned a nil PID for a live child after second prompt")
+	}
+	if pidBefore != 0 && *final.PID != pidBefore {
+		t.Fatalf("PID changed after second prompt: want %d, got %v", pidBefore, *final.PID)
 	}
 }
