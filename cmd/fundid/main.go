@@ -94,10 +94,20 @@ func main() {
 	if dsn := envvar.Get(envvar.AgentDB); dsn != "" {
 		pool, err = pgxpool.New(baseCtx, dsn)
 		if err != nil {
-			slog.Error("open agent database", "error", err)
-			os.Exit(1)
+			// Deliberately NOT fatal. pgxpool.New only PARSES the DSN, it does
+			// not connect, so the only way to reach this branch is a malformed
+			// DSN — and killing the daemon over one takes pi and claude
+			// children down with it, for an operator who may never spawn an
+			// agent at all. "The database is required" is a phase 2 decision
+			// that has not been made; exiting here would make it silently, in
+			// a failure path, ahead of the design.
+			slog.Error("agent database DSN is invalid; starting without a pool. "+
+				"Agent conversations will be in-memory and no cost data will be recorded",
+				"env", envvar.AgentDB, "error", err)
+			pool = nil
+		} else {
+			slog.Info("agent database pool opened")
 		}
-		slog.Info("agent database pool opened")
 	} else {
 		slog.Warn("no agent database configured; agent conversations are in-memory and no cost data will be recorded",
 			"env", envvar.AgentDB)
