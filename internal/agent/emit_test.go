@@ -115,6 +115,88 @@ func TestMapAssistantMessage_MapsAccumulatedToolUseBlock(t *testing.T) {
 	}
 }
 
+// TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate is H6: a
+// mid-stream flush must not warn, and must not surface a truncated JSON
+// fragment as {"_raw": ...}. This is the fresh regression from d53d5dc:
+// MapAssistantMessage now reads b.Input directly (correctly, per
+// TestMapAssistantMessage_MapsAccumulatedToolUseBlock above) and unmarshals
+// it, but per anthropic.Message.Accumulate a tool_use block's Input is a
+// growing JSON *prefix* until content_block_stop, not a complete document --
+// so every flush before that point handed json.Unmarshal a truncated
+// fragment, which is neither empty nor valid, and previously always took the
+// warn+_raw path meant for GENUINELY malformed complete input.
+//
+// accumulateToolUseEvents (used by TestMapAssistantMessage_MapsAccumulatedToolUseBlock)
+// feeds its whole input as ONE input_json_delta, which Accumulate replaces
+// "{}" with wholesale -- that is always complete JSON and never exercises a
+// truncated state, which is exactly why the brief calls that guard vacuous.
+// This test instead splits `{"file_path": "/Users/brent/project"}` across
+// TWO deltas and asserts against the state after only the first has landed
+// -- a genuine SDK-accumulated prefix, not a hand-typed guess at what one
+// looks like.
+func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing.T) {
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	acc := accumulateSDKEvents(t, []ssestream.Event{
+		streamMessageStart("claude-x"),
+		streamToolUseStart(0, "tu_partial", "Write"),
+		streamInputJSONDelta(0, `{"file_path": "/Users/b`),
+	})
+	if json.Valid(acc.Content[0].Input) {
+		t.Fatalf("test fixture bug: b.Input = %q must be an INCOMPLETE JSON prefix, not valid JSON",
+			acc.Content[0].Input)
+	}
+
+	got := MapAssistantMessage(acc, "anthropic", nil)
+
+	if logs.String() != "" {
+		t.Fatalf("logged a warning for input that is merely still streaming: %s", logs.String())
+	}
+	if len(got.Content) != 1 || got.Content[0].Type != "toolCall" {
+		t.Fatalf("content = %+v, want one toolCall block (never dropped mid-stream, to avoid TUI flicker)",
+			got.Content)
+	}
+	args := got.Content[0].Arguments
+	if args == nil {
+		t.Fatal("arguments is nil")
+	}
+	if _, isRaw := (*args)["_raw"]; isRaw {
+		t.Fatalf("arguments leaked the truncated fragment as _raw: %+v", *args)
+	}
+	if len(*args) != 0 {
+		t.Fatalf("arguments = %+v, want empty {} while input is still streaming", *args)
+	}
+
+	// The second delta completes the JSON. The next flush (the real shape of
+	// engine.go's stream handler: MapAssistantMessage is called again against
+	// the same accumulator, not handed a delta directly) must map the full,
+	// correct arguments and still log nothing.
+	var u anthropic.MessageStreamEventUnion
+	ev2 := streamInputJSONDelta(0, `rent/project"}`)
+	if err := json.Unmarshal(ev2.Data, &u); err != nil {
+		t.Fatalf("unmarshal second delta: %v", err)
+	}
+	if err := acc.Accumulate(u); err != nil {
+		t.Fatalf("accumulate second delta: %v", err)
+	}
+	if !json.Valid(acc.Content[0].Input) {
+		t.Fatalf("test fixture bug: b.Input = %q must be complete valid JSON after the second delta",
+			acc.Content[0].Input)
+	}
+
+	got2 := MapAssistantMessage(acc, "anthropic", nil)
+	if logs.String() != "" {
+		t.Fatalf("logged a warning after the second delta completed valid JSON: %s", logs.String())
+	}
+	args2 := got2.Content[0].Arguments
+	if args2 == nil || (*args2)["file_path"] != "/Users/brent/project" {
+		t.Fatalf("arguments after completion = %+v, want file_path=/Users/brent/project", args2)
+	}
+}
+
 const sampleResp = `{
  "id":"msg_1","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"tool_use",

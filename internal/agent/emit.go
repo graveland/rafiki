@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
@@ -224,6 +227,58 @@ func costOf(pricer Pricer, model string, usage anthropic.Usage) child.PiCost {
 	}
 }
 
+// streamingToolArgs decodes a tool_use block's Input for MapAssistantMessage,
+// distinguishing "still streaming" from "genuinely malformed" so only the
+// latter warns.
+//
+// Per anthropic.Message.Accumulate (messageutil.go), a tool_use block's Input
+// starts as the literal "{}" (content_block_start) and is then either
+// REPLACED wholesale by the first non-empty input_json_delta or APPENDED to
+// by every one after that. So while the block is still open, Input is a JSON
+// *prefix* of the eventual object — e.g. `{"file_path": "/Users/b` — not a
+// malformed document. Only content_block_stop (which this function has no
+// visibility into; see MapAssistantMessage's doc on why it reads fields
+// directly) guarantees Input is complete.
+//
+// A byte-slice json.Unmarshal can't tell a truncated prefix from a syntax
+// error — both just fail. Decoding through a json.Decoder over a
+// bytes.Reader does: reading a token stream that runs out of input before
+// the value closes surfaces io.ErrUnexpectedEOF (or, for a zero-length
+// Input, plain io.EOF) specifically, while a value that is syntactically
+// broken but *complete* (e.g. `{a:1}`, unquoted key) surfaces a
+// *json.SyntaxError distinguishable from either. That is exactly the
+// truncated-vs-broken distinction this function needs, and it costs nothing
+// extra: it's a bounded decode of an already-in-memory byte slice, not a
+// stream read.
+//
+// A still-streaming block reports empty arguments ({}) with no warning,
+// deliberately mirroring the API's own initial wire state for a fresh
+// tool_use block (content_block_start's Input is always "{}") rather than
+// omitting the block. Omitting it would make the block appear, vanish (once
+// the first delta lands and Input stops being "{}"), then reappear (once the
+// block closes) in successive message_update frames — worse for an attached
+// TUI than staying present throughout with a placeholder that fills in once
+// complete, and it exactly matches the pre-regression AsAny() path's
+// behavior for this case ("wrong, but benign" — see this file's package
+// doc). A genuinely malformed *complete* input still warns and falls back to
+// {"_raw": ...}, unchanged from before.
+func streamingToolArgs(id, name string, input json.RawMessage) map[string]any {
+	var args map[string]any
+	dec := json.NewDecoder(bytes.NewReader(input))
+	err := dec.Decode(&args)
+	switch {
+	case err == nil:
+		return args
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		// Input ran out before the value closed: still streaming, not an
+		// error. Do not warn.
+		return map[string]any{}
+	default:
+		slog.Warn("emit: tool_use input unmarshal failed", "tool", name, "id", id, "error", err)
+		return map[string]any{"_raw": string(input)}
+	}
+}
+
 // MapAssistantMessage maps an Anthropic SDK response message onto the pi
 // AssistantMessage wire shape, tagging it with provider and this layer's
 // fixed API identifier ("anthropic-messages"). Timestamp is captured at map
@@ -266,12 +321,7 @@ func MapAssistantMessage(resp *anthropic.Message, provider string, pricer Pricer
 				blocks = append(blocks, child.PiThinkingBlock(b.Thinking))
 			}
 		case "tool_use":
-			var args map[string]any
-			if err := json.Unmarshal(b.Input, &args); err != nil {
-				slog.Warn("emit: tool_use input unmarshal failed", "tool", b.Name, "id", b.ID, "error", err)
-				args = map[string]any{"_raw": string(b.Input)}
-			}
-			blocks = append(blocks, child.PiToolCallBlock(b.ID, b.Name, args))
+			blocks = append(blocks, child.PiToolCallBlock(b.ID, b.Name, streamingToolArgs(b.ID, b.Name, b.Input)))
 		}
 	}
 
