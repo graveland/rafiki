@@ -89,6 +89,53 @@ func TestChild_StuckProcess_Escalates(t *testing.T) {
 	}
 }
 
+// TestChild_StuckProcess_SignalExitCodeIsZero pins the pre-Runner-seam
+// contract for a process that is escalated to signal termination: ExitCode
+// stays 0 (its zero value), not -1. -1 is reserved for the case where Wait()
+// itself errored and the outcome is genuinely indeterminate; a process that
+// exited via signal is a determinate outcome recorded separately in Signal.
+// This guards against a regression where processRunner.Wait() returned -1
+// for any state.ExitCode() < 0, which also fires for the signalled-but-known
+// case and silently changed the ExitCode the wire API reports for every
+// escalated Shutdown/Interrupt.
+func TestChild_StuckProcess_SignalExitCodeIsZero(t *testing.T) {
+	spec := child.SpawnSpec{
+		ChildID:  "c_test",
+		Cwd:      t.TempDir(),
+		PiBinary: fakePiPath(t),
+		Env:      []string{"FAKE_PI_SHUTDOWN_DELAY=999"},
+	}
+
+	c, err := child.Spawn(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
+	})
+
+	select {
+	case <-c.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Ready timed out")
+	}
+
+	// Short shutdown timeout; expect escalation to SIGTERM (or SIGKILL).
+	res, err := c.Shutdown(100*time.Millisecond, 500*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Escalated {
+		t.Fatal("expected escalation")
+	}
+	if res.Signal == "" {
+		t.Fatal("expected a recorded signal name")
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0 (signal-terminated, see Signal=%q); -1 is reserved for an indeterminate Wait() error", res.ExitCode, res.Signal)
+	}
+}
+
 func TestChild_BinaryMissing_SpawnFails(t *testing.T) {
 	spec := child.SpawnSpec{
 		ChildID:  "c_test",

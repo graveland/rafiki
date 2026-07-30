@@ -96,7 +96,16 @@ func (p *processRunner) Wait() (int, string) {
 	if err != nil {
 		return -1, ""
 	}
-	code := -1
+	// -1 is reserved for the err != nil case above (Wait() itself failed, so
+	// the outcome is genuinely indeterminate). A process that exited via
+	// signal has state.ExitCode() == -1 too, but that is a determinate
+	// outcome — the pre-seam code left ExitCode at its zero value (0) for a
+	// signalled process, recording the signal separately in Signal. Preserve
+	// that exact contract: 0 here means "terminated by signal, see Signal",
+	// not "unknown." This is API-visible (Session.ExitCode, ChildSummary.ExitCode
+	// on the wire), so do not "fix" this to -1 without a deliberate, separate
+	// decision to change that contract.
+	code := 0
 	if state.ExitCode() >= 0 {
 		code = state.ExitCode()
 	}
