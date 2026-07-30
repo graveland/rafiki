@@ -117,8 +117,45 @@ ring with a limit of one.
 
 Point those children at rafiki's `/v1/messages` face. Capture is then automatic and
 byte-exact, which is what the proxy was built for (rafiki DESIGN §2.3, §4.2). The face accepts
-`Authorization: Bearer` or `x-api-key`, which matches Claude Code's `ANTHROPIC_BASE_URL` +
-`ANTHROPIC_API_KEY` shape. fundi has no base-URL plumbing today; this is net-new but small.
+`Authorization: Bearer` or `x-api-key`. fundi has no base-URL plumbing today; this is net-new
+but small.
+
+### Conversation correlation: one stable ref, three delivery mechanisms
+
+Each kind has its own conversation identity — pi has a `sessionId`/`sessionFile`, claude has a
+`session_id`, rafiki has a conversation id — so the mapping must be recorded, not inferred.
+
+**The proxy already provides the hook.** `server/proxy.go:809` and `server/openai.go:222` both
+call `store.EnsureConversationByExternalRef` with `Source: r.Header.Get("X-Rafiki-Source")` and
+`ExternalRef: r.Header.Get("X-Rafiki-Session")`. `X-Rafiki-Session` *is* the correlation key, and
+because `Ensure…` is idempotent, the same ref always resolves to the same conversation. fundi
+holds the pool, so it resolves ref → conversation id with the same call and needs no coordination
+with the proxy at all. No upstream rafiki change.
+
+**The ref is conversation-stable, not child-stable.** fundi mints one at first spawn, persists it
+in the child registry, and every child that later drives that conversation passes the same ref —
+so a resume lands on the same conversation rather than forking a new one. This is the concrete
+form of the identity inversion described in phase 2: today `--ref` is the childId, which is why
+resume needed `childClaimSet`.
+
+One ref, three deliveries:
+
+| kind | mechanism |
+|---|---|
+| agent | rafiki library `ByExternalRef` — already the path; only the ref's *value* changes |
+| claude | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_CUSTOM_HEADERS` carrying `X-Rafiki-Session` and `X-Rafiki-Source`. All three env vars are read by the claude binary (verified against v2.1.220) |
+| pi | a provider override via the `fundi-helpers` pi extension, which `fundi create` **already auto-installs** into `~/.pi/agent/extensions/`. pi's model registry documents "if provider has only baseUrl/headers: overrides existing models' URLs", and `examples/extensions/custom-provider-anthropic` and `custom-provider-gitlab-duo` both do exactly this |
+
+pi notably does **not** read `ANTHROPIC_BASE_URL` or any custom-header env var — only
+`ANTHROPIC_API_KEY` / `ANTHROPIC_OAUTH_TOKEN` plus `HTTP(S)_PROXY`. The proxy variables are no
+help: CONNECT tunnelling leaves the TLS stream opaque, so it captures nothing. The extension
+route is the only env-free option, and fundi is already installing an extension.
+
+**Also record each kind's own session identity** in the child registry — pi's
+`sessionId`/`sessionFile` and claude's `session_id`. Both are already sniffed today
+(`internal/child/sniff.go` from `response.get_state`; `provider_claude.go:45` from claude's
+stream frames) and already land in `persist.Record.SessionID`. Keeping them lets you cross-
+reference a fundi conversation to pi's session file or claude's on-disk transcript.
 
 ### `forget` becomes `done`
 
@@ -275,9 +312,9 @@ lifecycle. Ship and verify 1a before starting 1b.
 
 ## Open questions for planning
 
-1. **Proxy correlation.** rafiki's proxy keys conversations by its own ids, so relating a
-   pi/claude child to its captured conversation needs a ref travelling with the request.
-   Unverified whether the proxy supports that; if not, this is upstream work.
+1. **`ANTHROPIC_CUSTOM_HEADERS` format.** The variable exists in the claude binary, but the exact
+   encoding for multiple headers (separator, whitespace) needs confirming against a live request
+   before the claude wiring is written. The mechanism is settled; the syntax is not.
 2. **Does `renderRing` survive?** It exists because claude's native frames must be re-rendered
    for backfill (`docs/plans/2026-06-15-claude-rendered-backfill-design.md`). Normalized
    messages from `Messages.Load` may remove the need.
