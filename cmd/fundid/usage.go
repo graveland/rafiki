@@ -40,14 +40,28 @@ Usage:
 The command-line client is a separate binary, `+"`fundi`"+`.
 
 The daemon listens on a unix socket and stores its state under the XDG base
-directories (override with the standard XDG_* variables):
+directories (override with the standard XDG_* variables). These are this
+process's own resolved paths — a client (fundi, or a launchd/systemd unit
+with a different environment) may resolve differently if its HOME or XDG_*
+variables disagree with the daemon's:
 `)
-	fmt.Fprintf(w, "  socket   %s\n", paths.SocketPath())
-	fmt.Fprintf(w, "  records  %s\n", paths.RecordsDir())
-	fmt.Fprintf(w, "  logs     %s\n", paths.LogsDir())
+	fmt.Fprintf(w, "  %-12s %s\n", "socket", paths.SocketPath())
+	fmt.Fprintf(w, "  %-12s %s\n", "records", paths.RecordsDir())
+	fmt.Fprintf(w, "  %-12s %s\n", "logs", paths.LogsDir())
+	fmt.Fprintf(w, "  %-12s %s\n", "instructions", paths.InstructionsFile())
+	for i, d := range paths.SkillsDirs() {
+		label := ""
+		if i == 0 {
+			label = "skills"
+		}
+		fmt.Fprintf(w, "  %-12s %s\n", label, d)
+	}
+	fmt.Fprintf(w, "  %-12s %s\n", "presets", paths.PresetsFile())
+	fmt.Fprintf(w, "  %-12s %s\n", "mcp", paths.GlobalMCPConfig())
 	fmt.Fprint(w, `
 $FUNDI_SOCKET overrides the socket path for both the daemon's clients
-and any child it spawns.
+and any child it spawns. $FUNDI_INSTRUCTIONS, $FUNDI_SKILLS_DIRS, and
+$FUNDI_MCP_CONFIG override the instructions/skills/mcp paths above.
 `)
 }
 

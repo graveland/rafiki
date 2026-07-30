@@ -51,11 +51,19 @@ build-cli: # Build the CLI client (bin/fundi)
 	mkdir -p $(BIN_DIR)
 	$(GO) build -o $(BIN_DIR)/$(CLI_BIN) ./cmd/fundi
 
-print-config: build-cli # Show the resolved agent config paths
-	@printf "instructions : %s\n" "$${FUNDI_INSTRUCTIONS:-~/.config/fundi/instructions.md}"
-	@printf "skills       : %s\n" "$${FUNDI_SKILLS_DIRS:-~/.config/fundi/skills}"
-	@printf "mcp          : %s\n" "$${FUNDI_MCP_CONFIG:-~/.config/fundi/mcp.json}"
-	@printf "agent db     : %s\n" "$${FUNDI_AGENT_DB:-<unset — NO COST DATA>}"
+# internal/paths (via fundid -h) is the one authority for resolved config
+# paths — this used to hand-roll its own shell guesses and got all four of
+# these wrong: it hardcoded ~/.config/fundi ignoring $XDG_CONFIG_HOME, printed
+# the literal unexpanded "~" instead of an actual path, read the invoking
+# shell's $FUNDI_* values rather than what the daemon itself resolves, and
+# never mentioned presets.json at all. Shelling out to the built binary's own
+# -h output means this can never drift from the code again — and it reports
+# the path-resolution code's view, not a second, independently-maintained
+# guess. Depends on build-daemon (not build-cli): `fundid`, not `fundi`, is
+# the process that actually reads these paths at runtime.
+print-config: build-daemon # Show the resolved config paths (shells out to fundid -h; the one source of truth)
+	@$(BIN_DIR)/$(DAEMON_BIN) -h | awk '/^  socket /,/^  mcp /'
+	@printf "  %-12s %s\n" "agent db" "$${FUNDI_AGENT_DB:-<unset — NO COST DATA>}"
 
 # Kept for one cycle: muscle memory, and the M1 smoke checklist names them.
 build-controller: build-daemon # Deprecated alias for build-daemon
