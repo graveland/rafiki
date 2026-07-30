@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"git.graveland.dev/brent/fundi/internal/agent"
+	skillspkg "git.graveland.dev/brent/fundi/internal/skills"
 )
 
 // TestParseAgentFlagsRequiresModel covers the redesign's central invariant:
@@ -155,7 +156,7 @@ func TestAssembleSkillDirs_FlagsWinLast(t *testing.T) {
 // TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision proves the whole
 // point of reading both per-project dirs: when a skill of the same name
 // exists under both .claude/skills and .fundi/skills, the .fundi one wins.
-// This exercises the real merge in agent.DiscoverSkills (later dir wins),
+// This exercises the real merge in skillspkg.DiscoverSkills (later dir wins),
 // not just the ordering of assembleSkillDirs's output slice.
 func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 	repo := t.TempDir()
@@ -179,12 +180,12 @@ func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 	t.Setenv("FUNDI_SKILLS_DIRS", "") // isolate from the invoking user's real config dir
 
 	dirs := assembleSkillDirs(repo, nil)
-	skills, err := agent.DiscoverSkills(dirs, nil)
+	skills, err := skillspkg.DiscoverSkills(dirs, nil)
 	if err != nil {
 		t.Fatalf("DiscoverSkills: %v", err)
 	}
 
-	var demo *agent.SkillMeta
+	var demo *skillspkg.SkillMeta
 	for i := range skills {
 		if skills[i].Name == "demo" {
 			demo = &skills[i]

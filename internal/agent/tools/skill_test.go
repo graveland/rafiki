@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/agent"
+	skillspkg "git.graveland.dev/brent/fundi/internal/skills"
 )
 
 // writeSkill creates <dir>/<name>/SKILL.md with the given frontmatter and
 // body, mirroring the layout DiscoverSkills expects.
-func writeSkill(t *testing.T, dir, name, description, body string) agent.SkillMeta {
+func writeSkill(t *testing.T, dir, name, description, body string) skillspkg.SkillMeta {
 	t.Helper()
 	skillDir := filepath.Join(dir, name)
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -24,7 +24,7 @@ func writeSkill(t *testing.T, dir, name, description, body string) agent.SkillMe
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return agent.SkillMeta{Name: name, Description: description, Dir: skillDir, Path: path}
+	return skillspkg.SkillMeta{Name: name, Description: description, Dir: skillDir, Path: path}
 }
 
 // TestSkillToolReturnsBodyAndBaseDir covers the tool's success shape: the
@@ -34,7 +34,7 @@ func TestSkillToolReturnsBodyAndBaseDir(t *testing.T) {
 	meta := writeSkill(t, dir, "reviewer", "reviews code", "REVIEWER_BODY_MARKER\nstep one\n")
 
 	r := NewRegistry()
-	RegisterSkillTool(r, []agent.SkillMeta{meta})
+	RegisterSkillTool(r, []skillspkg.SkillMeta{meta})
 
 	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"reviewer"}`))
 	if err != nil {
@@ -62,7 +62,7 @@ func TestSkillToolUnknownNameListsAvailable(t *testing.T) {
 	m2 := writeSkill(t, dir, "beta", "beta desc", "beta body")
 
 	r := NewRegistry()
-	RegisterSkillTool(r, []agent.SkillMeta{m1, m2})
+	RegisterSkillTool(r, []skillspkg.SkillMeta{m1, m2})
 
 	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"nonexistent"}`))
 	if err == nil {

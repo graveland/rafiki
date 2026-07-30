@@ -15,6 +15,7 @@ import (
 	"git.graveland.dev/brent/fundi/internal/agent"
 	"git.graveland.dev/brent/fundi/internal/agent/tools"
 	"git.graveland.dev/brent/fundi/internal/paths"
+	skillspkg "git.graveland.dev/brent/fundi/internal/skills"
 )
 
 // stringSliceFlag implements flag.Value for a repeatable flag (--skills-dir).
@@ -70,7 +71,7 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 // ~/.claude/skills), then the project's existing <cwd>/.claude/skills (kept
 // so a repo that already has one doesn't silently lose its skills), then the
 // project's own <cwd>/.fundi/skills (which wins on name collision with
-// .claude/skills - agent.DiscoverSkills lets later entries override
+// .claude/skills - skillspkg.DiscoverSkills lets later entries override
 // earlier ones), then any --skills-dir flags. Pure so it is testable.
 func assembleSkillDirs(cwd string, flagDirs []string) []string {
 	dirs := paths.SkillsDirs()
@@ -140,7 +141,7 @@ func runAgent(args []string) int {
 		}
 	}
 
-	var skills []agent.SkillMeta
+	var skills []skillspkg.SkillMeta
 	if !f.noSkills {
 		dirs := assembleSkillDirs(cwd, f.skillsDir)
 
@@ -148,7 +149,7 @@ func runAgent(args []string) int {
 		if f.skills != "" {
 			only = strings.Split(f.skills, ",")
 		}
-		skills, err = agent.DiscoverSkills(dirs, only)
+		skills, err = skillspkg.DiscoverSkills(dirs, only)
 		if err != nil {
 			slog.Error("agent: discover skills", "error", err)
 			return 1
@@ -189,7 +190,7 @@ func runAgent(args []string) int {
 		SystemPromptOverride: f.systemPrompt,
 		AppendSystemPrompt:   f.appendSystemPrompt,
 		ContextFiles:         contextFiles,
-		SkillsInventory:      agent.SkillsInventory(skills),
+		SkillsInventory:      skillspkg.SkillsInventory(skills),
 		Cwd:                  cwd,
 		Ref:                  f.ref,
 		Name:                 f.name,

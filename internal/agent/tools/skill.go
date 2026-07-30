@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"git.graveland.dev/brent/fundi/internal/agent"
+	skillspkg "git.graveland.dev/brent/fundi/internal/skills"
 )
 
 const (
@@ -30,12 +30,12 @@ type skillInput struct {
 }
 
 // RegisterSkillTool registers the "skill" tool against r, backed by the
-// given already-discovered skills (see agent.DiscoverSkills). Invoking it
+// given already-discovered skills (see skillspkg.DiscoverSkills). Invoking it
 // with an unknown name is a returned error listing the available names -
 // agentloop turns that into an is_error tool result the model can read and
 // recover from, so no special-casing is needed here.
-func RegisterSkillTool(r *Registry, skills []agent.SkillMeta) {
-	byName := make(map[string]agent.SkillMeta, len(skills))
+func RegisterSkillTool(r *Registry, skills []skillspkg.SkillMeta) {
+	byName := make(map[string]skillspkg.SkillMeta, len(skills))
 	names := make([]string, 0, len(skills))
 	for _, s := range skills {
 		byName[s.Name] = s
@@ -46,7 +46,7 @@ func RegisterSkillTool(r *Registry, skills []agent.SkillMeta) {
 	r.Register(Def("skill", skillDescription, skillSchema), newSkillTool(byName, names))
 }
 
-func newSkillTool(byName map[string]agent.SkillMeta, names []string) ToolFunc {
+func newSkillTool(byName map[string]skillspkg.SkillMeta, names []string) ToolFunc {
 	return func(_ context.Context, input json.RawMessage) (string, error) {
 		var in skillInput
 		if err := json.Unmarshal(input, &in); err != nil {
@@ -58,7 +58,7 @@ func newSkillTool(byName map[string]agent.SkillMeta, names []string) ToolFunc {
 			return "", fmt.Errorf("skill: unknown skill %q; available skills: %s", in.Skill, strings.Join(names, ", "))
 		}
 
-		body, err := agent.SkillBody(s.Path)
+		body, err := skillspkg.SkillBody(s.Path)
 		if err != nil {
 			return "", fmt.Errorf("skill: %w", err)
 		}
