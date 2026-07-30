@@ -146,20 +146,31 @@ func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 				"child", r.opts.ChildID, "panic", v, "stack", string(debug.Stack()))
 			r.setExit(2)
 			// The engine's turn worker (if Build got far enough to create one)
-			// may still be running; cancelling ctx unblocks anything selecting
-			// on it. r.eng is readable here (under mu), but calling Close() on
-			// it is NOT safe: Close's contract requires Wait() to have already
-			// returned, and Wait() can block indefinitely on a genuinely wedged
-			// turn — exactly what we cannot risk doing from inside panic
-			// recovery, whose whole job is to return promptly. Left as an
-			// accepted, bounded leak (one goroutine) on a path that should
-			// never execute in practice.
-			r.mu.Lock()
-			cancel := r.cancel
-			r.mu.Unlock()
-			if cancel != nil {
-				cancel()
-			}
+			// may still be running. r.eng is readable here (under mu), but
+			// calling Close() on it is NOT safe: Close's contract requires
+			// Wait() to have already returned, and Wait() can block
+			// indefinitely on a genuinely wedged turn — exactly what we cannot
+			// risk doing from inside panic recovery, whose whole job is to
+			// return promptly. Left as an accepted, bounded leak (one
+			// goroutine) on a path that should never execute in practice. The
+			// unconditional cancel() below still unblocks anything in that
+			// worker that selects on ctx.
+		}
+		// Release the context derived from r.opts.Parent on EVERY exit path,
+		// not just the panic one. This is not merely tidy. When Parent is a
+		// real cancelCtx — and it always is in the daemon, which passes
+		// Controller.baseCtx — the child ctx registers itself in Parent's
+		// children map at WithCancel time and is removed only by its own
+		// cancel. A run() that returned normally without cancelling therefore
+		// pinned one cancelCtx per completed child for the daemon's entire
+		// lifetime: an unbounded leak. No test could see it, because New
+		// defaults Parent to context.Background(), whose nil Done() channel
+		// makes propagateCancel register nothing at all.
+		r.mu.Lock()
+		cancel := r.cancel
+		r.mu.Unlock()
+		if cancel != nil {
+			cancel()
 		}
 		if err := stdoutW.Close(); err != nil {
 			slog.Warn("inproc: close stdout", "child", r.opts.ChildID, "error", err)

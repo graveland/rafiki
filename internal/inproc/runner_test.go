@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -571,5 +572,115 @@ func TestRunnerTerminateEndsIt(t *testing.T) {
 	}
 	if _, err := io.ReadAll(stdout); err != nil {
 		t.Errorf("stdout read: %v", err)
+	}
+}
+
+// cancelCtxChildCount reports how many child contexts ctx still has
+// registered, by reflecting on context.cancelCtx's unexported `children` map.
+// ok is false when that internal shape is not what we expect (a future Go
+// release could rename or restructure it), so the caller can fall back to the
+// public-API assertion rather than failing for the wrong reason.
+//
+// reflect.Value.Len does not require the field to be exported — only
+// Interface() does — so reading the map's length here is legal.
+func cancelCtxChildCount(ctx context.Context) (int, bool) {
+	v := reflect.ValueOf(ctx)
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return 0, false
+	}
+	v = v.Elem()
+	if v.Kind() != reflect.Struct {
+		return 0, false
+	}
+	f := v.FieldByName("children")
+	if !f.IsValid() || f.Kind() != reflect.Map {
+		return 0, false
+	}
+	return f.Len(), true
+}
+
+// TestRunnerReleasesChildContextOnNormalCompletion guards the leak that
+// nothing else in this package can see: run() derives a cancellable context
+// from Options.Parent, and until this test existed cancel() was invoked only
+// by Terminate, Kill, and the panic arm of the recover defer. An ordinary
+// completed child therefore left its cancelCtx registered in the parent's
+// children map forever, and the daemon passes a REAL cancelCtx
+// (Controller.baseCtx) as Parent — one leaked context per completed
+// conversation, for the daemon's lifetime.
+//
+// Every other test in this file passes t.Context() or lets New default Parent
+// to context.Background(); Background's Done() is nil, so propagateCancel
+// registers nothing and the leak is structurally invisible there. This test
+// therefore builds its own context.WithCancel(context.Background()) parent —
+// that IS the shape the daemon uses.
+//
+// It asserts two ways: the public-API one (a context.AfterFunc registered on
+// the child ctx inside Build must fire, which can only happen if the child ctx
+// was cancelled), and the direct one (the parent's child count returns to
+// zero), the latter only when the context package's internals are still the
+// shape cancelCtxChildCount expects.
+func TestRunnerReleasesChildContextOnNormalCompletion(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	const children = 4
+	fired := make(chan string, children)
+	turns := writeFakeTurns(t, sampleEndTurn)
+
+	for i := range children {
+		id := fmt.Sprintf("c_ctxleak_%d", i)
+		inner := blockingBuildFunc(make(chan struct{}), turns)
+		r := New(Options{
+			ChildID: id,
+			Parent:  parent,
+			Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+			Build: func(ctx context.Context, fe *agent.Frontend, ro agent.RuntimeOptions) (*agent.Engine, func(), error) {
+				context.AfterFunc(ctx, func() { fired <- id })
+				return inner(ctx, fe, ro)
+			},
+		})
+
+		stdin, stdout, stderr, err := r.Start()
+		if err != nil {
+			t.Fatalf("Start %s: %v", id, err)
+		}
+		if err := stderr.Close(); err != nil {
+			t.Errorf("close stderr %s: %v", id, err)
+		}
+		// Drain stdout so the engine can never block on a full pipe; this test
+		// is about the ordinary completion path, nothing else.
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			if _, cerr := io.Copy(io.Discard, stdout); cerr != nil {
+				t.Errorf("drain stdout %s: %v", id, cerr)
+			}
+		}()
+
+		// No prompt at all: closing stdin immediately is the shortest possible
+		// ordinary completion — Frontend.Run sees EOF, run() returns normally.
+		if err := stdin.Close(); err != nil {
+			t.Fatalf("close stdin %s: %v", id, err)
+		}
+		if code, sig := r.Wait(); code != 0 || sig != "" {
+			t.Fatalf("Wait() = (%d, %q) for %s, want (0, \"\") on a clean EOF", code, sig, id)
+		}
+		<-drained
+	}
+
+	for range children {
+		select {
+		case <-fired:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a child context was never cancelled after its runner completed normally; " +
+				"run()'s cancel() is not running on the ordinary return path")
+		}
+	}
+
+	if got, ok := cancelCtxChildCount(parent); !ok {
+		t.Log("context.cancelCtx internals changed shape; relying on the AfterFunc assertion above")
+	} else if got != 0 {
+		t.Errorf("parent context still has %d registered children after %d runners completed normally; want 0",
+			got, children)
 	}
 }
