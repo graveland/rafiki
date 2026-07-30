@@ -129,9 +129,11 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 //     or fe.Run doesn't crash the daemon) and unconditionally closes stdoutW,
 //     which is what turns a contained panic into an ordinary EOF for the
 //     daemon's reader.
-//  3. defer stdinR.Close() — registered only once Build has run (it is a
-//     plain defer statement below, not conditional on success), so it always
-//     fires before #2 sees stdoutW close.
+//  3. defer stdinR.Close() — registered BEFORE Build is called, deliberately.
+//     Being ahead of Build is precisely what makes it fire on the build-error
+//     return and on a panic raised inside Build itself; moving it after Build,
+//     or making it conditional on Build succeeding, reintroduces an FD leak on
+//     both of those paths. It always runs before #2 sees stdoutW close.
 //  4. defer shutdown() — registered only after Build succeeds, so it never
 //     runs on a build-error exit. Runs before #3's stdinR.Close().
 //
