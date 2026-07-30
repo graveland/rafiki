@@ -10,10 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"git.graveland.dev/brent/fundi/internal/bus"
@@ -34,6 +32,11 @@ type SpawnSpec struct {
 	// Provider selects the wire protocol. When nil, PiProvider{} is used so
 	// existing callers and tests keep pi behavior unchanged.
 	Provider ProtocolProvider
+
+	// Runner overrides how the child executes. When nil, a subprocess runner is
+	// built from PiBinary/Argv/Env. Injected rather than selected inside this
+	// package because internal/agent imports it.
+	Runner Runner
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -95,9 +98,9 @@ func (b *inBuffer) snapshot() [][]byte {
 // call concurrently. The supervise goroutine is the only writer to the child's
 // stdin; callers queue frames via Send.
 type Child struct {
-	ID   string
-	spec SpawnSpec
-	cmd  *exec.Cmd
+	ID     string
+	spec   SpawnSpec
+	runner Runner
 
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
@@ -133,9 +136,6 @@ type Child struct {
 // goroutine. The returned Child is immediately usable; wait on Ready() before
 // sending commands if you need the supervise loop to be processing.
 func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
-	if spec.PiBinary == "" {
-		return nil, errors.New("pi binary path required")
-	}
 	if !filepath.IsAbs(spec.Cwd) {
 		return nil, fmt.Errorf("cwd must be absolute: %q", spec.Cwd)
 	}
@@ -143,41 +143,21 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		return nil, fmt.Errorf("cwd: %w", err)
 	}
 
-	argv := append([]string{}, spec.Argv...)
-	argv = append(argv, spec.ExtraArgs...)
-
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("spawn: %w", err)
 	}
-	cmd := exec.Command(spec.PiBinary, argv...)
-	cmd.Dir = spec.Cwd
-	// Put the child in its own process group so that any subprocesses it spawns
-	// can be killed as a group during shutdown (prevents orphan children from
-	// keeping pipe write ends open and blocking our readers).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if len(spec.Env) > 0 {
-		if spec.EnvOverride {
-			cmd.Env = append([]string{}, spec.Env...) // override: use only the specified env
-		} else {
-			cmd.Env = append(os.Environ(), spec.Env...) // merge: inherit parent env plus additions
+
+	r := spec.Runner
+	if r == nil {
+		pr, perr := newProcessRunner(spec)
+		if perr != nil {
+			return nil, perr
 		}
+		r = pr
 	}
-
-	stdin, err := cmd.StdinPipe()
+	stdin, stdout, stderr, err := r.Start()
 	if err != nil {
 		return nil, err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start: %w", err)
 	}
 
 	prov := spec.Provider
@@ -191,7 +171,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	c := &Child{
 		ID:          spec.ChildID,
 		spec:        spec,
-		cmd:         cmd,
+		runner:      r,
 		stdin:       stdin,
 		stdout:      stdout,
 		stderr:      stderr,
@@ -216,7 +196,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 
 // PID returns the operating system process ID of the child. Safe to call
 // after Spawn returns.
-func (c *Child) PID() int { return c.cmd.Process.Pid }
+func (c *Child) PID() int { return c.runner.PID() }
 
 // ExitResult returns the shutdown result recorded after the child exits.
 // Call only after Done() is closed; before that the fields are zero-valued.
@@ -483,18 +463,10 @@ func (c *Child) readStdout() {
 	}
 
 	// Reap the process and record its exit status.
-	state, err := c.cmd.Process.Wait()
+	code, sig := c.runner.Wait()
 	c.mu.Lock()
-	if err != nil {
-		c.exit.ExitCode = -1
-	} else {
-		if state.ExitCode() >= 0 {
-			c.exit.ExitCode = state.ExitCode()
-		}
-		if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-			c.exit.Signal = ws.Signal().String()
-		}
-	}
+	c.exit.ExitCode = code
+	c.exit.Signal = sig
 	c.closed = true
 	c.mu.Unlock()
 
@@ -625,15 +597,16 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 	case <-c.done:
 	case <-time.After(shutdownTimeout):
 		// stdin close didn't cause a timely exit; escalate to SIGTERM.
-		// Kill the entire process group so that any subprocesses the child
-		// spawned also receive the signal.
 		escalated = true
-		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+		if terr := c.runner.Terminate(); terr != nil {
+			slog.Warn("terminate runner", "child", c.ID, "error", terr)
+		}
 		select {
 		case <-c.done:
 		case <-time.After(killTimeout):
-			// SIGTERM didn't work; force-kill the process group.
-			_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+			if kerr := c.runner.Kill(); kerr != nil {
+				slog.Warn("kill runner", "child", c.ID, "error", kerr)
+			}
 			<-c.done
 		}
 	}
@@ -658,15 +631,5 @@ func (c *Child) Interrupt() error {
 	if closed {
 		return nil
 	}
-	if c.cmd == nil || c.cmd.Process == nil {
-		return fmt.Errorf("interrupt: no process handle")
-	}
-	// Signal the whole process group (negative PID), matching Shutdown, so any
-	// subprocess the child spawned is interrupted too. A process that exited
-	// between the closed check and here yields ESRCH — treat that as the no-op
-	// the caller asked for, not an error.
-	if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return nil
+	return c.runner.Interrupt()
 }
