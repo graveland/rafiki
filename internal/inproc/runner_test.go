@@ -19,6 +19,7 @@ import (
 
 	"git.graveland.dev/brent/fundi/internal/agent"
 	"git.graveland.dev/brent/fundi/internal/agent/tools"
+	"git.graveland.dev/brent/fundi/internal/child"
 	"git.graveland.dev/brent/rafiki/llm"
 )
 
@@ -922,5 +923,93 @@ func TestRunnerPanicInTurnWorkerEndsTheChild(t *testing.T) {
 
 	if err := stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 		t.Errorf("close stdin: %v", err)
+	}
+}
+
+// TestKillReportsTheSameExitShapeAsASignalledSubprocess pins the two halves of
+// the Runner seam to ONE exit contract for the same user action.
+//
+// Task 2 went out of its way to preserve the subprocess contract — a
+// signal-terminated child reports ExitCode 0 with the signal name, explicitly
+// not -1 (see internal/child/runner.go). An escalated Kill of an in-process
+// agent child used to report exit 1 with no signal instead, because Kill
+// closes stdinR and Frontend.Run then surfaces os.ErrClosed rather than EOF.
+// That put two different answers on the same wire fields
+// (ChildSummary.ExitCode/ExitSignal, KillResponseData.Signal, meta.json)
+// depending on which runner happened to be serving the child.
+//
+// The subprocess half is exercised through child.Spawn with no injected
+// Runner, so it really is processRunner producing the reference values rather
+// than this test asserting a remembered literal.
+func TestKillReportsTheSameExitShapeAsASignalledSubprocess(t *testing.T) {
+	// --- in-process half ---------------------------------------------------
+	started := make(chan struct{})
+	r := New(Options{
+		ChildID: "c_killshape",
+		Parent:  t.Context(),
+		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Build:   blockingBuildFunc(started, writeFakeTurns(t, sampleToolUseResp)),
+	})
+
+	stdin, stdout, stderr, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := stderr.Close(); err != nil {
+		t.Errorf("close stderr: %v", err)
+	}
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		// The read end is closed by Kill while this is in flight, so an error
+		// here is expected and not worth asserting on.
+		_, _ = io.Copy(io.Discard, stdout)
+	}()
+
+	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"go"}` + "\n")); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool never started; the turn never went in flight")
+	}
+
+	if err := r.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	inCode, inSignal := r.Wait()
+	<-drained
+	if err := stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		t.Errorf("close stdin: %v", err)
+	}
+
+	// --- subprocess half ---------------------------------------------------
+	// A shell that ignores SIGTERM and never reads stdin, so the daemon's
+	// shutdown ladder is forced all the way down to SIGKILL: closing stdin
+	// does nothing, SIGTERM is trapped away, only SIGKILL ends it.
+	ch, err := child.Spawn(t.Context(), child.SpawnSpec{
+		ChildID:  "c_killshape_proc",
+		Cwd:      t.TempDir(),
+		PiBinary: "/bin/sh",
+		Argv:     []string{"-c", `trap "" TERM; while :; do sleep 0.05; done`},
+	})
+	if err != nil {
+		t.Fatalf("spawn subprocess child: %v", err)
+	}
+	res, err := ch.Shutdown(300*time.Millisecond, 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("subprocess Shutdown: %v", err)
+	}
+	if !res.Escalated {
+		t.Fatal("the subprocess exited before SIGKILL; this test needs a signalled reference, not a clean exit")
+	}
+
+	if inCode != res.ExitCode || inSignal != res.Signal {
+		t.Errorf("kill exit shape disagrees between runners:\n  in-process: (%d, %q)\n  subprocess: (%d, %q)",
+			inCode, inSignal, res.ExitCode, res.Signal)
+	}
+	if inSignal != killedSignal {
+		t.Errorf("in-process kill signal = %q, want %q", inSignal, killedSignal)
 	}
 }

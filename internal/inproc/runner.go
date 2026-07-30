@@ -52,30 +52,47 @@ const (
 	// stopEngineFatal: the engine's turn worker hit a panic and asked to be
 	// ended (see Runner.engineFatal). The exit code is already recorded.
 	stopEngineFatal
+	// stopKilled: Kill() forced this teardown. Reported as a signalled stop,
+	// not a failure — see killedSignal.
+	stopKilled
 )
 
 func (s stopReason) String() string {
 	switch s {
 	case stopEngineFatal:
 		return "engine_fatal"
+	case stopKilled:
+		return "killed"
 	default:
 		return "none"
 	}
 }
+
+// killedSignal is the signal name a Kill()-initiated teardown reports.
+//
+// It must stay byte-identical to what a SIGKILLed subprocess produces:
+// processRunner.Wait reads syscall.WaitStatus.Signal().String(), and
+// syscall.SIGKILL stringifies to exactly "killed". The two runners are two
+// halves of one wire contract — ChildSummary.ExitCode/ExitSignal,
+// KillResponseData.Signal, and meta.json all carry whichever one served the
+// child — so a user killing an agent child and a user killing a pi child must
+// not get different answers for the same action.
+const killedSignal = "killed"
 
 // Runner drives an agent.Engine in a goroutine. It satisfies child.Runner.
 type Runner struct {
 	opts Options
 	done chan struct{}
 
-	mu       sync.Mutex
-	started  bool
-	stop     stopReason
-	cancel   context.CancelFunc
-	exitCode int
-	eng      *agent.Engine
-	stdinR   *os.File
-	stdoutR  *os.File
+	mu         sync.Mutex
+	started    bool
+	stop       stopReason
+	cancel     context.CancelFunc
+	exitCode   int
+	exitSignal string
+	eng        *agent.Engine
+	stdinR     *os.File
+	stdoutR    *os.File
 }
 
 // New returns a Runner for opts. Nothing runs until Start is called.
@@ -334,6 +351,15 @@ func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 	}
 	eng.Wait()
 	eng.Close()
+
+	// Shape a forced stop's exit LAST, once everything else has settled. Kill
+	// can land at two quite different moments — while Frontend.Run is parked
+	// on a read (handled by the branch above) or after it already returned
+	// cleanly, when the daemon's shutdown ladder escalated because the engine
+	// was wedged mid-turn — and both must report the same thing.
+	if r.stopReasonOf() == stopKilled {
+		r.setExitSignal(0, killedSignal)
+	}
 }
 
 func (r *Runner) setExit(code int) {
@@ -342,13 +368,27 @@ func (r *Runner) setExit(code int) {
 	r.exitCode = code
 }
 
-// Wait blocks until the engine goroutine finishes. An in-process runner is
-// never signalled, so the signal string is always empty.
+func (r *Runner) setExitSignal(code int, signal string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.exitCode = code
+	r.exitSignal = signal
+}
+
+// Wait blocks until the engine goroutine finishes and reports the exit the
+// same way a subprocess runner does.
+//
+// The signal is empty for every ordinary end (clean EOF, build failure,
+// frontend error, contained panic) and "killed" when Kill() forced the
+// teardown — matching processRunner, which reports a SIGKILLed child as exit
+// code 0 with signal "killed". Terminate() alone does not produce a signal: it
+// only cancels the in-flight turn and the runner still ends on the daemon's
+// stdin close, which is an ordinary EOF.
 func (r *Runner) Wait() (int, string) {
 	<-r.done
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.exitCode, ""
+	return r.exitCode, r.exitSignal
 }
 
 // PID reports 0: there is no process. Callers persisting a PID must treat 0 as
@@ -380,11 +420,26 @@ func (r *Runner) Terminate() error {
 // Both closes tolerate an already-closed file (a second Kill call, or a race
 // with run()'s own stdinR close on ordinary EOF) rather than reporting it as
 // an error.
+//
+// Kill also records that the stop was FORCED, which is what lets run() report
+// the subprocess exit shape (code 0, signal "killed") instead of the exit 1 a
+// bare Frontend.Run error would otherwise produce — closing stdinR makes that
+// read fail with os.ErrClosed rather than returning the EOF a clean stop
+// gives. Without this the two runners answer the same user action ("kill this
+// child") differently on the wire. See killedSignal.
 func (r *Runner) Kill() error {
 	if err := r.Terminate(); err != nil {
 		return err
 	}
 	r.mu.Lock()
+	// Do not overwrite an engine-fatal stop: that child was already dying of
+	// its own panic with a recorded exit code, and a Kill racing its teardown
+	// should not rewrite the cause of death. A subprocess behaves the same way
+	// — a signal delivered to an already-exited process is reaped as the
+	// original exit, not as a kill.
+	if r.stop == stopNone {
+		r.stop = stopKilled
+	}
 	stdinR := r.stdinR
 	stdoutR := r.stdoutR
 	r.mu.Unlock()
