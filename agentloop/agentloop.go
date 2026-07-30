@@ -208,8 +208,19 @@ func Resume(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Even
 	}
 
 	// Fabricate synthetic results for orphaned tool_use blocks of the LAST
-	// assistant tool_use message. Persisting them makes fabrication naturally
-	// once-per-id: the next Resume sees a result row, not an orphan.
+	// assistant tool_use message. This read (History above) plus the
+	// AppendUser writes below are NOT concurrency-safe: two Resume calls
+	// racing on the same conversation can each observe the same orphan
+	// before either has persisted its synthetic result, fabricating it
+	// twice (see TestConcurrentResume, which documents this as a known,
+	// currently unfixed race — it is NOT an emergent "once per id"
+	// property of persistence alone). That is acceptable today only
+	// because Resume has no production caller in either rafiki or fundi;
+	// fundi's live orphan-fabrication path is a separate implementation
+	// (internal/agent/orphans.go's RepairOrphans) with its own reachability
+	// analysis. If Resume ever gains a caller that can run concurrently for
+	// the same conversation, this needs external serialization before that
+	// lands — do not assume this loop is safe without it.
 	orphans, lastAssistantClean := analyzeOrphans(history)
 	for _, o := range orphans {
 		synthetic := []anthropic.ContentBlockParamUnion{
