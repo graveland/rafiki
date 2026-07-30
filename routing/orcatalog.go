@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/timescale/rafiki/store"
+	"git.graveland.dev/brent/rafiki/store"
 	"github.com/timescale/savannah-common/go/tslogs"
 	"golang.org/x/sync/singleflight"
 )
