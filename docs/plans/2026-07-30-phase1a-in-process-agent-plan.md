@@ -305,7 +305,10 @@ go test ./internal/agent/ -run 'TestBuildRuntime' -v 2>&1 | tee /tmp/t1.log
 grep -c '=== RUN' /tmp/t1.log
 ```
 
-Expected: a non-zero `=== RUN` count and a compile failure — `undefined: RuntimeOptions`, `undefined: BuildRuntime`. A zero count means the tests never ran and this step proved nothing.
+Expected: a compile failure — `undefined: RuntimeOptions`, `undefined: BuildRuntime`. A compile
+failure yields **zero** `=== RUN` lines, which is correct here. The `=== RUN` check exists for a
+different hazard: a test that compiles, matches nothing under `-run`, and prints `ok` while
+executing nothing. Apply it to steps whose test compiles and is expected to fail at runtime.
 
 - [ ] **Step 3: Write `internal/agent/runtime.go`**
 
@@ -642,7 +645,9 @@ go test ./internal/child/ -run 'TestSpawnUsesInjectedRunner|TestSpawnWithoutRunn
 grep -c '=== RUN' /tmp/t2.log
 ```
 
-Expected: non-zero `=== RUN`, compile failure on `unknown field Runner in struct literal`.
+Expected: a compile failure on `unknown field Runner in struct literal`. Note a compile
+failure yields ZERO `=== RUN` lines — the `=== RUN` check only applies once the test
+compiles and fails at runtime.
 
 - [ ] **Step 3: Write `internal/child/runner.go`**
 
@@ -745,7 +750,14 @@ func (p *processRunner) Wait() (int, string) {
 	if err != nil {
 		return -1, ""
 	}
-	code := -1
+	// A signal-killed process has ExitCode() == -1. Report 0, NOT -1: the
+	// pre-seam reap only assigned ExitCode inside `if state.ExitCode() >= 0`,
+	// so a signalled child left the field at its zero value and callers have
+	// always seen 0 there. ExitCode reaches the wire via store.MarkExited ->
+	// snapshotToSummary -> protocol.ChildSummary.ExitCode, ungated by Signal,
+	// so -1 here is an API change. -1 stays reserved for an indeterminate
+	// Wait() error above.
+	code := 0
 	if state.ExitCode() >= 0 {
 		code = state.ExitCode()
 	}
@@ -1104,7 +1116,8 @@ go test ./internal/inproc/ -v 2>&1 | tee /tmp/t3.log
 grep -c '=== RUN' /tmp/t3.log
 ```
 
-Expected: non-zero `=== RUN`; failure is the missing package / `undefined: New`.
+Expected: a compile failure (missing package / `undefined: New`), and therefore zero
+`=== RUN` lines. The `=== RUN` check applies only to tests that compile and fail at runtime.
 
 - [ ] **Step 3: Write `internal/inproc/runner.go`**
 
@@ -1383,7 +1396,7 @@ go test ./internal/agent/ -run TestBuildRuntimeNilPoolIsInMemory -v 2>&1 | tee /
 grep -c '=== RUN' /tmp/t4.log
 ```
 
-Expected: `=== RUN` present; fails because `Config` has no `Pool` field.
+Expected: a compile failure because `Config` has no `Pool` field, so zero `=== RUN` lines.
 
 - [ ] **Step 3: Implement**
 
@@ -1592,7 +1605,8 @@ go test ./cmd/fundid/ -run 'TestArgvRoundTrips|TestExtraArgsOverride|TestAgentRe
 grep -c '=== RUN' /tmp/t5.log
 ```
 
-Expected: `=== RUN` present, failing on `undefined: toRuntimeOptions` and `undefined: appendDaemonRef`.
+Expected: a compile failure on `undefined: toRuntimeOptions` / `undefined: appendDaemonRef`,
+so zero `=== RUN` lines.
 
 - [ ] **Step 3: Write `cmd/fundid/agent_runtime.go`**
 
