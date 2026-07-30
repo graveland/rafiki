@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"git.graveland.dev/brent/fundi/internal/child"
 )
@@ -22,6 +23,96 @@ func silenceSlog(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+}
+
+// accumulateTextEvents builds the SDK's own stream events for a text block
+// that has started and received deltas but has NOT reached
+// content_block_stop -- the exact state MapAssistantMessage is handed on
+// every message_update (engine.go's stream handler maps the accumulator on
+// every content_block_delta, well before that block's content_block_stop,
+// which is the only thing that resyncs ContentBlockUnion.JSON.raw -- see
+// anthropic.Message.Accumulate in messageutil.go). Built from the same
+// SDK-shaped event constructors engine_stream_test.go uses
+// (streamMessageStart/streamTextBlockStart/streamTextDelta) rather than a
+// parallel fixture builder.
+func accumulateTextEvents(parts ...string) []ssestream.Event {
+	ev := []ssestream.Event{streamMessageStart("claude-x"), streamTextBlockStart(0)}
+	for _, p := range parts {
+		ev = append(ev, streamTextDelta(0, p))
+	}
+	return ev
+}
+
+// accumulateToolUseEvents is accumulateTextEvents' tool_use sibling: a
+// content_block_start followed by input_json_delta fragments, again with no
+// content_block_stop -- the mid-stream state a message_update sees for a
+// still-open tool_use block.
+func accumulateToolUseEvents(toolID, name string, jsonParts ...string) []ssestream.Event {
+	ev := []ssestream.Event{streamMessageStart("claude-x"), streamToolUseStart(0, toolID, name)}
+	for _, p := range jsonParts {
+		ev = append(ev, streamInputJSONDelta(0, p))
+	}
+	return ev
+}
+
+// accumulateSDKEvents replays evs into a fresh anthropic.Message via the real
+// SDK Accumulate method, unmarshaling each event's Data exactly the way
+// ssestream.Stream[T] does before handing it to the caller (see
+// packages/ssestream/ssestream.go: json.Unmarshal(s.decoder.Event().Data,
+// &nxt)) -- so this is the real accumulation path, not a simplified stand-in.
+func accumulateSDKEvents(t *testing.T, evs []ssestream.Event) *anthropic.Message {
+	t.Helper()
+	var acc anthropic.Message
+	for _, ev := range evs {
+		var u anthropic.MessageStreamEventUnion
+		if err := json.Unmarshal(ev.Data, &u); err != nil {
+			t.Fatalf("unmarshal stream event %s: %v", ev.Type, err)
+		}
+		if err := acc.Accumulate(u); err != nil {
+			t.Fatalf("accumulate stream event %s: %v", ev.Type, err)
+		}
+	}
+	return &acc
+}
+
+// TestMapAssistantMessage_MapsAccumulatedTextBlock guards the bug this
+// project shipped once: MapAssistantMessage dispatched via b.AsAny(), which
+// reconstructs the block from ContentBlockUnion.JSON.raw. Message.Accumulate
+// never rewrites that raw JSON while a block is still open -- only
+// content_block_stop/message_stop resync it -- it grows the struct field in
+// place instead. So every streamed message_update mapped to empty content
+// while hasContent (which reads the field directly) correctly saw text and
+// flushed: 23 empty frames per turn, and the full reply only in message_end.
+func TestMapAssistantMessage_MapsAccumulatedTextBlock(t *testing.T) {
+	acc := accumulateSDKEvents(t, accumulateTextEvents("Hel", "lo"))
+	got := MapAssistantMessage(acc, "anthropic", nil)
+	if len(got.Content) != 1 {
+		t.Fatalf("content = %+v, want one text block -- an accumulated (not API-parsed) message must still map", got.Content)
+	}
+	if got.Content[0].Text != "Hello" {
+		t.Errorf("text = %q, want %q", got.Content[0].Text, "Hello")
+	}
+}
+
+// TestMapAssistantMessage_MapsAccumulatedToolUseBlock is
+// TestMapAssistantMessage_MapsAccumulatedTextBlock's tool_use sibling: every
+// As*() reads JSON.raw identically, so a still-accumulating tool_use block
+// vanished from message_update the same way a text block did.
+func TestMapAssistantMessage_MapsAccumulatedToolUseBlock(t *testing.T) {
+	acc := accumulateSDKEvents(t, accumulateToolUseEvents("call-1", "bash", `{"command":"ls"}`))
+	got := MapAssistantMessage(acc, "anthropic", nil)
+	if len(got.Content) != 1 {
+		t.Fatalf("content = %+v, want one tool_use block", got.Content)
+	}
+	if got.Content[0].Type != "toolCall" {
+		t.Fatalf("content[0].type = %q, want toolCall", got.Content[0].Type)
+	}
+	if got.Content[0].Arguments == nil {
+		t.Fatal("arguments is nil")
+	}
+	if cmd := (*got.Content[0].Arguments)["command"]; cmd != "ls" {
+		t.Fatalf("arguments = %+v, want command=ls", *got.Content[0].Arguments)
+	}
 }
 
 const sampleResp = `{

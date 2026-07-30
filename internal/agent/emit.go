@@ -235,29 +235,43 @@ func MapAssistantMessage(resp *anthropic.Message, provider string, pricer Pricer
 	// elsewhere in child.Pi* (PiToolExecutionStart args, PiAgentEnd messages).
 	blocks := make([]child.PiContentBlock, 0, len(resp.Content))
 	for _, b := range resp.Content {
-		switch v := b.AsAny().(type) {
-		case anthropic.TextBlock:
+		// Read the union's flattened variant fields directly rather than going
+		// through b.AsAny(). AsAny() delegates to AsText()/AsToolUse()/etc., each
+		// of which unmarshals from ContentBlockUnion.JSON.raw — and
+		// anthropic.Message.Accumulate only rewrites that raw JSON on
+		// content_block_stop/message_stop (see messageutil.go). While a block is
+		// still accumulating (i.e. on every message_update fired from a
+		// content_block_delta), the struct fields (b.Text, b.Thinking, ...) have
+		// already grown but JSON.raw has not been re-marshaled yet. So on a
+		// mid-stream accumulated message every As*() returns an EMPTY block,
+		// which is how streaming shipped emitting 23 content-free message_update
+		// frames per turn while hasContent (reading b.Text directly) correctly
+		// saw content. A complete API response populates both the fields and
+		// the raw JSON, so reading fields directly is correct for both and
+		// needs no second code path.
+		switch b.Type {
+		case "text":
 			// Skip empty text. PiContentBlock.Text is `omitempty`, so an empty
 			// string serializes to {type:"text"} with no `text` field, and pi's
 			// TUI does c.text.trim() → crashes on the undefined field. Mirrors
 			// the same guard in provider_claude_state.go's emitAssistant.
-			if v.Text != "" {
-				blocks = append(blocks, child.PiTextBlock(v.Text))
+			if b.Text != "" {
+				blocks = append(blocks, child.PiTextBlock(b.Text))
 			}
-		case anthropic.ThinkingBlock:
+		case "thinking":
 			// Same hazard for thinking: an empty string would serialize to
 			// {type:"thinking"} (no `thinking` field) and crash pi's TUI at
 			// c.thinking.trim(). Skip empty thinking blocks entirely.
-			if v.Thinking != "" {
-				blocks = append(blocks, child.PiThinkingBlock(v.Thinking))
+			if b.Thinking != "" {
+				blocks = append(blocks, child.PiThinkingBlock(b.Thinking))
 			}
-		case anthropic.ToolUseBlock:
+		case "tool_use":
 			var args map[string]any
-			if err := json.Unmarshal(v.Input, &args); err != nil {
-				slog.Warn("emit: tool_use input unmarshal failed", "tool", v.Name, "id", v.ID, "error", err)
-				args = map[string]any{"_raw": string(v.Input)}
+			if err := json.Unmarshal(b.Input, &args); err != nil {
+				slog.Warn("emit: tool_use input unmarshal failed", "tool", b.Name, "id", b.ID, "error", err)
+				args = map[string]any{"_raw": string(b.Input)}
 			}
-			blocks = append(blocks, child.PiToolCallBlock(v.ID, v.Name, args))
+			blocks = append(blocks, child.PiToolCallBlock(b.ID, b.Name, args))
 		}
 	}
 
