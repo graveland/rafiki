@@ -314,6 +314,63 @@ func (f *recordingChatStore) AppendResponseMessage(_ context.Context, _, _ strin
 	return nil
 }
 
+// When the client sends no x-session-id, the OpenRouter path falls back to
+// rafiki's own conversation id — so a client that never sets the header
+// (e.g. Claude Code) still gets a stable, correlatable session pin.
+func TestMessagesOpenRouterPathFallsBackToConvID(t *testing.T) {
+	var gotSession string
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get("x-session-id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","stop_reason":"end_turn","usage":{"output_tokens":1}}`)
+	}))
+	defer orSrv.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	p := NewMessagesProxy(nil, nil, "real-key", "http://unused-primary", "", nil, logger)
+	p.store = &recordingChatStore{}
+	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"openai/gpt-4o","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	// No x-session-id set.
+	p.ServeHTTP(rec, req)
+
+	if gotSession != "conv-openai" {
+		t.Errorf("x-session-id fallback = %q, want rafiki's conversation id", gotSession)
+	}
+}
+
+// The OpenAI face has the same fallback: no client x-session-id, fall back
+// to rafiki's own conversation id.
+func TestChatCompletionsFallsBackToConvID(t *testing.T) {
+	var gotSession string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get("x-session-id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"x","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	fake := &recordingChatStore{}
+	p := NewChatCompletionsProxy(nil, nil,
+		[]OpenAIUpstream{{Name: "openrouter", BaseURL: upstream.URL, APIKey: "or-key"}},
+		nil, "openrouter", logger)
+	p.store = fake
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"openai/gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	// No x-session-id set.
+	p.ServeHTTP(rec, req)
+
+	if gotSession != "conv-openai" {
+		t.Errorf("x-session-id fallback = %q, want rafiki's conversation id", gotSession)
+	}
+}
+
 // End-to-end tee against a REAL capture store (RAFIKI_TEST_DSN): adversarial
 // chunking upstream, then assert the persisted turn is complete with a valid
 // reassembled canonical response — the fake-store tests can't catch

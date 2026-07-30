@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/timescale/rafiki/store"
 	"github.com/timescale/savannah-common/go/tslogs"
 )
 
@@ -476,5 +477,157 @@ func TestFetchBackoff(t *testing.T) {
 	}
 	if got := hits.Load(); got != 1 {
 		t.Errorf("fetch hits = %d, want 1 (failed fetch backs off for %s)", got, fetchBackoff)
+	}
+}
+
+// TestResolveIDUsesCatalogResolution proves ResolveID is a thin wrapper over
+// the same resolution entryFor already applies to Pricing and ContextWindow —
+// it must not reimplement any of the bare-id/slash-id/alias rules.
+func TestResolveIDUsesCatalogResolution(t *testing.T) {
+	c := NewModelCatalog(nil, time.Hour, nil)
+	c.SeedForTest([]CatalogEntry{
+		{ID: "anthropic/claude-opus-5"},
+		{ID: "moonshotai/kimi-k3"},
+	})
+
+	cases := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"claude-opus-5", "anthropic/claude-opus-5", true},           // bare Anthropic id
+		{"anthropic/claude-opus-5", "anthropic/claude-opus-5", true}, // slash id passes through
+		{"kimi-k3", "moonshotai/kimi-k3", true},                      // modelAliases
+		{"gpt-5.6", "", false},                                       // not in catalog
+	}
+	for _, tc := range cases {
+		got, ok := c.ResolveID(tc.in)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("ResolveID(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
+// TestModelCatalogPriceSatisfiesStorePriceSource proves Price reports the
+// catalog's prices in the shape store.SyncModelPricing writes.
+func TestModelCatalogPriceSatisfiesStorePriceSource(t *testing.T) {
+	c := NewModelCatalog(nil, time.Hour, nil)
+	c.SeedForTest([]CatalogEntry{
+		{
+			ID: "anthropic/claude-opus-5",
+			Pricing: &ModelPricing{
+				PromptUSD:     0.000005,
+				CompletionUSD: 0.000025,
+				CacheReadUSD:  0.0000005,
+				CacheWriteUSD: 0.00000625,
+			},
+		},
+		{ID: "moonshotai/kimi-k3"}, // no Pricing set: unpriced
+	})
+
+	got, ok := c.Price("claude-opus-5")
+	if !ok {
+		t.Fatal("Price(claude-opus-5) ok = false, want true")
+	}
+	if got.PromptUSD != 0.000005 || got.CompletionUSD != 0.000025 {
+		t.Errorf("Price(claude-opus-5) base = %g/%g, want 0.000005/0.000025",
+			got.PromptUSD, got.CompletionUSD)
+	}
+	if got.CacheReadUSD == nil || *got.CacheReadUSD != 0.0000005 {
+		t.Errorf("Price(claude-opus-5) cache read = %v, want 0.0000005", got.CacheReadUSD)
+	}
+	if got.CacheWriteUSD == nil || *got.CacheWriteUSD != 0.00000625 {
+		t.Errorf("Price(claude-opus-5) cache write = %v, want 0.00000625", got.CacheWriteUSD)
+	}
+
+	if _, ok := c.Price("kimi-k3"); ok {
+		t.Error("Price(kimi-k3) ok = true, want false: entry has no Pricing")
+	}
+	if _, ok := c.Price("gpt-5.6"); ok {
+		t.Error("Price(gpt-5.6) ok = true, want false: not in catalog")
+	}
+}
+
+// A model OpenRouter prices but does not cache reports nil cache prices, not
+// zero ones. Zero is a real price meaning "free"; recording it for an absent
+// rate made the dashboard's cache-savings tile compute the cache tokens at the
+// full prompt price.
+func TestPriceAbsentCachePriceIsNil(t *testing.T) {
+	c := NewModelCatalog(nil, time.Hour, nil)
+	c.SeedForTest([]CatalogEntry{
+		// No cache prices seeded → OpenRouter omits the fields.
+		{ID: "vendor/no-cache-model", Pricing: &ModelPricing{PromptUSD: 0.000001, CompletionUSD: 0.000002}},
+	})
+
+	got, ok := c.Price("vendor/no-cache-model")
+	if !ok {
+		t.Fatal("Price ok = false, want true: base prices are present")
+	}
+	if got.CacheReadUSD != nil {
+		t.Errorf("cache read = %v, want nil for an omitted price", *got.CacheReadUSD)
+	}
+	if got.CacheWriteUSD != nil {
+		t.Errorf("cache write = %v, want nil for an omitted price", *got.CacheWriteUSD)
+	}
+}
+
+// Lookup is the syncer's only catalog accessor, so it must carry the id, the
+// prices and the priced/unpriced verdict that ResolveID + Price used to report
+// separately.
+func TestLookupReportsIDAndPriceInOneCall(t *testing.T) {
+	c := NewModelCatalog(nil, time.Hour, nil)
+	c.SeedForTest([]CatalogEntry{
+		{ID: "anthropic/claude-opus-5", Pricing: &ModelPricing{
+			PromptUSD: 0.000005, CompletionUSD: 0.000025, CacheReadUSD: 0.0000005,
+		}},
+		{ID: "moonshotai/kimi-k3"}, // in the catalog, but unpriced
+	})
+
+	// A bare Anthropic id resolves, and reports the same id ResolveID does.
+	info, ok := c.Lookup("claude-opus-5")
+	if !ok {
+		t.Fatal("Lookup(claude-opus-5) ok = false, want true")
+	}
+	if info.ORID != "anthropic/claude-opus-5" {
+		t.Errorf("ORID = %q, want anthropic/claude-opus-5", info.ORID)
+	}
+	if !info.Priced || info.Price.PromptUSD != 0.000005 {
+		t.Errorf("Lookup(claude-opus-5) = %+v, want priced with prompt 0.000005", info)
+	}
+	if id, _ := c.ResolveID("claude-opus-5"); id != info.ORID {
+		t.Errorf("Lookup ORID %q disagrees with ResolveID %q", info.ORID, id)
+	}
+
+	// An entry with no prices is still found — the syncer records the row with
+	// its or_id and NULL prices rather than dropping the model.
+	info, ok = c.Lookup("kimi-k3")
+	if !ok {
+		t.Fatal("Lookup(kimi-k3) ok = false, want true: the entry exists")
+	}
+	if info.ORID != "moonshotai/kimi-k3" {
+		t.Errorf("ORID = %q, want moonshotai/kimi-k3", info.ORID)
+	}
+	if info.Priced {
+		t.Errorf("Lookup(kimi-k3) Priced = true, want false: entry has no prices")
+	}
+
+	if _, ok := c.Lookup("gpt-5.6"); ok {
+		t.Error("Lookup(gpt-5.6) ok = true, want false: not in catalog")
+	}
+}
+
+// A typed-nil *ModelCatalog reaches store.SyncModelPricing as a NON-nil
+// store.PriceSource, so the syncer's `src == nil` check cannot catch it. Every
+// interface method must survive it: the sync runs in a bare goroutine with no
+// recover, so a panic here takes the server down.
+func TestNilCatalogSatisfiesPriceSourceWithoutPanic(t *testing.T) {
+	var src store.PriceSource = (*ModelCatalog)(nil)
+
+	src.Warm()
+	if ids := src.AllIDs(); len(ids) != 0 {
+		t.Errorf("AllIDs on a nil catalog = %v, want empty", ids)
+	}
+	if _, ok := src.Lookup("claude-opus-5"); ok {
+		t.Error("Lookup on a nil catalog ok = true, want false")
 	}
 }
