@@ -630,3 +630,90 @@ func TestEngine_CoalescesManyDeltasIntoFewFrames(t *testing.T) {
 		t.Fatalf("200 deltas produced %d message_update frames; coalescing is not engaging", n)
 	}
 }
+
+// ---- message_update content assertion (Task F2) ----
+
+// assistantUpdateTexts returns the concatenated text content of every
+// message_update frame in out, in order — the sequence of partial-message
+// snapshots an attached TUI would actually render across a streamed turn.
+// Mirrors lastAssistantText's frame-walking shape, but collects every
+// message_update rather than the last message_end.
+func assistantUpdateTexts(t *testing.T, out string) []string {
+	t.Helper()
+	var texts []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l == "" {
+			continue
+		}
+		// Type-sniff first: a user-echo message_start/message_end frame's
+		// message.content is a bare string ("hi"), not an array of blocks like
+		// an assistant message's, so decoding straight into the assistant shape
+		// below would fail on those frames before we ever get to check Type.
+		var typ struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(l), &typ); err != nil {
+			t.Fatalf("bad frame %q: %v", l, err)
+		}
+		if typ.Type != "message_update" {
+			continue
+		}
+		var f struct {
+			Message struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(l), &f); err != nil {
+			t.Fatalf("bad message_update frame %q: %v", l, err)
+		}
+		var b strings.Builder
+		for _, c := range f.Message.Content {
+			if c.Type == "text" {
+				b.WriteString(c.Text)
+			}
+		}
+		texts = append(texts, b.String())
+	}
+	return texts
+}
+
+// TestEngine_MessageUpdateCarriesPartialText is the assertion whose absence
+// let a completely non-streaming implementation pass twelve tests, nine
+// independent reviews, and a whole-branch review: every prior content
+// assertion targets message_end, which is built from the complete API
+// response and therefore maps fine even when every intermediate frame is
+// empty. THIS is the assertion that distinguishes streaming from batch
+// delivery with extra frames.
+func TestEngine_MessageUpdateCarriesPartialText(t *testing.T) {
+	ts := fakeToolSet{}
+	sender := newScriptedStreamingSender(streamScript{
+		events: textTurnEvents("claude-x", "Hel", "lo", " world"),
+	})
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi")
+	eng.Wait()
+
+	texts := assistantUpdateTexts(t, out.String())
+	if len(texts) == 0 {
+		t.Fatal("no assistant message_update frames")
+	}
+	for i, s := range texts {
+		if s == "" {
+			t.Fatalf("message_update[%d] carried no text; frames are flowing but empty — "+
+				"this is batch delivery with extra frames (texts=%q)", i, texts)
+		}
+	}
+	// Coalescing (250ms) means a fast scripted turn may produce just one
+	// update — that's correct and sufficient here; the assertion is that
+	// updates carry content, not that there are many. Whatever text was
+	// observed mid-stream must be a genuine prefix of the eventual message,
+	// since accumulation only ever appends.
+	const final = "Hello world"
+	if last := texts[len(texts)-1]; !strings.HasPrefix(final, last) {
+		t.Errorf("last update text = %q, not a prefix of the final message %q", last, final)
+	}
+}
