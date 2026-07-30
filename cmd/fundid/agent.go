@@ -13,9 +13,7 @@ import (
 	"syscall"
 
 	"git.graveland.dev/brent/fundi/internal/agent"
-	"git.graveland.dev/brent/fundi/internal/agent/tools"
 	"git.graveland.dev/brent/fundi/internal/paths"
-	skillspkg "git.graveland.dev/brent/fundi/internal/skills"
 )
 
 // stringSliceFlag implements flag.Value for a repeatable flag (--skills-dir).
@@ -71,7 +69,7 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 // ~/.claude/skills), then the project's existing <cwd>/.claude/skills (kept
 // so a repo that already has one doesn't silently lose its skills), then the
 // project's own <cwd>/.fundi/skills (which wins on name collision with
-// .claude/skills - skillspkg.DiscoverSkills lets later entries override
+// .claude/skills - skills.DiscoverSkills lets later entries override
 // earlier ones), then any --skills-dir flags. Pure so it is testable.
 func assembleSkillDirs(cwd string, flagDirs []string) []string {
 	dirs := paths.SkillsDirs()
@@ -82,9 +80,12 @@ func assembleSkillDirs(cwd string, flagDirs []string) []string {
 
 // runAgent is cmd/fundid's other entry point: `fundid agent ...` runs a single
 // agent child speaking pi's rpc protocol on stdio, in place of Claude Code.
-// It owns everything internal/agent.Config cannot build itself (env/flag
-// parsing, filesystem discovery, and the tool registry - see Config's doc
-// comment for why the registry can't be assembled inside internal/agent).
+// It owns everything agent.BuildRuntime cannot: flag parsing, os.Getwd(), the
+// process-level signal.NotifyContext, and the CLI-only "--mcp-config not
+// found" vs "defaulted .mcp.json absent" distinction (see the mcpPath block
+// below). BuildRuntime owns the rest of the assembly (context files, skills,
+// the tool registry, MCP connections, the Engine) so the daemon can build the
+// same runtime per child without touching cwd or installing signal handlers.
 //
 // Exit codes: 0 or the reader's clean EOF/graceful-shutdown path, 1 for a
 // setup or run error, 2 for a flag-parse error.
@@ -122,90 +123,39 @@ func runAgent(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	childID := f.ref
-	if childID == "" {
-		childID = "standalone"
-	}
-	spillDir := f.spillDir
-	if spillDir == "" {
-		spillDir = paths.SpillDir(childID)
-	}
-	outputPolicy := tools.OutputPolicy{SpillDir: spillDir}
-
-	var contextFiles string
-	if !f.noContextFiles {
-		contextFiles, err = agent.LoadContextFiles(cwd)
-		if err != nil {
-			slog.Error("agent: load context files", "error", err)
+	mcpPath := resolveMCPConfig(f.mcpConfig, cwd)
+	explicitMCP := f.mcpConfig != ""
+	if _, err := os.Stat(mcpPath); err != nil {
+		if explicitMCP {
+			slog.Error("agent: --mcp-config not found", "path", mcpPath, "error", err)
 			return 1
 		}
+		mcpPath = "" // defaulted path absent: skip MCP, as before
 	}
 
-	var skills []skillspkg.SkillMeta
-	if !f.noSkills {
-		dirs := assembleSkillDirs(cwd, f.skillsDir)
-
-		var only []string
-		if f.skills != "" {
-			only = strings.Split(f.skills, ",")
-		}
-		skills, err = skillspkg.DiscoverSkills(dirs, only)
-		if err != nil {
-			slog.Error("agent: discover skills", "error", err)
-			return 1
-		}
-	}
-
-	registry := tools.NewRegistry()
-	tools.RegisterFileTools(registry, tools.NewFileTracker())
-	tools.RegisterBash(registry, outputPolicy, cwd)
-	if len(skills) > 0 {
-		tools.RegisterSkillTool(registry, skills)
-	}
-
-	mcpShutdown := func() {}
-	explicitMCPConfig := f.mcpConfig != ""
-	mcpConfigPath := resolveMCPConfig(f.mcpConfig, cwd)
-	if _, statErr := os.Stat(mcpConfigPath); statErr == nil {
-		mcpCfg, lerr := tools.LoadMCPConfig(mcpConfigPath)
-		if lerr != nil {
-			slog.Error("agent: load MCP config", "path", mcpConfigPath, "error", lerr)
-			return 1
-		}
-		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy)
-		if err != nil {
-			slog.Error("agent: connect MCP servers", "error", err)
-			return 1
-		}
-	} else if explicitMCPConfig {
-		// An explicitly-named --mcp-config that doesn't exist is a startup
-		// error; the default <cwd>/.mcp.json is silently skipped when absent.
-		slog.Error("agent: --mcp-config not found", "path", mcpConfigPath, "error", statErr)
-		return 1
-	}
-
-	cfg := agent.Config{
+	opts := agent.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
 		SystemPromptOverride: f.systemPrompt,
 		AppendSystemPrompt:   f.appendSystemPrompt,
-		ContextFiles:         contextFiles,
-		SkillsInventory:      skillspkg.SkillsInventory(skills),
 		Cwd:                  cwd,
 		Ref:                  f.ref,
 		Name:                 f.name,
-		DBURL:                f.db,
+		SpillDir:             f.spillDir,
+		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir),
+		Skills:               f.skills,
+		NoSkills:             f.noSkills,
+		NoContextFiles:       f.noContextFiles,
+		MCPConfig:            mcpPath,
 		FakeTurns:            f.fakeTurns,
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
-		Tools:                registry,
 	}
 
 	fe := agent.NewFrontend(os.Stdin, os.Stdout, nil)
-	eng, engShutdown, err := cfg.BuildEngine(ctx, fe)
+	eng, shutdown, err := agent.BuildRuntime(ctx, fe, opts)
 	if err != nil {
 		slog.Error("agent: build engine", "error", err)
-		mcpShutdown()
 		return 1
 	}
 
@@ -216,8 +166,7 @@ func runAgent(args []string) int {
 	// Engine.Close's doc comment).
 	eng.Wait()
 	eng.Close()
-	mcpShutdown()
-	engShutdown()
+	shutdown()
 
 	if runErr != nil {
 		slog.Error("agent: frontend run", "error", runErr)
