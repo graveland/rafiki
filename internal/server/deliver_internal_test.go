@@ -9,9 +9,12 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"git.graveland.dev/brent/fundi/protocol"
 )
 
 // TestDeliverDoesNotBlockForeverOnUnreadSocket verifies that a subscriber
@@ -135,6 +138,422 @@ func TestIsRoutineConnClose(t *testing.T) {
 				t.Errorf("isRoutineConnClose(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- Tests for the C1/C2 fix (Task H1) ---
+//
+// The tests above use one net.Pipe and one Deliver call each — structurally
+// incapable of observing either C1 (a deadline that outlives its write) or
+// C2 (concurrent writers racing the deadline / splicing frames), both of
+// which only manifest with a second write and a second goroutine. The tests
+// below add that second write and second goroutine, and run under -race.
+
+// TestWriteFrameClearsItsDeadlineForLaterUnmanagedWrites establishes
+// invariant 1: a write deadline set for one write must not affect any later
+// write on the same connection — even one that does not itself go through
+// writeFrame.
+//
+// This is deliberately NOT "call writeFrame twice": writeFrame always sets
+// its own fresh deadline before writing, so two sequential writeFrame calls
+// would both succeed whether or not the first one cleared its deadline
+// afterward — that shape can't distinguish the fix from the bug. The actual
+// C1 defect was handleConn's response write, which set no deadline of its
+// own at all and simply fired against whatever the connection's deadline
+// happened to be. So this test writes "first" through writeFrame, waits past
+// deliverWriteTimeout, then writes "second" with a bare protocol.WriteFrame
+// directly on the raw conn — modeling any write that does not manage its own
+// deadline, exactly as the pre-fix handleConn did. That only succeeds if
+// writeFrame cleared its deadline when "first" returned.
+func TestWriteFrameClearsItsDeadlineForLaterUnmanagedWrites(t *testing.T) {
+	_, serverSide := newUnixConnPair(t)
+	c := &netConn{conn: serverSide}
+
+	if err := c.writeFrame([]byte("first")); err != nil {
+		t.Fatalf("first writeFrame: %v", err)
+	}
+
+	// If writeFrame's deadline had outlived this call, it would now sit
+	// squarely in the past — reproducing "subscribe, receive an event, wait
+	// 6s, send a request" from the real repro.
+	time.Sleep(deliverWriteTimeout + 500*time.Millisecond)
+
+	if err := protocol.WriteFrame(c.conn, []byte("second")); err != nil {
+		t.Fatalf("a write with no deadline of its own failed against a deadline writeFrame should have cleared: %v", err)
+	}
+}
+
+// TestBlockedWriteTimesOutDespiteConcurrentPeerDelivers establishes
+// invariants 2 and 4: a write blocked on a non-draining peer must still time
+// out within its own budget, and must log at warn, even while a second
+// goroutine is concurrently calling Deliver on the SAME connection.
+//
+// Reproduced pre-fix (per the brief): a blocked write with a 300ms deadline
+// survived more than 3s under a 100ms reset ticker. The mechanism: Deliver
+// calls SetWriteDeadline before attempting its write, and SetWriteDeadline
+// itself never blocks — so even a peer whose own write then gets stuck
+// behind the first (nothing drains this connection) still lands one fresh
+// deadline reset before it does. Each peer write here is fired from its own
+// short-lived goroutine (mirroring DeliverToChild/DeliverToGlobal/
+// DeliverToMatching/Broadcast each running on a different real goroutine) so
+// that, pre-fix, ticks keep landing fresh resets indefinitely instead of
+// stalling behind one earlier peer's own blocked write.
+//
+// A real Unix-domain-socket pair is required: net.Pipe has its own internal
+// write mutex serializing Write calls (though not SetWriteDeadline), which
+// would mask the very race this test targets.
+func TestBlockedWriteTimesOutDespiteConcurrentPeerDelivers(t *testing.T) {
+	buf := captureSlog(t)
+
+	client, server := newUnixConnPair(t) // never read from `client`
+	c := &netConn{conn: server}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					c.Deliver([]byte("peer"))
+				}()
+			}
+		}
+	}()
+
+	t.Cleanup(func() {
+		close(stop)
+		client.Close()
+		server.Close()
+		wg.Wait()
+	})
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		c.Deliver(bytes.Repeat([]byte("x"), 256*1024))
+		done <- time.Since(start)
+	}()
+
+	select {
+	case elapsed := <-done:
+		if elapsed > deliverWriteTimeout+2*time.Second {
+			t.Fatalf("blocked write took %v to time out, want close to deliverWriteTimeout (%v) despite concurrent peer Delivers on the same connection", elapsed, deliverWriteTimeout)
+		}
+	case <-time.After(deliverWriteTimeout + 5*time.Second):
+		t.Fatal("blocked write never timed out within deliverWriteTimeout+5s — a concurrent peer Deliver kept extending its deadline, reproducing the reported defect")
+	}
+
+	assertLogLevel(t, buf, "server: deliver frame", slog.LevelWarn)
+}
+
+// TestConcurrentDeliversNeverInterleaveOnTheWire establishes invariant 3:
+// two concurrent frame writes must never interleave — every frame on the
+// wire is contiguous and parseable.
+//
+// protocol.WriteFrame issues two separate writes (payload, then '\n'); with
+// no synchronization, another goroutine's whole frame can land in the gap
+// between them, splicing frames together the same way JSONL framing can
+// only recover from by discarding both. This drives two goroutines writing
+// distinct, fixed, easily-distinguished payloads at the same connection and
+// parses everything the peer receives with the real protocol.FrameReader —
+// exactly what a client does — asserting every parsed frame is byte-for-byte
+// one of the two payloads, and that exactly as many frames arrive as were
+// written.
+//
+// A real Unix-domain-socket pair is required for the same reason as above:
+// net.Pipe's internal write mutex would serialize the two payload writes
+// itself and mask the race.
+func TestConcurrentDeliversNeverInterleaveOnTheWire(t *testing.T) {
+	client, server := newUnixConnPair(t)
+	c := &netConn{conn: server}
+
+	const n = 4000
+	frameA := bytes.Repeat([]byte("A"), 200)
+	frameB := bytes.Repeat([]byte("B"), 200)
+
+	var writers sync.WaitGroup
+	writers.Add(2)
+	go func() {
+		defer writers.Done()
+		for i := 0; i < n; i++ {
+			c.Deliver(frameA)
+		}
+	}()
+	go func() {
+		defer writers.Done()
+		for i := 0; i < n; i++ {
+			c.Deliver(frameB)
+		}
+	}()
+
+	type readResult struct {
+		frames [][]byte
+		err    error
+	}
+	resCh := make(chan readResult, 1)
+	go func() {
+		r := protocol.NewFrameReader(client, protocol.MaxFrameBytes)
+		frames := make([][]byte, 0, 2*n)
+		for len(frames) < 2*n {
+			f, err := r.ReadFrame()
+			if err != nil {
+				resCh <- readResult{frames, err}
+				return
+			}
+			cp := make([]byte, len(f))
+			copy(cp, f)
+			frames = append(frames, cp)
+		}
+		resCh <- readResult{frames, nil}
+	}()
+
+	writers.Wait()
+
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			t.Fatalf("reading frames: %v (got %d of %d before the error)", res.err, len(res.frames), 2*n)
+		}
+		var gotA, gotB int
+		for _, f := range res.frames {
+			switch {
+			case bytes.Equal(f, frameA):
+				gotA++
+			case bytes.Equal(f, frameB):
+				gotB++
+			default:
+				t.Fatalf("received a frame matching neither writer's payload — frames spliced on the wire: %q", f)
+			}
+		}
+		if gotA != n || gotB != n {
+			t.Fatalf("got %d A-frames and %d B-frames, want %d each — frame count mismatch implies a splice merged or split frames", gotA, gotB, n)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out reading all frames — a splice likely swallowed a newline, merging two frames into one and starving the reader of the expected count")
+	}
+}
+
+// TestHandleConnResponseSurvivesStaleSubscriptionDeadline establishes
+// invariant 5, as the exact end-to-end C1 reproduction from the brief: a
+// response write from handleConn must not inherit or be broken by an
+// earlier subscription (Deliver/Broadcast) write's deadline on the same
+// connection.
+//
+// Sequence, matching the real repro: ctrl_subscribe (modeled here by
+// Broadcast, which calls Deliver on this connection) → receive the event →
+// wait past deliverWriteTimeout (a normal pause for a user reading) → send a
+// request on the SAME socket → the response must still arrive, not
+// "i/o timeout" followed by connection close.
+func TestHandleConnResponseSurvivesStaleSubscriptionDeadline(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "fsk")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := dir + "/s.sock"
+
+	echo := FuncHandler(func(_ Connection, frame []byte) []byte {
+		return append([]byte("echo:"), frame...)
+	})
+	srv, err := Listen(path, echo)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(deliverWriteTimeout + 10*time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
+
+	// The subscription event that sets this connection's write deadline.
+	// Dial returns as soon as the client side of the handshake completes;
+	// the server's acceptLoop registers the connection in a separate
+	// goroutine, so poll briefly rather than racing it.
+	deadline := time.Now().Add(2 * time.Second)
+	var got int
+	for time.Now().Before(deadline) {
+		if got = srv.Broadcast([]byte("event-1")); got == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got != 1 {
+		t.Fatalf("Broadcast delivered to %d conns, want 1 (connection never registered)", got)
+	}
+	if _, err := r.ReadFrame(); err != nil {
+		t.Fatalf("read broadcast frame: %v", err)
+	}
+
+	// The normal pause for a user reading — well past the deadline the
+	// broadcast set.
+	time.Sleep(deliverWriteTimeout + 500*time.Millisecond)
+
+	// A later request on the SAME socket (attach's prompt/steer/abort path).
+	if err := protocol.WriteFrame(conn, []byte("ping")); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	resp, err := r.ReadFrame()
+	if err != nil {
+		t.Fatalf("handleConn's response write failed against the stale subscription deadline: %v", err)
+	}
+	if string(resp) != "echo:ping" {
+		t.Fatalf("got %q, want %q", resp, "echo:ping")
+	}
+}
+
+// TestHandleConnResponseNotCorruptedByConcurrentBroadcast strengthens
+// invariant 5 with genuine contention, which
+// TestHandleConnResponseSurvivesStaleSubscriptionDeadline does not exercise:
+// that test's Broadcast call completes (and its writeFrame clears the
+// deadline it set) long before the later request, so it can only prove the
+// sequential/quiescent case. It cannot distinguish "handleConn's response
+// shares netConn's mutex" from "Deliver alone clears its own deadline in
+// time" — both make that particular scenario pass. (Confirmed empirically:
+// it still passes with handleConn's response write reverted to a bare,
+// unsynchronized protocol.WriteFrame, as long as Deliver's own
+// clear-after-write fix is left in place.)
+//
+// This test instead drives a Broadcast loop on a second goroutine
+// CONCURRENTLY with a client hammering requests on the same connection, so
+// handleConn's response write and Deliver's subscription write are
+// genuinely in flight together, at the same time, on the same net.Conn. If
+// handleConn's response write does not share netConn's mutex, the two
+// writers' payload+'\n' pairs can interleave on the wire (the same
+// splicing mechanism as TestConcurrentDeliversNeverInterleaveOnTheWire, but
+// this time with handleConn's real call site as one of the two writers
+// instead of two synthetic Deliver calls) — which corrupts frames and/or
+// desyncs the expected counts and ordering asserted below.
+func TestHandleConnResponseNotCorruptedByConcurrentBroadcast(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "fsk")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := dir + "/s.sock"
+
+	echo := FuncHandler(func(_ Connection, frame []byte) []byte {
+		return append([]byte("echo:"), frame...)
+	})
+	srv, err := Listen(path, echo)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
+
+	// Warm-up round trip: guarantees the connection is registered in
+	// s.conns before the broadcaster goroutine starts, without racing
+	// acceptLoop's registration the way a bare Dial would.
+	if err := protocol.WriteFrame(conn, []byte("ping:warmup")); err != nil {
+		t.Fatalf("warmup write: %v", err)
+	}
+	if resp, err := r.ReadFrame(); err != nil || string(resp) != "echo:ping:warmup" {
+		t.Fatalf("warmup round trip: resp=%q err=%v", resp, err)
+	}
+
+	const n = 4000
+	var broadcaster sync.WaitGroup
+	broadcaster.Add(1)
+	go func() {
+		defer broadcaster.Done()
+		for i := 0; i < n; i++ {
+			srv.Broadcast([]byte(fmt.Sprintf("EVNT:%06d", i)))
+		}
+	}()
+
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for i := 0; i < n; i++ {
+			if err := protocol.WriteFrame(conn, []byte(fmt.Sprintf("ping:%06d", i))); err != nil {
+				return // surfaced via the reader's frame-count mismatch below
+			}
+		}
+	}()
+
+	type readResult struct {
+		echoes []string
+		events []string
+		err    error
+	}
+	resCh := make(chan readResult, 1)
+	go func() {
+		echoes := make([]string, 0, n)
+		events := make([]string, 0, n)
+		for len(echoes) < n || len(events) < n {
+			f, err := r.ReadFrame()
+			if err != nil {
+				resCh <- readResult{echoes, events, err}
+				return
+			}
+			s := string(f)
+			switch {
+			case strings.HasPrefix(s, "echo:ping:"):
+				echoes = append(echoes, s)
+			case strings.HasPrefix(s, "EVNT:"):
+				events = append(events, s)
+			default:
+				resCh <- readResult{echoes, events, fmt.Errorf("frame matching neither writer's payload — spliced on the wire: %q", s)}
+				return
+			}
+		}
+		resCh <- readResult{echoes, events, nil}
+	}()
+
+	writer.Wait()
+	broadcaster.Wait()
+
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			t.Fatalf("reading frames: %v (got %d echoes, %d events before the error)", res.err, len(res.echoes), len(res.events))
+		}
+		if len(res.echoes) != n {
+			t.Fatalf("got %d echo responses, want %d", len(res.echoes), n)
+		}
+		if len(res.events) != n {
+			t.Fatalf("got %d broadcast events, want %d", len(res.events), n)
+		}
+		for i, e := range res.echoes {
+			want := fmt.Sprintf("echo:ping:%06d", i)
+			if e != want {
+				t.Fatalf("echo response %d out of order or corrupted: got %q, want %q", i, e, want)
+			}
+		}
+		for i, e := range res.events {
+			want := fmt.Sprintf("EVNT:%06d", i)
+			if e != want {
+				t.Fatalf("broadcast event %d out of order or corrupted: got %q, want %q", i, e, want)
+			}
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out reading all frames — a splice likely swallowed a newline, merging two frames into one and starving the reader of the expected count")
 	}
 }
 

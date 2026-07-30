@@ -137,8 +137,13 @@ func (s *Server) acceptLoop() {
 	}
 }
 
-// netConn wraps a net.Conn and implements Connection.
-type netConn struct{ conn net.Conn }
+// netConn wraps a net.Conn and implements Connection. Every write to conn
+// (Deliver, and handleConn's own response write) goes through writeFrame,
+// which serializes them on mu — see writeFrame's doc comment for why.
+type netConn struct {
+	conn net.Conn
+	mu   sync.Mutex
+}
 
 // deliverWriteTimeout bounds a single frame write. A subscriber that has
 // stopped reading (a suspended terminal, `fundi tail` into a pager) would
@@ -183,12 +188,43 @@ func logDeliverErr(msg string, err error, args ...any) {
 	slog.Warn("server: "+msg, args...)
 }
 
-func (c *netConn) Deliver(frame []byte) {
+// writeFrame writes one frame to the connection under c.mu, which serializes
+// it against every other writer of this connection: Deliver (called from
+// DeliverToChild/DeliverToGlobal/DeliverToMatching and Server.Broadcast, each
+// on its own goroutine) and handleConn's own response write. This buys two
+// things at once:
+//
+//  1. No interleaving. protocol.WriteFrame issues two writes (payload, then
+//     '\n'); holding mu across both means a second goroutine's frame can
+//     never be spliced in between them.
+//  2. No deadline theft. The deadline is scoped to exactly this write: set
+//     immediately before it, cleared immediately after (success, failure, or
+//     timeout alike), before mu is released. A goroutine already blocked
+//     inside a write is holding mu for the whole blocked duration, so a peer
+//     calling writeFrame is blocked on mu, not on the socket — it cannot
+//     reach SetWriteDeadline and reset the in-flight write's clock the way
+//     an unsynchronized peer could. And because the deadline never outlives
+//     its own write, a later write (e.g. handleConn's response, long after a
+//     prior Deliver) never inherits a stale, already-expired deadline.
+func (c *netConn) writeFrame(frame []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if err := c.conn.SetWriteDeadline(time.Now().Add(deliverWriteTimeout)); err != nil {
 		logDeliverErr("set write deadline", err)
 		// Fall through: a write without a deadline is still better than no frame.
 	}
-	if err := protocol.WriteFrame(c.conn, frame); err != nil {
+	err := protocol.WriteFrame(c.conn, frame)
+	// Clear the deadline unconditionally (write succeeded, failed, or timed
+	// out) so it cannot affect whatever write comes next on this connection.
+	if clearErr := c.conn.SetWriteDeadline(time.Time{}); clearErr != nil && err == nil {
+		err = clearErr
+	}
+	return err
+}
+
+func (c *netConn) Deliver(frame []byte) {
+	if err := c.writeFrame(frame); err != nil {
 		// A closed/closing connection is routine — the client went away or
 		// the conn already tore down, and the read loop will notice on its
 		// next read; logDeliverErr logs that at debug. A write-deadline
@@ -238,7 +274,13 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		resp := s.handler.HandleFrame(nc, frame)
 		if len(resp) > 0 {
-			if err := protocol.WriteFrame(conn, resp); err != nil {
+			// Route through nc.writeFrame (not a bare protocol.WriteFrame on
+			// conn) so this response write shares the same per-connection
+			// mutex and own-deadline-per-write discipline as Deliver: it
+			// cannot interleave with a concurrent subscription frame, and it
+			// gets its own fresh deadline rather than firing against one a
+			// prior Deliver left behind.
+			if err := nc.writeFrame(resp); err != nil {
 				if s.ctx.Err() == nil {
 					slog.Warn("server: write frame", "remote", conn.RemoteAddr(), "error", err)
 				}
