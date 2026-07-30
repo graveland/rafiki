@@ -46,6 +46,7 @@ type Runner struct {
 	done chan struct{}
 
 	mu       sync.Mutex
+	started  bool
 	cancel   context.CancelFunc
 	exitCode int
 	eng      *agent.Engine
@@ -87,7 +88,27 @@ var _ child.Runner = (*Runner)(nil)
 // stops reading stdout for good (see Kill's doc comment), the engine's next
 // Write blocks forever holding Emit's mutex. Closing stdoutR is what
 // guarantees Kill is always effective.
+//
+// Start is single-shot and returns an error on any subsequent call. This is
+// not defensive tidiness: a second Start would launch a second run()
+// goroutine over the same Runner, and the second one's `defer close(r.done)`
+// would panic on an already-closed channel. That panic is registered BEFORE
+// run's recover defer, so it is not contained by it — it would take the whole
+// daemon down. Unreachable through child.Spawn today (which calls Start
+// exactly once per Runner and discards the Runner on failure), but the blast
+// radius is out of all proportion to the cost of the guard.
 func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
+	r.mu.Lock()
+	if r.started {
+		r.mu.Unlock()
+		return nil, nil, nil, errors.New("inproc: Start called more than once on the same Runner")
+	}
+	// Set before the pipes are created, not after they succeed: a Runner whose
+	// Start failed partway has already been rejected by its caller, and
+	// allowing a retry buys nothing while reopening the double-run() window.
+	r.started = true
+	r.mu.Unlock()
+
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("inproc: stdin pipe: %w", err)

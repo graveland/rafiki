@@ -684,3 +684,39 @@ func TestRunnerReleasesChildContextOnNormalCompletion(t *testing.T) {
 			got, children)
 	}
 }
+
+// TestRunnerStartIsSingleShot guards a daemon-fatal panic. A second Start()
+// would launch a second run() goroutine over the same Runner, and that
+// goroutine's `defer close(r.done)` closes an already-closed channel. Because
+// that defer is registered BEFORE run's recover defer, the resulting panic is
+// NOT contained — it kills the whole daemon rather than one child.
+func TestRunnerStartIsSingleShot(t *testing.T) {
+	r := New(Options{
+		ChildID: "c_twice",
+		Parent:  t.Context(),
+		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Build:   blockingBuildFunc(make(chan struct{}), writeFakeTurns(t, sampleEndTurn)),
+	})
+
+	stdin, stdout, stderr, err := r.Start()
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if err := stderr.Close(); err != nil {
+		t.Errorf("close stderr: %v", err)
+	}
+
+	if _, _, _, err := r.Start(); err == nil {
+		t.Fatal("second Start returned nil error; it must be rejected, not run() twice")
+	}
+
+	if err := stdin.Close(); err != nil {
+		t.Errorf("close stdin: %v", err)
+	}
+	if _, err := io.ReadAll(stdout); err != nil {
+		t.Errorf("stdout read: %v", err)
+	}
+	if code, sig := r.Wait(); code != 0 || sig != "" {
+		t.Errorf("Wait() = (%d, %q), want (0, \"\") - the rejected second Start must not have disturbed the first", code, sig)
+	}
+}
