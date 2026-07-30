@@ -65,6 +65,13 @@ func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 // nil - so agentRuntimeOptions must overlay it directly onto RuntimeOptions,
 // or it is silently dropped.
 func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
+	// toRuntimeOptions seeds both key fields from os.Getenv, so the "other
+	// field is empty" assertions below are only meaningful with a controlled,
+	// empty ambient environment - on a dev machine whose shell/.env exports
+	// both ANTHROPIC_API_KEY and OPENROUTER_API_KEY this test fails without
+	// this, and in a clean CI it passes vacuously (on absence, not behavior).
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
 	c := newTestController(t)
 
 	anthropicReq := protocol.SpawnRequest{
@@ -99,6 +106,93 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 	}
 	if ro.AnthropicAPIKey != "" {
 		t.Errorf("AnthropicAPIKey = %q, want empty for a non-anthropic model", ro.AnthropicAPIKey)
+	}
+}
+
+// TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel is the assertion that
+// actually exercises the Critical fix's "keyed off f.model, not req.Model"
+// requirement: without it (i.e. keying off req.Model instead), req.Model and
+// the ExtraArgs --model override agree in every other test in this file, so
+// reverting to req.Model would leave the rest of the suite green.
+func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+	c := newTestController(t)
+
+	req := protocol.SpawnRequest{
+		Kind:      "agent",
+		Cwd:       t.TempDir(),
+		Model:     "anthropic/x",
+		ExtraArgs: []string{"--model", "deepseek/y"},
+		APIKey:    "sk-test-key",
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_model_override_key")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.OpenRouterAPIKey != req.APIKey {
+		t.Errorf("OpenRouterAPIKey = %q, want %q (the ExtraArgs --model override should route the key here, not AnthropicAPIKey)", ro.OpenRouterAPIKey, req.APIKey)
+	}
+	if ro.AnthropicAPIKey != "" {
+		t.Errorf("AnthropicAPIKey = %q, want empty: keying off req.Model instead of the parsed f.model would wrongly land the key here", ro.AnthropicAPIKey)
+	}
+}
+
+// TestAgentRunnerEnvOverlay proves the two names an in-process child can
+// actually receive from req.Env (ANTHROPIC_API_KEY/OPENROUTER_API_KEY) reach
+// RuntimeOptions, that req.Env wins over the ambient daemon environment, and
+// that an explicit req.APIKey still wins over a forwarded req.Env value
+// (daemon env < forwarded env < explicit key).
+func TestAgentRunnerEnvOverlay(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "ambient-anthropic")
+	t.Setenv("OPENROUTER_API_KEY", "ambient-openrouter")
+	c := newTestController(t)
+
+	req := protocol.SpawnRequest{
+		Kind:  "agent",
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+		Env: map[string]string{
+			"ANTHROPIC_API_KEY": "forwarded-anthropic",
+			"http_proxy":        "http://example.invalid:8080",
+		},
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_env_overlay")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.AnthropicAPIKey != "forwarded-anthropic" {
+		t.Errorf("AnthropicAPIKey = %q, want the forwarded req.Env value to win over the ambient daemon env", ro.AnthropicAPIKey)
+	}
+	if ro.OpenRouterAPIKey != "ambient-openrouter" {
+		t.Errorf("OpenRouterAPIKey = %q, want the ambient daemon env preserved (req.Env didn't touch this key)", ro.OpenRouterAPIKey)
+	}
+
+	// An explicit req.APIKey must still win over a forwarded req.Env value.
+	req.APIKey = "explicit-key"
+	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.AnthropicAPIKey != "explicit-key" {
+		t.Errorf("AnthropicAPIKey = %q, want the explicit req.APIKey to win over both ambient and forwarded env", ro.AnthropicAPIKey)
+	}
+}
+
+// TestAgentSpawnHasExplicitDBSingleDash proves the single-dash spellings
+// flag.FlagSet also accepts (-db, -db=...) are detected, not just the
+// double-dash forms - flag.NewFlagSet takes one or two leading dashes, so a
+// detector that only matched "--db"/"--db=" let a single-dash caller's DSN
+// through undetected, silently discarding it (the exact failure mode this
+// check exists to eliminate).
+func TestAgentSpawnHasExplicitDBSingleDash(t *testing.T) {
+	for _, extraArgs := range [][]string{
+		{"-db", "postgres://caller-supplied"},
+		{"-db=postgres://caller-supplied"},
+	} {
+		if !agentSpawnHasExplicitDB(extraArgs) {
+			t.Errorf("agentSpawnHasExplicitDB(%v) = false, want true", extraArgs)
+		}
 	}
 }
 
