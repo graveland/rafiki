@@ -125,7 +125,7 @@ func InstructionsFile() string {
 
 // SkillsDirs is the ordered skill search path: $FUNDI_SKILLS_DIRS split on the
 // OS path-list separator, else [<ConfigDir>/skills]. Order is
-// lowest-to-highest precedence, matching agent.DiscoverSkills. Empty segments
+// lowest-to-highest precedence, matching skills.DiscoverSkills. Empty segments
 // are dropped so a leading, trailing, or doubled separator is not read as the
 // current directory.
 //

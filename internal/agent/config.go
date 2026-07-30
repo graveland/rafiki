@@ -43,12 +43,13 @@ func ThinkingBudgetFor(level string) (int64, error) {
 // BuildEngine - BuildEngine itself parses no flags and does no filesystem
 // discovery beyond opening the optional DB pool.
 //
-// Tools is a pre-built agentloop.ToolSet rather than something BuildEngine
-// assembles itself: internal/agent/tools imports this package (for
-// SkillMeta, in the skill tool), so this package can never import
-// internal/agent/tools without an import cycle. cmd/fundid is where both
-// sides meet - see cmd/fundid/agent.go, which builds the Registry (file
-// tools, bash, skills, MCP) and hands it in here.
+// Tools is a pre-built agentloop.ToolSet so callers can assemble a registry
+// (file tools, bash, skills, MCP) and hand it in; this decouples BuildEngine
+// from the concrete registry and lets tests inject a fake toolset. This
+// architecture was originally forced by an import cycle (internal/agent/tools
+// importing this package for SkillMeta), which the extraction of internal/skills
+// removed. The interface design remains the right choice for the decoupling alone.
+// cmd/fundid builds the Registry and passes it in; see cmd/fundid/agent.go.
 type Config struct {
 	// Model is the provider-qualified model id, e.g. "anthropic/sonnet-latest"
 	// or "deepseek/deepseek-chat". rafiki routes on this id alone: an
@@ -112,9 +113,8 @@ type Config struct {
 //
 // The returned shutdown func closes the DB pool (a no-op when DBURL was
 // empty). It does NOT close MCP sessions or the Engine's worker goroutine -
-// those are cmd/fundid's to own (ConnectMCP's shutdown, Engine.Close) since
-// this package cannot import internal/agent/tools. cmd/fundid/agent.go
-// combines all three on its shutdown path.
+// those are cmd/fundid's to own (ConnectMCP's shutdown, Engine.Close).
+// cmd/fundid/agent.go combines all three on its shutdown path.
 func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(), error) {
 	if c.Tools == nil {
 		return nil, nil, errors.New("agent: Config.Tools is required")

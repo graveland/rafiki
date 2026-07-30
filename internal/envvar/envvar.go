@@ -68,7 +68,7 @@ const (
 
 	// SkillsDirs is an OS-path-list of skill directories ($PATH convention:
 	// ":" on unix). Ordered lowest-to-highest precedence, matching
-	// agent.DiscoverSkills, so a later entry overrides an earlier one on name
+	// skills.DiscoverSkills, so a later entry overrides an earlier one on name
 	// collision. Non-existent entries are skipped, not errors.
 	SkillsDirs = "FUNDI_SKILLS_DIRS"
 
