@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"git.graveland.dev/brent/fundi/internal/child"
+	"git.graveland.dev/brent/fundi/internal/server"
 	"git.graveland.dev/brent/fundi/internal/store"
 	"git.graveland.dev/brent/fundi/protocol"
 )
@@ -373,5 +376,94 @@ func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 
 	if _, err := os.Stat(spillDir); !os.IsNotExist(err) {
 		t.Fatalf("spill dir %s still exists after ForgetAllExited (err=%v)", spillDir, err)
+	}
+}
+
+// TestSend_RejectsSessionSwitchForAgentChild covers the silent-wrong-answer
+// case RespawnChild's routing through resolveSpawnPlan created.
+//
+// new_session/switch_session are intercepted and implemented as a respawn with
+// a session override. That override is meaningless for an agent child:
+// buildAgentArgv ignores ResumeSession, and appendDaemonRef pins --ref to the
+// unchanged childID, so the respawned child reattaches the ENTIRE prior
+// conversation while the RPC reports success. A user asking for a fresh
+// session would silently get their old one. Before the routing fix the same
+// request produced a dead child, which at least surfaced the problem.
+//
+// Both commands must be refused, for both a live and an exited agent child.
+func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
+	for _, frame := range []string{
+		`{"type":"new_session","id":"req-1"}`,
+		`{"type":"switch_session","id":"req-2","sessionPath":"/tmp/other.jsonl"}`,
+	} {
+		t.Run(frame, func(t *testing.T) {
+			ctrl := newTestController(t)
+			const childID = "c_agent_session_switch"
+			now := time.Now()
+			ctrl.st.Insert(&store.Session{
+				ChildID:      childID,
+				Status:       protocol.StatusIdle,
+				Kind:         "agent",
+				Cwd:          t.TempDir(),
+				StartedAt:    now,
+				LastActivity: now,
+			})
+
+			err := ctrl.Send(childID, json.RawMessage(frame))
+			if err == nil {
+				t.Fatal("Send accepted a session switch for an agent child; it would silently reattach the same conversation")
+			}
+			var ce *server.ControllerError
+			if !errors.As(err, &ce) {
+				t.Fatalf("error is %T, want *server.ControllerError so the client sees a coded failure: %v", err, err)
+			}
+			if ce.Code != protocol.ErrInvalidArgs {
+				t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)
+			}
+			if !strings.Contains(ce.Message, "agent child") {
+				t.Errorf("message %q does not explain that the agent kind is the problem", ce.Message)
+			}
+
+			// The child must be left completely alone: the rejection happens
+			// before the kill+respawn ceremony, so it is still exactly as it was.
+			snap, ok := ctrl.st.Get(childID)
+			if !ok {
+				t.Fatal("the rejected request removed the child from the store")
+			}
+			if snap.Status != protocol.StatusIdle {
+				t.Errorf("child status = %q after a rejected session switch, want %q untouched",
+					snap.Status, protocol.StatusIdle)
+			}
+		})
+	}
+}
+
+// TestSend_AllowsSessionSwitchForNonAgentKinds pins the negative half: the
+// rejection above must be scoped to the agent kind and not quietly break
+// new_session for pi or claude children. A pi child with no live process
+// fails later in the respawn ceremony, which is fine — what matters is that it
+// is NOT refused up front with the agent-kind error.
+func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
+	for _, kind := range []string{"", "pi", "claude"} {
+		t.Run("kind="+kind, func(t *testing.T) {
+			ctrl := newTestController(t)
+			const childID = "c_nonagent_session_switch"
+			now := time.Now()
+			ctrl.st.Insert(&store.Session{
+				ChildID:      childID,
+				Status:       protocol.StatusIdle,
+				Kind:         kind,
+				Cwd:          t.TempDir(),
+				StartedAt:    now,
+				LastActivity: now,
+			})
+
+			err := ctrl.Send(childID, json.RawMessage(`{"type":"new_session","id":"req-1"}`))
+			var ce *server.ControllerError
+			if errors.As(err, &ce) && ce.Code == protocol.ErrInvalidArgs &&
+				strings.Contains(ce.Message, "agent child") {
+				t.Fatalf("kind %q was refused with the agent-kind rejection: %v", kind, err)
+			}
+		})
 	}
 }

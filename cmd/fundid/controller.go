@@ -1480,10 +1480,34 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 // clients observe a seamless transition. A synthesized pi-level response is
 // delivered to subscribers after the new process is ready.
 func (c *Controller) handleInterceptedSend(childID string, decision intercept.Decision) error {
-	if _, ok := c.st.Get(childID); !ok {
+	snap, ok := c.st.Get(childID)
+	if !ok {
 		return &server.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
+		}
+	}
+
+	// Refuse both commands outright for an agent child. Every piece of the
+	// respawn below assumes a child whose conversation identity lives in a pi
+	// session file that --session can point at; an agent child's conversation
+	// is keyed by the daemon's child id instead. buildAgentArgv ignores
+	// ResumeSession entirely, and appendDaemonRef pins --ref to the SAME
+	// unchanged childID (deliberately, so a caller cannot aim one child at
+	// another's history) — so a respawn here reattaches the ENTIRE prior
+	// conversation and reports success. A user who asked for a fresh session
+	// would get their old one back with nothing to indicate it.
+	//
+	// Before RespawnChild was routed through resolveSpawnPlan this produced a
+	// dead child, which at least told the user something was wrong. Failing
+	// loudly is the honest replacement; it stays this way until agent
+	// conversations have an identity of their own, separate from the child id.
+	if snap.Kind == "agent" {
+		return &server.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: string(decision.Type) + " is not supported for an agent child: an agent conversation is " +
+				"identified by the child id itself, so a respawn would silently reattach the same conversation " +
+				"rather than starting a new one. Spawn a new agent child instead.",
 		}
 	}
 
