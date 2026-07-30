@@ -44,6 +44,14 @@ type Controller struct {
 	stateDir    string
 	graceWindow time.Duration
 	sweeperWg   sync.WaitGroup
+
+	// spawnClaims serializes Resume and RespawnChild per childID. Both methods
+	// share the same check-then-act shape (read exited status, fork a real OS
+	// process, then replace the store record) and both operate on a childID
+	// that is reused across the exited->live transition rather than minted
+	// fresh — see the doc comment on childClaimSet for why a shared claim set
+	// covers both.
+	spawnClaims childClaimSet
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -828,7 +836,86 @@ func resumeRequestFromSnapshot(snap store.Snapshot, apiKey string) protocol.Spaw
 	return req
 }
 
+// childClaimSet is a per-childID mutual-exclusion set guarding the
+// check-then-act window shared by Controller.Resume and
+// Controller.RespawnChild: both read the exited snapshot, fork a real OS
+// process (child.Spawn — real wall-clock time, up to a 5s idle-wait), and
+// only then delete-and-replace the store record for the same childID. Two
+// concurrent callers for the same childID (a client retry, two attached
+// clients, or a resume racing an intercepted new_session/switch_session) can
+// both pass the status check before either mutates the record, producing two
+// live processes sharing one ref.
+//
+// A map[string]*sync.Mutex was considered and rejected: entries would have to
+// live forever, because a mutex can never be safely deleted while another
+// goroutine might be about to Lock it — so the map would grow by one entry
+// for every childID ever resumed or respawned over the daemon's lifetime.
+// A claim set instead only ever holds entries for IDs currently in flight:
+// membership *is* the state, so release (delete) is always safe — "absent"
+// and "never claimed" are indistinguishable to any other goroutine, so a
+// delete can never race with a concurrent locker the way freeing a live
+// mutex could. The set's size is bounded by concurrently in-flight
+// resumes/respawns, not by history.
+//
+// The mutex here is a leaf lock: every method takes it, does an O(1) map
+// operation, and releases it before returning. It is never held while
+// calling into c.st, c.cm, or child.Spawn, so it cannot participate in any
+// lock-ordering cycle with the store, ChildManager, or connsMu.
+type childClaimSet struct {
+	mu  sync.Mutex
+	ids map[string]struct{}
+}
+
+// tryClaim attempts to claim id for the calling goroutine. It returns true
+// iff this call now has exclusive ownership of id; a false return means
+// another Resume/RespawnChild for the same id is already in flight and the
+// caller must not proceed (report a clear error to its caller instead of
+// blocking — blocking would just turn a client bug/retry into a hang for the
+// duration of a spawn).
+func (s *childClaimSet) tryClaim(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ids == nil {
+		s.ids = make(map[string]struct{})
+	}
+	if _, busy := s.ids[id]; busy {
+		return false
+	}
+	s.ids[id] = struct{}{}
+	return true
+}
+
+// release relinquishes a claim taken by tryClaim. Must be called exactly
+// once per successful tryClaim, on every return path — callers use `defer`
+// immediately after a successful tryClaim so release runs on every error
+// return and on panic unwind, never just the success path.
+func (s *childClaimSet) release(id string) {
+	s.mu.Lock()
+	delete(s.ids, id)
+	s.mu.Unlock()
+}
+
 func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (server.SpawnResult, error) {
+	// Claim childID for the whole check-then-act window below: from before
+	// the exited-status check, through the child.Spawn fork, to after the
+	// old exited record is replaced by activateLiveChild. See childClaimSet's
+	// doc comment for why this is a set rather than a per-ID mutex, and for
+	// the lock-ordering argument (this is always the outermost and
+	// shortest-held lock in the call path).
+	//
+	// A losing concurrent caller gets ErrNotResumable immediately rather than
+	// blocking: from its perspective the child genuinely is not resumable
+	// right now (a resume for it is already in flight), and blocking for the
+	// duration of a spawn would just convert a client bug/retry into a
+	// confusing hang instead of an actionable error.
+	if !c.spawnClaims.tryClaim(childID) {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrNotResumable,
+			Message: "resume already in progress for child: " + childID,
+		}
+	}
+	defer c.spawnClaims.release(childID)
+
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return server.SpawnResult{}, &server.ControllerError{
@@ -915,7 +1002,23 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 // All other spawn configuration is inherited from the child's persisted
 // snapshot. The childID is preserved across the respawn. This is the
 // implementation path for new_session and switch_session interception (spec §5.1).
+//
+// Shares Controller.spawnClaims with Resume: RespawnChild has the identical
+// check-then-act-around-a-fork shape (read exited status, child.Spawn, then
+// delete-and-replace the record), reached via a concurrent ctrl_send
+// {new_session|switch_session} on the same childID (see
+// handleInterceptedSend), and a shared claim set also blocks the cross-path
+// case of a resume racing an intercepted respawn for the same exited
+// childID. See childClaimSet's doc comment for the full rationale.
 func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath string) (server.SpawnResult, error) {
+	if !c.spawnClaims.tryClaim(childID) {
+		return server.SpawnResult{}, &server.ControllerError{
+			Code:    protocol.ErrNotResumable,
+			Message: "respawn already in progress for child: " + childID,
+		}
+	}
+	defer c.spawnClaims.release(childID)
+
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return server.SpawnResult{}, &server.ControllerError{

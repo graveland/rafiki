@@ -16,6 +16,15 @@
 #   reports that path as the session file (simulating a resumed session), with
 #   a derived SESSION_ID so integration tests can distinguish resumed vs fresh.
 
+# If FUNDI_TEST_SPAWN_LOG is set, append one line recording this invocation
+# before doing anything else. Used by tests that need to count how many real
+# OS processes were actually forked (e.g. a concurrent-Resume race test),
+# which per-process bookkeeping in the controller can't prove on its own.
+# Opt-in and off by default, so it does not affect any existing test.
+if [ -n "$FUNDI_TEST_SPAWN_LOG" ]; then
+    printf 'spawn pid=%s\n' "$$" >> "$FUNDI_TEST_SPAWN_LOG"
+fi
+
 # Allow tests to slow the shutdown.
 SHUTDOWN_DELAY="${FAKE_PI_SHUTDOWN_DELAY:-0}"
 
