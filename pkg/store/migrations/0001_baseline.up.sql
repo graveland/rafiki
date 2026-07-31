@@ -1,10 +1,8 @@
--- Baseline: byte-exact concatenation of scadmin's conversations-schema
--- migrations (savannah-client pkg/admindb/sql 0007_conversations,
--- 0008_turn_provenance, 0009_turn_prefix_hash), the state this chain
--- baselines at. store.Migrate adopts an existing scadmin-shaped schema
--- by recording this version without executing it.
+-- Baseline: the initial conversations schema. Assembled from three
+-- originally separate migrations, kept as delimited sections below so each is
+-- still readable on its own.
 
--- >>> scadmin 0007_conversations.up.sql
+-- >>> conversations schema and core tables
 CREATE SCHEMA IF NOT EXISTS conversations;
 
 -- A conversation is a first-class, entrypoint-agnostic entity (design §9).
@@ -80,7 +78,7 @@ CREATE TABLE IF NOT EXISTS conversations.conversation_attachment (
 CREATE UNIQUE INDEX IF NOT EXISTS conversation_attachment_active_uniq
 	ON conversations.conversation_attachment (conversation_id, entrypoint) WHERE detached_at IS NULL;
 
--- >>> scadmin 0008_turn_provenance.up.sql
+-- >>> turn provenance columns
 -- Per-turn provenance: a conversation can interleave inputs from multiple
 -- entrypoints (claude, tui, slack, diagnose) and multiple users, but the turn
 -- row previously carried no origin/author — only conversation.owner, a single
@@ -91,7 +89,7 @@ ALTER TABLE conversations.conversation_turn
 	ADD COLUMN IF NOT EXISTS author      TEXT,  -- who-is username / slack user id (nullable)
 	ADD COLUMN IF NOT EXISTS author_kind TEXT;  -- 'human' | 'agent' | 'system'
 
--- >>> scadmin 0009_turn_prefix_hash.up.sql
+-- >>> turn prefix_hash column
 -- prefix_hash: sha256 of the request's static cache-prefix — the request with the
 -- volatile "messages" list removed and keys canonicalized, i.e. model + system
 -- prompt + tools. Lets us verify the prefix stays byte-identical across a

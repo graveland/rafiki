@@ -1,7 +1,7 @@
 # rafiki
 
-Standalone LLM proxy / capture / agent library, extracted from
-savannah-client's LLM stack.
+Standalone LLM proxy, conversation-capture store and agent library for
+Anthropic- and OpenAI-protocol traffic.
 
 **Built (phases 1–4):** the routing core (per-upstream breaker, OpenRouter
 catalog, model resolution, prefix_hash, SSE capture parsing); the typed
@@ -25,7 +25,6 @@ pkg/store/      conversations schema migrations (source of truth), message
                 persistence, recovery queries
 pkg/server/     HTTP faces (/v1/messages, /v1/chat/completions), Authenticator
                 seam, static token auth, Prometheus metrics
-pkg/goldenwire/ frozen golden-wire fixture definitions (see note below)
 cmd/rafiki/     standalone binary (serve, migrate, --dev)
 ```
 
@@ -115,9 +114,11 @@ rafiki agent analyze --corpus DIR --compact --out DIR   # no DSN, no credentials
 
 ## Schema ownership
 
-This repo owns the `conversations` schema. The migration chain baselines at
-scadmin's 0007–0009 state; `store.Migrate` detects an existing scadmin-shaped
-schema and adopts it (records the baseline as applied without executing).
+This repo owns the `conversations` schema. `store.Migrate` brings a database to
+the head of the embedded chain, creating the tracking table
+(`public.rafiki_schema_migrations`) on first run and applying whatever it does
+not already record. It is idempotent, and concurrent callers are serialized by
+an advisory lock so two servers booting together apply the chain exactly once.
 
 ## Model effort adaptation
 
@@ -130,18 +131,3 @@ Subsequent requests to that model clamp proactively. The cache is per-process
 (never persisted) and starts empty, so it always reflects the current provider
 behavior. See `pkg/routing/effortmap.go` (`EffortCache`) and `pkg/server/proxy.go`
 (`effortRetry`).
-
-## goldenwire status
-
-The committed goldens (`pkg/routing/testdata/goldenwire.json` and
-`goldenwire_insitu.json`) were generated from savannah-client's
-PRE-extraction `pkg/routing` at 4fa61974 and are asserted by
-`pkg/routing/golden_test.go` / `golden_insitu_test.go` in CI;
-`pkg/llm/golden_builder_test.go` additionally binds the llm builder's constructed
-requests byte-identical to the in-situ recordings.
-
-`pkg/goldenwire/` holds the fixture definitions those goldens were computed over,
-as a plain package the tests import. The generator that produced the testdata
-is retired (the pre-extraction code it ran against was deleted in the phase-1
-swap) and survives only in git history — the testdata is a frozen recording
-and must never be regenerated.

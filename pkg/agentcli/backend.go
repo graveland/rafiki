@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Package agentcli defines the transport-agnostic seam between the CLI
-// and backend services: a DSN-backed local implementation today, a gRPC one in
-// savannah-client later.
+// Package agentcli defines the transport-agnostic seam between the CLI and
+// backend services: a DSN-backed local implementation today, leaving room for a
+// gRPC one.
 package agentcli
 
 import (
@@ -14,7 +14,7 @@ import (
 )
 
 // Backend is the transport-agnostic seam: the DSN-backed local implementation
-// today, a gRPC one in savannah-client later. It powers agent CLI commands with
+// today, leaving room for a gRPC one. It powers agent CLI commands with
 // insights queries, analysis, and finding management.
 type Backend interface {
 	Stats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error)

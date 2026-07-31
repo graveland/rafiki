@@ -448,7 +448,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 // while teeing a copy, then records the turn: a 4xx/5xx or a mid-stream read
 // error fails it; a clean stream completes it with the reassembled canonical
 // response. The per-turn "llm turn" log fires regardless of whether DB capture
-// is on, so savannah-admin surfaces every proxied turn.
+// is on, so a log-based consumer still sees every proxied turn.
 func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time) {
 	// A 4xx/5xx is a small, non-streamed error body — handle it before touching
 	// the streaming path so we can buffer, surface the provider's real message

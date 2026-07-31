@@ -193,8 +193,8 @@ insights and skill-gap analysis over the same `conversations` schema — but
 differ in transport. `rafiki agent` talks straight to Postgres via
 `pkg/agentcli/local.Backend`, useful for local/dev work against a DSN you hold
 directly. `sc agent` is expected to mount the same `pkg/agentcli.Backend`
-interface over a gRPC backend in savannah-client, adding what a
-multi-tenant deployment needs on top: auth, per-environment config
+interface over a gRPC backend, adding what a multi-tenant
+deployment needs on top: auth, per-environment config
 resolution, and tailnet-routed connectivity. The CLI surface
 (`agentcli` package: filters, renderers, the `AnalyzeRequest`/`AnalyzeEvent`
 contract) is the seam meant to be reused as-is — only the `Backend`

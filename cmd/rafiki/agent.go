@@ -797,11 +797,9 @@ type analyzeResultJSON struct {
 	WrittenSkillFiles []string          `json:"written_skill_files,omitempty"`
 }
 
-// renderWrittenFiles prints the paths agentcli.WriteSkillEdits wrote,
-// mirroring savannah-client's renderWrittenFiles (client/pkg/sc/agent_repo.go)
-// — the CLI's equivalent of surfacing what a drafted-skill-edit run touched
-// on disk. Unlike the client's version, this has no byte count available
-// (agentcli.WriteSkillEdits returns only paths), so each line is just the
+// renderWrittenFiles prints the paths agentcli.WriteSkillEdits wrote —
+// surfacing what a drafted-skill-edit run touched on disk. No byte count is
+// available (agentcli.WriteSkillEdits returns only paths), so each line is the
 // path.
 func renderWrittenFiles(w io.Writer, files []string) error {
 	if len(files) == 0 {
