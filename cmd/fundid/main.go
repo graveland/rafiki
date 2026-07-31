@@ -195,9 +195,46 @@ func main() {
 	// main is a harmless no-op once this fires.
 	baseCancel()
 	if pool != nil {
-		pool.Close()
-		slog.Info("agent database pool closed")
+		closePoolBounded(pool, poolCloseTimeout)
 	}
 
 	slog.Info("done")
+}
+
+// poolCloseTimeout bounds the wait on pgxpool.Pool.Close at daemon exit. Sized
+// well under the 180s platform stop timeout the service unit advertises, and
+// generous next to the milliseconds a normal close takes once baseCtx is
+// cancelled.
+const poolCloseTimeout = 15 * time.Second
+
+// closePoolBounded closes pool but refuses to wait on it forever.
+//
+// pgxpool.Pool.Close blocks until every acquired connection is released.
+// Cancelling baseCtx first (see the caller) releases every connection whose
+// work is ctx-derived, which is all of them in practice — pgx tears a
+// connection down on context cancellation. It is NOT a guarantee: a child that
+// Child.Shutdown ABANDONED rather than reaped (see internal/child's
+// abandonTimeout) is by definition blocked in something a context cannot
+// interrupt, and if that something is holding a pooled connection then
+// baseCancel cannot pry it loose. Now that abandonment is a designed outcome
+// rather than a theoretical one, the last unbounded wait on the exit path has
+// to go: a daemon that has already reported "done" for every child must not
+// hang here and get SIGKILLed by the service manager instead of exiting.
+//
+// Leaking the pool on timeout is safe: the process is about to exit, and the
+// kernel closes the sockets.
+func closePoolBounded(pool *pgxpool.Pool, timeout time.Duration) {
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		pool.Close()
+	}()
+	select {
+	case <-closed:
+		slog.Info("agent database pool closed")
+	case <-time.After(timeout):
+		slog.Error("agent database pool did not close in time; exiting without it. "+
+			"A connection is still held by work no context could cancel — most likely an abandoned child",
+			"waited", timeout)
+	}
 }

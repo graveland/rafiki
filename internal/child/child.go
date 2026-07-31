@@ -44,8 +44,47 @@ type ShutdownResult struct {
 	ExitCode  int
 	Signal    string
 	Escalated bool // true if SIGTERM or SIGKILL was required
+	// Abandoned is true when the terminal Kill() rung expired without the
+	// runner ever being reaped: the child was declared dead without proof and
+	// its execution context was left behind inside the daemon (see
+	// abandonTimeout and Child.abandon). "Reaped" and "abandoned" are NOT
+	// interchangeable outcomes — a caller, and an operator, must be able to
+	// tell them apart.
+	Abandoned bool
 	Duration  time.Duration
 }
+
+// abandonTimeout bounds the terminal `<-c.done` wait in Shutdown — how long we
+// wait for runner.Wait() to return AFTER Kill() has already cancelled the
+// child's context and closed its pipe ends.
+//
+// Why it must be bounded at all: for a subprocess it need not be, because
+// SIGKILL always lands and the reap is immediate. For an in-process child
+// (internal/inproc) Kill() cancels a context and closes two pipe ends, which
+// covers the wedged-*write* case it was written for — but eng.Wait() can still
+// be parked on a turn blocked in a syscall no context can interrupt (a tool
+// subprocess ignoring signals, an HTTP call with no timeout). An unbounded
+// wait there hangs `fundi kill` outright, makes ShutdownAllChildren return at
+// its 180s global bound with the goroutine still live, and can extend
+// pool.Close() at daemon exit.
+//
+// Why 10 seconds:
+//
+//   - Long enough that a genuinely-terminating child is never abandoned. Once
+//     Kill() has landed, all that remains is eng.Wait() (whose counts the turn
+//     worker retires before it can park), eng.Close(), and the runtime's
+//     shutdown func — MCP teardown, itself running on the very context Kill
+//     just cancelled. That is milliseconds in practice, so 10s is three to
+//     four orders of magnitude of headroom.
+//   - Short enough to keep `fundi kill` responsive: it is additive to the
+//     caller's own ladder, and 10s on top of a 30s kill rung is noise next to
+//     the alternative of never returning at all.
+//   - It keeps the whole per-child ladder inside the daemon's global bound:
+//     120s stdin-close + 30s kill + 10s abandon = 160s < the 180s
+//     globalTimeout in cmd/fundid/main.go, so ShutdownAllChildren still
+//     reports every child's outcome instead of tripping its own deadline first
+//     and reporting nothing.
+const abandonTimeout = 10 * time.Second
 
 // inBufMaxFrames / inBufMaxBytes are the eviction caps for the stdin capture.
 const (
@@ -106,9 +145,15 @@ type Child struct {
 	stdout io.ReadCloser
 	stderr io.ReadCloser
 
-	cmdCh       chan []byte
-	ready       chan struct{} // closed once supervise loop is processing
-	done        chan struct{} // closed when child has exited and been reaped
+	cmdCh chan []byte
+	ready chan struct{} // closed once supervise loop is processing
+	// done is closed when the child has exited and been reaped — or, on the
+	// abandon path, when Shutdown gave up waiting for a reap that is never
+	// coming (see abandon). Both closers go through closeDone, because a
+	// leaked supervise goroutine that later completes would otherwise
+	// double-close it and panic the daemon.
+	done        chan struct{}
+	doneOnce    sync.Once
 	processDone chan struct{} // internal: closed by readStdout after Wait()
 
 	exit ShutdownResult
@@ -118,10 +163,29 @@ type Child struct {
 	renderRing *ring.Ring // bus-frame capture for normalizing providers (claude); nil otherwise
 	in         inBuffer   // bounded stdin frame capture for log dumps
 
-	errBuf bytes.Buffer // written by readStderr only; safe to read after Done() is closed
+	// errMu guards errBuf. readStderr is its only writer and StderrSnapshot
+	// its only reader, and before the abandon path existed "call it after
+	// Done() is closed" was a sufficient contract: Done() implied wg.Wait(),
+	// which implied readStderr had returned. Shutdown can now close Done()
+	// while a leaked reader goroutine is still live, so the ordering argument
+	// no longer holds and the buffer needs a real lock.
+	errMu  sync.Mutex
+	errBuf bytes.Buffer
 
 	mu     sync.Mutex
 	closed bool // set by readStdout after cmd.Process.Wait() returns
+	// abandoned is set by abandon() and means "this child's exit has already
+	// been recorded without a reap". It makes the record final: a leaked
+	// readStdout whose runner.Wait() eventually returns must not overwrite the
+	// abandoned outcome with a late, now-meaningless exit status.
+	abandoned bool
+
+	// abandonAfter is the bound Shutdown applies to its terminal post-Kill
+	// wait. It is a field rather than a direct read of abandonTimeout purely so
+	// a test can shrink it: the mechanism under test is "the wait is bounded
+	// and abandonment is safe", not "ten seconds elapse". Spawn is its only
+	// production writer, and Shutdown its only reader.
+	abandonAfter time.Duration
 
 	sm       *StateMachine
 	provider ProtocolProvider
@@ -169,21 +233,22 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	prov = prov.Fresh()
 
 	c := &Child{
-		ID:          spec.ChildID,
-		spec:        spec,
-		runner:      r,
-		stdin:       stdin,
-		stdout:      stdout,
-		stderr:      stderr,
-		cmdCh:       make(chan []byte, 16),
-		ready:       make(chan struct{}),
-		done:        make(chan struct{}),
-		processDone: make(chan struct{}),
-		bus:         bus.New[[]byte](bus.Options{}),
-		ring:        ring.New(ring.Options{}),
-		sm:          NewStateMachine(),
-		provider:    prov,
-		idle:        make(chan struct{}),
+		ID:           spec.ChildID,
+		spec:         spec,
+		runner:       r,
+		stdin:        stdin,
+		stdout:       stdout,
+		stderr:       stderr,
+		cmdCh:        make(chan []byte, 16),
+		ready:        make(chan struct{}),
+		done:         make(chan struct{}),
+		processDone:  make(chan struct{}),
+		bus:          bus.New[[]byte](bus.Options{}),
+		ring:         ring.New(ring.Options{}),
+		sm:           NewStateMachine(),
+		provider:     prov,
+		idle:         make(chan struct{}),
+		abandonAfter: abandonTimeout,
 	}
 
 	if c.provider.Normalizes() {
@@ -331,10 +396,12 @@ func (c *Child) RenderStats() (events int, oldestTimestamp int64) {
 // source; when false, the raw ring is already renderable.
 func (c *Child) Normalizes() bool { return c.provider.Normalizes() }
 
-// StderrSnapshot returns a copy of buffered stderr bytes.
-// Must only be called after Done() is closed; otherwise concurrent
-// readStderr writes may race.
+// StderrSnapshot returns a copy of buffered stderr bytes. Safe to call at any
+// time: readStderr's writes and this read share errMu, because Done() being
+// closed no longer proves readStderr has finished (see abandon).
 func (c *Child) StderrSnapshot() []byte {
+	c.errMu.Lock()
+	defer c.errMu.Unlock()
 	b := make([]byte, c.errBuf.Len())
 	copy(b, c.errBuf.Bytes())
 	return b
@@ -362,7 +429,7 @@ func (c *Child) Metadata() SnifferMetadata {
 // stdout and stderr reader goroutines, then drives the stdin write loop until
 // the process exits. defer close(c.done) makes Done() observable to callers.
 func (c *Child) supervise() {
-	defer close(c.done)
+	defer c.closeDone()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -438,6 +505,15 @@ cleanup:
 	closeStream(c.ID, "stderr", c.stderr)
 }
 
+// closeDone closes c.done at most once. There are two closers — supervise on
+// the ordinary path, and Shutdown's abandon path — and they are not mutually
+// exclusive: an abandoned child's supervise goroutine can still complete
+// later, if the syscall its runner was stuck in finally returns. A plain
+// `close` in both places would panic the whole daemon at that moment.
+func (c *Child) closeDone() {
+	c.doneOnce.Do(func() { close(c.done) })
+}
+
 // closeStream closes one of the child's stream handles, logging any failure.
 // An already-closed handle is not a failure: Shutdown closes stdin on its own
 // path, and a runner (inproc.Runner.Kill) may have closed a read end to force
@@ -492,10 +568,21 @@ func (c *Child) readStdout() {
 	// Reap the process and record its exit status.
 	code, sig := c.runner.Wait()
 	c.mu.Lock()
-	c.exit.ExitCode = code
-	c.exit.Signal = sig
-	c.closed = true
-	c.mu.Unlock()
+	if c.abandoned {
+		// Shutdown gave up on this reap and already published an outcome; the
+		// daemon has moved on (the store record is written, the log dump
+		// taken, ctrl_child_exited delivered). Overwriting c.exit now would
+		// silently contradict what everyone was told, so keep the record and
+		// just note that the straggler did eventually land.
+		c.mu.Unlock()
+		slog.Info("abandoned child was reaped after all; keeping the abandoned exit record",
+			"child", c.ID, "late_exit_code", code, "late_signal", sig)
+	} else {
+		c.exit.ExitCode = code
+		c.exit.Signal = sig
+		c.closed = true
+		c.mu.Unlock()
+	}
 
 	close(c.processDone)
 }
@@ -575,6 +662,7 @@ func (c *Child) readStderr() {
 	for {
 		n, err := br.Read(buf)
 		if n > 0 {
+			c.errMu.Lock()
 			if c.errBuf.Len()+n > maxErr {
 				// Drop oldest to stay within the cap.
 				trim := c.errBuf.Len() + n - maxErr
@@ -585,6 +673,7 @@ func (c *Child) readStderr() {
 				}
 			}
 			c.errBuf.Write(buf[:n])
+			c.errMu.Unlock()
 		}
 		if err != nil {
 			return
@@ -595,9 +684,10 @@ func (c *Child) readStderr() {
 // Shutdown attempts a graceful shutdown:
 //  1. Close stdin. Wait up to shutdownTimeout.
 //  2. SIGTERM. Wait up to killTimeout.
-//  3. SIGKILL. Reap.
+//  3. SIGKILL. Wait up to abandonTimeout, then abandon (see abandon).
 //
-// Escalated is true if SIGTERM (or SIGKILL) was required.
+// Escalated is true if SIGTERM (or SIGKILL) was required; Abandoned is true if
+// rung 3 expired without a reap.
 func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownResult, error) {
 	start := time.Now()
 
@@ -640,7 +730,14 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 			if kerr := c.runner.Kill(); kerr != nil {
 				slog.Warn("kill runner", "child", c.ID, "error", kerr)
 			}
-			<-c.done
+			// Kill() is the last thing we can do TO the child; it is not proof
+			// the child stopped. Bound the wait rather than hanging the caller
+			// forever on a reap that may never come.
+			select {
+			case <-c.done:
+			case <-time.After(c.abandonAfter):
+				c.abandon() // records Abandoned on c.exit, read back below
+			}
 		}
 	}
 
@@ -650,6 +747,66 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 	res.Escalated = escalated
 	res.Duration = time.Since(start)
 	return res, nil
+}
+
+// abandon gives up on a reap that is not coming and puts the child into a state
+// where the still-running execution context cannot do damage when the syscall
+// it is stuck in finally returns. Called only from Shutdown, only after Kill()
+// has already run, and only once per child (Shutdown's already-exited early
+// return catches every subsequent call).
+//
+// Leaking a goroutine is acceptable ONLY because of what this function
+// guarantees first:
+//
+//  1. Everything the child could write to is closed. Kill() has already closed
+//     the read ends of both pipes (inproc.Runner.Kill), which is what makes a
+//     late Frontend.Emit fail with a broken pipe rather than succeed into a
+//     structure the daemon has moved on from; Shutdown closed the daemon-side
+//     stdin write end at its top. The two remaining daemon-side handles are
+//     c.stdout and c.stderr, normally closed by supervise's cleanup block —
+//     which is exactly what a leaked supervise (parked in wg.Wait()) will never
+//     reach. Close them here. closeStream tolerates the already-closed case,
+//     so supervise's own close is still correct if it ever gets there.
+//  2. The context is cancelled, so no NEW work can start after the syscall
+//     returns: Kill() calls Terminate() first, which cancels it.
+//  3. The child is recorded as exited before this returns, so the daemon stops
+//     treating it as live. closed=true makes Send reject frames, the exit
+//     result is published as the forced-stop shape a reaped kill would have
+//     produced, and closing done releases monitorChild into handleChildExit —
+//     which is also what unblocks ShutdownAllChildren's post-Shutdown wait for
+//     cm.Remove. abandoned=true makes the record final against a late reap
+//     (see readStdout).
+//  4. Nothing waits on the leaked goroutine again. done is closed here rather
+//     than by supervise, so no future Shutdown, Done() select, or
+//     handleChildExit blocks on it.
+func (c *Child) abandon() {
+	closeStream(c.ID, "stdout", c.stdout)
+	closeStream(c.ID, "stderr", c.stderr)
+
+	c.mu.Lock()
+	c.abandoned = true
+	c.closed = true
+	// Report the same shape a reaped forced stop reports — exit code 0 with
+	// signal "killed", the contract processRunner.Wait and inproc.Runner.Wait
+	// both honour — so the wire answer to "I killed this child" does not change
+	// depending on whether the reap happened to land. ShutdownResult.Abandoned
+	// is what carries the difference.
+	c.exit.ExitCode = 0
+	c.exit.Signal = "killed"
+	// Stored on the record itself, not just on the ShutdownResult this call
+	// returns, so ExitResult() (what handleChildExit persists and what a second
+	// Shutdown's already-exited early return copies) reports it too.
+	c.exit.Abandoned = true
+	c.mu.Unlock()
+
+	c.closeDone()
+
+	// Error level, with the child id: a goroutine leaked inside a long-lived
+	// daemon is something an operator needs to see, not a debug detail. If the
+	// child was an in-process agent, this leaks its engine goroutine (and
+	// whatever it is blocked in) for the daemon's remaining lifetime.
+	slog.Error("child never reaped after kill; abandoning the wait and leaking its execution context",
+		"child", c.ID, "waited", c.abandonAfter)
 }
 
 // Interrupt sends SIGINT to the child's process group. For a claude child this

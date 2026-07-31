@@ -1191,6 +1191,7 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		Signal:     res.Signal,
 		DurationMs: res.Duration.Milliseconds(),
 		Escalated:  res.Escalated,
+		Abandoned:  res.Abandoned,
 	}, nil
 }
 
@@ -1216,8 +1217,9 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 	slog.Info("shutting down children", "count", len(ids))
 
 	type result struct {
-		id  string
-		err error
+		id        string
+		err       error
+		abandoned bool
 	}
 	done := make(chan result, len(ids))
 
@@ -1235,7 +1237,7 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 			c.handleStatusChange(id, protocol.StatusShuttingDown, prev)
 		}
 		go func() {
-			_, err := ch.Shutdown(perChildShutdown, perChildKill)
+			res, err := ch.Shutdown(perChildShutdown, perChildKill)
 			// ch.Shutdown returns when the child *process* is reaped, but
 			// handleChildExit — which persists the exit code/signal to the
 			// state record — runs asynchronously in monitorChild's goroutine.
@@ -1249,7 +1251,7 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			done <- result{id: id, err: err}
+			done <- result{id: id, err: err, abandoned: res.Abandoned}
 		}()
 	}
 
@@ -1259,10 +1261,15 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 		select {
 		case r := <-done:
 			remaining--
-			if r.err != nil {
+			switch {
+			case r.err != nil:
 				slog.Warn("child shutdown error", "childId", r.id, "error", r.err)
 				errs = append(errs, fmt.Errorf("child %s: %w", r.id, r.err))
-			} else {
+			case r.abandoned:
+				// Not an error — Shutdown did everything it could — but "shut
+				// down" would be a lie: the goroutine is still in there.
+				slog.Error("child abandoned rather than reaped; its execution context is leaked", "childId", r.id)
+			default:
 				slog.Info("child shut down", "childId", r.id)
 			}
 		case <-ctx.Done():

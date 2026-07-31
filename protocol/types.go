@@ -406,11 +406,16 @@ type SpawnResponseData struct {
 // ExitCode is nil when the child was killed by signal with no exit code.
 // Signal is absent (not "null") when the child exited via normal exit code rather than a signal.
 // Escalated is true if SIGTERM or SIGKILL was needed.
+// Abandoned is true when even SIGKILL/forced teardown never produced a reap and
+// the daemon gave up waiting, leaking the child's execution context (see
+// internal/child's abandonTimeout). Omitted when false, so a reaped kill's
+// payload is unchanged.
 type KillResponseData struct {
 	ExitCode   *int   `json:"exitCode"`
 	Signal     string `json:"signal,omitempty"`
 	DurationMs int64  `json:"durationMs"`
 	Escalated  bool   `json:"escalated"`
+	Abandoned  bool   `json:"abandoned,omitempty"`
 }
 
 // GetRecentResponseData is the data payload for ctrl_get_recent responses (§6.11).
