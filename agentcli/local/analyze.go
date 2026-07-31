@@ -11,10 +11,10 @@ import (
 	"sort"
 	"strings"
 
-	"git.graveland.dev/brent/rafiki/agentcli"
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/insights"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/agentcli"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/insights"
+	"go.graveland.dev/rafiki/store"
 )
 
 // analyzeItem is one conversation this run will consider processing.

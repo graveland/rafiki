@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"git.graveland.dev/brent/rafiki/insights"
+	"go.graveland.dev/rafiki/insights"
 )
 
 // RenderTranscriptMD renders an exported conversation as markdown: scalar

@@ -14,8 +14,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/llm"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/llm"
 )
 
 // captureStdout runs fn with os.Stdout redirected to an in-memory pipe and

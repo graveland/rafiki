@@ -16,7 +16,7 @@ import (
 
 	"golang.org/x/net/http2"
 
-	"git.graveland.dev/brent/rafiki/routing"
+	"go.graveland.dev/rafiki/routing"
 )
 
 type proxyStore interface {

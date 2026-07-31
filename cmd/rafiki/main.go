@@ -31,10 +31,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 
-	"git.graveland.dev/brent/rafiki/llm"
-	"git.graveland.dev/brent/rafiki/routing"
-	"git.graveland.dev/brent/rafiki/server"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/llm"
+	"go.graveland.dev/rafiki/routing"
+	"go.graveland.dev/rafiki/server"
+	"go.graveland.dev/rafiki/store"
 )
 
 func main() {

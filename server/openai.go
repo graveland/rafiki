@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"git.graveland.dev/brent/rafiki/routing"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/routing"
+	"go.graveland.dev/rafiki/store"
 )
 
 // OpenAIUpstream is one configured /v1/chat/completions target.

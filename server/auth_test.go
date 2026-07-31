@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/rafiki/routing"
+	"go.graveland.dev/rafiki/routing"
 )
 
 type recordingStore struct {

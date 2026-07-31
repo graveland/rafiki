@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/rafiki/insights"
+	"go.graveland.dev/rafiki/insights"
 )
 
 func TestRenderStats(t *testing.T) {

@@ -19,9 +19,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"git.graveland.dev/brent/rafiki/routing"
-	"git.graveland.dev/brent/rafiki/store"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.graveland.dev/rafiki/routing"
+	"go.graveland.dev/rafiki/store"
 )
 
 type fakeProxyStore struct {

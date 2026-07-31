@@ -8,7 +8,7 @@ import (
 
 	"github.com/jedib0t/go-pretty/v6/table"
 
-	"git.graveland.dev/brent/rafiki/insights"
+	"go.graveland.dev/rafiki/insights"
 )
 
 // RenderSearch renders search results as a rounded table: identity columns,

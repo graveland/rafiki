@@ -14,7 +14,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"git.graveland.dev/brent/rafiki/routing"
+	"go.graveland.dev/rafiki/routing"
 )
 
 func testLogger(t *testing.T) *slog.Logger {

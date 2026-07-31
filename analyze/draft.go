@@ -11,8 +11,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"git.graveland.dev/brent/rafiki/insights"
-	"git.graveland.dev/brent/rafiki/llm"
+	"go.graveland.dev/rafiki/insights"
+	"go.graveland.dev/rafiki/llm"
 )
 
 // builtinDraftPrompt is the default system prompt for Draft, proposing a

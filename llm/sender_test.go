@@ -8,7 +8,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"git.graveland.dev/brent/rafiki/llm"
+	"go.graveland.dev/rafiki/llm"
 )
 
 func TestSdkSenderImplementsStreamingSender(t *testing.T) {

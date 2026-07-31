@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/rafiki/insights"
+	"go.graveland.dev/rafiki/insights"
 )
 
 func TestParseTime(t *testing.T) {

@@ -11,9 +11,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/rafiki/agentcli"
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/agentcli"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/store"
 )
 
 // storedAnalysesFor loads previously-stored (status='ok') analyses for ids at

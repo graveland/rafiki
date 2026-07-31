@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/store"
 )
 
 func TestRenderProgressLine(t *testing.T) {

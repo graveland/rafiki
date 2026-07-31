@@ -5,7 +5,7 @@ package analyze
 import (
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"git.graveland.dev/brent/rafiki/llm"
+	"go.graveland.dev/rafiki/llm"
 )
 
 // retryContent builds the follow-up user turn for a failed schema-forced

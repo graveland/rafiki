@@ -14,8 +14,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/rafiki/routing"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/routing"
+	"go.graveland.dev/rafiki/store"
 )
 
 // Integration tests need TimescaleDB (RAFIKI_TEST_DSN, see store/migrate_test.go).

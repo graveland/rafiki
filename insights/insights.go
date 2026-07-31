@@ -12,7 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/rafiki/routing"
+	"go.graveland.dev/rafiki/routing"
 )
 
 // ErrNotFound is returned when a requested conversation does not exist. Callers

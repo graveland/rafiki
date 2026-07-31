@@ -13,7 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/store"
 )
 
 // TestCaptureStore requires a real PostgreSQL/TimescaleDB instance. Set

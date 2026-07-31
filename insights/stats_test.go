@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/rafiki/routing"
+	"go.graveland.dev/rafiki/routing"
 )
 
 // seedTurns creates a conversation on the given path (owner uniquely derived

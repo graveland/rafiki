@@ -10,7 +10,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"git.graveland.dev/brent/rafiki/insights"
+	"go.graveland.dev/rafiki/insights"
 )
 
 func block(v any) map[string]any {

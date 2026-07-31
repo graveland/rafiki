@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"git.graveland.dev/brent/rafiki/insights"
+	"go.graveland.dev/rafiki/insights"
 )
 
 // FilterVals is the flag-value bag both binaries fill from their own flag

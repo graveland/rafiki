@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/store"
 )
 
 const orFixture = `{"data":[

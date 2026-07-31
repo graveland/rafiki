@@ -8,9 +8,9 @@ package agentcli
 import (
 	"context"
 
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/insights"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/insights"
+	"go.graveland.dev/rafiki/store"
 )
 
 // Backend is the transport-agnostic seam: the DSN-backed local implementation

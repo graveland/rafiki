@@ -16,9 +16,9 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/jedib0t/go-pretty/v6/table"
 
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/insights"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/insights"
+	"go.graveland.dev/rafiki/store"
 )
 
 // errWriter accumulates the first write error so long render paths can

@@ -26,8 +26,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"golang.org/x/sync/errgroup"
 
-	"git.graveland.dev/brent/rafiki/llm"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/llm"
+	"go.graveland.dev/rafiki/store"
 )
 
 const (

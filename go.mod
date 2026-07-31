@@ -1,4 +1,4 @@
-module git.graveland.dev/brent/rafiki
+module go.graveland.dev/rafiki
 
 go 1.26.4
 

@@ -14,7 +14,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/jedib0t/go-pretty/v6/table"
 
-	"git.graveland.dev/brent/rafiki/insights"
+	"go.graveland.dev/rafiki/insights"
 )
 
 // RenderStats renders a stats bundle as a designed, human-first layout:

@@ -8,10 +8,10 @@ import (
 	"errors"
 	"fmt"
 
-	"git.graveland.dev/brent/rafiki/agentcli"
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/insights"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/agentcli"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/insights"
+	"go.graveland.dev/rafiki/store"
 )
 
 // analyzeOutcome is analyzeOne's result for one conversation. A nil

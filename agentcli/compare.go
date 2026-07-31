@@ -12,7 +12,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/jedib0t/go-pretty/v6/table"
 
-	"git.graveland.dev/brent/rafiki/analyze"
+	"go.graveland.dev/rafiki/analyze"
 )
 
 // CompareRun is one model's result in a --compare sweep: either a Summary

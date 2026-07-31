@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/rafiki/analyze"
-	"git.graveland.dev/brent/rafiki/insights"
-	"git.graveland.dev/brent/rafiki/store"
+	"go.graveland.dev/rafiki/analyze"
+	"go.graveland.dev/rafiki/insights"
+	"go.graveland.dev/rafiki/store"
 )
 
 // fakeBackend is a Backend stub for Compare tests: Analyze looks up the
