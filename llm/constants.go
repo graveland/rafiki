@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package llm is the library front door: a typed builder over the routing
 // core with DB-backed Conversations. Callers never construct
 // anthropic.MessageNewParams for conversation sends — the library owns

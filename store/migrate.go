@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package store owns the conversations schema: its migration chain and (in
 // later phases) conversation/message/turn persistence. The chain baselines at
 // scadmin's 0007–0009 state; Migrate adopts an existing scadmin-shaped schema

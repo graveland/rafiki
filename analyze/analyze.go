@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package analyze
 
 const DetectorVersion = 2 // bump when the detector prompt or Finding schema changes

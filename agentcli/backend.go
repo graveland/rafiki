@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package agentcli defines the transport-agnostic seam between the CLI
 // and backend services: a DSN-backed local implementation today, a gRPC one in
 // savannah-client later.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // rafiki is the standalone LLM capturing proxy: Anthropic /v1/messages and
 // OpenAI /v1/chat/completions faces with static bearer-token auth, a
 // TimescaleDB conversation store, Prometheus metrics and optional OTLP
