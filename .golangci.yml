@@ -1,16 +1,42 @@
 version: "2"
+
+# The standard set, deliberately NOT `default: all`.
+#
+# This file also exists so golangci-lint stops walking up to ~/.golangci.yml,
+# which is a different project's configuration and is not part of this repo. A
+# config outside the repo makes lint results depend on the machine.
+#
+# The gate must be meaningful: it should fail only on problems a change
+# introduces. `default: all` reported 535 findings on fundi's tree alone, so a
+# task could never satisfy it and the signal would be discarded as noise.
+# Widen this set deliberately, one linter at a time, each with its backlog
+# cleared first.
+#
+# The settings below are the union of what the rafiki and fundi trees each
+# needed before the merge. Exclusions only ever suppress, so a superset keeps
+# both halves passing; picking one lineage's config would have surfaced the
+# other's backlog as a wall of new findings on a change that caused none of it.
 linters:
+  default: standard
   settings:
     errcheck:
+      check-blank: false
       # Deferred response-body closes: errcheck stays on everywhere else, this
       # is the one call whose error is genuinely not actionable.
       exclude-functions:
         - (io.ReadCloser).Close
   exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
       # SeedForTest's struct copy is deliberate — it snapshots the entry.
       - path: pkg/routing/orcatalog\.go
         text: "S1016"
+
 formatters:
   enable:
     - gofmt

@@ -1,8 +1,48 @@
+# Binaries
 /rafiki
+/fundi
+/fundid
+/pi-controller
+/pic
 /bin/
+
+# Isolated worktrees for multi-task feature work
+/.worktrees/
+
+# Go build artifacts
 *.test
+*.out
+coverage.txt
+
+# go.work is never committed. It used to wire fundi -> ../rafiki live, which is
+# precisely how a stale module pin went unnoticed: the workspace resolved off
+# disk while the pinned version in go.mod rotted. One repo now, so there is
+# nothing left to wire — this entry exists to stop it coming back.
+go.work
+go.work.sum
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.*.swp
+
+# Local env (direnv + secrets)
 .env
 .env-*
 .envrc
 .direnv/
-.*.swp
+
+# Local runtime state (belongs under ~/.local/state, not the repo)
+/run/
+
+# TypeScript / bun
+/attach/node_modules/
+/attach/*.bun-build
+/attach/.*.bun-build
+
+# Handoffs and task scratch are never committed. Note that some files under
+# tasks/ predate this rule and are still tracked; untracking them is a
+# deliberate call, not a drive-by.
+/tasks/

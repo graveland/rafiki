@@ -1,0 +1,283 @@
+package agent
+
+import (
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// isolateHome points $HOME at an empty temp directory and clears
+// $FUNDI_INSTRUCTIONS/$XDG_CONFIG_HOME so tests never pick up the real
+// developer machine's own fundi instructions file (or a stray
+// ~/.claude/CLAUDE.md, back when that was the source).
+func isolateHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FUNDI_INSTRUCTIONS", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+}
+
+// captureSlog swaps the default slog.Logger for one writing into a
+// *syncBuffer (see engine_test.go) for the duration of the test, returning
+// an accessor for what was logged - so a test can assert a non-not-exist
+// stat error was actually logged, not just silently mapped to "absent".
+func captureSlog(t *testing.T) *syncBuffer {
+	t.Helper()
+	var b syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&b, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &b
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadContextFilesUserGlobal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "") // force the ~/.config fallback, ignoring any real value
+	t.Setenv("FUNDI_INSTRUCTIONS", "")
+	mustWriteFile(t, filepath.Join(home, ".config", "fundi", "instructions.md"), "GLOBAL_MARKER instructions")
+
+	cwd := t.TempDir() // no git root, no local instruction files
+	got, err := LoadContextFiles(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "GLOBAL_MARKER") {
+		t.Fatalf("expected global instructions-file content, got %q", got)
+	}
+}
+
+// TestLoadContextFiles_UsesFundiInstructionsNotClaude locks down the point of
+// this task: fundi's user-global instructions come from
+// paths.InstructionsFile() ($FUNDI_INSTRUCTIONS, else <ConfigDir>/instructions.md),
+// never from Claude Code's own ~/.claude/CLAUDE.md.
+func TestLoadContextFiles_UsesFundiInstructionsNotClaude(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A Claude profile that must NOT be read.
+	mustWriteFile(t, filepath.Join(home, ".claude", "CLAUDE.md"), "CLAUDE-PROFILE-MARKER")
+
+	// fundi's own instructions, which must be read.
+	inst := filepath.Join(t.TempDir(), "instructions.md")
+	mustWriteFile(t, inst, "FUNDI-INSTRUCTIONS-MARKER")
+	t.Setenv("FUNDI_INSTRUCTIONS", inst)
+
+	got, err := LoadContextFiles(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "FUNDI-INSTRUCTIONS-MARKER") {
+		t.Error("did not load $FUNDI_INSTRUCTIONS")
+	}
+	if strings.Contains(got, "CLAUDE-PROFILE-MARKER") {
+		t.Error("read ~/.claude/CLAUDE.md; fundi must not read its config from Claude's directory")
+	}
+}
+
+// TestLoadContextFiles_MissingInstructionsIsNotAnError covers the "most
+// installs have no global instructions file yet" case: a $FUNDI_INSTRUCTIONS
+// pointing at a nonexistent path must be skipped silently, not returned as
+// an error.
+func TestLoadContextFiles_MissingInstructionsIsNotAnError(t *testing.T) {
+	t.Setenv("FUNDI_INSTRUCTIONS", filepath.Join(t.TempDir(), "absent.md"))
+	if _, err := LoadContextFiles(t.TempDir()); err != nil {
+		t.Fatalf("missing instructions file must be skipped silently, got %v", err)
+	}
+}
+
+// TestLoadContextFilesNestedGitRootAndInclude covers the brief's primary
+// scenario: a nested git root whose CLAUDE.md @-includes another file, and a
+// deeper cwd with its own AGENTS.md. Both must appear, in order (git root
+// before cwd), and the include must be inlined rather than left as a literal
+// @-line.
+func TestLoadContextFilesNestedGitRootAndInclude(t *testing.T) {
+	isolateHome(t)
+
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(root, "CLAUDE.md"), "ROOT_MARKER instructions\n@docs/extra.md\n")
+	mustWriteFile(t, filepath.Join(root, "docs", "extra.md"), "INCLUDED_MARKER content")
+
+	cwd := filepath.Join(root, "deep", "sub", "dir")
+	mustWriteFile(t, filepath.Join(cwd, "AGENTS.md"), "CWD_MARKER agent instructions")
+
+	got, err := LoadContextFiles(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, marker := range []string{"ROOT_MARKER", "INCLUDED_MARKER", "CWD_MARKER"} {
+		if !strings.Contains(got, marker) {
+			t.Fatalf("expected %s in output, got %q", marker, got)
+		}
+	}
+	// The raw @-include line must not survive verbatim - it should have been
+	// replaced by the included content.
+	if strings.Contains(got, "@docs/extra.md") {
+		t.Fatalf("include line was not inlined: %q", got)
+	}
+	// git root content precedes cwd content (cache-stability ordering).
+	if strings.Index(got, "ROOT_MARKER") > strings.Index(got, "CWD_MARKER") {
+		t.Fatalf("expected root content before cwd content, got %q", got)
+	}
+}
+
+// TestLoadContextFilesDedupWhenCwdIsGitRoot covers the dedup rule: when cwd
+// IS the git root, its CLAUDE.md must be emitted exactly once, not twice.
+func TestLoadContextFilesDedupWhenCwdIsGitRoot(t *testing.T) {
+	isolateHome(t)
+
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(root, "CLAUDE.md"), "ONLY_ONCE_MARKER")
+
+	got, err := LoadContextFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(got, "ONLY_ONCE_MARKER"); n != 1 {
+		t.Fatalf("expected ONLY_ONCE_MARKER exactly once, got %d in %q", n, got)
+	}
+}
+
+// TestLoadContextFilesCycleTerminates is the brief's named scenario:
+// a.md @-> b.md @-> a.md must terminate rather than hang or stack overflow,
+// and produce the missing/cycle marker.
+func TestLoadContextFilesCycleTerminates(t *testing.T) {
+	isolateHome(t)
+
+	cwd := t.TempDir()
+	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "@a.md")
+	mustWriteFile(t, filepath.Join(cwd, "a.md"), "@b.md")
+	mustWriteFile(t, filepath.Join(cwd, "b.md"), "@a.md")
+
+	got, err := LoadContextFiles(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "[missing include:") {
+		t.Fatalf("expected a missing/cycle marker, got %q", got)
+	}
+}
+
+// TestLoadContextFilesMissingInclude covers a single dangling @-reference: it
+// must become the literal marker, not an error.
+func TestLoadContextFilesMissingInclude(t *testing.T) {
+	isolateHome(t)
+
+	cwd := t.TempDir()
+	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "before\n@nope.md\nafter")
+
+	got, err := LoadContextFiles(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "[missing include: nope.md]") {
+		t.Fatalf("expected missing-include marker, got %q", got)
+	}
+}
+
+// TestLoadContextFilesDepthCapTerminates builds a long include chain (well
+// past the depth-5 cap) with no cycle at all, to prove the cap itself - not
+// just cycle detection - bounds recursion. The deepest file's content must
+// not surface, and a marker must appear instead.
+func TestLoadContextFilesDepthCapTerminates(t *testing.T) {
+	isolateHome(t)
+
+	cwd := t.TempDir()
+	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "@chain0.md")
+	const chainLen = 10
+	for i := 0; i < chainLen; i++ {
+		mustWriteFile(t, filepath.Join(cwd, "chain"+strconv.Itoa(i)+".md"), "@chain"+strconv.Itoa(i+1)+".md")
+	}
+	mustWriteFile(t, filepath.Join(cwd, "chain"+strconv.Itoa(chainLen)+".md"), "UNREACHABLE_LEAF_MARKER")
+
+	got, err := LoadContextFiles(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "UNREACHABLE_LEAF_MARKER") {
+		t.Fatalf("depth cap did not bound recursion, leaf content leaked: %q", got)
+	}
+	if !strings.Contains(got, "[missing include:") {
+		t.Fatalf("expected depth-cap marker, got %q", got)
+	}
+}
+
+// TestLoadContextFilesLogsNonNotExistStatError covers loadInstructionFile's
+// doc comment ("could not be read for any other reason ... logged, not
+// silently dropped"): a stat error other than "does not exist" - here,
+// ENOTDIR from a path whose parent component is a regular file, not a
+// directory, which is portable and doesn't depend on running as
+// non-root - must be logged, not just mapped to the empty-string "absent"
+// result used for the ordinary missing-file case.
+func TestLoadContextFilesLogsNonNotExistStatError(t *testing.T) {
+	isolateHome(t)
+	logged := captureSlog(t)
+
+	cwd := t.TempDir()
+	// A regular file where CLAUDE.md's parent directory would need to be:
+	// stat-ing "notadir/CLAUDE.md" fails with ENOTDIR, not ENOENT.
+	notADir := filepath.Join(cwd, "notadir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadContextFiles(filepath.Join(notADir, "sub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("expected no content from an unreadable path, got %q", got)
+	}
+	if !strings.Contains(logged.String(), "failed to stat instruction file") {
+		t.Fatalf("expected the stat error to be logged, got %q", logged.String())
+	}
+}
+
+// TestLoadContextFilesLogsNonNotExistIncludeStatError is
+// TestLoadContextFilesLogsNonNotExistStatError's counterpart for
+// resolveInclude's own os.Stat call: an @-include target whose parent path
+// component is a regular file must log the stat error (not just emit the
+// silent missing-include marker) - matching the analogous top-level
+// instruction file case above.
+func TestLoadContextFilesLogsNonNotExistIncludeStatError(t *testing.T) {
+	isolateHome(t)
+	logged := captureSlog(t)
+
+	cwd := t.TempDir()
+	notADir := filepath.Join(cwd, "notadir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "before\n@notadir/CLAUDE.md\nafter")
+
+	got, err := LoadContextFiles(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "[missing include: notadir/CLAUDE.md]") {
+		t.Fatalf("expected missing-include marker for the unreadable target, got %q", got)
+	}
+	if !strings.Contains(logged.String(), "failed to stat include target") {
+		t.Fatalf("expected the stat error to be logged, got %q", logged.String())
+	}
+}
