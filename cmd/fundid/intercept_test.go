@@ -1,15 +1,13 @@
-package intercept_test
+package main
 
 import (
 	"encoding/json"
 	"testing"
-
-	"go.graveland.dev/rafiki/pkg/intercept"
 )
 
 func TestInspect_NewSession(t *testing.T) {
 	frame := []byte(`{"type":"new_session","id":"x"}`)
-	got, ok := intercept.Inspect(frame)
+	got, ok := inspect(frame)
 	if !ok {
 		t.Fatal("expected intercept")
 	}
@@ -20,7 +18,7 @@ func TestInspect_NewSession(t *testing.T) {
 
 func TestInspect_SwitchSession(t *testing.T) {
 	frame := []byte(`{"type":"switch_session","id":"y","sessionPath":"/path"}`)
-	got, ok := intercept.Inspect(frame)
+	got, ok := inspect(frame)
 	if !ok || got.Type != "switch_session" || got.SessionPath != "/path" {
 		t.Fatalf("got %+v ok=%v", got, ok)
 	}
@@ -34,7 +32,7 @@ func TestInspect_PassThrough(t *testing.T) {
 		`{"not":"json"}`,
 		``,
 	} {
-		_, ok := intercept.Inspect([]byte(f))
+		_, ok := inspect([]byte(f))
 		if ok {
 			t.Fatalf("expected no intercept for %q", f)
 		}
@@ -42,7 +40,7 @@ func TestInspect_PassThrough(t *testing.T) {
 }
 
 func TestSynthesizeResponse_Shape(t *testing.T) {
-	got := intercept.SynthesizeResponse("new_session", "req-1")
+	got := synthesizeResponse("new_session", "req-1")
 	var parsed struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`

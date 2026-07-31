@@ -1,28 +1,28 @@
-package intercept
+package main
 
 import (
 	"encoding/json"
 	"fmt"
 )
 
-type InterceptType string
+type interceptType string
 
 const (
-	InterceptNewSession    InterceptType = "new_session"
-	InterceptSwitchSession InterceptType = "switch_session"
+	interceptNewSession    interceptType = "new_session"
+	interceptSwitchSession interceptType = "switch_session"
 )
 
-type Decision struct {
-	Type        InterceptType
+type interceptDecision struct {
+	Type        interceptType
 	PiRequestID string
 	SessionPath string // for switch_session only
 }
 
-// Inspect decodes a ctrl_send frame payload and returns a Decision if the
+// inspect decodes a ctrl_send frame payload and returns a interceptDecision if the
 // command should be intercepted rather than forwarded to pi.
-func Inspect(frame []byte) (Decision, bool) {
+func inspect(frame []byte) (interceptDecision, bool) {
 	if len(frame) == 0 {
-		return Decision{}, false
+		return interceptDecision{}, false
 	}
 	var hdr struct {
 		Type        string `json:"type"`
@@ -30,28 +30,28 @@ func Inspect(frame []byte) (Decision, bool) {
 		SessionPath string `json:"sessionPath"`
 	}
 	if err := json.Unmarshal(frame, &hdr); err != nil {
-		return Decision{}, false
+		return interceptDecision{}, false
 	}
 	switch hdr.Type {
 	case "new_session":
-		return Decision{
-			Type:        InterceptNewSession,
+		return interceptDecision{
+			Type:        interceptNewSession,
 			PiRequestID: hdr.ID,
 		}, true
 	case "switch_session":
-		return Decision{
-			Type:        InterceptSwitchSession,
+		return interceptDecision{
+			Type:        interceptSwitchSession,
 			PiRequestID: hdr.ID,
 			SessionPath: hdr.SessionPath,
 		}, true
 	}
-	return Decision{}, false
+	return interceptDecision{}, false
 }
 
-// SynthesizeResponse produces the JSON bytes for a fake pi response to an
+// synthesizeResponse produces the JSON bytes for a fake pi response to an
 // intercepted command. The controller sends this to the client in place of a
 // real pi response.
-func SynthesizeResponse(command, piRequestID string) []byte {
+func synthesizeResponse(command, piRequestID string) []byte {
 	type data struct {
 		Cancelled bool `json:"cancelled"`
 	}

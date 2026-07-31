@@ -24,7 +24,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
-	"go.graveland.dev/rafiki/pkg/intercept"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -1466,7 +1465,7 @@ func (c *Controller) emitChildLabeled(childID string, labels map[string]string) 
 func (c *Controller) Send(childID string, frame json.RawMessage) error {
 	// new_session and switch_session are handled via kill+respawn rather than
 	// forwarded to pi (spec §5.1).
-	if decision, ok := intercept.Inspect(frame); ok {
+	if decision, ok := inspect(frame); ok {
 		return c.handleInterceptedSend(childID, decision)
 	}
 
@@ -1526,7 +1525,7 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 // Per-child subscriptions are preserved across the kill+resume cycle so that
 // clients observe a seamless transition. A synthesized pi-level response is
 // delivered to subscribers after the new process is ready.
-func (c *Controller) handleInterceptedSend(childID string, decision intercept.Decision) error {
+func (c *Controller) handleInterceptedSend(childID string, decision interceptDecision) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return &control.ControllerError{
@@ -1588,7 +1587,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision intercept.De
 	// Respawn the child with the same childId, applying the session override
 	// dictated by the intercepted command (spec §5.1).
 	sessionPath := "" // new_session: let pi create a fresh session
-	if decision.Type == intercept.InterceptSwitchSession {
+	if decision.Type == interceptSwitchSession {
 		sessionPath = decision.SessionPath
 	}
 	if _, err := c.RespawnChild(context.Background(), childID, sessionPath); err != nil {
@@ -1599,7 +1598,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision intercept.De
 	// the synthetic pi-level response so subscribers observe the transition.
 	// Wrap in ctrl_event so subscribers see the correct envelope shape (§7.1).
 	c.cm.RestoreSubscribers(childID, savedSubs)
-	synthFrame := intercept.SynthesizeResponse(string(decision.Type), decision.PiRequestID)
+	synthFrame := synthesizeResponse(string(decision.Type), decision.PiRequestID)
 	c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, synthFrame))
 
 	return nil
