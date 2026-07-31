@@ -685,11 +685,18 @@ func (c *Controller) activateLiveChild(
 		if err := c.writeRecord(childID); err != nil {
 			slog.Warn("write state record (after idle)", "childId", childID, "error", err)
 		}
-		// Emit the spawning→idle transition. handleStatusChange also fixes the
-		// byStatus index that Insert left at StatusSpawning.
-		if !stalled {
-			c.handleStatusChange(childID, protocol.StatusIdle, protocol.StatusSpawning)
-		}
+		// Emit the spawning→idle transition — by draining what the child
+		// actually recorded, not by asserting the pair, so this cannot disagree
+		// with the state machine. handleStatusChange also fixes the byStatus
+		// index that Insert left at StatusSpawning.
+		//
+		// Draining HERE, before monitorChild starts, is what keeps the status
+		// visible in the store by the time Spawn returns. The stalled case needs
+		// no guard of its own: a child that never reached idle recorded no
+		// transition, so this emits nothing and the record stays spawning, and a
+		// child that reached idle just after the timeout expired is now reported
+		// correctly instead of being silently left as spawning.
+		c.drainChildStatus(childID, ch)
 
 		go c.monitorChild(childID, ch)
 
@@ -774,6 +781,15 @@ func (c *Controller) activateLiveChild(
 		PiBinary:           piBin,
 		ExtraArgs:          snap.ExtraArgs,
 	}
+	// Discard the transitions the new process made while starting up, rather
+	// than emitting them. sess above captured ch.Status() directly, so the
+	// record this path inserts is ALREADY post-idle: no subscriber ever saw the
+	// resumed child as spawning, and announcing spawning→idle after the
+	// ctrl_child_spawned below would describe a transition none of them could
+	// have observed. This is the one place a transition is deliberately dropped,
+	// and it drops nothing a consumer is owed. Anything recorded after this
+	// point is still delivered — monitorChild's wake survives the drain.
+	ch.DrainTransitions()
 	c.st.Insert(sess)
 	c.cm.Add(childID, ch)
 
@@ -1726,13 +1742,25 @@ func (c *Controller) OnConnectionClose(conn server.Connection) {
 // ─── monitorChild ─────────────────────────────────────────────────────────────
 
 // monitorChild runs as a goroutine for each live child. It forwards bus events
-// to per-child subscribers (wrapped in ctrl_event envelopes per §7.1), tracks
+// to per-child subscribers (wrapped in ctrl_event envelopes per §7.1), delivers
 // status transitions, handles rename detection, model-label updates, and child exit.
+//
+// Status transitions are DRAINED from the child, never sampled off Status().
+// The state machine transitions on the child's readStdout goroutine, which runs
+// far ahead of this loop's consumption of the bus (a JSON header decode per
+// frame versus a store lookup and three subscriber fan-outs), so a turn whose
+// frames arrive in one burst used to complete its whole idle→streaming→idle
+// round trip between two samples and lose BOTH ends of it — a subscriber
+// watching a fast turn saw nothing at all. Draining is loss-free whatever the
+// relative speed of the two goroutines.
 func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	busCh, cancel := ch.Bus().Subscribe()
 	defer cancel()
 
-	lastStatus := ch.Status()
+	// drainChildStatus (below) is the ONLY path from a child-side transition to
+	// handleStatusChange, and once this goroutine is running it is the only
+	// caller, which is what keeps delivery exactly-once.
+	drainStatus := func() { c.drainChildStatus(childID, ch) }
 
 	// Initialise last-known name from the store so we can detect renames.
 	// Initialise last-known model so we can detect model changes (set_model/cycle_model).
@@ -1753,6 +1781,10 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 		case frame, ok := <-busCh:
 			if !ok {
 				// Bus was closed (shouldn't happen in normal operation).
+				// Drain first: a transition recorded just before the bus went
+				// away is still owed to subscribers, and handleChildExit reports
+				// the store's status as last_status.
+				drainStatus()
 				c.handleChildExit(childID, ch)
 				return
 			}
@@ -1765,11 +1797,12 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 				c.cm.DeliverToMatching(childID, snap.Labels, wrapped)
 			}
 
-			// Check for status change and keep store + global subs in sync.
-			if newStatus := ch.Status(); newStatus != lastStatus {
-				c.handleStatusChange(childID, newStatus, lastStatus)
-				lastStatus = newStatus
-			}
+			// Emit any status transitions this frame (or an earlier one) caused,
+			// keeping store + subscribers in sync. Draining here rather than only
+			// on the StatusChanged wake keeps a status change behind the frames
+			// that produced it in the common case: handleFrame records a
+			// transition only after publishing the frame that caused it.
+			drainStatus()
 
 			// Detect session name changes produced by the sniffer. The sniffer
 			// updates Metadata().SessionName when set_session_name completes.
@@ -1809,6 +1842,14 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 				slashSynced = true
 			}
 
+		case <-ch.StatusChanged():
+			// A transition was recorded without a bus frame following it — the
+			// last one of a turn, or one made off the readStdout goroutine
+			// (NotifyExtensionUIResponse). Without this wake it would sit in the
+			// queue until the next frame arrived, which for a child that has gone
+			// quiet is never.
+			drainStatus()
+
 		case <-ch.Done():
 			// Drain any frames that arrived before the done signal.
 			drained := false
@@ -1828,6 +1869,13 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 					drained = true
 				}
 			}
+			// Then the transitions those frames caused, BEFORE handleChildExit:
+			// a transition recorded just before exit is still owed to
+			// subscribers, and after handleChildExit it would be unreachable
+			// (cm.Remove clears the per-child subscriber list) as well as
+			// announced after ctrl_child_exited. Draining first also means the
+			// exit event's last_status reflects the child's real final status.
+			drainStatus()
 			c.handleChildExit(childID, ch)
 			return
 		}
@@ -1845,6 +1893,17 @@ func wrapCtrlEvent(childID string, raw []byte) []byte {
 	}
 	b, _ := json.Marshal(env)
 	return b
+}
+
+// drainChildStatus emits every status transition the child has queued, oldest
+// first. It is used by activateLiveChild to flush the startup transitions
+// synchronously, before monitorChild takes over draining for the rest of the
+// child's life. Only one goroutine drains a given child at a time: this call
+// completes before `go c.monitorChild` starts.
+func (c *Controller) drainChildStatus(childID string, ch *child.Child) {
+	for _, t := range ch.DrainTransitions() {
+		c.handleStatusChange(childID, t.To, t.From)
+	}
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {

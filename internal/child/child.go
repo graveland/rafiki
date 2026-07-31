@@ -189,11 +189,31 @@ type Child struct {
 
 	sm       *StateMachine
 	provider ProtocolProvider
-	// metaMu protects meta and sm to allow Status()/Metadata() concurrent reads.
-	metaMu   sync.Mutex
-	meta     SnifferMetadata
-	idle     chan struct{}
-	idleOnce sync.Once
+	// metaMu protects meta, sm and transitions to allow Status()/Metadata()
+	// concurrent reads.
+	metaMu sync.Mutex
+	meta   SnifferMetadata
+	// transitions is the queue of status changes the state machine has made but
+	// nobody has consumed yet, appended under metaMu — the lock that already
+	// guards the SM, so a transition and its record are one atomic step — and
+	// emptied by DrainTransitions. Unbounded on purpose: the producer is our own
+	// state machine, bounded by the child's event rate, and the consumer is
+	// monitorChild, which lives as long as the child and is woken on every
+	// record. Capping it would mean dropping transitions, which is the very bug
+	// this queue exists to fix.
+	transitions []Transition
+	// transitionCh is a capacity-1 wake for the consumer. It carries no data —
+	// the queue does. This is what makes delivery prompt as well as loss-free:
+	// draining only on bus frames would strand a turn's final streaming→idle
+	// transition until the NEXT frame arrived, which for a child that has gone
+	// quiet is never. It also cannot be a data channel: a bounded one would
+	// either block the state machine or drop transitions, and the bus already
+	// demonstrates the second failure mode (Publish drops on a full subscriber
+	// buffer, so a status frame ON the bus would be lossy under exactly the
+	// burst this fix is about).
+	transitionCh chan struct{}
+	idle         chan struct{}
+	idleOnce     sync.Once
 }
 
 // Spawn validates the spec, starts the pi binary, and launches the supervise
@@ -247,6 +267,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		ring:         ring.New(ring.Options{}),
 		sm:           NewStateMachine(),
 		provider:     prov,
+		transitionCh: make(chan struct{}, 1),
 		idle:         make(chan struct{}),
 		abandonAfter: abandonTimeout,
 	}
@@ -316,10 +337,66 @@ func (c *Child) Status() protocol.Status {
 	return c.sm.Current()
 }
 
+// recordTransition queues a status change for DrainTransitions and wakes the
+// consumer. changed/prev are exactly what the StateMachine's On* methods
+// return, so a no-op call (changed==false) is free and every caller can pass
+// the result through without branching.
+//
+// Callers MUST hold metaMu, so that the transition is queued in the same
+// critical section that made it: two goroutines transitioning concurrently can
+// then never record their changes in the opposite order to the one the state
+// machine applied them in.
+func (c *Child) recordTransition(changed bool, prev protocol.Status) {
+	if !changed {
+		return
+	}
+	c.transitions = append(c.transitions, Transition{From: prev, To: c.sm.Current()})
+	// Non-blocking: a wake already pending covers this record too, since the
+	// consumer drains the whole queue per wake. Deliberately does NOT consume
+	// from the channel anywhere but the consumer's select — a spurious wake with
+	// an empty queue is a no-op, whereas swallowing a wake would strand a
+	// transition.
+	select {
+	case c.transitionCh <- struct{}{}:
+	default:
+	}
+}
+
+// StatusChanged returns a channel that receives a value whenever one or more
+// status transitions have been queued. Consumers must call DrainTransitions to
+// read them; the channel carries no data and may fire spuriously (an empty
+// drain is harmless).
+func (c *Child) StatusChanged() <-chan struct{} { return c.transitionCh }
+
+// DrainTransitions removes and returns every queued status transition, oldest
+// first. Safe to call concurrently; returns nil when there is nothing queued.
+//
+// Every transition the child makes on its own goroutines is queued here, so a
+// consumer that drains — rather than comparing Status() against a remembered
+// value — cannot miss one. The single exception is BeginShutdown; see its doc.
+func (c *Child) DrainTransitions() []Transition {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	if len(c.transitions) == 0 {
+		return nil
+	}
+	// Hand the backing array to the caller rather than copying; a fresh nil
+	// slice also drops the accumulated capacity.
+	out := c.transitions
+	c.transitions = nil
+	return out
+}
+
 // BeginShutdown transitions the state machine to shutting_down. It is called
 // by the controller before invoking Shutdown() so that status-change events
 // can be emitted before the graceful-shutdown sequence begins. Returns whether
 // the transition occurred and the previous status. Safe to call concurrently.
+//
+// This transition is deliberately NOT queued for DrainTransitions. It is the
+// one transition the controller makes itself rather than observes: it gets
+// (changed, prev) back here and emits the status event synchronously, before
+// starting the shutdown sequence, which is the ordering its callers depend on.
+// Queueing it as well would deliver that one status change twice.
 func (c *Child) BeginShutdown() (changed bool, prev protocol.Status) {
 	c.metaMu.Lock()
 	defer c.metaMu.Unlock()
@@ -414,7 +491,7 @@ func (c *Child) StderrSnapshot() []byte {
 func (c *Child) NotifyExtensionUIResponse(id string) {
 	c.metaMu.Lock()
 	defer c.metaMu.Unlock()
-	c.sm.OnExtensionUIResponse(id)
+	c.recordTransition(c.sm.OnExtensionUIResponse(id))
 }
 
 // Metadata returns the most recently sniffed session/model metadata.
@@ -452,7 +529,7 @@ func (c *Child) supervise() {
 	// out (stalled), and the store status would never advance.
 	if c.provider.ReadyOnSpawn() {
 		c.metaMu.Lock()
-		c.sm.OnFirstResponse()
+		c.recordTransition(c.sm.OnFirstResponse())
 		c.metaMu.Unlock()
 		c.idleOnce.Do(func() { close(c.idle) })
 	}
@@ -627,7 +704,7 @@ func (c *Child) handleFrame(line []byte) {
 	c.metaMu.Lock()
 
 	if res.FirstResponse {
-		c.sm.OnFirstResponse()
+		c.recordTransition(c.sm.OnFirstResponse())
 	}
 
 	if res.HasMeta {
@@ -652,11 +729,12 @@ func (c *Child) handleFrame(line []byte) {
 	for _, e := range res.Events {
 		switch e.Type {
 		case "auto_retry_start":
+			// Informational only; OnAutoRetryStart makes no transition.
 			c.sm.OnAutoRetryStart(e.RetryError)
 		case "extension_ui_request":
-			c.sm.OnPiEvent(e.Type, e.UI)
+			c.recordTransition(c.sm.OnPiEvent(e.Type, e.UI))
 		default:
-			c.sm.OnPiEvent(e.Type, nil)
+			c.recordTransition(c.sm.OnPiEvent(e.Type, nil))
 		}
 	}
 

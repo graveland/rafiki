@@ -6,6 +6,23 @@ package child
 
 import "git.graveland.dev/brent/fundi/protocol"
 
+// Transition is one status change, recorded at the moment the state machine
+// made it. It exists because a status change CANNOT be recovered by sampling
+// Status() later: the state machine runs on the child's readStdout goroutine,
+// which is much cheaper per frame than the controller's monitor goroutine
+// (a JSON header decode versus a store lookup plus three subscriber fan-outs),
+// so a turn whose frames arrive in one burst completes its whole
+// idle→streaming→idle round trip between two samples and both ends of it are
+// simply gone. Recording each transition into Child's queue is what makes the
+// sequence loss-free regardless of the relative speed of the two goroutines.
+//
+// It carries no timestamp: the consumer stamps the event as it delivers it, and
+// the wake on every record makes that effectively the transition time anyway.
+type Transition struct {
+	From protocol.Status
+	To   protocol.Status
+}
+
 // PiUIRequestMeta carries the minimum fields needed from an
 // extension_ui_request event to make the dialog/fire-and-forget decision.
 type PiUIRequestMeta struct {
