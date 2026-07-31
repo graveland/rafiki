@@ -516,10 +516,11 @@ func (c *Client) primaryGate(primary Upstream, fallbacks []Upstream, now time.Ti
 
 // recordPrimaryResult mirrors callModel's post-attempt breaker bookkeeping so
 // both the non-streaming and streaming send paths learn from the SAME rule:
-// success closes an open breaker; a retryable failure trips/extends it; a
-// non-retryable failure (bad auth, malformed request) is left alone since it
-// says nothing about whether the primary itself is healthy. No-op when
-// breaker is nil (the bypass case from primaryGate).
+// success closes an open breaker; a failover-worthy failure (retryable, or an
+// out-of-credit account) trips/extends it; any other failure (bad auth,
+// malformed request) is left alone since it says nothing about whether the
+// primary itself is healthy. No-op when breaker is nil (the bypass case from
+// primaryGate).
 func recordPrimaryResult(breaker *routing.Breaker, now time.Time, err error) {
 	if breaker == nil {
 		return
@@ -528,7 +529,7 @@ func recordPrimaryResult(breaker *routing.Breaker, now time.Time, err error) {
 		breaker.RecordResult(now, false)
 		return
 	}
-	if routing.Retryable(err) {
+	if routing.FailoverWorthy(err) {
 		breaker.RecordResult(now, true)
 	}
 }
@@ -558,8 +559,8 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 		if err == nil {
 			return resp, primary, nil
 		}
-		if !routing.Retryable(err) {
-			return nil, primary, err // non-retryable: don't fail over or trip
+		if !routing.FailoverWorthy(err) {
+			return nil, primary, err // not failover-worthy: don't fail over or trip
 		}
 		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", err.Error())))
 		c.logger.Warn("primary failed; failing over", "primary", string(primary), "error", err)

@@ -3,6 +3,7 @@
 package routing
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -37,6 +38,64 @@ func ClassifyFailure(statusCode int, err error) bool {
 	}
 	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
 }
+
+// creditMarkers identify an account-level billing rejection in a provider's
+// error body. Matched case-insensitively as substrings, because providers
+// return these as prose inside error.message with no machine-readable code
+// distinguishing them from any other invalid_request_error:
+//
+//	{"type":"error","error":{"type":"invalid_request_error","message":
+//	 "Your credit balance is too low to access the Anthropic API. ..."}}
+var creditMarkers = []string{
+	"credit balance is too low", // Anthropic (400 invalid_request_error)
+	"insufficient credits",      // OpenRouter (402)
+	"insufficient_quota",        // OpenAI-shaped upstreams
+}
+
+// CreditExhausted reports whether an upstream rejection is an account-level
+// billing failure — the account is out of credit, so the SAME request will
+// fail identically until a human tops it up.
+//
+// This is deliberately NOT folded into ClassifyFailure: retrying the primary
+// is pointless here (unlike a 5xx blip), but the primary IS unusable, so
+// failing over to the fallback and tripping the breaker is exactly right.
+// Callers must therefore treat it as "fail over now, without retrying".
+//
+// Restricted to the statuses providers actually use for billing rejections,
+// so an unrelated 4xx whose body happens to quote one of these phrases (an
+// echoed prompt, say) can't masquerade as one.
+func CreditExhausted(statusCode int, body []byte) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusPaymentRequired, http.StatusForbidden:
+	default:
+		return false
+	}
+	lower := bytes.ToLower(body)
+	for _, m := range creditMarkers {
+		if bytes.Contains(lower, []byte(m)) {
+			return true
+		}
+	}
+	return false
+}
+
+// creditExhausted is the SDK-error counterpart of CreditExhausted, reading the
+// rejection body off an *anthropic.Error. RawJSON (not Error(), which
+// dereferences Request/Response) so a status-only error value is safe.
+func creditExhausted(err error) bool {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return CreditExhausted(apiErr.StatusCode, []byte(apiErr.RawJSON()))
+}
+
+// FailoverWorthy reports whether an SDK error means the primary should be
+// abandoned for the fallback chain (and the breaker tripped): a retryable
+// failure, or a credit-exhausted account. It is the SDK path's single
+// failover gate — Retryable alone would strand every caller on a primary that
+// cannot answer until someone pays the bill.
+func FailoverWorthy(err error) bool { return retryable(err) || creditExhausted(err) }
 
 // Retryable classifies an Anthropic SDK error, mapping its embedded HTTP
 // status onto ClassifyFailure — the SDK-error counterpart used by the llm

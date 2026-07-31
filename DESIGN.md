@@ -191,6 +191,9 @@ to get caching wrong than right.
 
 - **Routing:** Per-upstream circuit breaker. OpenRouter catalog with live model resolution. Short aliases (`kimi-k3`,
   `deepseek-v4-pro`). Provider pins for open-weight models. Runtime effort adaptation. SSE capture parsing.
+  Failover triggers on a transient primary failure (5xx/429/transport — retried per `routing.RetryBackoffs` first)
+  **and** on an out-of-credit primary account: a 400 that is pointless to retry but leaves the primary unusable, so it
+  fails over immediately and trips the breaker (`routing.CreditExhausted`).
 
 - **Storage:** TimescaleDB hypertable schema for `conversation`, `conversation_turn`, `conversation_msg`. Price-correct
   token cost tracking. Schema migration chain with baseline adoption of existing data.

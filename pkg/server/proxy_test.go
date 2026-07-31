@@ -505,6 +505,108 @@ func TestMessagesProxyFailsOverAfterExhaustingRetries(t *testing.T) {
 	}
 }
 
+// An out-of-credit primary (a 400, so not retryable by status) fails over to
+// OpenRouter immediately — no retry burst against an account that cannot pay
+// for the request — and trips the breaker so the next request skips the
+// primary entirely.
+func TestMessagesProxyFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
+	orig := routing.RetryBackoffs
+	routing.RetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { routing.RetryBackoffs = orig }()
+
+	var primaryCalls int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`)
+	}))
+	defer primary.Close()
+	var orCalls int
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		orCalls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer orSrv.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+	breaker := routing.NewBreaker(15 * time.Minute)
+	p.SetFallback("or-key", orSrv.URL, breaker)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
+	p.ServeHTTP(rec, req)
+
+	if primaryCalls != 1 {
+		t.Errorf("primary calls = %d, want 1 (no retries against an unfunded account)", primaryCalls)
+	}
+	if !strings.Contains(rec.Body.String(), "message_stop") {
+		t.Errorf("client did not get the OR stream: %q", rec.Body.String())
+	}
+	if fs.lastUpstream != "openrouter" {
+		t.Errorf("captured upstream=%q, want openrouter", fs.lastUpstream)
+	}
+	if !breaker.Open() {
+		t.Error("breaker must be open after an out-of-credit primary rejection")
+	}
+
+	// Breaker now open: the next request skips the primary entirely.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
+	p.ServeHTTP(rec2, req2)
+	if primaryCalls != 1 {
+		t.Errorf("primary calls = %d after a second request, want 1 (breaker open)", primaryCalls)
+	}
+	if orCalls != 2 {
+		t.Errorf("openrouter calls = %d, want 2", orCalls)
+	}
+}
+
+// An ordinary 400 is neither retryable nor failover-worthy: it is the caller's
+// own bad request, so it must be surfaced verbatim rather than re-sent to a
+// second provider that would reject it identically.
+func TestMessagesProxyOrdinaryBadRequestDoesNotFailOver(t *testing.T) {
+	const badReq = `{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: must be greater than or equal to 1"}}`
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, badReq)
+	}))
+	defer primary.Close()
+	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("openrouter must not be called for an ordinary bad request")
+	}))
+	defer orSrv.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+	breaker := routing.NewBreaker(15 * time.Minute)
+	p.SetFallback("or-key", orSrv.URL, breaker)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	// The body must survive the classification peek intact.
+	if rec.Body.String() != badReq {
+		t.Errorf("client body = %q, want the upstream rejection verbatim %q", rec.Body.String(), badReq)
+	}
+	if breaker.Open() {
+		t.Error("breaker must stay closed on a caller-caused 400")
+	}
+}
+
 func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("primary must not be called for slash model")

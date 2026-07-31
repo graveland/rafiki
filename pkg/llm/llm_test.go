@@ -79,6 +79,18 @@ func authErr() *anthropic.Error {
 	return e
 }
 
+// creditExhaustedErr fabricates the 400 Anthropic returns when the account has
+// run out of credit: not retryable (the same request fails identically) but
+// failover-worthy.
+func creditExhaustedErr() *anthropic.Error {
+	e := &anthropic.Error{StatusCode: http.StatusBadRequest}
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	e.Request = req
+	e.Response = &http.Response{StatusCode: http.StatusBadRequest}
+	_ = e.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`))
+	return e
+}
+
 func promptTooLargeErr() *anthropic.Error {
 	e := &anthropic.Error{StatusCode: http.StatusBadRequest}
 	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
@@ -174,6 +186,40 @@ func TestSendParamsNonRetryableDoesNotFailOver(t *testing.T) {
 	}
 	if c.Breaker(UpstreamAnthropic).Open() {
 		t.Error("401 must not trip the breaker")
+	}
+}
+
+// An out-of-credit primary is not retryable, but it IS a reason to fail over:
+// the account cannot answer any request until it is funded, so pinning callers
+// to it would strand every send behind a billing problem.
+func TestSendParamsFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
+	primary := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondErr(creditExhaustedErr()),
+	}}
+	fallback := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("from fallback"),
+	}}
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, primary),
+		WithUpstream(UpstreamOpenRouter, fallback),
+		WithBreaker(15*time.Minute),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
+	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params)
+	if err != nil {
+		t.Fatalf("SendParams: %v", err)
+	}
+	if resp.Content[0].Text != "from fallback" {
+		t.Errorf("response = %q, want fallback", resp.Content[0].Text)
+	}
+	if !c.Breaker(UpstreamAnthropic).Open() {
+		t.Error("breaker must be open after an out-of-credit primary rejection")
 	}
 }
 

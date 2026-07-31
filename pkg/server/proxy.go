@@ -376,6 +376,36 @@ func statusOf(resp *http.Response) int {
 	return resp.StatusCode
 }
 
+// primaryOutOfCredit reports whether the primary rejected the request because
+// the account is out of credit. Reading the (small) rejection body is the only
+// way to tell — the status alone is an ordinary 400 — so the body is restored
+// afterwards: the caller may still forward this very response to the client
+// when there is no fallback to fail over to.
+func (p *MessagesProxy) primaryOutOfCredit(resp *http.Response, status int) bool {
+	if resp == nil || status < 400 {
+		return false
+	}
+	orig := resp.Body
+	raw, rerr := io.ReadAll(orig)
+	// Restore the buffered bytes, keeping the ORIGINAL Closer: the caller
+	// still owns closing this response, and a NopCloser here would leak the
+	// upstream connection on every path that forwards or discards it.
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{bytes.NewReader(raw), orig}
+	if rerr != nil {
+		// A partial read still classifies (the marker is early in the body);
+		// note it so a truncated rejection isn't a silent mystery later.
+		p.logger.Warn("proxy: reading primary rejection body failed", "status", status, "bytes", len(raw), "error", rerr)
+	}
+	if !routing.CreditExhausted(status, raw) {
+		return false
+	}
+	p.logger.Warn("proxy: primary account is out of credit; failing over", "status", status, "body", boundedErrorBody(raw))
+	return true
+}
+
 // selectUpstream routes the request and returns the upstream response. A slash
 // (OpenRouter-native) model goes straight to OpenRouter; otherwise the breaker
 // picks the Anthropic primary — retrying a retryable failure per
@@ -404,6 +434,13 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		}
 		status := statusOf(resp)
 		primaryFailed := routing.ClassifyFailure(status, err)
+		// An out-of-credit rejection is a 400, so ClassifyFailure (rightly)
+		// says "not retryable" — the identical request will be rejected the
+		// same way until someone tops up the account. But the primary IS
+		// unusable, which is precisely what the fallback is for: fail over
+		// immediately, skipping a retry burst that could only burn the backoff
+		// schedule on a guaranteed rejection.
+		outOfCredit := !primaryFailed && p.primaryOutOfCredit(resp, status)
 		// A retryable primary failure is usually a transient blip, not an
 		// outage — retry a few times before failing over to OpenRouter, so we
 		// don't lose Anthropic prompt-cache locality on noise.
@@ -422,13 +459,16 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			status = statusOf(resp)
 			primaryFailed = routing.ClassifyFailure(status, err)
 		}
-		p.breaker.RecordResult(now, primaryFailed)
-		if !primaryFailed || p.orKey == "" {
+		// Both an exhausted retry budget and an out-of-credit account trip the
+		// breaker: each means "stop sending traffic to the primary", and the
+		// breaker's periodic probe is what notices the account is funded again.
+		p.breaker.RecordResult(now, primaryFailed || outOfCredit)
+		if (!primaryFailed && !outOfCredit) || p.orKey == "" {
 			return resp, "anthropic", err, false
 		}
 		// Failing over to OpenRouter. Log it (mirrors core.go's in-process path) so
 		// an Anthropic outage masked by a successful failover isn't invisible.
-		p.logger.Warn("proxy: primary failed, failing over to openrouter", "status", status, "error", err)
+		p.logger.Warn("proxy: primary failed, failing over to openrouter", "status", status, "out_of_credit", outOfCredit, "error", err)
 		if resp != nil {
 			resp.Body.Close()
 		}
