@@ -45,7 +45,16 @@ func newCapturingSender(t *testing.T, bodies ...string) *capturingSender {
 }
 
 // New records params, then returns the next scripted message.
-func (s *capturingSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+//
+// It honours ctx BEFORE recording, for the same reason fakeSender.New does
+// (see faketurns.go) and one more besides: a real HTTP sender never issues the
+// request at all on a cancelled context, so an aborted iteration must leave no
+// trace in captured. That is what lets a test assert "the aborted turn made no
+// further API call" by counting captured requests.
+func (s *capturingSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.captured = append(s.captured, params)
@@ -55,6 +64,14 @@ func (s *capturingSender) New(_ context.Context, params anthropic.MessageNewPara
 	msg := s.turns[s.next]
 	s.next++
 	return msg, nil
+}
+
+// callCount reports how many requests this sender actually served. A request
+// that never went out (cancelled context) is not counted — see New.
+func (s *capturingSender) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.captured)
 }
 
 // lastParams returns the params of the most recent New call, failing the

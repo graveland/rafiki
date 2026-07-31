@@ -54,7 +54,20 @@ func LoadFakeSender(path string) (llm.Sender, error) {
 
 // New returns the next scripted message. Safe for concurrent use; the agent
 // loop is sequential, but nothing in the Sender contract promises that.
-func (s *fakeSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+//
+// It honours ctx, which is not a formality. rafiki's agentloop.drive does not
+// check ctx.Err() between iterations, so a sender that ignores its context
+// answers one more iteration after an abort and the turn completes with a nil
+// error. That made Engine.runTurn's abort branch — RepairOrphans included,
+// whose whole job is to stop the NEXT API call being rejected for a dangling
+// tool_use — unreachable from every fake-turns test, and it silently consumed a
+// scripted message the aborted turn should never have seen. A real HTTP sender
+// fails on a cancelled context; this one has to as well, or the harness is
+// testing a loop that does not exist in production.
+func (s *fakeSender) New(ctx context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.next >= len(s.turns) {

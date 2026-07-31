@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -87,11 +88,15 @@ func waitForMarker(t *testing.T, path string, timeout time.Duration) {
 // waitForEventAfter polls sc's event buffer starting at index from until it
 // finds a frame matching predicate, returning that frame and the index just
 // past it. Unlike subConn.waitForEvent (which always scans from the start),
-// this lets a caller require a *new* occurrence of a status that has already
-// fired once before - status transitions like "streaming"/"idle" repeat
-// across multiple prompts on the same child, so plain "first match anywhere
-// in history" semantics would let a later wait succeed instantly on a stale
-// frame from an earlier round.
+// this lets a caller require a *new* occurrence of something that has already
+// fired once before - agent_start/agent_settled repeat across every prompt on
+// the same child, so plain "first match anywhere in history" semantics would
+// let a later wait succeed instantly on a stale frame from an earlier round.
+//
+// On timeout it dumps every buffered frame. A wait on a stream of frames that
+// says only "I didn't find it" leaves the reader guessing about which of
+// "never emitted", "emitted before `from`", or "emitted in a different shape"
+// happened, and all three have been live possibilities here.
 func waitForEventAfter(t *testing.T, sc *subConn, from int, predicate func(json.RawMessage) bool, timeout time.Duration) (json.RawMessage, int) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -107,21 +112,98 @@ func waitForEventAfter(t *testing.T, sc *subConn, from int, predicate func(json.
 		sc.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timeout (%v) waiting for event after index %d", timeout, from)
+	sc.mu.Lock()
+	dump := make([]string, 0, len(sc.events))
+	for i, e := range sc.events {
+		dump = append(dump, fmt.Sprintf("  [%d] %s", i, e))
+	}
+	sc.mu.Unlock()
+	t.Fatalf("timeout (%v) waiting for event after index %d; buffered events:\n%s", timeout, from, strings.Join(dump, "\n"))
 	return nil, from
 }
 
-func childStatusPredicate(childID, status string) func(json.RawMessage) bool {
+// childEventPredicate matches a ctrl_event envelope for childID carrying an
+// inner pi event of type eventType.
+//
+// Deliberately NOT a ctrl_child_status predicate, which is what this test used
+// to wait on. Status events are not a reliable witness of a turn: the daemon
+// DERIVES them by sampling ch.Status() once per bus frame monitorChild
+// receives (cmd/fundid/controller.go), while readStdout updates the state
+// machine as it races ahead. A turn short enough to emit all its frames before
+// monitorChild's goroutine is next scheduled therefore completes its entire
+// streaming -> idle round trip between two samples and produces NO status
+// event at all. Measured, not theorised: the second prompt here (a scripted
+// reply with no tool call, so it finishes in about a millisecond) emitted zero
+// status frames in 5-7 runs out of 10, which is precisely why this test was
+// red half the time.
+//
+// The pi events themselves are lossless — every frame readStdout reads is
+// published to the bus — so they are what a turn should be witnessed by. See
+// docs/plans/2026-07-30-phase1a-followups.md for the daemon-side bug.
+func childEventPredicate(childID, eventType string) func(json.RawMessage) bool {
 	return func(f json.RawMessage) bool {
 		var ev struct {
 			Type    string `json:"type"`
 			ChildID string `json:"childId"`
-			Status  string `json:"status"`
+			Event   struct {
+				Type string `json:"type"`
+			} `json:"event"`
 		}
 		if json.Unmarshal(f, &ev) != nil {
 			return false
 		}
-		return ev.Type == protocol.TypeCtrlChildStatus && ev.ChildID == childID && ev.Status == status
+		return ev.Type == protocol.TypeCtrlEvent && ev.ChildID == childID && ev.Event.Type == eventType
+	}
+}
+
+// assistantTextIn returns the assistant message text carried by a
+// message_end ctrl_event for childID, or "" for any other frame. It is how
+// this test proves WHICH scripted turn a prompt consumed.
+func assistantTextIn(childID string, f json.RawMessage) string {
+	var ev struct {
+		Type    string `json:"type"`
+		ChildID string `json:"childId"`
+		Event   struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		} `json:"event"`
+	}
+	if json.Unmarshal(f, &ev) != nil {
+		return ""
+	}
+	if ev.Type != protocol.TypeCtrlEvent || ev.ChildID != childID {
+		return ""
+	}
+	if ev.Event.Type != "message_end" || ev.Event.Message.Role != "assistant" {
+		return ""
+	}
+	for _, b := range ev.Event.Message.Content {
+		if b.Type == "text" && b.Text != "" {
+			return b.Text
+		}
+	}
+	return ""
+}
+
+// assertNoErrorEventBetween fails if any agent_error frame for childID appears
+// in sc's buffered range [from, to). An agent_error in the second prompt's
+// window is the exact signature of the context-blind fake sender bug: the
+// aborted turn had consumed the second scripted message, so the follow-up
+// prompt failed with "scripted turns exhausted".
+func assertNoErrorEventBetween(t *testing.T, sc *subConn, from, to int, childID string) {
+	t.Helper()
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	for i := from; i < to && i < len(sc.events); i++ {
+		if childEventPredicate(childID, "agent_error")(sc.events[i]) {
+			t.Fatalf("agent_error in window [%d,%d): %s", from, to, sc.events[i])
+		}
 	}
 }
 
@@ -277,7 +359,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	}
 
 	eventIdx := 0
-	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusStreaming)), 5*time.Second)
+	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_start"), 5*time.Second)
 
 	// Deterministic happens-before edge: block until the scripted tool has
 	// actually touched its marker file, proving it is genuinely executing
@@ -288,7 +370,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 
 	// Snapshot the event cursor immediately before the abort is sent, so the
 	// restart witness below can scan exactly the window between the abort and
-	// the following idle.
+	// the turn settling.
 	preAbortIdx := eventIdx
 
 	abortJSON := fmt.Sprintf(`{"type":"ctrl_send","id":"a1","childId":%q,"frame":{"type":"abort"}}`, childID)
@@ -298,11 +380,14 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		t.Fatalf("ctrl_send (abort) failed: %+v", r.Error)
 	}
 
-	// The turn must settle back to idle - RepairOrphans cleans up the
-	// dangling tool_use without consuming a second scripted LLM turn.
-	var idleIdx int
-	_, idleIdx = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusIdle)), 10*time.Second)
-	eventIdx = idleIdx
+	// The turn must settle - agent_settled is the child's own "this turn is
+	// over" frame, emitted by the engine's AgentEnd after runTurn's abort arm
+	// has run RepairOrphans. The tool cannot finish on its own (nothing ever
+	// opens the FIFO for writing), so reaching this frame at all is only
+	// possible through the abort.
+	var settledIdx int
+	_, settledIdx = waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_settled"), 10*time.Second)
+	eventIdx = settledIdx
 
 	// KEYSTONE ASSERTION: the abort must NOT have restarted the child.
 	//
@@ -314,9 +399,9 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	// respawn is a real subprocess re-exec (pi, claude) or an in-process
 	// respawn (agent), activateLiveChild's Resume/RespawnChild path re-emits
 	// ctrl_child_spawned for the SAME childID to per-child subscribers (see
-	// cmd/fundid/controller.go), so its absence between the abort and the
-	// following idle states "not restarted" without relying on pid identity.
-	assertNoRestartBetween(t, sc, preAbortIdx, idleIdx, childID)
+	// cmd/fundid/controller.go), so its absence between the abort and the turn
+	// settling states "not restarted" without relying on pid identity.
+	assertNoRestartBetween(t, sc, preAbortIdx, settledIdx, childID)
 
 	raw = d.request(t, getJSON)
 	mustUnmarshal(t, raw, &r)
@@ -340,7 +425,8 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	}
 
 	// Prompt 2: prove the SAME process still works after the abort - this
-	// consumes the fake-turns script's second (plain end_turn) message.
+	// consumes the fake-turns script's second (plain end_turn) message, which
+	// the aborted turn must NOT have eaten.
 	sendJSON2 := fmt.Sprintf(`{"type":"ctrl_send","id":"p2","childId":%q,"frame":{"type":"prompt","message":"anything"}}`, childID)
 	raw = d.request(t, sendJSON2)
 	mustUnmarshal(t, raw, &r)
@@ -348,8 +434,21 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		t.Fatalf("ctrl_send (prompt 2) failed: %+v", r.Error)
 	}
 
-	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusStreaming)), 5*time.Second)
-	_, _ = waitForEventAfter(t, sc, eventIdx, childStatusPredicate(childID, string(protocol.StatusIdle)), 5*time.Second)
+	prePrompt2Idx := eventIdx
+	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_start"), 5*time.Second)
+	// The scripted second turn's assistant text is "done" (see
+	// fakeTurnsScript). Requiring it, rather than just "a turn happened", is
+	// what proves the aborted turn left the script alone: with a fake sender
+	// that ignores its context, the post-abort iteration consumes this very
+	// message and prompt 2 gets "scripted turns exhausted" instead.
+	doneFrame, eventIdx := waitForEventAfter(t, sc, eventIdx, func(f json.RawMessage) bool {
+		return assistantTextIn(childID, f) == "done"
+	}, 5*time.Second)
+	if doneFrame == nil {
+		t.Fatal("no assistant reply for prompt 2")
+	}
+	_, settled2Idx := waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_settled"), 5*time.Second)
+	assertNoErrorEventBetween(t, sc, prePrompt2Idx, settled2Idx, childID)
 
 	// Final PID check: still the same process throughout the second prompt.
 	// Gated on pidBefore != 0 for the same reason as the KEYSTONE ASSERTION

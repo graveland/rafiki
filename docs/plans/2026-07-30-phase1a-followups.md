@@ -7,6 +7,12 @@ reader can disagree with the judgement rather than rediscover the problem.
 Nothing here blocks the merge. The two items under "Needs a decision" are not defects —
 they are choices nobody has made yet.
 
+**Status:** items 1-5 have since been decided and fixed on this branch. Item 1 is bounded at
+10s with the leak made safe (`internal/child`'s `abandonTimeout`/`Child.abandon`); item 2's
+fake senders now honour their context, and the abort branch has a test. Items 3-5 are done.
+The rest of this document stands as written. One NEW item was found while re-measuring item
+2's flake, and it is recorded at the bottom under "Found while fixing the above".
+
 ## Needs a decision (not mine to make)
 
 ### 1. `Child.Shutdown`'s terminal rung is no longer a guaranteed reap
@@ -117,6 +123,47 @@ the reverse of the safe one.
 - **`switch_session` on a claude child passes a pi session *path* to `--resume`**, which
   expects a claude session id. Unchanged by this branch, but newly reachable now that
   `RespawnChild` resolves the kind correctly.
+
+## Found while fixing the above
+
+### `ctrl_child_status` events are SAMPLED, so a fast turn can emit none at all
+
+This is a real daemon bug, not a test artifact, and it — not the context-blind fake sender —
+was the actual cause of `TestIntegration_AgentKind_AbortPreservesProcess` being red half the
+time.
+
+`Child.readStdout` publishes each frame to the bus and *then* applies it to the state machine
+(`handleFrame`). `monitorChild` derives status events by SAMPLING `ch.Status()` once per bus
+frame it receives from its subscription. The two run on different goroutines with a buffered
+channel between them, so `readStdout` routinely races ahead. Consequences, both observed in
+captured event dumps:
+
+- A transition can be reported against the wrong position in the event stream (an `idle`
+  frame emitted while the assistant message that precedes `agent_end` is still being
+  delivered).
+- **A transition can be lost entirely.** If a turn emits all of its frames before
+  `monitorChild`'s goroutine is next scheduled, the state machine completes the whole
+  `idle -> streaming -> idle` round trip between two samples and NO `ctrl_child_status` frame
+  is emitted for that turn. Measured: the second prompt in that test is a scripted reply with
+  no tool call, so it finishes in about a millisecond, and it emitted zero status frames in
+  5-7 runs out of 10.
+
+The store ends up with the correct FINAL status (the last sample sees it), so `ctrl_get` is
+right after the fact. What is unreliable is the live `ctrl_child_status` stream: an attached
+TUI can miss a fast turn's activity indicator completely.
+
+The test was fixed by witnessing turns through the pi event frames instead, which ARE
+lossless — every frame `readStdout` reads is published. That is the correct assertion for
+that test independently of this bug (it was measuring a derived artifact, not the behaviour
+it named), and it took the test from 5/10 failing to 40/40 passing.
+
+**The decision:** the daemon-side fix is to make transitions authoritative rather than
+sampled — have the state machine hand each transition to `monitorChild` through a queue it
+drains, instead of `monitorChild` polling `ch.Status()` per frame. That is a change to the
+status pipeline every kind shares (pi and claude have the same exposure), and it will surface
+transitions that are currently swallowed, so existing controller tests that assert exact
+status sequences may need updating. Deliberately NOT bundled into the phase-1a follow-up wave:
+it is a behaviour change to a shared path, discovered late, on a branch about to merge.
 
 ## Worth keeping from how this was built
 
