@@ -207,7 +207,7 @@ These must reach the **daemon's** environment, not your shell's — see
 `.env.example`, which documents why and how to verify it.
 
 `fundid -h` and `fundid agent -h` document the two daemon process modes;
-`fundi --help` covers the client. See `tasks/pi-controller-protocol.md` for the
+`fundi --help` covers the client. See `docs/reference/pi-controller-protocol.md` for the
 wire protocol spec and `docs/plans/2026-07-20-fundi-design.md` for the
 architecture.
 

@@ -393,7 +393,7 @@ func resetTerminal() {
 }
 
 // knownEventTypes lists pi RPC event types used by --include/--exclude
-// flags on tail and recent. Source: tasks/pi-controller-protocol.md §7 and §10.
+// flags on tail and recent. Source: docs/reference/pi-controller-protocol.md §7 and §10.
 var knownEventTypes = []string{
 	"agent_start", "agent_end",
 	"turn_start", "turn_end",
