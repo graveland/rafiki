@@ -6,9 +6,14 @@
 #   - On `__emit_event:<json>` command, echoes the JSON to stdout as an event.
 #   - On `__exit:<code>`, exits with that code.
 #   - On `{"type":"__ctrl_test_emit",...}`, emits a test event then acks.
+#   - On `{"type":"__ctrl_test_burst"}`, emits $FAKE_PI_BURST_TURNS complete
+#     turns in ONE write (then exits, if $FAKE_PI_BURST_THEN_EXIT is set).
 #   - On EOF, exits 0 after a brief delay (simulating shutdown handlers).
 #
 # Anything else: echoes a generic success response.
+#
+# $FAKE_PI_IGNORE_GET_STATE leaves the readiness probe unanswered, which is how a
+# test reaches the daemon's "stalled" spawn outcome.
 #
 # Session identity:
 #   By default each invocation creates a fresh session using $$ (PID) for
@@ -60,6 +65,12 @@ MODEL="${FAKE_PI_MODEL:-fake/model-1}"
 while IFS= read -r line; do
   case "$line" in
     '{"type":"get_state"'*)
+      if [ -n "$FAKE_PI_IGNORE_GET_STATE" ]; then
+        # Deliberately silent. The daemon's spawn path waits for
+        # response.get_state to release spawning→idle, so swallowing the probe
+        # is how a test reaches the "stalled" spawn outcome.
+        continue
+      fi
       id=$(printf '%s' "$line" | sed -E 's/.*"id":"([^"]*)".*/\1/' 2>/dev/null)
       [ "$id" = "$line" ] && id=""
       printf '{"type":"response","command":"get_state","id":"%s","success":true,"data":{"sessionId":"%s","sessionFile":"%s","sessionName":"%s","model":{"id":"%s","provider":"fake"},"isStreaming":false,"messageCount":0,"thinkingLevel":"medium"}}\n' "$id" "$SESSION_ID" "$SESSION_FILE" "$SESSION_NAME" "$MODEL"
@@ -87,6 +98,31 @@ while IFS= read -r line; do
         printf '{"type":"%s"}\n' "$evt"
       fi
       printf '{"type":"response","command":"__ctrl_test_emit","success":true}\n'
+      ;;
+    '{"type":"__ctrl_test_burst"'*)
+      # Emit $FAKE_PI_BURST_TURNS complete turns (agent_start → agent_settled)
+      # in a SINGLE write, with nothing between them. That is the point: the
+      # whole burst lands in the daemon's stdout pipe at once, so the child's
+      # state machine runs the full idle→streaming→idle round trip for every
+      # turn far faster than the controller's monitor goroutine can consume the
+      # bus. Used by the ctrl_child_status transition-loss test; no ack, so the
+      # burst is the only thing on stdout.
+      turns="${FAKE_PI_BURST_TURNS:-10}"
+      burst=""
+      i=0
+      while [ "$i" -lt "$turns" ]; do
+        burst="${burst}{\"type\":\"agent_start\"}
+{\"type\":\"agent_settled\"}
+"
+        i=$((i+1))
+      done
+      printf '%s' "$burst"
+      # Optionally exit in the same breath, so the process death races the
+      # frames it just wrote. Used to prove the daemon still delivers a
+      # transition recorded immediately before exit.
+      if [ -n "$FAKE_PI_BURST_THEN_EXIT" ]; then
+        exit 0
+      fi
       ;;
     *)
       printf '{"type":"response","success":true}\n'
