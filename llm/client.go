@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -19,8 +21,6 @@ import (
 
 	"github.com/timescale/rafiki/routing"
 	"github.com/timescale/rafiki/store"
-
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 // Client is the long-lived library handle: configured upstreams, per-upstream
@@ -34,7 +34,7 @@ type Client struct {
 	capture  *routing.CaptureStore
 	messages *store.Messages
 	catalog  *routing.ModelCatalog
-	logger   *tslogs.Logger
+	logger   *slog.Logger
 	tracer   trace.Tracer
 
 	breakerWindow time.Duration
@@ -71,7 +71,7 @@ func WithCatalog(cat *routing.ModelCatalog) ClientOption {
 }
 
 // WithLogger sets the library logger; defaults to error-level.
-func WithLogger(l *tslogs.Logger) ClientOption {
+func WithLogger(l *slog.Logger) ClientOption {
 	return func(c *Client) { c.logger = l }
 }
 
@@ -101,11 +101,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		return nil, errors.New("llm: an UpstreamAnthropic sender is required (WithUpstream)")
 	}
 	if c.logger == nil {
-		logger, err := tslogs.NewLogger(tslogs.LevelError, false, "rafiki-llm", 0)
-		if err != nil {
-			return nil, fmt.Errorf("llm: default logger: %w", err)
-		}
-		c.logger = logger
+		c.logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	}
 	if c.tracer == nil {
 		c.tracer = noop.NewTracerProvider().Tracer("github.com/timescale/rafiki/llm")

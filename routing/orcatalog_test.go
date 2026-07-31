@@ -3,6 +3,7 @@
 package routing
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/timescale/rafiki/store"
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 const orFixture = `{"data":[
@@ -28,7 +28,7 @@ func newTestCatalog(t *testing.T, body string) (*ModelCatalog, *httptest.Server)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(body))
 	}))
-	c := NewModelCatalog(srv.Client(), time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(srv.Client(), time.Minute, slog.New(slog.DiscardHandler))
 	c.url = srv.URL // test hook
 	return c, srv
 }
@@ -65,7 +65,7 @@ func TestLatestAlias(t *testing.T) {
 // the catalog resolves to its real dotted OR id with no hardcoded map — so
 // failover stays valid as new models ship (the map-drift bug this fixes).
 func TestOpenRouterModel(t *testing.T) {
-	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "anthropic/claude-haiku-4.5", Created: 1},
 		{ID: "anthropic/claude-sonnet-5", Created: 2},
@@ -100,7 +100,7 @@ func TestOpenRouterModel(t *testing.T) {
 // stamped point release ("-0905") — never a variant fork (-thinking, -code),
 // a new line (kimi-k3.5), or a ~alias.
 func TestResolveNewest(t *testing.T) {
-	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "moonshotai/kimi-k2.6", Created: 10},
 		{ID: "moonshotai/kimi-k3", Created: 20},
@@ -136,7 +136,7 @@ func TestModelAliases(t *testing.T) {
 }
 
 func TestResolveModel(t *testing.T) {
-	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "anthropic/claude-haiku-4.5", Created: 1},
 		{ID: "anthropic/claude-sonnet-5", Created: 2},
@@ -226,7 +226,7 @@ func TestCatalogRefreshCoalesces(t *testing.T) {
 		_, _ = w.Write([]byte(orFixture))
 	}))
 	defer srv.Close()
-	c := NewModelCatalog(srv.Client(), time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(srv.Client(), time.Minute, slog.New(slog.DiscardHandler))
 	c.url = srv.URL
 
 	const n = 8
@@ -244,7 +244,7 @@ func TestCatalogRefreshCoalesces(t *testing.T) {
 }
 
 func TestAllIDs(t *testing.T) {
-	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "openai/gpt-4o", Created: 1},
 		{ID: "anthropic/claude-opus-4.8", Created: 2},
@@ -284,7 +284,7 @@ func TestAutoCompactWindow(t *testing.T) {
 }
 
 func TestContextWindow(t *testing.T) {
-	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "openai/gpt-5-codex", Created: 1, ContextLength: 400000, MaxCompletionTokens: 128000},
 		{ID: "anthropic/claude-sonnet-5", Created: 2, ContextLength: 1000000, MaxCompletionTokens: 64000},
@@ -334,7 +334,7 @@ func TestModelCatalogCache(t *testing.T) {
 	store := &memStore{}
 
 	// Cold cache: one fetch, snapshot persisted to the store.
-	c1 := NewModelCatalog(srv.Client(), time.Hour, tslogs.NewDiscardingLogger())
+	c1 := NewModelCatalog(srv.Client(), time.Hour, slog.New(slog.DiscardHandler))
 	c1.url = srv.URL
 	c1.WithCache(store)
 	if ctxLen, maxComp, ok := c1.ContextWindow("openai/gpt-5-codex"); !ok || ctxLen != 400000 || maxComp != 128000 {
@@ -348,7 +348,7 @@ func TestModelCatalogCache(t *testing.T) {
 	}
 
 	// A fresh process sharing the warm store must not hit the network.
-	c2 := NewModelCatalog(srv.Client(), time.Hour, tslogs.NewDiscardingLogger())
+	c2 := NewModelCatalog(srv.Client(), time.Hour, slog.New(slog.DiscardHandler))
 	c2.url = srv.URL
 	c2.WithCache(store)
 	if ctxLen, _, ok := c2.ContextWindow("openai/gpt-5-codex"); !ok || ctxLen != 400000 {
@@ -369,7 +369,7 @@ func TestModelPricingWireDecode(t *testing.T) {
 		_, _ = w.Write([]byte(wire))
 	}))
 	defer srv.Close()
-	c := NewModelCatalog(srv.Client(), time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(srv.Client(), time.Minute, slog.New(slog.DiscardHandler))
 	c.url = srv.URL
 	c.Warm()
 
@@ -387,7 +387,7 @@ func TestModelPricingWireDecode(t *testing.T) {
 }
 
 func TestPricing(t *testing.T) {
-	c := NewModelCatalog(nil, time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	sonnet := ModelPricing{PromptUSD: 0.000002, CompletionUSD: 0.00001, CacheReadUSD: 0.0000002, CacheWriteUSD: 0.0000025}
 	c.SeedForTest([]CatalogEntry{
 		{ID: "anthropic/claude-sonnet-5", Created: 2, Pricing: &sonnet},
@@ -459,7 +459,7 @@ func TestFetchBackoff(t *testing.T) {
 		_, _ = w.Write([]byte("not json")) // decode fails → recorded failure
 	}))
 	defer srv.Close()
-	c := NewModelCatalog(srv.Client(), time.Minute, tslogs.NewDiscardingLogger())
+	c := NewModelCatalog(srv.Client(), time.Minute, slog.New(slog.DiscardHandler))
 	c.url = srv.URL
 	for range 5 {
 		c.Warm() // each would refresh; backoff must cap fetches to one

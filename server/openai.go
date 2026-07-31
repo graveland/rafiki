@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/timescale/rafiki/routing"
 	"github.com/timescale/rafiki/store"
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 // OpenAIUpstream is one configured /v1/chat/completions target.
@@ -45,11 +45,11 @@ type ChatCompletionsProxy struct {
 	routes     []OpenAIRoute
 	defaultUp  string
 	httpClient *http.Client
-	logger     *tslogs.Logger
+	logger     *slog.Logger
 	metrics    *Metrics
 }
 
-func NewChatCompletionsProxy(cs *routing.CaptureStore, auth Authenticator, upstreams []OpenAIUpstream, routes []OpenAIRoute, defaultUpstream string, logger *tslogs.Logger) *ChatCompletionsProxy {
+func NewChatCompletionsProxy(cs *routing.CaptureStore, auth Authenticator, upstreams []OpenAIUpstream, routes []OpenAIRoute, defaultUpstream string, logger *slog.Logger) *ChatCompletionsProxy {
 	ups := make(map[string]OpenAIUpstream, len(upstreams))
 	for _, u := range upstreams {
 		ups[u.Name] = u

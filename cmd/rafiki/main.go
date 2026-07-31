@@ -16,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,8 +35,6 @@ import (
 	"github.com/timescale/rafiki/routing"
 	"github.com/timescale/rafiki/server"
 	"github.com/timescale/rafiki/store"
-
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 func main() {
@@ -99,10 +98,7 @@ func serveCmd(args []string) error {
 	dev := fs.Bool("dev", false, "dev mode: auto-migrate, accept token \"dev\"")
 	_ = fs.Parse(args)
 
-	logger, err := tslogs.NewLogger(tslogs.LevelInfo, false, "rafiki", 0)
-	if err != nil {
-		return err
-	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
 	if anthropicKey == "" {

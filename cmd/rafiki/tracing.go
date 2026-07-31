@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -16,8 +17,6 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
-
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 var propagator = propagation.TraceContext{}
@@ -26,7 +25,7 @@ var propagator = propagation.TraceContext{}
 // (OTEL_EXPORTER_OTLP_ENDPOINT etc.). Unset → no-op provider, zero overhead:
 // tracing is opt-in for the --dev rig. The provider is injected (never
 // installed globally) — the same contract embedded hosts get.
-func setupTracing(ctx context.Context, logger *tslogs.Logger) (trace.TracerProvider, func(), error) {
+func setupTracing(ctx context.Context, logger *slog.Logger) (trace.TracerProvider, func(), error) {
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" && os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == "" {
 		return noop.NewTracerProvider(), func() {}, nil
 	}

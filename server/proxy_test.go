@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/timescale/rafiki/routing"
 	"github.com/timescale/rafiki/store"
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 type fakeProxyStore struct {
@@ -91,7 +91,7 @@ func TestMessagesProxyStreamsAndCaptures(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs // inject fake
@@ -133,7 +133,7 @@ func TestMessagesProxySourceHeaderOverridesEntrypoint(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
@@ -161,7 +161,7 @@ func TestMessagesProxyCompleteTurnFailureFallsBackToFailTurn(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{completeErr: errors.New("boom: jsonb write failed")}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
@@ -188,7 +188,7 @@ func TestMessagesProxyFailsTurnOnUpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs // inject fake
@@ -293,7 +293,7 @@ func TestMessagesProxySurfacesProviderErrorToClient(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
@@ -360,7 +360,7 @@ func TestHandleUpstreamErrorContentEncoding(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 			p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 			p.store = &fakeProxyStore{}
 
@@ -398,7 +398,7 @@ func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
 	}))
 	defer orSrv.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
@@ -442,7 +442,7 @@ func TestMessagesProxyRetriesPrimaryBeforeFailover(t *testing.T) {
 	}))
 	defer orSrv.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
@@ -484,7 +484,7 @@ func TestMessagesProxyFailsOverAfterExhaustingRetries(t *testing.T) {
 	}))
 	defer orSrv.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
@@ -528,7 +528,7 @@ func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
 	}))
 	defer orSrv.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", primary.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs
@@ -560,7 +560,7 @@ func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
 	}))
 	defer orSrv.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "real-key", "http://unused-primary", "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = &fakeProxyStore{}
 	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
@@ -602,7 +602,7 @@ func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
 // A slash model on a proxy with no OpenRouter key returns 502 AND must resolve
 // the turn it began, or the row is stranded 'pending' forever (a false orphan).
 func TestMessagesProxySlashWithoutOpenRouterFailsTurn(t *testing.T) {
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", "http://unused", "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.store = fs // capturing, but no setFallback -> orKey == ""
@@ -625,7 +625,7 @@ func TestMessagesProxySlashWithoutOpenRouterFailsTurn(t *testing.T) {
 }
 
 func TestProxyResolveModel(t *testing.T) {
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cat := routing.NewModelCatalog(nil, time.Minute, logger)
 	p := &MessagesProxy{logger: logger, catalog: cat, defaultModel: "haiku-latest"}
 	// Seed the catalog via its test hook instead of the network:
@@ -740,7 +740,7 @@ func TestProxy_DecomposesConversation(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(cs, nil, "key", upstream.URL, "claude", nil, logger)
 
 	body := `{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
@@ -814,7 +814,7 @@ func TestMessagesProxyAdaptsEffort(t *testing.T) {
 			}))
 			defer or.Close()
 
-			logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 			p := NewMessagesProxy(nil, nil, "real-key", "http://unused.example", "" /*default*/, nil /*catalog*/, logger)
 			p.SetFallback("or-key", or.URL, nil) // slash ids route here
 			// Pre-seed the runtime cache to exercise proactive clamping (the
@@ -881,7 +881,7 @@ func TestMessagesProxyEffortRetry(t *testing.T) {
 	}))
 	defer or.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "real-key", "http://unused.example", "" /*default*/, nil /*catalog*/, logger)
 	p.SetFallback("or-key", or.URL, nil) // slash ids route here
 

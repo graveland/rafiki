@@ -5,7 +5,9 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,17 +15,11 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"github.com/timescale/rafiki/routing"
-
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
-func testLogger(t *testing.T) *tslogs.Logger {
+func testLogger(t *testing.T) *slog.Logger {
 	t.Helper()
-	logger, err := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return logger
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
 // scriptedSender returns queued results in order; the last repeats.
