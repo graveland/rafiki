@@ -14,8 +14,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"go.graveland.dev/rafiki/analyze"
-	"go.graveland.dev/rafiki/llm"
+	"go.graveland.dev/rafiki/pkg/analyze"
+	"go.graveland.dev/rafiki/pkg/llm"
 )
 
 // captureStdout runs fn with os.Stdout redirected to an in-memory pipe and
@@ -43,7 +43,7 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 }
 
 // writeCorpusTranscript writes a minimal, well-formed insights.Transcript
-// corpus file — the same shape agentcli/local's own corpus tests use — so
+// corpus file — the same shape pkg/agentcli/local's own corpus tests use — so
 // --corpus runs have something real to compact/detect against.
 func writeCorpusTranscript(t *testing.T, dir, name, convID string) {
 	t.Helper()

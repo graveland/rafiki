@@ -4,7 +4,7 @@
 schema the proxy captures into: read-only insights (`stats`/`search`/
 `export`), the LLM-driven skill-gap detector (`analyze`), and finding
 triage (`findings`). It talks to Postgres directly — no gRPC, no auth layer
-— via `agentcli.Backend`, implemented today by `agentcli/local.Backend`.
+— via `pkg/agentcli.Backend`, implemented today by `pkg/agentcli/local.Backend`.
 See `cmd/rafiki/agent.go` for the flag/dispatch code this doc describes.
 
 Every subcommand accepts `-j` (indented JSON) or `-J` (compact JSON) instead
@@ -191,8 +191,8 @@ model calls:
 `rafiki agent` and `sc agent` cover the same domain — conversation
 insights and skill-gap analysis over the same `conversations` schema — but
 differ in transport. `rafiki agent` talks straight to Postgres via
-`agentcli/local.Backend`, useful for local/dev work against a DSN you hold
-directly. `sc agent` is expected to mount the same `agentcli.Backend`
+`pkg/agentcli/local.Backend`, useful for local/dev work against a DSN you hold
+directly. `sc agent` is expected to mount the same `pkg/agentcli.Backend`
 interface over a gRPC backend in savannah-client, adding what a
 multi-tenant deployment needs on top: auth, per-environment config
 resolution, and tailnet-routed connectivity. The CLI surface

@@ -17,12 +17,12 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"go.graveland.dev/rafiki/agentcli"
-	"go.graveland.dev/rafiki/agentcli/local"
-	"go.graveland.dev/rafiki/analyze"
-	"go.graveland.dev/rafiki/insights"
-	"go.graveland.dev/rafiki/llm"
-	"go.graveland.dev/rafiki/store"
+	"go.graveland.dev/rafiki/pkg/agentcli"
+	"go.graveland.dev/rafiki/pkg/agentcli/local"
+	"go.graveland.dev/rafiki/pkg/analyze"
+	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // agentCmd dispatches `rafiki agent <subcommand>`, a DSN-backed CLI over the

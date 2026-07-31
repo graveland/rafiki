@@ -17,17 +17,20 @@ and core-dump analyzer run on the library.
 ## Layout
 
 ```
-llm/        typed builder + Conversation — the library front door
-routing/    breaker, OpenRouter catalog, model resolution, ClassifyFailure,
-            prefix_hash, SSE capture parsing, turn store
-agentloop/  ToolSet, Run/Resume, Events — tool-use loop primitives
-store/      conversations schema migrations (source of truth), message
-            persistence, recovery queries
-server/     HTTP faces (/v1/messages, /v1/chat/completions), Authenticator
-            seam, static token auth, Prometheus metrics
-cmd/rafiki/ standalone binary (serve, migrate, --dev)
-goldenwire/ frozen golden-wire fixture definitions (see note below)
+pkg/llm/        typed builder + Conversation — the library front door
+pkg/routing/    breaker, OpenRouter catalog, model resolution, ClassifyFailure,
+                prefix_hash, SSE capture parsing, turn store
+pkg/agentloop/  ToolSet, Run/Resume, Events — tool-use loop primitives
+pkg/store/      conversations schema migrations (source of truth), message
+                persistence, recovery queries
+pkg/server/     HTTP faces (/v1/messages, /v1/chat/completions), Authenticator
+                seam, static token auth, Prometheus metrics
+pkg/goldenwire/ frozen golden-wire fixture definitions (see note below)
+cmd/rafiki/     standalone binary (serve, migrate, --dev)
 ```
+
+Everything importable lives under `pkg/`; `cmd/` is binaries. There is no
+`internal/` — if you want to use something, import it.
 
 ## Model selection
 
@@ -125,19 +128,19 @@ records the constraint in an in-memory cache, clamps the effort, and retries the
 request once, so the client gets a working response instead of a dead turn.
 Subsequent requests to that model clamp proactively. The cache is per-process
 (never persisted) and starts empty, so it always reflects the current provider
-behavior. See `routing/effortmap.go` (`EffortCache`) and `server/proxy.go`
+behavior. See `pkg/routing/effortmap.go` (`EffortCache`) and `pkg/server/proxy.go`
 (`effortRetry`).
 
 ## goldenwire status
 
-The committed goldens (`routing/testdata/goldenwire.json` and
+The committed goldens (`pkg/routing/testdata/goldenwire.json` and
 `goldenwire_insitu.json`) were generated from savannah-client's
 PRE-extraction `pkg/routing` at 4fa61974 and are asserted by
-`routing/golden_test.go` / `golden_insitu_test.go` in CI;
-`llm/golden_builder_test.go` additionally binds the llm builder's constructed
+`pkg/routing/golden_test.go` / `golden_insitu_test.go` in CI;
+`pkg/llm/golden_builder_test.go` additionally binds the llm builder's constructed
 requests byte-identical to the in-situ recordings.
 
-`goldenwire/` holds the fixture definitions those goldens were computed over,
+`pkg/goldenwire/` holds the fixture definitions those goldens were computed over,
 as a plain package the tests import. The generator that produced the testdata
 is retired (the pre-extraction code it ran against was deleted in the phase-1
 swap) and survives only in git history — the testdata is a frozen recording
