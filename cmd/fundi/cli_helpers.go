@@ -16,7 +16,7 @@ import (
 	"golang.org/x/term"
 
 	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -148,7 +148,7 @@ func findFundiAttach() (string, error) {
 // Appending is enough to win over an inherited value: os/exec deduplicates
 // Env and keeps the last entry for a repeated key.
 func attachEnv(socket string) []string {
-	return append(os.Environ(), envvar.Socket+"="+socket)
+	return append(os.Environ(), paths.Socket+"="+socket)
 }
 
 // execFundiAttach spawns fundi-attach <childID> with stdio inherited and waits

@@ -16,8 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-
-	"go.graveland.dev/rafiki/pkg/envvar"
 )
 
 // appName is the per-application leaf every base directory gets.
@@ -117,7 +115,7 @@ func SpillDir(ref string) string { return filepath.Join(CacheDir(), "spill", ref
 // that directory belongs to Claude Code, and fundi reads its own configuration
 // from its own directory. Point the variable at a Claude profile to use one.
 func InstructionsFile() string {
-	if v := envvar.Get(envvar.Instructions); v != "" {
+	if v := Get(Instructions); v != "" {
 		return v
 	}
 	return filepath.Join(ConfigDir(), "instructions.md")
@@ -136,7 +134,7 @@ func InstructionsFile() string {
 // still searched by cmd/fundid/agent.go's assembleSkillDirs, alongside
 // fundi's own <cwd>/.fundi/skills, so existing per-repo skills keep working.
 func SkillsDirs() []string {
-	v := envvar.Get(envvar.SkillsDirs)
+	v := Get(SkillsDirsEnv)
 	if v == "" {
 		return []string{filepath.Join(ConfigDir(), "skills")}
 	}
@@ -160,7 +158,7 @@ func PresetsFile() string { return filepath.Join(ConfigDir(), "presets.json") }
 // <ConfigDir>/mcp.json. The per-cwd .mcp.json remains the primary source and
 // takes precedence; this is the fallback for servers you want everywhere.
 func GlobalMCPConfig() string {
-	if v := envvar.Get(envvar.MCPConfig); v != "" {
+	if v := Get(MCPConfig); v != "" {
 		return v
 	}
 	return filepath.Join(ConfigDir(), "mcp.json")

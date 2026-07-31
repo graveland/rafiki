@@ -24,8 +24,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
-	"go.graveland.dev/rafiki/pkg/envvar"
 	"go.graveland.dev/rafiki/pkg/intercept"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
@@ -79,7 +79,7 @@ type Controller struct {
 // owned by main.go — this constructor only stores them.
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, baseCtx context.Context) *Controller {
 	gw := 7 * 24 * time.Hour
-	if h := envvar.Get(envvar.GraceHours); h != "" {
+	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
 			gw = time.Duration(n * float64(time.Hour))
 		}
@@ -2141,7 +2141,7 @@ func resolvePiBinary(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	if env := envvar.Get(envvar.PiBinary); env != "" {
+	if env := paths.Get(paths.PiBinary); env != "" {
 		return env, nil
 	}
 	return exec.LookPath("pi")
@@ -2477,8 +2477,8 @@ func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 		env = append(env, k+"="+v)
 	}
 	env = append(env,
-		envvar.ChildID+"="+childID,
-		envvar.Socket+"="+socketPath,
+		paths.ChildID+"="+childID,
+		paths.Socket+"="+socketPath,
 	)
 	if req.Kind == "agent" && req.APIKey != "" {
 		envVar := "OPENROUTER_API_KEY"

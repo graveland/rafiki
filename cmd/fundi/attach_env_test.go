@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // TestAttachEnv_SocketReachesChild spawns a real subprocess and reads the value
@@ -19,10 +19,10 @@ import (
 // stopped happening, the child would silently read the stale inherited path and
 // dial the wrong daemon. Only an actual exec proves which value lands.
 func TestAttachEnv_SocketReachesChild(t *testing.T) {
-	t.Setenv(envvar.Socket, "/inherited/stale.sock")
+	t.Setenv(paths.Socket, "/inherited/stale.sock")
 
 	const want = "/tmp/resolved-by-parent.sock"
-	cmd := exec.Command("sh", "-c", "printenv "+envvar.Socket)
+	cmd := exec.Command("sh", "-c", "printenv "+paths.Socket)
 	cmd.Env = attachEnv(want)
 
 	out, err := cmd.Output()
@@ -30,7 +30,7 @@ func TestAttachEnv_SocketReachesChild(t *testing.T) {
 		t.Fatalf("run child: %v", err)
 	}
 	if got := strings.TrimSpace(string(out)); got != want {
-		t.Errorf("child saw %s=%q, want %q (the appended value must win over the inherited one)", envvar.Socket, got, want)
+		t.Errorf("child saw %s=%q, want %q (the appended value must win over the inherited one)", paths.Socket, got, want)
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"go.graveland.dev/rafiki/pkg/envvar"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -64,7 +63,7 @@ func Dial(path string) (*Client, error) {
 // XDG runtime path. This MUST agree with the daemon's own paths.SocketPath, or
 // every client dials a socket nobody is listening on.
 func DefaultSocketPath() string {
-	if p := envvar.Get(envvar.Socket); p != "" {
+	if p := paths.Get(paths.Socket); p != "" {
 		return p
 	}
 	return paths.SocketPath()

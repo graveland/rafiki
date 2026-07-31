@@ -1,16 +1,17 @@
-// Package envvar names the environment variables fundi owns, and reads them with
-// a deprecation fallback to their pi-controller-era spellings.
-//
-// The old names were inherited from the fork and misnamed the product. They are
-// still honoured — a shell that exports PI_CONTROLLER_SOCKET today keeps working
-// — but the new name wins when both are set. Nothing here is pi's contract:
-// fundi both sets and reads all four, so renaming them breaks no pi process.
-package envvar
+package paths
 
 import (
 	"log/slog"
 	"os"
 )
+
+// This file names the environment variables fundi owns, and reads them with a
+// deprecation fallback to their pi-controller-era spellings.
+//
+// The old names were inherited from the fork and misnamed the product. They are
+// still honoured — a shell that exports PI_CONTROLLER_SOCKET today keeps working
+// — but the new name wins when both are set. Nothing here is pi's contract:
+// fundi both sets and reads all four, so renaming them breaks no pi process.
 
 // The variables fundi owns, and the pre-rename spelling each still accepts.
 const (
@@ -61,16 +62,19 @@ const (
 	AgentDB = "FUNDI_AGENT_DB"
 
 	// Instructions is the user-global instruction file. fundi's own config, so
-	// it is NOT ~/.claude/CLAUDE.md — see internal/paths for why fundi does not
-	// read its configuration out of another tool's directory. Point it at a
-	// Claude profile explicitly if that is what you want.
+	// it is NOT ~/.claude/CLAUDE.md — see this package's doc comment for why
+	// fundi does not read its configuration out of another tool's directory.
+	// Point it at a Claude profile explicitly if that is what you want.
 	Instructions = "FUNDI_INSTRUCTIONS"
 
-	// SkillsDirs is an OS-path-list of skill directories ($PATH convention:
+	// SkillsDirsEnv is an OS-path-list of skill directories ($PATH convention:
 	// ":" on unix). Ordered lowest-to-highest precedence, matching
 	// skills.DiscoverSkills, so a later entry overrides an earlier one on name
 	// collision. Non-existent entries are skipped, not errors.
-	SkillsDirs = "FUNDI_SKILLS_DIRS"
+	//
+	// The Env suffix breaks a collision with SkillsDirs(), the resolver in this
+	// same package that reads it. It is the only one of these names that clashes.
+	SkillsDirsEnv = "FUNDI_SKILLS_DIRS"
 
 	// MCPConfig is the path to a global .mcp.json, merged under the per-cwd one.
 	MCPConfig = "FUNDI_MCP_CONFIG"

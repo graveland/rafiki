@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -109,7 +109,7 @@ func resolvePresetName(cmd *cobra.Command) string {
 	if name, _ := cmd.Flags().GetString("preset"); name != "" {
 		return name
 	}
-	return envvar.Get(envvar.DefaultPreset)
+	return paths.Get(paths.DefaultPreset)
 }
 
 // buildSpawnRequest constructs a SpawnRequest from the spawn flags, env-var
@@ -134,7 +134,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	// FUNDI_DEFAULT_MODEL: fallback when --model not given.
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
-		model = envvar.Get(envvar.DefaultModel)
+		model = paths.Get(paths.DefaultModel)
 	}
 
 	kind, _ := cmd.Flags().GetString("kind")
@@ -153,7 +153,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	mcpConfig, _ := cmd.Flags().GetString("mcp-config")
 
 	// FUNDI_DEFAULT_LABELS: parsed lazily and merged before --label flags.
-	envLabels, err := parseEnvLabels(envvar.Get(envvar.DefaultLabels))
+	envLabels, err := parseEnvLabels(paths.Get(paths.DefaultLabels))
 	if err != nil {
 		return protocol.SpawnRequest{}, fmt.Errorf("FUNDI_DEFAULT_LABELS: %w", err)
 	}
@@ -213,7 +213,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 // trusts to identify itself and to call home.
 //
 // BOTH prefixes are stripped: the FUNDI_* names and the PI_CONTROLLER_* ones
-// they replaced. Dropping the old prefix while envvar.Get still honours it as a
+// they replaced. Dropping the old prefix while paths.Get still honours it as a
 // fallback would reopen exactly the override this guards against.
 func collectCallerEnv() map[string]string {
 	environ := os.Environ()

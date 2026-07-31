@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -65,7 +65,7 @@ func runAttach(cmd *cobra.Command, args []string) error {
 	}
 
 	tailN, _ := cmd.Flags().GetInt("tail")
-	os.Setenv(envvar.AttachTail, strconv.Itoa(tailN))
+	os.Setenv(paths.AttachTail, strconv.Itoa(tailN))
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
 	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")

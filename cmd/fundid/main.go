@@ -19,7 +19,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
-	"go.graveland.dev/rafiki/pkg/envvar"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -91,7 +90,7 @@ func main() {
 	// or close one themselves. A nil pool (FUNDI_AGENT_DB unset) means every
 	// agent conversation is in-memory, matching `fundid agent --db` unset.
 	var pool *pgxpool.Pool
-	if dsn := envvar.Get(envvar.AgentDB); dsn != "" {
+	if dsn := paths.Get(paths.AgentDB); dsn != "" {
 		pool, err = pgxpool.New(baseCtx, dsn)
 		if err != nil {
 			// Deliberately NOT fatal. pgxpool.New only PARSES the DSN, it does
@@ -103,14 +102,14 @@ func main() {
 			// a failure path, ahead of the design.
 			slog.Error("agent database DSN is invalid; starting without a pool. "+
 				"Agent conversations will be in-memory and no cost data will be recorded",
-				"env", envvar.AgentDB, "error", err)
+				"env", paths.AgentDB, "error", err)
 			pool = nil
 		} else {
 			slog.Info("agent database pool opened")
 		}
 	} else {
 		slog.Warn("no agent database configured; agent conversations are in-memory and no cost data will be recorded",
-			"env", envvar.AgentDB)
+			"env", paths.AgentDB)
 	}
 
 	st := childstore.New()

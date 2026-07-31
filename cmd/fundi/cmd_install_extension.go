@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/cmd/fundi/helpersembed"
-	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // legacyHelpersDir is the pre-rename extension directory. pi-controller's own
@@ -163,7 +163,7 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 // If install fails for any reason (permissions, disk full, etc.), the
 // caller should log a warning and continue — fundi-helpers is a nice-to-have.
 func ensureHelpersInstalled() error {
-	if envvar.Get(envvar.NoAutoInstallHelpers) != "" {
+	if paths.Get(paths.NoAutoInstallHelpers) != "" {
 		return nil
 	}
 

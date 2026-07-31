@@ -1,4 +1,4 @@
-package envvar
+package paths
 
 import "testing"
 
@@ -90,7 +90,7 @@ func TestEveryMigratedVariableHasAFallback(t *testing.T) {
 }
 
 func TestNewVarsHaveNoDeprecatedSpelling(t *testing.T) {
-	for _, name := range []string{Instructions, SkillsDirs, MCPConfig} {
+	for _, name := range []string{Instructions, SkillsDirsEnv, MCPConfig} {
 		if _, ok := deprecated[name]; ok {
 			t.Errorf("%s has a deprecated-map entry; these are new names with no pre-rename spelling", name)
 		}
@@ -99,9 +99,9 @@ func TestNewVarsHaveNoDeprecatedSpelling(t *testing.T) {
 
 func TestNewVarNamesAreFundiPrefixed(t *testing.T) {
 	want := map[string]string{
-		Instructions: "FUNDI_INSTRUCTIONS",
-		SkillsDirs:   "FUNDI_SKILLS_DIRS",
-		MCPConfig:    "FUNDI_MCP_CONFIG",
+		Instructions:  "FUNDI_INSTRUCTIONS",
+		SkillsDirsEnv: "FUNDI_SKILLS_DIRS",
+		MCPConfig:     "FUNDI_MCP_CONFIG",
 	}
 	for got, expect := range want {
 		if got != expect {

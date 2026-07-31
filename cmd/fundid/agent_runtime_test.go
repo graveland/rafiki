@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -225,7 +225,7 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 // already points at, so an ordinary deployment with a configured database
 // must still be able to spawn agent children.
 func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
-	t.Setenv(envvar.AgentDB, "postgres://daemons-own-pool")
+	t.Setenv(paths.AgentDB, "postgres://daemons-own-pool")
 	c := newTestController(t)
 	req := protocol.SpawnRequest{
 		Kind:  "agent",
