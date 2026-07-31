@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package local implements agentcli.Backend directly against a Postgres
 // pool: no gRPC, no auth. It is the DSN-backed backend the CLI runs against
 // today; a gRPC one lives in savannah-client later.

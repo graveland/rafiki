@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package server
 
 import (
@@ -6,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +19,6 @@ import (
 	"git.graveland.dev/brent/rafiki/routing"
 	"git.graveland.dev/brent/rafiki/store"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 // The fidelity rule: the tee mutates nothing except the model field.
@@ -60,7 +62,7 @@ func TestMessagesTeePassesBodyAndHeadersByteFaithful(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
 
 	rec := httptest.NewRecorder()
@@ -112,7 +114,7 @@ func TestMessagesOpenRouterPathForwardsSessionID(t *testing.T) {
 	}))
 	defer orSrv.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "real-key", "http://unused-primary", "", nil, logger)
 	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
 
@@ -144,7 +146,7 @@ func TestChatCompletionsProxyStreamsAndCaptures(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &recordingChatStore{}
 	p := NewChatCompletionsProxy(nil, nil,
 		[]OpenAIUpstream{{Name: "openrouter", BaseURL: upstream.URL, APIKey: "or-key"}},
@@ -191,7 +193,7 @@ func TestChatCompletionsProxyFailsTurnOnUpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &recordingChatStore{}
 	p := NewChatCompletionsProxy(nil, nil,
 		[]OpenAIUpstream{{Name: "openrouter", BaseURL: upstream.URL, APIKey: "k"}}, nil, "openrouter", logger)
@@ -222,7 +224,7 @@ func TestChatCompletionsRoutesByModelPrefix(t *testing.T) {
 	defer def.Close()
 	defer special.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewChatCompletionsProxy(nil, nil,
 		[]OpenAIUpstream{
 			{Name: "openrouter", BaseURL: def.URL, APIKey: "k1"},
@@ -326,7 +328,7 @@ func TestMessagesOpenRouterPathFallsBackToConvID(t *testing.T) {
 	}))
 	defer orSrv.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "real-key", "http://unused-primary", "", nil, logger)
 	p.store = &recordingChatStore{}
 	p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
@@ -353,7 +355,7 @@ func TestChatCompletionsFallsBackToConvID(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fake := &recordingChatStore{}
 	p := NewChatCompletionsProxy(nil, nil,
 		[]OpenAIUpstream{{Name: "openrouter", BaseURL: upstream.URL, APIKey: "or-key"}},
@@ -419,7 +421,7 @@ func TestMessagesTeeWithRealStore(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(routing.NewCaptureStore(pool), nil, "real-key", upstream.URL, "", nil, logger)
 
 	rec := httptest.NewRecorder()

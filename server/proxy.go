@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package server
 
 import (
@@ -6,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,7 +17,6 @@ import (
 	"golang.org/x/net/http2"
 
 	"git.graveland.dev/brent/rafiki/routing"
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 type proxyStore interface {
@@ -32,7 +34,7 @@ type MessagesProxy struct {
 	apiKey      string
 	upstreamURL string // e.g. https://api.anthropic.com
 	httpClient  *http.Client
-	logger      *tslogs.Logger
+	logger      *slog.Logger
 
 	// Fallback (OpenRouter) target, set via setFallback. When orKey is empty
 	// (the default), the proxy behaves exactly as primary-only: no breaker
@@ -60,7 +62,7 @@ func (p *MessagesProxy) SetMetrics(m *Metrics) { p.metrics = m }
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
 
-func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *tslogs.Logger) *MessagesProxy {
+func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *slog.Logger) *MessagesProxy {
 	// ResponseHeaderTimeout bounds connect + time-to-first-byte so a hung
 	// upstream can't wedge the stream-copy loop forever. It does NOT cap
 	// total streaming duration, so legitimate multi-minute SSE conversations

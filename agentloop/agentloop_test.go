@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package agentloop
 
 import (
@@ -5,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -17,8 +20,6 @@ import (
 
 	"git.graveland.dev/brent/rafiki/llm"
 	"git.graveland.dev/brent/rafiki/store"
-
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 // ---- scaffolding ----------------------------------------------------------
@@ -118,7 +119,7 @@ func (f *fakeTools) executedNames() []string {
 // to hand each concurrent racer its own handle on one stored conversation.
 func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref string) *llm.Conversation {
 	t.Helper()
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
 		llm.WithUpstream(llm.UpstreamAnthropic, sender),
 		llm.WithStore(pool),
@@ -138,7 +139,7 @@ func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref strin
 
 func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.Sender) *llm.Conversation {
 	t.Helper()
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
 		llm.WithUpstream(llm.UpstreamAnthropic, sender),
 		llm.WithStore(pool),
@@ -675,7 +676,7 @@ func TestConcurrentResume(t *testing.T) {
 // semantics, no DB — the fast path for exercising drive() without a store.
 func newMemConv(t *testing.T, sender llm.Sender) *llm.Conversation {
 	t.Helper()
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
 		llm.WithUpstream(llm.UpstreamAnthropic, sender),
 		llm.WithLogger(logger),

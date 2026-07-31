@@ -37,6 +37,16 @@ run: ## Run the server locally: serve --dev on :8035, sourcing .env.
 build: ## Build the standalone binary to bin/rafiki.
 	go build -o bin/rafiki ./cmd/rafiki
 
+# The docs (README, docs/agent-cli.md) spell every command as a bare
+# `rafiki agent ...`, which only works once the binary is on PATH. Honours
+# GOBIN, else $(go env GOPATH)/bin — make sure that directory is on your PATH.
+.PHONY: install
+install: ## Install the rafiki binary to GOBIN (or GOPATH/bin).
+	go install ./cmd/rafiki
+	@bin="$$(go env GOBIN)"; [ -n "$$bin" ] || bin="$$(go env GOPATH)/bin"; \
+	echo "installed $$bin/rafiki"; \
+	command -v rafiki >/dev/null || echo "warning: $$bin is not on your PATH"
+
 # Interactive by default; pass extra flags via ARGS, e.g.:
 #   make claude ARGS='-p "what changed today"'
 # RAFIKI_URL / RAFIKI_TOKEN override the target server (environment wins over

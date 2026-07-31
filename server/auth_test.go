@@ -1,16 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package server
 
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"git.graveland.dev/brent/rafiki/routing"
-	"github.com/timescale/savannah-common/go/tslogs"
 )
 
 type recordingStore struct {
@@ -50,7 +53,7 @@ func TestMessagesProxyAuthenticatorSetsOwner(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &recordingStore{}
 	p := NewMessagesProxy(nil, staticAuthenticator{id: &Identity{Username: "brent"}}, "real-key", upstream.URL, "", nil, logger)
 	p.store = fs
@@ -71,7 +74,7 @@ func TestMessagesProxyNilAuthenticatorIsAnonymous(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, _ := tslogs.NewLogger(tslogs.LevelError, false, "test", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &recordingStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
 	p.store = fs

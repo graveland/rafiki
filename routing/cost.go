@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package routing
 
 import "github.com/anthropics/anthropic-sdk-go"

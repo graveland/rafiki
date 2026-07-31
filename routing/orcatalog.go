@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package routing
 
 import (
@@ -5,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -13,7 +16,6 @@ import (
 	"time"
 
 	"git.graveland.dev/brent/rafiki/store"
-	"github.com/timescale/savannah-common/go/tslogs"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -244,7 +246,7 @@ type ModelCatalog struct {
 	http   *http.Client
 	url    string
 	ttl    time.Duration
-	logger *tslogs.Logger
+	logger *slog.Logger
 	store  SnapshotStore // optional cross-process cache; nil = memory-only
 
 	sf singleflight.Group // coalesces concurrent refreshes
@@ -272,7 +274,7 @@ type SnapshotStore interface {
 	Save([]byte) error
 }
 
-func NewModelCatalog(httpClient *http.Client, ttl time.Duration, logger *tslogs.Logger) *ModelCatalog {
+func NewModelCatalog(httpClient *http.Client, ttl time.Duration, logger *slog.Logger) *ModelCatalog {
 	return &ModelCatalog{http: httpClient, url: openRouterModelsURL, ttl: ttl, logger: logger}
 }
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package insights reads the captured conversations schema (conversation,
 // conversation_turn, conversation_message) for analysis surfaces: search,
 // transcript export, aggregate stats, and a sanitized read-only query executor.

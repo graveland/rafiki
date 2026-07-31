@@ -102,7 +102,11 @@ LLM-driven skill-gap detector, and finding triage. See
 [`docs/agent-cli.md`](docs/agent-cli.md) for every verb, flag, and the dev
 loop.
 
+Install it first — `make install` puts `rafiki` in `GOBIN` (else
+`$(go env GOPATH)/bin`); without that, run it as `go run ./cmd/rafiki agent`.
+
 ```bash
+make install
 rafiki agent analyze --corpus DIR --compact --out DIR   # no DSN, no credentials
 ```
 

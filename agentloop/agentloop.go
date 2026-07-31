@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package agentloop layers tool-use loop primitives on llm.Conversation, so
 // every consumer gets capture + failover + cache hygiene + durability without
 // thinking about it. Ported from sc's diagnose loop: deterministic tool

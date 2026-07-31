@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package store
 
 // DrivenBy is who drives a conversation's history: the library (stateful,
