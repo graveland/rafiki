@@ -1,10 +1,15 @@
 package main
 
 import (
+	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"git.graveland.dev/brent/fundi/internal/agent"
 	skillspkg "git.graveland.dev/brent/fundi/internal/skills"
@@ -197,4 +202,94 @@ func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 	if demo.Description != "from .fundi" {
 		t.Errorf("demo.Description = %q, want %q (.fundi/skills must win over .claude/skills on name collision)", demo.Description, "from .fundi")
 	}
+}
+
+// countingCloser records Close calls and can be told to fail with a specific
+// error, so the standaloneFatal test can cover both the ordinary close and the
+// already-closed case it must tolerate.
+type countingCloser struct {
+	mu     sync.Mutex
+	closes int
+	err    error
+}
+
+func (c *countingCloser) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closes++
+	return c.err
+}
+
+func (c *countingCloser) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closes
+}
+
+// TestStandaloneFatalEndsTheProcess covers the OnFatal hook `fundid agent`
+// passes to agent.RuntimeOptions. Before it existed the standalone path built
+// its RuntimeOptions with no OnFatal at all, so a turn panic marked the engine
+// dead, logged, and left the process answering get_state forever while every
+// prompt was silently dropped — the exact silently-stopped-queue shape the
+// daemon path was fixed to avoid. A nil OnFatal is documented as legal, but here
+// it was a choice rather than a constraint.
+//
+// The hook's whole job is to unblock Frontend.Run, which is parked reading
+// stdin; closing stdin is the only way to do that.
+func TestStandaloneFatalEndsTheProcess(t *testing.T) {
+	silenceStandaloneLogs(t)
+	stdin := &countingCloser{}
+	hook, fired := standaloneFatal(stdin)
+
+	want := errors.New("turn panicked")
+	hook(want)
+
+	select {
+	case got := <-fired:
+		if !errors.Is(got, want) {
+			t.Errorf("fired error = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("standaloneFatal never reported the fatal error; runAgent would exit 0 as if nothing happened")
+	}
+	if got := stdin.count(); got != 1 {
+		t.Errorf("stdin closed %d times, want 1; without it Frontend.Run stays parked on a read and the process never ends", got)
+	}
+
+	// OnFatal is once-only by contract, but the send is into a size-1 buffer and
+	// the close is on a real file: a second call must be a no-op either way.
+	hook(errors.New("second"))
+	if got := stdin.count(); got != 1 {
+		t.Errorf("stdin closed %d times after a second hook call, want 1", got)
+	}
+	select {
+	case got := <-fired:
+		t.Errorf("a second hook call reported %v; the hook must fire once", got)
+	default:
+	}
+}
+
+// TestStandaloneFatalToleratesAnAlreadyClosedStdin: stdin may already be closed
+// (a racing EOF), and that must not be logged as a failure or stop the hook from
+// reporting the fatal error.
+func TestStandaloneFatalToleratesAnAlreadyClosedStdin(t *testing.T) {
+	silenceStandaloneLogs(t)
+	stdin := &countingCloser{err: os.ErrClosed}
+	hook, fired := standaloneFatal(stdin)
+
+	hook(errors.New("boom"))
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("standaloneFatal did not report the fatal error when stdin was already closed")
+	}
+}
+
+// silenceStandaloneLogs keeps the error-level logging standaloneFatal does out
+// of the test output.
+func silenceStandaloneLogs(t *testing.T) {
+	t.Helper()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 }

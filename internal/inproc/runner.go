@@ -123,7 +123,12 @@ func New(opts Options) *Runner {
 // stdinR. Closing that read end is the only way to do it — the same mechanism
 // Kill uses, minus the stdout close, because on this path the engine is not
 // wedged in a write and the daemon should still receive the frames already
-// queued (including the agent_error the engine emits on its way out).
+// queued.
+//
+// NOT closing stdout is also what keeps the engine's parting agent_error
+// deliverable — Engine.fatal has already put that frame on the wire (on a
+// bounded wait) by the time it calls this hook, and closing stdoutR here would
+// serve no purpose but to risk truncating it.
 func (r *Runner) engineFatal(err error) {
 	slog.Error("inproc: engine reported a fatal error; ending the child",
 		"child", r.opts.ChildID, "error", err)

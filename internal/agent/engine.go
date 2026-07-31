@@ -24,6 +24,13 @@ import (
 // cancelled the turn in the first place.
 const repairTimeout = 10 * time.Second
 
+// fatalEmitTimeout bounds how long fatal() will wait for its parting
+// agent_error frame to reach stdout before ending the child regardless. A
+// reader that is consuming normally takes microseconds; this only ever expires
+// when nothing is reading at all, in which case the frame was never going to
+// arrive and ending the child is what matters. See fatal().
+const fatalEmitTimeout = 2 * time.Second
+
 // streamFlushInterval is the coalescing cadence for streamed message_update
 // frames: at most one flush per interval, regardless of how many SDK stream
 // events arrive. Each frame carries the WHOLE accumulated message (see
@@ -349,7 +356,42 @@ func (e *Engine) fatal(err error) {
 		e.wg.Done()
 	}
 
-	e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+	// Emit the parting agent_error on a BOUNDED wait, then end the child.
+	//
+	// The hazard: Frontend.Emit holds its mutex across the stdout write, so if
+	// the reader has stopped consuming — the daemon hit a frame-too-large error,
+	// or is simply gone — it blocks with no error and no timeout. A plain
+	// `e.fe.Emit(...)` here therefore blocked inside the very path whose only
+	// job is to END this child, and nothing would unblock it short of an
+	// external Kill. Narrow in practice (64 KB of kernel buffer plus a
+	// continuously-reading daemon) but exactly the wrong way round.
+	//
+	// Why this shape and not a plain reversal (onFatal first, emit after): the
+	// frame would then usually be LOST, not merely delayed. OnFatal unblocks
+	// Frontend.Run, and run()'s remaining path — Wait, Close, shutdown, and the
+	// stdout close — is microseconds, so it routinely wins the race against this
+	// write. Measured, not assumed: reversing alone fails
+	// TestRunnerPanicInTurnWorkerEndsTheChild, which requires the daemon to
+	// receive the one frame that explains why the child died.
+	//
+	// So: emit off this goroutine, WAIT for it (which keeps delivery
+	// deterministic and the frame strictly ahead of the child's stdout close),
+	// but give up after fatalEmitTimeout and end the child anyway. The
+	// abandoned emit goroutine cannot outlive the child: OnFatal's teardown
+	// closes stdout, and the blocked write then fails. Preferred over a write
+	// deadline, which is not reachable through the io.Writer a Frontend holds.
+	emitted := make(chan struct{})
+	go func() {
+		defer close(emitted)
+		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+	}()
+	select {
+	case <-emitted:
+	case <-time.After(fatalEmitTimeout):
+		slog.Error("agent: could not emit agent_error before ending the child; "+
+			"nothing is reading this child's stdout",
+			"conversation", e.conv.ID, "waited", fatalEmitTimeout, "error", err)
+	}
 
 	if onFatal == nil {
 		slog.Error("agent: engine is no longer running turns and has no OnFatal owner to end the child",

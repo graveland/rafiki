@@ -490,17 +490,31 @@ func (c *Child) supervise() {
 cleanup:
 	wg.Wait()
 
-	// Release the daemon-side ends of the child's output streams. Until this
-	// existed, NOTHING in the daemon ever closed c.stdout or c.stderr: they
-	// were reclaimed only by os.File finalizers, and FD exhaustion does not
+	// Release the daemon-side ends of ALL THREE of the child's streams. Until
+	// this existed, NOTHING in the daemon ever closed c.stdout or c.stderr:
+	// they were reclaimed only by os.File finalizers, and FD exhaustion does not
 	// trigger a GC — so a daemon churning children can hit EMFILE with a
 	// perfectly small heap. In-process children make that far more than
 	// theoretical, since self-exit (a failed Build, a frontend scan error, a
 	// contained panic) is their common case rather than an exception.
 	//
+	// stdin belongs here for exactly the same reason, and the omission left the
+	// same leak on the most common path of all. Child.Shutdown closes it, but
+	// handleChildExit does NOT call Shutdown — its only callers are
+	// Controller.Kill and ShutdownAllChildren — so a child that ends on its own
+	// left its stdin write end to a finalizer. This block is the symmetric
+	// home: supervise is the only writer to c.stdin and has already left the
+	// write loop above, whichever way it got here.
+	//
 	// Safe here and nowhere earlier: wg.Wait() above means readStdout and
 	// readStderr have both returned, so every read is complete, and readStdout
 	// only returns after runner.Wait() has reaped the child.
+	//
+	// Composes with both of Shutdown's own closes (its unconditional stdin
+	// close, and abandon's stdout/stderr close on the leaked path) because
+	// closeStream treats os.ErrClosed as success — whichever runs second is a
+	// no-op rather than a spurious warning.
+	closeStream(c.ID, "stdin", c.stdin)
 	closeStream(c.ID, "stdout", c.stdout)
 	closeStream(c.ID, "stderr", c.stderr)
 }

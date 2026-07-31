@@ -183,31 +183,47 @@ func TestSuperviseClosesChildOutputStreams(t *testing.T) {
 	}
 }
 
-// TestShutdownClosesStdinEvenWhenAlreadyExited covers the other half. The
-// already-exited early return in Shutdown used to skip the stdin close
-// entirely, so a child that ended on its own — the COMMON case for an
-// in-process agent child — leaked its stdin write end too.
-func TestShutdownClosesStdinEvenWhenAlreadyExited(t *testing.T) {
+// TestSuperviseClosesStdinOnSelfExit covers the third stream, on the path that
+// needed it most.
+//
+// Child.Shutdown closes c.stdin — but handleChildExit does not call Shutdown;
+// its only callers are Controller.Kill and ShutdownAllChildren. So a child that
+// ended ON ITS OWN (a build error, an engine-fatal, a frontend EOF — the COMMON
+// case for an in-process agent child, not an exception) left its stdin write
+// end to an os.File finalizer, and FD exhaustion does not trigger a GC, so
+// finalizers are not a backstop under real pressure. supervise's cleanup block
+// is the symmetric home: it is the only writer to c.stdin and has already left
+// the write loop.
+//
+// Then it checks the composition: Shutdown's own unconditional stdin close
+// still runs afterwards and is tolerated rather than logged as a failure, which
+// is what closeStream's os.ErrClosed handling is for. Both closes are wanted —
+// Shutdown's is step 1 of the graceful ladder when it runs BEFORE the child
+// exits.
+func TestSuperviseClosesStdinOnSelfExit(t *testing.T) {
 	r := newRecordingRunner(`{"type":"agent_end"}` + "\n")
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_fd_stdin", Cwd: t.TempDir(), Runner: r})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	// Done() closes only after readStdout has reaped and set closed=true, so
-	// Shutdown below is guaranteed to take the already-exited path.
+	// Done() is closed by supervise's LAST deferred call, after its cleanup
+	// block has run — so observing it means the closes have already happened.
 	select {
 	case <-c.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("child did not finish within 5s")
 	}
-	if got := r.stdin.count(); got != 0 {
-		t.Fatalf("stdin was closed %d times before Shutdown; this test no longer covers the already-exited path", got)
+	if got := r.stdin.count(); got != 1 {
+		t.Fatalf("stdin closed %d times on the self-exit path, want exactly 1; "+
+			"nothing else in the daemon closes it for a child that was never Shutdown", got)
 	}
 
+	// The already-exited Shutdown path still closes unconditionally.
 	if _, err := c.Shutdown(time.Second, time.Second); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
-	if got := r.stdin.count(); got != 1 {
-		t.Errorf("stdin closed %d times after Shutdown on an already-exited child, want exactly 1", got)
+	if got := r.stdin.count(); got != 2 {
+		t.Errorf("stdin closed %d times after a follow-up Shutdown, want 2 "+
+			"(supervise's close plus Shutdown's own, which must tolerate the already-closed handle)", got)
 	}
 }

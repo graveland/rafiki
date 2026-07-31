@@ -5,11 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,6 +80,39 @@ func assembleSkillDirs(cwd string, flagDirs []string) []string {
 	dirs = append(dirs, filepath.Join(cwd, ".claude", "skills"))
 	dirs = append(dirs, filepath.Join(cwd, ".fundi", "skills"))
 	return append(dirs, flagDirs...)
+}
+
+// standaloneFatal builds the EngineConfig.OnFatal hook for `fundid agent`, plus
+// the channel runAgent reads to learn that it fired.
+//
+// A nil OnFatal is documented as legal and means "log it and stop taking
+// turns" — but for this process that is a wedge, not a constraint. The Frontend
+// keeps reading frames and answering get_state, so the caller still sees a
+// healthy idle child while every prompt from that point on is accepted and
+// silently never run: the exact silently-stopped-queue shape the daemon path
+// was fixed to avoid. It was a choice here, not a limitation.
+//
+// Ending the process cleanly means unblocking Frontend.Run, which is parked in a
+// read on stdin. Closing that is the only way to do it — the same mechanism
+// inproc.Runner.engineFatal uses on the daemon path. The resulting Frontend.Run
+// error is then OURS, not the engine's, which is why runAgent checks the
+// returned channel first and reports the fatal error instead (mirroring
+// inproc.Runner's stopReason).
+//
+// The hook is idempotent: OnFatal is once-only by contract, but the close and
+// the buffered send must not be able to double-fire regardless of who calls it.
+func standaloneFatal(stdin io.Closer) (func(error), <-chan error) {
+	fired := make(chan error, 1)
+	var once sync.Once
+	return func(err error) {
+		once.Do(func() {
+			slog.Error("agent: engine reported a fatal error; ending the process", "error", err)
+			fired <- err
+			if cerr := stdin.Close(); cerr != nil && !errors.Is(cerr, os.ErrClosed) {
+				slog.Warn("agent: close stdin after engine fatal", "error", cerr)
+			}
+		})
+	}, fired
 }
 
 // runAgent is cmd/fundid's other entry point: `fundid agent ...` runs a single
@@ -149,6 +184,8 @@ func runAgent(args []string) int {
 		defer pool.Close()
 	}
 
+	onFatal, fatal := standaloneFatal(os.Stdin)
+
 	opts := agent.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
@@ -167,6 +204,7 @@ func runAgent(args []string) int {
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
 		Pool:                 pool,
+		OnFatal:              onFatal,
 	}
 
 	fe := agent.NewFrontend(os.Stdin, os.Stdout, nil)
@@ -180,10 +218,21 @@ func runAgent(args []string) int {
 	// Frontend.Run only returns once stdin hits EOF (or a scan error) or the
 	// process is signalled - either way no further HandlePrompt/HandleSteer/
 	// HandleAbort call can arrive, so Wait() then Close() is race-free (see
-	// Engine.Close's doc comment).
+	// Engine.Close's doc comment). Wait() cannot block on the turn that
+	// panicked: Engine.fatal releases every outstanding count before calling
+	// OnFatal.
 	eng.Wait()
 	eng.Close()
 	shutdown()
+
+	// An engine-fatal exit is reported as such, and takes precedence over the
+	// runErr it caused (os.ErrClosed from the stdin close onFatal performed).
+	select {
+	case err := <-fatal:
+		slog.Error("agent: exiting after a fatal engine error", "error", err)
+		return 1
+	default:
+	}
 
 	if runErr != nil {
 		slog.Error("agent: frontend run", "error", runErr)
