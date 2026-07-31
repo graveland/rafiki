@@ -691,11 +691,24 @@ func (c *Controller) activateLiveChild(
 		// index that Insert left at StatusSpawning.
 		//
 		// Draining HERE, before monitorChild starts, is what keeps the status
-		// visible in the store by the time Spawn returns. The stalled case needs
-		// no guard of its own: a child that never reached idle recorded no
-		// transition, so this emits nothing and the record stays spawning, and a
-		// child that reached idle just after the timeout expired is now reported
-		// correctly instead of being silently left as spawning.
+		// visible in the store by the time Spawn returns.
+		//
+		// The old `if !stalled` guard is gone because the drain emits exactly
+		// what the state machine recorded, which is right in BOTH stalled cases:
+		//
+		//   - Nothing was recorded (the usual stall: the child answered nothing).
+		//     The drain emits nothing and the record stays spawning, as before.
+		//   - Something WAS recorded despite the stall. This is reachable: for pi
+		//     only response.get_state sets FirstResponse, while agent_start
+		//     transitions to streaming unconditionally — so a child that streams
+		//     without ever answering the readiness probe is stalled AND has
+		//     recorded spawning→streaming. Emitting it is the fix, not a
+		//     regression: the old guard suppressed that event, and monitorChild's
+		//     initial `lastStatus := ch.Status()` sample already read streaming,
+		//     so the store sat at spawning for the child's whole life.
+		//
+		// A child that reaches idle just after the timeout expires is likewise
+		// now reported correctly rather than left as spawning.
 		c.drainChildStatus(childID, ch)
 
 		go c.monitorChild(childID, ch)
@@ -718,6 +731,26 @@ func (c *Controller) activateLiveChild(
 	if model == "" {
 		model = snap.Model
 	}
+
+	// Discard the transitions the new process made while starting up, rather than
+	// emitting them — and do it BEFORE the ch.Status() read that populates the
+	// record below. This path inserts its record already post-idle, so no
+	// subscriber ever saw the resumed child as spawning, and announcing
+	// spawning→idle after the ctrl_child_spawned below would describe a
+	// transition none of them could have observed.
+	//
+	// The ORDER is the point: draining after the Status() read leaves a window
+	// where a transition landing in between is both discarded AND absent from
+	// the inserted record — the store would say idle while the state machine
+	// said streaming, with no event to correct it until the next transition.
+	// Draining first means anything that arrives after it stays queued, wakes
+	// monitorChild, and is delivered. Practically unreachable (a just-resumed pi
+	// child emits nothing unprompted) but it is the same class of bug as the one
+	// this queue exists to fix.
+	//
+	// This is the one place a transition is deliberately dropped, and it drops
+	// nothing a consumer is owed.
+	ch.DrainTransitions()
 
 	// Recompute auto-labels from the snapshot's user labels with fresh pid/model.
 	resumeLabels := copyLabels(snap.Labels)
@@ -781,15 +814,6 @@ func (c *Controller) activateLiveChild(
 		PiBinary:           piBin,
 		ExtraArgs:          snap.ExtraArgs,
 	}
-	// Discard the transitions the new process made while starting up, rather
-	// than emitting them. sess above captured ch.Status() directly, so the
-	// record this path inserts is ALREADY post-idle: no subscriber ever saw the
-	// resumed child as spawning, and announcing spawning→idle after the
-	// ctrl_child_spawned below would describe a transition none of them could
-	// have observed. This is the one place a transition is deliberately dropped,
-	// and it drops nothing a consumer is owed. Anything recorded after this
-	// point is still delivered — monitorChild's wake survives the drain.
-	ch.DrainTransitions()
 	c.st.Insert(sess)
 	c.cm.Add(childID, ch)
 
@@ -1848,6 +1872,11 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			// (NotifyExtensionUIResponse). Without this wake it would sit in the
 			// queue until the next frame arrived, which for a child that has gone
 			// quiet is never.
+			//
+			// Guarded by TestMonitorChild_UIResponseTransition_NeedsNoBusFrame,
+			// which is the shape that bites: the burst tests do NOT cover this
+			// case and pass with this branch deleted, because readStdout records
+			// before monitorChild consumes the frame that caused it.
 			drainStatus()
 
 		case <-ch.Done():
@@ -1875,6 +1904,17 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			// (cm.Remove clears the per-child subscriber list) as well as
 			// announced after ctrl_child_exited. Draining first also means the
 			// exit event's last_status reflects the child's real final status.
+			//
+			// This drain is DEFENSIVE, and deliberately kept as such: no test
+			// covers it, and deleting it breaks nothing (30 runs of the
+			// burst-then-exit test and the full suite stay green). The window it
+			// closes is real but narrow — the wake token is set strictly before
+			// done closes, so a parked monitorChild takes the StatusChanged case
+			// and drains before the reap even completes. Losing a transition here
+			// needs monitorChild to be busy across the whole record→reap interval
+			// AND the select to pick Done over an equally-ready StatusChanged.
+			// Cheap insurance against a uniformly-random select; do not read the
+			// absence of a failing test as evidence it is unnecessary.
 			drainStatus()
 			c.handleChildExit(childID, ch)
 			return

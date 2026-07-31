@@ -42,6 +42,19 @@ func framesUntilExit(conn *collectConn) ([][]byte, *protocol.CtrlChildExited) {
 	return frames, nil
 }
 
+// waitForStatusEvents blocks until conn has collected at least n
+// ctrl_child_status frames, or the timeout expires (the caller asserts).
+func waitForStatusEvents(t *testing.T, conn *collectConn, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(statusEvents(conn)) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // statusEventsIn extracts the ctrl_child_status frames from frames, in order.
 func statusEventsIn(frames [][]byte) []protocol.CtrlChildStatus {
 	var out []protocol.CtrlChildStatus
@@ -135,6 +148,74 @@ func TestMonitorChild_FastTurnBurst_LosesNoTransition(t *testing.T) {
 	// a sample happened to catch.
 	if snap, ok := ctrl.st.Get(childID); !ok || snap.Status != protocol.StatusIdle {
 		t.Errorf("store status = %v (found=%v), want idle", snap.Status, ok)
+	}
+}
+
+// TestMonitorChild_UIResponseTransition_NeedsNoBusFrame guards the
+// StatusChanged() wake — and it is the shape that actually bites, where the
+// burst tests do not.
+//
+// The burst is biased AGAINST the window the wake protects: readStdout publishes
+// a frame BEFORE handleFrame records the transition it caused, and readStdout
+// runs ahead, so by the time monitorChild consumes the burst's last frame and
+// drains, the last transition is already queued. Both burst tests pass with the
+// wake deleted.
+//
+// A dialog response is the case with no bus frame behind it at all.
+// NotifyExtensionUIResponse pops blocked_ui on the CONTROLLER's goroutine and
+// nothing further arrives on the child's stdout, so draining only on bus frames
+// leaves that transition queued until the next frame — which, for a child
+// sitting at a dialog, is never. (The method's own doc comment used to concede
+// exactly this stall: "observed by monitorChild on the next bus event.") With
+// the wake case removed, this test reports 1 event where 2 are owed.
+func TestMonitorChild_UIResponseTransition_NeedsNoBusFrame(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTestController(t)
+	childID := spawnTestChild(t, ctrl, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := ctrl.ShutdownAllChildren(ctx, 2*time.Second, time.Second); err != nil {
+			t.Errorf("cleanup ShutdownAllChildren: %v", err)
+		}
+	})
+
+	conn := &collectConn{}
+	ctrl.cm.GlobalSubscribe(conn)
+	t.Cleanup(func() { ctrl.cm.GlobalUnsubscribe(conn) })
+
+	// A dialog-method extension_ui_request pushes blocked_ui. This transition DOES
+	// have a bus frame behind it, so the drain-on-frame path carries it.
+	emit := `__emit_event:{"type":"extension_ui_request","id":"u1","method":"select"}`
+	if err := ctrl.Send(childID, json.RawMessage(emit)); err != nil {
+		t.Fatalf("send extension_ui_request: %v", err)
+	}
+	waitForStatusEvents(t, conn, 1, 5*time.Second)
+	first := statusEvents(conn)
+	if len(first) != 1 {
+		t.Fatalf("got %d status events after the dialog request, want 1: %+v", len(first), first)
+	}
+	if first[0].Status != string(protocol.StatusBlockedUI) {
+		t.Fatalf("first event = %s→%s, want →blocked_ui", first[0].Previous, first[0].Status)
+	}
+
+	// Resolving the dialog pops back to idle on THIS goroutine. No further child
+	// output follows, so only the wake can carry it.
+	ch, ok := ctrl.cm.Get(childID)
+	if !ok {
+		t.Fatal("child not live")
+	}
+	ch.NotifyExtensionUIResponse("u1")
+
+	waitForStatusEvents(t, conn, 2, 5*time.Second)
+	got := statusEvents(conn)
+	if len(got) != 2 {
+		t.Fatalf("got %d status events, want 2 — blocked_ui→idle was stranded, with no bus frame behind it to trigger a drain: %+v",
+			len(got), got)
+	}
+	if got[1].Previous != string(protocol.StatusBlockedUI) || got[1].Status != string(protocol.StatusIdle) {
+		t.Errorf("second event = %s→%s, want blocked_ui→idle", got[1].Previous, got[1].Status)
 	}
 }
 

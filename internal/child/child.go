@@ -351,10 +351,19 @@ func (c *Child) recordTransition(changed bool, prev protocol.Status) {
 		return
 	}
 	c.transitions = append(c.transitions, Transition{From: prev, To: c.sm.Current()})
-	// Non-blocking: a wake already pending covers this record too, since the
-	// consumer drains the whole queue per wake. Deliberately does NOT consume
-	// from the channel anywhere but the consumer's select — a spurious wake with
-	// an empty queue is a no-op, whereas swallowing a wake would strand a
+	// The select/default is DEADLOCK-critical, not merely drop-avoiding. This
+	// runs with metaMu held, and the only possible receiver's drain
+	// (DrainTransitions) must take metaMu to empty the queue. A blocking send on
+	// a full channel would therefore park readStdout while it holds the very
+	// lock the consumer needs to make room: readStdout and monitorChild
+	// deadlocked against each other. Never "improve" this into a blocking send,
+	// and never widen the channel to make blocking unlikely — the queue carries
+	// the data, the channel is only a doorbell.
+	//
+	// Dropping the token is free: a wake already pending covers this record too,
+	// since the consumer drains the whole queue per wake. Nothing but the
+	// consumer's select ever receives from the channel — a spurious wake with an
+	// empty queue is a no-op, whereas swallowing a wake would strand a
 	// transition.
 	select {
 	case c.transitionCh <- struct{}{}:
@@ -380,8 +389,12 @@ func (c *Child) DrainTransitions() []Transition {
 	if len(c.transitions) == 0 {
 		return nil
 	}
-	// Hand the backing array to the caller rather than copying; a fresh nil
-	// slice also drops the accumulated capacity.
+	// Hand the backing array to the caller and start a FRESH slice. `nil` here
+	// is load-bearing, not tidiness: `c.transitions[:0]` would keep the same
+	// backing array, so the next append would overwrite the very slots the
+	// caller is still iterating — a data race the detector would only sometimes
+	// catch, since it needs a record to land during the caller's loop. Dropping
+	// the accumulated capacity is a side benefit, not the reason.
 	out := c.transitions
 	c.transitions = nil
 	return out
