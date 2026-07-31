@@ -4,12 +4,15 @@ Captured 2026-06-10 from Claude Code **2.1.172** via:
 
 ```
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"..."}}' \
-  | ~/.local/bin/claude -p --input-format stream-json --output-format stream-json \
+  | claude -p --input-format stream-json --output-format stream-json \
       --verbose --dangerously-skip-permissions
 ```
 
 Two fixtures: `startup_and_turn.jsonl` (text-only turn) and `turn_with_tool.jsonl`
 (one Bash tool call). These drive `provider_claude_test.go`.
+
+**The committed fixtures are scrubbed** — see "Scrubbing" at the bottom before you
+regenerate them.
 
 ## Answers to the spike questions
 
@@ -58,7 +61,8 @@ Two fixtures: `startup_and_turn.jsonl` (text-only turn) and `turn_with_tool.json
 
 ## Other observed frame types
 
-- `system/hook_started`, `system/hook_response` — from the config dir's hooks.
+- `system/hook_started`, `system/hook_response` — from whatever `SessionStart`
+  hooks the capturing machine's config dir has installed.
   These appear **only after** a turn begins (input arrived), interleaved with the
   turn — NOT un-prompted (see spike answer #1). `Parse` ignores them (no case);
   readiness is process-up, not derived from these.
@@ -94,3 +98,37 @@ across turns and exits only when stdin is closed (Shutdown) — matching pi.
 - **Plan 3 `shapeTranscript`**: a `thinking`-only assistant frame yields an empty
   `turnView`. Skip turns with empty `Text` and no `ToolCalls` to avoid blank
   transcript entries.
+
+## Scrubbing
+
+A raw capture describes the capturing machine in detail, so the committed
+fixtures have every environment-identifying **value** replaced with a neutral
+placeholder. Only values changed — key order, nesting, types and array lengths
+are byte-for-byte those of the real capture, because the tests parse these files
+and assert on their shape.
+
+What was replaced, and with what:
+
+| Field | Placeholder |
+|---|---|
+| `system/init.cwd` | `/home/user/project` |
+| `system/init.tools[]` (`mcp__*` entries only) | `mcp__example-mcp-N__tool_NN` |
+| `system/init.mcp_servers[].name` | `example-mcp-N`, `plugin:example-plugin-N:example-mcp-N` |
+| `system/init.plugins[].{name,path,source}` | `example-plugin-N` under `/home/user/.config/example/plugins/…` |
+| `system/init.{skills,slash_commands}[]` | `example-skill-N`, `example-plugin-N:skill-N` (Claude Code builtins left alone) |
+| `system/init.agents[]` | `example-agent-N` (builtins left alone) |
+| `system/init.memory_paths.auto` | `/home/user/.config/example/projects/-home-user-project/memory/` |
+| `hook_response.{output,stdout}` | a stub `SessionStart` `hookSpecificOutput` payload |
+| the Bash `tool_result` content | a generic Go project `ls` listing |
+
+Session ids, uuids, request ids, token counts, costs and the thinking-block
+signature are capture artefacts, not environment data, and were left verbatim.
+
+**If you regenerate these fixtures, scrub them again.** Two constraints are easy
+to miss:
+
+- `tools[]` is sorted, and `-` sorts before `_`, so placeholder MCP tool names
+  need zero-padded indices (`tool_01`, not `tool_1`) or the list stops being
+  plausibly sorted.
+- `TestClaudeBusFrames_ToolTurn` asserts the tool output contains `go.mod`, so
+  whatever you substitute for the `ls` result must keep it.
