@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/fundi/cmd/fundi/helpersembed"
-	"git.graveland.dev/brent/fundi/internal/envvar"
+	"go.graveland.dev/rafiki/cmd/fundi/helpersembed"
+	"go.graveland.dev/rafiki/pkg/envvar"
 )
 
 // legacyHelpersDir is the pre-rename extension directory. pi-controller's own

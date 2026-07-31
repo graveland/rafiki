@@ -16,8 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/fundi/internal/agent"
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/agent"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // stringSliceFlag implements flag.Value for a repeatable flag (--skills-dir).

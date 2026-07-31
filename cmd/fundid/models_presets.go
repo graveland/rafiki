@@ -7,9 +7,9 @@ import (
 	"os"
 	"sort"
 
-	"git.graveland.dev/brent/fundi/internal/models"
-	"git.graveland.dev/brent/fundi/internal/paths"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/models"
+	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // ListModels enumerates LLM models from all configured sources.

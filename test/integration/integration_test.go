@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // ─── TestMain: build binary once for all tests ────────────────────────────────

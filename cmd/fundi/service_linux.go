@@ -5,7 +5,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"os"
 	"path/filepath"
 	"regexp"

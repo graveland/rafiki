@@ -11,10 +11,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"git.graveland.dev/brent/fundi/client"
-	"git.graveland.dev/brent/fundi/internal/paths"
-	"git.graveland.dev/brent/fundi/protocol"
 	"github.com/spf13/cobra"
+	"go.graveland.dev/rafiki/pkg/client"
+	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func newLogsCmd() *cobra.Command {

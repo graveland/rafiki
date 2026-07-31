@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/fundi/internal/version"
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 func main() {

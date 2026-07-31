@@ -8,8 +8,8 @@ import (
 	"io"
 	"os"
 
-	"git.graveland.dev/brent/fundi/client"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/client"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // emitMachineFrame writes inner (a raw inner pi-event frame) for the machine-

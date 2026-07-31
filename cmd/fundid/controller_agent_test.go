@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/internal/child"
-	"git.graveland.dev/brent/fundi/internal/server"
-	"git.graveland.dev/brent/fundi/internal/store"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // TestResolveSpawnPlanAgentKind covers R1: the "agent" case resolves to the
@@ -156,7 +156,7 @@ func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
 // something resolveSpawnPlan actually ACCEPTS. That holds regardless of how
 // the rejoin is implemented, so it still catches a future re-break.
 func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
-	snap := store.Snapshot{
+	snap := childstore.Snapshot{
 		Kind:     "agent",
 		Cwd:      "/tmp/fundi-smoke",
 		Name:     "smoke6",
@@ -181,7 +181,7 @@ func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
 // where no provider was ever recorded: joinModel must leave the model alone
 // rather than emitting a leading "/", which would resolve to a bogus provider.
 func TestResumeRequestFromSnapshotAgentBareModel(t *testing.T) {
-	snap := store.Snapshot{Kind: "agent", Model: "sonnet-latest"}
+	snap := childstore.Snapshot{Kind: "agent", Model: "sonnet-latest"}
 	req := resumeRequestFromSnapshot(snap, "")
 	if req.Model != "sonnet-latest" {
 		t.Errorf("Model = %q, want %q unchanged", req.Model, "sonnet-latest")
@@ -195,7 +195,7 @@ func TestResumeRequestFromSnapshotAgentBareModel(t *testing.T) {
 // resumed agent-kind child must rejoin with the same skill inventory and MCP
 // tool set it was spawned with, not a silently shrunk one.
 func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
-	snap := store.Snapshot{
+	snap := childstore.Snapshot{
 		Kind:       "agent",
 		Model:      "anthropic/claude-sonnet-5",
 		SkillsDirs: []string{"/work/skills", "/other/skills"},
@@ -321,7 +321,7 @@ func TestForget_RemovesAgentSpillDir(t *testing.T) {
 	}
 
 	now := time.Now()
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID:      childID,
 		Status:       protocol.StatusExited,
 		Kind:         "agent",
@@ -356,7 +356,7 @@ func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 	}
 
 	now := time.Now()
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID:      childID,
 		Status:       protocol.StatusExited,
 		Kind:         "agent",
@@ -400,7 +400,7 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 			ctrl := newTestController(t)
 			const childID = "c_agent_session_switch"
 			now := time.Now()
-			ctrl.st.Insert(&store.Session{
+			ctrl.st.Insert(&childstore.Session{
 				ChildID:      childID,
 				Status:       protocol.StatusIdle,
 				Kind:         "agent",
@@ -413,9 +413,9 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 			if err == nil {
 				t.Fatal("Send accepted a session switch for an agent child; it would silently reattach the same conversation")
 			}
-			var ce *server.ControllerError
+			var ce *control.ControllerError
 			if !errors.As(err, &ce) {
-				t.Fatalf("error is %T, want *server.ControllerError so the client sees a coded failure: %v", err, err)
+				t.Fatalf("error is %T, want *control.ControllerError so the client sees a coded failure: %v", err, err)
 			}
 			if ce.Code != protocol.ErrInvalidArgs {
 				t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)
@@ -449,7 +449,7 @@ func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
 			ctrl := newTestController(t)
 			const childID = "c_nonagent_session_switch"
 			now := time.Now()
-			ctrl.st.Insert(&store.Session{
+			ctrl.st.Insert(&childstore.Session{
 				ChildID:      childID,
 				Status:       protocol.StatusIdle,
 				Kind:         kind,
@@ -459,7 +459,7 @@ func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
 			})
 
 			err := ctrl.Send(childID, json.RawMessage(`{"type":"new_session","id":"req-1"}`))
-			var ce *server.ControllerError
+			var ce *control.ControllerError
 			if errors.As(err, &ce) && ce.Code == protocol.ErrInvalidArgs &&
 				strings.Contains(ce.Message, "agent child") {
 				t.Fatalf("kind %q was refused with the agent-kind rejection: %v", kind, err)

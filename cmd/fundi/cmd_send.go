@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/fundi/client"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/client"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func newSendCmd() *cobra.Command {

@@ -21,21 +21,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
-	"git.graveland.dev/brent/fundi/internal/child"
-	"git.graveland.dev/brent/fundi/internal/envvar"
-	"git.graveland.dev/brent/fundi/internal/intercept"
-	"git.graveland.dev/brent/fundi/internal/persist"
-	"git.graveland.dev/brent/fundi/internal/ring"
-	"git.graveland.dev/brent/fundi/internal/server"
-	"git.graveland.dev/brent/fundi/internal/store"
-	"git.graveland.dev/brent/fundi/internal/version"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/intercept"
+	"go.graveland.dev/rafiki/pkg/persist"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/ring"
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 // Controller wires together the store, child lifecycle, persistence and the
-// server.Controller interface. It is safe for concurrent use.
+// control.Controller interface. It is safe for concurrent use.
 type Controller struct {
-	st          *store.Store
+	st          *childstore.Store
 	cm          *ChildManager
 	records     *persist.RecordWriter
 	dumper      *persist.LogDumper
@@ -77,7 +77,7 @@ type Controller struct {
 // in-memory conversations); baseCtx is the daemon's own context, threaded into
 // every in-process child so cancelling it stops them all at once. Both are
 // owned by main.go — this constructor only stores them.
-func NewController(st *store.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, baseCtx context.Context) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, baseCtx context.Context) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := envvar.Get(envvar.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -162,9 +162,9 @@ func (c *Controller) loadOrphans(records []persist.Record) {
 	}
 }
 
-// ─── server.Controller implementation ────────────────────────────────────────
+// ─── control.Controller implementation ────────────────────────────────────────
 
-func (c *Controller) List(filter protocol.ListFilter) []store.Snapshot {
+func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
 	snaps := c.st.List()
 	if filter.Status == "" && filter.Name == "" && filter.NameContains == "" &&
 		filter.CwdContains == "" && filter.Since == 0 &&
@@ -196,14 +196,14 @@ func (c *Controller) List(filter protocol.ListFilter) []store.Snapshot {
 	return out
 }
 
-func (c *Controller) Get(childID string) (store.Snapshot, bool) {
+func (c *Controller) Get(childID string) (childstore.Snapshot, bool) {
 	return c.st.Get(childID)
 }
 
-func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.RecentResult, error) {
+func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.RecentResult, error) {
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return server.RecentResult{}, &server.ControllerError{
+		return control.RecentResult{}, &control.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
@@ -288,7 +288,7 @@ func (c *Controller) GetRecent(childID string, q server.RecentQuery) (server.Rec
 	truncatedBySize := cut > 0
 	out = out[cut:]
 
-	return server.RecentResult{
+	return control.RecentResult{
 		Events:           out,
 		TotalInBuffer:    total,
 		OldestTimestamp:  oldestTS,
@@ -322,18 +322,18 @@ func (c *Controller) readDiskEvents(childID, name string) []ring.Event {
 	return out
 }
 
-func (c *Controller) GetStreams(childID string, which string) (server.GetStreamsResult, error) {
+func (c *Controller) GetStreams(childID string, which string) (control.GetStreamsResult, error) {
 	if _, ok := c.st.Get(childID); !ok {
-		return server.GetStreamsResult{}, &server.ControllerError{
+		return control.GetStreamsResult{}, &control.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	ch, alive := c.cm.Get(childID)
 	if !alive {
-		return server.GetStreamsResult{Alive: false}, nil
+		return control.GetStreamsResult{Alive: false}, nil
 	}
-	res := server.GetStreamsResult{Alive: true}
+	res := control.GetStreamsResult{Alive: true}
 	if which == "" || which == "all" || which == "in" {
 		res.In = ch.InSnapshot()
 	}
@@ -344,7 +344,7 @@ func (c *Controller) GetStreams(childID string, which string) (server.GetStreams
 	return res, nil
 }
 
-func (c *Controller) Search(q server.SearchQuery) server.SearchResult {
+func (c *Controller) Search(q control.SearchQuery) control.SearchResult {
 	start := time.Now()
 	limit := q.Limit
 	if limit <= 0 {
@@ -387,7 +387,7 @@ func (c *Controller) Search(q server.SearchQuery) server.SearchResult {
 				MatchEnd:    idx + len(q.Query),
 			})
 			if len(hits) >= limit {
-				return server.SearchResult{
+				return control.SearchResult{
 					Hits:      hits,
 					TotalHits: len(hits),
 					Scanned:   scanned,
@@ -396,7 +396,7 @@ func (c *Controller) Search(q server.SearchQuery) server.SearchResult {
 			}
 		}
 	}
-	return server.SearchResult{
+	return control.SearchResult{
 		Hits:      hits,
 		TotalHits: len(hits),
 		Scanned:   scanned,
@@ -404,7 +404,7 @@ func (c *Controller) Search(q server.SearchQuery) server.SearchResult {
 	}
 }
 
-func (c *Controller) Status() server.ControllerStatus {
+func (c *Controller) Status() control.ControllerStatus {
 	snaps := c.st.List()
 	var live, exited int
 	for _, s := range snaps {
@@ -416,7 +416,7 @@ func (c *Controller) Status() server.ControllerStatus {
 	}
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	return server.ControllerStatus{
+	return control.ControllerStatus{
 		Version:     version.String(),
 		StartedAt:   c.startedAt.UnixMilli(),
 		Children:    protocol.ChildCounts{Live: live, Exited: exited},
@@ -426,10 +426,10 @@ func (c *Controller) Status() server.ControllerStatus {
 	}
 }
 
-func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (server.SpawnResult, error) {
+func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (control.SpawnResult, error) {
 	// Validate cwd (dispatch already checks it's absolute; check it exists).
 	if _, err := os.Stat(req.Cwd); err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "cwd: " + err.Error(),
 		}
@@ -437,7 +437,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 
 	// Validate user-supplied labels: no invalid keys, no fundi/ prefix.
 	if err := validateUserLabelKeys(req.Labels); err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: err.Error(),
 		}
@@ -449,7 +449,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	childID := newChildID()
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "spawn plan: " + err.Error(),
 		}
@@ -462,7 +462,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 
 	runner, err := c.agentRunner(req, childID)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "agent runner: " + err.Error(),
 		}
@@ -489,7 +489,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),
 		}
@@ -522,7 +522,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (serv
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
 	// process is confirmed running. A crash between exec and Idle() would
 	// otherwise leave an orphan pi process with no persisted record.
-	sess := &store.Session{
+	sess := &childstore.Session{
 		ChildID:      childID,
 		PID:          ch.PID(),
 		Status:       protocol.StatusSpawning,
@@ -615,11 +615,11 @@ func (c *Controller) activateLiveChild(
 	ch *child.Child,
 	piBin string,
 	req protocol.SpawnRequest,
-	baseSnap *store.Snapshot,
+	baseSnap *childstore.Snapshot,
 	noSession bool,
 	resumeSession string,
 	forkSession string,
-) (server.SpawnResult, error) {
+) (control.SpawnResult, error) {
 	stalled := false
 	select {
 	case <-ch.Idle():
@@ -662,7 +662,7 @@ func (c *Controller) activateLiveChild(
 
 		// Update the StatusSpawning session inserted before Idle() with the
 		// session metadata that is only available after pi responds.
-		_ = c.st.Update(childID, func(s *store.Session) {
+		_ = c.st.Update(childID, func(s *childstore.Session) {
 			s.SessionID = meta.SessionID
 			s.SessionFile = meta.SessionFile
 			s.Provider = provider
@@ -713,7 +713,7 @@ func (c *Controller) activateLiveChild(
 
 		go c.monitorChild(childID, ch)
 
-		return server.SpawnResult{
+		return control.SpawnResult{
 			ChildID:     childID,
 			SessionID:   meta.SessionID,
 			SessionFile: meta.SessionFile,
@@ -774,7 +774,7 @@ func (c *Controller) activateLiveChild(
 		delete(resumeLabels, "fundi/model")
 	}
 
-	sess := &store.Session{
+	sess := &childstore.Session{
 		ChildID:            childID,
 		PID:                ch.PID(),
 		Name:               snap.Name,
@@ -841,7 +841,7 @@ func (c *Controller) activateLiveChild(
 
 	go c.monitorChild(childID, ch)
 
-	return server.SpawnResult{
+	return control.SpawnResult{
 		ChildID:     childID,
 		SessionID:   meta.SessionID,
 		SessionFile: meta.SessionFile,
@@ -854,7 +854,7 @@ func (c *Controller) activateLiveChild(
 // snapshot. The resume token differs by kind: pi re-opens its session file via
 // --session <path> (ResumeSession=SessionFile); claude re-attaches its stored
 // conversation via --resume <id> (ResumeSession=SessionID).
-func resumeRequestFromSnapshot(snap store.Snapshot, apiKey string) protocol.SpawnRequest {
+func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol.SpawnRequest {
 	req := protocol.SpawnRequest{
 		Kind:               snap.Kind,
 		ConfigDir:          snap.ConfigDir,
@@ -969,7 +969,7 @@ func (s *childClaimSet) release(id string) {
 	s.mu.Unlock()
 }
 
-func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (server.SpawnResult, error) {
+func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (control.SpawnResult, error) {
 	// Claim childID for the whole check-then-act window below: from before
 	// the exited-status check, through the child.Spawn fork, to after the
 	// old exited record is replaced by activateLiveChild. See childClaimSet's
@@ -983,7 +983,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 	// duration of a spawn would just convert a client bug/retry into a
 	// confusing hang instead of an actionable error.
 	if !c.spawnClaims.tryClaim(childID) {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "resume already in progress for child: " + childID,
 		}
@@ -992,13 +992,13 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	if snap.Status != protocol.StatusExited {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "child is not exited (status: " + string(snap.Status) + ")",
 		}
@@ -1014,7 +1014,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 	// session id), so there is nothing to stat.
 	if kind == "pi" && !snap.NoSession && snap.SessionFile != "" {
 		if _, err := os.Stat(snap.SessionFile); err != nil {
-			return server.SpawnResult{}, &server.ControllerError{
+			return control.SpawnResult{}, &control.ControllerError{
 				Code:    protocol.ErrSessionFileMissing,
 				Message: "session file not found: " + snap.SessionFile,
 			}
@@ -1025,7 +1025,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "spawn plan: " + err.Error(),
 		}
@@ -1038,7 +1038,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 
 	runner, err := c.agentRunner(req, childID)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "agent runner: " + err.Error(),
 		}
@@ -1061,7 +1061,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),
 		}
@@ -1097,9 +1097,9 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 // handleInterceptedSend), and a shared claim set also blocks the cross-path
 // case of a resume racing an intercepted respawn for the same exited
 // childID. See childClaimSet's doc comment for the full rationale.
-func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath string) (server.SpawnResult, error) {
+func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath string) (control.SpawnResult, error) {
 	if !c.spawnClaims.tryClaim(childID) {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "respawn already in progress for child: " + childID,
 		}
@@ -1108,13 +1108,13 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	if snap.Status != protocol.StatusExited {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "child is not exited (status: " + string(snap.Status) + ")",
 		}
@@ -1139,7 +1139,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "spawn plan: " + err.Error(),
 		}
@@ -1152,7 +1152,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	runner, err := c.agentRunner(req, childID)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "agent runner: " + err.Error(),
 		}
@@ -1174,7 +1174,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
-		return server.SpawnResult{}, &server.ControllerError{
+		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),
 		}
@@ -1192,16 +1192,16 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		false, sessionPath, "")
 }
 
-func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (server.KillResult, error) {
+func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (control.KillResult, error) {
 	ch, ok := c.cm.Get(childID)
 	if !ok {
 		if snap, ok2 := c.st.Get(childID); ok2 && snap.Status == protocol.StatusExited {
-			return server.KillResult{}, &server.ControllerError{
+			return control.KillResult{}, &control.ControllerError{
 				Code:    protocol.ErrChildExited,
 				Message: "child has already exited",
 			}
 		}
-		return server.KillResult{}, &server.ControllerError{
+		return control.KillResult{}, &control.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
@@ -1218,7 +1218,7 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 
 	res, err := ch.Shutdown(shutdownTimeout, killTimeout)
 	if err != nil {
-		return server.KillResult{}, fmt.Errorf("shutdown: %w", err)
+		return control.KillResult{}, fmt.Errorf("shutdown: %w", err)
 	}
 
 	var exitCode *int
@@ -1226,7 +1226,7 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		code := res.ExitCode
 		exitCode = &code
 	}
-	return server.KillResult{
+	return control.KillResult{
 		ExitCode:   exitCode,
 		Signal:     res.Signal,
 		DurationMs: res.Duration.Milliseconds(),
@@ -1323,10 +1323,10 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 func (c *Controller) Forget(childID string) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &server.ControllerError{Code: protocol.ErrNotFound, Message: "child not found: " + childID}
+		return &control.ControllerError{Code: protocol.ErrNotFound, Message: "child not found: " + childID}
 	}
 	if snap.Status != protocol.StatusExited {
-		return &server.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
+		return &control.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
 	}
 
 	// Wait for handleChildExit (running on monitorChild's goroutine) to finish
@@ -1421,20 +1421,20 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 // prefix or invalid characters. Emits ctrl_child_labeled to subscribers.
 func (c *Controller) SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error) {
 	if _, ok := c.st.Get(childID); !ok {
-		return nil, &server.ControllerError{
+		return nil, &control.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	if err := validateUserLabelKeys(set); err != nil {
-		return nil, &server.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	if err := validateUserRemoveKeys(remove); err != nil {
-		return nil, &server.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	merged, err := c.st.SetLabels(childID, set, remove)
 	if err != nil {
-		return nil, &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return nil, &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record after set_labels", "childId", childID, "error", err)
@@ -1482,18 +1482,18 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	if snap.Status == protocol.StatusShuttingDown {
-		return &server.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
+		return &control.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
 	}
 	if snap.Status == protocol.StatusExited {
-		return &server.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+		return &control.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
 	}
 
 	ch, ok := c.cm.Get(childID)
 	if !ok {
-		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 
 	// Detect extension_ui_response frames and update the SM so the blocked_ui
@@ -1511,10 +1511,10 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 	if err := ch.Send(frame); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "backpressure") {
-			return &server.ControllerError{Code: protocol.ErrBackpressure, Message: msg}
+			return &control.ControllerError{Code: protocol.ErrBackpressure, Message: msg}
 		}
 		if strings.Contains(msg, "shutting down") {
-			return &server.ControllerError{Code: protocol.ErrChildShuttingDown, Message: msg}
+			return &control.ControllerError{Code: protocol.ErrChildShuttingDown, Message: msg}
 		}
 		return err
 	}
@@ -1529,7 +1529,7 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 func (c *Controller) handleInterceptedSend(childID string, decision intercept.Decision) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &server.ControllerError{
+		return &control.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
@@ -1550,7 +1550,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision intercept.De
 	// loudly is the honest replacement; it stays this way until agent
 	// conversations have an identity of their own, separate from the child id.
 	if snap.Kind == "agent" {
-		return &server.ControllerError{
+		return &control.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: string(decision.Type) + " is not supported for an agent child: an agent conversation is " +
 				"identified by the child id itself, so a respawn would silently reattach the same conversation " +
@@ -1564,7 +1564,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision intercept.De
 
 	// Gracefully shut down the current child.
 	if _, err := c.Kill(context.Background(), childID, 3000, 500); err != nil {
-		var ce *server.ControllerError
+		var ce *control.ControllerError
 		if !errors.As(err, &ce) ||
 			(ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
 			return fmt.Errorf("intercept kill: %w", err)
@@ -1630,17 +1630,17 @@ func isAbortFrame(frame []byte) bool {
 func (c *Controller) handleClaudeAbort(childID string) error {
 	ch, ok := c.cm.Get(childID)
 	if !ok {
-		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	if snap.Status == protocol.StatusShuttingDown {
-		return &server.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
+		return &control.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
 	}
 	if snap.Status == protocol.StatusExited {
-		return &server.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+		return &control.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
 	}
 	// Resume threads --resume <snap.SessionID>. The store's SessionID is synced
 	// lazily by monitorChild on the first bus event, but claude's system/init
@@ -1652,10 +1652,10 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	// (this window only exists before claude's first system/init).
 	sessionID := ch.Metadata().SessionID
 	if sessionID == "" {
-		return &server.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
+		return &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
 	}
 	if snap.SessionID != sessionID {
-		_ = c.st.Update(childID, func(s *store.Session) { s.SessionID = sessionID })
+		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID })
 	}
 
 	// Save subscribers before exit: handleChildExit clears them on process exit.
@@ -1678,7 +1678,7 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	}
 	if !exited {
 		if _, err := c.Kill(context.Background(), childID, 1000, 500); err != nil {
-			var ce *server.ControllerError
+			var ce *control.ControllerError
 			if !errors.As(err, &ce) || (ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
 				return fmt.Errorf("claude abort kill: %w", err)
 			}
@@ -1714,25 +1714,25 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	return nil
 }
 
-func (c *Controller) Subscribe(childID string, conn server.Connection, filter protocol.SubscribeFilter) error {
+func (c *Controller) Subscribe(childID string, conn control.Connection, filter protocol.SubscribeFilter) error {
 	if _, ok := c.st.Get(childID); !ok {
-		return &server.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	c.cm.Subscribe(childID, conn, filter)
 	return nil
 }
 
-func (c *Controller) Unsubscribe(childID string, conn server.Connection) error {
+func (c *Controller) Unsubscribe(childID string, conn control.Connection) error {
 	c.cm.Unsubscribe(childID, conn)
 	return nil
 }
 
-func (c *Controller) GlobalSubscribe(conn server.Connection) error {
+func (c *Controller) GlobalSubscribe(conn control.Connection) error {
 	c.cm.GlobalSubscribe(conn)
 	return nil
 }
 
-func (c *Controller) GlobalUnsubscribe(conn server.Connection) error {
+func (c *Controller) GlobalUnsubscribe(conn control.Connection) error {
 	c.cm.GlobalUnsubscribe(conn)
 	return nil
 }
@@ -1741,7 +1741,7 @@ func (c *Controller) GlobalUnsubscribe(conn server.Connection) error {
 // delivered from every child whose labels match the filter, evaluated
 // dynamically on each event. A nil filter means "pass everything".
 // Cleanup occurs automatically in OnConnectionClose.
-func (c *Controller) SubscribeLabeled(conn server.Connection, labels map[string]string, hasLabel []string, filter protocol.SubscribeFilter) error {
+func (c *Controller) SubscribeLabeled(conn control.Connection, labels map[string]string, hasLabel []string, filter protocol.SubscribeFilter) error {
 	var fp *protocol.SubscribeFilter
 	if filter.Profile != "" || len(filter.Include) > 0 || len(filter.Exclude) > 0 {
 		f := filter
@@ -1758,7 +1758,7 @@ func (c *Controller) SubscribeLabeled(conn server.Connection, labels map[string]
 // they accumulate until the child is removed from the ChildManager on exit.
 // This is a known limitation — per-child sub sets are bounded by the child
 // lifetime and the subscriber count is small in practice.
-func (c *Controller) OnConnectionClose(conn server.Connection) {
+func (c *Controller) OnConnectionClose(conn control.Connection) {
 	c.cm.GlobalUnsubscribe(conn)
 	c.cm.RemoveLabeledSubsForConn(conn)
 }
@@ -1862,7 +1862,7 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			// (claude emits them in the init frame; static for the session).
 			if len(md.SlashCommands) > 0 && !slashSynced {
 				sc := md.SlashCommands
-				_ = c.st.Update(childID, func(s *store.Session) { s.SlashCommands = sc })
+				_ = c.st.Update(childID, func(s *childstore.Session) { s.SlashCommands = sc })
 				slashSynced = true
 			}
 
@@ -1971,7 +1971,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 // via set_model or cycle_model responses. Emits ctrl_child_labeled.
 func (c *Controller) handleModelChange(childID, modelStr string) {
 	provider, model := splitModel(modelStr)
-	_ = c.st.Update(childID, func(s *store.Session) {
+	_ = c.st.Update(childID, func(s *childstore.Session) {
 		s.Provider = provider
 		s.Model = model
 		if s.Labels == nil {
@@ -2004,7 +2004,7 @@ func (c *Controller) handleModelChange(childID, modelStr string) {
 // the first turn's init; without this sync the store keeps the empty session id
 // captured at activate time and resume cannot re-attach.
 func (c *Controller) handleSessionMetaChange(childID, sessionID, sessionFile string) {
-	_ = c.st.Update(childID, func(s *store.Session) {
+	_ = c.st.Update(childID, func(s *childstore.Session) {
 		if sessionID != "" {
 			s.SessionID = sessionID
 		}
@@ -2554,7 +2554,7 @@ func framePassesTypeFilter(frame []byte, include, exclude []string) bool {
 	return true
 }
 
-func matchesSessionFilter(snap store.Snapshot, f protocol.SearchSessionFilter) bool {
+func matchesSessionFilter(snap childstore.Snapshot, f protocol.SearchSessionFilter) bool {
 	if f.CwdContains != "" && !strings.Contains(snap.Cwd, f.CwdContains) {
 		return false
 	}
@@ -2592,9 +2592,9 @@ func parseEventType(frame []byte, hdr any) error {
 	return json.Unmarshal(frame, hdr)
 }
 
-// sessionFromRecord rebuilds a store.Session from a persisted Record.
-func sessionFromRecord(rec persist.Record) *store.Session {
-	return &store.Session{
+// sessionFromRecord rebuilds a childstore.Session from a persisted Record.
+func sessionFromRecord(rec persist.Record) *childstore.Session {
+	return &childstore.Session{
 		ChildID:            rec.ChildID,
 		PID:                rec.PID,
 		Name:               rec.Name,
@@ -2637,7 +2637,7 @@ func sessionFromRecord(rec persist.Record) *store.Session {
 }
 
 // recordFromSnapshot builds a persist.Record from a store Snapshot.
-func recordFromSnapshot(snap store.Snapshot) persist.Record {
+func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 	return persist.Record{
 		ChildID:            snap.ChildID,
 		PID:                snap.PID,

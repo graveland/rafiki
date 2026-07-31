@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/internal/child"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestIsAbortFrame(t *testing.T) {

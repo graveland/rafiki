@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // burstTurns is the number of complete idle→streaming→idle turns the fake pi

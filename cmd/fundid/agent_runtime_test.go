@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/envvar"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // TestAgentRunnerKind proves agentRunner only builds an in-process Runner for

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // fakeTurnsScript writes a --fake-turns ndjson file (internal/agent's hidden

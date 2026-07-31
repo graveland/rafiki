@@ -13,7 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // serviceBackend abstracts per-OS service management operations.

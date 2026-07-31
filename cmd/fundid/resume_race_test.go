@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/internal/server"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // TestResume_ConcurrentCallsSpawnExactlyOneChild proves the fix for the
@@ -58,7 +58,7 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	type outcome struct {
-		res server.SpawnResult
+		res control.SpawnResult
 		err error
 	}
 	results := make([]outcome, n)
@@ -84,9 +84,9 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 			}
 			continue
 		}
-		var ce *server.ControllerError
+		var ce *control.ControllerError
 		if !errors.As(r.err, &ce) {
-			t.Fatalf("result %d: error is not *server.ControllerError: %v", i, r.err)
+			t.Fatalf("result %d: error is not *control.ControllerError: %v", i, r.err)
 		}
 		if ce.Code != protocol.ErrNotResumable {
 			t.Errorf("result %d: error code = %q, want %q", i, ce.Code, protocol.ErrNotResumable)
@@ -139,7 +139,7 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	type outcome struct {
-		res server.SpawnResult
+		res control.SpawnResult
 		err error
 	}
 	results := make([]outcome, n)
@@ -165,9 +165,9 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 			}
 			continue
 		}
-		var ce *server.ControllerError
+		var ce *control.ControllerError
 		if !errors.As(r.err, &ce) {
-			t.Fatalf("result %d: error is not *server.ControllerError: %v", i, r.err)
+			t.Fatalf("result %d: error is not *control.ControllerError: %v", i, r.err)
 		}
 		if ce.Code != protocol.ErrNotResumable {
 			t.Errorf("result %d: error code = %q, want %q", i, ce.Code, protocol.ErrNotResumable)
@@ -212,7 +212,7 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 
-	var resumeRes server.SpawnResult
+	var resumeRes control.SpawnResult
 	var resumeErr error
 	wg.Add(1)
 	go func() {
@@ -221,7 +221,7 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 		resumeRes, resumeErr = ctrl.Resume(context.Background(), id, "")
 	}()
 
-	var respawnRes server.SpawnResult
+	var respawnRes control.SpawnResult
 	var respawnErr error
 	wg.Add(1)
 	go func() {
@@ -239,9 +239,9 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 			successes++
 			continue
 		}
-		var ce *server.ControllerError
+		var ce *control.ControllerError
 		if !errors.As(err, &ce) {
-			t.Fatalf("error is not *server.ControllerError: %v", err)
+			t.Fatalf("error is not *control.ControllerError: %v", err)
 		}
 		if ce.Code != protocol.ErrNotResumable {
 			t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrNotResumable)

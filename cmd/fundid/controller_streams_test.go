@@ -4,11 +4,11 @@ import (
 	"errors"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/persist"
-	"git.graveland.dev/brent/fundi/internal/ring"
-	"git.graveland.dev/brent/fundi/internal/server"
-	"git.graveland.dev/brent/fundi/internal/store"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/persist"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/ring"
 )
 
 // TestController_GetStreams_StoreMiss verifies that GetStreams returns a
@@ -22,9 +22,9 @@ func TestController_GetStreams_StoreMiss(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for missing child, got nil")
 	}
-	var ce *server.ControllerError
+	var ce *control.ControllerError
 	if !errors.As(err, &ce) {
-		t.Fatalf("expected *server.ControllerError, got %T: %v", err, err)
+		t.Fatalf("expected *control.ControllerError, got %T: %v", err, err)
 	}
 	if ce.Code != protocol.ErrChildNotFound {
 		t.Fatalf("expected code %s, got %s", protocol.ErrChildNotFound, ce.Code)
@@ -38,7 +38,7 @@ func TestController_GetStreams_StoreOnlyChild(t *testing.T) {
 	t.Parallel()
 
 	ctrl := newTestController(t)
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID: "exited-child",
 		Status:  protocol.StatusExited,
 	})
@@ -61,7 +61,7 @@ func TestGetRecentRenderedExited(t *testing.T) {
 	t.Parallel()
 
 	ctrl := newTestController(t)
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID:          "c1",
 		Kind:             "claude",
 		Status:           protocol.StatusExited,
@@ -69,7 +69,7 @@ func TestGetRecentRenderedExited(t *testing.T) {
 		ExitedRenderRing: []ring.Event{{Bytes: []byte(`{"type":"message_end"}`)}},
 	})
 
-	raw, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestGetRecentRenderedExited(t *testing.T) {
 		t.Fatalf("raw events = %v, want the raw frame", raw.Events)
 	}
 
-	rendered, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: true})
+	rendered, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 	t.Parallel()
 
 	ctrl := newTestController(t)
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID:    "c2",
 		Kind:       "claude",
 		Status:     protocol.StatusExited,
@@ -101,7 +101,7 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 		// ExitedRenderRing intentionally empty; no logsDir dump.
 	})
 
-	rendered, err := ctrl.GetRecent("c2", server.RecentQuery{Rendered: true})
+	rendered, err := ctrl.GetRecent("c2", control.RecentQuery{Rendered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 		t.Fatalf("rendered events = %v, want zero (no raw fallback for claude)", rendered.Events)
 	}
 
-	raw, err := ctrl.GetRecent("c2", server.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent("c2", control.RecentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,14 +133,14 @@ func TestGetRecentDiskFallback(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID: "c1",
 		Kind:    "claude",
 		Status:  protocol.StatusExited,
 		// ExitedRing / ExitedRenderRing intentionally empty (lost on restart).
 	})
 
-	raw, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestGetRecentDiskFallback(t *testing.T) {
 		t.Fatalf("raw events = %v, want the disk out frame", raw.Events)
 	}
 
-	rendered, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: true})
+	rendered, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,13 +171,13 @@ func TestGetRecentDiskZeroTimestampSinceGuard(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID: "c1",
 		Kind:    "claude",
 		Status:  protocol.StatusExited,
 	})
 
-	res, err := ctrl.GetRecent("c1", server.RecentQuery{Rendered: true, Since: 1716000000})
+	res, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: true, Since: 1716000000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,14 +207,14 @@ func TestGetRecentByteBudget(t *testing.T) {
 			Timestamp: int64(i + 1),
 		}
 	}
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID:    "c1",
 		Kind:       "pi",
 		Status:     protocol.StatusExited,
 		ExitedRing: events,
 	})
 
-	res, err := ctrl.GetRecent("c1", server.RecentQuery{})
+	res, err := ctrl.GetRecent("c1", control.RecentQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,13 +241,13 @@ func TestGetRecentByteBudget(t *testing.T) {
 	}
 
 	// A small history passes through untrimmed.
-	ctrl.st.Insert(&store.Session{
+	ctrl.st.Insert(&childstore.Session{
 		ChildID:    "c2",
 		Kind:       "pi",
 		Status:     protocol.StatusExited,
 		ExitedRing: []ring.Event{{Bytes: []byte(`{"type":"system"}`), Timestamp: 1}},
 	})
-	small, err := ctrl.GetRecent("c2", server.RecentQuery{})
+	small, err := ctrl.GetRecent("c2", control.RecentQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}

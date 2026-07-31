@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // writePresetsFile writes a presets.json into dir and returns the path.

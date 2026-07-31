@@ -10,10 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/fundi/internal/agent"
-	"git.graveland.dev/brent/fundi/internal/child"
-	"git.graveland.dev/brent/fundi/internal/inproc"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/agent"
+	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/inproc"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // appendDaemonRef appends the authoritative --ref last so it wins over

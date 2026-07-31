@@ -5,14 +5,14 @@ import (
 	"sync"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/server"
-	"git.graveland.dev/brent/fundi/internal/store"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // ─── fake Connection ──────────────────────────────────────────────────────────
 
-// collectConn is a server.Connection that collects all delivered frames.
+// collectConn is a control.Connection that collects all delivered frames.
 type collectConn struct {
 	mu     sync.Mutex
 	frames [][]byte
@@ -31,7 +31,7 @@ func (c *collectConn) count() int {
 }
 
 // Verify collectConn satisfies the interface.
-var _ server.Connection = (*collectConn)(nil)
+var _ control.Connection = (*collectConn)(nil)
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -320,7 +320,7 @@ func TestDeliverToMatching_LabelChangeStopsDelivery(t *testing.T) {
 // ─── Connection-close cleanup ─────────────────────────────────────────────────
 
 func TestConnectionClose_CleansUpLabeledSubs(t *testing.T) {
-	st := store.New()
+	st := childstore.New()
 	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil, nil, t.Context())
 
 	conn := &collectConn{}
@@ -350,7 +350,7 @@ func TestConnectionClose_CleansUpLabeledSubs(t *testing.T) {
 // TestSubscribeLabeled_NilFilterStored verifies that a zero-value filter is
 // stored as nil (no unnecessary allocation) by SubscribeLabeled.
 func TestSubscribeLabeled_NilFilterStored(t *testing.T) {
-	st := store.New()
+	st := childstore.New()
 	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil, nil, t.Context())
 	conn := &collectConn{}
 
@@ -374,7 +374,7 @@ func TestSubscribeLabeled_NilFilterStored(t *testing.T) {
 // TestSubscribeLabeled_NonEmptyFilterStored verifies that a non-empty filter is
 // preserved as a non-nil pointer.
 func TestSubscribeLabeled_NonEmptyFilterStored(t *testing.T) {
-	st := store.New()
+	st := childstore.New()
 	ctrl := NewController(st, t.TempDir(), t.TempDir(), "/tmp/test.sock", nil, nil, t.Context())
 	conn := &collectConn{}
 

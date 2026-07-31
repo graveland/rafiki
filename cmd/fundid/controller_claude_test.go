@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestBuildClaudeArgv_Defaults(t *testing.T) {

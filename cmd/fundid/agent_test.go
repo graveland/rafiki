@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/internal/agent"
-	skillspkg "git.graveland.dev/brent/fundi/internal/skills"
+	"go.graveland.dev/rafiki/pkg/agent"
+	skillspkg "go.graveland.dev/rafiki/pkg/skills"
 )
 
 // TestParseAgentFlagsRequiresModel covers the redesign's central invariant:

@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"git.graveland.dev/brent/fundi/internal/envvar"
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // isHelpArg reports whether arg is a request for usage. Consulted by main

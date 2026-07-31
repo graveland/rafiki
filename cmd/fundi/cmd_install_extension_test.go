@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/cmd/fundi/helpersembed"
+	"go.graveland.dev/rafiki/cmd/fundi/helpersembed"
 )
 
 func TestHelpers_EmbedHasExpectedFiles(t *testing.T) {

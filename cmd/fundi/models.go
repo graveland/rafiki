@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"git.graveland.dev/brent/fundi/internal/models"
+	"go.graveland.dev/rafiki/pkg/models"
 )
 
 // completeModel returns tab-completion candidates for the --model flag.

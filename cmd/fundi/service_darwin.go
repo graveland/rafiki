@@ -12,7 +12,7 @@ import (
 	"strings"
 	"text/template"
 
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // Distinct from pi-controller's own "dev.graveland.pi-controller": sharing the

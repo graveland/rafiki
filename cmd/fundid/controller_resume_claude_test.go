@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/child"
-	"git.graveland.dev/brent/fundi/internal/store"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestResolveSpawnPlan_Claude(t *testing.T) {
@@ -43,7 +43,7 @@ func TestResolveSpawnPlan_UnknownKind(t *testing.T) {
 }
 
 func TestResumeRequestFromSnapshot_Claude(t *testing.T) {
-	snap := store.Snapshot{
+	snap := childstore.Snapshot{
 		Cwd:       "/tmp",
 		Kind:      "claude",
 		ConfigDir: "/home/u/.claude-personal",
@@ -60,7 +60,7 @@ func TestResumeRequestFromSnapshot_Claude(t *testing.T) {
 }
 
 func TestResumeRequestFromSnapshot_Pi(t *testing.T) {
-	snap := store.Snapshot{
+	snap := childstore.Snapshot{
 		Cwd:         "/tmp",
 		Kind:        "", // pi
 		SessionFile: "/tmp/sessions/s.jsonl",

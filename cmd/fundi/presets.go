@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // Preset defines default model and label values applied by fundi create --preset NAME.

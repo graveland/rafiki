@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestRenderList_Table(t *testing.T) {

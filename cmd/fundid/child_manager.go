@@ -4,15 +4,15 @@ import (
 	"encoding/json"
 	"sync"
 
-	"git.graveland.dev/brent/fundi/internal/child"
-	"git.graveland.dev/brent/fundi/internal/server"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // connSub is a registered per-child subscriber: a connection and an optional
 // event filter.
 type connSub struct {
-	conn   server.Connection
+	conn   control.Connection
 	filter protocol.SubscribeFilter
 }
 
@@ -27,7 +27,7 @@ type childEntry struct {
 // (hasLabel) filter.  Delivery is re-evaluated on each event so label
 // changes take effect immediately without re-subscribing.
 type labeledSub struct {
-	conn     server.Connection
+	conn     control.Connection
 	labels   map[string]string
 	hasLabel []string
 	filter   *protocol.SubscribeFilter // optional event-type filter
@@ -90,7 +90,7 @@ func (cm *ChildManager) Remove(childID string) {
 }
 
 // Subscribe adds conn as a subscriber for events from childID.
-func (cm *ChildManager) Subscribe(childID string, conn server.Connection, filter protocol.SubscribeFilter) {
+func (cm *ChildManager) Subscribe(childID string, conn control.Connection, filter protocol.SubscribeFilter) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	e, ok := cm.children[childID]
@@ -101,7 +101,7 @@ func (cm *ChildManager) Subscribe(childID string, conn server.Connection, filter
 }
 
 // Unsubscribe removes conn's subscription for childID.
-func (cm *ChildManager) Unsubscribe(childID string, conn server.Connection) {
+func (cm *ChildManager) Unsubscribe(childID string, conn control.Connection) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	e, ok := cm.children[childID]
@@ -148,14 +148,14 @@ func (cm *ChildManager) RestoreSubscribers(childID string, subs []*connSub) {
 }
 
 // GlobalSubscribe adds conn as a global subscriber (lifecycle events only).
-func (cm *ChildManager) GlobalSubscribe(conn server.Connection) {
+func (cm *ChildManager) GlobalSubscribe(conn control.Connection) {
 	cm.globalMu.Lock()
 	defer cm.globalMu.Unlock()
 	cm.globalSubs = append(cm.globalSubs, &connSub{conn: conn})
 }
 
 // GlobalUnsubscribe removes conn's global subscription.
-func (cm *ChildManager) GlobalUnsubscribe(conn server.Connection) {
+func (cm *ChildManager) GlobalUnsubscribe(conn control.Connection) {
 	cm.globalMu.Lock()
 	defer cm.globalMu.Unlock()
 	for i, s := range cm.globalSubs {
@@ -205,7 +205,7 @@ func (cm *ChildManager) DeliverToGlobal(frame []byte) {
 // RegisterLabeled adds conn as a label-filtered subscriber and returns the
 // registration handle (used by UnregisterLabeled for explicit cleanup; the
 // connection-close path uses RemoveLabeledSubsForConn instead).
-func (cm *ChildManager) RegisterLabeled(conn server.Connection, labels map[string]string, hasLabel []string, filter *protocol.SubscribeFilter) *labeledSub {
+func (cm *ChildManager) RegisterLabeled(conn control.Connection, labels map[string]string, hasLabel []string, filter *protocol.SubscribeFilter) *labeledSub {
 	sub := &labeledSub{
 		conn:     conn,
 		labels:   labels,
@@ -233,7 +233,7 @@ func (cm *ChildManager) UnregisterLabeled(sub *labeledSub) {
 
 // RemoveLabeledSubsForConn removes all labeled subscriptions associated with
 // conn. Called from OnConnectionClose to prevent delivery to closed connections.
-func (cm *ChildManager) RemoveLabeledSubsForConn(conn server.Connection) {
+func (cm *ChildManager) RemoveLabeledSubsForConn(conn control.Connection) {
 	cm.labeledMu.Lock()
 	defer cm.labeledMu.Unlock()
 	keep := cm.labeledSubs[:0]

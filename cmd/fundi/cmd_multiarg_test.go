@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/protocol"
 	"github.com/spf13/cobra"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // ─── Argument validation tests ───────────────────────────────────────────────

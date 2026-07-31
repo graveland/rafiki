@@ -3,11 +3,11 @@ package main
 import (
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/store"
+	"go.graveland.dev/rafiki/pkg/childstore"
 )
 
 func TestRecordRoundTrip_KindAndConfigDir(t *testing.T) {
-	snap := store.Snapshot{
+	snap := childstore.Snapshot{
 		ChildID:   "c1",
 		Cwd:       "/tmp",
 		Kind:      "claude",

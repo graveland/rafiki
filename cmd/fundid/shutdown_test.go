@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"git.graveland.dev/brent/fundi/internal/store"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // fakePiBin returns the path to fake-pi.sh for use in shutdown tests.
@@ -36,7 +36,7 @@ func newTestController(t *testing.T) *Controller {
 			t.Fatalf("mkdirall %s: %v", d, err)
 		}
 	}
-	st := store.New()
+	st := childstore.New()
 	return NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, t.Context())
 }
 
@@ -143,7 +143,7 @@ func TestController_ShutdownAllChildren_CtxExpires(t *testing.T) {
 }
 
 // waitForExited polls st until the child has StatusExited or the deadline passes.
-func waitForExited(t *testing.T, st *store.Store, childID string, timeout time.Duration) {
+func waitForExited(t *testing.T, st *childstore.Store, childID string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

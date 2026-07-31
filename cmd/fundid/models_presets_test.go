@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/paths"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // TestListPresets_ReadsFromPathsPresetsFile locks down that the daemon reads

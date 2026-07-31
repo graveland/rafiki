@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/internal/envvar"
+	"go.graveland.dev/rafiki/pkg/envvar"
 )
 
 // TestAttachEnv_SocketReachesChild spawns a real subprocess and reads the value

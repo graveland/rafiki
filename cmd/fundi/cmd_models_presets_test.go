@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // ─── renderModels ──────────────────────────────────────────────────────────────

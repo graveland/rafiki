@@ -17,12 +17,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"git.graveland.dev/brent/fundi/internal/envvar"
-	"git.graveland.dev/brent/fundi/internal/paths"
-	"git.graveland.dev/brent/fundi/internal/persist"
-	"git.graveland.dev/brent/fundi/internal/server"
-	"git.graveland.dev/brent/fundi/internal/store"
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/envvar"
+	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/persist"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func main() {
@@ -113,7 +113,7 @@ func main() {
 			"env", envvar.AgentDB)
 	}
 
-	st := store.New()
+	st := childstore.New()
 	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, baseCtx)
 	ctrl.loadOrphans(records)
@@ -121,8 +121,8 @@ func main() {
 
 	slog.Info("loaded orphans", "count", len(records))
 
-	handler := server.NewDispatch(ctrl)
-	srv, err := server.Listen(socketPath, handler)
+	handler := control.NewDispatch(ctrl)
+	srv, err := control.Listen(socketPath, handler)
 	if err != nil {
 		slog.Error("listen", "socket", socketPath, "error", err)
 		os.Exit(1)

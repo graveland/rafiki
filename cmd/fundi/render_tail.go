@@ -13,7 +13,7 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
-	"git.graveland.dev/brent/fundi/protocol"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // errDaemonShutdown is returned by render when a ctrl_daemon_shutdown frame
