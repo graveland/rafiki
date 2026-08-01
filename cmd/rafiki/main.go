@@ -39,7 +39,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: rafiki <serve|migrate|agent> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: rafiki <serve|migrate|agent|claude> [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -50,8 +50,10 @@ func main() {
 		err = migrateCmd(os.Args[2:])
 	case "agent":
 		err = agentCmd(os.Args[2:])
+	case "claude":
+		err = claudeCmd(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (want serve, migrate or agent)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (want serve, migrate, agent or claude)", os.Args[1])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "rafiki:", err)

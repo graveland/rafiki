@@ -254,15 +254,32 @@ container above (auto-migrating in `--dev` mode), and accepts the client token
 `dev`. Then, in another shell:
 
 ```bash
-make claude                          # Claude Code through the local proxy
-make claude ARGS='-p "quick question"'
+make claude                                   # Claude Code through the local proxy
+make claude ARGS='--model glm-5.2'            # …on any model the proxy can route
+make claude ARGS='-- --permission-mode plan'  # …passing claude its own flags
 psql 'postgres://postgres:postgres@localhost:5433/rafiki_live' \
   -c 'select model, status, upstream from conversations.conversation_turn'
 ```
 
-`make claude` preflights `/healthz` and fails with a hint if the server
-isn't up; `RAFIKI_URL`/`RAFIKI_TOKEN` retarget it (any Anthropic-protocol
-client works the same way via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`).
+`make claude` is a thin wrapper over `rafiki claude`, which preflights
+`/healthz` and fails with a hint if the server isn't up. `RAFIKI_URL` /
+`RAFIKI_TOKEN` / `RAFIKI_MODEL` retarget it, and everything after `--` is passed
+to claude verbatim.
+
+`--model` accepts anything the proxy can resolve: a concrete id, a
+`<family>-latest` alias, or an OpenRouter slash id. That works because the
+launcher registers the id as a *custom model option* rather than setting
+`ANTHROPIC_MODEL` — Claude Code validates the latter against a client-side
+allowlist of Anthropic ids and rejects everything else before a request ever
+leaves, which would otherwise make the whole routing story above unreachable
+from this launcher. It also pins `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the
+model's real context window (Claude Code assumes 200K for a proxied model it
+cannot verify, so it compacts at the wrong point) and strips inherited
+`ANTHROPIC_*` variables, so launching a session from inside one does not land
+its turns on the outer session's captured conversation.
+
+Any other Anthropic-protocol client works the same way via
+`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 
 ## The fundi TUI
 

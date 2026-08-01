@@ -117,27 +117,21 @@ print-config: build-daemon ## Show the resolved fundi config paths (shells out t
 # Interactive by default; pass extra flags via ARGS, e.g.:
 #   make claude ARGS='-p "what changed today"'
 # RAFIKI_URL / RAFIKI_TOKEN override the target server (environment wins over
-# .env, which wins over the make-run defaults). Only those two client-side
-# values are read from .env — the server's upstream keys
-# (ANTHROPIC/OPENROUTER_API_KEY) must NEVER reach the client: Claude Code
-# would present the real Anthropic key to rafiki's static auth (401) and
-# warn about conflicting auth sources. They are explicitly unset besides.
-# A per-invocation X-Rafiki-Session id (RAFIKI_SESSION overrides) correlates
-# every turn of the launched session onto ONE captured conversation — without
-# it the proxy falls back to one conversation per request.
+# .env, which wins over the make-run defaults).
+#
+# The launch itself lives in `rafiki claude`, not here. It was inline shell
+# until it needed three things a Makefile recipe should not be doing: stripping
+# inherited ANTHROPIC_* vars so a nested session does not adopt its parent's
+# conversation, registering the model as a custom /model option so Claude Code
+# does not reject non-Anthropic ids against its client-side allowlist before a
+# request ever leaves, and pinning the auto-compact threshold to the model's
+# real context window from the OpenRouter catalog. See cmd/rafiki/claude.go —
+# and note that sourcing .env here is now safe precisely because the command
+# strips the provider keys itself.
 .PHONY: claude
 claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
-	@if [ -f .env ]; then \
-		RAFIKI_URL="$${RAFIKI_URL:-$$(sed -n 's/^RAFIKI_URL=//p' .env)}"; \
-		RAFIKI_TOKEN="$${RAFIKI_TOKEN:-$$(sed -n 's/^RAFIKI_TOKEN=//p' .env)}"; \
-	fi; \
-	unset ANTHROPIC_API_KEY OPENROUTER_API_KEY; \
-	url="$${RAFIKI_URL:-http://localhost:8035}"; \
-	curl -sf --max-time 2 "$$url/healthz" >/dev/null || { \
-		echo "error: rafiki is not answering at $$url — start it with 'make run' first"; exit 1; }; \
-	session="$${RAFIKI_SESSION:-make-claude-$$(uuidgen | tr '[:upper:]' '[:lower:]')}"; \
-	ANTHROPIC_BASE_URL="$$url" ANTHROPIC_AUTH_TOKEN="$${RAFIKI_TOKEN:-dev}" \
-	ANTHROPIC_CUSTOM_HEADERS="X-Rafiki-Session: $$session" exec claude $(ARGS)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	go run ./cmd/rafiki claude $(ARGS)
 
 ##@ Install
 
