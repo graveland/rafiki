@@ -152,6 +152,15 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 #
 # fundi-attach is copied only when it has been built — build-attach needs bun
 # and the pi submodule, and skips itself when bun is absent.
+#
+# It does not travel alone. bun compiles it to a static binary, and pi's
+# config.js then resolves package assets relative to dirname(process.execPath)
+# — so package.json, theme/*.json and assets/ must sit NEXT TO the binary
+# wherever it lands, not merely in bin/. Copying only the executable produces a
+# fundi-attach that runs fine from bin/ and dies from $(DESTDIR) with
+# "ENOENT: .../theme/dark.json" followed by "Theme not initialized", which
+# reads like a TUI bug rather than a missing file. attach/scripts/copy-pi-assets.ts
+# is the authority for this list and documents the same contract.
 .PHONY: install
 install: build ## Install rafiki + fundid + fundi (+ fundi-attach if built) to $(DESTDIR).
 	@mkdir -p "$(DESTDIR)"
@@ -162,6 +171,16 @@ install: build ## Install rafiki + fundid + fundi (+ fundi-attach if built) to $
 	@if [ -x "$(BIN_DIR)/$(ATTACH_BIN)" ]; then \
 	    cp "$(BIN_DIR)/$(ATTACH_BIN)" "$(DESTDIR)/$(ATTACH_BIN)" || exit 1; \
 	    echo "installed $(DESTDIR)/$(ATTACH_BIN)"; \
+	    for a in package.json theme assets; do \
+	        if [ -e "$(BIN_DIR)/$$a" ]; then \
+	            rm -rf "$(DESTDIR)/$$a"; \
+	            cp -R "$(BIN_DIR)/$$a" "$(DESTDIR)/$$a" || exit 1; \
+	            echo "installed $(DESTDIR)/$$a"; \
+	        else \
+	            echo "warning: $(BIN_DIR)/$$a missing — fundi-attach will fail at startup;" >&2; \
+	            echo "         re-run 'make build-attach'" >&2; \
+	        fi; \
+	    done; \
 	else \
 	    echo "note: $(BIN_DIR)/$(ATTACH_BIN) not built — run 'make build-attach' (needs bun + the pi submodule)"; \
 	fi
