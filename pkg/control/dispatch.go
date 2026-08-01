@@ -409,6 +409,26 @@ func (d *dispatcher) ctrlStatus(_ []byte, id string) []byte {
 
 // ─── Conversation insight handlers ────────────────────────────────────────────
 
+// conversationQueryTimeout bounds Controller calls made by the three
+// conversation-insight handlers below. Every other handler in this file uses
+// a bare context.Background(), matching the daemon's existing convention —
+// but these three run unbounded aggregate queries against the daemon's
+// shared agent-database pool (also handed to every in-process agent child),
+// so a slow query must not be left uncancellable just because the requesting
+// client disconnected.
+const conversationQueryTimeout = 30 * time.Second
+
+// maxConversationSearchLimit bounds ctrl_conversation_search's effective row
+// limit so a large or absent client-supplied limit can't produce a response
+// that risks protocol.MaxFrameBytes. insights.SearchFilter already floors
+// Limit<=0 to a default of 50 internally; this only adds the missing ceiling.
+const maxConversationSearchLimit = 500
+
+// conversationExportSizeBudget bounds the marshaled size of a
+// ctrl_conversation_export response, leaving headroom below
+// protocol.MaxFrameBytes for the response envelope.
+const conversationExportSizeBudget = protocol.MaxFrameBytes - 4096
+
 // unixToTime converts a wire Unix-seconds value to *time.Time, treating 0 as
 // unset — matches insights.StatsFilter/SearchFilter's nil-means-unbounded
 // convention for Since/Until.
@@ -425,7 +445,8 @@ func (d *dispatcher) conversationStats(frame []byte, id string) []byte {
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlConversationStats, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
+	defer cancel()
 	if req.ConversationID != "" {
 		st, err := d.c.ConversationStatsByID(ctx, req.ConversationID)
 		if err != nil {
@@ -454,6 +475,10 @@ func (d *dispatcher) conversationSearch(frame []byte, id string) []byte {
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlConversationSearch, id, protocol.ErrInvalidArgs, "malformed request")
 	}
+	limit := req.Limit
+	if limit > maxConversationSearchLimit {
+		limit = maxConversationSearchLimit
+	}
 	f := insights.SearchFilter{
 		Since:     unixToTime(req.SinceUnix),
 		Until:     unixToTime(req.UntilUnix),
@@ -465,9 +490,11 @@ func (d *dispatcher) conversationSearch(frame []byte, id string) []byte {
 		Path:      insights.Path(req.Path),
 		MinTokens: req.MinTokens,
 		Text:      req.Text,
-		Limit:     req.Limit,
+		Limit:     limit,
 	}
-	rows, err := d.c.ConversationSearch(context.Background(), f)
+	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
+	defer cancel()
+	rows, err := d.c.ConversationSearch(ctx, f)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlConversationSearch, id, err, protocol.ErrInternal)
 	}
@@ -487,9 +514,15 @@ func (d *dispatcher) conversationExport(frame []byte, id string) []byte {
 	if req.ConversationID == "" {
 		return errResponse(protocol.TypeCtrlConversationExport, id, protocol.ErrInvalidArgs, "conversationId required")
 	}
-	tr, err := d.c.ConversationExport(context.Background(), req.ConversationID)
+	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
+	defer cancel()
+	tr, err := d.c.ConversationExport(ctx, req.ConversationID)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlConversationExport, id, err, protocol.ErrInternal)
+	}
+	if b, err := json.Marshal(tr); err == nil && len(b) > conversationExportSizeBudget {
+		return errResponse(protocol.TypeCtrlConversationExport, id, protocol.ErrPayloadTooLarge,
+			"transcript exceeds the maximum response size; export it via `rafiki agent export` instead")
 	}
 	return okResponse(protocol.TypeCtrlConversationExport, id, tr)
 }

@@ -728,15 +728,15 @@ stock pi-controller daemon — it requires the `agent` child kind's database
 pi-controller daemon gets `unknown command`.
 
 Global stats over persisted conversation history, or stats for one conversation when
-`conversationId` is given (filter fields are then ignored). `since`/`until` are Unix seconds
-(0/absent = unbounded).
+`conversationId` is given (filter fields are then ignored). `sinceUnix`/`untilUnix` are Unix
+seconds (0/absent = unbounded).
 
 ```jsonc
 {
-  "type":  "ctrl_conversation_stats",
-  "id":    "30",
-  "owner": "brent",
-  "since": 1716000000
+  "type":      "ctrl_conversation_stats",
+  "id":        "30",
+  "owner":     "brent",
+  "sinceUnix": 1716000000
 }
 ```
 
@@ -745,7 +745,8 @@ volume, adoption, token, cost, failure, latency, cache-waste, and prefix-reuse f
 `docs/agent-cli.md` for the field-level description; not duplicated here since it's the exact
 same struct.
 
-Error `no_agent_db` (§8) means the daemon has no database configured.
+Errors: `no_agent_db` (§8) means the daemon has no database configured; `not_found` (§8) means
+`conversationId` was given but no such conversation exists.
 
 ### 6.18 `ctrl_conversation_search`
 
@@ -774,6 +775,8 @@ Response:
 }
 ```
 
+Results are capped at 500 rows per request regardless of the requested `limit`.
+
 Error `no_agent_db` (§8) means the daemon has no database configured.
 
 ### 6.19 `ctrl_conversation_export`
@@ -788,8 +791,10 @@ Response `data` is `insights.Transcript` (same shape `rafiki agent export -j` pr
 ordered turns with role, content, per-turn token/latency/model metrics, and the recovered
 skill catalog.
 
-Errors: `invalid_args` when `conversationId` is missing; `no_agent_db` (§8) when the daemon
-has no database configured.
+Errors: `invalid_args` when `conversationId` is missing; `not_found` when no such conversation
+exists; `payload_too_large` (§8) when the transcript exceeds the maximum response size — export
+it via `rafiki agent export` instead; `no_agent_db` (§8) when the daemon has no database
+configured.
 
 ## 7. Controller → client events
 
@@ -904,6 +909,7 @@ Defined error codes:
 | `not_found`             | Generic; e.g., `ctrl_resume` against unknown id.                   |
 | `internal`              | Unexpected controller-side error. Message contains details.        |
 | `no_agent_db`           | `ctrl_conversation_*`: no agent database configured (`FUNDI_AGENT_DB` unset). |
+| `payload_too_large`     | `ctrl_conversation_export`: transcript exceeds the maximum response frame size. |
 
 ## 9. Multi-client semantics
 

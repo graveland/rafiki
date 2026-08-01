@@ -98,6 +98,9 @@ const (
 	// ErrNoAgentDB is returned by ctrl_conversation_* commands when the
 	// daemon has no agent database configured (FUNDI_AGENT_DB unset).
 	ErrNoAgentDB = "no_agent_db"
+	// ErrPayloadTooLarge is returned by ctrl_conversation_export when the
+	// marshaled transcript would exceed the maximum response frame size.
+	ErrPayloadTooLarge = "payload_too_large"
 )
 
 // ─── Shared sub-shapes ───────────────────────────────────────────────────────

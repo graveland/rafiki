@@ -452,15 +452,27 @@ func (c *Controller) Status() control.ControllerStatus {
 
 // ─── Conversation insights (backed by the agent database) ────────────────────
 
-// noAgentDBErr translates agentcli/local.ErrNoPool — "no database pool
-// configured" — to the wire error code clients can act on, distinguishing an
-// expected, actionable state (daemon has no DB configured) from a genuine
-// query failure.
-func noAgentDBErr(err error) error {
+// translateInsightsErr translates errors from the agentcli/local backend into
+// the wire error codes clients can act on, distinguishing expected,
+// actionable states from a genuine query failure:
+//   - agentcli/local.ErrNoPool ("no database pool configured") means the
+//     daemon has no agent database configured at all.
+//   - insights.ErrNotFound means the request named a specific conversation
+//     (ConversationStatsByID / ConversationExport) that does not exist.
+//
+// Any other error is returned unchanged, so dispatch's mapErr falls back to
+// protocol.ErrInternal.
+func translateInsightsErr(err error) error {
 	if errors.Is(err, local.ErrNoPool) {
 		return &control.ControllerError{
 			Code:    protocol.ErrNoAgentDB,
 			Message: "no agent database configured (FUNDI_AGENT_DB unset); set it and run `fundi service install`",
+		}
+	}
+	if errors.Is(err, insights.ErrNotFound) {
+		return &control.ControllerError{
+			Code:    protocol.ErrNotFound,
+			Message: err.Error(),
 		}
 	}
 	return err
@@ -469,7 +481,7 @@ func noAgentDBErr(err error) error {
 func (c *Controller) ConversationStats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error) {
 	st, err := c.insights.Stats(ctx, f)
 	if err != nil {
-		return nil, noAgentDBErr(err)
+		return nil, translateInsightsErr(err)
 	}
 	return st, nil
 }
@@ -477,7 +489,7 @@ func (c *Controller) ConversationStats(ctx context.Context, f insights.StatsFilt
 func (c *Controller) ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error) {
 	st, err := c.insights.ConversationStats(ctx, id)
 	if err != nil {
-		return nil, noAgentDBErr(err)
+		return nil, translateInsightsErr(err)
 	}
 	return st, nil
 }
@@ -485,7 +497,7 @@ func (c *Controller) ConversationStatsByID(ctx context.Context, id string) (*ins
 func (c *Controller) ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
 	rows, err := c.insights.Search(ctx, f)
 	if err != nil {
-		return nil, noAgentDBErr(err)
+		return nil, translateInsightsErr(err)
 	}
 	return rows, nil
 }
@@ -493,7 +505,7 @@ func (c *Controller) ConversationSearch(ctx context.Context, f insights.SearchFi
 func (c *Controller) ConversationExport(ctx context.Context, id string) (*insights.Transcript, error) {
 	tr, err := c.insights.Export(ctx, id)
 	if err != nil {
-		return nil, noAgentDBErr(err)
+		return nil, translateInsightsErr(err)
 	}
 	return tr, nil
 }

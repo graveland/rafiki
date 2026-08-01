@@ -725,6 +725,26 @@ func TestDispatch_ConversationStats_Global_Success(t *testing.T) {
 	}
 }
 
+func TestDispatch_ConversationStats_Global_TimeAndPathConversion(t *testing.T) {
+	c := &fakeController{
+		conversationStatsFn: func(_ context.Context, f insights.StatsFilter) (*insights.Stats, error) {
+			if f.Since == nil || f.Since.Unix() != 1716000000 {
+				t.Fatalf("since: %v", f.Since)
+			}
+			if f.Until == nil || f.Until.Unix() != 1716100000 {
+				t.Fatalf("until: %v", f.Until)
+			}
+			if f.Path != insights.PathDirect {
+				t.Fatalf("path: %q", f.Path)
+			}
+			return &insights.Stats{}, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	frame := `{"type":"ctrl_conversation_stats","id":"30b","sinceUnix":1716000000,"untilUnix":1716100000,"path":"direct"}`
+	mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+}
+
 func TestDispatch_ConversationStats_ByID_Success(t *testing.T) {
 	c := &fakeController{
 		conversationStatsByIDFn: func(_ context.Context, id string) (*insights.Stats, error) {
