@@ -78,13 +78,23 @@ kind itself is the same kind of divergence).
 ### Wire shapes
 
 `pkg/protocol` is deliberately a pure-data, zero-dependency package (its own header: *"no
-logic, no I/O"*) — it imports nothing but `encoding/json`, so that the wire contract stays
-readable as a single file independent of the query/storage engine behind it. The new request
-and response types keep that invariant: they do **not** reuse `pkg/insights` types directly,
-even though the response shapes are structurally identical to `insights.Stats` /
-`insights.ConversationSummary` / `insights.Transcript`. Converting between them is a few lines
-in `pkg/control` (see below), matching the existing `snapshotToSummary(childstore.Snapshot)
-protocol.ChildSummary` precedent for `ctrl_list`/`ctrl_get`.
+logic, no I/O"*) — it imports nothing but `encoding/json`. The new **request** types keep that
+invariant: they're protocol-local (not reused from `pkg/insights`), because they're real wire
+input the dispatcher validates, and the filter shape (~10 scalar fields, `Since`/`Until` cross
+the wire as resolved Unix seconds rather than `*time.Time`) is small and stable.
+
+**Response** payloads are a different call: `insights.Stats` alone is 9 nested structs, ~40
+fields. Hand-mirroring that into a parallel `protocol.ConversationStatsResponseData` buys
+nothing — nothing enforces the two stay in sync, it's pure drift risk, and the CLI never
+decodes the response into a typed struct anyway (see below: it just re-emits `resp.Data`
+verbatim). So the response payloads are **not** protocol-declared types at all:
+`pkg/control`'s handlers pass `*insights.Stats` / `[]insights.ConversationSummary` (wrapped
+`{"rows": [...]}`, via a local anonymous struct — matching `ListResponseData`'s
+`{"children": [...]}` shape rather than a bare array) / `*insights.Transcript` straight to
+`okResponse`, which just `json.Marshal`s whatever `any` it's given. `pkg/control` already
+depends on domain types in the `Controller` interface itself (`childstore.Snapshot`), so this
+isn't a new kind of dependency — just the existing `snapshotToSummary(childstore.Snapshot)
+protocol.ChildSummary` precedent, minus the wrapper type since none is needed here.
 
 `Since`/`Until` cross the wire as **already-resolved Unix seconds** (`0` = unset), not as raw
 duration strings — the CLI resolves `--since 24h` client-side (reusing
@@ -143,13 +153,6 @@ type ConversationExportRequest struct {
 }
 ```
 
-Response payload types (`ConversationStatsResponseData`, `ConversationSearchResponseData` —
-a `{"rows": [...]}` wrapper matching `ListResponseData`'s `{"children": [...]}` shape rather
-than a bare array, so a future field can be added without breaking the envelope —
-`ConversationExportResponseData`) are field-for-field mirrors of `insights.Stats` /
-`insights.ConversationSummary` / `insights.Transcript`, same JSON tags. Deliberately
-mechanical; not reproduced in full here.
-
 ### Errors
 
 No DB configured on the daemon (`FUNDI_AGENT_DB` unset ⇒ nil pool ⇒ nil backend) is not a
@@ -163,43 +166,55 @@ now to the client that actually asked instead of only to whoever's watching the 
 
 ## Daemon wiring
 
-- `cmd/fundid/main.go`: right after the existing `pool` construction, build
-  `agentcli/local.New(agentcli_local.Options{Pool: pool})` when `pool != nil`; `nil` backend
-  when `pool == nil`, mirroring the existing branch exactly. Pass the backend into whatever
-  constructs the real `Controller`.
-- `pkg/control`: `Controller` interface gains
-  `ConversationStats(ctx, ConversationStatsQuery) (*insights.Stats, error)`,
-  `ConversationSearch(ctx, ConversationSearchQuery) ([]insights.ConversationSummary, error)`,
-  `ConversationExport(ctx, id string) (*insights.Transcript, error)` — three new `case` arms in
-  `dispatch.go` alongside the existing `TypeCtrlSearch`/`TypeCtrlStatus` ones, each: decode
-  request → build the query/filter type → call through → convert the domain result to the wire
-  response type → `okResponse`/`errResponse`. A nil backend short-circuits to
-  `ERR_NO_AGENT_DB` before touching the (nil) pool.
-- `pkg/control/dispatch_test.go`'s fake `Controller` gets the three new methods (canned data),
-  so dispatch tests cover encode/decode and error-code plumbing without a real database —
-  same shape as every other dispatch test in that file today.
+- `cmd/fundid/controller.go`: `NewController` already takes `pool *pgxpool.Pool` as a
+  parameter and stores it (`c.pool`) — no `main.go` change needed. Add one more line to the
+  constructor: `insights: agentclilocal.New(agentclilocal.Options{Pool: pool})`. `local.New` is
+  nil-pool-safe already (`pool == nil` ⇒ its read methods return `local.ErrNoPool`, not a
+  panic), so this is unconditional, matching the existing "works fine with no DB" posture.
+- `pkg/control`: `Controller` interface gains four methods, mirroring `agentcli.Backend`'s own
+  split rather than inventing a combined query type:
+  - `ConversationStats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error)`
+  - `ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error)`
+  - `ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error)`
+  - `ConversationExport(ctx context.Context, id string) (*insights.Transcript, error)`
+
+  `pkg/control` already depends on domain types in this interface (`childstore.Snapshot`), so
+  importing `pkg/insights` here is consistent, not a new kind of dependency. Three new `case`
+  arms in `dispatch.go` (one per wire type; `ctrl_conversation_stats` picks
+  `ConversationStats`/`ConversationStatsByID` based on whether `conversationId` was sent, same
+  branch `agentStatsCmd` already makes), each: decode request → build the resolved filter (Unix
+  seconds → `*time.Time`) → call through → `okResponse`/`errResponse`. On the real `Controller`,
+  each of the four methods delegates straight to `c.insights.<Method>(...)` and translates
+  `errors.Is(err, agentclilocal.ErrNoPool)` to `&control.ControllerError{Code:
+  protocol.ErrNoAgentDB, ...}`; dispatch's existing `mapErr` picks that code up automatically.
+- `pkg/control/dispatch_test.go`'s fake `Controller` gets the four new methods (canned data via
+  function fields, matching every other fake method in that file), so dispatch tests cover
+  encode/decode and error-code plumbing without a real database.
 
 ## CLI wiring
 
-- New `cmd/fundi/cmd_conversations.go`: a `conversations` parent `cobra.Command` with three
-  subcommands, each following `cmd_status.go`'s existing dial → `c.Request(...)` →
-  check-`Success` → decode pattern verbatim.
+- New `cmd/fundi/cmd_conversations.go`: a `conversations` parent `cobra.Command` (parent +
+  `AddCommand`, matching `newServiceCmd()`'s pattern) with three subcommands, each following
+  `cmd_status.go`'s/`cmd_search.go`'s existing dial → `c.Request(...)` → check-`Success` →
+  print pattern verbatim. **No render layer**: every non-`list`/`tail` `fundi` command always
+  emits raw `resp.Data` JSON (the `--output` flag's own help text says so — it only affects
+  `list`/`tail`), so these three follow suit. `pkg/agentcli`'s `Render*` functions are not used
+  anywhere in `cmd/fundi`.
 - Flag binding reuses `agentcli.FilterVals` + `agentcli.BindStatsFilter`/`BindSearchFilter`
-  (imported from the same module, already used by `cmd/rafiki`) to parse and validate
-  `--since`/`--until`/etc. client-side, then the resolved `*time.Time`s convert to
-  `SinceUnix`/`UntilUnix` for the wire request.
-- Rendering: reuse `pkg/agentcli.RenderStats` / `RenderSearch` / `RenderTranscriptMD` — decode
-  `resp.Data` into the corresponding `insights.*` shape (same JSON tags, so this is a plain
-  `json.Unmarshal`) and hand it to the existing render functions for the human-readable
-  default. `--output json` (fundi's existing global flag) short-circuits to raw `resp.Data`
-  passthrough, same as `cmd_status.go` does today.
+  (same module, already used by `cmd/rafiki`) to parse and validate `--since`/`--until`/etc.
+  client-side, then the resolved `*time.Time`s convert to `SinceUnix`/`UntilUnix` for the wire
+  request.
 
 ## Testing
 
 - `pkg/control/dispatch_test.go`: table cases per new `ctrl_*` type — success, malformed
-  request, nil-backend `ERR_NO_AGENT_DB`.
-- `cmd/fundi`: one request/response round-trip test per new subcommand against a fake socket
-  server, matching the existing `cmd_*_test.go` pattern in that package.
+  request, nil-backend `no_agent_db`. Same pattern as `TestDispatch_Search_Success` /
+  `TestDispatch_Status_Success` already in that file.
+- `pkg/protocol/types_test.go`: a `roundTrip` marshal/unmarshal test per new request type,
+  matching `TestSearchRequest_RoundTrip`/`TestStatusRequest_RoundTrip`.
+- `cmd/fundi`: flag-registration/parsing tests for the three new subcommands, matching the
+  existing lightweight style in that package (e.g. `cmd_kill_test.go` — no fake socket server;
+  `cmd/fundi` doesn't have that pattern anywhere today for any command).
 - Manual verification: `FUNDI_AGENT_DB=... fundi service restart && fundi conversations stats`
   against a live database, mirroring the verification style already recorded for `rafiki agent
   stats` in `docs/agent-cli.md`.
