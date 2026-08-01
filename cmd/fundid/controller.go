@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/version"
 )
@@ -2486,7 +2488,62 @@ func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 		}
 		env = append(env, envVar+"="+req.APIKey)
 	}
+	env = append(env, proxyChildEnv(req, childID)...)
 	return env
+}
+
+// proxyChildEnv returns the variables that point a child at the rafiki proxy,
+// or nothing when no proxy is configured or this kind is not routed.
+//
+// The agent kind is never routed: it reaches rafiki in-process through pkg/llm
+// and pkg/routing, so there is no HTTP face to point it at, and doing so would
+// put a network hop in front of a library call.
+func proxyChildEnv(req protocol.SpawnRequest, childID string) []string {
+	url := paths.Get(paths.ProxyURL)
+	if url == "" || req.Kind == "agent" || !proxyRoutesKind(req.Kind) {
+		return nil
+	}
+	token := paths.Get(paths.ProxyToken)
+
+	// childID rather than the session id: it exists before the child does, is
+	// stable for the child's whole life, and already identifies it everywhere
+	// else in the daemon. The proxy stores it as external_ref, so a captured
+	// conversation traces back to the child that produced it.
+	headers := map[string]string{
+		"X-Rafiki-Session": childID,
+		"X-Rafiki-Source":  req.Kind,
+	}
+
+	switch req.Kind {
+	case "claude":
+		// Built by the same code as `rafiki claude`, so the two cannot drift.
+		// Passing a nil environ yields only the additions, which is what is
+		// wanted: the child inherits os.Environ and this is appended to it,
+		// where the last assignment wins.
+		additions, _ := proxyenv.Claude(nil, proxyenv.ClaudeOptions{
+			URL: url, Token: token, Model: req.Model, Headers: headers,
+		})
+		return additions
+	default:
+		// pi has no ANTHROPIC_BASE_URL equivalent. It reads these in the
+		// fundi-helpers extension, which is where its provider override is
+		// registered.
+		return []string{
+			paths.ProxyURL + "=" + url,
+			paths.ProxyToken + "=" + token,
+			"FUNDI_SESSION_REF=" + childID,
+		}
+	}
+}
+
+// proxyRoutesKind reports whether kind is listed in FUNDI_PROXY_KINDS, which
+// defaults to "pi,claude".
+func proxyRoutesKind(kind string) bool {
+	kinds := splitComma(paths.Get(paths.ProxyKinds))
+	if len(kinds) == 0 {
+		kinds = []string{"pi", "claude"}
+	}
+	return slices.Contains(kinds, kind)
 }
 
 // splitModel splits "provider/model" into provider and model. If no slash is

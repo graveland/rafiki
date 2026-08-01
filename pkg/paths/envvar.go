@@ -61,6 +61,31 @@ const (
 	// one home.
 	AgentDB = "FUNDI_AGENT_DB"
 
+	// ProxyURL points pi and claude children at a rafiki proxy, so their turns
+	// are captured and their models resolved by the same path the agent kind
+	// already uses in-process.
+	//
+	// Empty DISABLES the mechanism entirely: children talk to providers
+	// directly, exactly as before. That default matters — enabling this cannot
+	// break an install that has not opted in.
+	ProxyURL = "FUNDI_PROXY_URL"
+
+	// ProxyToken authenticates to the proxy. claude sends it as a bearer, pi as
+	// X-Api-Key; rafiki's face accepts either.
+	//
+	// A credential, so it belongs in the environment file rather than the
+	// service unit (see ServiceEnvFile), and is deliberately absent from
+	// cmd/fundi's daemonEnvVars for that reason.
+	ProxyToken = "FUNDI_PROXY_TOKEN"
+
+	// ProxyKinds limits which child kinds are routed, comma-separated. Default
+	// "pi,claude"; the agent kind is never listed because it reaches rafiki
+	// in-process and has no proxy to point at.
+	//
+	// An escape hatch: it makes "is this regression the proxy?" answerable by
+	// restarting the daemon rather than rebuilding it.
+	ProxyKinds = "FUNDI_PROXY_KINDS"
+
 	// Instructions is the user-global instruction file. fundi's own config, so
 	// it is NOT ~/.claude/CLAUDE.md — see this package's doc comment for why
 	// fundi does not read its configuration out of another tool's directory.

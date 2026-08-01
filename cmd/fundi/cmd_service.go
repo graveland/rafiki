@@ -67,9 +67,12 @@ type serviceSpec struct {
 //   - paths.AttachTail, paths.NoAutoInstallHelpers — read by the TUI and by
 //     `fundi create` respectively, i.e. client-side. They reach those from the
 //     user's own shell and have no business in the daemon's unit.
-//   - ANTHROPIC_API_KEY / OPENROUTER_API_KEY — unit files are world-readable
-//     (0644). Copying live credentials into one to save an export is not a
-//     trade to make silently; children get them via --forward-env instead.
+//   - ANTHROPIC_API_KEY / OPENROUTER_API_KEY / paths.ProxyToken — unit files
+//     are world-readable (0644). Credentials belong in the environment file
+//     (paths.ServiceEnvFile), which the daemon reads at startup and which can
+//     be 0600. Note ProxyURL and ProxyKinds ARE captured: a URL and a list of
+//     kinds are not secrets, and having them in the unit means the routing is
+//     visible to anyone reading the service definition.
 var daemonEnvVars = []string{
 	paths.AgentDB,
 	paths.Socket,
@@ -81,6 +84,8 @@ var daemonEnvVars = []string{
 	paths.DefaultLabels,
 	paths.GraceHours,
 	paths.PiBinary,
+	paths.ProxyURL,
+	paths.ProxyKinds,
 }
 
 // captureDaemonEnv returns the daemonEnvVars actually set in environ (in

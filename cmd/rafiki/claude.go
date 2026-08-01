@@ -13,13 +13,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
@@ -32,84 +32,12 @@ const (
 	claudeCatalogBudget = 2 * time.Second
 )
 
-// claudeManagedEnv are the variables this launcher sets deliberately. They are
-// stripped from the inherited environment first so that launching a session
-// from inside one does not silently inherit the parent's base URL, model or
-// correlation header — which would land the child's turns on the parent's
-// captured conversation and make a nested run look like a continuation of the
-// outer one.
-var claudeManagedEnv = []string{
-	"ANTHROPIC_BASE_URL",
-	"ANTHROPIC_AUTH_TOKEN",
-	"ANTHROPIC_CUSTOM_HEADERS",
-	"ANTHROPIC_CUSTOM_MODEL_OPTION",
-	"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-	"ANTHROPIC_MODEL",
-	"CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-}
-
 // claudeInvocation is the assembled environment and argument list for exec'ing
-// the claude binary.
+// the claude binary. The environment itself is built by pkg/proxyenv, shared
+// with the daemon's --kind claude children so the two cannot drift.
 type claudeInvocation struct {
 	Env  []string
 	Args []string
-}
-
-// buildClaudeInvocation assembles the env and args for launching Claude Code
-// against a rafiki proxy at url with the given bearer token.
-//
-// model may be empty (Claude Code picks its own). autoCompactWindow of 0 leaves
-// Claude Code's default in place. passthrough is the user's own claude flags.
-func buildClaudeInvocation(environ []string, url, token, sessionID, model string, autoCompactWindow int, passthrough []string) claudeInvocation {
-	env := make([]string, 0, len(environ)+8)
-	for _, e := range environ {
-		k, _, _ := strings.Cut(e, "=")
-		if slices.Contains(claudeManagedEnv, k) {
-			continue // set explicitly below; drop the inherited copy
-		}
-		// The real Anthropic key must not reach a proxied child: Claude Code
-		// would present it as x-api-key, which bypasses the bearer the proxy
-		// authenticates on and defeats the capture the proxy exists for. The
-		// OpenRouter key is the server's business and never the client's.
-		if k == "ANTHROPIC_API_KEY" || k == "OPENROUTER_API_KEY" {
-			continue
-		}
-		env = append(env, e)
-	}
-
-	env = append(env,
-		"ANTHROPIC_BASE_URL="+url,
-		"ANTHROPIC_AUTH_TOKEN="+token,
-	)
-	if sessionID != "" {
-		// Correlates every turn of this session onto ONE captured
-		// conversation; without it the proxy falls back to one conversation
-		// per request.
-		env = append(env, "ANTHROPIC_CUSTOM_HEADERS=X-Rafiki-Session: "+sessionID)
-	}
-
-	var args []string
-	if model != "" {
-		// Register the model as a custom /model option rather than setting
-		// ANTHROPIC_MODEL or passing a bare --model. Claude Code validates
-		// those against a client-side allowlist of Anthropic ids and rejects
-		// anything else BEFORE a request ever leaves the client, which makes
-		// every OpenRouter slash id and every <family>-latest alias
-		// unreachable. A registered custom option is sent verbatim, leaving
-		// resolution to the proxy, which is the only side that can do it.
-		env = append(env,
-			"ANTHROPIC_CUSTOM_MODEL_OPTION="+model,
-			"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=rafiki: "+model,
-		)
-		args = append(args, "--model", model)
-		// Claude Code assumes a 200K context for a proxied model it cannot
-		// verify, so it compacts too early or too late for the real window.
-		if autoCompactWindow > 0 {
-			env = append(env, fmt.Sprintf("CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d", autoCompactWindow))
-		}
-	}
-	args = append(args, passthrough...)
-	return claudeInvocation{Env: env, Args: args}
 }
 
 // claudeAutoCompactWindow resolves model's real context window from the
@@ -188,8 +116,20 @@ and model resolution. Everything after -- is passed to claude verbatim.
 		}
 	}
 
-	inv := buildClaudeInvocation(os.Environ(), *url, *token, sessionID, *model, autoCompact, fs.Args())
-	return execClaude(inv)
+	env, modelArgs := proxyenv.Claude(os.Environ(), proxyenv.ClaudeOptions{
+		URL:               *url,
+		Token:             *token,
+		Model:             *model,
+		AutoCompactWindow: autoCompact,
+		Headers: map[string]string{
+			// Correlates every turn of this session onto ONE captured
+			// conversation; without it the proxy falls back to one
+			// conversation per request.
+			"X-Rafiki-Session": sessionID,
+			"X-Rafiki-Source":  "rafiki-claude",
+		},
+	})
+	return execClaude(claudeInvocation{Env: env, Args: append(modelArgs, fs.Args()...)})
 }
 
 func envOr(key, fallback string) string {

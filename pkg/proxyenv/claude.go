@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Package proxyenv builds the environment that points a Claude Code process at
+// a rafiki proxy.
+//
+// It exists because two callers need byte-identical behaviour and got it wrong
+// independently: `rafiki claude` launches Claude Code interactively, and the
+// fundi daemon spawns `--kind claude` children. A difference between them shows
+// up as a child whose turns land on the wrong conversation, or one that quietly
+// bypasses the proxy altogether — neither of which errors.
+package proxyenv
+
+import (
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+)
+
+// Managed are the variables this package sets. They are stripped from the
+// inherited environment before being set, so that launching a session from
+// inside one does not adopt the outer session's base URL, model or correlation
+// header — which would land the child's turns on the parent's conversation and
+// make a nested run read as a continuation of the outer one.
+var Managed = []string{
+	"ANTHROPIC_BASE_URL",
+	"ANTHROPIC_AUTH_TOKEN",
+	"ANTHROPIC_CUSTOM_HEADERS",
+	"ANTHROPIC_CUSTOM_MODEL_OPTION",
+	"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+	"ANTHROPIC_MODEL",
+	"CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+}
+
+// Credentials must not reach a proxied child. Claude Code presents
+// ANTHROPIC_API_KEY as x-api-key, which bypasses the bearer the proxy
+// authenticates on and defeats the capture the proxy exists for. The OpenRouter
+// key is the server's business and never the client's.
+var Credentials = []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"}
+
+// ClaudeOptions describes one proxied Claude Code session.
+type ClaudeOptions struct {
+	// URL is the rafiki base URL. Empty means "not proxied": Claude sets
+	// nothing and strips nothing, so the caller gets the unmodified
+	// environment back and talks to Anthropic directly.
+	URL string
+	// Token is the proxy's bearer. Claude Code requires a non-empty auth token
+	// to send anything to a custom base URL at all, so an empty one is
+	// replaced with a placeholder rather than omitted.
+	Token string
+	// Model may be empty, leaving Claude Code's own default in place.
+	Model string
+	// AutoCompactWindow of 0 leaves Claude Code's default threshold alone.
+	AutoCompactWindow int
+	// Headers are sent via ANTHROPIC_CUSTOM_HEADERS. Order is normalised so a
+	// respawn with the same inputs produces the same environment.
+	Headers map[string]string
+}
+
+// Claude returns a complete environment derived from environ with the proxy
+// wired in, plus the arguments to pass to the claude binary.
+//
+// The returned environment is complete rather than a set of additions, because
+// stripping is half the job and you cannot un-set a variable by appending to a
+// list.
+func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
+	if o.URL == "" {
+		return slices.Clone(environ), nil // not proxied: leave everything alone
+	}
+
+	env = make([]string, 0, len(environ)+8)
+	for _, e := range environ {
+		k, _, _ := strings.Cut(e, "=")
+		if slices.Contains(Managed, k) || slices.Contains(Credentials, k) {
+			continue
+		}
+		env = append(env, e)
+	}
+
+	token := o.Token
+	if token == "" {
+		// Claude Code will not send to a custom base URL without one; a proxy
+		// that authenticates by other means (tailnet identity, anonymous dev)
+		// still needs the field populated.
+		token = "rafiki"
+	}
+	env = append(env,
+		"ANTHROPIC_BASE_URL="+o.URL,
+		"ANTHROPIC_AUTH_TOKEN="+token,
+	)
+
+	if h := FormatHeaders(o.Headers); h != "" {
+		env = append(env, "ANTHROPIC_CUSTOM_HEADERS="+h)
+	}
+
+	if o.Model != "" {
+		// Register the model as a custom /model option rather than setting
+		// ANTHROPIC_MODEL or passing a bare --model. Claude Code validates
+		// those against a client-side allowlist of Anthropic ids and rejects
+		// anything else BEFORE a request leaves, which makes every OpenRouter
+		// slash id and every <family>-latest alias unreachable. A registered
+		// custom option is sent verbatim, leaving resolution to the proxy —
+		// the only side that can do it.
+		env = append(env,
+			"ANTHROPIC_CUSTOM_MODEL_OPTION="+o.Model,
+			"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=rafiki: "+o.Model,
+		)
+		args = append(args, "--model", o.Model)
+		if o.AutoCompactWindow > 0 {
+			// Claude Code assumes a 200K context for a proxied model it cannot
+			// verify, so it compacts at the wrong point for the real window.
+			env = append(env, fmt.Sprintf("CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d", o.AutoCompactWindow))
+		}
+	}
+	return env, args
+}
+
+// FormatHeaders renders headers for ANTHROPIC_CUSTOM_HEADERS.
+//
+// The separator is a literal newline and nothing else. A comma, a semicolon or
+// an escaped "\n" each silently collapse into ONE malformed header — no error,
+// the correlation simply stops working. That single fact is why the daemon
+// needs an environment file at all: systemd's Environment= is line-based and
+// cannot carry this value (see paths.ServiceEnvFile).
+//
+// Keys are emitted in sorted order so the same inputs always produce the same
+// string; an environment that differs run to run is needless noise when
+// diffing what a child was actually given.
+func FormatHeaders(h map[string]string) string {
+	if len(h) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		// A newline in a value would forge an extra header; a header whose
+		// value contains one is malformed anyway, so drop it rather than emit
+		// something the proxy would read as two.
+		if strings.ContainsAny(h[k], "\n\r") {
+			continue
+		}
+		parts = append(parts, k+": "+h[k])
+	}
+	return strings.Join(parts, "\n")
+}
