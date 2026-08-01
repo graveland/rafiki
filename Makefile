@@ -43,13 +43,33 @@ help: ## Display this help.
 
 ##@ Development
 
-# Run the standalone server locally in --dev mode (auto-migrate, client token
-# "dev", :8035) against the local rafiki-test-db container. Sources a
-# gitignored .env from the repo root when present (keys + optional config;
-# see .env.example). RAFIKI_DB precedence: .env wins over the inherited
-# environment; the DSN below is only the fallback when neither sets it.
+# Run fundi in the foreground. fundid serves the proxy face itself on :8035 —
+# the port `rafiki serve` used to hold — so anything already pointed at a local
+# rafiki keeps working, and pi/claude children get capture, failover and model
+# resolution without a second process to start.
+#
+# FUNDI_PROXY_TOKEN=dev makes the face accept the same token `make claude` sends.
+# The daemon also mints a per-boot token for its own children; this is the extra
+# one for humans and tools, which cannot know a per-boot secret.
+#
+# FUNDI_AGENT_DB is what makes turns land in the conversations schema, for
+# proxied children and in-process agent children alike. It falls back to
+# RAFIKI_DB from .env so one DSN configures both.
+#
+# Note this does NOT migrate, where `rafiki serve --dev` did: run
+# `go run ./cmd/rafiki migrate` once against a fresh database.
 .PHONY: run
-run: ## Run the rafiki server locally: serve --dev on :8035, sourcing .env.
+run: ## Run fundid in the foreground, serving the proxy face on :8035.
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	export FUNDI_AGENT_DB="$${FUNDI_AGENT_DB:-$${RAFIKI_DB}}"; \
+	export FUNDI_PROXY_TOKEN="$${FUNDI_PROXY_TOKEN:-dev}"; \
+	go run ./cmd/fundid
+
+# The old `rafiki serve` path, kept for running the proxy WITHOUT the daemon —
+# a bare capture server, or a second one on another port. It still auto-migrates
+# in --dev mode, which is why the note on `run` points here.
+.PHONY: run-proxy
+run-proxy: ## Run the standalone proxy only: rafiki serve --dev on :8035.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	export RAFIKI_DB="$${RAFIKI_DB:-postgres://postgres:postgres@localhost:5433/rafiki_live?sslmode=disable}"; \
 	go run ./cmd/rafiki serve --dev

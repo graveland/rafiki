@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,12 +36,28 @@ type proxyFace struct {
 	srv   *http.Server
 }
 
-// startProxyFace binds an ephemeral loopback port and serves the proxy on it.
+// defaultProxyListen is where the face binds unless FUNDI_PROXY_LISTEN says
+// otherwise.
 //
-// Ephemeral by design: nothing outside this process needs to predict the
-// address, because the daemon injects it into each child's environment. A fixed
-// port would only add a way for two daemons, or a stray `rafiki serve`, to
-// collide.
+// Port 8035 is the one `rafiki serve` has always used, so anything already
+// pointed at a local rafiki — `make claude`, an editor plugin, a shell alias —
+// keeps working with the daemon serving instead.
+//
+// All interfaces, not loopback: the point of one face is that everything on the
+// network can have the capture store and the failover, including other hosts
+// and sentinel. A loopback default would make that a knob to discover rather
+// than the behaviour. Auth is mandatory either way — see the token handling in
+// startProxyFace, and the warning when the face is reachable off-box with no
+// token anyone else could know.
+const defaultProxyListen = ":8035"
+
+// startProxyFace binds the proxy face and serves it.
+//
+// A busy address is a hard error, not a reason to pick another port. The
+// address is a contract: clients are configured to find it, and silently
+// landing somewhere else would leave them talking to whatever *did* claim
+// 8035 — most likely a stale `rafiki serve` with different credentials and a
+// different database.
 //
 // pool may be nil, in which case turns are proxied but not captured — the
 // routing, failover and model resolution are still worth having, and refusing
@@ -105,20 +122,45 @@ func startProxyFace(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger
 	if err != nil {
 		return nil, err
 	}
-	// A token even on loopback: any process on this machine can reach an
-	// ephemeral local port, and this one forwards to a paid API on the
-	// daemon's credentials. Generated per boot, never written anywhere, and
-	// handed only to the children that need it.
-	tokenAuth := server.NewStaticTokenAuth(map[string]string{"fundi-child": token})
+	// A token even on loopback: any process on this machine can reach a local
+	// port, and this one forwards to a paid API on the daemon's credentials.
+	// The per-boot token is generated fresh, written nowhere, and handed only
+	// to the children the daemon spawns.
+	tokens := map[string]string{"fundi-child": token}
+
+	// When the daemon is the face (no FUNDI_PROXY_URL redirecting elsewhere),
+	// FUNDI_PROXY_TOKEN names an ADDITIONAL accepted token — for humans and
+	// tools that are not children: `rafiki claude`, an editor plugin, curl.
+	// They cannot know a per-boot secret. When FUNDI_PROXY_URL *is* set the
+	// same variable means the opposite thing, the token to send to that other
+	// host; the two never apply at once because the daemon is either serving
+	// the face or pointing away from it.
+	if extra := paths.Get(paths.ProxyToken); extra != "" && paths.Get(paths.ProxyURL) == "" {
+		tokens["configured"] = extra
+	}
+	tokenAuth := server.NewStaticTokenAuth(tokens)
 
 	mux := http.NewServeMux()
 	h := &server.Handler{Messages: messages, Chat: chat}
 	h.Mount(mux, tokenAuth.Middleware)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	addr := paths.Get("FUNDI_PROXY_LISTEN")
+	if addr == "" {
+		addr = defaultProxyListen
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("listen: %w", err)
+		return nil, fmt.Errorf("listen on %s (is a `rafiki serve` or another fundid already there?): %w", addr, err)
+	}
+	if offBox(addr) && paths.Get(paths.ProxyToken) == "" {
+		// Reachable from the network but the only valid token is the per-boot
+		// one, which only this daemon's own children ever see. Nothing else can
+		// authenticate, so the face is off-box in name only — and the operator
+		// who opened it up plainly meant otherwise.
+		logger.Warn("proxy face is reachable off-box but no shared token is set, "+
+			"so only this daemon's own children can use it",
+			"addr", addr, "set", paths.ProxyToken, "in", paths.ServiceEnvFile())
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -127,12 +169,21 @@ func startProxyFace(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger
 		}
 	}()
 
+	// Children get a loopback URL with the real port, NOT ln.Addr(): binding
+	// every interface reports "[::]:8035", which is a valid bind address and a
+	// useless destination. Children are local by construction, so loopback is
+	// both correct and the shortest path.
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		return nil, fmt.Errorf("resolve proxy port from %s: %w", ln.Addr(), err)
+	}
 	f := &proxyFace{
-		URL:   "http://" + ln.Addr().String(),
+		URL:   "http://127.0.0.1:" + port,
 		Token: token,
 		srv:   srv,
 	}
-	logger.Info("proxy face listening", "url", f.URL, "captured", pool != nil)
+	logger.Info("proxy face listening",
+		"addr", ln.Addr().String(), "children_use", f.URL, "captured", pool != nil)
 	return f, nil
 }
 
@@ -153,4 +204,20 @@ func randomToken() (string, error) {
 		return "", fmt.Errorf("generate proxy token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// offBox reports whether a listen address is reachable from outside this
+// machine. An empty or wildcard host binds every interface; anything else that
+// is not a loopback literal is a specific external address.
+func offBox(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true // unparseable: assume the riskier reading
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip == nil || !ip.IsLoopback()
 }

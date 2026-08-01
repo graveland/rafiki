@@ -120,3 +120,22 @@ func TestProxyChildEnv_ExplicitURLOverridesTheEmbeddedFace(t *testing.T) {
 			env["ANTHROPIC_AUTH_TOKEN"])
 	}
 }
+
+// The bind address and the address children are given are different things: a
+// wildcard bind reports "[::]:8035", which is a valid thing to bind and a
+// useless thing to connect to.
+func TestOffBox(t *testing.T) {
+	for addr, want := range map[string]bool{
+		":8035":           true,
+		"0.0.0.0:8035":    true,
+		"[::]:8035":       true,
+		"192.168.1.10:80": true,
+		"127.0.0.1:8035":  false,
+		"[::1]:8035":      false,
+		"localhost-ish":   true, // unparseable: assume the riskier reading
+	} {
+		if got := offBox(addr); got != want {
+			t.Errorf("offBox(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}

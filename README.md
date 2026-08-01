@@ -255,16 +255,34 @@ RAFIKI_TEST_DSN='postgres://postgres:postgres@localhost:5433/postgres?sslmode=di
 is unset — without it every DB-backed test *skips* while the run still reports
 success, which is indistinguishable from a clean pass.
 
-## Running the proxy locally
+## Running locally
 
 ```bash
 cp .env.example .env   # fill in ANTHROPIC_API_KEY (+ OPENROUTER_API_KEY)
-make run               # serve --dev on :8035 against rafiki-test-db
+make run               # fundid in the foreground, proxy face on :8035
 ```
 
-`make run` sources `.env`, defaults `RAFIKI_DB` to the `rafiki-test-db`
-container above (auto-migrating in `--dev` mode), and accepts the client token
-`dev`. Then, in another shell:
+**`fundid` serves the proxy itself.** It mounts the same `/v1/messages` and
+`/v1/chat/completions` handlers `rafiki serve` does, on the same port, so
+anything already pointed at a local rafiki keeps working — and pi and claude
+children get capture, failover and model resolution without a second process
+anyone has to remember to start. The agent kind never uses it: it reaches the
+library in-process.
+
+The face binds **all interfaces** by default (`FUNDI_PROXY_LISTEN`, default
+`:8035`), so other hosts on your network can use one capture store and one set
+of breakers. Auth is always required. The daemon mints a per-boot token for its
+own children; `FUNDI_PROXY_TOKEN` names an additional token for everything else,
+which is what `make run` sets to `dev` so `make claude` works. A busy port is a
+hard error rather than a fallback — the address is a contract, and silently
+landing elsewhere would mean talking to whatever *did* claim it.
+
+Because `make run` is now the daemon, it and the installed `fundi service`
+cannot both hold the port. Use one or the other.
+
+`make run` does **not** migrate, where `rafiki serve --dev` did — run
+`go run ./cmd/rafiki migrate` once against a fresh database, or `make run-proxy`
+for the old standalone-proxy behaviour. Then, in another shell:
 
 ```bash
 make claude                                   # Claude Code through the local proxy
