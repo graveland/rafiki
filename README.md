@@ -219,6 +219,12 @@ environment; `.env.example` documents each one in full.
 These must reach the **daemon's** environment, not your shell's — see
 `.env.example`, which documents why and how to verify it.
 
+Once `FUNDI_AGENT_DB` is set, `fundi conversations stats|search|export` queries
+that persisted history through the daemon socket — no separate DB credentials
+needed on the machine running `fundi`. See `docs/agent-cli.md` for the
+DSN-direct equivalent (`rafiki agent stats|search|export`), or
+`docs/reference/pi-controller-protocol.md` §6.17-6.19 for the wire commands.
+
 `fundid -h` and `fundid agent -h` document the two daemon process modes;
 `fundi --help` covers the client. See `docs/reference/pi-controller-protocol.md` for the
 wire protocol spec and `docs/plans/2026-07-20-fundi-design.md` for the
