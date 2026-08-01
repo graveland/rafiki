@@ -22,9 +22,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
+	"go.graveland.dev/rafiki/pkg/agentcli"
+	"go.graveland.dev/rafiki/pkg/agentcli/local"
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -51,6 +54,11 @@ type Controller struct {
 	// agent child (agent.RuntimeOptions.Pool). Nil means every agent
 	// conversation is in-memory. Owned and closed by main.go, not here.
 	pool *pgxpool.Pool
+
+	// insights answers the ctrl_conversation_* RPCs. Always constructed —
+	// agentcli/local.New is nil-pool-safe, so a nil pool just means every
+	// read method below returns local.ErrNoPool instead of panicking.
+	insights agentcli.Backend
 
 	// proxyURL and proxyToken address the daemon's own proxy face, which pi
 	// and claude children are pointed at so their turns are captured and
@@ -110,6 +118,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		stateDir:    stateDir,
 		graceWindow: gw,
 		pool:        pool,
+		insights:    local.New(local.Options{Pool: pool}),
 		baseCtx:     baseCtx,
 	}
 }
@@ -439,6 +448,54 @@ func (c *Controller) Status() control.ControllerStatus {
 		Socket:      c.socketPath,
 		LogsDir:     c.logsDir,
 	}
+}
+
+// ─── Conversation insights (backed by the agent database) ────────────────────
+
+// noAgentDBErr translates agentcli/local.ErrNoPool — "no database pool
+// configured" — to the wire error code clients can act on, distinguishing an
+// expected, actionable state (daemon has no DB configured) from a genuine
+// query failure.
+func noAgentDBErr(err error) error {
+	if errors.Is(err, local.ErrNoPool) {
+		return &control.ControllerError{
+			Code:    protocol.ErrNoAgentDB,
+			Message: "no agent database configured (FUNDI_AGENT_DB unset); set it and run `fundi service install`",
+		}
+	}
+	return err
+}
+
+func (c *Controller) ConversationStats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error) {
+	st, err := c.insights.Stats(ctx, f)
+	if err != nil {
+		return nil, noAgentDBErr(err)
+	}
+	return st, nil
+}
+
+func (c *Controller) ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error) {
+	st, err := c.insights.ConversationStats(ctx, id)
+	if err != nil {
+		return nil, noAgentDBErr(err)
+	}
+	return st, nil
+}
+
+func (c *Controller) ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
+	rows, err := c.insights.Search(ctx, f)
+	if err != nil {
+		return nil, noAgentDBErr(err)
+	}
+	return rows, nil
+}
+
+func (c *Controller) ConversationExport(ctx context.Context, id string) (*insights.Transcript, error) {
+	tr, err := c.insights.Export(ctx, id)
+	if err != nil {
+		return nil, noAgentDBErr(err)
+	}
+	return tr, nil
 }
 
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (control.SpawnResult, error) {
