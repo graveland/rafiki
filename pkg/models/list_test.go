@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -458,5 +459,46 @@ func TestLoadOpenRouter_RespectsCancelledContext(t *testing.T) {
 	cancel()
 	if got := loadOpenRouter(ctx); got != nil {
 		t.Errorf("got %d entries on a cancelled context, want none", len(got))
+	}
+}
+
+// ─── ListSources ───────────────────────────────────────────────────────────────
+
+// An unwanted source must not merely be filtered out of the result — it must
+// never be consulted, or a pi-kind completion still pays OpenRouter's network
+// round trip and the local-server probes to discard them.
+func TestListSources_ConsultsOnlyRequestedSources(t *testing.T) {
+	// Point the local-server probes at a server that records whether it was
+	// contacted at all.
+	var hit atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit.Store(true)
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+
+	got := ListSources(context.Background(), map[Source]bool{SourceBuiltin: true})
+	if hit.Load() {
+		t.Error("Ollama was probed despite not being requested")
+	}
+	for _, m := range got {
+		if m.Source != SourceBuiltin {
+			t.Errorf("unrequested source in result: %s (%s)", m.Source, m.ID)
+		}
+	}
+	if len(got) == 0 {
+		t.Error("builtin source produced nothing")
+	}
+}
+
+func TestListSources_NilMeansAll(t *testing.T) {
+	all := ListSources(context.Background(), nil)
+	viaList := List(context.Background())
+	if len(all) != len(viaList) {
+		t.Errorf("ListSources(nil) returned %d, List returned %d — they must agree", len(all), len(viaList))
+	}
+	if len(all) == 0 {
+		t.Fatal("no models at all")
 	}
 }

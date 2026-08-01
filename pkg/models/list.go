@@ -110,12 +110,37 @@ var knownModels = []string{
 // ctx is used as the parent for per-source HTTP timeouts (200 ms each), so
 // callers can bound overall wall time by passing a context with a deadline.
 func List(ctx context.Context) []Model {
+	return ListSources(ctx, nil)
+}
+
+// ListSources is List restricted to the given sources. A nil or empty set
+// means all of them.
+//
+// This is not merely a filter over List: a source the caller does not want is
+// never consulted at all. That matters because the sources have very different
+// costs — OpenRouter may fetch over the network, and Ollama and LM Studio are
+// probed with a 200ms timeout each — and the caller usually knows it cannot use
+// most of them. Tab completion for a pi child has no use for OpenRouter ids and
+// should not pay a network round trip to discard them.
+func ListSources(ctx context.Context, want map[Source]bool) []Model {
+	enabled := func(s Source) bool { return len(want) == 0 || want[s] }
+
 	var all []Model
-	all = append(all, loadUserConfig()...)
-	all = append(all, loadBuiltins()...)
-	all = append(all, loadOpenRouter(ctx)...)
-	all = append(all, loadOllama(ctx)...)
-	all = append(all, loadLMStudio(ctx)...)
+	if enabled(SourceUserConfig) {
+		all = append(all, loadUserConfig()...)
+	}
+	if enabled(SourceBuiltin) {
+		all = append(all, loadBuiltins()...)
+	}
+	if enabled(SourceOpenRouter) {
+		all = append(all, loadOpenRouter(ctx)...)
+	}
+	if enabled(SourceOllama) {
+		all = append(all, loadOllama(ctx)...)
+	}
+	if enabled(SourceLMStudio) {
+		all = append(all, loadLMStudio(ctx)...)
+	}
 
 	// Deduplicate by ID, preserving first-seen order.
 	seen := make(map[string]struct{}, len(all))

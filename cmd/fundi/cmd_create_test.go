@@ -329,7 +329,7 @@ func TestBuildSpawnRequest_KindClaude(t *testing.T) {
 	}
 }
 
-func TestBuildSpawnRequest_KindDefaultsPi(t *testing.T) {
+func TestBuildSpawnRequest_KindDefaultsAgent(t *testing.T) {
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -339,8 +339,12 @@ func TestBuildSpawnRequest_KindDefaultsPi(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Kind != "pi" {
-		t.Errorf("Kind = %q, want pi (default)", req.Kind)
+	// The default is the native runtime, not a pi subprocess: it is the kind
+	// with in-band abort and per-turn cost accounting, and the only one whose
+	// model ids this repo can resolve. --model completion keys off the same
+	// default (see modelSourcesForKind).
+	if req.Kind != "agent" {
+		t.Errorf("Kind = %q, want agent (default)", req.Kind)
 	}
 	if req.ConfigDir != "" {
 		t.Errorf("ConfigDir = %q, want empty", req.ConfigDir)

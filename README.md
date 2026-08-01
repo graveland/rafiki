@@ -146,9 +146,22 @@ process stays resident.
 
 | Child kind | Backend |
 |---|---|
-| `agent` | native loop over `pkg/agentloop` — in-band abort, per-turn token and cost accounting |
+| `agent` (default) | native loop over `pkg/agentloop` — in-band abort, per-turn token and cost accounting |
 | `pi` | a pi process in `--mode rpc` |
 | `claude` | Claude Code |
+
+The kinds have **different model universes**, and `--model` completion is scoped
+to the one you picked. An `agent` child routes through this module, so it takes
+concrete Anthropic ids, `<family>-latest` aliases and any OpenRouter slash id. A
+`pi` child resolves the id against pi's *own* providers in
+`~/.pi/agent/models.json`, so an OpenRouter slash id means nothing to it — pick
+one and the child spawns, attaches, and then never answers.
+
+`agent` needs `ANTHROPIC_API_KEY` in the **daemon-visible** environment
+(unconditionally — the client always builds an Anthropic sender), plus
+`OPENROUTER_API_KEY` for any non-`anthropic/` model. Both reach a child from the
+caller's shell via `fundi create --forward-env`, on by default. A missing key
+fails fast at spawn rather than on the first turn.
 
 ## Binaries
 
