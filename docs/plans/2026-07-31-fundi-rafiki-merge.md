@@ -16,6 +16,56 @@ see "Sequencing rationale" below.
 
 ---
 
+## STATUS: executed 2026-07-31 — tasks 1,2,3,4,6,7 done; task 5 deferred
+
+Branch `feat/fundi-merge`, pushed to `local` only. **Not on `gh`** — see task 5.
+
+| task | outcome |
+|---|---|
+| 1 | baseline captured: 358 tests / 10 packages, vet+lint clean |
+| 2 | `ac90515` — **7** conflicts, not the 2 predicted (see below) |
+| 3 | `7723745` — gate passed, 104 renames detected, `internal/` gone |
+| 4 | `e1f919e` + `89bcc2b` — `pkg/` 24 → **22** |
+| 5 | **deferred** — pi submodule still present; blocks the public push |
+| 6 | `c821072` — fixtures neutralised, JSONL shape byte-verified |
+| 7 | `3ef9131` + `ccfc083` — Makefile/README merged, `tasks/` resolved |
+| — | `582251a` — unplanned: fixed the `inproc` test the merge revealed |
+
+Final: **1191 passed, 0 failed, 29 packages.** `make check`, `make build` and
+`make build-linux` all green. Baseline was 358, so fundi contributed ~833 tests
+that had not been running at all.
+
+### Where this plan was wrong, for the next one
+
+- **Task 2 predicted 2 conflicts and got 7.** The miss that mattered was
+  `go.mod`/`go.sum`: neither side can simply win, since `--ours` drops fundi's
+  dependencies and `--theirs` drops rafiki's module path. Resolution was
+  rafiki's module path plus fundi's 10 direct requires layered on, letting MVS
+  take the max, with `go.sum` unioned so `tidy` needed no refetch.
+- **The package mapping table missed `cmd/fundi/helpersembed`**, imported by
+  full module path. The rewrite rules covered `internal/`, `client` and
+  `protocol` but not `cmd/`. The plan's own "no stale module refs" check caught
+  it, which is the whole argument for putting verification *between* the rewrite
+  and the commit rather than after it.
+- **Two silent shell failures, both worth internalising.** zsh does not
+  word-split unquoted parameters, so `sed $files` passes every path as a single
+  argument. And BSD sed's ERE has no `\b`, so a qualifier rewrite anchored on it
+  matched nothing, rewrote zero files, and still exited 0 — indistinguishable
+  from success. Use `xargs -0`, and `perl -pi -e` when you need word boundaries.
+- **`go.work` was never tracked** — gitignored and disk-only. The file that hid
+  the stale pin was invisible to anyone reading the repo, which is worth
+  remembering next time a build resolves differently than the repo implies.
+- **Consolidation reached 22 packages, not the ~19 first estimated.** The import
+  graph rejected the deeper folds; `ring` has three consumers and `agent` is not
+  among them.
+- **A revealed failure is not a caused failure, but it is still yours.**
+  `pkg/inproc`'s Kill test failed 4 runs in 5 the moment the merge made the
+  package compile again. It had been unrunnable since rafiki moved to `pkg/`.
+  Diagnosis: the test's own 32 MiB fixture took ~6.5s to parse under `-race`, so
+  `Kill()` landed before the engine existed — and on its passing runs it had
+  been asserting nothing at all, because the pipe was never filled. Fixed in
+  `582251a`.
+
 ## Global Constraints
 
 - Module path: `go.graveland.dev/rafiki`. Single `go.mod`. No nested modules, no `go.work`.
