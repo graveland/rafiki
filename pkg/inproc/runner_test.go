@@ -240,9 +240,21 @@ func hugeEndTurn(t *testing.T, size int) string {
 // Wait() does NOT return on its own, then calls Kill() and requires Wait() to
 // return within a few seconds.
 func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
-	// 4 MiB comfortably exceeds any realistic OS pipe buffer (tens of KB on
-	// Linux and macOS), so a handful of these frames is certain to fill it.
-	const hugeSize = 4 << 20
+	// 256 KiB is 4x the largest OS pipe buffer (64 KiB on Linux and macOS), so
+	// the first frame alone already blocks a writer nobody is draining.
+	//
+	// This was 4 MiB, which is 64x the buffer and sounds harmlessly generous —
+	// but 8 turns of it is a 32 MiB scripted-turns file, and agent.LoadFakeSender
+	// parses the whole thing eagerly and synchronously inside Options.Build.
+	// That takes ~0.7s normally and ~6.5s under -race, which is longer than this
+	// test's entire Kill deadline. So under -race run() was still in
+	// encoding/json when Kill() landed, the engine had not emitted a single
+	// byte, the pipe was never filled, and nothing was ever wedged: the test
+	// failed against a CPU-bound parse rather than the mechanism it names, and
+	// on the runs where it passed it had proved nothing at all. Keep this
+	// comfortably above the pipe buffer and well below anything that makes
+	// parsing the fixture a factor.
+	const hugeSize = 256 << 10
 	turns := make([]string, 8)
 	for i := range turns {
 		turns[i] = hugeEndTurn(t, hugeSize)
@@ -261,11 +273,7 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 		},
 	})
 
-	// stdout is intentionally discarded: the whole scenario is a daemon that
-	// stops reading a child's stdout, and the Runner (via r.stdoutR) retains
-	// its own reference to the same underlying file, so not keeping a local
-	// one here doesn't risk an early finalizer-driven close.
-	stdin, _, stderr, err := r.Start()
+	stdin, stdout, stderr, err := r.Start()
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -273,9 +281,8 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 		t.Errorf("close stderr: %v", err)
 	}
 
-	// Deliberately never read stdout after this point — that's the
-	// scenario. Drive one prompt per scripted huge turn; the engine only
-	// needs to get partway through before its stdout write blocks.
+	// Drive one prompt per scripted huge turn; the engine only needs to get
+	// partway through before its stdout write blocks.
 	for i := range turns {
 		if _, err := stdin.Write([]byte(fmt.Sprintf(`{"type":"prompt","message":"go %d"}`, i) + "\n")); err != nil {
 			// A blocked engine can also make the daemon's own stdin write
@@ -286,6 +293,33 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 			break
 		}
 	}
+
+	// Require exactly one byte from the engine before going silent. Without
+	// this the test can pass having proved nothing: if the engine never emits
+	// at all then the pipe is never filled, nothing is ever wedged, and the
+	// "Wait() did not return within 2s" check below is satisfied by any
+	// slowness whatsoever — which is exactly how a 6.5s fixture parse
+	// masqueraded as a wedge for as long as the payload was oversized. A byte
+	// on stdout proves Build returned, fe.Run() is running and the engine is
+	// writing, so the block that follows really is a write wedge and not a
+	// stalled startup. One byte and no more: draining any further would
+	// relieve the very back-pressure the test depends on.
+	firstByte := make(chan error, 1)
+	go func() {
+		_, err := stdout.Read(make([]byte, 1))
+		firstByte <- err
+	}()
+	select {
+	case err := <-firstByte:
+		if err != nil {
+			t.Fatalf("reading the engine's first stdout byte: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("engine emitted nothing within 30s; the write wedge under test was never reached")
+	}
+
+	// Deliberately never read stdout past this point — that is the scenario:
+	// a daemon that has stopped draining its child's stdout.
 
 	waitDone := make(chan struct{})
 	go func() {
