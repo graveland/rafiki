@@ -52,6 +52,13 @@ type Controller struct {
 	// conversation is in-memory. Owned and closed by main.go, not here.
 	pool *pgxpool.Pool
 
+	// proxyURL and proxyToken address the daemon's own proxy face, which pi
+	// and claude children are pointed at so their turns are captured and
+	// routed by the same code the agent kind uses in-process. Set once at
+	// startup via SetProxy; empty means no face was started.
+	proxyURL   string
+	proxyToken string
+
 	// baseCtx is the daemon's own context, threaded into inproc.Options.Parent
 	// so cancelling it stops every in-process agent child at once. Distinct
 	// from the per-request ctx passed to Spawn/Resume/RespawnChild, which only
@@ -78,6 +85,13 @@ type Controller struct {
 // in-memory conversations); baseCtx is the daemon's own context, threaded into
 // every in-process child so cancelling it stops them all at once. Both are
 // owned by main.go — this constructor only stores them.
+// SetProxy records the address of the daemon's own proxy face, which pi and
+// claude children are pointed at. Called once at startup, before the socket
+// accepts anything, so no child can observe it unset.
+func (c *Controller) SetProxy(url, token string) {
+	c.proxyURL, c.proxyToken = url, token
+}
+
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, baseCtx context.Context) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
@@ -456,7 +470,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		}
 	}
 
-	env := buildEnv(req, childID, c.socketPath)
+	env := c.buildEnv(req, childID, c.socketPath)
 	if req.Kind == "claude" {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
@@ -1032,7 +1046,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		}
 	}
 
-	env := buildEnv(req, childID, c.socketPath)
+	env := c.buildEnv(req, childID, c.socketPath)
 	if kind == "claude" {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
@@ -1146,7 +1160,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		}
 	}
 
-	env := buildEnv(req, childID, c.socketPath)
+	env := c.buildEnv(req, childID, c.socketPath)
 	if kind == "claude" {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
@@ -2472,7 +2486,7 @@ func claudeEnv(configDir string) []string {
 // senderOptions): an "anthropic/" prefixed model needs ANTHROPIC_API_KEY,
 // anything else needs OPENROUTER_API_KEY - there is no separate --provider
 // concept any more.
-func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
+func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 	var env []string
 	for k, v := range req.Env {
 		env = append(env, k+"="+v)
@@ -2488,7 +2502,7 @@ func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 		}
 		env = append(env, envVar+"="+req.APIKey)
 	}
-	env = append(env, proxyChildEnv(req, childID)...)
+	env = append(env, c.proxyChildEnv(req, childID)...)
 	return env
 }
 
@@ -2498,12 +2512,17 @@ func buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
 // The agent kind is never routed: it reaches rafiki in-process through pkg/llm
 // and pkg/routing, so there is no HTTP face to point it at, and doing so would
 // put a network hop in front of a library call.
-func proxyChildEnv(req protocol.SpawnRequest, childID string) []string {
-	url := paths.Get(paths.ProxyURL)
+func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []string {
+	url, token := c.proxyURL, c.proxyToken
+	// An explicit FUNDI_PROXY_URL points children at an external rafiki
+	// instead of the embedded face — useful for aiming a whole machine at a
+	// shared capture server. Its token comes from the environment file.
+	if v := paths.Get(paths.ProxyURL); v != "" {
+		url, token = v, paths.Get(paths.ProxyToken)
+	}
 	if url == "" || req.Kind == "agent" || !proxyRoutesKind(req.Kind) {
 		return nil
 	}
-	token := paths.Get(paths.ProxyToken)
 
 	// childID rather than the session id: it exists before the child does, is
 	// stable for the child's whole life, and already identifies it everywhere

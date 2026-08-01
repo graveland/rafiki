@@ -19,10 +19,11 @@ func envKeys(env []string) map[string]string {
 
 // No proxy configured must mean no behaviour change at all. This is what makes
 // the feature safe to ship: an install that has not opted in is untouched.
-func TestProxyChildEnv_DisabledByDefault(t *testing.T) {
+func TestProxyChildEnv_NothingWhenNoFaceAndNoOverride(t *testing.T) {
 	t.Setenv(paths.ProxyURL, "")
+	ctl := &Controller{} // no face started
 	for _, kind := range []string{"pi", "claude", "agent"} {
-		if got := proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1"); got != nil {
+		if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1"); got != nil {
 			t.Errorf("kind %q with no proxy configured: got %v, want nothing", kind, got)
 		}
 	}
@@ -31,17 +32,16 @@ func TestProxyChildEnv_DisabledByDefault(t *testing.T) {
 // The agent kind reaches rafiki in-process; pointing it at an HTTP face would
 // put a network hop in front of a library call.
 func TestProxyChildEnv_NeverRoutesAgent(t *testing.T) {
-	t.Setenv(paths.ProxyURL, "http://localhost:8035")
-	if got := proxyChildEnv(protocol.SpawnRequest{Kind: "agent"}, "c_1"); got != nil {
+	ctl := &Controller{proxyURL: "http://127.0.0.1:1", proxyToken: "t"}
+	if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "agent"}, "c_1"); got != nil {
 		t.Errorf("agent kind was routed through the proxy: %v", got)
 	}
 }
 
 func TestProxyChildEnv_Claude(t *testing.T) {
-	t.Setenv(paths.ProxyURL, "http://localhost:8035")
-	t.Setenv(paths.ProxyToken, "tok")
+	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
-	env := envKeys(proxyChildEnv(protocol.SpawnRequest{Kind: "claude", Model: "glm-5.2"}, "c_abc"))
+	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "claude", Model: "glm-5.2"}, "c_abc"))
 	if env["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
 		t.Errorf("ANTHROPIC_BASE_URL = %q", env["ANTHROPIC_BASE_URL"])
 	}
@@ -70,10 +70,9 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 // pi has no ANTHROPIC_BASE_URL equivalent — it reads these in the fundi-helpers
 // extension, where its provider override is registered.
 func TestProxyChildEnv_Pi(t *testing.T) {
-	t.Setenv(paths.ProxyURL, "http://localhost:8035")
-	t.Setenv(paths.ProxyToken, "tok")
+	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
-	env := envKeys(proxyChildEnv(protocol.SpawnRequest{Kind: "pi"}, "c_xyz"))
+	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "pi"}, "c_xyz"))
 	if env[paths.ProxyURL] != "http://localhost:8035" || env[paths.ProxyToken] != "tok" {
 		t.Errorf("proxy vars not passed to pi: %v", env)
 	}
@@ -101,5 +100,23 @@ func TestProxyRoutesKind(t *testing.T) {
 	}
 	if !proxyRoutesKind("claude") {
 		t.Error("claude not routed despite being listed")
+	}
+}
+
+// The embedded face is the default path; FUNDI_PROXY_URL redirects children at
+// an external rafiki instead, taking its token from the environment file rather
+// than the per-boot one the face generated for itself.
+func TestProxyChildEnv_ExplicitURLOverridesTheEmbeddedFace(t *testing.T) {
+	ctl := &Controller{proxyURL: "http://127.0.0.1:58318", proxyToken: "boot-token"}
+	t.Setenv(paths.ProxyURL, "http://shared-capture:8035")
+	t.Setenv(paths.ProxyToken, "shared-token")
+
+	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "claude"}, "c_1"))
+	if env["ANTHROPIC_BASE_URL"] != "http://shared-capture:8035" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want the override", env["ANTHROPIC_BASE_URL"])
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "shared-token" {
+		t.Errorf("token = %q; the embedded face's per-boot token must not be sent to another host",
+			env["ANTHROPIC_AUTH_TOKEN"])
 	}
 }

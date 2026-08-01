@@ -122,9 +122,26 @@ func main() {
 			"env", paths.AgentDB)
 	}
 
+	// The daemon's own proxy face. pi and claude children are separate
+	// processes and can only speak HTTP, so they need an address — and making
+	// that a second daemon someone must remember to start is how a child ends
+	// up talking to a provider directly. Serving it here means it cannot be
+	// down while the daemon is up.
+	face, err := startProxyFace(baseCtx, pool, slog.Default())
+	if err != nil {
+		// Not fatal: agent children reach the library in-process and are
+		// unaffected, and killing the daemon would take them down for a face
+		// they never use.
+		slog.Error("could not start the proxy face; pi and claude children will not be routed through it",
+			"error", err)
+	}
+
 	st := childstore.New()
 	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, baseCtx)
+	if face != nil {
+		ctrl.SetProxy(face.URL, face.Token)
+	}
 	ctrl.loadOrphans(records)
 	ctrl.startSweeper(ctx)
 
@@ -181,6 +198,10 @@ func main() {
 	if err := ctrl.ShutdownAllChildren(shutdownCtx, childShutdownTimeout, childKillTimeout); err != nil {
 		slog.Warn("child shutdown errors", "error", err)
 	}
+
+	// After the children are down: nothing is left to serve, and shutting it
+	// earlier would fail their final in-flight turns.
+	face.Close(shutdownCtx)
 
 	ctrl.Stop() // wait for sweeper goroutine to exit
 	if err := srv.Close(); err != nil {
