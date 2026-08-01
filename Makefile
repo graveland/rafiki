@@ -176,6 +176,28 @@ install: build ## Install rafiki + fundid + fundi (+ fundi-attach if built) to $
 	    fi; \
 	done
 
+# The edit loop for daemon code: build, install, and bounce the running daemon
+# so it is actually executing what you just built. Without the restart, `make
+# install` leaves the old fundid resident and the change appears not to have
+# landed — the daemon answers RPCs (ctrl_list_models among them) from whatever
+# binary launchd started, not from $(DESTDIR).
+#
+# `service restart`, deliberately NOT `service install`. Install rewrites the
+# plist from a template carrying only HOME and PATH (cmd/fundi/service_darwin.go),
+# so it silently drops any hand-added environment. FUNDI_AGENT_DB is the one
+# that matters: lose it and agent conversations go back to in-memory with no
+# per-turn cost recorded anywhere, and the only symptom is a "mem-" session id
+# where a UUIDv7 should be.
+#
+# The restart runs the just-installed binary by explicit path rather than
+# whatever `fundi` resolves to, so a shadowing install elsewhere on $PATH
+# cannot bounce the service with a different client's idea of where things
+# live — the same failure the warnings above exist to catch.
+.PHONY: redeploy
+redeploy: install ## Rebuild + install, then restart the fundi daemon.
+	@"$(DESTDIR)/$(CLI_BIN)" service restart
+	@"$(DESTDIR)/$(CLI_BIN)" service status
+
 ##@ pi submodule lifecycle
 
 # fundi-attach links against the bundled pi tree at $(PI_DIR), and the daemon
