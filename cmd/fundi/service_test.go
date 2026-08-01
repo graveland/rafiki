@@ -1,8 +1,10 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -149,5 +151,63 @@ func TestNewServiceBackend(t *testing.T) {
 	}
 	if !filepath.IsAbs(lp) {
 		t.Errorf("LogPath() should be absolute, got %s", lp)
+	}
+}
+
+// ─── daemon environment capture ────────────────────────────────────────────────
+
+func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
+	got := captureDaemonEnv([]string{
+		"FUNDI_AGENT_DB=postgres://u@localhost/rafiki?sslmode=disable",
+		"FUNDI_DEFAULT_MODEL=anthropic/opus-latest",
+		"PATH=/usr/bin",
+		"UNRELATED=x",
+	})
+	want := map[string]string{
+		"FUNDI_AGENT_DB":      "postgres://u@localhost/rafiki?sslmode=disable",
+		"FUNDI_DEFAULT_MODEL": "anthropic/opus-latest",
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// FUNDI_CHILD_ID must never be baked into the unit: the daemon sets it per
+// child and `fundid agent` uses it as the default --ref, so a service-wide
+// value would collide every child onto one conversation.
+func TestCaptureDaemonEnv_ExcludesChildID(t *testing.T) {
+	got := captureDaemonEnv([]string{"FUNDI_CHILD_ID=c_123", "FUNDI_AGENT_DB=x"})
+	if _, ok := got["FUNDI_CHILD_ID"]; ok {
+		t.Error("FUNDI_CHILD_ID was captured into the service environment")
+	}
+}
+
+// Credentials do not belong in a world-readable unit file.
+func TestCaptureDaemonEnv_ExcludesAPIKeys(t *testing.T) {
+	got := captureDaemonEnv([]string{"ANTHROPIC_API_KEY=sk-ant", "OPENROUTER_API_KEY=sk-or"})
+	if len(got) != 0 {
+		t.Errorf("captured credentials into the unit: %v", got)
+	}
+}
+
+// An empty value is not the same as an absent one: writing FUNDI_AGENT_DB=""
+// would turn a missing export into a configured-but-broken DSN.
+func TestCaptureDaemonEnv_SkipsEmpty(t *testing.T) {
+	got := captureDaemonEnv([]string{"FUNDI_AGENT_DB="})
+	if _, ok := got["FUNDI_AGENT_DB"]; ok {
+		t.Error("an empty value was captured")
+	}
+}
+
+func TestSortedEnv_IsDeterministic(t *testing.T) {
+	m := map[string]string{"FUNDI_SOCKET": "/s", "FUNDI_AGENT_DB": "db", "FUNDI_PI_BINARY": "/pi"}
+	first := sortedEnv(m)
+	for range 20 { // map iteration order varies per range; the output must not
+		if !slices.Equal(sortedEnv(m), first) {
+			t.Fatal("sortedEnv is not deterministic across calls")
+		}
+	}
+	if first[0].Key != "FUNDI_AGENT_DB" {
+		t.Errorf("not sorted by key: %v", first)
 	}
 }

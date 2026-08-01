@@ -33,21 +33,44 @@ RestartSec=2
 TimeoutStopSec=200
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
-Environment=HOME={{.HomeEnv}}
-Environment=PATH={{.PathEnv}}
+Environment={{unitq (printf "HOME=%s" .HomeEnv)}}
+Environment={{unitq (printf "PATH=%s" .PathEnv)}}
+{{- range .Extra}}
+Environment={{unitq (printf "%s=%s" .Key .Value)}}
+{{- end}}
 
 [Install]
 WantedBy=default.target
 `
 
+type unitData struct {
+	serviceSpec
+	// Extra is ExtraEnv in deterministic order; see sortedEnv.
+	Extra []envKV
+}
+
+// unitQuote renders one Environment= assignment, quoting it when the value
+// needs it. systemd splits an unquoted assignment on whitespace, so a value
+// containing a space — FUNDI_DEFAULT_LABELS, or any path under a directory
+// with a space in its name — would silently truncate at the first space, with
+// the remainder parsed as a second malformed assignment. The backslash and
+// quote escapes below are systemd's own unquoting rules.
+func unitQuote(assignment string) string {
+	if !strings.ContainsAny(assignment, " \t\"'\\") {
+		return assignment
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + r.Replace(assignment) + `"`
+}
+
 // renderServiceConfig renders the systemd unit file content for the given spec.
 func renderServiceConfig(spec serviceSpec) (string, error) {
-	tmpl, err := template.New("unit").Parse(unitTemplate)
+	tmpl, err := template.New("unit").Funcs(template.FuncMap{"unitq": unitQuote}).Parse(unitTemplate)
 	if err != nil {
 		return "", err
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, spec); err != nil {
+	if err := tmpl.Execute(&buf, unitData{serviceSpec: spec, Extra: sortedEnv(spec.ExtraEnv)}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

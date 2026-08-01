@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,8 +37,81 @@ type serviceSpec struct {
 	// install time and baked in as an absolute path: launchd and systemd do not
 	// inherit the interactive shell's XDG_* variables, so a unit that referenced
 	// them would resolve differently from every CLI invocation.
-	LogPath  string
+	LogPath string
+	// ExtraEnv are the fundi variables baked into the unit so the daemon sees
+	// them. See daemonEnvVars.
 	ExtraEnv map[string]string
+}
+
+// daemonEnvVars are the FUNDI_* variables that configure the DAEMON, and so
+// must be captured into the service definition at install time.
+//
+// These are documented as daemon-environment-only: `fundi create --forward-env`
+// forwards the caller's environment to a child, but collectCallerEnv strips
+// every FUNDI_* key first, so exporting them in an interactive shell does
+// nothing at all. launchd and systemd do not inherit a login shell either. The
+// unit is therefore the only place they can be set — and before this they were
+// not templated, so `service install` rewrote the unit with only HOME and PATH
+// and silently dropped anything added by hand. FUNDI_AGENT_DB is the one that
+// hurts: losing it reverts agent conversations to in-memory with no per-turn
+// cost recorded anywhere, and the only visible symptom is a "mem-" session id
+// where a UUIDv7 belongs.
+//
+// Deliberately absent:
+//   - paths.ChildID — the daemon sets it per child and `fundid agent` uses it
+//     as the default --ref, so pinning it service-wide would collide every
+//     child onto one conversation.
+//   - paths.AttachTail, paths.NoAutoInstallHelpers — read by the TUI and by
+//     `fundi create` respectively, i.e. client-side. They reach those from the
+//     user's own shell and have no business in the daemon's unit.
+//   - ANTHROPIC_API_KEY / OPENROUTER_API_KEY — unit files are world-readable
+//     (0644). Copying live credentials into one to save an export is not a
+//     trade to make silently; children get them via --forward-env instead.
+var daemonEnvVars = []string{
+	paths.AgentDB,
+	paths.Socket,
+	paths.Instructions,
+	paths.SkillsDirsEnv,
+	paths.MCPConfig,
+	paths.DefaultModel,
+	paths.DefaultPreset,
+	paths.DefaultLabels,
+	paths.GraceHours,
+	paths.PiBinary,
+}
+
+// captureDaemonEnv returns the daemonEnvVars actually set in environ (in
+// os.Environ "K=V" form). Unset and empty variables are omitted rather than
+// written through: an empty FUNDI_AGENT_DB is not the same as an absent one to
+// the daemon's "is persistence configured" check, and writing one would turn a
+// missing export into a configured-but-broken DSN.
+func captureDaemonEnv(environ []string) map[string]string {
+	want := make(map[string]bool, len(daemonEnvVars))
+	for _, k := range daemonEnvVars {
+		want[k] = true
+	}
+	out := make(map[string]string)
+	for _, e := range environ {
+		k, v, ok := strings.Cut(e, "=")
+		if ok && want[k] && v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// envKV is one captured variable. Templates render a sorted slice rather than
+// ranging a map so that reinstalling with an unchanged environment produces a
+// byte-identical unit file instead of one with randomly reordered keys.
+type envKV struct{ Key, Value string }
+
+func sortedEnv(m map[string]string) []envKV {
+	out := make([]envKV, 0, len(m))
+	for k, v := range m {
+		out = append(out, envKV{Key: k, Value: v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
 }
 
 // serviceStatus describes the current state of the installed service.
@@ -150,6 +224,21 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("install service: %w", err)
 	}
 	fmt.Printf("fundi service installed.\nLog: %s\n", b.LogPath())
+	// Report what was baked in. These come from the installing shell and are
+	// invisible afterwards, so an install that captured nothing — the common
+	// mistake, running `service install` from a shell that never sourced .env —
+	// should say so here rather than surface later as conversations silently
+	// not persisting.
+	if captured := sortedEnv(spec.ExtraEnv); len(captured) > 0 {
+		fmt.Println("Captured from the current environment:")
+		for _, kv := range captured {
+			fmt.Printf("  %s\n", kv.Key)
+		}
+	} else {
+		fmt.Printf("No %s in this shell's environment — agent conversations will be\n"+
+			"in-memory and no per-turn cost will be recorded. Export it (or source\n"+
+			"your .env) and re-run `fundi service install` to bake it in.\n", paths.AgentDB)
+	}
 	return nil
 }
 
@@ -291,6 +380,7 @@ func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
 	}
 	spec.HomeEnv = home
 	spec.LogPath = paths.ServiceLogPath()
+	spec.ExtraEnv = captureDaemonEnv(os.Environ())
 
 	if v, _ := cmd.Flags().GetString("path-env"); v != "" {
 		spec.PathEnv = v
@@ -332,8 +422,17 @@ func findDaemonBinaryFrom(self string) (string, error) {
 }
 
 // buildPathEnv builds the PATH string for the service environment. It
-// prepends the directory containing the `pi` binary (so the daemon can
-// spawn it) and appends a set of standard directories.
+// prepends the directories containing the child backends the daemon spawns by
+// name — `pi` and `claude` — and appends a set of standard directories.
+//
+// claude is here for the same reason pi is, and is easier to miss: it is
+// commonly installed under ~/.local/bin (as a symlink into a versioned
+// directory), which is on nobody's default service PATH. Worse, in an
+// interactive shell `claude` is often a shell function, so it appears to be
+// "on PATH" when checked by hand while launchd has no equivalent and cannot
+// find it at all — --kind claude children then fail to spawn under the service
+// while working perfectly when fundid is run from a terminal. exec.LookPath
+// resolves the real executable, which is exactly what the daemon needs.
 func buildPathEnv() string {
 	standard := []string{
 		"/usr/local/bin",
@@ -343,6 +442,9 @@ func buildPathEnv() string {
 	}
 
 	var dirs []string
+	if claudePath, err := exec.LookPath("claude"); err == nil {
+		dirs = append(dirs, filepath.Dir(claudePath))
+	}
 	if piPath, err := exec.LookPath("pi"); err == nil {
 		dirs = append(dirs, filepath.Dir(piPath))
 	} else {

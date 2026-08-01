@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,9 +49,13 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
-		<string>{{.HomeEnv}}</string>
+		<string>{{xml .HomeEnv}}</string>
 		<key>PATH</key>
-		<string>{{.PathEnv}}</string>
+		<string>{{xml .PathEnv}}</string>
+{{- range .Extra}}
+		<key>{{xml .Key}}</key>
+		<string>{{xml .Value}}</string>
+{{- end}}
 	</dict>
 </dict>
 </plist>
@@ -59,16 +64,33 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 type plistData struct {
 	serviceSpec
 	Label string
+	// Extra is ExtraEnv in deterministic order; see sortedEnv.
+	Extra []envKV
+}
+
+// xmlEscape escapes a value for a plist <string>. text/template does no
+// context-aware escaping, and these values are not tame: a postgres DSN
+// routinely carries a query string, so "?sslmode=disable&application_name=x"
+// would emit a bare ampersand and produce a plist launchd refuses to parse —
+// leaving the service uninstallable over the very variable this mechanism
+// exists to carry.
+func xmlEscape(s string) (string, error) {
+	var buf bytes.Buffer
+	if err := xml.EscapeText(&buf, []byte(s)); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // renderServiceConfig renders the launchd plist content for the given spec.
 func renderServiceConfig(spec serviceSpec) (string, error) {
-	tmpl, err := template.New("plist").Parse(plistTemplate)
+	tmpl, err := template.New("plist").Funcs(template.FuncMap{"xml": xmlEscape}).Parse(plistTemplate)
 	if err != nil {
 		return "", err
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, plistData{serviceSpec: spec, Label: launchdLabel}); err != nil {
+	data := plistData{serviceSpec: spec, Label: launchdLabel, Extra: sortedEnv(spec.ExtraEnv)}
+	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

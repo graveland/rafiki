@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/xml"
 	"strings"
 	"testing"
 )
@@ -59,5 +60,92 @@ func TestRenderPlist_Format(t *testing.T) {
 		if !strings.Contains(content, c) {
 			t.Errorf("plist missing %q", c)
 		}
+	}
+}
+
+func TestRenderPlist_IncludesCapturedEnv(t *testing.T) {
+	spec := testSpec()
+	spec.ExtraEnv = map[string]string{
+		"FUNDI_AGENT_DB": "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
+		"FUNDI_SOCKET":   "/tmp/fundi.sock",
+	}
+	out, err := renderServiceConfig(spec)
+	if err != nil {
+		t.Fatalf("renderServiceConfig: %v", err)
+	}
+	for _, want := range []string{
+		"<key>FUNDI_AGENT_DB</key>",
+		"<string>postgres://postgres@localhost:5432/rafiki?sslmode=disable</string>",
+		"<key>FUNDI_SOCKET</key>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("plist missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+// A DSN routinely carries a query string, so an unescaped ampersand would
+// produce a plist launchd refuses to parse — the service would become
+// uninstallable over the very variable this mechanism exists to carry.
+func TestRenderPlist_EscapesXML(t *testing.T) {
+	spec := testSpec()
+	spec.ExtraEnv = map[string]string{
+		"FUNDI_AGENT_DB": "postgres://h/db?sslmode=disable&application_name=fundi<1>",
+	}
+	out, err := renderServiceConfig(spec)
+	if err != nil {
+		t.Fatalf("renderServiceConfig: %v", err)
+	}
+	if strings.Contains(out, "&application_name") {
+		t.Error("raw ampersand emitted; the plist would not parse")
+	}
+	if !strings.Contains(out, "&amp;application_name") {
+		t.Errorf("ampersand not escaped\n---\n%s", out)
+	}
+	if strings.Contains(out, "fundi<1>") {
+		t.Error("raw angle brackets emitted")
+	}
+	// The real check: it must actually parse as XML.
+	if err := xml.Unmarshal([]byte(out), new(any)); err != nil {
+		t.Errorf("rendered plist is not well-formed XML: %v\n---\n%s", err, out)
+	}
+}
+
+// Reinstalling with an unchanged environment must produce a byte-identical
+// plist; a map ranged directly would reorder keys at random and make every
+// reinstall look like a change.
+func TestRenderPlist_Deterministic(t *testing.T) {
+	spec := testSpec()
+	spec.ExtraEnv = map[string]string{
+		"FUNDI_AGENT_DB": "db", "FUNDI_SOCKET": "/s", "FUNDI_PI_BINARY": "/pi",
+		"FUNDI_DEFAULT_MODEL": "m", "FUNDI_MCP_CONFIG": "/c",
+	}
+	first, err := renderServiceConfig(spec)
+	if err != nil {
+		t.Fatalf("renderServiceConfig: %v", err)
+	}
+	for range 20 {
+		again, err := renderServiceConfig(spec)
+		if err != nil {
+			t.Fatalf("renderServiceConfig: %v", err)
+		}
+		if again != first {
+			t.Fatal("plist rendering is not deterministic")
+		}
+	}
+}
+
+// No captured environment must still render a valid plist — the pre-existing
+// HOME/PATH-only shape.
+func TestRenderPlist_EmptyExtraEnv(t *testing.T) {
+	out, err := renderServiceConfig(testSpec())
+	if err != nil {
+		t.Fatalf("renderServiceConfig: %v", err)
+	}
+	if strings.Contains(out, "FUNDI_") {
+		t.Errorf("unexpected FUNDI_ key with no captured env\n---\n%s", out)
+	}
+	if err := xml.Unmarshal([]byte(out), new(any)); err != nil {
+		t.Errorf("not well-formed XML: %v", err)
 	}
 }
