@@ -37,7 +37,7 @@ type editInput struct {
 // fresh read of path (see FileTracker.Verify) and records its own edit in tr
 // so a chained edit on the same path doesn't need a redundant read.
 func newEditTool(tr *FileTracker) ToolFunc {
-	return func(_ context.Context, input json.RawMessage) (string, error) {
+	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in editInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("edit: invalid input: %w", err)
@@ -50,6 +50,13 @@ func newEditTool(tr *FileTracker) ToolFunc {
 		}
 		if in.OldString == "" {
 			return "", fmt.Errorf("edit: old_string is required")
+		}
+		// Fail fast on an already-aborted turn rather than doing work whose
+		// result nobody will see — agentloop runs a batch of tool calls
+		// concurrently, so a call can still be starting after the turn's
+		// context was canceled.
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 		// Everything from here down is a read-modify-write. rafiki's agentloop
 		// runs a tool batch concurrently, and a model emitting two edits on

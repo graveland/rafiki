@@ -47,10 +47,13 @@ func RegisterSkillTool(r *Registry, skills []skillspkg.SkillMeta) {
 }
 
 func newSkillTool(byName map[string]skillspkg.SkillMeta, names []string) ToolFunc {
-	return func(_ context.Context, input json.RawMessage) (string, error) {
+	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in skillInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("skill: invalid input: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 
 		s, ok := byName[in.Skill]

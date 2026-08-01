@@ -21,19 +21,18 @@ const (
 	defaultGrepMaxMatches = 100
 
 	grepDescription = "Search file contents for a regular expression (RE2 syntax), walking " +
-		"path (defaults to the current working directory). .git directories are " +
-		"always excluded. Optionally restrict the search to files matching a glob. " +
-		"Output is one \"path:line:text\" line per match, capped at 100 matches by " +
-		"default."
+		"path. .git directories are always excluded. Optionally restrict the " +
+		"search to files matching a glob. Output is one \"path:line:text\" line " +
+		"per match, capped at 100 matches by default."
 	grepSchema = `{
 		"type": "object",
 		"properties": {
 			"pattern": {"type": "string", "description": "Regular expression (RE2 syntax) to search for."},
-			"path": {"type": "string", "description": "Base directory to search from. Defaults to the current working directory."},
+			"path": {"type": "string", "description": "Base directory to search from. Required; must not be the filesystem root (\"/\")."},
 			"glob": {"type": "string", "description": "Optional glob pattern to restrict which files are searched, matched against each file's path relative to path. A pattern with no / (e.g. \"*.go\") matches by file name at any depth, like ripgrep's -g."},
 			"max_matches": {"type": "integer", "description": "Maximum number of matches to return. Defaults to 100."}
 		},
-		"required": ["pattern"]
+		"required": ["pattern", "path"]
 	}`
 )
 
@@ -47,7 +46,7 @@ type grepInput struct {
 // newGrepTool builds the grep ToolFunc. It has no shared state, so unlike
 // read/write/edit it takes no FileTracker.
 func newGrepTool() ToolFunc {
-	return func(_ context.Context, input json.RawMessage) (string, error) {
+	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in grepInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("grep: invalid input: %w", err)
@@ -60,21 +59,19 @@ func newGrepTool() ToolFunc {
 			return "", fmt.Errorf("grep: invalid pattern %q: %w", in.Pattern, err)
 		}
 
-		base := in.Path
-		if base == "" {
-			wd, err := os.Getwd()
-			if err != nil {
-				return "", fmt.Errorf("grep: %w", err)
-			}
-			base = wd
+		if in.Path == "" {
+			return "", fmt.Errorf("grep: path is required")
 		}
 		// Absolutize before walking (glob does the same): every emitted match
 		// is prefixed with the walked path, and read/edit both *reject* a
 		// relative path — so a relative base would produce output the model
 		// cannot feed back into any other tool.
-		base, err = filepath.Abs(base)
+		base, err := filepath.Abs(in.Path)
 		if err != nil {
 			return "", fmt.Errorf("grep: %w", err)
+		}
+		if base == string(filepath.Separator) {
+			return "", fmt.Errorf("grep: refusing to search the filesystem root (%s); pass a narrower path", base)
 		}
 		baseInfo, err := os.Stat(base)
 		if err != nil {
@@ -93,6 +90,13 @@ func newGrepTool() ToolFunc {
 		shown := 0
 		total := 0
 		walkErr := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+			// Checked per visited entry (not just once up front) so an abort
+			// mid-walk over a large or slow (e.g. network-mounted) tree stops
+			// promptly instead of running to completion after the caller has
+			// moved on.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			if err != nil {
 				// A subtree we can't even stat (permission denied, race with
 				// a concurrent delete) shouldn't fail the whole search — log

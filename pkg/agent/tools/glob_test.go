@@ -148,6 +148,53 @@ func TestGlobToolAbsolutePatternOutsideBase(t *testing.T) {
 	}
 }
 
+// TestGlobToolRespectsCanceledContext guards against a slow or huge glob
+// walk continuing after the caller (agentloop's in-band abort) has given up
+// on it.
+func TestGlobToolRespectsCanceledContext(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fn := newGlobTool()
+	_, err := fn(ctx, json.RawMessage(fmt.Sprintf(`{"pattern":"*.go","path":%q}`, dir)))
+	if err == nil {
+		t.Fatal("expected an error for an already-canceled context")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("expected a context-canceled error, got %v", err)
+	}
+}
+
+func TestCtxFSFailsOnceContextIsDone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cfs := ctxFS{FS: os.DirFS(dir), ctx: ctx}
+
+	if _, err := cfs.Open("a.txt"); err != nil {
+		t.Fatalf("expected Open to succeed before cancellation, got %v", err)
+	}
+	if _, err := cfs.ReadDir("."); err != nil {
+		t.Fatalf("expected ReadDir to succeed before cancellation, got %v", err)
+	}
+
+	cancel()
+	if _, err := cfs.Open("a.txt"); err == nil {
+		t.Fatal("expected Open to fail after cancellation")
+	}
+	if _, err := cfs.ReadDir("."); err == nil {
+		t.Fatal("expected ReadDir to fail after cancellation")
+	}
+}
+
 func TestGlobToolDefaultsToWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cwd-match.go")

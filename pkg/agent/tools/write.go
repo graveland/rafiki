@@ -34,7 +34,7 @@ type writeInput struct {
 // modification, and records its own write in tr so an immediately following
 // edit doesn't need a redundant read.
 func newWriteTool(tr *FileTracker) ToolFunc {
-	return func(_ context.Context, input json.RawMessage) (string, error) {
+	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in writeInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("write: invalid input: %w", err)
@@ -44,6 +44,13 @@ func newWriteTool(tr *FileTracker) ToolFunc {
 		}
 		if !filepath.IsAbs(in.Path) {
 			return "", fmt.Errorf("write: path must be absolute, got %q", in.Path)
+		}
+		// Fail fast on an already-aborted turn rather than doing work whose
+		// result nobody will see — agentloop runs a batch of tool calls
+		// concurrently, so a call can still be starting after the turn's
+		// context was canceled.
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 
 		// Everything from here down is a read-modify-write (stat, verify,

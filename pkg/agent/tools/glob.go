@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -41,13 +42,16 @@ type globInput struct {
 // newGlobTool builds the glob ToolFunc. It has no shared state, so unlike
 // read/write/edit it takes no FileTracker.
 func newGlobTool() ToolFunc {
-	return func(_ context.Context, input json.RawMessage) (string, error) {
+	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in globInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("glob: invalid input: %w", err)
 		}
 		if in.Pattern == "" {
 			return "", fmt.Errorf("glob: pattern is required")
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 
 		base := in.Path
@@ -87,8 +91,15 @@ func newGlobTool() ToolFunc {
 			pattern = rel
 		}
 
-		matches, err := doublestar.Glob(os.DirFS(base), pattern)
+		matches, err := doublestar.Glob(ctxFS{FS: os.DirFS(base), ctx: ctx}, pattern, doublestar.WithFailOnIOErrors())
 		if err != nil {
+			// A canceled turn surfaces as an I/O error from ctxFS deep inside
+			// doublestar's walk (WithFailOnIOErrors makes that abort the walk
+			// instead of being silently swallowed) — report the real cause
+			// rather than a confusing "invalid pattern".
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
 			return "", fmt.Errorf("glob: invalid pattern %q: %w", in.Pattern, err)
 		}
 		if len(matches) == 0 {
@@ -131,4 +142,33 @@ func newGlobTool() ToolFunc {
 		}
 		return out.String(), nil
 	}
+}
+
+// ctxFS wraps an fs.FS and fails Open/ReadDir once ctx is done, so a
+// doublestar walk over a large or slow (e.g. network-mounted) tree — driven
+// entirely inside the library, with no callback of our own to check — aborts
+// promptly instead of running to completion after the caller has moved on.
+// Paired with doublestar.WithFailOnIOErrors, which is required for this
+// synthetic I/O error to actually stop the walk rather than being silently
+// skipped like a real permission error.
+type ctxFS struct {
+	fs.FS
+	ctx context.Context
+}
+
+func (c ctxFS) Open(name string) (fs.File, error) {
+	if err := c.ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.FS.Open(name)
+}
+
+func (c ctxFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if err := c.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if rdfs, ok := c.FS.(fs.ReadDirFS); ok {
+		return rdfs.ReadDir(name)
+	}
+	return fs.ReadDir(c.FS, name)
 }

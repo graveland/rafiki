@@ -188,31 +188,43 @@ func TestGrepToolInvalidPattern(t *testing.T) {
 	}
 }
 
-func TestGrepToolDefaultsToWorkingDirectory(t *testing.T) {
+// TestGrepToolRespectsCanceledContext guards against a slow or huge tree
+// walk continuing after the caller (agentloop's in-band abort) has given up
+// on it.
+func TestGrepToolRespectsCanceledContext(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	origWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.Chdir(origWD); err != nil {
-			t.Fatal(err)
-		}
-	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(`{"pattern":"needle"}`))
-	if err != nil {
-		t.Fatal(err)
+	_, err := fn(ctx, json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q}`, dir)))
+	if err == nil {
+		t.Fatal("expected an error for an already-canceled context")
 	}
-	if !strings.Contains(out, "needle") {
-		t.Fatalf("expected default path to be the working directory, got %q", out)
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("expected a context-canceled error, got %v", err)
+	}
+}
+
+func TestGrepToolRequiresPath(t *testing.T) {
+	fn := newGrepTool()
+	_, err := fn(context.Background(), json.RawMessage(`{"pattern":"needle"}`))
+	if err == nil {
+		t.Fatal("expected an error for a missing path")
+	}
+}
+
+// TestGrepToolRejectsFilesystemRoot guards against a model (accidentally or
+// otherwise) walking the entire disk via path:"/".
+func TestGrepToolRejectsFilesystemRoot(t *testing.T) {
+	fn := newGrepTool()
+	_, err := fn(context.Background(), json.RawMessage(`{"pattern":"needle","path":"/"}`))
+	if err == nil {
+		t.Fatal("expected an error for path \"/\"")
 	}
 }
 

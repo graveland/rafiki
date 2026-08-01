@@ -42,7 +42,7 @@ type readInput struct {
 // newReadTool builds the read ToolFunc, recording every successful read's
 // path+mtime in tr so write/edit can verify freshness later.
 func newReadTool(tr *FileTracker) ToolFunc {
-	return func(_ context.Context, input json.RawMessage) (string, error) {
+	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in readInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("read: invalid input: %w", err)
@@ -52,6 +52,13 @@ func newReadTool(tr *FileTracker) ToolFunc {
 		}
 		if !filepath.IsAbs(in.Path) {
 			return "", fmt.Errorf("read: path must be absolute, got %q", in.Path)
+		}
+		// Fail fast on an already-aborted turn rather than doing work whose
+		// result nobody will see — agentloop runs a batch of tool calls
+		// concurrently, so a call can still be starting after the turn's
+		// context was canceled.
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 
 		// rafiki's agentloop runs a tool batch concurrently, so a read can land
