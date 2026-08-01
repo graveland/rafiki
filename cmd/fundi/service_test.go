@@ -157,7 +157,7 @@ func TestNewServiceBackend(t *testing.T) {
 // ─── daemon environment capture ────────────────────────────────────────────────
 
 func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
-	got := captureDaemonEnv([]string{
+	got, _ := captureDaemonEnv([]string{
 		"FUNDI_AGENT_DB=postgres://u@localhost/rafiki?sslmode=disable",
 		"FUNDI_DEFAULT_MODEL=anthropic/opus-latest",
 		"PATH=/usr/bin",
@@ -176,7 +176,7 @@ func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
 // child and `fundid agent` uses it as the default --ref, so a service-wide
 // value would collide every child onto one conversation.
 func TestCaptureDaemonEnv_ExcludesChildID(t *testing.T) {
-	got := captureDaemonEnv([]string{"FUNDI_CHILD_ID=c_123", "FUNDI_AGENT_DB=x"})
+	got, _ := captureDaemonEnv([]string{"FUNDI_CHILD_ID=c_123", "FUNDI_AGENT_DB=x"})
 	if _, ok := got["FUNDI_CHILD_ID"]; ok {
 		t.Error("FUNDI_CHILD_ID was captured into the service environment")
 	}
@@ -184,7 +184,7 @@ func TestCaptureDaemonEnv_ExcludesChildID(t *testing.T) {
 
 // Credentials do not belong in a world-readable unit file.
 func TestCaptureDaemonEnv_ExcludesAPIKeys(t *testing.T) {
-	got := captureDaemonEnv([]string{"ANTHROPIC_API_KEY=sk-ant", "OPENROUTER_API_KEY=sk-or"})
+	got, _ := captureDaemonEnv([]string{"ANTHROPIC_API_KEY=sk-ant", "OPENROUTER_API_KEY=sk-or"})
 	if len(got) != 0 {
 		t.Errorf("captured credentials into the unit: %v", got)
 	}
@@ -193,7 +193,7 @@ func TestCaptureDaemonEnv_ExcludesAPIKeys(t *testing.T) {
 // An empty value is not the same as an absent one: writing FUNDI_AGENT_DB=""
 // would turn a missing export into a configured-but-broken DSN.
 func TestCaptureDaemonEnv_SkipsEmpty(t *testing.T) {
-	got := captureDaemonEnv([]string{"FUNDI_AGENT_DB="})
+	got, _ := captureDaemonEnv([]string{"FUNDI_AGENT_DB="})
 	if _, ok := got["FUNDI_AGENT_DB"]; ok {
 		t.Error("an empty value was captured")
 	}
@@ -209,5 +209,26 @@ func TestSortedEnv_IsDeterministic(t *testing.T) {
 	}
 	if first[0].Key != "FUNDI_AGENT_DB" {
 		t.Errorf("not sorted by key: %v", first)
+	}
+}
+
+// No unit file can carry a newline: systemd's Environment= is line-based, and
+// carrying it only on launchd would give a service that installs on one
+// platform and not the other. Such values must be skipped and reported, not
+// written into a unit that then fails to parse.
+func TestCaptureDaemonEnv_SkipsNewlineValues(t *testing.T) {
+	captured, skipped := captureDaemonEnv([]string{
+		"FUNDI_DEFAULT_LABELS=a=1\nb=2",
+		"FUNDI_AGENT_DB=postgres://u@h/db",
+	})
+	if _, ok := captured["FUNDI_DEFAULT_LABELS"]; ok {
+		t.Error("a newline-bearing value was written into the unit")
+	}
+	if !slices.Contains(skipped, "FUNDI_DEFAULT_LABELS") {
+		t.Errorf("skipped = %v, want it to name FUNDI_DEFAULT_LABELS", skipped)
+	}
+	// Skipping one must not cost the others.
+	if captured["FUNDI_AGENT_DB"] != "postgres://u@h/db" {
+		t.Error("an unrelated variable was lost alongside the skipped one")
 	}
 }

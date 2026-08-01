@@ -25,6 +25,16 @@ import (
 )
 
 func main() {
+	// Load the environment file before anything reads configuration — that
+	// includes the XDG lookups below, since the file may legitimately set them.
+	//
+	// This runs ahead of the `agent` dispatch deliberately, so a hand-run
+	// `fundid agent` gets the same environment the daemon would have given it.
+	// That is safe because the real environment always wins: values the daemon
+	// sets explicitly when it spawns a child are already present and the file
+	// only fills gaps.
+	loadServiceEnv()
+
 	// Dispatch `fundid agent ...` before any daemon setup below - it is a
 	// separate process mode (a single agent child speaking pi's rpc
 	// protocol on stdio) and must not fall through into the daemon's own
@@ -235,5 +245,31 @@ func closePoolBounded(pool *pgxpool.Pool, timeout time.Duration) {
 		slog.Error("agent database pool did not close in time; exiting without it. "+
 			"A connection is still held by work no context could cancel — most likely an abandoned child",
 			"waited", timeout)
+	}
+}
+
+// loadServiceEnv applies the daemon's environment file (see
+// paths.ServiceEnvFile). It is where credentials and any multi-header
+// ANTHROPIC_CUSTOM_HEADERS belong: unit files are world-readable, and systemd's
+// line-based Environment= cannot represent a value containing the literal
+// newline that variable requires as its separator.
+//
+// Everything here is best-effort but never silent. A missing file is normal and
+// says nothing; a load error, a malformed line or loose permissions are all
+// reported, because the failure this replaces — configuration that looks
+// present and is not — is the expensive one. The applied names are logged (not
+// their values) so the log answers "did the daemon actually get the DSN".
+func loadServiceEnv() {
+	path := paths.ServiceEnvFile()
+	applied, warnings, err := paths.LoadEnvFile(path)
+	if err != nil {
+		slog.Error("could not read the environment file; continuing without it",
+			"path", path, "error", err)
+	}
+	for _, w := range warnings {
+		slog.Warn("environment file", "detail", w)
+	}
+	if len(applied) > 0 {
+		slog.Info("loaded environment file", "path", path, "vars", applied)
 	}
 }

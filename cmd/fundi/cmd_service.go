@@ -41,6 +41,9 @@ type serviceSpec struct {
 	// ExtraEnv are the fundi variables baked into the unit so the daemon sees
 	// them. See daemonEnvVars.
 	ExtraEnv map[string]string
+	// SkippedEnv names variables that were set but could not be represented in
+	// a unit file. Reported at install time so they are not lost silently.
+	SkippedEnv []string
 }
 
 // daemonEnvVars are the FUNDI_* variables that configure the DAEMON, and so
@@ -81,23 +84,39 @@ var daemonEnvVars = []string{
 }
 
 // captureDaemonEnv returns the daemonEnvVars actually set in environ (in
-// os.Environ "K=V" form). Unset and empty variables are omitted rather than
-// written through: an empty FUNDI_AGENT_DB is not the same as an absent one to
-// the daemon's "is persistence configured" check, and writing one would turn a
-// missing export into a configured-but-broken DSN.
-func captureDaemonEnv(environ []string) map[string]string {
+// os.Environ "K=V" form), plus the names it had to skip.
+//
+// Unset and empty variables are omitted rather than written through: an empty
+// FUNDI_AGENT_DB is not the same as an absent one to the daemon's "is
+// persistence configured" check, and writing one would turn a missing export
+// into a configured-but-broken DSN.
+//
+// A value containing a newline is skipped, because no unit file can hold one.
+// systemd's Environment= is line-based, and a launchd plist would carry it but
+// only the systemd side would then be broken — a difference that would show up
+// as a service that installs on one platform and not the other. Such values
+// belong in the environment file (paths.ServiceEnvFile), which is also where
+// ANTHROPIC_CUSTOM_HEADERS has to live: a literal newline is the only separator
+// that variable accepts.
+func captureDaemonEnv(environ []string) (captured map[string]string, skipped []string) {
 	want := make(map[string]bool, len(daemonEnvVars))
 	for _, k := range daemonEnvVars {
 		want[k] = true
 	}
-	out := make(map[string]string)
+	captured = make(map[string]string)
 	for _, e := range environ {
 		k, v, ok := strings.Cut(e, "=")
-		if ok && want[k] && v != "" {
-			out[k] = v
+		if !ok || !want[k] || v == "" {
+			continue
 		}
+		if strings.ContainsAny(v, "\n\r") {
+			skipped = append(skipped, k)
+			continue
+		}
+		captured[k] = v
 	}
-	return out
+	sort.Strings(skipped)
+	return captured, skipped
 }
 
 // envKV is one captured variable. Templates render a sorted slice rather than
@@ -238,6 +257,12 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		fmt.Printf("No %s in this shell's environment — agent conversations will be\n"+
 			"in-memory and no per-turn cost will be recorded. Export it (or source\n"+
 			"your .env) and re-run `fundi service install` to bake it in.\n", paths.AgentDB)
+	}
+	if len(spec.SkippedEnv) > 0 {
+		fmt.Printf("\nNot baked in (a unit file cannot hold a newline): %s\n"+
+			"Put these in %s instead — the daemon reads it at startup, and it is\n"+
+			"also the right home for credentials, which a world-readable unit is not.\n",
+			strings.Join(spec.SkippedEnv, ", "), paths.ServiceEnvFile())
 	}
 	return nil
 }
@@ -380,7 +405,9 @@ func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
 	}
 	spec.HomeEnv = home
 	spec.LogPath = paths.ServiceLogPath()
-	spec.ExtraEnv = captureDaemonEnv(os.Environ())
+	var skipped []string
+	spec.ExtraEnv, skipped = captureDaemonEnv(os.Environ())
+	spec.SkippedEnv = skipped
 
 	if v, _ := cmd.Flags().GetString("path-env"); v != "" {
 		spec.PathEnv = v
