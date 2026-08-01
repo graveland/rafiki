@@ -43,6 +43,9 @@ const (
 	TypeCtrlChildStatus       = "ctrl_child_status"
 	TypeCtrlChildRenamed      = "ctrl_child_renamed"
 	TypeCtrlChildLabeled      = "ctrl_child_labeled"
+	TypeCtrlConversationStats  = "ctrl_conversation_stats"
+	TypeCtrlConversationSearch = "ctrl_conversation_search"
+	TypeCtrlConversationExport = "ctrl_conversation_export"
 )
 
 // ─── Status constants (§10) ──────────────────────────────────────────────────
@@ -92,6 +95,9 @@ const (
 	ErrNotFound = "not_found"
 	// ErrInternal is returned on unexpected controller-side errors.
 	ErrInternal = "internal"
+	// ErrNoAgentDB is returned by ctrl_conversation_* commands when the
+	// daemon has no agent database configured (FUNDI_AGENT_DB unset).
+	ErrNoAgentDB = "no_agent_db"
 )
 
 // ─── Shared sub-shapes ───────────────────────────────────────────────────────
@@ -340,6 +346,48 @@ type SearchRequest struct {
 type StatusRequest struct {
 	Type string `json:"type"`
 	ID   string `json:"id,omitempty"`
+}
+
+// ConversationStatsRequest queries persisted conversation stats: global
+// (filtered) when ConversationID is empty, scoped to one conversation
+// otherwise — in which case the filter fields below are ignored (§6.17).
+// SinceUnix/UntilUnix are Unix seconds; 0 means unbounded.
+type ConversationStatsRequest struct {
+	Type           string `json:"type"`
+	ID             string `json:"id,omitempty"`
+	ConversationID string `json:"conversationId,omitempty"`
+	SinceUnix      int64  `json:"sinceUnix,omitempty"`
+	UntilUnix      int64  `json:"untilUnix,omitempty"`
+	Owner          string `json:"owner,omitempty"`
+	Persona        string `json:"persona,omitempty"`
+	Source         string `json:"source,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Path           string `json:"path,omitempty"`
+}
+
+// ConversationSearchRequest searches persisted conversation history (§6.18).
+// SinceUnix/UntilUnix are Unix seconds; 0 means unbounded.
+type ConversationSearchRequest struct {
+	Type      string `json:"type"`
+	ID        string `json:"id,omitempty"`
+	SinceUnix int64  `json:"sinceUnix,omitempty"`
+	UntilUnix int64  `json:"untilUnix,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Persona   string `json:"persona,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Status    string `json:"status,omitempty"`
+	MinTokens int64  `json:"minTokens,omitempty"`
+	Text      string `json:"text,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+// ConversationExportRequest fetches one conversation's full transcript (§6.19).
+type ConversationExportRequest struct {
+	Type           string `json:"type"`
+	ID             string `json:"id,omitempty"`
+	ConversationID string `json:"conversationId"`
 }
 
 // ─── Response envelope and per-command response data types ───────────────────

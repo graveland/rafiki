@@ -720,6 +720,77 @@ Response:
 }
 ```
 
+### 6.17 `ctrl_conversation_stats`
+
+**fundi-specific.** Unlike every other command in this document, this is not answerable by a
+stock pi-controller daemon — it requires the `agent` child kind's database
+(`FUNDI_AGENT_DB`), which pi-controller has no concept of. `pic` sending this to a real
+pi-controller daemon gets `unknown command`.
+
+Global stats over persisted conversation history, or stats for one conversation when
+`conversationId` is given (filter fields are then ignored). `since`/`until` are Unix seconds
+(0/absent = unbounded).
+
+```jsonc
+{
+  "type":  "ctrl_conversation_stats",
+  "id":    "30",
+  "owner": "brent",
+  "since": 1716000000
+}
+```
+
+Response `data` is the same JSON shape `rafiki agent stats -j` prints (`pkg/insights.Stats`):
+volume, adoption, token, cost, failure, latency, cache-waste, and prefix-reuse facets. See
+`docs/agent-cli.md` for the field-level description; not duplicated here since it's the exact
+same struct.
+
+Error `no_agent_db` (§8) means the daemon has no database configured.
+
+### 6.18 `ctrl_conversation_search`
+
+**fundi-specific** (see §6.17). Searches persisted conversation history — the opposite
+population from `ctrl_search` (§6.15), which is live-only and explicitly does not scan
+historical sessions.
+
+```jsonc
+{
+  "type":      "ctrl_conversation_search",
+  "id":        "33",
+  "text":      "skill gap",
+  "status":    "failed",
+  "minTokens": 5000,
+  "limit":     20
+}
+```
+
+Response:
+
+```jsonc
+{
+  "type": "ctrl_response", "command": "ctrl_conversation_search", "id": "33",
+  "success": true,
+  "data": { "rows": [ /* insights.ConversationSummary, same shape rafiki agent search -j prints */ ] }
+}
+```
+
+Error `no_agent_db` (§8) means the daemon has no database configured.
+
+### 6.19 `ctrl_conversation_export`
+
+**fundi-specific** (see §6.17). Fetches one persisted conversation's full transcript.
+
+```jsonc
+{ "type": "ctrl_conversation_export", "id": "35", "conversationId": "conv-abc" }
+```
+
+Response `data` is `insights.Transcript` (same shape `rafiki agent export -j` prints):
+ordered turns with role, content, per-turn token/latency/model metrics, and the recovered
+skill catalog.
+
+Errors: `invalid_args` when `conversationId` is missing; `no_agent_db` (§8) when the daemon
+has no database configured.
+
 ## 7. Controller → client events
 
 ### 7.1 `ctrl_event`
@@ -832,6 +903,7 @@ Defined error codes:
 | `auth_invalid`          | TCP auth token did not match.                                      |
 | `not_found`             | Generic; e.g., `ctrl_resume` against unknown id.                   |
 | `internal`              | Unexpected controller-side error. Message contains details.        |
+| `no_agent_db`           | `ctrl_conversation_*`: no agent database configured (`FUNDI_AGENT_DB` unset). |
 
 ## 9. Multi-client semantics
 

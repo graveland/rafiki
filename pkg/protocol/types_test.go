@@ -254,6 +254,50 @@ func TestStatusRequest_RoundTrip(t *testing.T) {
 	roundTrip(t, req, &protocol.StatusRequest{})
 }
 
+func TestConversationStatsRequest_RoundTrip(t *testing.T) {
+	req := protocol.ConversationStatsRequest{
+		Type:           protocol.TypeCtrlConversationStats,
+		ID:             "req-20",
+		ConversationID: "conv-abc",
+		SinceUnix:      1716000000,
+		UntilUnix:      1716100000,
+		Owner:          "brent",
+		Persona:        "default",
+		Source:         "cli",
+		Model:          "claude-sonnet-5",
+		Path:           "direct",
+	}
+	roundTrip(t, req, &protocol.ConversationStatsRequest{})
+}
+
+func TestConversationSearchRequest_RoundTrip(t *testing.T) {
+	req := protocol.ConversationSearchRequest{
+		Type:      protocol.TypeCtrlConversationSearch,
+		ID:        "req-21",
+		SinceUnix: 1716000000,
+		UntilUnix: 1716100000,
+		Owner:     "brent",
+		Persona:   "default",
+		Source:    "cli",
+		Model:     "claude-sonnet-5",
+		Path:      "direct",
+		Status:    "failed",
+		MinTokens: 5000,
+		Text:      "skill gap",
+		Limit:     20,
+	}
+	roundTrip(t, req, &protocol.ConversationSearchRequest{})
+}
+
+func TestConversationExportRequest_RoundTrip(t *testing.T) {
+	req := protocol.ConversationExportRequest{
+		Type:           protocol.TypeCtrlConversationExport,
+		ID:             "req-22",
+		ConversationID: "conv-abc",
+	}
+	roundTrip(t, req, &protocol.ConversationExportRequest{})
+}
+
 // roundTrip marshals src to JSON, unmarshals into dst, and asserts deep equality.
 // dst must be a pointer to the same type as src.
 func roundTrip[T any](t *testing.T, src T, dst *T) {
