@@ -9,14 +9,35 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 // ─── loadBuiltins ──────────────────────────────────────────────────────────────
 
 func TestLoadBuiltins_Count(t *testing.T) {
 	got := loadBuiltins()
-	if len(got) != len(knownModels) {
-		t.Errorf("loadBuiltins returned %d entries, want %d", len(got), len(knownModels))
+	want := len(knownModels) + len(routing.LatestFamilies())
+	if len(got) != want {
+		t.Errorf("loadBuiltins returned %d entries, want %d (%d curated + %d family aliases)",
+			len(got), want, len(knownModels), len(routing.LatestFamilies()))
+	}
+}
+
+// The "<family>-latest" aliases are what keeps completion current across a
+// model release without anyone editing knownModels, so their presence is the
+// contract rather than an implementation detail.
+func TestLoadBuiltins_ContainsFamilyAliases(t *testing.T) {
+	got := loadBuiltins()
+	have := make(map[string]bool, len(got))
+	for _, m := range got {
+		have[m.ID] = true
+	}
+	for _, fam := range routing.LatestFamilies() {
+		id := "anthropic/" + fam
+		if !have[id] {
+			t.Errorf("loadBuiltins is missing the family alias %s", id)
+		}
 	}
 }
 
@@ -382,5 +403,60 @@ func TestList_NoDuplicatesInBuiltins(t *testing.T) {
 		if n > 1 {
 			t.Errorf("builtin ID %q appears %d times", id, n)
 		}
+	}
+}
+
+// ─── loadOpenRouter ────────────────────────────────────────────────────────────
+
+// Anthropic ids must never come from the OpenRouter catalog. fundi routes an
+// "anthropic/" prefix to the native Anthropic sender, which spells versions
+// with dashes ("claude-opus-4-7") where this catalog uses dots
+// ("claude-opus-4.7") — so an imported id would complete cleanly and then fail
+// at call time, which is the worst of both. See the package doc.
+func TestOpenRouterModels_ExcludesAnthropic(t *testing.T) {
+	got := openRouterModels([]string{
+		"anthropic/claude-opus-4.7",
+		"anthropic/claude-sonnet-5",
+		"openai/gpt-4o",
+		"moonshotai/kimi-k3",
+	})
+	for _, m := range got {
+		if strings.HasPrefix(m.ID, "anthropic/") {
+			t.Errorf("anthropic id leaked from the OpenRouter catalog: %s", m.ID)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d entries, want 2 (the non-anthropic ids)", len(got))
+	}
+}
+
+func TestOpenRouterModels_Fields(t *testing.T) {
+	got := openRouterModels([]string{"moonshotai/kimi-k3"})
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	want := Model{ID: "moonshotai/kimi-k3", Provider: "moonshotai", Model: "kimi-k3", Source: SourceOpenRouter}
+	if got[0] != want {
+		t.Errorf("got %+v, want %+v", got[0], want)
+	}
+}
+
+// fundi requires a provider-qualified id (pkg/agent/config.go's splitModel
+// returns an empty provider otherwise, and the agent rejects it), so a bare id
+// in the catalog must not be offered as a completion.
+func TestOpenRouterModels_SkipsUnqualified(t *testing.T) {
+	got := openRouterModels([]string{"gpt-4o", "", "/leading", "trailing/", "openai/gpt-4o"})
+	if len(got) != 1 || got[0].ID != "openai/gpt-4o" {
+		t.Errorf("got %+v, want only openai/gpt-4o", got)
+	}
+}
+
+// A cancelled context must abandon the catalog rather than block: completion
+// runs on a TAB press, and a hung fetch would look like a wedged shell.
+func TestLoadOpenRouter_RespectsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := loadOpenRouter(ctx); got != nil {
+		t.Errorf("got %d entries on a cancelled context, want none", len(got))
 	}
 }
