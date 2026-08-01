@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -21,27 +22,31 @@ func (discardConn) Deliver(_ []byte) {}
 // ─── fakeController ───────────────────────────────────────────────────────────
 
 type fakeController struct {
-	listFn              func(protocol.ListFilter) []childstore.Snapshot
-	getFn               func(string) (childstore.Snapshot, bool)
-	getRecentFn         func(string, control.RecentQuery) (control.RecentResult, error)
-	searchFn            func(control.SearchQuery) control.SearchResult
-	statusFn            func() control.ControllerStatus
-	spawnFn             func(context.Context, protocol.SpawnRequest) (control.SpawnResult, error)
-	resumeFn            func(context.Context, string, string) (control.SpawnResult, error)
-	killFn              func(context.Context, string, int64, int64) (control.KillResult, error)
-	forgetFn            func(string) error
-	forgetAllExitedFn   func(int64) (int, error)
-	sendFn              func(string, json.RawMessage) error
-	subscribeFn         func(string, control.Connection, protocol.SubscribeFilter) error
-	unsubscribeFn       func(string, control.Connection) error
-	globalSubscribeFn   func(control.Connection) error
-	globalUnsubscribeFn func(control.Connection) error
-	subscribeLabeledFn  func(control.Connection, map[string]string, []string, protocol.SubscribeFilter) error
-	onConnectionCloseFn func(control.Connection)
-	listModelsFn        func(context.Context, string) ([]protocol.ModelInfo, error)
-	listPresetsFn       func(map[string]string, []string) ([]protocol.PresetInfo, error)
-	getStreamsResult    control.GetStreamsResult
-	getStreamsErr       error
+	listFn                  func(protocol.ListFilter) []childstore.Snapshot
+	getFn                   func(string) (childstore.Snapshot, bool)
+	getRecentFn             func(string, control.RecentQuery) (control.RecentResult, error)
+	searchFn                func(control.SearchQuery) control.SearchResult
+	statusFn                func() control.ControllerStatus
+	spawnFn                 func(context.Context, protocol.SpawnRequest) (control.SpawnResult, error)
+	resumeFn                func(context.Context, string, string) (control.SpawnResult, error)
+	killFn                  func(context.Context, string, int64, int64) (control.KillResult, error)
+	forgetFn                func(string) error
+	forgetAllExitedFn       func(int64) (int, error)
+	sendFn                  func(string, json.RawMessage) error
+	subscribeFn             func(string, control.Connection, protocol.SubscribeFilter) error
+	unsubscribeFn           func(string, control.Connection) error
+	globalSubscribeFn       func(control.Connection) error
+	globalUnsubscribeFn     func(control.Connection) error
+	subscribeLabeledFn      func(control.Connection, map[string]string, []string, protocol.SubscribeFilter) error
+	onConnectionCloseFn     func(control.Connection)
+	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
+	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
+	getStreamsResult        control.GetStreamsResult
+	getStreamsErr           error
+	conversationStatsFn     func(context.Context, insights.StatsFilter) (*insights.Stats, error)
+	conversationStatsByIDFn func(context.Context, string) (*insights.Stats, error)
+	conversationSearchFn    func(context.Context, insights.SearchFilter) ([]insights.ConversationSummary, error)
+	conversationExportFn    func(context.Context, string) (*insights.Transcript, error)
 }
 
 func (f *fakeController) List(filter protocol.ListFilter) []childstore.Snapshot {
@@ -84,6 +89,34 @@ func (f *fakeController) Status() control.ControllerStatus {
 		return f.statusFn()
 	}
 	return control.ControllerStatus{}
+}
+
+func (f *fakeController) ConversationStats(ctx context.Context, filter insights.StatsFilter) (*insights.Stats, error) {
+	if f.conversationStatsFn != nil {
+		return f.conversationStatsFn(ctx, filter)
+	}
+	return &insights.Stats{}, nil
+}
+
+func (f *fakeController) ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error) {
+	if f.conversationStatsByIDFn != nil {
+		return f.conversationStatsByIDFn(ctx, id)
+	}
+	return &insights.Stats{}, nil
+}
+
+func (f *fakeController) ConversationSearch(ctx context.Context, filter insights.SearchFilter) ([]insights.ConversationSummary, error) {
+	if f.conversationSearchFn != nil {
+		return f.conversationSearchFn(ctx, filter)
+	}
+	return nil, nil
+}
+
+func (f *fakeController) ConversationExport(ctx context.Context, id string) (*insights.Transcript, error) {
+	if f.conversationExportFn != nil {
+		return f.conversationExportFn(ctx, id)
+	}
+	return &insights.Transcript{}, nil
 }
 
 func (f *fakeController) Spawn(ctx context.Context, req protocol.SpawnRequest) (control.SpawnResult, error) {
@@ -666,6 +699,136 @@ func TestDispatch_Search_EmptyHitsIsArray(t *testing.T) {
 	if string(raw["hits"]) == "null" {
 		t.Error("hits should be [] not null")
 	}
+}
+
+// ─── ctrl_conversation_stats ───────────────────────────────────────────────────
+
+func TestDispatch_ConversationStats_Global_Success(t *testing.T) {
+	c := &fakeController{
+		conversationStatsFn: func(_ context.Context, f insights.StatsFilter) (*insights.Stats, error) {
+			if f.Owner != "brent" {
+				t.Fatalf("owner: %s", f.Owner)
+			}
+			return &insights.Stats{Volume: insights.VolumeStats{Conversations: 5, Turns: 20}}, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	frame := `{"type":"ctrl_conversation_stats","id":"30","owner":"brent"}`
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+
+	var data insights.Stats
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Volume.Conversations != 5 || data.Volume.Turns != 20 {
+		t.Errorf("volume: %+v", data.Volume)
+	}
+}
+
+func TestDispatch_ConversationStats_ByID_Success(t *testing.T) {
+	c := &fakeController{
+		conversationStatsByIDFn: func(_ context.Context, id string) (*insights.Stats, error) {
+			if id != "conv-abc" {
+				t.Fatalf("id: %s", id)
+			}
+			return &insights.Stats{Volume: insights.VolumeStats{Conversations: 1}}, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	frame := `{"type":"ctrl_conversation_stats","id":"31","conversationId":"conv-abc"}`
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+
+	var data insights.Stats
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Volume.Conversations != 1 {
+		t.Errorf("volume: %+v", data.Volume)
+	}
+}
+
+func TestDispatch_ConversationStats_NoAgentDB(t *testing.T) {
+	c := &fakeController{
+		conversationStatsFn: func(context.Context, insights.StatsFilter) (*insights.Stats, error) {
+			return nil, controllerErr(protocol.ErrNoAgentDB, "no agent database configured")
+		},
+	}
+	d := control.NewDispatch(c)
+	resp := d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_conversation_stats","id":"32"}`))
+	mustError(t, resp, protocol.ErrNoAgentDB)
+}
+
+// ─── ctrl_conversation_search ──────────────────────────────────────────────────
+
+func TestDispatch_ConversationSearch_Success(t *testing.T) {
+	c := &fakeController{
+		conversationSearchFn: func(_ context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
+			if f.Text != "skill gap" {
+				t.Fatalf("text: %s", f.Text)
+			}
+			return []insights.ConversationSummary{{ID: "conv-abc", Owner: "brent"}}, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	frame := `{"type":"ctrl_conversation_search","id":"33","text":"skill gap"}`
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+
+	var data struct {
+		Rows []insights.ConversationSummary `json:"rows"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Rows) != 1 || data.Rows[0].ID != "conv-abc" {
+		t.Errorf("rows: %+v", data.Rows)
+	}
+}
+
+func TestDispatch_ConversationSearch_EmptyRowsIsArray(t *testing.T) {
+	c := &fakeController{
+		conversationSearchFn: func(context.Context, insights.SearchFilter) ([]insights.ConversationSummary, error) {
+			return nil, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_conversation_search","id":"34"}`)))
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(r.Data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["rows"]) == "null" {
+		t.Error("rows should be [] not null")
+	}
+}
+
+// ─── ctrl_conversation_export ──────────────────────────────────────────────────
+
+func TestDispatch_ConversationExport_Success(t *testing.T) {
+	c := &fakeController{
+		conversationExportFn: func(_ context.Context, id string) (*insights.Transcript, error) {
+			if id != "conv-abc" {
+				t.Fatalf("id: %s", id)
+			}
+			return &insights.Transcript{ConversationID: "conv-abc", Owner: "brent"}, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	frame := `{"type":"ctrl_conversation_export","id":"35","conversationId":"conv-abc"}`
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
+
+	var data insights.Transcript
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.ConversationID != "conv-abc" {
+		t.Errorf("conversationId: %s", data.ConversationID)
+	}
+}
+
+func TestDispatch_ConversationExport_MissingConversationID(t *testing.T) {
+	d := control.NewDispatch(&fakeController{})
+	resp := d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_conversation_export","id":"x"}`))
+	mustError(t, resp, protocol.ErrInvalidArgs)
 }
 
 // ─── ctrl_spawn ───────────────────────────────────────────────────────────────

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -76,6 +78,14 @@ type Controller interface {
 	GetStreams(childID string, which string) (GetStreamsResult, error)
 	Search(q SearchQuery) SearchResult
 	Status() ControllerStatus
+
+	// Conversation insights, backed by the daemon's agent database.
+	// Implementations return a *ControllerError with Code: protocol.ErrNoAgentDB
+	// when no database is configured (FUNDI_AGENT_DB unset).
+	ConversationStats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error)
+	ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error)
+	ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error)
+	ConversationExport(ctx context.Context, id string) (*insights.Transcript, error)
 
 	// Lifecycle mutations.
 	Spawn(ctx context.Context, req protocol.SpawnRequest) (SpawnResult, error)
@@ -174,6 +184,12 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.search(frame, hdr.ID)
 	case protocol.TypeCtrlStatus:
 		return d.ctrlStatus(frame, hdr.ID)
+	case protocol.TypeCtrlConversationStats:
+		return d.conversationStats(frame, hdr.ID)
+	case protocol.TypeCtrlConversationSearch:
+		return d.conversationSearch(frame, hdr.ID)
+	case protocol.TypeCtrlConversationExport:
+		return d.conversationExport(frame, hdr.ID)
 	case protocol.TypeCtrlSend:
 		return d.ctrlSend(frame, hdr.ID)
 	case protocol.TypeCtrlSetLabels:
@@ -389,6 +405,93 @@ func (d *dispatcher) search(frame []byte, id string) []byte {
 
 func (d *dispatcher) ctrlStatus(_ []byte, id string) []byte {
 	return okResponse(protocol.TypeCtrlStatus, id, d.c.Status())
+}
+
+// ─── Conversation insight handlers ────────────────────────────────────────────
+
+// unixToTime converts a wire Unix-seconds value to *time.Time, treating 0 as
+// unset — matches insights.StatsFilter/SearchFilter's nil-means-unbounded
+// convention for Since/Until.
+func unixToTime(sec int64) *time.Time {
+	if sec == 0 {
+		return nil
+	}
+	t := time.Unix(sec, 0)
+	return &t
+}
+
+func (d *dispatcher) conversationStats(frame []byte, id string) []byte {
+	var req protocol.ConversationStatsRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlConversationStats, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	ctx := context.Background()
+	if req.ConversationID != "" {
+		st, err := d.c.ConversationStatsByID(ctx, req.ConversationID)
+		if err != nil {
+			return mapErr(protocol.TypeCtrlConversationStats, id, err, protocol.ErrInternal)
+		}
+		return okResponse(protocol.TypeCtrlConversationStats, id, st)
+	}
+	f := insights.StatsFilter{
+		Since:   unixToTime(req.SinceUnix),
+		Until:   unixToTime(req.UntilUnix),
+		Owner:   req.Owner,
+		Persona: req.Persona,
+		Source:  req.Source,
+		Model:   req.Model,
+		Path:    insights.Path(req.Path),
+	}
+	st, err := d.c.ConversationStats(ctx, f)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlConversationStats, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlConversationStats, id, st)
+}
+
+func (d *dispatcher) conversationSearch(frame []byte, id string) []byte {
+	var req protocol.ConversationSearchRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlConversationSearch, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	f := insights.SearchFilter{
+		Since:     unixToTime(req.SinceUnix),
+		Until:     unixToTime(req.UntilUnix),
+		Owner:     req.Owner,
+		Persona:   req.Persona,
+		Source:    req.Source,
+		Model:     req.Model,
+		Status:    req.Status,
+		Path:      insights.Path(req.Path),
+		MinTokens: req.MinTokens,
+		Text:      req.Text,
+		Limit:     req.Limit,
+	}
+	rows, err := d.c.ConversationSearch(context.Background(), f)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlConversationSearch, id, err, protocol.ErrInternal)
+	}
+	if rows == nil {
+		rows = []insights.ConversationSummary{}
+	}
+	return okResponse(protocol.TypeCtrlConversationSearch, id, struct {
+		Rows []insights.ConversationSummary `json:"rows"`
+	}{Rows: rows})
+}
+
+func (d *dispatcher) conversationExport(frame []byte, id string) []byte {
+	var req protocol.ConversationExportRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlConversationExport, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ConversationID == "" {
+		return errResponse(protocol.TypeCtrlConversationExport, id, protocol.ErrInvalidArgs, "conversationId required")
+	}
+	tr, err := d.c.ConversationExport(context.Background(), req.ConversationID)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlConversationExport, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlConversationExport, id, tr)
 }
 
 // ─── Lifecycle handlers ───────────────────────────────────────────────────────
