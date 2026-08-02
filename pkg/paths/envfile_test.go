@@ -217,3 +217,191 @@ func TestParseEnvFile_PreservesOrder(t *testing.T) {
 		t.Errorf("got %v, want [B A C] in file order", got)
 	}
 }
+
+// The property the whole feature rests on: whatever MergeEnvFile writes,
+// parseEnvFile must read back byte-identically. A DSN carries '?' and '&',
+// a password can carry anything at all.
+func TestMergeEnvFile_RoundTripsAwkwardValues(t *testing.T) {
+	awkward := map[string]string{
+		"PLAIN":        "simple",
+		"DSN":          "postgres://u:p@h:5432/db?sslmode=disable&application_name=x",
+		"HASH":         "value # not a comment",
+		"QUOTED":       `he said "hi"`,
+		"BACKSLASH":    `C:\path\to\thing`,
+		"LEADINGQUOTE": `"starts with a quote`,
+		"TRAILINGWS":   "keep this space ",
+		"NEWLINE":      "a: 1\nb: 2",
+		"EQUALS":       "k=v=w",
+	}
+	path := filepath.Join(t.TempDir(), "service.env")
+
+	res, err := MergeEnvFile(path, awkward, "test")
+	if err != nil {
+		t.Fatalf("MergeEnvFile: %v", err)
+	}
+	if len(res.Added) != len(awkward) {
+		t.Fatalf("Added = %v, want all %d keys", res.Added, len(awkward))
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	got, warnings, err := parseEnvFile(f, path)
+	if err != nil {
+		t.Fatalf("parseEnvFile: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("re-parsing what we wrote produced warnings: %v", warnings)
+	}
+	back := map[string]string{}
+	for _, v := range got {
+		back[v.Key] = v.Value
+	}
+	for k, want := range awkward {
+		if back[k] != want {
+			t.Errorf("%s round-tripped as %q, want %q", k, back[k], want)
+		}
+	}
+}
+
+// Append-only is what makes this safe against a hand-maintained file. An
+// existing key is never rewritten, and a differing value is reported rather
+// than silently discarded or silently overwritten.
+func TestMergeEnvFile_NeverRewritesAnExistingKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.env")
+	original := "# hand written\nRAFIKI_DB=postgres://old@h/db\nRAFIKI_SERVE_TOKEN=same\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := MergeEnvFile(path, map[string]string{
+		"RAFIKI_DB":          "postgres://new@h/db", // differs -> Conflict
+		"RAFIKI_SERVE_TOKEN": "same",                // identical -> Existing
+		"ANTHROPIC_API_KEY":  "sk-ant",              // new -> Added
+	}, "test")
+	if err != nil {
+		t.Fatalf("MergeEnvFile: %v", err)
+	}
+	if !slices.Equal(res.Added, []string{"ANTHROPIC_API_KEY"}) {
+		t.Errorf("Added = %v, want [ANTHROPIC_API_KEY]", res.Added)
+	}
+	if !slices.Equal(res.Existing, []string{"RAFIKI_SERVE_TOKEN"}) {
+		t.Errorf("Existing = %v, want [RAFIKI_SERVE_TOKEN]", res.Existing)
+	}
+	if !slices.Equal(res.Conflict, []string{"RAFIKI_DB"}) {
+		t.Errorf("Conflict = %v, want [RAFIKI_DB]", res.Conflict)
+	}
+	if !slices.Equal(res.Defined, []string{"RAFIKI_DB", "RAFIKI_SERVE_TOKEN"}) {
+		t.Errorf("Defined = %v, want the file's pre-merge keys in order", res.Defined)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(after), original) {
+		t.Error("MergeEnvFile rewrote existing content instead of appending to it")
+	}
+	if strings.Contains(string(after), "postgres://new@h/db") {
+		t.Error("a conflicting value was written into the file")
+	}
+}
+
+// A reinstall that has nothing new to add must not touch the file at all —
+// otherwise repeated installs accumulate empty comment headers.
+func TestMergeEnvFile_NoOpLeavesTheFileByteIdentical(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.env")
+	vars := map[string]string{"RAFIKI_DB": "postgres://u@h/db"}
+	if _, err := MergeEnvFile(path, vars, "test"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := MergeEnvFile(path, vars, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Added) != 0 {
+		t.Errorf("Added = %v on a no-op merge, want none", res.Added)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("a no-op merge changed the file:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+}
+
+// It holds credentials. A file this creates must not be readable by anyone else.
+func TestMergeEnvFile_CreatesAt0600(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "service.env")
+	if _, err := MergeEnvFile(path, map[string]string{"K": "v"}, "test"); err != nil {
+		t.Fatalf("MergeEnvFile: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("created mode %04o, want 0600", perm)
+	}
+}
+
+// An existing loose-permission file is warned about, not silently chmod'ed:
+// MergeEnvFile did not create it and does not own its policy.
+func TestMergeEnvFile_WarnsButDoesNotChmodAnExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.env")
+	if err := os.WriteFile(path, []byte("EXISTING=1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := MergeEnvFile(path, map[string]string{"NEW": "v"}, "test")
+	if err != nil {
+		t.Fatalf("MergeEnvFile: %v", err)
+	}
+	if len(res.Warnings) == 0 {
+		t.Fatal("no warning for a 0644 file holding credentials")
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0644 {
+		t.Errorf("mode changed to %04o; MergeEnvFile must not chmod a file it did not create", perm)
+	}
+}
+
+// A file not ending in a newline must not have the first appended line
+// concatenated onto its last one.
+func TestMergeEnvFile_SeparatesFromAnUnterminatedLastLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.env")
+	if err := os.WriteFile(path, []byte("EXISTING=1"), 0600); err != nil { // no trailing \n
+		t.Fatal(err)
+	}
+	if _, err := MergeEnvFile(path, map[string]string{"NEW": "v"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	vars, _, err := parseEnvFile(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back := map[string]string{}
+	for _, v := range vars {
+		back[v.Key] = v.Value
+	}
+	if back["EXISTING"] != "1" || back["NEW"] != "v" {
+		t.Errorf("appending to an unterminated file corrupted it: %v", back)
+	}
+}

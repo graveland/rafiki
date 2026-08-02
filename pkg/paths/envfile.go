@@ -2,10 +2,12 @@ package paths
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -193,4 +195,112 @@ func applyEnv(k, v string, applied *[]string) {
 	if err := os.Setenv(k, v); err == nil {
 		*applied = append(*applied, k)
 	}
+}
+
+// envEscaper is the inverse of envUnescaper. Backslash comes first so its own
+// doubling is not re-scanned: strings.Replacer makes one pass and never
+// rewrites what it just wrote.
+var envEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
+
+// escapeEnvValue renders v as a double-quoted assignment value that
+// parseEnvFile reads back unchanged. Everything is quoted, unconditionally:
+// deciding per value which characters need it is how a writer and a parser
+// drift apart, and an unnecessary pair of quotes costs nothing.
+func escapeEnvValue(v string) string { return `"` + envEscaper.Replace(v) + `"` }
+
+// MergeResult reports what a MergeEnvFile call did. Added, Existing and
+// Conflict are disjoint and cover every key passed in.
+type MergeResult struct {
+	Added    []string // appended to the file, sorted
+	Existing []string // already in the file with the same value, sorted
+	Conflict []string // already in the file with a DIFFERENT value, sorted
+	Defined  []string // every key the file defined BEFORE the merge, in file order
+	Warnings []string
+}
+
+// MergeEnvFile appends to the environment file at path every assignment in
+// vars whose key the file does not already define, creating it 0600 if absent.
+// comment labels the appended block.
+//
+// Append-only, deliberately. This file is hand-maintained — it is where an
+// operator puts an API key, a DSN, and the one multi-line
+// ANTHROPIC_CUSTOM_HEADERS value no unit file can express — and a writer that
+// rewrote it would have to reproduce every one of those faithfully to avoid
+// destroying work it did not create. Appending needs to be correct only about
+// what it adds. A key already present is therefore never touched: if its value
+// differs from the one offered, that is reported as a Conflict for the caller
+// to surface, because silently keeping either one loses information the
+// operator has.
+func MergeEnvFile(path string, vars map[string]string, comment string) (MergeResult, error) {
+	var res MergeResult
+
+	defined := make(map[string]string)
+	existing, err := os.ReadFile(path) //nolint:gosec // operator-supplied path, by design
+	switch {
+	case err == nil:
+		if fi, statErr := os.Stat(path); statErr == nil {
+			if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+				res.Warnings = append(res.Warnings, fmt.Sprintf(
+					"%s is mode %04o; it holds credentials and should be 0600 (chmod 600 %s)", path, perm, path))
+			}
+		}
+		parsed, warnings, parseErr := parseEnvFile(bytes.NewReader(existing), path)
+		res.Warnings = append(res.Warnings, warnings...)
+		if parseErr != nil {
+			return res, parseErr
+		}
+		for _, v := range parsed {
+			if _, seen := defined[v.Key]; !seen {
+				res.Defined = append(res.Defined, v.Key)
+			}
+			defined[v.Key] = v.Value
+		}
+	case os.IsNotExist(err):
+		existing = nil
+	default:
+		return res, err
+	}
+
+	for k, v := range vars {
+		switch old, present := defined[k]; {
+		case !present:
+			res.Added = append(res.Added, k)
+		case old == v:
+			res.Existing = append(res.Existing, k)
+		default:
+			res.Conflict = append(res.Conflict, k)
+		}
+	}
+	sort.Strings(res.Added)
+	sort.Strings(res.Existing)
+	sort.Strings(res.Conflict)
+
+	if len(res.Added) == 0 {
+		return res, nil // nothing to write; leave the file byte-identical
+	}
+
+	var b strings.Builder
+	if len(existing) > 0 {
+		// Unconditional blank line rather than a trailing-newline check: it
+		// separates blocks readably and makes appending to a file whose last
+		// line has no newline correct without inspecting it.
+		b.WriteString("\n")
+	}
+	b.WriteString("# " + comment + "\n")
+	for _, k := range res.Added {
+		b.WriteString(k + "=" + escapeEnvValue(vars[k]) + "\n")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return res, err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // operator-supplied path, by design
+	if err != nil {
+		return res, err
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		_ = f.Close()
+		return res, err
+	}
+	return res, f.Close()
 }
