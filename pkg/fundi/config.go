@@ -38,7 +38,7 @@ func ThinkingBudgetFor(level string) (int64, error) {
 }
 
 // Config is the fully-resolved input to BuildEngine. Every field is either a
-// flag value taken as-is, or something cmd/fundid has already produced via
+// flag value taken as-is, or something cmd/rafikid has already produced via
 // I/O (env lookups, file reads, the assembled tool registry, the shared DB
 // pool) before calling BuildEngine - BuildEngine itself parses no flags and
 // does no filesystem or network discovery.
@@ -49,13 +49,13 @@ func ThinkingBudgetFor(level string) (int64, error) {
 // architecture was originally forced by an import cycle (internal/fundi/tools
 // importing this package for SkillMeta), which the extraction of internal/skills
 // removed. The interface design remains the right choice for the decoupling alone.
-// cmd/fundid builds the Registry and passes it in; see cmd/fundid/agent.go.
+// cmd/rafikid builds the Registry and passes it in; see cmd/rafikid/agent.go.
 type Config struct {
 	// Model is the provider-qualified model id, e.g. "anthropic/sonnet-latest"
 	// or "deepseek/deepseek-chat". rafiki routes on this id alone: an
 	// "anthropic/" prefix resolves through the native Anthropic sender
 	// (prefix stripped, remainder resolved as an alias or concrete id);
-	// anything else routes to OpenRouter. cmd/fundid requires --model to be
+	// anything else routes to OpenRouter. cmd/rafikid requires --model to be
 	// provider-qualified (see parseAgentFlags) - BuildEngine itself does not
 	// re-validate that, so a bare id here (as some pre-redesign unit tests
 	// still use) is passed straight to rafiki uninterpreted.
@@ -86,7 +86,7 @@ type Config struct {
 	// the owning process. A nil Pool means an in-memory (capture-less)
 	// conversation, exactly as an empty DBURL used to behave. BuildEngine
 	// never opens or closes a pool itself — one daemon can share a single
-	// Pool across N engines, and only the owner (cmd/fundid's standalone CLI
+	// Pool across N engines, and only the owner (cmd/rafikid's standalone CLI
 	// path, or the daemon in Task 5) may open or close it.
 	Pool *pgxpool.Pool
 
@@ -97,19 +97,19 @@ type Config struct {
 	FakeTurns string
 
 	// AnthropicAPIKey / OpenRouterAPIKey are read from the environment by
-	// cmd/fundid and passed in explicitly - rather than BuildEngine reading
+	// cmd/rafikid and passed in explicitly - rather than BuildEngine reading
 	// os.Getenv itself - so tests can exercise the missing-key error path
 	// without mutating the process environment.
 	AnthropicAPIKey  string
 	OpenRouterAPIKey string
 
 	// Tools is the assembled tool registry (file tools + bash + skills +
-	// MCP), built by cmd/fundid before calling BuildEngine.
+	// MCP), built by cmd/rafikid before calling BuildEngine.
 	Tools agentloop.ToolSet
 
 	// OnFatal is handed straight to EngineConfig.OnFatal: the owner's hook for
 	// ending this child when a turn panics. See EngineConfig.OnFatal. Nil is
-	// legal (a standalone `fundid agent` process has nothing to hand back to).
+	// legal (a standalone `rafikid fundi` process has nothing to hand back to).
 	OnFatal func(error)
 }
 
@@ -123,7 +123,7 @@ type Config struct {
 // engines in one daemon can share one pool. The returned shutdown func is
 // therefore a no-op today, kept for signature stability; it does NOT close
 // MCP sessions or the Engine's worker goroutine either - those are
-// cmd/fundid's to own (ConnectMCP's shutdown, Engine.Close). cmd/fundid/agent.go
+// cmd/rafikid's to own (ConnectMCP's shutdown, Engine.Close). cmd/rafikid/agent.go
 // combines all three (plus its own pool.Close()) on its shutdown path.
 func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(), error) {
 	if c.Tools == nil {
@@ -193,7 +193,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	// process that crashed or was killed mid-turn — before that process's
 	// own abort handling ever ran. Repair here, once, before the engine's
 	// worker can execute any turn (NewEngine has already started it, but
-	// nothing wakes it until cmd/fundid's Frontend.Run reads its first
+	// nothing wakes it until cmd/rafikid's Frontend.Run reads its first
 	// inbound frame, which happens strictly after BuildEngine returns).
 	// In-memory mode (c.Pool == nil) has nothing to reattach — Conversation
 	// always mints a fresh "mem-..." id — so this is a clean no-op there,
@@ -246,7 +246,7 @@ func (c Config) senderOptions() ([]llm.ClientOption, error) {
 		// WithBreaker is what makes Fallback(UpstreamOpenRouter) actually
 		// live: llm.Client.callModel bypasses the whole fallback chain
 		// whenever the primary's breaker is nil, regardless of how many
-		// fallbacks are configured. Mirrors the daemon's own cmd/fundid/proxy.go,
+		// fallbacks are configured. Mirrors the daemon's own cmd/rafikid/proxy.go,
 		// which enables the breaker under the identical condition.
 		opts = append(opts,
 			llm.WithUpstream(llm.UpstreamOpenRouter, llm.OpenRouter(c.OpenRouterAPIKey)),

@@ -1,5 +1,12 @@
 # Rafiki: Vision, Architecture, and Status
 
+> **Note:** the prose below predates the rafiki/fundi identity consolidation and
+> still frames "Fundi" and "rafiki" as two products. They are one. `fundi` now
+> names only the native agent runtime — one of three child kinds, alongside `pi`
+> and `claude`. Section 8's "Rafiki provides the infrastructure; fundi provides
+> the runtime" is the framing that survived. See [`docs/MIGRATING.md`](docs/MIGRATING.md)
+> for what changed, and `README.md` for the current architecture.
+
 ## 1. The End State
 
 Rafiki is designed to be the **central LLM system for a whole organization**. Every agent, every Slack bot, every TUI,
@@ -87,7 +94,7 @@ to get caching wrong than right.
                            │    Multiple Clients       │
                            │                           │
                            │  Slack                    │
-                           │  TUI (fundi-attach)       │
+                           │  TUI (rafiki-attach)       │
                            │  Claude Code (via proxy)  │
                            │  Automated workflows      │
                            │  Incident triggers        │
@@ -142,7 +149,7 @@ to get caching wrong than right.
 1. An alert fires → an agent starts a conversation and triggers a diagnostic.
 2. The conversation is created in rafiki's DB. Every turn, tool call, and response is captured.
 3. An on-call engineer connects from Slack.
-4. Another engineer connects from a TUI: `fundi attach <id>`.
+4. Another engineer connects from a TUI: `rafiki attach <id>`.
 5. Everyone sees the same state. Commands from any client route through the same conversation.
 6. When the incident resolves, the transcript is stored. Some time later, `rafiki agent analyze` runs over it to find
    skill gaps or process/tooling improvements.

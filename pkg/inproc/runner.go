@@ -7,7 +7,7 @@
 //
 // This package exists because internal/fundi imports internal/child: an
 // in-process runner cannot live in internal/child without an import cycle.
-// Nothing imports this package except cmd/fundid.
+// Nothing imports this package except cmd/rafikid.
 package inproc
 
 import (
@@ -339,7 +339,7 @@ func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 
 	// Frontend.Run returns only on stdin EOF or a scan error, so no further
 	// HandlePrompt/HandleSteer/HandleAbort can arrive afterwards — which is what
-	// makes Wait-then-Close race-free. Same ordering as cmd/fundid/agent.go.
+	// makes Wait-then-Close race-free. Same ordering as cmd/rafikid/agent.go.
 	if runErr := fe.Run(); runErr != nil {
 		// An error here is not automatically a failure: a deliberate teardown
 		// closes stdinR out from under the parked read, so Frontend.Run

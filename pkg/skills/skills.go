@@ -31,7 +31,7 @@ type skillFrontmatter struct {
 // Later entries in dirs override earlier ones on name collision: callers
 // build dirs as [paths.SkillsDirs()..., <cwd>/.claude/skills,
 // <cwd>/.rafiki/skills, ...--skills-dir extras] (see
-// cmd/fundid/agent.go:assembleSkillDirs), so a project-level skill shadows a
+// cmd/rafikid/agent.go:assembleSkillDirs), so a project-level skill shadows a
 // user-level one of the same name, and .rafiki/skills shadows .claude/skills
 // of the same name. Note the project-level dirs are keyed off the child's
 // cwd, not its git root - so a skill dir living at the repo root is only

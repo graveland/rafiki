@@ -74,7 +74,7 @@ func TestSpawnRequest_RoundTrip(t *testing.T) {
 
 // TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip locks down that
 // SkillsDirs/MCPConfig follow the protocol's camelCase convention, matching
-// every other SpawnRequest field and the wire spec (docs/reference/pi-controller-protocol.md §6.3).
+// every other SpawnRequest field and the wire spec (docs/reference/control-protocol.md §6.3).
 func TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip(t *testing.T) {
 	req := protocol.SpawnRequest{
 		SkillsDirs: []string{"/a", "/b"},

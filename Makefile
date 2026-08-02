@@ -292,8 +292,62 @@ bootstrap: ## Fresh-clone setup — init submodules, build and install everythin
 
 ##@ Quality
 
+.PHONY: check-naming
+check-naming: ## Fail if `fundi` survives anywhere it should not.
+#  The identity consolidation left exactly four legitimate uses of the word, all
+#  naming the native agent RUNTIME rather than the product: the pkg/fundi
+#  package and its import path, the protocol.KindFundi child kind (and the bare
+#  "fundi" kind string on the wire), the `rafikid fundi` stdio subcommand, and
+#  historical prose in the migration guide and README. Anything else is residue
+#  from the rename and should fail the gate.
+#
+#  Excludes vendored trees, build output, and the deliberately untracked working
+#  files (docs/plans/, tasks/, .superpowers/) — those legitimately discuss the
+#  old names at length and are not shipped.
+#  Matched positively against the PRODUCT spellings rather than the bare word.
+#  "find every fundi, subtract the legitimate ones" needs an exclusion list that
+#  grows without bound — `fundi.RuntimeOptions`, "the fundi kind", test names
+#  like TestAssembleSkillDirs_FundiBeatsClaude are all correct. These spellings
+#  only ever named the product, so any survivor is real residue.
+#
+#  The excluded FILES legitimately narrate the rename or carry deliberate
+#  compatibility code; everything else must come back clean:
+#    Makefile                 this rule matches its own pattern
+#    .gitignore               ignores stale pre-rename build artifacts
+#    docs/MIGRATING.md        the migration guide, necessarily full of old names
+#    DESIGN.md                pre-consolidation narrative, marked as such at the top
+#    README.md, .env.example  document the retired spellings for upgraders
+#    cmd/rafiki/cmd_create.go LIVE code: strips stale FUNDI_* from a child's env
+#    cmd/rafikid/proxy.go     explains the FUNDI_PROXY_TOKEN accept/send split
+#    pkg/paths/envvar.go      explains which variables merged into which
+	@hits=$$(grep -rnE "fundid|FUNDI_|fundi-attach|fundi-helpers|fundi-presets|fundi-child|cmd/fundi|dev\.graveland\.fundi|@graveland/fundi|\.fundi/" \
+	    --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.worktrees \
+	    --exclude-dir=.superpowers --exclude-dir=bin --exclude-dir=pi \
+	    --exclude-dir=plans --exclude-dir=tasks . \
+	  | grep -v "^\./Makefile" \
+	  | grep -v "^\./CLAUDE\.md" \
+	  | grep -v "^\./\.gitignore" \
+	  | grep -v "^\./DESIGN\.md" \
+	  | grep -v "^\./README\.md" \
+	  | grep -v "^\./\.env\.example" \
+	  | grep -v "^\./rafiki\.md" \
+	  | grep -v "^\./rafiki-prev\.md" \
+	  | grep -v "^\./docs/MIGRATING\.md" \
+	  | grep -v "^\./cmd/rafiki/cmd_create\.go" \
+	  | grep -v "^\./cmd/rafikid/proxy\.go" \
+	  | grep -v "^\./pkg/paths/envvar\.go" \
+	  | grep -v "^\./pkg/paths/envvar_test\.go" \
+	  | grep -v "^\./test/integration/integration_test\.go" \
+	  || true) ; \
+	if [ -n "$$hits" ]; then \
+	  echo "check-naming: unexpected 'fundi' references (see the Makefile for the four legitimate uses):" ; \
+	  echo "$$hits" ; \
+	  exit 1 ; \
+	fi ; \
+	echo "check-naming: ok"
+
 .PHONY: check
-check: vet lint test ## Run vet + lint + tests (the full local gate).
+check: vet lint test check-naming ## Run vet + lint + tests + naming gate (the full local gate).
 
 .PHONY: vet
 vet: ## Run go vet.

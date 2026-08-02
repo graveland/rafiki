@@ -27,7 +27,7 @@ const (
 	PiBinary = "RAFIKI_PI_BINARY"
 
 	// NoAutoInstallHelpers, when non-empty, stops `rafiki create` from installing
-	// or updating the bundled fundi-helpers pi extension.
+	// or updating the bundled rafiki-helpers pi extension.
 	NoAutoInstallHelpers = "RAFIKI_NO_AUTO_INSTALL_HELPERS"
 
 	// DefaultModel supplies the model when `rafiki create` gets no --model.

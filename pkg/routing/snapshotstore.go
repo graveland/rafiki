@@ -13,8 +13,8 @@ import (
 //
 // This exists because every consumer of a disk-cached catalog was otherwise
 // writing the same twenty lines: fundi's --model completion, sc's rafiki
-// launcher, and the `fundid agent` pricer that is currently left nil precisely
-// for want of one (see cmd/fundid/agent_cli.go). A third copy was the point to
+// launcher, and the `rafikid fundi` pricer that is currently left nil precisely
+// for want of one (see cmd/rafikid/agent_cli.go). A third copy was the point to
 // stop copying.
 type FileSnapshotStore struct {
 	// Path is the snapshot file. Its parent directory is created on Save.

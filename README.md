@@ -228,10 +228,10 @@ Once `RAFIKI_DB` is set, `rafiki conversations stats|search|export` queries
 that persisted history through the daemon socket — no separate DB credentials
 needed on the machine running `rafiki`. See `docs/agent-cli.md` for the
 DSN-direct equivalent (`rafikid agent stats|search|export`), or
-`docs/reference/pi-controller-protocol.md` §6.17-6.19 for the wire commands.
+`docs/reference/control-protocol.md` §6.17-6.19 for the wire commands.
 
 `rafikid -h` and `rafikid fundi -h` document the two daemon process modes;
-`rafiki --help` covers the client. See `docs/reference/pi-controller-protocol.md` for the
+`rafiki --help` covers the client. See `docs/reference/control-protocol.md` for the
 wire protocol spec and `docs/plans/2026-07-20-fundi-design.md` for the
 architecture.
 

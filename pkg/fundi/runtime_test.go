@@ -129,9 +129,9 @@ func TestBuildRuntimeNilPoolIsInMemory(t *testing.T) {
 	}
 }
 
-// TestBuildRuntimeMissingMCPConfigIsAnError pins the contract cmd/fundid relies
+// TestBuildRuntimeMissingMCPConfigIsAnError pins the contract cmd/rafikid relies
 // on: BuildRuntime errors on any MCPConfig path that does not exist. The
-// "silently skip a defaulted <cwd>/.mcp.json" behaviour stays in cmd/fundid,
+// "silently skip a defaulted <cwd>/.mcp.json" behaviour stays in cmd/rafikid,
 // which passes an empty MCPConfig in that case.
 func TestBuildRuntimeMissingMCPConfigIsAnError(t *testing.T) {
 	opts := fakeRuntimeOptions(t, t.TempDir())

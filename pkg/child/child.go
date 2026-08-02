@@ -81,7 +81,7 @@ type ShutdownResult struct {
 //     the alternative of never returning at all.
 //   - It keeps the whole per-child ladder inside the daemon's global bound:
 //     120s stdin-close + 30s kill + 10s abandon = 160s < the 180s
-//     globalTimeout in cmd/fundid/main.go, so ShutdownAllChildren still
+//     globalTimeout in cmd/rafikid/main.go, so ShutdownAllChildren still
 //     reports every child's outcome instead of tripping its own deadline first
 //     and reporting nothing.
 const abandonTimeout = 10 * time.Second
@@ -693,7 +693,7 @@ func (c *Child) readStdout() {
 
 // isMessageUpdate reports whether line is a message_update frame. It runs on
 // every frame from every child, so it decodes only the type field via a
-// minimal struct — the same cheap-extraction approach cmd/fundid's
+// minimal struct — the same cheap-extraction approach cmd/rafikid's
 // eventPassesFilter uses for subscriber filtering — rather than fully
 // unmarshaling the (potentially multi-KB) message payload. An unparseable
 // frame returns false so it is still appended to the ring: a parse failure is

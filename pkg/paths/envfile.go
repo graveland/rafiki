@@ -17,7 +17,7 @@ const EnvFile = "RAFIKI_ENV_FILE"
 // This exists because neither init system can carry what the daemon needs. A
 // launchd plist and a systemd unit are both world-readable, so credentials must
 // not be written into them — but agent children resolve their API key from the
-// daemon's own environment first (see cmd/fundid/agent_runtime.go: daemon env <
+// daemon's own environment first (see cmd/rafikid/agent_runtime.go: daemon env <
 // forwarded env < explicit key), so a child spawned with no caller has nothing
 // else to fall back on. And systemd's Environment= is line-based, which cannot
 // represent ANTHROPIC_CUSTOM_HEADERS at all: that variable accepts a literal
@@ -25,7 +25,7 @@ const EnvFile = "RAFIKI_ENV_FILE"
 // the unit file.
 //
 // systemd has EnvironmentFile= for exactly this; launchd has no equivalent, and
-// the usual workaround — running the daemon under `sh -c '. file; exec fundid'`
+// the usual workaround — running the daemon under `sh -c '. file; exec rafikid'`
 // — makes ProgramArguments unreadable and the service harder to introspect.
 // Reading the file in the daemon is one implementation that behaves identically
 // on both platforms.
@@ -40,7 +40,7 @@ func ServiceEnvFile() string {
 // environment, and returns the names it set.
 //
 // A name already present in the environment is left alone and not returned:
-// the real environment wins, so `RAFIKI_DB=... fundid` still overrides the
+// the real environment wins, so `RAFIKI_DB=... rafikid` still overrides the
 // file, and a service manager's own settings are not silently replaced by a
 // file the operator forgot about.
 //

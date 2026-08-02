@@ -68,7 +68,7 @@ type EngineConfig struct {
 	// daemon sees an ordinary EOF (inproc.Runner does exactly this).
 	//
 	// A nil OnFatal is legal and means "log it and stop taking turns", which
-	// is all a standalone `fundid agent` process can do; the in-process daemon
+	// is all a standalone `rafikid fundi` process can do; the in-process daemon
 	// path always supplies one, because a silently-stopped queue there is a
 	// wedged child that answers prompts forever and never runs one.
 	OnFatal func(error)
@@ -144,7 +144,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		wake: make(chan struct{}, 1),
 	}
 	// fe's Handler is wired here rather than by the caller: Engine and
-	// Frontend are the same package, but BuildEngine (cmd/fundid's entry
+	// Frontend are the same package, but BuildEngine (cmd/rafikid's entry
 	// point, per the import-direction constraint) constructs fe before the
 	// Engine exists and cannot reach Frontend's unexported handler field
 	// itself.
@@ -263,7 +263,7 @@ func (e *Engine) Wait() { e.wg.Wait() }
 
 // Close stops the engine's worker goroutine. Call it only after Wait() has
 // returned and after nothing can call HandlePrompt/HandleSteer/HandleAbort
-// again — in cmd/fundid's shutdown path that means: stop reading frames
+// again — in cmd/rafikid's shutdown path that means: stop reading frames
 // (Frontend.Run has already returned), then Wait(), then Close(). Sending on
 // wake after Close (i.e. a HandlePrompt racing a Close) would panic on a
 // closed channel; the ordering above is what rules that race out.

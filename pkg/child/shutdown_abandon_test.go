@@ -227,7 +227,7 @@ func TestAbandonedRecordSurvivesALateReap(t *testing.T) {
 // TestAbandonTimeoutDefault pins the production bound, which the two tests
 // above deliberately shrink. 10s is the deliberate choice: orders of magnitude
 // more than a real post-Kill reap needs, and 120+30+10 = 160s keeps the whole
-// per-child ladder inside cmd/fundid's 180s global shutdown bound.
+// per-child ladder inside cmd/rafikid's 180s global shutdown bound.
 func TestAbandonTimeoutDefault(t *testing.T) {
 	if abandonTimeout != 10*time.Second {
 		t.Errorf("abandonTimeout = %v, want 10s (see its doc comment for the derivation)", abandonTimeout)

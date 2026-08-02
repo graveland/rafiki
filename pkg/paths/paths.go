@@ -22,7 +22,7 @@ import (
 const appName = "rafiki"
 
 // homeDirWarnOnce guards the warning below against spam. base() is called on
-// every path resolution — once per incoming request in a long-lived fundid —
+// every path resolution — once per incoming request in a long-lived rafikid —
 // so logging unconditionally would flood the log with the same fact on every
 // call. A single fired warning already says "every path from here on is
 // wrong, relative to the wrong directory": os.UserHomeDir() only reads $HOME
@@ -100,7 +100,7 @@ func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }
 // ~/.cache/rafiki.
 func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
 
-// SpillDir is where a standalone `fundid agent` writes clipped tool output. Cache
+// SpillDir is where a standalone `rafikid fundi` writes clipped tool output. Cache
 // rather than data: it is large, disposable, and reconstructible from the
 // conversation. No "fundi-" prefix on the leaf — the directory is already
 // namespaced, unlike the os.TempDir() location this replaced, where the prefix
@@ -131,7 +131,7 @@ func InstructionsFile() string {
 // and rafiki reads its own configuration from its own directory. Point
 // $RAFIKI_SKILLS_DIRS at a Claude skills tree (or a plugin cache) to use one.
 // This only covers the user-global dir: a per-project <cwd>/.claude/skills is
-// still searched by cmd/fundid/agent.go's assembleSkillDirs, alongside
+// still searched by cmd/rafikid/agent.go's assembleSkillDirs, alongside
 // rafiki's own <cwd>/.rafiki/skills, so existing per-repo skills keep working.
 func SkillsDirs() []string {
 	v := Get(SkillsDirsEnv)

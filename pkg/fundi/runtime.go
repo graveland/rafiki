@@ -27,7 +27,7 @@ type RuntimeOptions struct {
 	Ref                  string
 	Name                 string
 	SpillDir             string   // defaults to paths.SpillDir(Ref) when empty
-	SkillsDirs           []string // already assembled; see assembleSkillDirs in cmd/fundid
+	SkillsDirs           []string // already assembled; see assembleSkillDirs in cmd/rafikid
 	Skills               string   // comma-separated allowlist; empty means all
 	NoSkills             bool
 	NoContextFiles       bool
@@ -44,7 +44,7 @@ type RuntimeOptions struct {
 	// OnFatal is the owner's hook for ending this child when a turn panics. It
 	// is passed straight through to EngineConfig.OnFatal, whose doc comment
 	// carries the contract. Nil is legal and means "log it and stop taking
-	// turns" — correct for the standalone `fundid agent` process, wrong for
+	// turns" — correct for the standalone `rafikid fundi` process, wrong for
 	// the daemon, which supplies one (inproc.Runner) so a panicked
 	// conversation becomes an ordinary child exit rather than a wedged child.
 	OnFatal func(error)

@@ -93,7 +93,7 @@ func TestLoadEnvFile_Newlines(t *testing.T) {
 	})
 }
 
-// The real environment wins, so `RAFIKI_DB=... fundid` still overrides the
+// The real environment wins, so `RAFIKI_DB=... rafikid` still overrides the
 // file and a service manager's own settings are not silently replaced.
 func TestLoadEnvFile_ExistingEnvWins(t *testing.T) {
 	p := writeEnv(t, "RAFIKI_TEST_PRESET=from-file\n")

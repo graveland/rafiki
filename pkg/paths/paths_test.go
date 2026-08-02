@@ -207,7 +207,7 @@ func TestBase_HomeDirUnresolvable_FallsBackToRelativePath(t *testing.T) {
 // The invariant is two-sided: the failure must be observable in the log, and
 // it must not spam — base() runs on every path resolution (SocketPath(),
 // InstructionsFile(), etc.), so logging unconditionally would flood a
-// long-lived fundid with the same fact on every request.
+// long-lived rafikid with the same fact on every request.
 func TestBase_HomeDirUnresolvable_WarnsExactlyOnceAcrossRepeatedCalls(t *testing.T) {
 	homeDirWarnOnce = sync.Once{}
 	t.Setenv("HOME", "")
