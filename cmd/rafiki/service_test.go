@@ -232,3 +232,33 @@ func TestCaptureDaemonEnv_SkipsNewlineValues(t *testing.T) {
 		t.Error("an unrelated variable was lost alongside the skipped one")
 	}
 }
+
+// `logs` prints and exits; `tail` is the one that follows. The default on
+// --follow is the whole distinction, so it is worth pinning.
+func TestServiceLogsPrintsAndExitsByDefault(t *testing.T) {
+	f := newServiceLogsCmd().Flags().Lookup("follow")
+	if f == nil {
+		t.Fatal("--follow not registered on service logs")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("--follow default = %s, want false (logs prints and exits; use tail to follow)", f.DefValue)
+	}
+	if f.Shorthand != "f" {
+		t.Errorf("--follow shorthand = %q, want \"f\"", f.Shorthand)
+	}
+}
+
+func TestServiceTailIsRegistered(t *testing.T) {
+	var found bool
+	for _, c := range newServiceCmd().Commands() {
+		if c.Name() == "tail" {
+			found = true
+			if c.Flags().Lookup("follow") != nil {
+				t.Error("service tail should always follow, not carry a --follow flag")
+			}
+		}
+	}
+	if !found {
+		t.Error("service tail not registered")
+	}
+}

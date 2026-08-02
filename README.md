@@ -226,9 +226,17 @@ These must reach the **daemon's** environment, not your shell's — see
 
 Once `RAFIKI_DB` is set, `rafiki conversations stats|search|export` queries
 that persisted history through the daemon socket — no separate DB credentials
-needed on the machine running `rafiki`. See `docs/agent-cli.md` for the
-DSN-direct equivalent (`rafikid agent stats|search|export`), or
-`docs/reference/control-protocol.md` §6.17-6.19 for the wire commands.
+needed on the machine running `rafiki`. It renders the same tables as the
+DSN-direct `rafikid agent stats|search|export` (same queries, same renderers,
+only the transport differs); `--output` picks the format, defaulting to tables
+at a terminal and JSON when piped. See `docs/agent-cli.md` for the DSN-direct
+equivalent, or `docs/reference/control-protocol.md` §6.17-6.19 for the wire
+commands.
+
+Note that the two read whatever DSN each was given: `rafiki conversations` uses
+the **daemon's** `RAFIKI_DB` (baked into the unit at `service install` time),
+while `rafikid agent --db` defaults to your shell's `RAFIKI_DB`, then
+`RAFIKI_TEST_DSN`. If their numbers disagree, check that first.
 
 `rafikid -h` and `rafikid fundi -h` document the two daemon process modes;
 `rafiki --help` covers the client. See `docs/reference/control-protocol.md` for the

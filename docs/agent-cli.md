@@ -10,6 +10,27 @@ See `cmd/rafikid/agent_cli.go` for the flag/dispatch code this doc describes.
 Every subcommand accepts `-j` (indented JSON) or `-J` (compact JSON) instead
 of the human-readable table/markdown render.
 
+`stats`, `search`, and `export` have a socket-side twin in `rafiki
+conversations <verb>`, which needs no DB credentials of its own. The two are
+the same query — both reach `pkg/insights` through `local.Backend`, with no
+`Pricer` on either side, so `cost_usd` is 0 for both — and they now share the
+render path as well: every result goes through `agentcli.Render` into the same
+`RenderStats`/`RenderSearch`/`RenderTranscriptMD`. Only the transport differs
+(pool vs. daemon socket) and, in the JSON arm, how the mode is selected: `-j`/
+`-J` here, the global `--output` flag there. The JSON *payload* matches too —
+`ctrl_conversation_search` puts its rows in a `{"rows": [...]}` envelope on the
+wire (control-protocol.md §6.18), and the client unwraps it before printing, so
+`rafiki conversations search -o json | jq '.[]'` and `rafikid agent search -J |
+jq '.[]'` iterate the same thing. `analyze` and `findings` stay
+`rafikid`-only — they have no wire verbs, `analyze` needs an LLM client and
+writes to the DB, and `rafiki` never holds a DSN.
+
+One thing the shared renderer cannot equalize: the two commands read whatever
+DSN each was handed. `rafikid agent --db` defaults to your shell's `RAFIKI_DB`
+then `RAFIKI_TEST_DSN`; `rafiki conversations` uses the daemon's, baked into
+the service unit at install time. Differing *numbers* between them is a DSN
+mismatch, not a rendering bug.
+
 ## `stats`
 
 Global stats, or stats for one conversation if given a positional id.
@@ -196,6 +217,8 @@ directly. `sc agent` is expected to mount the same `pkg/agentcli.Backend`
 interface over a gRPC backend, adding what a multi-tenant
 deployment needs on top: auth, per-environment config
 resolution, and tailnet-routed connectivity. The CLI surface
-(`agentcli` package: filters, renderers, the `AnalyzeRequest`/`AnalyzeEvent`
-contract) is the seam meant to be reused as-is — only the `Backend`
-implementation changes.
+(`agentcli` package: filters, renderers, `agentcli.Render`, the
+`AnalyzeRequest`/`AnalyzeEvent` contract) is the seam meant to be reused as-is
+— only the `Backend` implementation changes. `rafiki conversations` is the
+first proof that the seam holds: a different transport reusing every renderer
+unchanged.

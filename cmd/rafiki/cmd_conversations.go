@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/client"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -20,7 +22,11 @@ func newConversationsCmd() *cobra.Command {
 		Long: `Global stats, search, and transcript export over the conversations schema
 the daemon persists to when RAFIKI_DB is set. Unlike "rafiki search" (live,
 in-memory, currently-running children only), these query history in Postgres
-regardless of whether anything is still running.`,
+regardless of whether anything is still running.
+
+Output matches "rafikid agent stats|search|export" exactly — same queries, same
+renderers, only the transport differs. --output controls the format: tables at a
+terminal, JSON when piped.`,
 	}
 	cmd.AddCommand(
 		newConversationsStatsCmd(),
@@ -65,10 +71,39 @@ func unixOrZero(t *time.Time) int64 {
 	return t.Unix()
 }
 
-func printResponseJSON(resp *protocol.Response) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(json.RawMessage(resp.Data))
+// conversationsMode maps the global --output flag onto the render mode shared
+// with `rafikid agent`. "auto" stays TTY-aware, matching every other rafiki
+// command: tables at a terminal, JSON when piped so `| jq` keeps working.
+func conversationsMode(cmd *cobra.Command) agentcli.Mode {
+	mode, _ := outputOpts(cmd)
+	if mode == outputTable {
+		return agentcli.ModeTable
+	}
+	return agentcli.ModeJSON
+}
+
+// renderConversationResponse decodes a ctrl_conversation_* payload into the
+// domain type the daemon marshalled it from (pkg/control/dispatch.go hands
+// *insights.Stats and friends straight to okResponse) and hands it to the same
+// renderer `rafikid agent` uses. Both surfaces read the same rows through the
+// same pkg/insights queries; routing both through agentcli.Render is what keeps
+// them from presenting those rows differently.
+func renderConversationResponse[T any](w io.Writer, m agentcli.Mode, resp *protocol.Response, table func(io.Writer, T) error) error {
+	var v T
+	if err := decodeConversationData(resp, &v); err != nil {
+		return err
+	}
+	return agentcli.Render(w, v, m, table)
+}
+
+// decodeConversationData decodes a ctrl_conversation_* payload into v. Split
+// out of renderConversationResponse for search, whose payload is an envelope
+// around the value it renders rather than the value itself.
+func decodeConversationData[T any](resp *protocol.Response, v *T) error {
+	if err := json.Unmarshal(resp.Data, v); err != nil {
+		return fmt.Errorf("decode %s response: %w", resp.Command, err)
+	}
+	return nil
 }
 
 // ─── stats ──────────────────────────────────────────────────────────────────
@@ -112,7 +147,7 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_stats: %s", client.FormatError(resp))
 	}
-	return printResponseJSON(resp)
+	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, agentcli.RenderStats)
 }
 
 // ─── search ─────────────────────────────────────────────────────────────────
@@ -169,7 +204,23 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_search: %s", client.FormatError(resp))
 	}
-	return printResponseJSON(resp)
+	return renderConversationSearch(os.Stdout, conversationsMode(cmd), resp)
+}
+
+// renderConversationSearch unwraps ctrl_conversation_search's payload before
+// rendering. Alone among the three verbs it wraps its rows in a {"rows": [...]}
+// envelope (control-protocol.md §6.18) where stats and export send the domain
+// value bare, so it cannot go through renderConversationResponse. Unwrapping
+// here keeps both the table and the JSON matching `rafikid agent search`, which
+// prints the rows themselves.
+func renderConversationSearch(w io.Writer, m agentcli.Mode, resp *protocol.Response) error {
+	var payload struct {
+		Rows []insights.ConversationSummary `json:"rows"`
+	}
+	if err := decodeConversationData(resp, &payload); err != nil {
+		return err
+	}
+	return agentcli.Render(w, payload.Rows, m, agentcli.RenderSearch)
 }
 
 // ─── export ─────────────────────────────────────────────────────────────────
@@ -199,5 +250,5 @@ func runConversationsExport(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_export: %s", client.FormatError(resp))
 	}
-	return printResponseJSON(resp)
+	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, agentcli.RenderTranscriptMD)
 }

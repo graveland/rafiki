@@ -149,7 +149,7 @@ func agentStatsCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		return renderJSONOr(os.Stdout, st, *indent, *compact, func() error { return agentcli.RenderStats(os.Stdout, st) })
+		return agentcli.Render(os.Stdout, st, jsonMode(*indent, *compact), agentcli.RenderStats)
 	}
 
 	f, err := agentcli.BindStatsFilter(*v)
@@ -160,7 +160,7 @@ func agentStatsCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	return renderJSONOr(os.Stdout, st, *indent, *compact, func() error { return agentcli.RenderStats(os.Stdout, st) })
+	return agentcli.Render(os.Stdout, st, jsonMode(*indent, *compact), agentcli.RenderStats)
 }
 
 // agentSearchCmd runs `rafikid agent search [flags]`.
@@ -191,7 +191,7 @@ func agentSearchCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	return renderJSONOr(os.Stdout, rows, *indent, *compact, func() error { return agentcli.RenderSearch(os.Stdout, rows) })
+	return agentcli.Render(os.Stdout, rows, jsonMode(*indent, *compact), agentcli.RenderSearch)
 }
 
 // agentExportCmd runs `rafikid agent export <conv-id>`.
@@ -216,19 +216,19 @@ func agentExportCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	return renderJSONOr(os.Stdout, tr, *indent, *compact, func() error { return agentcli.RenderTranscriptMD(os.Stdout, tr) })
+	return agentcli.Render(os.Stdout, tr, jsonMode(*indent, *compact), agentcli.RenderTranscriptMD)
 }
 
-// renderJSONOr writes v as JSON (indented if indent, else compact if
-// compact) or, when neither flag is set, runs human.
-func renderJSONOr(w *os.File, v any, indent, compact bool, human func() error) error {
+// jsonMode maps the -j/-J flag pair onto the render mode shared with
+// `rafiki conversations`; neither flag means the human-first tables.
+func jsonMode(indent, compact bool) agentcli.Mode {
 	switch {
 	case indent:
-		return agentcli.RenderJSON(w, v, true)
+		return agentcli.ModeJSON
 	case compact:
-		return agentcli.RenderJSON(w, v, false)
+		return agentcli.ModeJSONCompact
 	default:
-		return human()
+		return agentcli.ModeTable
 	}
 }
 
@@ -897,7 +897,7 @@ func agentFindingsCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	return renderJSONOr(os.Stdout, rows, *indent, *compact, func() error { return agentcli.RenderFindings(os.Stdout, rows) })
+	return agentcli.Render(os.Stdout, rows, jsonMode(*indent, *compact), agentcli.RenderFindings)
 }
 
 // agentFindingsSetStatusCmd performs `rafikid agent findings dismiss|action
@@ -927,5 +927,8 @@ func agentFindingsSetStatusCmd(verb, db string, ids []string, indent, compact bo
 	if err != nil {
 		return err
 	}
-	return renderJSONOr(os.Stdout, row, indent, compact, func() error { return agentcli.RenderFindings(os.Stdout, []store.FindingRow{row}) })
+	// The value stays a bare row, not a one-element slice: JSON output of a
+	// single-finding mutation is an object, and only the table wraps it.
+	return agentcli.Render(os.Stdout, row, jsonMode(indent, compact),
+		func(w io.Writer, r store.FindingRow) error { return agentcli.RenderFindings(w, []store.FindingRow{r}) })
 }

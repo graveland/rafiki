@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -164,6 +165,7 @@ On macOS this uses launchd (launchctl); on Linux it uses systemd --user.`,
 		newServiceRestartCmd(),
 		newServiceStatusCmd(),
 		newServiceLogsCmd(),
+		newServiceTailCmd(),
 	)
 	return cmd
 }
@@ -228,13 +230,23 @@ func newServiceStatusCmd() *cobra.Command {
 func newServiceLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Show the rafiki daemon log",
-		Long:  "Show the rafiki daemon log. Follows by default; use --follow=false to print and exit.",
+		Short: "Print the rafiki daemon log and exit",
+		Long:  "Print the rafiki daemon log and exit. Use --follow (or `rafiki service tail`) to keep streaming.",
 		Args:  cobra.NoArgs,
 		RunE:  runServiceLogs,
 	}
-	cmd.Flags().BoolP("follow", "f", true, "Follow log output via polling (set --follow=false to print and exit)")
+	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new log output instead of exiting at EOF")
 	return cmd
+}
+
+func newServiceTailCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tail",
+		Short: "Follow the rafiki daemon log",
+		Long:  "Print the rafiki daemon log and keep streaming new output. Equivalent to `rafiki service logs --follow`.",
+		Args:  cobra.NoArgs,
+		RunE:  runServiceTail,
+	}
 }
 
 // --- run functions ---
@@ -340,10 +352,19 @@ func runServiceStatus(_ *cobra.Command, _ []string) error {
 }
 
 func runServiceLogs(cmd *cobra.Command, _ []string) error {
+	follow, _ := cmd.Flags().GetBool("follow")
+	return streamServiceLog(cmdCtx(cmd), follow)
+}
+
+func runServiceTail(cmd *cobra.Command, _ []string) error {
+	return streamServiceLog(cmdCtx(cmd), true)
+}
+
+// streamServiceLog copies the daemon log to stdout. When follow is false it
+// stops at EOF; when true it keeps polling for new writes until ctx is done.
+func streamServiceLog(ctx context.Context, follow bool) error {
 	b := newServiceBackend()
 	logPath := b.LogPath()
-
-	follow, _ := cmd.Flags().GetBool("follow")
 
 	f, err := os.Open(logPath)
 	if err != nil {
@@ -360,7 +381,6 @@ func runServiceLogs(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Follow mode: stream existing content then poll for new writes.
-	ctx := cmdCtx(cmd)
 	buf := make([]byte, 4096)
 	for {
 		select {
