@@ -23,6 +23,11 @@ func validateLabelKey(k string) error {
 
 // validateUserLabelKeys checks that all keys in m are syntactically valid and
 // do not use the reserved rafiki/ prefix.
+//
+// The prefix was "fundi/" pre-rename; a child spawned before the rename still
+// carries "fundi/*" auto-labels on its persisted record (no migration
+// rewrites old rows), so a "rafiki/*" filter will not match it. See
+// childstore.Session.Labels and docs/MIGRATING.md.
 func validateUserLabelKeys(m map[string]string) error {
 	for k := range m {
 		if err := validateLabelKey(k); err != nil {

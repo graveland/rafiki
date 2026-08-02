@@ -148,7 +148,7 @@ export type ReplacedSessionContext = ExtensionCommandContext & {
 };
 
 import type { Client } from "./client.ts";
-import { setupTuiAutocomplete } from "../../cmd/fundi/helpersembed/fundi-helpers/index.ts";
+import { setupTuiAutocomplete } from "../../cmd/rafiki/helpersembed/rafiki-helpers/index.ts";
 import { envFlag } from "./env.ts";
 
 // ─── Local type definitions (not exported from main package index) ────────────

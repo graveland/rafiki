@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
-import extensionFactory, { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/fundi/helpersembed/fundi-helpers/index.ts";
+import extensionFactory, { setupTuiAutocomplete, filterCommandSuggestions, slashCommandsToCommandInfo } from "../../cmd/rafiki/helpersembed/rafiki-helpers/index.ts";
 
 // ─── Inline AutocompleteProvider type (mirrors @earendil-works/pi-tui) ────────
 

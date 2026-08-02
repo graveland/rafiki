@@ -98,6 +98,13 @@ type Session struct {
 
 	// Labels holds arbitrary user-defined and auto-derived key=value metadata.
 	// Keys with the "rafiki/" prefix are reserved for auto-labels set by the daemon.
+	//
+	// The prefix was "fundi/" before the rename to rafiki. This is a persisted
+	// value, not just a code identifier: a child spawned (or resumed) before
+	// the rename keeps "fundi/kind"/"fundi/model"/etc. on its record forever —
+	// there is no migration that rewrites old rows. A `--has-label rafiki/kind=…`
+	// filter written after upgrading will silently NOT match a pre-rename
+	// child's still-"fundi/kind"-labeled record. See docs/MIGRATING.md.
 	Labels map[string]string
 
 	// SlashCommands is the claude child's advertised slash-command list (names),
