@@ -70,7 +70,7 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 	}
 
 	// --provider no longer exists as a flag - the model id alone determines
-	// routing (see internal/agent/config.go's senderOptions).
+	// routing (see internal/fundi/config.go's senderOptions).
 	if strings.Contains(joined, "--provider") {
 		t.Fatalf("argv unexpectedly contains --provider (removed in the provider/model redesign): %v", argv)
 	}

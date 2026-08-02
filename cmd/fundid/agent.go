@@ -16,7 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"go.graveland.dev/rafiki/pkg/agent"
+	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
@@ -117,7 +117,7 @@ func standaloneFatal(stdin io.Closer) (func(error), <-chan error) {
 
 // runAgent is cmd/fundid's other entry point: `fundid agent ...` runs a single
 // agent child speaking pi's rpc protocol on stdio, in place of Claude Code.
-// It owns everything agent.BuildRuntime cannot: flag parsing, os.Getwd(), the
+// It owns everything fundi.BuildRuntime cannot: flag parsing, os.Getwd(), the
 // process-level signal.NotifyContext, and the CLI-only "--mcp-config not
 // found" vs "defaulted .mcp.json absent" distinction (see the mcpPath block
 // below). BuildRuntime owns the rest of the assembly (context files, skills,
@@ -143,7 +143,7 @@ func runAgent(args []string) int {
 		return 2
 	}
 
-	thinkingBudget, err := agent.ThinkingBudgetFor(f.thinking)
+	thinkingBudget, err := fundi.ThinkingBudgetFor(f.thinking)
 	if err != nil {
 		slog.Error("agent: invalid --thinking", "error", err)
 		return 2
@@ -156,7 +156,7 @@ func runAgent(args []string) int {
 	}
 
 	// ctx is the Engine's BaseCtx: a SIGINT/SIGTERM here cancels any turn in
-	// flight, per the engine lifecycle fix in internal/agent/engine.go.
+	// flight, per the engine lifecycle fix in internal/fundi/engine.go.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -186,7 +186,7 @@ func runAgent(args []string) int {
 
 	onFatal, fatal := standaloneFatal(os.Stdin)
 
-	opts := agent.RuntimeOptions{
+	opts := fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
 		SystemPromptOverride: f.systemPrompt,
@@ -207,8 +207,8 @@ func runAgent(args []string) int {
 		OnFatal:              onFatal,
 	}
 
-	fe := agent.NewFrontend(os.Stdin, os.Stdout, nil)
-	eng, shutdown, err := agent.BuildRuntime(ctx, fe, opts)
+	fe := fundi.NewFrontend(os.Stdin, os.Stdout, nil)
+	eng, shutdown, err := fundi.BuildRuntime(ctx, fe, opts)
 	if err != nil {
 		slog.Error("agent: build engine", "error", err)
 		return 1

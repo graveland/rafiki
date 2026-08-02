@@ -35,7 +35,7 @@ type SpawnSpec struct {
 
 	// Runner overrides how the child executes. When nil, a subprocess runner is
 	// built from PiBinary/Argv/Env. Injected rather than selected inside this
-	// package because internal/agent imports it.
+	// package because internal/fundi imports it.
 	Runner Runner
 }
 

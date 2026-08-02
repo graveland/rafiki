@@ -5,7 +5,7 @@
 // what a subprocess's stdio actually gives the daemon, which an unbuffered
 // io.Pipe does not (see Start's doc comment).
 //
-// This package exists because internal/agent imports internal/child: an
+// This package exists because internal/fundi imports internal/child: an
 // in-process runner cannot live in internal/child without an import cycle.
 // Nothing imports this package except cmd/fundid.
 package inproc
@@ -21,22 +21,22 @@ import (
 	"strings"
 	"sync"
 
-	"go.graveland.dev/rafiki/pkg/agent"
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/fundi"
 )
 
-// BuildFunc constructs the engine. Defaults to agent.BuildRuntime; tests
+// BuildFunc constructs the engine. Defaults to fundi.BuildRuntime; tests
 // substitute it to inject failures a real builder cannot produce on demand.
-type BuildFunc func(ctx context.Context, fe *agent.Frontend, ro agent.RuntimeOptions) (*agent.Engine, func(), error)
+type BuildFunc func(ctx context.Context, fe *fundi.Frontend, ro fundi.RuntimeOptions) (*fundi.Engine, func(), error)
 
 // Options configures a Runner.
 type Options struct {
 	ChildID string
-	Runtime agent.RuntimeOptions
+	Runtime fundi.RuntimeOptions
 	// Parent is the daemon's context. The runner derives a cancellable child
 	// from it, so cancelling Parent stops every in-process child at once.
 	Parent context.Context
-	// Build defaults to agent.BuildRuntime when nil.
+	// Build defaults to fundi.BuildRuntime when nil.
 	Build BuildFunc
 }
 
@@ -79,7 +79,7 @@ func (s stopReason) String() string {
 // not get different answers for the same action.
 const killedSignal = "killed"
 
-// Runner drives an agent.Engine in a goroutine. It satisfies child.Runner.
+// Runner drives a fundi.Engine in a goroutine. It satisfies child.Runner.
 type Runner struct {
 	opts Options
 	done chan struct{}
@@ -90,7 +90,7 @@ type Runner struct {
 	cancel     context.CancelFunc
 	exitCode   int
 	exitSignal string
-	eng        *agent.Engine
+	eng        *fundi.Engine
 	stdinR     *os.File
 	stdoutR    *os.File
 }
@@ -98,7 +98,7 @@ type Runner struct {
 // New returns a Runner for opts. Nothing runs until Start is called.
 func New(opts Options) *Runner {
 	if opts.Build == nil {
-		opts.Build = agent.BuildRuntime
+		opts.Build = fundi.BuildRuntime
 	}
 	if opts.Parent == nil {
 		opts.Parent = context.Background()
@@ -163,7 +163,7 @@ var _ child.Runner = (*Runner)(nil)
 // Start wires two pipes and launches the engine goroutine. The daemon writes
 // frames to the returned stdin and reads them from the returned stdout.
 //
-// These are real OS pipes (os.Pipe), not io.Pipe: agent.Frontend.Emit issues
+// These are real OS pipes (os.Pipe), not io.Pipe: fundi.Frontend.Emit issues
 // two separate Write calls per frame (the JSON bytes, then a bare "\n"), both
 // under the same mutex. Over an unbuffered io.Pipe, any Write that the reader
 // doesn't immediately and fully consume blocks — and because both Writes hold
@@ -258,7 +258,7 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 //
 // A recover only ever sees panics on ITS OWN goroutine. This one is on the
 // run() goroutine, so it covers exactly: Options.Build (including
-// agent.BuildRuntime and everything it constructs), fe.Run's reader loop and
+// fundi.BuildRuntime and everything it constructs), fe.Run's reader loop and
 // the Handler dispatch it makes inline (HandlePrompt/HandleSteer/HandleAbort/
 // State — all of which return promptly by contract), eng.Wait, eng.Close, and
 // shutdown().
@@ -267,15 +267,15 @@ func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 //
 //   - The engine's turn worker. Every turn — agentloop.Run, the streaming
 //     handler, message mapping — runs there. It has its OWN recover
-//     (agent.Engine.runTurnGuarded), which routes a panic back here through
+//     (fundi.Engine.runTurnGuarded), which routes a panic back here through
 //     EngineConfig.OnFatal (see Runner.engineFatal) so the child ends with a
 //     non-zero exit and a clean stdout EOF.
 //   - agentloop's per-tool errgroup goroutines. errgroup does not recover.
 //     Covered instead at the two fundi-owned boundaries that run there:
 //     tools.Registry.Execute (the whole tool surface, MCP included) and the
-//     OnToolStart/OnToolEnd emit callbacks in agent.Engine.events.
+//     OnToolStart/OnToolEnd emit callbacks in fundi.Engine.events.
 //   - The model-catalog warm goroutine, which recovers for itself in
-//     agent.NewEngine.
+//     fundi.NewEngine.
 //   - Goroutines inside dependencies, which no fundi-owned recover can reach:
 //     os/exec's stdio copy goroutines (bash and every other tool subprocess),
 //     the MCP client's session goroutines, and pgx's background pool
@@ -325,7 +325,7 @@ func (r *Runner) run(ctx context.Context, stdinR *os.File, stdoutW *os.File) {
 		}
 	}()
 
-	fe := agent.NewFrontend(stdinR, stdoutW, nil)
+	fe := fundi.NewFrontend(stdinR, stdoutW, nil)
 	eng, shutdown, err := r.opts.Build(ctx, fe, r.opts.Runtime)
 	if err != nil {
 		slog.Error("inproc: build engine", "child", r.opts.ChildID, "error", err)
@@ -415,7 +415,7 @@ func (r *Runner) Terminate() error {
 // Kill cancels the context and closes the read end of both pipes, so that
 // Frontend.Run returns even if it is blocked on a read, AND — the case
 // Terminate alone cannot handle — an engine goroutine blocked inside a stdout
-// Write (agent.Frontend.Emit holds its mutex across that Write; see Start's
+// Write (fundi.Frontend.Emit holds its mutex across that Write; see Start's
 // doc comment) unblocks too: closing stdoutR makes that Write fail with a
 // broken-pipe error instead of hanging forever. Without this, a daemon that
 // stops reading a child's stdout (e.g. after a frame-too-large error) can wedge

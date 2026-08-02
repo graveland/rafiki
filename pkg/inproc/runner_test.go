@@ -17,15 +17,15 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"go.graveland.dev/rafiki/pkg/agent"
-	"go.graveland.dev/rafiki/pkg/agent/tools"
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/fundi"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
 )
 
 // sampleEndTurn is one scripted assistant message: a completed turn whose text
-// the test asserts on. Mirrors internal/agent/engine_test.go's fixture of the
-// same name — that one is an unexported const in package agent, so it cannot be
+// the test asserts on. Mirrors internal/fundi/engine_test.go's fixture of the
+// same name — that one is an unexported const in package fundi, so it cannot be
 // imported here.
 const sampleEndTurn = `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x",` +
 	`"stop_reason":"end_turn","content":[{"type":"text","text":"the fake reply"}],` +
@@ -35,8 +35,8 @@ const sampleEndTurn = `{"id":"msg_1","type":"message","role":"assistant","model"
 // returns its path.
 //
 // Config.FakeTurns is a PATH to a newline-delimited-JSON file of
-// anthropic.Message values (loaded by agent.LoadFakeSender) — NOT literal reply
-// text. package agent has its own writeFakeTurns helper, but it is an
+// anthropic.Message values (loaded by fundi.LoadFakeSender) — NOT literal reply
+// text. package fundi has its own writeFakeTurns helper, but it is an
 // unexported test helper in another package, so this test needs its own.
 func writeFakeTurns(t *testing.T, bodies ...string) string {
 	t.Helper()
@@ -89,7 +89,7 @@ func TestRunnerDrivesAFakeTurn(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_inproc",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{
+		Runtime: fundi.RuntimeOptions{
 			Model:          "anthropic/claude-sonnet-4-5",
 			Cwd:            t.TempDir(),
 			Ref:            "c_inproc",
@@ -159,8 +159,8 @@ func TestRunnerContainsPanic(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_panic",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
-		Build: func(context.Context, *agent.Frontend, agent.RuntimeOptions) (*agent.Engine, func(), error) {
+		Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
+		Build: func(context.Context, *fundi.Frontend, fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
 			panic("boom from the engine builder")
 		},
 	})
@@ -188,7 +188,7 @@ func TestRunnerBuildErrorIsAnExit(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_builderr",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: "relative/path"}, // BuildRuntime rejects this
+		Runtime: fundi.RuntimeOptions{Cwd: "relative/path"}, // BuildRuntime rejects this
 	})
 	if _, stdout, _, err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -244,7 +244,7 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 	// the first frame alone already blocks a writer nobody is draining.
 	//
 	// This was 4 MiB, which is 64x the buffer and sounds harmlessly generous —
-	// but 8 turns of it is a 32 MiB scripted-turns file, and agent.LoadFakeSender
+	// but 8 turns of it is a 32 MiB scripted-turns file, and fundi.LoadFakeSender
 	// parses the whole thing eagerly and synchronously inside Options.Build.
 	// That takes ~0.7s normally and ~6.5s under -race, which is longer than this
 	// test's entire Kill deadline. So under -race run() was still in
@@ -263,7 +263,7 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_wedge",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{
+		Runtime: fundi.RuntimeOptions{
 			Model:          "anthropic/claude-sonnet-4-5",
 			Cwd:            t.TempDir(),
 			SpillDir:       t.TempDir(),
@@ -352,7 +352,7 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 // blockingToolSet is a minimal agentloop.ToolSet (structurally, not by
 // import — see below) with one tool, "bash", that signals started and then
 // blocks until its context is cancelled. It mirrors
-// internal/agent/engine_test.go's blockOnCtxTool/fakeToolSet, duplicated here
+// internal/fundi/engine_test.go's blockOnCtxTool/fakeToolSet, duplicated here
 // because those are unexported test helpers in another package.
 type blockingToolSet struct {
 	started chan struct{}
@@ -376,8 +376,8 @@ func (ts *blockingToolSet) Execute(ctx context.Context, name string, _ json.RawM
 }
 
 // ctxCheckingSender fails fast on an already-cancelled context before
-// delegating, mirroring internal/agent/engine_test.go's sender of the same
-// name — the plain fake sender loaded by agent.LoadFakeSender ignores ctx
+// delegating, mirroring internal/fundi/engine_test.go's sender of the same
+// name — the plain fake sender loaded by fundi.LoadFakeSender ignores ctx
 // entirely, which would let a turn's Continue call silently succeed via the
 // replay script even after an abort landed.
 type ctxCheckingSender struct{ inner llm.Sender }
@@ -389,16 +389,16 @@ func (s ctxCheckingSender) New(ctx context.Context, params anthropic.MessageNewP
 	return s.inner.New(ctx, params)
 }
 
-// blockingBuildFunc returns a BuildFunc that constructs a real agent.Engine
-// (bypassing agent.BuildRuntime) wired to a single "bash" tool that blocks on
+// blockingBuildFunc returns a BuildFunc that constructs a real fundi.Engine
+// (bypassing fundi.BuildRuntime) wired to a single "bash" tool that blocks on
 // its context until cancelled. It is the inproc package's equivalent of
-// internal/agent/engine_test.go's newTestEngineWithSender, injected through
+// internal/fundi/engine_test.go's newTestEngineWithSender, injected through
 // Options.Build — the same seam TestRunnerContainsPanic already uses to
 // substitute a builder a real one can't produce on demand — because
 // RuntimeOptions/BuildRuntime give no way to inject a custom tool registry.
 func blockingBuildFunc(started chan struct{}, fakeTurnsPath string) BuildFunc {
-	return func(ctx context.Context, fe *agent.Frontend, _ agent.RuntimeOptions) (*agent.Engine, func(), error) {
-		sender, err := agent.LoadFakeSender(fakeTurnsPath)
+	return func(ctx context.Context, fe *fundi.Frontend, _ fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
+		sender, err := fundi.LoadFakeSender(fakeTurnsPath)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -408,7 +408,7 @@ func blockingBuildFunc(started chan struct{}, fakeTurnsPath string) BuildFunc {
 		if err != nil {
 			return nil, nil, err
 		}
-		eng, err := agent.NewEngine(agent.EngineConfig{
+		eng, err := fundi.NewEngine(fundi.EngineConfig{
 			Client:   client,
 			Tools:    &blockingToolSet{started: started},
 			Provider: "anthropic",
@@ -427,8 +427,8 @@ func blockingBuildFunc(started chan struct{}, fakeTurnsPath string) BuildFunc {
 // sampleToolUseResp is a scripted assistant message that calls the "bash"
 // tool blockingToolSet provides, putting a turn genuinely in flight (the tool
 // blocks on ctx) rather than replaying instantaneously the way a plain
-// end_turn body would. Mirrors internal/agent/emit_test.go's sampleResp,
-// duplicated here because that one is an unexported const in package agent.
+// end_turn body would. Mirrors internal/fundi/emit_test.go's sampleResp,
+// duplicated here because that one is an unexported const in package fundi.
 const sampleToolUseResp = `{"id":"msg_0","type":"message","role":"assistant","model":"claude-x",` +
 	`"stop_reason":"tool_use","content":[{"type":"text","text":"on it"},` +
 	`{"type":"tool_use","id":"tu_1","name":"bash","input":{"command":"ls"}}],` +
@@ -486,7 +486,7 @@ func TestRunnerInterruptAbortsTurnButRunnerStaysAlive(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_interrupt",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
 		Build:   blockingBuildFunc(started, writeFakeTurns(t, sampleToolUseResp, sampleEndTurn)),
 	})
 
@@ -551,7 +551,7 @@ func TestRunnerTerminateEndsIt(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_terminate",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
 		Build:   blockingBuildFunc(started, writeFakeTurns(t, sampleToolUseResp)),
 	})
 
@@ -670,8 +670,8 @@ func TestRunnerReleasesChildContextOnNormalCompletion(t *testing.T) {
 		r := New(Options{
 			ChildID: id,
 			Parent:  parent,
-			Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
-			Build: func(ctx context.Context, fe *agent.Frontend, ro agent.RuntimeOptions) (*agent.Engine, func(), error) {
+			Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
+			Build: func(ctx context.Context, fe *fundi.Frontend, ro fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
 				context.AfterFunc(ctx, func() { fired <- id })
 				return inner(ctx, fe, ro)
 			},
@@ -731,7 +731,7 @@ func TestRunnerStartIsSingleShot(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_twice",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
 		Build:   blockingBuildFunc(make(chan struct{}), writeFakeTurns(t, sampleEndTurn)),
 	})
 
@@ -763,11 +763,11 @@ func TestRunnerStartIsSingleShot(t *testing.T) {
 // is the point: the containment under test lives in Registry.Execute, and a
 // hand-rolled ToolSet in this test would bypass it and prove nothing.
 //
-// It forwards ro.OnFatal to EngineConfig, exactly as agent.BuildRuntime does,
+// It forwards ro.OnFatal to EngineConfig, exactly as fundi.BuildRuntime does,
 // so the child-ending path stays wired for an injected build.
 func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
-	return func(ctx context.Context, fe *agent.Frontend, ro agent.RuntimeOptions) (*agent.Engine, func(), error) {
-		sender, err := agent.LoadFakeSender(fakeTurnsPath)
+	return func(ctx context.Context, fe *fundi.Frontend, ro fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
+		sender, err := fundi.LoadFakeSender(fakeTurnsPath)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -782,7 +782,7 @@ func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
 			func(context.Context, json.RawMessage) (string, error) {
 				panic("tool exploded inside a real turn")
 			})
-		eng, err := agent.NewEngine(agent.EngineConfig{
+		eng, err := fundi.NewEngine(fundi.EngineConfig{
 			Client:   client,
 			Tools:    reg,
 			Provider: "anthropic",
@@ -809,7 +809,7 @@ func TestRunnerSurvivesAPanickingTool(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_toolpanic",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
 		Build:   panicToolBuildFunc(writeFakeTurns(t, sampleToolUseResp, sampleEndTurn, sampleEndTurn)),
 	})
 
@@ -867,14 +867,14 @@ func (panickingSender) New(context.Context, anthropic.MessageNewParams) (*anthro
 // panickingTurnBuildFunc wires an engine whose every turn panics on the worker
 // goroutine.
 func panickingTurnBuildFunc() BuildFunc {
-	return func(ctx context.Context, fe *agent.Frontend, ro agent.RuntimeOptions) (*agent.Engine, func(), error) {
+	return func(ctx context.Context, fe *fundi.Frontend, ro fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
 		client, err := llm.NewClient(
 			llm.WithUpstream(llm.UpstreamAnthropic, panickingSender{}),
 			llm.WithDefaultModel("claude-x"))
 		if err != nil {
 			return nil, nil, err
 		}
-		eng, err := agent.NewEngine(agent.EngineConfig{
+		eng, err := fundi.NewEngine(fundi.EngineConfig{
 			Client:   client,
 			Tools:    &blockingToolSet{started: make(chan struct{})},
 			Provider: "anthropic",
@@ -893,7 +893,7 @@ func panickingTurnBuildFunc() BuildFunc {
 
 // TestRunnerPanicInTurnWorkerEndsTheChild covers the other half of the
 // containment story. A panic on the engine's turn worker is NOT on run()'s
-// goroutine, so run()'s recover cannot see it; agent.Engine.runTurnGuarded
+// goroutine, so run()'s recover cannot see it; fundi.Engine.runTurnGuarded
 // catches it and routes it back through EngineConfig.OnFatal.
 //
 // The requirement is specifically that this ends the CHILD rather than
@@ -905,7 +905,7 @@ func TestRunnerPanicInTurnWorkerEndsTheChild(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_workerpanic",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
 		Build:   panickingTurnBuildFunc(),
 	})
 
@@ -981,7 +981,7 @@ func TestKillReportsTheSameExitShapeAsASignalledSubprocess(t *testing.T) {
 	r := New(Options{
 		ChildID: "c_killshape",
 		Parent:  t.Context(),
-		Runtime: agent.RuntimeOptions{Cwd: t.TempDir()},
+		Runtime: fundi.RuntimeOptions{Cwd: t.TempDir()},
 		Build:   blockingBuildFunc(started, writeFakeTurns(t, sampleToolUseResp)),
 	})
 

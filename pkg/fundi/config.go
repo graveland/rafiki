@@ -1,4 +1,4 @@
-package agent
+package fundi
 
 import (
 	"context"
@@ -46,7 +46,7 @@ func ThinkingBudgetFor(level string) (int64, error) {
 // Tools is a pre-built agentloop.ToolSet so callers can assemble a registry
 // (file tools, bash, skills, MCP) and hand it in; this decouples BuildEngine
 // from the concrete registry and lets tests inject a fake toolset. This
-// architecture was originally forced by an import cycle (internal/agent/tools
+// architecture was originally forced by an import cycle (internal/fundi/tools
 // importing this package for SkillMeta), which the extraction of internal/skills
 // removed. The interface design remains the right choice for the decoupling alone.
 // cmd/fundid builds the Registry and passes it in; see cmd/fundid/agent.go.

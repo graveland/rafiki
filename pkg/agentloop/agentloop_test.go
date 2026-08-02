@@ -622,7 +622,7 @@ func (f *failingTools) Execute(ctx context.Context, name string, input json.RawM
 // UNRELATED conversations, i.e. with zero lock contention. It is not being
 // re-fixed here because Resume has no production caller in either rafiki
 // or fundi (grep confirms; fundi's live orphan-fabrication path is
-// internal/agent/orphans.go's RepairOrphans, a separate implementation).
+// internal/fundi/orphans.go's RepairOrphans, a separate implementation).
 // This test is also known to reproduce only ~4/10 runs, not reliably: the
 // two goroutines below have no start barrier, so the race window is
 // whatever happens to line up rather than a forced worst case. Skipped to

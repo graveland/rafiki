@@ -115,7 +115,7 @@ func main() {
 	defer cancel()
 
 	// baseCtx is the daemon's own lifetime context, threaded into every
-	// in-process agent child (Controller.baseCtx -> agent.RuntimeOptions) so a
+	// in-process agent child (Controller.baseCtx -> fundi.RuntimeOptions) so a
 	// hard daemon exit cancels them too. It is deliberately a SEPARATE context
 	// from ctx/cancel above: ctx is cancelled early (below, "stop the
 	// background sweeper") well before ShutdownAllChildren runs, and reusing
@@ -128,7 +128,7 @@ func main() {
 	defer baseCancel()
 
 	// The agent kind's in-process children share one pool across the whole
-	// daemon (agent.RuntimeOptions.Pool); BuildEngine/BuildRuntime never open
+	// daemon (fundi.RuntimeOptions.Pool); BuildEngine/BuildRuntime never open
 	// or close one themselves. A nil pool (FUNDI_AGENT_DB unset) means every
 	// agent conversation is in-memory, matching `fundid agent --db` unset.
 	var pool *pgxpool.Pool

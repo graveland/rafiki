@@ -1,7 +1,7 @@
 // Package agent implements fundi's native direct-API agent runtime: the
 // child process that speaks pi's rpc protocol on stdio in place of Claude
 // Code.
-package agent
+package fundi
 
 import (
 	"bufio"

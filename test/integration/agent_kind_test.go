@@ -14,7 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// fakeTurnsScript writes a --fake-turns ndjson file (internal/agent's hidden
+// fakeTurnsScript writes a --fake-turns ndjson file (internal/fundi's hidden
 // test seam, LoadFakeSender) with two scripted assistant turns:
 //
 //  1. A tool_use call to the real "bash" tool running
@@ -28,7 +28,7 @@ import (
 //     abort to prove the same child process still works.
 //
 // Aborting mid-tool cancels the turn's context, which is what actually kills
-// the blocked read (see internal/agent/tools/bash.go's Setpgid+cmd.Cancel
+// the blocked read (see internal/fundi/tools/bash.go's Setpgid+cmd.Cancel
 // wiring) - the turn never reaches a second LLM call, so the fake sender's
 // second scripted message is left for the second prompt.
 func fakeTurnsScript(t *testing.T, markerPath, fifoPath string) string {

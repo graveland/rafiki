@@ -15,7 +15,7 @@ import (
 // are identical for a subprocess and for an in-process engine.
 //
 // Runner is exported and injected via SpawnSpec rather than selected inside this
-// package: internal/agent already imports internal/child, so an in-process
+// package: internal/fundi already imports internal/child, so an in-process
 // implementation cannot live here without an import cycle.
 type Runner interface {
 	// Start begins execution and returns the child's three streams. stdin is

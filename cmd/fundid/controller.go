@@ -51,7 +51,7 @@ type Controller struct {
 	sweeperWg   sync.WaitGroup
 
 	// pool is the daemon's shared database pool, handed to every in-process
-	// agent child (agent.RuntimeOptions.Pool). Nil means every agent
+	// agent child (fundi.RuntimeOptions.Pool). Nil means every agent
 	// conversation is in-memory. Owned and closed by main.go, not here.
 	pool *pgxpool.Pool
 
@@ -2389,7 +2389,7 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 	case protocol.KindFundi:
 		// The fundi runtime is `fundid fundi ...`: the daemon re-execs itself
 		// rather than shelling out to a separate binary. It speaks pi's rpc
-		// protocol natively (internal/agent/frontend.go), so no translator is
+		// protocol natively (internal/fundi/frontend.go), so no translator is
 		// needed - child.PiProvider{} is the correct identity, same as the
 		// "pi" case above.
 		//
@@ -2401,7 +2401,7 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		}
 		// Unlike pi/claude, the fundi kind carries its provider inside the
 		// model id itself (e.g. "anthropic/sonnet-latest" - see
-		// internal/agent/config.go's senderOptions); there is no separate
+		// internal/fundi/config.go's senderOptions); there is no separate
 		// --provider flag for `fundid agent` to consume. A caller-supplied
 		// req.Provider here would silently be dropped were it not for this
 		// check, or worse, get double-prefixed onto the reported model - so
@@ -2540,10 +2540,10 @@ func claudeEnv(configDir string) []string {
 // The two reserved controller vars are always injected regardless of mode.
 //
 // Note on API key propagation for the "fundi" kind: unlike pi/claude, `fundid
-// fundi` has no --api-key flag (internal/agent.Config.AnthropicAPIKey /
+// fundi` has no --api-key flag (internal/fundi.Config.AnthropicAPIKey /
 // OpenRouterAPIKey are read from the environment by cmd/fundid/agent.go's
 // runAgent, deliberately, so tests can exercise the missing-key path without
-// mutating the process env - see internal/agent/config.go's Config doc
+// mutating the process env - see internal/fundi/config.go's Config doc
 // comment). Two paths feed the child those vars: (1) when EnvOverride is
 // false (the default), child.Spawn merges os.Environ() - the daemon's own
 // inherited env - into the child's env for free, so an ANTHROPIC_API_KEY /
@@ -2552,7 +2552,7 @@ func claudeEnv(configDir string) []string {
 // explicitly (the same field pi/claude thread via --api-key), this function
 // translates it into the correctly-named var below so it isn't silently
 // dropped for agent kind. Which var name to use is decided the same way
-// `fundid agent` itself decides routing (internal/agent/config.go's
+// `fundid agent` itself decides routing (internal/fundi/config.go's
 // senderOptions): an "anthropic/" prefixed model needs ANTHROPIC_API_KEY,
 // anything else needs OPENROUTER_API_KEY - there is no separate --provider
 // concept any more.

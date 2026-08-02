@@ -219,7 +219,7 @@ func Resume(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Even
 	// property of persistence alone). That is acceptable today only
 	// because Resume has no production caller in either rafiki or fundi;
 	// fundi's live orphan-fabrication path is a separate implementation
-	// (internal/agent/orphans.go's RepairOrphans) with its own reachability
+	// (internal/fundi/orphans.go's RepairOrphans) with its own reachability
 	// analysis. If Resume ever gains a caller that can run concurrently for
 	// the same conversation, this needs external serialization before that
 	// lands — do not assume this loop is safe without it.

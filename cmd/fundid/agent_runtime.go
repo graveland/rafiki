@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"go.graveland.dev/rafiki/pkg/agent"
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/inproc"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -85,19 +85,19 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string) (chi
 // source of per-child agent config) and then parsed back with parseAgentFlags
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string) (agent.RuntimeOptions, error) {
+func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
-		return agent.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
+		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
 	}
 
 	argv := appendDaemonRef(buildAgentArgv(req, childID, c.stateDir), childID)
 	f, err := parseAgentFlags(argv[1:]) // argv[0] is the "fundi" subcommand
 	if err != nil {
-		return agent.RuntimeOptions{}, fmt.Errorf("agent flags: %w", err)
+		return fundi.RuntimeOptions{}, fmt.Errorf("agent flags: %w", err)
 	}
 	ro, err := f.toRuntimeOptions(req.Cwd, c.pool)
 	if err != nil {
-		return agent.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
+		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
 
 	// req.Env is buildEnv's second payload for the subprocess path (alongside
@@ -147,7 +147,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 // per-child environment forwarding is not achievable at all for an in-process
 // child - see the caller's doc comment) and is logged once, by name only, so
 // a caller relying on a forwarded variable can discover why it didn't apply.
-func overlayAgentEnv(childID string, env map[string]string, ro *agent.RuntimeOptions) {
+func overlayAgentEnv(childID string, env map[string]string, ro *fundi.RuntimeOptions) {
 	var dropped []string
 	for k, v := range env {
 		switch k {
@@ -183,10 +183,10 @@ func overlayAgentEnv(childID string, env map[string]string, ro *agent.RuntimeOpt
 // agentRuntimeOptions rejects an explicit --db in req.ExtraArgs before this is
 // ever reached, so a caller who deliberately asked for a different database
 // learns it was refused rather than discovering later their DSN was ignored.
-func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (agent.RuntimeOptions, error) {
-	thinkingBudget, err := agent.ThinkingBudgetFor(f.thinking)
+func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.RuntimeOptions, error) {
+	thinkingBudget, err := fundi.ThinkingBudgetFor(f.thinking)
 	if err != nil {
-		return agent.RuntimeOptions{}, err
+		return fundi.RuntimeOptions{}, err
 	}
 
 	// Mirror runAgent's MCP asymmetry: an explicit --mcp-config that does not
@@ -199,7 +199,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (agent.Runt
 		}
 	}
 
-	return agent.RuntimeOptions{
+	return fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
 		SystemPromptOverride: f.systemPrompt,

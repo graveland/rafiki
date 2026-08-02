@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/agent"
+	"go.graveland.dev/rafiki/pkg/fundi"
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
 )
 
@@ -97,7 +97,7 @@ func TestParseAgentFlagsThinkingLevel(t *testing.T) {
 	if f.thinking != "xhigh" {
 		t.Errorf("thinking = %q, want xhigh", f.thinking)
 	}
-	if _, err := agent.ThinkingBudgetFor(f.thinking); err != nil {
+	if _, err := fundi.ThinkingBudgetFor(f.thinking); err != nil {
 		t.Errorf("ThinkingBudgetFor(%q): unexpected error: %v", f.thinking, err)
 	}
 }
@@ -227,7 +227,7 @@ func (c *countingCloser) count() int {
 }
 
 // TestStandaloneFatalEndsTheProcess covers the OnFatal hook `fundid agent`
-// passes to agent.RuntimeOptions. Before it existed the standalone path built
+// passes to fundi.RuntimeOptions. Before it existed the standalone path built
 // its RuntimeOptions with no OnFatal at all, so a turn panic marked the engine
 // dead, logged, and left the process answering get_state forever while every
 // prompt was silently dropped — the exact silently-stopped-queue shape the

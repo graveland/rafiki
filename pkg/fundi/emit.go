@@ -1,4 +1,4 @@
-package agent
+package fundi
 
 import (
 	"bytes"
@@ -123,7 +123,7 @@ func (e *Emitter) StreamEnd(msg child.PiAssistantMessage) {
 }
 
 // mapMessage maps resp through this emitter's own provider/pricer. It exists
-// so the engine's streaming handler (package agent, but a different type) can
+// so the engine's streaming handler (package fundi, but a different type) can
 // build the child.PiAssistantMessage that StreamStart/StreamDelta/StreamEnd
 // take without reaching into Emitter's provider/pricer fields directly.
 func (e *Emitter) mapMessage(resp *anthropic.Message) child.PiAssistantMessage {

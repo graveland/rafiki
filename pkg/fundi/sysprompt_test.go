@@ -1,4 +1,4 @@
-package agent
+package fundi
 
 import (
 	"strings"
