@@ -100,9 +100,9 @@ func TestPrintRootUsageCoversBothModes(t *testing.T) {
 // $HOME.
 func TestPrintRootUsageListsResolvedConfigPaths(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "cfg"))
-	t.Setenv("FUNDI_INSTRUCTIONS", "")
-	t.Setenv("FUNDI_SKILLS_DIRS", "")
-	t.Setenv("FUNDI_MCP_CONFIG", "")
+	t.Setenv("RAFIKI_INSTRUCTIONS", "")
+	t.Setenv("RAFIKI_SKILLS_DIRS", "")
+	t.Setenv("RAFIKI_MCP_CONFIG", "")
 
 	var buf bytes.Buffer
 	printRootUsage(&buf)
@@ -135,7 +135,7 @@ func TestPrintRootUsageListsResolvedConfigPaths(t *testing.T) {
 // printRootUsage) gets exercised at all.
 func TestPrintRootUsageListsAllSkillsDirs(t *testing.T) {
 	sep := string(os.PathListSeparator)
-	t.Setenv("FUNDI_SKILLS_DIRS", "/a"+sep+"/b"+sep+"/c")
+	t.Setenv("RAFIKI_SKILLS_DIRS", "/a"+sep+"/b"+sep+"/c")
 
 	var buf bytes.Buffer
 	printRootUsage(&buf)
@@ -157,7 +157,7 @@ func TestPrintRootUsageListsAllSkillsDirs(t *testing.T) {
 }
 
 // TestMCPConfigPrecedence_CwdBeatsGlobal covers task A6 step 4: a project's
-// own .mcp.json must win over the machine-wide $FUNDI_MCP_CONFIG fallback —
+// own .mcp.json must win over the machine-wide $RAFIKI_MCP_CONFIG fallback —
 // getting this backwards would silently apply the wrong MCP servers to a
 // project.
 //
@@ -177,7 +177,7 @@ func TestMCPConfigPrecedence_CwdBeatsGlobal(t *testing.T) {
 	if err := os.WriteFile(global, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FUNDI_MCP_CONFIG", global)
+	t.Setenv("RAFIKI_MCP_CONFIG", global)
 
 	if got := resolveMCPConfig("", cwd); got != cwdCfg {
 		t.Fatalf("resolveMCPConfig = %q, want the cwd file %q", got, cwdCfg)
@@ -192,7 +192,7 @@ func TestMCPConfigPrecedence_GlobalUsedWhenNoCwdFile(t *testing.T) {
 	if err := os.WriteFile(global, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FUNDI_MCP_CONFIG", global)
+	t.Setenv("RAFIKI_MCP_CONFIG", global)
 
 	if got := resolveMCPConfig("", t.TempDir()); got != global {
 		t.Fatalf("resolveMCPConfig = %q, want the global file %q", got, global)
@@ -209,7 +209,7 @@ func TestMCPConfigPrecedence_ExplicitFlagWinsOutright(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, ".mcp.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FUNDI_MCP_CONFIG", filepath.Join(t.TempDir(), "global.json"))
+	t.Setenv("RAFIKI_MCP_CONFIG", filepath.Join(t.TempDir(), "global.json"))
 
 	explicit := "/explicit/.mcp.json"
 	if got := resolveMCPConfig(explicit, cwd); got != explicit {

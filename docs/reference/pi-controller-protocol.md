@@ -724,7 +724,7 @@ Response:
 
 **fundi-specific.** Unlike every other command in this document, this is not answerable by a
 stock pi-controller daemon — it requires the `fundi` child kind's database
-(`FUNDI_AGENT_DB`), which pi-controller has no concept of. `pic` sending this to a real
+(`RAFIKI_DB`), which pi-controller has no concept of. `pic` sending this to a real
 pi-controller daemon gets `unknown command`.
 
 Global stats over persisted conversation history, or stats for one conversation when
@@ -908,7 +908,7 @@ Defined error codes:
 | `auth_invalid`          | TCP auth token did not match.                                      |
 | `not_found`             | Generic; e.g., `ctrl_resume` against unknown id.                   |
 | `internal`              | Unexpected controller-side error. Message contains details.        |
-| `no_agent_db`           | `ctrl_conversation_*`: no agent database configured (`FUNDI_AGENT_DB` unset). |
+| `no_agent_db`           | `ctrl_conversation_*`: no agent database configured (`RAFIKI_DB` unset). |
 | `payload_too_large`     | `ctrl_conversation_export`: transcript exceeds the maximum response frame size. |
 
 ## 9. Multi-client semantics

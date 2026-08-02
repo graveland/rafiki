@@ -18,7 +18,7 @@ import (
 
 // appendDaemonRef appends the authoritative --ref last so it wins over
 // req.ExtraArgs under buildAgentArgv's last-flag-wins convention. A subprocess
-// child receives its id through the injected FUNDI_CHILD_ID env var; an
+// child receives its id through the injected RAFIKI_CHILD_ID env var; an
 // in-process child inherits no env, so the id must travel in argv. It must not
 // be caller-overridable: --ref selects which stored conversation the child
 // reattaches, so a spoofed value points one child at another's history.
@@ -32,7 +32,7 @@ func appendDaemonRef(argv []string, childID string) []string {
 // caller's DSN is silently discarded - exactly the failure mode this check
 // exists to eliminate). This is deliberately NOT the same question as "is
 // agentFlags.db non-empty": newAgentFlagSet defaults f.db from
-// $FUNDI_AGENT_DB, read in the daemon's OWN process environment — the exact
+// $RAFIKI_DB, read in the daemon's OWN process environment — the exact
 // env var main.go already read to open the shared pool passed into
 // toRuntimeOptions. So an ordinary daemon deployment with a configured
 // database has a non-empty f.db on every single parse, override or not, and
@@ -176,7 +176,7 @@ func overlayAgentEnv(childID string, env map[string]string, ro *fundi.RuntimeOpt
 // directly, so ExtraArgs and last-flag-wins behave identically for both
 // execution models and no field can be dropped on one path only.
 //
-// f.db (--db / $FUNDI_AGENT_DB) is deliberately NOT read here: the daemon
+// f.db (--db / $RAFIKI_DB) is deliberately NOT read here: the daemon
 // owns one shared pool for every in-process child, passed in as pool, and
 // f.db's own default is sourced from the same env var the daemon used to open
 // that pool in the first place - so silently ignoring it is correct, not lossy.

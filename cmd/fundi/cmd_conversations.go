@@ -18,7 +18,7 @@ func newConversationsCmd() *cobra.Command {
 		Use:   "conversations",
 		Short: "Query persisted conversation history from the daemon's agent database",
 		Long: `Global stats, search, and transcript export over the conversations schema
-the daemon persists to when FUNDI_AGENT_DB is set. Unlike "fundi search" (live,
+the daemon persists to when RAFIKI_DB is set. Unlike "fundi search" (live,
 in-memory, currently-running children only), these query history in Postgres
 regardless of whether anything is still running.`,
 	}

@@ -140,9 +140,9 @@ func TestRenderPresets_EmptySlice(t *testing.T) {
 	}
 }
 
-// ─── FUNDI_DEFAULT_PRESET ───────────────────────────────────────────────────────
+// ─── RAFIKI_DEFAULT_PRESET ───────────────────────────────────────────────────────
 
-// TestFundiDefaultPreset_AppliedWhenFlagUnset checks that FUNDI_DEFAULT_PRESET
+// TestFundiDefaultPreset_AppliedWhenFlagUnset checks that RAFIKI_DEFAULT_PRESET
 // is read in runCreate when --preset is not passed.  We test this by calling
 // the preset-resolution block inline (as runCreate does) rather than spinning
 // up a real daemon.
@@ -165,12 +165,12 @@ func TestFundiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "presets.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FUNDI_DEFAULT_PRESET", "mypreset")
-	os.Unsetenv("FUNDI_DEFAULT_MODEL")
-	os.Unsetenv("FUNDI_DEFAULT_LABELS")
+	t.Setenv("RAFIKI_DEFAULT_PRESET", "mypreset")
+	os.Unsetenv("RAFIKI_DEFAULT_MODEL")
+	os.Unsetenv("RAFIKI_DEFAULT_LABELS")
 
 	// Simulate what runCreate does: read --preset flag (unset → ""), then
-	// fall back to FUNDI_DEFAULT_PRESET.
+	// fall back to RAFIKI_DEFAULT_PRESET.
 	cmd := newCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -210,8 +210,8 @@ func TestFundiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 }
 
 func TestFundiDefaultPreset_FlagWinsOverEnvVar(t *testing.T) {
-	// When --preset is set explicitly, FUNDI_DEFAULT_PRESET should be ignored.
-	t.Setenv("FUNDI_DEFAULT_PRESET", "envpreset")
+	// When --preset is set explicitly, RAFIKI_DEFAULT_PRESET should be ignored.
+	t.Setenv("RAFIKI_DEFAULT_PRESET", "envpreset")
 
 	cmd := newCreateCmd()
 	// Read the flag value — should be the default (empty), not the env var.

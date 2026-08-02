@@ -124,7 +124,7 @@ func TestDerivedPathsNestUnderBases(t *testing.T) {
 
 func TestSkillsDirs_DefaultIsConfigDir(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
-	t.Setenv("FUNDI_SKILLS_DIRS", "")
+	t.Setenv("RAFIKI_SKILLS_DIRS", "")
 	got := SkillsDirs()
 	want := []string{"/tmp/cfg/fundi/skills"}
 	if !reflect.DeepEqual(got, want) {
@@ -133,7 +133,7 @@ func TestSkillsDirs_DefaultIsConfigDir(t *testing.T) {
 }
 
 func TestSkillsDirs_SplitsPathList(t *testing.T) {
-	t.Setenv("FUNDI_SKILLS_DIRS", "/a"+string(os.PathListSeparator)+"/b")
+	t.Setenv("RAFIKI_SKILLS_DIRS", "/a"+string(os.PathListSeparator)+"/b")
 	got := SkillsDirs()
 	want := []string{"/a", "/b"}
 	if !reflect.DeepEqual(got, want) {
@@ -143,7 +143,7 @@ func TestSkillsDirs_SplitsPathList(t *testing.T) {
 
 func TestSkillsDirs_DropsEmptySegments(t *testing.T) {
 	sep := string(os.PathListSeparator)
-	t.Setenv("FUNDI_SKILLS_DIRS", sep+"/a"+sep+sep+"/b"+sep)
+	t.Setenv("RAFIKI_SKILLS_DIRS", sep+"/a"+sep+sep+"/b"+sep)
 	got := SkillsDirs()
 	want := []string{"/a", "/b"}
 	if !reflect.DeepEqual(got, want) {
@@ -154,7 +154,7 @@ func TestSkillsDirs_DropsEmptySegments(t *testing.T) {
 func TestSkillsDirs_AllEmptySegmentsFallsBackToDefault(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
 	sep := string(os.PathListSeparator)
-	t.Setenv("FUNDI_SKILLS_DIRS", sep+sep+sep)
+	t.Setenv("RAFIKI_SKILLS_DIRS", sep+sep+sep)
 
 	got := SkillsDirs()
 	want := []string{"/tmp/cfg/fundi/skills"}
@@ -164,7 +164,7 @@ func TestSkillsDirs_AllEmptySegmentsFallsBackToDefault(t *testing.T) {
 }
 
 func TestInstructionsFile_EnvWins(t *testing.T) {
-	t.Setenv("FUNDI_INSTRUCTIONS", "/custom/inst.md")
+	t.Setenv("RAFIKI_INSTRUCTIONS", "/custom/inst.md")
 	if got := InstructionsFile(); got != "/custom/inst.md" {
 		t.Fatalf("InstructionsFile() = %q, want /custom/inst.md", got)
 	}
@@ -172,7 +172,7 @@ func TestInstructionsFile_EnvWins(t *testing.T) {
 
 func TestNoClaudeOrPiPathsLeak(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
-	for _, env := range []string{"FUNDI_INSTRUCTIONS", "FUNDI_SKILLS_DIRS", "FUNDI_MCP_CONFIG"} {
+	for _, env := range []string{"RAFIKI_INSTRUCTIONS", "RAFIKI_SKILLS_DIRS", "RAFIKI_MCP_CONFIG"} {
 		t.Setenv(env, "")
 	}
 	all := append(SkillsDirs(),

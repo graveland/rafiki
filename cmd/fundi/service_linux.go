@@ -51,7 +51,7 @@ type unitData struct {
 
 // unitQuote renders one Environment= assignment, quoting it when the value
 // needs it. systemd splits an unquoted assignment on whitespace, so a value
-// containing a space — FUNDI_DEFAULT_LABELS, or any path under a directory
+// containing a space — RAFIKI_DEFAULT_LABELS, or any path under a directory
 // with a space in its name — would silently truncate at the first space, with
 // the remainder parsed as a second malformed assignment. The backslash and
 // quote escapes below are systemd's own unquoting rules.

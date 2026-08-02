@@ -23,7 +23,7 @@ func newCreateCmd() *cobra.Command {
 The fundi-helpers pi extension is auto-installed (or upgraded) into
 ~/.pi/agent/extensions/fundi-helpers/ before spawning, so slash commands
 like /reload work inside the TUI. Use --no-install-helpers or set
-FUNDI_NO_AUTO_INSTALL_HELPERS=1 to skip.
+RAFIKI_NO_AUTO_INSTALL_HELPERS=1 to skip.
 
 When the TUI quits (Ctrl+D, /quit), fundi asks whether to terminate the session
 or leave it running. Use --kill-on-exit or --keep-on-exit to skip the prompt
@@ -35,9 +35,9 @@ The child runs in the background; reattach later with 'fundi attach <name>'.
 --cwd defaults to the current directory. Specify explicitly to override.
 
 Environment variable defaults (applied before explicit flags; lowest priority):
-  FUNDI_DEFAULT_PRESET  preset name from <config dir>/presets.json (see 'fundi presets')
-  FUNDI_DEFAULT_MODEL   fallback model string
-  FUNDI_DEFAULT_LABELS  comma-separated k=v label defaults
+  RAFIKI_DEFAULT_PRESET  preset name from <config dir>/presets.json (see 'fundi presets')
+  RAFIKI_DEFAULT_MODEL   fallback model string
+  RAFIKI_DEFAULT_LABELS  comma-separated k=v label defaults
 
 (Note: fundi create replaces the earlier ` + "`fundi spawn`" + ` subcommand. For
 scripting / AFK workflows, use --detached.)`,
@@ -50,7 +50,7 @@ scripting / AFK workflows, use --detached.)`,
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the fundi-helpers pi extension")
-	cmd.Flags().String("preset", "", "Apply a named preset from <config dir>/presets.json (also settable via FUNDI_DEFAULT_PRESET)")
+	cmd.Flags().String("preset", "", "Apply a named preset from <config dir>/presets.json (also settable via RAFIKI_DEFAULT_PRESET)")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort: silently empty list when presets file is missing or malformed.
 		pf, err := loadPresets()
@@ -72,7 +72,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("kind", protocol.KindFundi, "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model), pi (a pi process in rpc mode), or claude (Claude Code)")
 	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi and --kind pi")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
-	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via FUNDI_DEFAULT_MODEL")
+	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via RAFIKI_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
 	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")
@@ -82,8 +82,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
 	cmd.Flags().StringSlice("skills-dir", nil, "Additional skills directory for --kind fundi (repeatable)")
-	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind fundi (default: <cwd>/.mcp.json, else $FUNDI_MCP_CONFIG or <config dir>/mcp.json)")
-	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see FUNDI_DEFAULT_LABELS")
+	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind fundi (default: <cwd>/.mcp.json, else $RAFIKI_MCP_CONFIG or <config dir>/mcp.json)")
+	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see RAFIKI_DEFAULT_LABELS")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
@@ -108,7 +108,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 }
 
 // resolvePresetName returns the preset to apply: the --preset flag if given,
-// else $FUNDI_DEFAULT_PRESET (the pre-rename PIC_DEFAULT_PRESET still works).
+// else $RAFIKI_DEFAULT_PRESET.
 // Extracted so tests exercise this resolution rather than reimplementing it —
 // an inlined copy in a test passes no matter what the real command reads.
 func resolvePresetName(cmd *cobra.Command) string {
@@ -122,8 +122,8 @@ func resolvePresetName(cmd *cobra.Command) string {
 // defaults, and positional args. Returns an error if required flags are invalid.
 //
 // Env-var defaults are read lazily here (not at process start) for test isolation:
-//   - FUNDI_DEFAULT_MODEL: used when --model is not set
-//   - FUNDI_DEFAULT_LABELS: comma-separated k=v pairs merged before --label flags
+//   - RAFIKI_DEFAULT_MODEL: used when --model is not set
+//   - RAFIKI_DEFAULT_LABELS: comma-separated k=v pairs merged before --label flags
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
@@ -137,7 +137,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute (got %q)", cwd)
 	}
 
-	// FUNDI_DEFAULT_MODEL: fallback when --model not given.
+	// RAFIKI_DEFAULT_MODEL: fallback when --model not given.
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
 		model = paths.Get(paths.DefaultModel)
@@ -158,10 +158,10 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	skillsDirs, _ := cmd.Flags().GetStringSlice("skills-dir")
 	mcpConfig, _ := cmd.Flags().GetString("mcp-config")
 
-	// FUNDI_DEFAULT_LABELS: parsed lazily and merged before --label flags.
+	// RAFIKI_DEFAULT_LABELS: parsed lazily and merged before --label flags.
 	envLabels, err := parseEnvLabels(paths.Get(paths.DefaultLabels))
 	if err != nil {
-		return protocol.SpawnRequest{}, fmt.Errorf("FUNDI_DEFAULT_LABELS: %w", err)
+		return protocol.SpawnRequest{}, fmt.Errorf("RAFIKI_DEFAULT_LABELS: %w", err)
 	}
 
 	flagLabelPairs, _ := cmd.Flags().GetStringArray("label")
@@ -218,9 +218,11 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 // daemon injects per-child — notably the socket and child id, which the child
 // trusts to identify itself and to call home.
 //
-// BOTH prefixes are stripped: the FUNDI_* names and the PI_CONTROLLER_* ones
-// they replaced. Dropping the old prefix while paths.Get still honours it as a
-// fallback would reopen exactly the override this guards against.
+// BOTH prefixes are stripped: the RAFIKI_* names and PI_CONTROLLER_*, the
+// two-renames-back spelling. paths.Get no longer falls back to the old name
+// at all, so this is belt-and-suspenders rather than load-bearing — but a
+// caller's stale PI_CONTROLLER_SOCKET export still has no business reaching
+// a spawned child either way.
 func collectCallerEnv() map[string]string {
 	environ := os.Environ()
 	out := make(map[string]string, len(environ))
@@ -230,7 +232,7 @@ func collectCallerEnv() map[string]string {
 			continue
 		}
 		k := kv[:eq]
-		if strings.HasPrefix(k, "FUNDI_") || strings.HasPrefix(k, "PI_CONTROLLER_") {
+		if strings.HasPrefix(k, "RAFIKI_") || strings.HasPrefix(k, "PI_CONTROLLER_") {
 			continue
 		}
 		out[k] = kv[eq+1:]
@@ -272,7 +274,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		if !ok {
 			return fmt.Errorf("--preset: unknown preset %q (available: %s)", presetName, availablePresets(pf))
 		}
-		// Preset model is the fallback when neither flag nor FUNDI_DEFAULT_MODEL set it.
+		// Preset model is the fallback when neither flag nor RAFIKI_DEFAULT_MODEL set it.
 		if req.Model == "" && preset.Model != "" {
 			req.Model = preset.Model
 		}

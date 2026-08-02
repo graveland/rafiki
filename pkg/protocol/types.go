@@ -96,7 +96,7 @@ const (
 	// ErrInternal is returned on unexpected controller-side errors.
 	ErrInternal = "internal"
 	// ErrNoAgentDB is returned by ctrl_conversation_* commands when the
-	// daemon has no agent database configured (FUNDI_AGENT_DB unset).
+	// daemon has no agent database configured (RAFIKI_DB unset).
 	ErrNoAgentDB = "no_agent_db"
 	// ErrPayloadTooLarge is returned by ctrl_conversation_export when the
 	// marshaled transcript would exceed the maximum response frame size.

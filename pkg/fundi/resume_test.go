@@ -17,7 +17,7 @@ import (
 // TestResumeBootTimeOrphanRepair is Task 15's Requirement 1: a
 // DB-backed conversation reattached via the same external ref across a
 // process restart (ctrl_resume re-execs the agent with the same
-// PI_CONTROLLER_CHILD_ID, and --ref defaults to it) can carry a dangling
+// RAFIKI_CHILD_ID, and --ref defaults to it) can carry a dangling
 // tool_use left by a PREVIOUS process that crashed or was killed mid-turn.
 // Config.BuildEngine must repair it once, at boot, before the reattached
 // engine ever executes a turn - distinct from runTurn's own abort-path

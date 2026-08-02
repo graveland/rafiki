@@ -47,21 +47,21 @@ help: ## Display this help.
 # pointed at a local rafiki keeps working, and pi/claude children get capture,
 # failover and model resolution without a second process to start.
 #
-# FUNDI_PROXY_TOKEN=dev makes the face accept the same token `make claude` sends.
-# The daemon also mints a per-boot token for its own children; this is the extra
-# one for humans and tools, which cannot know a per-boot secret.
+# RAFIKI_SERVE_TOKEN=dev makes the face accept the same token `make claude`
+# sends as RAFIKI_TOKEN. The daemon also mints a per-boot token for its own
+# children; this is the extra one for humans and tools, which cannot know a
+# per-boot secret.
 #
-# FUNDI_AGENT_DB is what makes turns land in the conversations schema, for
-# proxied children and in-process agent children alike. It falls back to
-# RAFIKI_DB from .env so one DSN configures both.
+# RAFIKI_DB is what makes turns land in the conversations schema, for
+# proxied children and in-process agent children alike — the server's own DSN
+# and the agent runtime's are the same variable, sourced straight from .env.
 #
 # Note this does NOT migrate, where the old standalone `rafiki serve --dev` did:
 # run `go run ./cmd/fundid migrate` once against a fresh database.
 .PHONY: run
 run: ## Run fundid in the foreground, serving the proxy face on :8035.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	export FUNDI_AGENT_DB="$${FUNDI_AGENT_DB:-$${RAFIKI_DB}}"; \
-	export FUNDI_PROXY_TOKEN="$${FUNDI_PROXY_TOKEN:-dev}"; \
+	export RAFIKI_SERVE_TOKEN="$${RAFIKI_SERVE_TOKEN:-dev}"; \
 	go run ./cmd/fundid
 
 # NOTE (merge): fundi's `build` also depended on build-attach. It no longer
@@ -108,7 +108,7 @@ build-attach: $(PI_MODULES) $(PI_DIST) ## Bundle the fundi-attach TUI binary (re
 # paths — this used to hand-roll its own shell guesses and got all four of
 # these wrong: it hardcoded ~/.config/fundi ignoring $XDG_CONFIG_HOME, printed
 # the literal unexpanded "~" instead of an actual path, read the invoking
-# shell's $FUNDI_* values rather than what the daemon itself resolves, and
+# shell's $RAFIKI_* values rather than what the daemon itself resolves, and
 # never mentioned presets.json at all. Shelling out to the built binary's own
 # -h output means this can never drift from the code again. Depends on
 # build-daemon (not build-cli): `fundid`, not `fundi`, is the process that
@@ -116,7 +116,7 @@ build-attach: $(PI_MODULES) $(PI_DIST) ## Bundle the fundi-attach TUI binary (re
 .PHONY: print-config
 print-config: build-daemon ## Show the resolved fundi config paths (shells out to fundid -h).
 	@$(BIN_DIR)/$(DAEMON_BIN) -h | awk '/^  socket /,/^  mcp /'
-	@printf "  %-12s %s\n" "agent db" "$${FUNDI_AGENT_DB:-<unset — NO COST DATA>}"
+	@printf "  %-12s %s\n" "agent db" "$${RAFIKI_DB:-<unset — NO COST DATA>}"
 
 # Interactive by default; pass extra flags via ARGS, e.g.:
 #   make claude ARGS='-p "what changed today"'
@@ -201,7 +201,7 @@ install: build ## Install fundid + fundi (+ fundi-attach if built) to $(DESTDIR)
 #
 # `service restart`, deliberately NOT `service install`. Install rewrites the
 # plist from a template carrying only HOME and PATH (cmd/fundi/service_darwin.go),
-# so it silently drops any hand-added environment. FUNDI_AGENT_DB is the one
+# so it silently drops any hand-added environment. RAFIKI_DB is the one
 # that matters: lose it and agent conversations go back to in-memory with no
 # per-turn cost recorded anywhere, and the only symptom is a "mem-" session id
 # where a UUIDv7 should be.

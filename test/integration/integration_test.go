@@ -139,7 +139,24 @@ func bootDaemon(t *testing.T) *daemon {
 		"XDG_RUNTIME_DIR="+homeDir,
 		"XDG_STATE_HOME="+homeDir,
 		"XDG_DATA_HOME="+homeDir,
-		"PI_BINARY="+fakePiPath,
+		// The daemon resolves an unset per-request pi binary via
+		// paths.Get(paths.PiBinary) — RAFIKI_PI_BINARY. (It used to be the
+		// bare, pre-rename PI_BINARY, honoured only through the now-deleted
+		// deprecation fallback; that stopped working the moment the fallback
+		// did, silently sending spawnChild through exec.LookPath("pi") — a
+		// real pi binary if one happens to be on $PATH — instead of this
+		// fake stub.)
+		"RAFIKI_PI_BINARY="+fakePiPath,
+		// This suite is designed around an in-memory conversation store —
+		// nothing here asserts against a real database, and everything it
+		// spawns must stay disposable. RAFIKI_DB used to be a different name
+		// (FUNDI_AGENT_DB) than the one developers set in .env for `make
+		// test`'s RAFIKI_DB-gated DB tests, so the two could never collide.
+		// The rename merged them: one real name now serves both purposes,
+		// so a developer's ambient RAFIKI_DB (inherited via os.Environ()
+		// above) would otherwise silently point this throwaway daemon at
+		// their real conversations database. Clear it explicitly.
+		"RAFIKI_DB=",
 	)
 	// Uncomment to stream daemon logs during debugging:
 	// cmd.Stderr = os.Stderr

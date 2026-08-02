@@ -46,16 +46,16 @@ type serviceSpec struct {
 	SkippedEnv []string
 }
 
-// daemonEnvVars are the FUNDI_* variables that configure the DAEMON, and so
+// daemonEnvVars are the RAFIKI_* variables that configure the DAEMON, and so
 // must be captured into the service definition at install time.
 //
 // These are documented as daemon-environment-only: `fundi create --forward-env`
 // forwards the caller's environment to a child, but collectCallerEnv strips
-// every FUNDI_* key first, so exporting them in an interactive shell does
+// every RAFIKI_* key first, so exporting them in an interactive shell does
 // nothing at all. launchd and systemd do not inherit a login shell either. The
 // unit is therefore the only place they can be set — and before this they were
 // not templated, so `service install` rewrote the unit with only HOME and PATH
-// and silently dropped anything added by hand. FUNDI_AGENT_DB is the one that
+// and silently dropped anything added by hand. RAFIKI_DB is the one that
 // hurts: losing it reverts agent conversations to in-memory with no per-turn
 // cost recorded anywhere, and the only visible symptom is a "mem-" session id
 // where a UUIDv7 belongs.
@@ -67,14 +67,15 @@ type serviceSpec struct {
 //   - paths.AttachTail, paths.NoAutoInstallHelpers — read by the TUI and by
 //     `fundi create` respectively, i.e. client-side. They reach those from the
 //     user's own shell and have no business in the daemon's unit.
-//   - ANTHROPIC_API_KEY / OPENROUTER_API_KEY / paths.ProxyToken — unit files
-//     are world-readable (0644). Credentials belong in the environment file
-//     (paths.ServiceEnvFile), which the daemon reads at startup and which can
-//     be 0600. Note ProxyURL and ProxyKinds ARE captured: a URL and a list of
-//     kinds are not secrets, and having them in the unit means the routing is
-//     visible to anyone reading the service definition.
+//   - ANTHROPIC_API_KEY / OPENROUTER_API_KEY / paths.Token / paths.ServeToken —
+//     unit files are world-readable (0644). Credentials belong in the
+//     environment file (paths.ServiceEnvFile), which the daemon reads at
+//     startup and which can be 0600. Note paths.URL and paths.ProxyKinds ARE
+//     captured: a URL and a list of kinds are not secrets, and having them in
+//     the unit means the routing is visible to anyone reading the service
+//     definition.
 var daemonEnvVars = []string{
-	paths.AgentDB,
+	paths.DB,
 	paths.Socket,
 	paths.Instructions,
 	paths.SkillsDirsEnv,
@@ -84,7 +85,7 @@ var daemonEnvVars = []string{
 	paths.DefaultLabels,
 	paths.GraceHours,
 	paths.PiBinary,
-	paths.ProxyURL,
+	paths.URL,
 	paths.ProxyKinds,
 }
 
@@ -92,7 +93,7 @@ var daemonEnvVars = []string{
 // os.Environ "K=V" form), plus the names it had to skip.
 //
 // Unset and empty variables are omitted rather than written through: an empty
-// FUNDI_AGENT_DB is not the same as an absent one to the daemon's "is
+// RAFIKI_DB is not the same as an absent one to the daemon's "is
 // persistence configured" check, and writing one would turn a missing export
 // into a configured-but-broken DSN.
 //
@@ -261,7 +262,7 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	} else {
 		fmt.Printf("No %s in this shell's environment — agent conversations will be\n"+
 			"in-memory and no per-turn cost will be recorded. Export it (or source\n"+
-			"your .env) and re-run `fundi service install` to bake it in.\n", paths.AgentDB)
+			"your .env) and re-run `fundi service install` to bake it in.\n", paths.DB)
 	}
 	if len(spec.SkippedEnv) > 0 {
 		fmt.Printf("\nNot baked in (a unit file cannot hold a newline): %s\n"+

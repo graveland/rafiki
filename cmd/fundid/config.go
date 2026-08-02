@@ -61,8 +61,8 @@ func parseDaemonFlags(args []string) (daemonFlags, error) {
 	var f daemonFlags
 	fs := flag.NewFlagSet("fundid", flag.ContinueOnError)
 	fs.StringVar(&f.Config, "config", "", "config file (named client tokens, openai routes, default model)")
-	fs.StringVar(&f.Listen, "listen", "", "proxy face listen address (overrides FUNDI_PROXY_LISTEN)")
-	fs.StringVar(&f.DB, "db", "", "postgres DSN (overrides FUNDI_AGENT_DB)")
+	fs.StringVar(&f.Listen, "listen", "", "proxy face listen address (overrides RAFIKI_PROXY_LISTEN)")
+	fs.StringVar(&f.DB, "db", "", "postgres DSN (overrides RAFIKI_DB)")
 	fs.BoolVar(&f.Dev, "dev", false, "dev mode: auto-migrate the schema, accept the token \"dev\"")
 	if err := fs.Parse(args); err != nil {
 		return f, err

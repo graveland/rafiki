@@ -110,7 +110,7 @@ func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
 // under its own state directory so Forget can find it deterministically.
 func SpillDir(ref string) string { return filepath.Join(CacheDir(), "spill", ref) }
 
-// InstructionsFile is the user-global instruction file: $FUNDI_INSTRUCTIONS,
+// InstructionsFile is the user-global instruction file: $RAFIKI_INSTRUCTIONS,
 // else <ConfigDir>/instructions.md. Deliberately not ~/.claude/CLAUDE.md —
 // that directory belongs to Claude Code, and fundi reads its own configuration
 // from its own directory. Point the variable at a Claude profile to use one.
@@ -121,7 +121,7 @@ func InstructionsFile() string {
 	return filepath.Join(ConfigDir(), "instructions.md")
 }
 
-// SkillsDirs is the ordered skill search path: $FUNDI_SKILLS_DIRS split on the
+// SkillsDirs is the ordered skill search path: $RAFIKI_SKILLS_DIRS split on the
 // OS path-list separator, else [<ConfigDir>/skills]. Order is
 // lowest-to-highest precedence, matching skills.DiscoverSkills. Empty segments
 // are dropped so a leading, trailing, or doubled separator is not read as the
@@ -129,7 +129,7 @@ func InstructionsFile() string {
 //
 // Deliberately not ~/.claude/skills — that directory belongs to Claude Code,
 // and fundi reads its own configuration from its own directory. Point
-// $FUNDI_SKILLS_DIRS at a Claude skills tree (or a plugin cache) to use one.
+// $RAFIKI_SKILLS_DIRS at a Claude skills tree (or a plugin cache) to use one.
 // This only covers the user-global dir: a per-project <cwd>/.claude/skills is
 // still searched by cmd/fundid/agent.go's assembleSkillDirs, alongside
 // fundi's own <cwd>/.fundi/skills, so existing per-repo skills keep working.
@@ -154,7 +154,7 @@ func SkillsDirs() []string {
 // ~/.pi/agent/fundi-presets.json — fundi's own file inside pi's directory.
 func PresetsFile() string { return filepath.Join(ConfigDir(), "presets.json") }
 
-// GlobalMCPConfig is the machine-wide .mcp.json: $FUNDI_MCP_CONFIG, else
+// GlobalMCPConfig is the machine-wide .mcp.json: $RAFIKI_MCP_CONFIG, else
 // <ConfigDir>/mcp.json. The per-cwd .mcp.json remains the primary source and
 // takes precedence; this is the fallback for servers you want everywhere.
 func GlobalMCPConfig() string {

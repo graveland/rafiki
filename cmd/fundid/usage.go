@@ -53,8 +53,8 @@ Usage:
 
 Daemon flags:
   -config string   config file (named client tokens, openai routes, default model)
-  -listen string   proxy face listen address (overrides FUNDI_PROXY_LISTEN)
-  -db string       postgres DSN (overrides FUNDI_AGENT_DB)
+  -listen string   proxy face listen address (overrides RAFIKI_PROXY_LISTEN)
+  -db string       postgres DSN (overrides RAFIKI_DB)
   -dev             dev mode: auto-migrate the schema, accept the token "dev"
 
 The command-line client is a separate binary, `+"`fundi`"+`.
@@ -79,9 +79,9 @@ variables disagree with the daemon's:
 	fmt.Fprintf(w, "  %-12s %s\n", "presets", paths.PresetsFile())
 	fmt.Fprintf(w, "  %-12s %s\n", "mcp", paths.GlobalMCPConfig())
 	fmt.Fprint(w, `
-$FUNDI_SOCKET overrides the socket path for both the daemon's clients
-and any child it spawns. $FUNDI_INSTRUCTIONS, $FUNDI_SKILLS_DIRS, and
-$FUNDI_MCP_CONFIG override the instructions/skills/mcp paths above.
+$RAFIKI_SOCKET overrides the socket path for both the daemon's clients
+and any child it spawns. $RAFIKI_INSTRUCTIONS, $RAFIKI_SKILLS_DIRS, and
+$RAFIKI_MCP_CONFIG override the instructions/skills/mcp paths above.
 `)
 }
 
@@ -120,9 +120,9 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.Var(&f.skillsDir, "skills-dir", "additional skills directory (repeatable)")
 	fs.StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")
 	fs.BoolVar(&f.noSkills, "no-skills", false, "disable skill discovery and the skill tool entirely")
-	fs.StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $FUNDI_MCP_CONFIG or <ConfigDir>/mcp.json)")
+	fs.StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $RAFIKI_MCP_CONFIG or <ConfigDir>/mcp.json)")
 	fs.StringVar(&f.ref, "ref", paths.Get(paths.ChildID), "external ref correlating the conversation across restarts")
-	fs.StringVar(&f.db, "db", paths.Get(paths.AgentDB), "postgres url for conversation persistence (empty: in-memory)")
+	fs.StringVar(&f.db, "db", paths.Get(paths.DB), "postgres url for conversation persistence (empty: in-memory)")
 	fs.StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: <XDG_CACHE_HOME>/fundi/spill/<ref>)")
 	fs.StringVar(&f.name, "name", "", "session name reported through get_state")
 	fs.StringVar(&f.fakeTurns, "fake-turns", "", "hidden test seam: path to a LoadFakeSender scripted-turns file")
@@ -134,7 +134,7 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 // child, in precedence order: an explicit --mcp-config value always wins;
 // otherwise <cwd>/.mcp.json if it exists (a project's own MCP servers must
 // win over a machine-wide default); otherwise paths.GlobalMCPConfig() (Task
-// A2's $FUNDI_MCP_CONFIG-or-<ConfigDir>/mcp.json fallback, unused until this
+// A2's $RAFIKI_MCP_CONFIG-or-<ConfigDir>/mcp.json fallback, unused until this
 // wiring).
 //
 // The returned path is not guaranteed to exist when it comes from the cwd or

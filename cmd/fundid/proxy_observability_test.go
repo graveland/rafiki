@@ -14,7 +14,7 @@ import (
 // The face must expose /metrics and /healthz WITHOUT a token: scrapers and
 // probes do not carry client credentials. Only the LLM faces require auth.
 func TestProxyFace_MetricsAndHealthzAreUnauthenticated(t *testing.T) {
-	t.Setenv("FUNDI_PROXY_LISTEN", "127.0.0.1:0")
+	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -45,7 +45,7 @@ func TestProxyFace_MetricsAndHealthzAreUnauthenticated(t *testing.T) {
 // An LLM face still requires a token — /metrics being open must not have
 // opened everything else.
 func TestProxyFace_MessagesStillRequiresToken(t *testing.T) {
-	t.Setenv("FUNDI_PROXY_LISTEN", "127.0.0.1:0")
+	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,7 +83,7 @@ func TestProxyFace_MessagesStillRequiresToken(t *testing.T) {
 // which is the one thing that can only come from OUR middleware refusing the
 // token, never from an upstream response.
 func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
-	t.Setenv("FUNDI_PROXY_LISTEN", "127.0.0.1:0")
+	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,7 +121,7 @@ func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
 // must fail at startup, loudly, naming the offending key — not resolve the
 // collision quietly in either direction.
 func TestStartProxyFace_ReservedChildTokenNameIsRejected(t *testing.T) {
-	t.Setenv("FUNDI_PROXY_LISTEN", "127.0.0.1:0")
+	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
 	ctx, cancel := context.WithCancel(context.Background())

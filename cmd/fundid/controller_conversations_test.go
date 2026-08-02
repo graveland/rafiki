@@ -13,7 +13,7 @@ import (
 )
 
 // TestIntegration_CtrlConversationStats_NoAgentDB boots the controller with a
-// nil pool — matching production when FUNDI_AGENT_DB is unset — and confirms
+// nil pool — matching production when RAFIKI_DB is unset — and confirms
 // ctrl_conversation_stats answers no_agent_db instead of panicking on the nil
 // pool. testSocketDir is defined in integration_test.go (same package).
 func TestIntegration_CtrlConversationStats_NoAgentDB(t *testing.T) {

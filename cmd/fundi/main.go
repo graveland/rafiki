@@ -29,7 +29,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true, // main() prints errors itself
 	}
 
-	root.PersistentFlags().String("socket", "", "controller socket path (default: $FUNDI_SOCKET, else the XDG runtime path)")
+	root.PersistentFlags().String("socket", "", "controller socket path (default: $RAFIKI_SOCKET, else the XDG runtime path)")
 	root.PersistentFlags().String("output", "auto", "output format for list/tail: auto|json|table (other commands always emit JSON)")
 	root.PersistentFlags().String("color", "auto", "color output: auto|always|never")
 

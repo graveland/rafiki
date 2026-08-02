@@ -81,7 +81,7 @@ type Controller interface {
 
 	// Conversation insights, backed by the daemon's agent database.
 	// Implementations return a *ControllerError with Code: protocol.ErrNoAgentDB
-	// when no database is configured (FUNDI_AGENT_DB unset).
+	// when no database is configured (RAFIKI_DB unset).
 	ConversationStats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error)
 	ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error)
 	ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error)

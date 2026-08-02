@@ -72,7 +72,7 @@ func TestLoadConfig_MalformedYAMLIsAnError(t *testing.T) {
 // default_model precedence: the config file wins when set; an empty config
 // value falls through to the environment variable.
 func TestResolveDefaultModel_ConfigWinsOverEnv(t *testing.T) {
-	t.Setenv("FUNDI_DEFAULT_MODEL", "env-model")
+	t.Setenv("RAFIKI_DEFAULT_MODEL", "env-model")
 	got := resolveDefaultModel(Config{DefaultModel: "config-model"})
 	if got != "config-model" {
 		t.Errorf("resolveDefaultModel = %q, want config-model (config should win over env)", got)
@@ -80,7 +80,7 @@ func TestResolveDefaultModel_ConfigWinsOverEnv(t *testing.T) {
 }
 
 func TestResolveDefaultModel_FallsThroughToEnv(t *testing.T) {
-	t.Setenv("FUNDI_DEFAULT_MODEL", "env-model")
+	t.Setenv("RAFIKI_DEFAULT_MODEL", "env-model")
 	got := resolveDefaultModel(Config{})
 	if got != "env-model" {
 		t.Errorf("resolveDefaultModel = %q, want env-model (empty config should fall through to env)", got)

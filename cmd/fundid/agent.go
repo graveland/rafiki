@@ -50,8 +50,8 @@ type agentFlags struct {
 }
 
 // parseAgentFlags parses the fundid agent flag set. It is a pure function of
-// args plus the environment defaults ($FUNDI_CHILD_ID for --ref,
-// $FUNDI_AGENT_DB for --db) so it can be exercised directly by tests without
+// args plus the environment defaults ($RAFIKI_CHILD_ID for --ref,
+// $RAFIKI_DB for --db) so it can be exercised directly by tests without
 // a running agent.
 func parseAgentFlags(args []string) (agentFlags, error) {
 	var f agentFlags

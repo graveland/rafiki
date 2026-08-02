@@ -40,7 +40,7 @@ pkg/client/     Go client for the daemon's socket
 pkg/bus/        event fan-out to concurrent subscribers
 pkg/ring/       bounded ring buffer for child output
 pkg/persist/    on-disk records and log dumps
-pkg/paths/      XDG path resolution and the FUNDI_* environment inventory
+pkg/paths/      XDG path resolution and the RAFIKI_* environment inventory
 pkg/skills/     skill discovery and loading
 pkg/models/     LLM model catalog enumeration
 pkg/version/    build-derived version string
@@ -183,7 +183,7 @@ pi-controller install instead of competing for its `~/.pi/run` socket:
 
 | | Default | Override |
 |---|---|---|
-| socket | `~/.local/state/fundi/controller.sock` | `$XDG_RUNTIME_DIR`, or `$FUNDI_SOCKET` |
+| socket | `~/.local/state/fundi/controller.sock` | `$XDG_RUNTIME_DIR`, or `$RAFIKI_SOCKET` |
 | records | `~/.local/share/fundi/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/fundi/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/fundi` (instructions, skills, `mcp.json`, `presets.json`) | `$XDG_CONFIG_HOME` |
@@ -197,30 +197,30 @@ pi discovers extensions.
 
 ## Environment
 
-fundi's variables are `FUNDI_`-prefixed. The pre-rename `PIC_*` and
+fundi's variables are `RAFIKI_`-prefixed. The pre-rename `PIC_*` and
 `PI_CONTROLLER_*` spellings are still accepted, with a deprecation warning.
 `pkg/paths` is the single source of truth for what fundi reads from the
 environment; `.env.example` documents each one in full.
 
 | | |
 |---|---|
-| `FUNDI_SOCKET` | override the controller socket path |
-| `FUNDI_DEFAULT_MODEL` | model used when `fundi create` gets no `--model` |
-| `FUNDI_DEFAULT_PRESET` | preset used when `--preset` is not given |
-| `FUNDI_DEFAULT_LABELS` | comma-separated `k=v` label defaults |
-| `FUNDI_NO_AUTO_INSTALL_HELPERS` | skip the `fundi-helpers` auto-install |
-| `FUNDI_ATTACH_TAIL` | scrollback the TUI replays (`-1` all, `0` none) |
-| `FUNDI_ATTACH_DEBUG` | `1` logs every event the TUI receives to stderr |
-| `FUNDI_KILL_ON_EXIT` | `1` terminates the child when a directly-invoked TUI quits |
-| `FUNDI_INSTRUCTIONS` | user-global instruction file (default `~/.config/fundi/instructions.md`) |
-| `FUNDI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/fundi/skills`) |
-| `FUNDI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/fundi/mcp.json`) |
-| `FUNDI_AGENT_DB` | postgres URL for conversation persistence; **required for cost accounting** |
+| `RAFIKI_SOCKET` | override the controller socket path |
+| `RAFIKI_DEFAULT_MODEL` | model used when `fundi create` gets no `--model` |
+| `RAFIKI_DEFAULT_PRESET` | preset used when `--preset` is not given |
+| `RAFIKI_DEFAULT_LABELS` | comma-separated `k=v` label defaults |
+| `RAFIKI_NO_AUTO_INSTALL_HELPERS` | skip the `fundi-helpers` auto-install |
+| `RAFIKI_ATTACH_TAIL` | scrollback the TUI replays (`-1` all, `0` none) |
+| `RAFIKI_ATTACH_DEBUG` | `1` logs every event the TUI receives to stderr |
+| `RAFIKI_KILL_ON_EXIT` | `1` terminates the child when a directly-invoked TUI quits |
+| `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/fundi/instructions.md`) |
+| `RAFIKI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/fundi/skills`) |
+| `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/fundi/mcp.json`) |
+| `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting** |
 
 These must reach the **daemon's** environment, not your shell's — see
 `.env.example`, which documents why and how to verify it.
 
-Once `FUNDI_AGENT_DB` is set, `fundi conversations stats|search|export` queries
+Once `RAFIKI_DB` is set, `fundi conversations stats|search|export` queries
 that persisted history through the daemon socket — no separate DB credentials
 needed on the machine running `fundi`. See `docs/agent-cli.md` for the
 DSN-direct equivalent (`fundid agent stats|search|export`), or
@@ -276,13 +276,14 @@ and pi and claude children get capture, failover and model resolution without
 a second process anyone has to remember to start. The fundi kind never uses
 it: it reaches the library in-process.
 
-The face binds **all interfaces** by default (`FUNDI_PROXY_LISTEN`, default
+The face binds **all interfaces** by default (`RAFIKI_PROXY_LISTEN`, default
 `:8035`), so other hosts on your network can use one capture store and one set
 of breakers. Auth is always required. The daemon mints a per-boot token for its
-own children; `FUNDI_PROXY_TOKEN` names an additional token for everything else,
-which is what `make run` sets to `dev` so `make claude` works. A busy port is a
-hard error rather than a fallback — the address is a contract, and silently
-landing elsewhere would mean talking to whatever *did* claim it.
+own children; `RAFIKI_SERVE_TOKEN` names an additional token for everything
+else, which is what `make run` sets to `dev` so `make claude` (which sends
+`RAFIKI_TOKEN`) works. A busy port is a hard error rather than a fallback —
+the address is a contract, and silently landing elsewhere would mean talking
+to whatever *did* claim it.
 
 Because `make run` is now the daemon, it and the installed `fundi service`
 cannot both hold the port. Use one or the other.

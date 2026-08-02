@@ -129,12 +129,12 @@ func main() {
 
 	// The agent kind's in-process children share one pool across the whole
 	// daemon (fundi.RuntimeOptions.Pool); BuildEngine/BuildRuntime never open
-	// or close one themselves. A nil pool (FUNDI_AGENT_DB unset) means every
+	// or close one themselves. A nil pool (RAFIKI_DB unset) means every
 	// agent conversation is in-memory, matching `fundid agent --db` unset.
 	var pool *pgxpool.Pool
 	dsn := flags.DB
 	if dsn == "" {
-		dsn = paths.Get(paths.AgentDB)
+		dsn = paths.Get(paths.DB)
 	}
 	if dsn != "" {
 		pool, err = pgxpool.New(baseCtx, dsn)
@@ -148,7 +148,7 @@ func main() {
 			// a failure path, ahead of the design.
 			slog.Error("agent database DSN is invalid; starting without a pool. "+
 				"Agent conversations will be in-memory and no cost data will be recorded",
-				"env", paths.AgentDB, "error", err)
+				"env", paths.DB, "error", err)
 			pool = nil
 		} else {
 			slog.Info("agent database pool opened")
@@ -162,7 +162,7 @@ func main() {
 		}
 	} else {
 		slog.Warn("no agent database configured; agent conversations are in-memory and no cost data will be recorded",
-			"env", paths.AgentDB)
+			"env", paths.DB)
 	}
 
 	// The daemon's own proxy face. pi and claude children are separate

@@ -91,7 +91,7 @@ func parseLabelFilterKeys(keys []string) ([]string, error) {
 	return keys, nil
 }
 
-// parseEnvLabels parses a comma-separated "k=v,k2=v2" string (e.g. FUNDI_DEFAULT_LABELS).
+// parseEnvLabels parses a comma-separated "k=v,k2=v2" string (e.g. RAFIKI_DEFAULT_LABELS).
 // Empty parts are silently skipped.
 func parseEnvLabels(s string) (map[string]string, error) {
 	if s == "" {

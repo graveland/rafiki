@@ -47,18 +47,18 @@ func TestParseAgentFlagsModelAndThinkingDefault(t *testing.T) {
 }
 
 func TestParseAgentFlagsRefFromEnv(t *testing.T) {
-	t.Setenv("PI_CONTROLLER_CHILD_ID", "child-123")
+	t.Setenv("RAFIKI_CHILD_ID", "child-123")
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
 	if f.ref != "child-123" {
-		t.Errorf("ref = %q, want child-123 (from $PI_CONTROLLER_CHILD_ID)", f.ref)
+		t.Errorf("ref = %q, want child-123 (from $RAFIKI_CHILD_ID)", f.ref)
 	}
 }
 
 func TestParseAgentFlagsRefExplicitFlagWins(t *testing.T) {
-	t.Setenv("PI_CONTROLLER_CHILD_ID", "child-123")
+	t.Setenv("RAFIKI_CHILD_ID", "child-123")
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--ref", "explicit-ref"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
@@ -69,13 +69,13 @@ func TestParseAgentFlagsRefExplicitFlagWins(t *testing.T) {
 }
 
 func TestParseAgentFlagsDBFromEnv(t *testing.T) {
-	t.Setenv("FUNDI_AGENT_DB", "postgres://example/db")
+	t.Setenv("RAFIKI_DB", "postgres://example/db")
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
 	if f.db != "postgres://example/db" {
-		t.Errorf("db = %q, want postgres://example/db (from $FUNDI_AGENT_DB)", f.db)
+		t.Errorf("db = %q, want postgres://example/db (from $RAFIKI_DB)", f.db)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestParseAgentFlagsNoSkillsAndNoContextFiles(t *testing.T) {
 // .fundi/skills dir comes after .claude/skills so it wins on name collision.
 func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 	t.Setenv("HOME", "/home/testuser")
-	t.Setenv("FUNDI_SKILLS_DIRS", "")
+	t.Setenv("RAFIKI_SKILLS_DIRS", "")
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
 
 	dirs := assembleSkillDirs("/work/repo", nil)
@@ -151,7 +151,7 @@ func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 }
 
 func TestAssembleSkillDirs_FlagsWinLast(t *testing.T) {
-	t.Setenv("FUNDI_SKILLS_DIRS", "/env/skills")
+	t.Setenv("RAFIKI_SKILLS_DIRS", "/env/skills")
 	dirs := assembleSkillDirs("/work/repo", []string{"/flag/skills"})
 	if dirs[len(dirs)-1] != "/flag/skills" {
 		t.Errorf("--skills-dir must have highest precedence, got %v", dirs)
@@ -182,7 +182,7 @@ func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 		t.Fatalf("WriteFile .fundi SKILL.md: %v", err)
 	}
 
-	t.Setenv("FUNDI_SKILLS_DIRS", "") // isolate from the invoking user's real config dir
+	t.Setenv("RAFIKI_SKILLS_DIRS", "") // isolate from the invoking user's real config dir
 
 	dirs := assembleSkillDirs(repo, nil)
 	skills, err := skillspkg.DiscoverSkills(dirs, nil)

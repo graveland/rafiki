@@ -40,7 +40,7 @@ type proxyFace struct {
 	srv   *http.Server
 }
 
-// defaultProxyListen is where the face binds unless FUNDI_PROXY_LISTEN says
+// defaultProxyListen is where the face binds unless RAFIKI_PROXY_LISTEN says
 // otherwise.
 //
 // Port 8035 is the one `rafiki serve` has always used, so anything already
@@ -58,7 +58,7 @@ const defaultProxyListen = ":8035"
 // childTokenName and configuredTokenName are the two token-map keys the daemon
 // assigns itself; a config file naming a client either of these would either
 // silently overwrite the per-boot child secret (every real spawned child then
-// gets rejected as "unknown token") or the FUNDI_PROXY_TOKEN slot. Both are
+// gets rejected as "unknown token") or the RAFIKI_SERVE_TOKEN slot. Both are
 // therefore reserved — see the collision check in startProxyFace.
 //
 // A later task renames "fundi-child" to "rafiki-child"; keeping it a constant
@@ -77,7 +77,7 @@ type faceOptions struct {
 	Tracer   trace.TracerProvider // nil = no-op
 	Registry *prometheus.Registry // nil = metrics not mounted
 	Config   Config               // named client tokens, openai routes, default model
-	Listen   string               // overrides FUNDI_PROXY_LISTEN when non-empty
+	Listen   string               // overrides RAFIKI_PROXY_LISTEN when non-empty
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -111,7 +111,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	if pool != nil {
 		captureStore = routing.NewCaptureStore(pool)
 	} else {
-		logger.Warn("no agent database; proxied turns will be routed but NOT captured", "env", paths.AgentDB)
+		logger.Warn("no agent database; proxied turns will be routed but NOT captured", "env", paths.DB)
 	}
 
 	llmOpts := []llm.ClientOption{
@@ -185,7 +185,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// identity, which is the one thing an environment variable cannot express.
 	// childTokenName and configuredTokenName are reserved — a config entry
 	// using either name would silently overwrite the per-boot child secret (or
-	// the FUNDI_PROXY_TOKEN slot below) and every real spawned child would
+	// the RAFIKI_SERVE_TOKEN slot below) and every real spawned child would
 	// then present the true per-boot token only to be rejected as "unknown
 	// token". That is a startup-time configuration error, not something to
 	// resolve silently in either direction.
@@ -196,14 +196,15 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		tokens[name] = tok
 	}
 
-	// When the daemon is the face (no FUNDI_PROXY_URL redirecting elsewhere),
-	// FUNDI_PROXY_TOKEN names an ADDITIONAL accepted token — for humans and
-	// tools that are not children: `rafiki claude`, an editor plugin, curl.
-	// They cannot know a per-boot secret. When FUNDI_PROXY_URL *is* set the
-	// same variable means the opposite thing, the token to send to that other
-	// host; the two never apply at once because the daemon is either serving
-	// the face or pointing away from it.
-	if extra := paths.Get(paths.ProxyToken); extra != "" && paths.Get(paths.ProxyURL) == "" {
+	// RAFIKI_SERVE_TOKEN names an ADDITIONAL token this face accepts — for
+	// humans and tools that are not children (`rafiki claude`, an editor
+	// plugin, curl). They cannot know a per-boot secret.
+	//
+	// Unconditional, unlike the variable it replaces: the old
+	// FUNDI_PROXY_TOKEN meant "accept this" when serving and "send this"
+	// when pointing away, so it needed a guard to tell which. Two names, no
+	// guard.
+	if extra := paths.Get(paths.ServeToken); extra != "" {
 		tokens[configuredTokenName] = extra
 	}
 	tokenAuth := server.NewStaticTokenAuth(tokens)
@@ -224,7 +225,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	addr := opts.Listen
 	if addr == "" {
-		addr = paths.Get("FUNDI_PROXY_LISTEN")
+		addr = paths.Get("RAFIKI_PROXY_LISTEN")
 	}
 	if addr == "" {
 		addr = defaultProxyListen
@@ -233,14 +234,14 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s (is a `rafiki serve` or another fundid already there?): %w", addr, err)
 	}
-	if offBox(addr) && paths.Get(paths.ProxyToken) == "" {
+	if offBox(addr) && paths.Get(paths.ServeToken) == "" {
 		// Reachable from the network but the only valid token is the per-boot
 		// one, which only this daemon's own children ever see. Nothing else can
 		// authenticate, so the face is off-box in name only — and the operator
 		// who opened it up plainly meant otherwise.
 		logger.Warn("proxy face is reachable off-box but no shared token is set, "+
 			"so only this daemon's own children can use it",
-			"addr", addr, "set", paths.ProxyToken, "in", paths.ServiceEnvFile())
+			"addr", addr, "set", paths.ServeToken, "in", paths.ServiceEnvFile())
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -280,7 +281,7 @@ func (f *proxyFace) Close(ctx context.Context) {
 
 // resolveDefaultModel picks the model used when a request names none: the
 // config file's default_model wins when set, otherwise the environment
-// variable (FUNDI_DEFAULT_MODEL) is the fallback, matching `rafiki serve`'s
+// variable (RAFIKI_DEFAULT_MODEL) is the fallback, matching `rafiki serve`'s
 // own config-over-env precedence.
 func resolveDefaultModel(cfg Config) string {
 	if cfg.DefaultModel != "" {

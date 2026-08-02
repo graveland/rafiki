@@ -38,7 +38,7 @@ type Client struct {
 }
 
 // Dial opens a connection to the UDS at path. If path is empty,
-// resolves to $FUNDI_SOCKET or the XDG default (see
+// resolves to $RAFIKI_SOCKET or the XDG default (see
 // DefaultSocketPath).
 func Dial(path string) (*Client, error) {
 	if path == "" {
@@ -58,8 +58,7 @@ func Dial(path string) (*Client, error) {
 }
 
 // DefaultSocketPath returns the controller socket location: an explicit
-// $FUNDI_SOCKET wins (the daemon sets it for spawned children; the old
-// PI_CONTROLLER_SOCKET is still honoured), else the
+// $RAFIKI_SOCKET wins (the daemon sets it for spawned children), else the
 // XDG runtime path. This MUST agree with the daemon's own paths.SocketPath, or
 // every client dials a socket nobody is listening on.
 func DefaultSocketPath() string {

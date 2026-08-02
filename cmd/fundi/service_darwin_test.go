@@ -66,17 +66,17 @@ func TestRenderPlist_Format(t *testing.T) {
 func TestRenderPlist_IncludesCapturedEnv(t *testing.T) {
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{
-		"FUNDI_AGENT_DB": "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
-		"FUNDI_SOCKET":   "/tmp/fundi.sock",
+		"RAFIKI_DB":     "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
+		"RAFIKI_SOCKET": "/tmp/fundi.sock",
 	}
 	out, err := renderServiceConfig(spec)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
 	for _, want := range []string{
-		"<key>FUNDI_AGENT_DB</key>",
+		"<key>RAFIKI_DB</key>",
 		"<string>postgres://postgres@localhost:5432/rafiki?sslmode=disable</string>",
-		"<key>FUNDI_SOCKET</key>",
+		"<key>RAFIKI_SOCKET</key>",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("plist missing %q\n---\n%s", want, out)
@@ -90,7 +90,7 @@ func TestRenderPlist_IncludesCapturedEnv(t *testing.T) {
 func TestRenderPlist_EscapesXML(t *testing.T) {
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{
-		"FUNDI_AGENT_DB": "postgres://h/db?sslmode=disable&application_name=fundi<1>",
+		"RAFIKI_DB": "postgres://h/db?sslmode=disable&application_name=fundi<1>",
 	}
 	out, err := renderServiceConfig(spec)
 	if err != nil {
@@ -117,8 +117,8 @@ func TestRenderPlist_EscapesXML(t *testing.T) {
 func TestRenderPlist_Deterministic(t *testing.T) {
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{
-		"FUNDI_AGENT_DB": "db", "FUNDI_SOCKET": "/s", "FUNDI_PI_BINARY": "/pi",
-		"FUNDI_DEFAULT_MODEL": "m", "FUNDI_MCP_CONFIG": "/c",
+		"RAFIKI_DB": "db", "RAFIKI_SOCKET": "/s", "RAFIKI_PI_BINARY": "/pi",
+		"RAFIKI_DEFAULT_MODEL": "m", "RAFIKI_MCP_CONFIG": "/c",
 	}
 	first, err := renderServiceConfig(spec)
 	if err != nil {
@@ -142,8 +142,8 @@ func TestRenderPlist_EmptyExtraEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
-	if strings.Contains(out, "FUNDI_") {
-		t.Errorf("unexpected FUNDI_ key with no captured env\n---\n%s", out)
+	if strings.Contains(out, "RAFIKI_") {
+		t.Errorf("unexpected RAFIKI_ key with no captured env\n---\n%s", out)
 	}
 	if err := xml.Unmarshal([]byte(out), new(any)); err != nil {
 		t.Errorf("not well-formed XML: %v", err)

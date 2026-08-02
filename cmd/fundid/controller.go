@@ -87,7 +87,7 @@ type Controller struct {
 //
 // dumper may be nil; when nil, no log dumps are written on child exit.
 // The grace window defaults to 7 days but can be overridden with the
-// FUNDI_GRACE_HOURS environment variable (PI_CONTROLLER_GRACE_HOURS still works).
+// RAFIKI_GRACE_HOURS environment variable.
 //
 // pool is the shared database pool for in-process agent children (nil means
 // in-memory conversations); baseCtx is the daemon's own context, threaded into
@@ -466,7 +466,7 @@ func translateInsightsErr(err error) error {
 	if errors.Is(err, local.ErrNoPool) {
 		return &control.ControllerError{
 			Code:    protocol.ErrNoAgentDB,
-			Message: "no agent database configured (FUNDI_AGENT_DB unset); set it and run `fundi service install`",
+			Message: "no agent database configured (RAFIKI_DB unset); set it and run `fundi service install`",
 		}
 	}
 	if errors.Is(err, insights.ErrNotFound) {
@@ -986,7 +986,7 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		// ResumeSession stays empty on purpose: an agent child has no pi
 		// session file to reopen. It reattaches its stored conversation by
 		// external ref instead - `fundid agent --ref` defaults to
-		// $FUNDI_CHILD_ID, and resume reuses the same childID, so the
+		// $RAFIKI_CHILD_ID, and resume reuses the same childID, so the
 		// conversation is found without a resume token.
 		req.Provider = ""
 		req.Model = joinModel(snap.Provider, snap.Model)
@@ -2584,11 +2584,11 @@ func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath str
 // put a network hop in front of a library call.
 func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []string {
 	url, token := c.proxyURL, c.proxyToken
-	// An explicit FUNDI_PROXY_URL points children at an external rafiki
+	// An explicit RAFIKI_URL points children at an external rafiki
 	// instead of the embedded face — useful for aiming a whole machine at a
 	// shared capture server. Its token comes from the environment file.
-	if v := paths.Get(paths.ProxyURL); v != "" {
-		url, token = v, paths.Get(paths.ProxyToken)
+	if v := paths.Get(paths.URL); v != "" {
+		url, token = v, paths.Get(paths.Token)
 	}
 	if url == "" || req.Kind == protocol.KindFundi || !proxyRoutesKind(req.Kind) {
 		return nil
@@ -2618,14 +2618,14 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 		// fundi-helpers extension, which is where its provider override is
 		// registered.
 		return []string{
-			paths.ProxyURL + "=" + url,
-			paths.ProxyToken + "=" + token,
-			"FUNDI_SESSION_REF=" + childID,
+			paths.URL + "=" + url,
+			paths.Token + "=" + token,
+			"RAFIKI_SESSION_REF=" + childID,
 		}
 	}
 }
 
-// proxyRoutesKind reports whether kind is listed in FUNDI_PROXY_KINDS, which
+// proxyRoutesKind reports whether kind is listed in RAFIKI_PROXY_KINDS, which
 // defaults to "pi,claude".
 func proxyRoutesKind(kind string) bool {
 	kinds := splitComma(paths.Get(paths.ProxyKinds))

@@ -28,7 +28,7 @@ import (
 // the second caller, so BOTH calls return (SpawnResult, nil), which fails
 // the "successes == 1" and "rejections == 1" assertions below. Separately,
 // the process-count assertion counts actual forked OS processes via
-// FUNDI_TEST_SPAWN_LOG, written by fake-pi.sh itself (an observation outside
+// RAFIKI_TEST_SPAWN_LOG, written by fake-pi.sh itself (an observation outside
 // the controller's own bookkeeping) — so even a partial fix that only
 // serializes the store mutation but still calls child.Spawn for both
 // callers (i.e. a guard placed after the fork instead of around it) would
@@ -52,7 +52,7 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	// in this package resumes past its own Parallel() call and starts
 	// spawning, so no other test's fake-pi invocations land in this log.
 	spawnLog := filepath.Join(t.TempDir(), "spawns.log")
-	t.Setenv("FUNDI_TEST_SPAWN_LOG", spawnLog)
+	t.Setenv("RAFIKI_TEST_SPAWN_LOG", spawnLog)
 
 	const n = 2
 	start := make(chan struct{})
@@ -133,7 +133,7 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	waitForExited(t, ctrl.st, id, 5*time.Second)
 
 	spawnLog := filepath.Join(t.TempDir(), "spawns.log")
-	t.Setenv("FUNDI_TEST_SPAWN_LOG", spawnLog)
+	t.Setenv("RAFIKI_TEST_SPAWN_LOG", spawnLog)
 
 	const n = 2
 	start := make(chan struct{})
@@ -207,7 +207,7 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 	waitForExited(t, ctrl.st, id, 5*time.Second)
 
 	spawnLog := filepath.Join(t.TempDir(), "spawns.log")
-	t.Setenv("FUNDI_TEST_SPAWN_LOG", spawnLog)
+	t.Setenv("RAFIKI_TEST_SPAWN_LOG", spawnLog)
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup

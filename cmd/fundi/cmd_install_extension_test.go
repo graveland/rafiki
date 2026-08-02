@@ -78,7 +78,7 @@ func TestHelpersVersionCheck_NotInstalled(t *testing.T) {
 func TestEnsureHelpersInstalled_FreshInstall(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FUNDI_NO_AUTO_INSTALL_HELPERS", "")
+	t.Setenv("RAFIKI_NO_AUTO_INSTALL_HELPERS", "")
 	if err := ensureHelpersInstalled(); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestEnsureHelpersInstalled_FreshInstall(t *testing.T) {
 func TestEnsureHelpersInstalled_OptOut(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FUNDI_NO_AUTO_INSTALL_HELPERS", "1")
+	t.Setenv("RAFIKI_NO_AUTO_INSTALL_HELPERS", "1")
 	if err := ensureHelpersInstalled(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestEnsureHelpersInstalled_OptOut(t *testing.T) {
 func TestEnsureHelpersInstalled_AlreadyCurrent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FUNDI_NO_AUTO_INSTALL_HELPERS", "")
+	t.Setenv("RAFIKI_NO_AUTO_INSTALL_HELPERS", "")
 	// First install.
 	if err := ensureHelpersInstalled(); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func writeLegacyHelpers(t *testing.T, home string) string {
 func TestLegacyHelpers_NeverRemovedOnInstall(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FUNDI_NO_AUTO_INSTALL_HELPERS", "")
+	t.Setenv("RAFIKI_NO_AUTO_INSTALL_HELPERS", "")
 	legacy := writeLegacyHelpers(t, home)
 
 	if err := ensureHelpersInstalled(); err != nil {
@@ -180,7 +180,7 @@ func TestLegacyHelpers_NeverRemovedOnInstall(t *testing.T) {
 func TestLegacyHelpers_NotRemovedByRemoveFlag(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("FUNDI_NO_AUTO_INSTALL_HELPERS", "")
+	t.Setenv("RAFIKI_NO_AUTO_INSTALL_HELPERS", "")
 	legacy := writeLegacyHelpers(t, home)
 	if err := ensureHelpersInstalled(); err != nil {
 		t.Fatal(err)

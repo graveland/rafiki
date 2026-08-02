@@ -19,14 +19,14 @@ func writeEnv(t *testing.T, content string) string {
 func TestLoadEnvFile_Basics(t *testing.T) {
 	p := writeEnv(t, `# a comment
 
-FUNDI_TEST_BARE=plain
-export FUNDI_TEST_EXPORTED=exported
-FUNDI_TEST_DQ="double quoted"
-FUNDI_TEST_SQ='single quoted'
-FUNDI_TEST_EMPTY=
-FUNDI_TEST_DSN=postgres://u@h:5432/db?sslmode=disable&application_name=fundi
+RAFIKI_TEST_BARE=plain
+export RAFIKI_TEST_EXPORTED=exported
+RAFIKI_TEST_DQ="double quoted"
+RAFIKI_TEST_SQ='single quoted'
+RAFIKI_TEST_EMPTY=
+RAFIKI_TEST_DSN=postgres://u@h:5432/db?sslmode=disable&application_name=fundi
 `)
-	for _, k := range []string{"FUNDI_TEST_BARE", "FUNDI_TEST_EXPORTED", "FUNDI_TEST_DQ", "FUNDI_TEST_SQ", "FUNDI_TEST_EMPTY", "FUNDI_TEST_DSN"} {
+	for _, k := range []string{"RAFIKI_TEST_BARE", "RAFIKI_TEST_EXPORTED", "RAFIKI_TEST_DQ", "RAFIKI_TEST_SQ", "RAFIKI_TEST_EMPTY", "RAFIKI_TEST_DSN"} {
 		t.Setenv(k, "") // registers cleanup; unset below so the file applies
 		os.Unsetenv(k)  //nolint:errcheck // best-effort
 	}
@@ -42,14 +42,14 @@ FUNDI_TEST_DSN=postgres://u@h:5432/db?sslmode=disable&application_name=fundi
 		t.Errorf("applied %d vars, want 6: %v", len(applied), applied)
 	}
 	for k, want := range map[string]string{
-		"FUNDI_TEST_BARE":     "plain",
-		"FUNDI_TEST_EXPORTED": "exported",
-		"FUNDI_TEST_DQ":       "double quoted",
-		"FUNDI_TEST_SQ":       "single quoted",
-		"FUNDI_TEST_EMPTY":    "",
+		"RAFIKI_TEST_BARE":     "plain",
+		"RAFIKI_TEST_EXPORTED": "exported",
+		"RAFIKI_TEST_DQ":       "double quoted",
+		"RAFIKI_TEST_SQ":       "single quoted",
+		"RAFIKI_TEST_EMPTY":    "",
 		// An unquoted DSN keeps its query string verbatim — no shell-style
 		// expansion, so & and ? are ordinary characters.
-		"FUNDI_TEST_DSN": "postgres://u@h:5432/db?sslmode=disable&application_name=fundi",
+		"RAFIKI_TEST_DSN": "postgres://u@h:5432/db?sslmode=disable&application_name=fundi",
 	} {
 		if got := os.Getenv(k); got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
@@ -62,52 +62,52 @@ FUNDI_TEST_DSN=postgres://u@h:5432/db?sslmode=disable&application_name=fundi
 // one. Both spellings must produce a real newline.
 func TestLoadEnvFile_Newlines(t *testing.T) {
 	t.Run("escape sequence", func(t *testing.T) {
-		p := writeEnv(t, "FUNDI_TEST_HDRS=\"X-A: 1\\nX-B: 2\"\n")
-		os.Unsetenv("FUNDI_TEST_HDRS") //nolint:errcheck
-		t.Setenv("FUNDI_TEST_HDRS", "")
-		os.Unsetenv("FUNDI_TEST_HDRS") //nolint:errcheck
+		p := writeEnv(t, "RAFIKI_TEST_HDRS=\"X-A: 1\\nX-B: 2\"\n")
+		os.Unsetenv("RAFIKI_TEST_HDRS") //nolint:errcheck
+		t.Setenv("RAFIKI_TEST_HDRS", "")
+		os.Unsetenv("RAFIKI_TEST_HDRS") //nolint:errcheck
 		if _, _, err := LoadEnvFile(p); err != nil {
 			t.Fatalf("LoadEnvFile: %v", err)
 		}
-		if got := os.Getenv("FUNDI_TEST_HDRS"); got != "X-A: 1\nX-B: 2" {
+		if got := os.Getenv("RAFIKI_TEST_HDRS"); got != "X-A: 1\nX-B: 2" {
 			t.Errorf("got %q, want a real newline between the headers", got)
 		}
 	})
 
 	t.Run("literal multi-line value", func(t *testing.T) {
-		p := writeEnv(t, "FUNDI_TEST_HDRS2=\"X-A: 1\nX-B: 2\"\nFUNDI_TEST_AFTER=after\n")
-		t.Setenv("FUNDI_TEST_HDRS2", "")
-		os.Unsetenv("FUNDI_TEST_HDRS2") //nolint:errcheck
-		t.Setenv("FUNDI_TEST_AFTER", "")
-		os.Unsetenv("FUNDI_TEST_AFTER") //nolint:errcheck
+		p := writeEnv(t, "RAFIKI_TEST_HDRS2=\"X-A: 1\nX-B: 2\"\nRAFIKI_TEST_AFTER=after\n")
+		t.Setenv("RAFIKI_TEST_HDRS2", "")
+		os.Unsetenv("RAFIKI_TEST_HDRS2") //nolint:errcheck
+		t.Setenv("RAFIKI_TEST_AFTER", "")
+		os.Unsetenv("RAFIKI_TEST_AFTER") //nolint:errcheck
 		if _, _, err := LoadEnvFile(p); err != nil {
 			t.Fatalf("LoadEnvFile: %v", err)
 		}
-		if got := os.Getenv("FUNDI_TEST_HDRS2"); got != "X-A: 1\nX-B: 2" {
+		if got := os.Getenv("RAFIKI_TEST_HDRS2"); got != "X-A: 1\nX-B: 2" {
 			t.Errorf("got %q, want the two lines joined by a newline", got)
 		}
 		// Parsing must resume normally after the multi-line value closes.
-		if got := os.Getenv("FUNDI_TEST_AFTER"); got != "after" {
+		if got := os.Getenv("RAFIKI_TEST_AFTER"); got != "after" {
 			t.Errorf("assignment after a multi-line value was lost: %q", got)
 		}
 	})
 }
 
-// The real environment wins, so `FUNDI_AGENT_DB=... fundid` still overrides the
+// The real environment wins, so `RAFIKI_DB=... fundid` still overrides the
 // file and a service manager's own settings are not silently replaced.
 func TestLoadEnvFile_ExistingEnvWins(t *testing.T) {
-	p := writeEnv(t, "FUNDI_TEST_PRESET=from-file\n")
-	t.Setenv("FUNDI_TEST_PRESET", "from-environment")
+	p := writeEnv(t, "RAFIKI_TEST_PRESET=from-file\n")
+	t.Setenv("RAFIKI_TEST_PRESET", "from-environment")
 
 	applied, _, err := LoadEnvFile(p)
 	if err != nil {
 		t.Fatalf("LoadEnvFile: %v", err)
 	}
-	if got := os.Getenv("FUNDI_TEST_PRESET"); got != "from-environment" {
+	if got := os.Getenv("RAFIKI_TEST_PRESET"); got != "from-environment" {
 		t.Errorf("file overrode the real environment: got %q", got)
 	}
 	for _, k := range applied {
-		if k == "FUNDI_TEST_PRESET" {
+		if k == "RAFIKI_TEST_PRESET" {
 			t.Error("reported applying a variable that was already set")
 		}
 	}
@@ -125,9 +125,9 @@ func TestLoadEnvFile_MissingIsNotAnError(t *testing.T) {
 // One bad line must not cost the operator every good one — the failure mode
 // pkg/models' silent nil-on-parse-error demonstrates.
 func TestLoadEnvFile_MalformedLinesWarnButDoNotAbort(t *testing.T) {
-	p := writeEnv(t, "this is not an assignment\n=novalue\nFUNDI_TEST_GOOD=kept\n")
-	t.Setenv("FUNDI_TEST_GOOD", "")
-	os.Unsetenv("FUNDI_TEST_GOOD") //nolint:errcheck
+	p := writeEnv(t, "this is not an assignment\n=novalue\nRAFIKI_TEST_GOOD=kept\n")
+	t.Setenv("RAFIKI_TEST_GOOD", "")
+	os.Unsetenv("RAFIKI_TEST_GOOD") //nolint:errcheck
 
 	applied, warnings, err := LoadEnvFile(p)
 	if err != nil {
@@ -136,7 +136,7 @@ func TestLoadEnvFile_MalformedLinesWarnButDoNotAbort(t *testing.T) {
 	if len(warnings) != 2 {
 		t.Errorf("got %d warnings, want 2: %v", len(warnings), warnings)
 	}
-	if os.Getenv("FUNDI_TEST_GOOD") != "kept" {
+	if os.Getenv("RAFIKI_TEST_GOOD") != "kept" {
 		t.Error("a good assignment after malformed lines was dropped")
 	}
 	if len(applied) != 1 {
@@ -145,12 +145,12 @@ func TestLoadEnvFile_MalformedLinesWarnButDoNotAbort(t *testing.T) {
 }
 
 func TestLoadEnvFile_WarnsOnLoosePermissions(t *testing.T) {
-	p := writeEnv(t, "FUNDI_TEST_PERM=x\n")
+	p := writeEnv(t, "RAFIKI_TEST_PERM=x\n")
 	if err := os.Chmod(p, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FUNDI_TEST_PERM", "")
-	os.Unsetenv("FUNDI_TEST_PERM") //nolint:errcheck
+	t.Setenv("RAFIKI_TEST_PERM", "")
+	os.Unsetenv("RAFIKI_TEST_PERM") //nolint:errcheck
 
 	applied, warnings, err := LoadEnvFile(p)
 	if err != nil {
@@ -160,7 +160,7 @@ func TestLoadEnvFile_WarnsOnLoosePermissions(t *testing.T) {
 		t.Errorf("want a permissions warning naming 0600, got %v", warnings)
 	}
 	// Warn, do not refuse: the variables must still be applied.
-	if os.Getenv("FUNDI_TEST_PERM") != "x" || len(applied) != 1 {
+	if os.Getenv("RAFIKI_TEST_PERM") != "x" || len(applied) != 1 {
 		t.Error("loose permissions blocked the load; it should only warn")
 	}
 }

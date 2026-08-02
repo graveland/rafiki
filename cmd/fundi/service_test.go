@@ -158,27 +158,27 @@ func TestNewServiceBackend(t *testing.T) {
 
 func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
 	got, _ := captureDaemonEnv([]string{
-		"FUNDI_AGENT_DB=postgres://u@localhost/rafiki?sslmode=disable",
-		"FUNDI_DEFAULT_MODEL=anthropic/opus-latest",
+		"RAFIKI_DB=postgres://u@localhost/rafiki?sslmode=disable",
+		"RAFIKI_DEFAULT_MODEL=anthropic/opus-latest",
 		"PATH=/usr/bin",
 		"UNRELATED=x",
 	})
 	want := map[string]string{
-		"FUNDI_AGENT_DB":      "postgres://u@localhost/rafiki?sslmode=disable",
-		"FUNDI_DEFAULT_MODEL": "anthropic/opus-latest",
+		"RAFIKI_DB":            "postgres://u@localhost/rafiki?sslmode=disable",
+		"RAFIKI_DEFAULT_MODEL": "anthropic/opus-latest",
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
-// FUNDI_CHILD_ID must never be baked into the unit: the daemon sets it per
+// RAFIKI_CHILD_ID must never be baked into the unit: the daemon sets it per
 // child and `fundid agent` uses it as the default --ref, so a service-wide
 // value would collide every child onto one conversation.
 func TestCaptureDaemonEnv_ExcludesChildID(t *testing.T) {
-	got, _ := captureDaemonEnv([]string{"FUNDI_CHILD_ID=c_123", "FUNDI_AGENT_DB=x"})
-	if _, ok := got["FUNDI_CHILD_ID"]; ok {
-		t.Error("FUNDI_CHILD_ID was captured into the service environment")
+	got, _ := captureDaemonEnv([]string{"RAFIKI_CHILD_ID=c_123", "RAFIKI_DB=x"})
+	if _, ok := got["RAFIKI_CHILD_ID"]; ok {
+		t.Error("RAFIKI_CHILD_ID was captured into the service environment")
 	}
 }
 
@@ -190,24 +190,24 @@ func TestCaptureDaemonEnv_ExcludesAPIKeys(t *testing.T) {
 	}
 }
 
-// An empty value is not the same as an absent one: writing FUNDI_AGENT_DB=""
+// An empty value is not the same as an absent one: writing RAFIKI_DB=""
 // would turn a missing export into a configured-but-broken DSN.
 func TestCaptureDaemonEnv_SkipsEmpty(t *testing.T) {
-	got, _ := captureDaemonEnv([]string{"FUNDI_AGENT_DB="})
-	if _, ok := got["FUNDI_AGENT_DB"]; ok {
+	got, _ := captureDaemonEnv([]string{"RAFIKI_DB="})
+	if _, ok := got["RAFIKI_DB"]; ok {
 		t.Error("an empty value was captured")
 	}
 }
 
 func TestSortedEnv_IsDeterministic(t *testing.T) {
-	m := map[string]string{"FUNDI_SOCKET": "/s", "FUNDI_AGENT_DB": "db", "FUNDI_PI_BINARY": "/pi"}
+	m := map[string]string{"RAFIKI_SOCKET": "/s", "RAFIKI_DB": "db", "RAFIKI_PI_BINARY": "/pi"}
 	first := sortedEnv(m)
 	for range 20 { // map iteration order varies per range; the output must not
 		if !slices.Equal(sortedEnv(m), first) {
 			t.Fatal("sortedEnv is not deterministic across calls")
 		}
 	}
-	if first[0].Key != "FUNDI_AGENT_DB" {
+	if first[0].Key != "RAFIKI_DB" {
 		t.Errorf("not sorted by key: %v", first)
 	}
 }
@@ -218,17 +218,17 @@ func TestSortedEnv_IsDeterministic(t *testing.T) {
 // written into a unit that then fails to parse.
 func TestCaptureDaemonEnv_SkipsNewlineValues(t *testing.T) {
 	captured, skipped := captureDaemonEnv([]string{
-		"FUNDI_DEFAULT_LABELS=a=1\nb=2",
-		"FUNDI_AGENT_DB=postgres://u@h/db",
+		"RAFIKI_DEFAULT_LABELS=a=1\nb=2",
+		"RAFIKI_DB=postgres://u@h/db",
 	})
-	if _, ok := captured["FUNDI_DEFAULT_LABELS"]; ok {
+	if _, ok := captured["RAFIKI_DEFAULT_LABELS"]; ok {
 		t.Error("a newline-bearing value was written into the unit")
 	}
-	if !slices.Contains(skipped, "FUNDI_DEFAULT_LABELS") {
-		t.Errorf("skipped = %v, want it to name FUNDI_DEFAULT_LABELS", skipped)
+	if !slices.Contains(skipped, "RAFIKI_DEFAULT_LABELS") {
+		t.Errorf("skipped = %v, want it to name RAFIKI_DEFAULT_LABELS", skipped)
 	}
 	// Skipping one must not cost the others.
-	if captured["FUNDI_AGENT_DB"] != "postgres://u@h/db" {
+	if captured["RAFIKI_DB"] != "postgres://u@h/db" {
 		t.Error("an unrelated variable was lost alongside the skipped one")
 	}
 }

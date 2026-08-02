@@ -97,7 +97,7 @@ draft):
   surprise than an actionable error.
 
 **Upstream:** a rafiki proxy (`--proxy-url`/`--proxy-token`, or
-`RAFIKI_PROXY_URL`/`RAFIKI_PROXY_TOKEN`) wins if set; otherwise
+`RAFIKI_URL`/`RAFIKI_TOKEN`) wins if set; otherwise
 `ANTHROPIC_API_KEY` goes direct to Anthropic. Direct-to-Anthropic can only
 serve concrete Anthropic ids — any OpenRouter-native id (a `provider/model`
 slash id, or a `~`-prefixed catalog alias) fails fast with an actionable
@@ -160,8 +160,8 @@ status to `dismissed`/`actioned`.
 | `RAFIKI_DB` | every subcommand's `--db` default | Postgres DSN; checked before `RAFIKI_TEST_DSN` |
 | `RAFIKI_TEST_DSN` | every subcommand's `--db` default | fallback DSN if `RAFIKI_DB` is unset |
 | `RAFIKI_ANALYZER_DIR` | `analyze --analyzer-dir` default | analyzer directory (`profiles.yaml` + `detector.md`/`draft.md`) |
-| `RAFIKI_PROXY_URL` | `analyze --proxy-url` default | rafiki proxy base URL for LLM calls |
-| `RAFIKI_PROXY_TOKEN` | `analyze --proxy-token` default | bearer token for `RAFIKI_PROXY_URL` |
+| `RAFIKI_URL` | `analyze --proxy-url` default | rafiki proxy base URL for LLM calls |
+| `RAFIKI_TOKEN` | `analyze --proxy-token` default | bearer token for `RAFIKI_URL` |
 | `ANTHROPIC_API_KEY` | `analyze` upstream resolution | used direct-to-Anthropic when no proxy URL is configured |
 
 None of these are required for `analyze --corpus DIR --compact` — that path

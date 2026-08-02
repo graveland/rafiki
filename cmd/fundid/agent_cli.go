@@ -278,8 +278,8 @@ func parseAnalyzeArgs(args []string) (analyzeArgs, error) {
 	out := fs.String("out", "", "write per-conversation JSON+markdown artifacts to this directory")
 	repo := fs.String("repo", "", "repo root to resolve current skill files from, for --draft edits")
 	noStore := fs.Bool("no-store", false, "don't persist analysis rows (still ranks/drafts in-memory)")
-	proxyURL := fs.String("proxy-url", os.Getenv("RAFIKI_PROXY_URL"), "route LLM calls through this rafiki proxy URL instead of ANTHROPIC_API_KEY")
-	proxyTok := fs.String("proxy-token", os.Getenv("RAFIKI_PROXY_TOKEN"), "bearer token for --proxy-url")
+	proxyURL := fs.String("proxy-url", os.Getenv("RAFIKI_URL"), "route LLM calls through this rafiki proxy URL instead of ANTHROPIC_API_KEY")
+	proxyTok := fs.String("proxy-token", os.Getenv("RAFIKI_TOKEN"), "bearer token for --proxy-url")
 	indent, compactJSON := jsonFlags(fs)
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -446,7 +446,7 @@ func checkModelServable(p *analyze.Profile, proxied bool) error {
 		{"draft_model", p.DraftModel},
 	} {
 		if isSlashOrTildeModelID(f.model) {
-			return fmt.Errorf("agent analyze: %s %q needs OpenRouter routing, which direct-to-Anthropic can't provide; configure --proxy-url/--proxy-token (or RAFIKI_PROXY_URL/RAFIKI_PROXY_TOKEN)", f.name, f.model)
+			return fmt.Errorf("agent analyze: %s %q needs OpenRouter routing, which direct-to-Anthropic can't provide; configure --proxy-url/--proxy-token (or RAFIKI_URL/RAFIKI_TOKEN)", f.name, f.model)
 		}
 	}
 	return nil
@@ -462,7 +462,7 @@ func checkModelsServable(models []string, proxied bool) error {
 	}
 	for _, m := range models {
 		if isSlashOrTildeModelID(m) {
-			return fmt.Errorf("agent analyze --compare: model %q needs OpenRouter routing, which direct-to-Anthropic can't provide; configure --proxy-url/--proxy-token (or RAFIKI_PROXY_URL/RAFIKI_PROXY_TOKEN)", m)
+			return fmt.Errorf("agent analyze --compare: model %q needs OpenRouter routing, which direct-to-Anthropic can't provide; configure --proxy-url/--proxy-token (or RAFIKI_URL/RAFIKI_TOKEN)", m)
 		}
 	}
 	return nil
@@ -504,7 +504,7 @@ const cliDefaultModel = "haiku-latest"
 
 // resolveUpstream builds the llm.Client Analyze runs against, per the
 // brief's upstream rules: a rafiki proxy (--proxy-url/-token or
-// RAFIKI_PROXY_URL/RAFIKI_PROXY_TOKEN) wins when set, registered as BOTH
+// RAFIKI_URL/RAFIKI_TOKEN) wins when set, registered as BOTH
 // llm.UpstreamAnthropic and llm.UpstreamOpenRouter (the proxy does the
 // OpenRouter routing itself for slash ids); else ANTHROPIC_API_KEY direct to
 // Anthropic, registered as Anthropic only. Returns whether the resolved
@@ -536,7 +536,7 @@ func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 	}
 	key := os.Getenv("ANTHROPIC_API_KEY")
 	if key == "" {
-		return nil, false, errors.New("agent analyze: no --proxy-url/RAFIKI_PROXY_URL configured and ANTHROPIC_API_KEY unset")
+		return nil, false, errors.New("agent analyze: no --proxy-url/RAFIKI_URL configured and ANTHROPIC_API_KEY unset")
 	}
 	client, err := llm.NewClient(
 		llm.WithUpstream(llm.UpstreamAnthropic, llm.Anthropic(key)),

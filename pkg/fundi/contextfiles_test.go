@@ -10,13 +10,13 @@ import (
 )
 
 // isolateHome points $HOME at an empty temp directory and clears
-// $FUNDI_INSTRUCTIONS/$XDG_CONFIG_HOME so tests never pick up the real
+// $RAFIKI_INSTRUCTIONS/$XDG_CONFIG_HOME so tests never pick up the real
 // developer machine's own fundi instructions file (or a stray
 // ~/.claude/CLAUDE.md, back when that was the source).
 func isolateHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("FUNDI_INSTRUCTIONS", "")
+	t.Setenv("RAFIKI_INSTRUCTIONS", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 }
 
@@ -47,7 +47,7 @@ func TestLoadContextFilesUserGlobal(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "") // force the ~/.config fallback, ignoring any real value
-	t.Setenv("FUNDI_INSTRUCTIONS", "")
+	t.Setenv("RAFIKI_INSTRUCTIONS", "")
 	mustWriteFile(t, filepath.Join(home, ".config", "fundi", "instructions.md"), "GLOBAL_MARKER instructions")
 
 	cwd := t.TempDir() // no git root, no local instruction files
@@ -62,7 +62,7 @@ func TestLoadContextFilesUserGlobal(t *testing.T) {
 
 // TestLoadContextFiles_UsesFundiInstructionsNotClaude locks down the point of
 // this task: fundi's user-global instructions come from
-// paths.InstructionsFile() ($FUNDI_INSTRUCTIONS, else <ConfigDir>/instructions.md),
+// paths.InstructionsFile() ($RAFIKI_INSTRUCTIONS, else <ConfigDir>/instructions.md),
 // never from Claude Code's own ~/.claude/CLAUDE.md.
 func TestLoadContextFiles_UsesFundiInstructionsNotClaude(t *testing.T) {
 	home := t.TempDir()
@@ -74,14 +74,14 @@ func TestLoadContextFiles_UsesFundiInstructionsNotClaude(t *testing.T) {
 	// fundi's own instructions, which must be read.
 	inst := filepath.Join(t.TempDir(), "instructions.md")
 	mustWriteFile(t, inst, "FUNDI-INSTRUCTIONS-MARKER")
-	t.Setenv("FUNDI_INSTRUCTIONS", inst)
+	t.Setenv("RAFIKI_INSTRUCTIONS", inst)
 
 	got, err := LoadContextFiles(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(got, "FUNDI-INSTRUCTIONS-MARKER") {
-		t.Error("did not load $FUNDI_INSTRUCTIONS")
+		t.Error("did not load $RAFIKI_INSTRUCTIONS")
 	}
 	if strings.Contains(got, "CLAUDE-PROFILE-MARKER") {
 		t.Error("read ~/.claude/CLAUDE.md; fundi must not read its config from Claude's directory")
@@ -89,11 +89,11 @@ func TestLoadContextFiles_UsesFundiInstructionsNotClaude(t *testing.T) {
 }
 
 // TestLoadContextFiles_MissingInstructionsIsNotAnError covers the "most
-// installs have no global instructions file yet" case: a $FUNDI_INSTRUCTIONS
+// installs have no global instructions file yet" case: a $RAFIKI_INSTRUCTIONS
 // pointing at a nonexistent path must be skipped silently, not returned as
 // an error.
 func TestLoadContextFiles_MissingInstructionsIsNotAnError(t *testing.T) {
-	t.Setenv("FUNDI_INSTRUCTIONS", filepath.Join(t.TempDir(), "absent.md"))
+	t.Setenv("RAFIKI_INSTRUCTIONS", filepath.Join(t.TempDir(), "absent.md"))
 	if _, err := LoadContextFiles(t.TempDir()); err != nil {
 		t.Fatalf("missing instructions file must be skipped silently, got %v", err)
 	}

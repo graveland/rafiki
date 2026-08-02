@@ -219,13 +219,13 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 }
 
 // TestAgentRunnerIgnoresEnvDefaultedDB proves the daemon's own
-// $FUNDI_AGENT_DB (read as agentFlags.db's default by newAgentFlagSet, with
+// $RAFIKI_DB (read as agentFlags.db's default by newAgentFlagSet, with
 // zero ExtraArgs involved) is NOT treated as an explicit --db and does not
 // trip the rejection above — it names the same database the shared pool
 // already points at, so an ordinary deployment with a configured database
 // must still be able to spawn agent children.
 func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
-	t.Setenv(paths.AgentDB, "postgres://daemons-own-pool")
+	t.Setenv(paths.DB, "postgres://daemons-own-pool")
 	c := newTestController(t)
 	req := protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
@@ -233,7 +233,7 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 		Model: "anthropic/claude-sonnet-4-5",
 	}
 	if _, err := c.agentRuntimeOptions(req, "c_env_default_db"); err != nil {
-		t.Errorf("agentRuntimeOptions with only $FUNDI_AGENT_DB set (no explicit --db): got error %v, want nil", err)
+		t.Errorf("agentRuntimeOptions with only $RAFIKI_DB set (no explicit --db): got error %v, want nil", err)
 	}
 }
 
@@ -332,7 +332,7 @@ func TestExtraArgsOverrideEarlierFlags(t *testing.T) {
 }
 
 // TestAgentRefIsDaemonControlled proves the child id reaches the engine. It
-// normally arrives via the injected FUNDI_CHILD_ID env var, which an in-process
+// normally arrives via the injected RAFIKI_CHILD_ID env var, which an in-process
 // child never inherits, so it must be appended to argv after ExtraArgs — a
 // caller must not be able to point one child at another's conversation.
 func TestAgentRefIsDaemonControlled(t *testing.T) {

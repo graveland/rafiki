@@ -9,9 +9,9 @@ import (
 )
 
 // EnvFile names an override for the daemon's environment file.
-const EnvFile = "FUNDI_ENV_FILE"
+const EnvFile = "RAFIKI_ENV_FILE"
 
-// ServiceEnvFile is the daemon's environment file: $FUNDI_ENV_FILE if set,
+// ServiceEnvFile is the daemon's environment file: $RAFIKI_ENV_FILE if set,
 // else <config dir>/service.env.
 //
 // This exists because neither init system can carry what the daemon needs. A
@@ -40,7 +40,7 @@ func ServiceEnvFile() string {
 // environment, and returns the names it set.
 //
 // A name already present in the environment is left alone and not returned:
-// the real environment wins, so `FUNDI_AGENT_DB=... fundid` still overrides the
+// the real environment wins, so `RAFIKI_DB=... fundid` still overrides the
 // file, and a service manager's own settings are not silently replaced by a
 // file the operator forgot about.
 //
