@@ -126,7 +126,7 @@ func bootDaemon(t *testing.T) *daemon {
 	// Setting HOME alone would also work (paths falls back to ~/.local/…) but
 	// buries the socket three directories deeper, and sun_path has ~104 bytes to
 	// spend. These must stay in step with internal/paths.
-	appDir := filepath.Join(homeDir, "fundi") // paths.base() appends the app leaf
+	appDir := filepath.Join(homeDir, "rafiki") // paths.base() appends the app leaf
 	socketPath := filepath.Join(appDir, "controller.sock")
 	if len(socketPath) > 100 {
 		os.RemoveAll(homeDir)

@@ -119,11 +119,11 @@ func TestParseAgentFlagsNoSkillsAndNoContextFiles(t *testing.T) {
 }
 
 // TestAssembleSkillDirs_NoClaudeHomeDir locks down the config-ownership
-// invariant this task exists for: fundi must never read skills out of the
+// invariant this task exists for: rafiki must never read skills out of the
 // user's home Claude profile (~/.claude/skills). It deliberately does NOT
 // forbid a per-project .claude/skills dir - a repo that already has one
 // keeps working, per the ruling in task-A4-brief.md's override. The project
-// .fundi/skills dir comes after .claude/skills so it wins on name collision.
+// .rafiki/skills dir comes after .claude/skills so it wins on name collision.
 func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 	t.Setenv("HOME", "/home/testuser")
 	t.Setenv("RAFIKI_SKILLS_DIRS", "")
@@ -139,14 +139,14 @@ func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 	if len(dirs) != 3 {
 		t.Fatalf("dirs = %v, want 3 entries", dirs)
 	}
-	if dirs[0] != "/tmp/cfg/fundi/skills" {
-		t.Errorf("dirs[0] = %q, want /tmp/cfg/fundi/skills", dirs[0])
+	if dirs[0] != "/tmp/cfg/rafiki/skills" {
+		t.Errorf("dirs[0] = %q, want /tmp/cfg/rafiki/skills", dirs[0])
 	}
 	if dirs[1] != "/work/repo/.claude/skills" {
 		t.Errorf("dirs[1] = %q, want /work/repo/.claude/skills (existing per-project skills keep working)", dirs[1])
 	}
-	if dirs[2] != "/work/repo/.fundi/skills" {
-		t.Errorf("dirs[2] = %q, want /work/repo/.fundi/skills (fundi's own per-project dir, overrides .claude)", dirs[2])
+	if dirs[2] != "/work/repo/.rafiki/skills" {
+		t.Errorf("dirs[2] = %q, want /work/repo/.rafiki/skills (rafiki's own per-project dir, overrides .claude)", dirs[2])
 	}
 }
 
@@ -160,26 +160,26 @@ func TestAssembleSkillDirs_FlagsWinLast(t *testing.T) {
 
 // TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision proves the whole
 // point of reading both per-project dirs: when a skill of the same name
-// exists under both .claude/skills and .fundi/skills, the .fundi one wins.
+// exists under both .claude/skills and .rafiki/skills, the .rafiki one wins.
 // This exercises the real merge in skillspkg.DiscoverSkills (later dir wins),
 // not just the ordering of assembleSkillDirs's output slice.
 func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 	repo := t.TempDir()
 	claudeSkillDir := filepath.Join(repo, ".claude", "skills", "demo")
-	fundiSkillDir := filepath.Join(repo, ".fundi", "skills", "demo")
+	rafikiSkillDir := filepath.Join(repo, ".rafiki", "skills", "demo")
 	if err := os.MkdirAll(claudeSkillDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll .claude skill: %v", err)
 	}
-	if err := os.MkdirAll(fundiSkillDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll .fundi skill: %v", err)
+	if err := os.MkdirAll(rafikiSkillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll .rafiki skill: %v", err)
 	}
 	claudeFrontmatter := "---\nname: demo\ndescription: from .claude\n---\n"
-	fundiFrontmatter := "---\nname: demo\ndescription: from .fundi\n---\n"
+	rafikiFrontmatter := "---\nname: demo\ndescription: from .rafiki\n---\n"
 	if err := os.WriteFile(filepath.Join(claudeSkillDir, "SKILL.md"), []byte(claudeFrontmatter), 0o644); err != nil {
 		t.Fatalf("WriteFile .claude SKILL.md: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(fundiSkillDir, "SKILL.md"), []byte(fundiFrontmatter), 0o644); err != nil {
-		t.Fatalf("WriteFile .fundi SKILL.md: %v", err)
+	if err := os.WriteFile(filepath.Join(rafikiSkillDir, "SKILL.md"), []byte(rafikiFrontmatter), 0o644); err != nil {
+		t.Fatalf("WriteFile .rafiki SKILL.md: %v", err)
 	}
 
 	t.Setenv("RAFIKI_SKILLS_DIRS", "") // isolate from the invoking user's real config dir
@@ -199,8 +199,8 @@ func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 	if demo == nil {
 		t.Fatalf("skill %q not found in %v", "demo", skills)
 	}
-	if demo.Description != "from .fundi" {
-		t.Errorf("demo.Description = %q, want %q (.fundi/skills must win over .claude/skills on name collision)", demo.Description, "from .fundi")
+	if demo.Description != "from .rafiki" {
+		t.Errorf("demo.Description = %q, want %q (.rafiki/skills must win over .claude/skills on name collision)", demo.Description, "from .rafiki")
 	}
 }
 

@@ -25,13 +25,13 @@ func writePresetsFile(t *testing.T, dir string, content any) string {
 }
 
 // setPresetsHome points HOME at dir and clears XDG_CONFIG_HOME so
-// paths.PresetsFile() resolves deterministically to dir/.config/fundi/presets.json,
+// paths.PresetsFile() resolves deterministically to dir/.config/rafiki/presets.json,
 // same as TestDefaultsFollowXDGSpec in internal/paths.
 func setPresetsHome(t *testing.T, dir string) string {
 	t.Helper()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	return filepath.Join(dir, ".config", "fundi")
+	return filepath.Join(dir, ".config", "rafiki")
 }
 
 // TestLoadPresets_MissingFile checks the specific error for a missing file.
@@ -53,13 +53,13 @@ func TestLoadPresets_MissingFile(t *testing.T) {
 	}
 }
 
-// TestPresetsPath_IsUnderFundiConfigDir locks down that fundi's presets file
-// lives under fundi's own config directory, not inside pi's.
+// TestPresetsPath_IsUnderFundiConfigDir locks down that rafiki's presets file
+// lives under rafiki's own config directory, not inside pi's.
 func TestPresetsPath_IsUnderFundiConfigDir(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
 	got := paths.PresetsFile()
-	if got != "/tmp/cfg/fundi/presets.json" {
-		t.Fatalf("presets path = %q, want /tmp/cfg/fundi/presets.json", got)
+	if got != "/tmp/cfg/rafiki/presets.json" {
+		t.Fatalf("presets path = %q, want /tmp/cfg/rafiki/presets.json", got)
 	}
 	if strings.Contains(got, "/.pi/") {
 		t.Error("presets must not live in pi's directory")
@@ -67,7 +67,7 @@ func TestPresetsPath_IsUnderFundiConfigDir(t *testing.T) {
 }
 
 // TestMissingPresets_ReportsLegacyPiLocation covers the move out of pi's
-// directory: the legacy file (fundi's own presets, formerly inside ~/.pi/agent)
+// directory: the legacy file (rafiki's own presets, formerly inside ~/.pi/agent)
 // is deliberately NOT read as a fallback, but failing with a bare "not found"
 // while the user's presets sit on disk under the old path would look like data
 // loss.
@@ -79,7 +79,7 @@ func TestMissingPresets_ReportsLegacyPiLocation(t *testing.T) {
 	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	legacy := filepath.Join(legacyDir, "fundi-presets.json")
+	legacy := filepath.Join(legacyDir, "rafiki-presets.json")
 	if err := os.WriteFile(legacy, []byte(`{"presets":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -97,12 +97,12 @@ func TestMissingPresets_ReportsLegacyPiLocation(t *testing.T) {
 }
 
 // TestLoadPresets_LegacyFileIsNotReadButIsReported covers both pre-move
-// locations: ~/.pi/agent/fundi-presets.json (fundi's own file, inside pi's
+// locations: ~/.pi/agent/rafiki-presets.json (rafiki's own file, inside pi's
 // directory) and ~/.pi/agent/pic-presets.json (the pre-rename spelling).
 // Neither is a fallback — they are only probed to turn "no presets file" into
 // an error that says what to do about it.
 func TestLoadPresets_LegacyFileIsNotReadButIsReported(t *testing.T) {
-	for _, legacyName := range []string{"fundi-presets.json", "pic-presets.json"} {
+	for _, legacyName := range []string{"rafiki-presets.json", "pic-presets.json"} {
 		t.Run(legacyName, func(t *testing.T) {
 			dir := t.TempDir()
 			agentDir := filepath.Join(dir, ".pi", "agent")

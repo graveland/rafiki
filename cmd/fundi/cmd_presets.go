@@ -18,8 +18,8 @@ func newPresetsCmd() *cobra.Command {
 		Use:     "presets",
 		Aliases: []string{"preset"},
 		Short:   "List presets from <config dir>/presets.json",
-		Long: `List named presets from <config dir>/presets.json (default $XDG_CONFIG_HOME/fundi/presets.json,
-or ~/.config/fundi/presets.json).
+		Long: `List named presets from <config dir>/presets.json (default $XDG_CONFIG_HOME/rafiki/presets.json,
+or ~/.config/rafiki/presets.json).
 
 Presets bundle a model and label defaults that can be applied at spawn time
 with --preset NAME or the RAFIKI_DEFAULT_PRESET environment variable.

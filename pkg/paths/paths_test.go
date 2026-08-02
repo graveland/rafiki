@@ -24,10 +24,10 @@ func TestXDGEnvOverrides(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"ConfigDir", ConfigDir(), "/tmp/xc/fundi"},
-		{"DataDir", DataDir(), "/tmp/xd/fundi"},
-		{"StateDir", StateDir(), "/tmp/xs/fundi"},
-		{"RuntimeDir", RuntimeDir(), "/tmp/xr/fundi"},
+		{"ConfigDir", ConfigDir(), "/tmp/xc/rafiki"},
+		{"DataDir", DataDir(), "/tmp/xd/rafiki"},
+		{"StateDir", StateDir(), "/tmp/xs/rafiki"},
+		{"RuntimeDir", RuntimeDir(), "/tmp/xr/rafiki"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
@@ -50,12 +50,12 @@ func TestDefaultsFollowXDGSpec(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"ConfigDir", ConfigDir(), "/home/tester/.config/fundi"},
-		{"DataDir", DataDir(), "/home/tester/.local/share/fundi"},
-		{"StateDir", StateDir(), "/home/tester/.local/state/fundi"},
+		{"ConfigDir", ConfigDir(), "/home/tester/.config/rafiki"},
+		{"DataDir", DataDir(), "/home/tester/.local/share/rafiki"},
+		{"StateDir", StateDir(), "/home/tester/.local/state/rafiki"},
 		// No XDG_RUNTIME_DIR (the normal case on macOS): fall back to the state
 		// dir rather than inventing a path outside the spec's directories.
-		{"RuntimeDir", RuntimeDir(), "/home/tester/.local/state/fundi"},
+		{"RuntimeDir", RuntimeDir(), "/home/tester/.local/state/rafiki"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
@@ -108,16 +108,16 @@ func TestDerivedPathsNestUnderBases(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "/tmp/s")
 	t.Setenv("XDG_RUNTIME_DIR", "/tmp/r")
 
-	if got, want := RecordsDir(), filepath.Join("/tmp/d/fundi", "state"); got != want {
+	if got, want := RecordsDir(), filepath.Join("/tmp/d/rafiki", "state"); got != want {
 		t.Errorf("RecordsDir = %q, want %q (session records are persistent data)", got, want)
 	}
-	if got, want := LogsDir(), filepath.Join("/tmp/s/fundi", "logs"); got != want {
+	if got, want := LogsDir(), filepath.Join("/tmp/s/rafiki", "logs"); got != want {
 		t.Errorf("LogsDir = %q, want %q", got, want)
 	}
-	if got, want := SocketPath(), filepath.Join("/tmp/r/fundi", "controller.sock"); got != want {
+	if got, want := SocketPath(), filepath.Join("/tmp/r/rafiki", "controller.sock"); got != want {
 		t.Errorf("SocketPath = %q, want %q", got, want)
 	}
-	if got, want := ServiceLogPath(), filepath.Join("/tmp/s/fundi", "controller.log"); got != want {
+	if got, want := ServiceLogPath(), filepath.Join("/tmp/s/rafiki", "controller.log"); got != want {
 		t.Errorf("ServiceLogPath = %q, want %q", got, want)
 	}
 }
@@ -126,7 +126,7 @@ func TestSkillsDirs_DefaultIsConfigDir(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
 	t.Setenv("RAFIKI_SKILLS_DIRS", "")
 	got := SkillsDirs()
-	want := []string{"/tmp/cfg/fundi/skills"}
+	want := []string{"/tmp/cfg/rafiki/skills"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SkillsDirs() = %v, want %v", got, want)
 	}
@@ -157,7 +157,7 @@ func TestSkillsDirs_AllEmptySegmentsFallsBackToDefault(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", sep+sep+sep)
 
 	got := SkillsDirs()
-	want := []string{"/tmp/cfg/fundi/skills"}
+	want := []string{"/tmp/cfg/rafiki/skills"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SkillsDirs() = %v, want %v — a variable of only separators must fall back to the default, not yield an empty slice", got, want)
 	}
@@ -195,7 +195,7 @@ func TestBase_HomeDirUnresolvable_FallsBackToRelativePath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 
 	got := ConfigDir()
-	want := filepath.Join(".config", "fundi")
+	want := filepath.Join(".config", "rafiki")
 	if got != want {
 		t.Fatalf("ConfigDir() = %q, want %q", got, want)
 	}

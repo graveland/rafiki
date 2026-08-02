@@ -48,7 +48,7 @@ func TestLoadContextFilesUserGlobal(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "") // force the ~/.config fallback, ignoring any real value
 	t.Setenv("RAFIKI_INSTRUCTIONS", "")
-	mustWriteFile(t, filepath.Join(home, ".config", "fundi", "instructions.md"), "GLOBAL_MARKER instructions")
+	mustWriteFile(t, filepath.Join(home, ".config", "rafiki", "instructions.md"), "GLOBAL_MARKER instructions")
 
 	cwd := t.TempDir() // no git root, no local instruction files
 	got, err := LoadContextFiles(cwd)

@@ -123,7 +123,7 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $RAFIKI_MCP_CONFIG or <ConfigDir>/mcp.json)")
 	fs.StringVar(&f.ref, "ref", paths.Get(paths.ChildID), "external ref correlating the conversation across restarts")
 	fs.StringVar(&f.db, "db", paths.Get(paths.DB), "postgres url for conversation persistence (empty: in-memory)")
-	fs.StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: <XDG_CACHE_HOME>/fundi/spill/<ref>)")
+	fs.StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: <XDG_CACHE_HOME>/rafiki/spill/<ref>)")
 	fs.StringVar(&f.name, "name", "", "session name reported through get_state")
 	fs.StringVar(&f.fakeTurns, "fake-turns", "", "hidden test seam: path to a LoadFakeSender scripted-turns file")
 

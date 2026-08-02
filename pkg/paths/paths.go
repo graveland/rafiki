@@ -1,10 +1,10 @@
-// Package paths resolves the on-disk locations fundi owns, following the XDG
+// Package paths resolves the on-disk locations rafiki owns, following the XDG
 // Base Directory specification.
 //
 // These deliberately do NOT live under ~/.pi. That directory belongs to pi
-// itself, and while fundi is a pi-controller successor it is a distinct daemon:
+// itself, and while rafiki is a pi-controller successor it is a distinct daemon:
 // sharing ~/.pi/run meant both processes claimed the same controller socket, so
-// running fundi while pi-controller was up failed with "socket in use by a live
+// running rafiki while pi-controller was up failed with "socket in use by a live
 // process". Genuine pi integration points (~/.pi/agent/models.json, pi's
 // extensions directory) are pi's contract and stay where they are — they are not
 // resolved here.
@@ -19,7 +19,7 @@ import (
 )
 
 // appName is the per-application leaf every base directory gets.
-const appName = "fundi"
+const appName = "rafiki"
 
 // homeDirWarnOnce guards the warning below against spam. base() is called on
 // every path resolution — once per incoming request in a long-lived fundid —
@@ -33,7 +33,7 @@ const appName = "fundi"
 // rate-limited warn instead of a one-shot.
 var homeDirWarnOnce sync.Once
 
-// base returns $envVar/fundi when envVar is set, else $HOME/<fallback>/fundi.
+// base returns $envVar/rafiki when envVar is set, else $HOME/<fallback>/rafiki.
 // The spec says a relative or empty value must be ignored in favour of the
 // default, which is why only an absolute path is honoured.
 func base(envVar string, fallback ...string) string {
@@ -57,18 +57,18 @@ func base(envVar string, fallback ...string) string {
 	return filepath.Join(append([]string{home}, append(fallback, appName)...)...)
 }
 
-// ConfigDir is user configuration: $XDG_CONFIG_HOME/fundi, else ~/.config/fundi.
+// ConfigDir is user configuration: $XDG_CONFIG_HOME/rafiki, else ~/.config/rafiki.
 func ConfigDir() string { return base("XDG_CONFIG_HOME", ".config") }
 
-// DataDir is persistent application data: $XDG_DATA_HOME/fundi, else
-// ~/.local/share/fundi. Session records live here — they must survive a reboot.
+// DataDir is persistent application data: $XDG_DATA_HOME/rafiki, else
+// ~/.local/share/rafiki. Session records live here — they must survive a reboot.
 func DataDir() string { return base("XDG_DATA_HOME", ".local", "share") }
 
-// StateDir is state that persists but is not precious: $XDG_STATE_HOME/fundi,
-// else ~/.local/state/fundi. Logs live here.
+// StateDir is state that persists but is not precious: $XDG_STATE_HOME/rafiki,
+// else ~/.local/state/rafiki. Logs live here.
 func StateDir() string { return base("XDG_STATE_HOME", ".local", "state") }
 
-// RuntimeDir is for sockets and other runtime files: $XDG_RUNTIME_DIR/fundi.
+// RuntimeDir is for sockets and other runtime files: $XDG_RUNTIME_DIR/rafiki.
 // That variable is normally unset on macOS (it is a Linux/systemd convention),
 // so it falls back to StateDir rather than to a path outside the spec — keeping
 // the socket short enough for sun_path either way.
@@ -96,8 +96,8 @@ func ServiceLogPath() string { return filepath.Join(StateDir(), "controller.log"
 // state, so it sits beside the socket rather than with the persisted records.
 func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }
 
-// CacheDir is disposable, regenerable data: $XDG_CACHE_HOME/fundi, else
-// ~/.cache/fundi.
+// CacheDir is disposable, regenerable data: $XDG_CACHE_HOME/rafiki, else
+// ~/.cache/rafiki.
 func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
 
 // SpillDir is where a standalone `fundid agent` writes clipped tool output. Cache
@@ -112,7 +112,7 @@ func SpillDir(ref string) string { return filepath.Join(CacheDir(), "spill", ref
 
 // InstructionsFile is the user-global instruction file: $RAFIKI_INSTRUCTIONS,
 // else <ConfigDir>/instructions.md. Deliberately not ~/.claude/CLAUDE.md —
-// that directory belongs to Claude Code, and fundi reads its own configuration
+// that directory belongs to Claude Code, and rafiki reads its own configuration
 // from its own directory. Point the variable at a Claude profile to use one.
 func InstructionsFile() string {
 	if v := Get(Instructions); v != "" {
@@ -128,11 +128,11 @@ func InstructionsFile() string {
 // current directory.
 //
 // Deliberately not ~/.claude/skills — that directory belongs to Claude Code,
-// and fundi reads its own configuration from its own directory. Point
+// and rafiki reads its own configuration from its own directory. Point
 // $RAFIKI_SKILLS_DIRS at a Claude skills tree (or a plugin cache) to use one.
 // This only covers the user-global dir: a per-project <cwd>/.claude/skills is
 // still searched by cmd/fundid/agent.go's assembleSkillDirs, alongside
-// fundi's own <cwd>/.fundi/skills, so existing per-repo skills keep working.
+// rafiki's own <cwd>/.rafiki/skills, so existing per-repo skills keep working.
 func SkillsDirs() []string {
 	v := Get(SkillsDirsEnv)
 	if v == "" {
@@ -151,7 +151,7 @@ func SkillsDirs() []string {
 }
 
 // PresetsFile is the presets file: <ConfigDir>/presets.json. It used to live at
-// ~/.pi/agent/fundi-presets.json — fundi's own file inside pi's directory.
+// ~/.pi/agent/rafiki-presets.json — rafiki's own file inside pi's directory.
 func PresetsFile() string { return filepath.Join(ConfigDir(), "presets.json") }
 
 // GlobalMCPConfig is the machine-wide .mcp.json: $RAFIKI_MCP_CONFIG, else

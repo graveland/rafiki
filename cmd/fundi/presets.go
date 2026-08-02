@@ -24,7 +24,7 @@ type PresetsFile struct {
 
 // legacyPresetsPaths are pre-move locations. They are probed only to turn "no
 // presets file" into an error that says what to do; they are never read and
-// never deleted. ~/.pi/agent held fundi's own presets file inside pi's
+// never deleted. ~/.pi/agent held rafiki's own presets file inside pi's
 // directory; the pic- spelling predates the binary rename. Neither may equal
 // paths.PresetsFile(), or the "legacy file still exists" branch would fire
 // against the user's actual current file and report their own presets as
@@ -35,7 +35,7 @@ func legacyPresetsPaths() []string {
 		return nil
 	}
 	return []string{
-		filepath.Join(home, ".pi", "agent", "fundi-presets.json"),
+		filepath.Join(home, ".pi", "agent", "rafiki-presets.json"),
 		filepath.Join(home, ".pi", "agent", "pic-presets.json"),
 	}
 }
