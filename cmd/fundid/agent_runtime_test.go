@@ -9,11 +9,11 @@ import (
 )
 
 // TestAgentRunnerKind proves agentRunner only builds an in-process Runner for
-// Kind: "agent" and leaves every other kind on the subprocess path (nil
+// Kind: "fundi" and leaves every other kind on the subprocess path (nil
 // Runner, nil error) unchanged.
 func TestAgentRunnerKind(t *testing.T) {
 	c := newTestController(t)
-	for _, kind := range []string{"pi", "claude"} {
+	for _, kind := range []string{protocol.KindPi, protocol.KindClaude} {
 		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
 		runner, err := c.agentRunner(req, "c_"+kind)
 		if err != nil {
@@ -24,7 +24,7 @@ func TestAgentRunnerKind(t *testing.T) {
 		}
 	}
 
-	req := protocol.SpawnRequest{Kind: "agent", Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5"}
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5"}
 	runner, err := c.agentRunner(req, "c_agent")
 	if err != nil {
 		t.Fatalf("agentRunner(kind=agent): %v", err)
@@ -44,7 +44,7 @@ func TestAgentRunnerKind(t *testing.T) {
 func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 	c := newTestController(t)
 	req := protocol.SpawnRequest{
-		Kind:      "agent",
+		Kind:      protocol.KindFundi,
 		Cwd:       t.TempDir(),
 		Model:     "anthropic/claude-sonnet-4-5",
 		ExtraArgs: []string{"--ref", "spoofed-child-id"},
@@ -75,7 +75,7 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 	c := newTestController(t)
 
 	anthropicReq := protocol.SpawnRequest{
-		Kind:   "agent",
+		Kind:   protocol.KindFundi,
 		Cwd:    t.TempDir(),
 		Model:  "anthropic/claude-sonnet-4-5",
 		APIKey: "sk-ant-test-key",
@@ -92,7 +92,7 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 	}
 
 	openrouterReq := protocol.SpawnRequest{
-		Kind:   "agent",
+		Kind:   protocol.KindFundi,
 		Cwd:    t.TempDir(),
 		Model:  "deepseek/deepseek-chat",
 		APIKey: "sk-or-test-key",
@@ -120,7 +120,7 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 	c := newTestController(t)
 
 	req := protocol.SpawnRequest{
-		Kind:      "agent",
+		Kind:      protocol.KindFundi,
 		Cwd:       t.TempDir(),
 		Model:     "anthropic/x",
 		ExtraArgs: []string{"--model", "deepseek/y"},
@@ -149,7 +149,7 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 	c := newTestController(t)
 
 	req := protocol.SpawnRequest{
-		Kind:  "agent",
+		Kind:  protocol.KindFundi,
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 		Env: map[string]string{
@@ -207,7 +207,7 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 		{"--db=postgres://caller-supplied"},
 	} {
 		req := protocol.SpawnRequest{
-			Kind:      "agent",
+			Kind:      protocol.KindFundi,
 			Cwd:       t.TempDir(),
 			Model:     "anthropic/claude-sonnet-4-5",
 			ExtraArgs: extraArgs,
@@ -228,7 +228,7 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 	t.Setenv(paths.AgentDB, "postgres://daemons-own-pool")
 	c := newTestController(t)
 	req := protocol.SpawnRequest{
-		Kind:  "agent",
+		Kind:  protocol.KindFundi,
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
@@ -245,7 +245,7 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 func TestArgvRoundTripsIntoRuntimeOptions(t *testing.T) {
 	mcp := t.TempDir() + "/mcp.json"
 	req := protocol.SpawnRequest{
-		Kind:               "agent",
+		Kind:               protocol.KindFundi,
 		Cwd:                t.TempDir(),
 		Model:              "anthropic/claude-sonnet-4-5",
 		Thinking:           "high",
@@ -258,8 +258,8 @@ func TestArgvRoundTripsIntoRuntimeOptions(t *testing.T) {
 	}
 
 	argv := buildAgentArgv(req, "c_round", t.TempDir())
-	if argv[0] != "agent" {
-		t.Fatalf("argv[0] = %q, want \"agent\"", argv[0])
+	if argv[0] != protocol.KindFundi {
+		t.Fatalf("argv[0] = %q, want %q", argv[0], protocol.KindFundi)
 	}
 
 	f, err := parseAgentFlags(argv[1:])
@@ -312,7 +312,7 @@ func TestArgvRoundTripsIntoRuntimeOptions(t *testing.T) {
 // them would diverge from a subprocess one.
 func TestExtraArgsOverrideEarlierFlags(t *testing.T) {
 	req := protocol.SpawnRequest{
-		Kind:      "agent",
+		Kind:      protocol.KindFundi,
 		Cwd:       t.TempDir(),
 		Model:     "anthropic/claude-sonnet-4-5",
 		ExtraArgs: []string{"--model", "deepseek/deepseek-chat"},
@@ -337,7 +337,7 @@ func TestExtraArgsOverrideEarlierFlags(t *testing.T) {
 // caller must not be able to point one child at another's conversation.
 func TestAgentRefIsDaemonControlled(t *testing.T) {
 	req := protocol.SpawnRequest{
-		Kind:      "agent",
+		Kind:      protocol.KindFundi,
 		Cwd:       t.TempDir(),
 		Model:     "anthropic/claude-sonnet-4-5",
 		ExtraArgs: []string{"--ref", "spoofed-child-id"},

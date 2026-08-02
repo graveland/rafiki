@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"go.graveland.dev/rafiki/pkg/models"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // modelSourcesForKind returns the model sources that a child of the given kind
@@ -14,7 +15,7 @@ import (
 // kind's ids to another produces a child that spawns, attaches, and then never
 // answers — no error, just a TUI that never becomes idle:
 //
-//   - "agent" (the DEFAULT kind) is fundi's native runtime through this
+//   - "fundi" (the DEFAULT kind) is fundi's native runtime through this
 //     module's llm/routing, so it takes exactly what rafiki resolves: the
 //     curated Anthropic ids and <family>-latest aliases, plus any OpenRouter
 //     slash id.
@@ -31,17 +32,17 @@ import (
 // superset of what will actually work is how this went wrong before.
 func modelSourcesForKind(kind string) map[models.Source]bool {
 	switch kind {
-	case "pi":
+	case protocol.KindPi:
 		return map[models.Source]bool{
 			models.SourceUserConfig: true,
 			models.SourceOllama:     true,
 			models.SourceLMStudio:   true,
 		}
-	case "claude":
+	case protocol.KindClaude:
 		// Claude Code resolves Anthropic ids itself; the curated list and the
 		// family aliases are the only entries that can apply.
 		return map[models.Source]bool{models.SourceBuiltin: true}
-	default: // "agent", and the not-yet-typed case
+	default: // protocol.KindFundi, and the not-yet-typed case
 		return map[models.Source]bool{
 			models.SourceBuiltin:    true,
 			models.SourceOpenRouter: true,
@@ -54,7 +55,7 @@ func modelSourcesForKind(kind string) map[models.Source]bool {
 // best-effort and errors are swallowed, so completion never blocks or errors.
 func completeModel(kind, _ string) []string {
 	// ListSources, not List-then-filter: an unwanted source is never consulted,
-	// so a pi completion pays no OpenRouter round trip and an agent completion
+	// so a pi completion pays no OpenRouter round trip and a fundi completion
 	// pays no Ollama/LM Studio probe.
 	list := models.ListSources(context.Background(), modelSourcesForKind(kind))
 	out := make([]string, 0, len(list))

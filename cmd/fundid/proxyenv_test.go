@@ -22,26 +22,26 @@ func envKeys(env []string) map[string]string {
 func TestProxyChildEnv_NothingWhenNoFaceAndNoOverride(t *testing.T) {
 	t.Setenv(paths.ProxyURL, "")
 	ctl := &Controller{} // no face started
-	for _, kind := range []string{"pi", "claude", "agent"} {
+	for _, kind := range []string{protocol.KindPi, protocol.KindClaude, protocol.KindFundi} {
 		if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1"); got != nil {
 			t.Errorf("kind %q with no proxy configured: got %v, want nothing", kind, got)
 		}
 	}
 }
 
-// The agent kind reaches rafiki in-process; pointing it at an HTTP face would
+// The fundi kind reaches rafiki in-process; pointing it at an HTTP face would
 // put a network hop in front of a library call.
 func TestProxyChildEnv_NeverRoutesAgent(t *testing.T) {
 	ctl := &Controller{proxyURL: "http://127.0.0.1:1", proxyToken: "t"}
-	if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "agent"}, "c_1"); got != nil {
-		t.Errorf("agent kind was routed through the proxy: %v", got)
+	if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindFundi}, "c_1"); got != nil {
+		t.Errorf("fundi kind was routed through the proxy: %v", got)
 	}
 }
 
 func TestProxyChildEnv_Claude(t *testing.T) {
 	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
-	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "claude", Model: "glm-5.2"}, "c_abc"))
+	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}, "c_abc"))
 	if env["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
 		t.Errorf("ANTHROPIC_BASE_URL = %q", env["ANTHROPIC_BASE_URL"])
 	}
@@ -72,7 +72,7 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 func TestProxyChildEnv_Pi(t *testing.T) {
 	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
-	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "pi"}, "c_xyz"))
+	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindPi}, "c_xyz"))
 	if env[paths.ProxyURL] != "http://localhost:8035" || env[paths.ProxyToken] != "tok" {
 		t.Errorf("proxy vars not passed to pi: %v", env)
 	}
@@ -87,18 +87,18 @@ func TestProxyChildEnv_Pi(t *testing.T) {
 
 func TestProxyRoutesKind(t *testing.T) {
 	t.Setenv(paths.ProxyKinds, "")
-	for _, k := range []string{"pi", "claude"} {
+	for _, k := range []string{protocol.KindPi, protocol.KindClaude} {
 		if !proxyRoutesKind(k) {
 			t.Errorf("default must route %q", k)
 		}
 	}
 	// The escape hatch: narrowing the list makes "is it the proxy?" answerable
 	// with a restart instead of a rebuild.
-	t.Setenv(paths.ProxyKinds, "claude")
-	if proxyRoutesKind("pi") {
+	t.Setenv(paths.ProxyKinds, protocol.KindClaude)
+	if proxyRoutesKind(protocol.KindPi) {
 		t.Error("pi routed despite being excluded by FUNDI_PROXY_KINDS")
 	}
-	if !proxyRoutesKind("claude") {
+	if !proxyRoutesKind(protocol.KindClaude) {
 		t.Error("claude not routed despite being listed")
 	}
 }
@@ -111,7 +111,7 @@ func TestProxyChildEnv_ExplicitURLOverridesTheEmbeddedFace(t *testing.T) {
 	t.Setenv(paths.ProxyURL, "http://shared-capture:8035")
 	t.Setenv(paths.ProxyToken, "shared-token")
 
-	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: "claude"}, "c_1"))
+	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_1"))
 	if env["ANTHROPIC_BASE_URL"] != "http://shared-capture:8035" {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want the override", env["ANTHROPIC_BASE_URL"])
 	}

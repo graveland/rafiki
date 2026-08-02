@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // newTestCreateCmd returns a cobra.Command with spawn flags registered, suitable
@@ -304,7 +306,7 @@ func TestBuildSpawnRequest_KindClaude(t *testing.T) {
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Flags().Set("kind", "claude"); err != nil {
+	if err := cmd.Flags().Set("kind", protocol.KindClaude); err != nil {
 		t.Fatal(err)
 	}
 	if err := cmd.Flags().Set("config-dir", "/x"); err != nil {
@@ -318,7 +320,7 @@ func TestBuildSpawnRequest_KindClaude(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Kind != "claude" {
+	if req.Kind != protocol.KindClaude {
 		t.Errorf("Kind = %q, want claude", req.Kind)
 	}
 	if req.ConfigDir != "/x" {
@@ -343,8 +345,8 @@ func TestBuildSpawnRequest_KindDefaultsAgent(t *testing.T) {
 	// with in-band abort and per-turn cost accounting, and the only one whose
 	// model ids this repo can resolve. --model completion keys off the same
 	// default (see modelSourcesForKind).
-	if req.Kind != "agent" {
-		t.Errorf("Kind = %q, want agent (default)", req.Kind)
+	if req.Kind != protocol.KindFundi {
+		t.Errorf("Kind = %q, want fundi (default)", req.Kind)
 	}
 	if req.ConfigDir != "" {
 		t.Errorf("ConfigDir = %q, want empty", req.ConfigDir)

@@ -62,7 +62,7 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 // Runner (and nil error) for every other kind, which leaves SpawnSpec on the
 // subprocess path unchanged.
 func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string) (child.Runner, error) {
-	if req.Kind != "agent" {
+	if req.Kind != protocol.KindFundi {
 		return nil, nil
 	}
 	ro, err := c.agentRuntimeOptions(req, childID)
@@ -91,7 +91,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	}
 
 	argv := appendDaemonRef(buildAgentArgv(req, childID, c.stateDir), childID)
-	f, err := parseAgentFlags(argv[1:]) // argv[0] is the "agent" subcommand
+	f, err := parseAgentFlags(argv[1:]) // argv[0] is the "fundi" subcommand
 	if err != nil {
 		return agent.RuntimeOptions{}, fmt.Errorf("agent flags: %w", err)
 	}

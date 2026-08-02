@@ -11,7 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
-// `fundid agent -h` must print usage. It previously exited 0 having printed
+// `fundid fundi -h` must print usage. It previously exited 0 having printed
 // NOTHING: parseAgentFlags sets the FlagSet output to io.Discard so runAgent can
 // report parse errors itself, which also silently swallowed the -h usage text.
 func TestPrintAgentUsageListsFlags(t *testing.T) {
@@ -29,7 +29,7 @@ func TestPrintAgentUsageListsFlags(t *testing.T) {
 			t.Errorf("usage missing flag %q; got:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "fundid agent") {
+	if !strings.Contains(out, "fundid fundi") {
 		t.Errorf("usage should name the command; got:\n%s", out)
 	}
 }
@@ -58,7 +58,7 @@ func errorsIsHelp(err error) bool {
 	return false
 }
 
-// The top-level binary has two modes (the daemon, and `fundid agent`), so its
+// The top-level binary has two modes (the daemon, and `fundid fundi`), so its
 // usage must name both — `fundid -h` used to fall through into daemon startup
 // and fail on the controller socket instead of printing anything.
 func TestPrintRootUsageCoversBothModes(t *testing.T) {
@@ -75,12 +75,15 @@ func TestPrintRootUsageCoversBothModes(t *testing.T) {
 		}
 	}
 
-	// The daemon must call itself fundid. Usage that still said "fundi" would
-	// tell users to run the client binary to start the daemon.
+	// The daemon must call itself fundid. Usage that suggested running the
+	// bare `fundi` client to start the daemon would be wrong — `fundid fundi`
+	// (the stdio agent-child subcommand) is the only place "fundi " may
+	// legitimately appear, so strip that phrase before checking for a stray one.
 	if !strings.Contains(out, "fundid") {
 		t.Errorf("root usage does not name the fundid binary; got:\n%s", out)
 	}
-	if strings.Contains(out, "fundi ") {
+	stripped := strings.ReplaceAll(out, "fundid fundi", "")
+	if strings.Contains(stripped, "fundi ") {
 		t.Errorf("root usage refers to `fundi ` as if it were the daemon; got:\n%s", out)
 	}
 }

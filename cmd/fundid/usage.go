@@ -24,7 +24,7 @@ func isHelpArg(arg string) bool {
 }
 
 // printRootUsage documents both process modes. fundid is one binary with two
-// entry points — the controller daemon (no flags) and `fundid agent`, a single
+// entry points — the controller daemon (no flags) and `fundid fundi`, a single
 // agent child speaking pi's rpc protocol on stdio — so usage that mentioned only
 // one of them would hide the other entirely.
 func printRootUsage(w io.Writer) {
@@ -32,8 +32,8 @@ func printRootUsage(w io.Writer) {
 
 Usage:
   fundid [flags]          Run the controller daemon.
-  fundid agent [flags]    Run one agent child on stdio (pi rpc protocol).
-                          Spawned by the daemon; see 'fundid agent -h'.
+  fundid fundi [flags]    Run one agent child on stdio (pi rpc protocol).
+                          Spawned by the daemon; see 'fundid fundi -h'.
   fundid -h | --help      Show this help.
 
 Daemon flags:
@@ -70,12 +70,12 @@ $FUNDI_MCP_CONFIG override the instructions/skills/mcp paths above.
 `)
 }
 
-// printAgentUsage writes `fundid agent` usage. It exists because
+// printAgentUsage writes `fundid fundi` usage. It exists because
 // parseAgentFlags points its FlagSet at io.Discard so runAgent can report parse
-// errors itself — which also swallowed the -h output, making `fundid agent -h`
+// errors itself — which also swallowed the -h output, making `fundid fundi -h`
 // exit 0 having printed nothing.
 func printAgentUsage(w io.Writer) {
-	fmt.Fprint(w, `Usage: fundid agent [flags]
+	fmt.Fprint(w, `Usage: fundid fundi [flags]
 
 Runs a single agent child speaking pi's rpc protocol on stdio, in place of
 Claude Code. Normally spawned by the fundi daemon rather than invoked directly.
@@ -88,7 +88,7 @@ Flags:
 	fs.PrintDefaults()
 }
 
-// newAgentFlagSet registers `fundid agent`'s flags. Shared by parseAgentFlags and
+// newAgentFlagSet registers `fundid fundi`'s flags. Shared by parseAgentFlags and
 // printAgentUsage so the documented flags cannot drift from the parsed ones.
 //
 // Output goes to io.Discard: runAgent reports parse errors itself, and

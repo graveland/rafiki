@@ -1,12 +1,17 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
+)
 
 func TestSpawnKindLabel(t *testing.T) {
 	cases := map[string]string{
-		"":       "pi", // empty kind defaults to pi (the implicit default)
-		"pi":     "pi",
-		"claude": "claude",
+		"":                  protocol.KindPi, // empty kind defaults to pi (the implicit default)
+		protocol.KindPi:     protocol.KindPi,
+		protocol.KindClaude: protocol.KindClaude,
+		protocol.KindFundi:  protocol.KindFundi,
 	}
 	for in, want := range cases {
 		if got := spawnKindLabel(in); got != want {

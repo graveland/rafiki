@@ -37,12 +37,12 @@ func main() {
 	// only fills gaps.
 	loadServiceEnv()
 
-	// Dispatch `fundid agent ...` before any daemon setup below - it is a
+	// Dispatch `fundid fundi ...` before any daemon setup below - it is a
 	// separate process mode (a single agent child speaking pi's rpc
 	// protocol on stdio) and must not fall through into the daemon's own
 	// flag-less startup. Every other invocation (including no args) runs the
 	// daemon unchanged.
-	if len(os.Args) > 1 && os.Args[1] == "agent" {
+	if len(os.Args) > 1 && os.Args[1] == protocol.KindFundi {
 		os.Exit(runAgent(os.Args[2:]))
 	}
 

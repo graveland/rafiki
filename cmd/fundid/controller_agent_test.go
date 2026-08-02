@@ -16,12 +16,12 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// TestResolveSpawnPlanAgentKind covers R1: the "agent" case resolves to the
+// TestResolveSpawnPlanAgentKind covers R1: the "fundi" case resolves to the
 // daemon's own binary (self re-exec) with the native pi protocol (no
 // translator - the agent runtime speaks pi's rpc protocol directly).
 func TestResolveSpawnPlanAgentKind(t *testing.T) {
 	req := protocol.SpawnRequest{
-		Kind:               "agent",
+		Kind:               protocol.KindFundi,
 		Model:              "deepseek/deepseek-chat",
 		Thinking:           "low",
 		SystemPrompt:       "sp",
@@ -49,7 +49,7 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 		t.Fatalf("provider = %T, want child.PiProvider (agent speaks pi protocol natively)", prov)
 	}
 
-	if len(argv) == 0 || argv[0] != "agent" {
+	if len(argv) == 0 || argv[0] != protocol.KindFundi {
 		t.Fatalf("argv[0] = %v, want \"agent\" subcommand token: %v", argv, argv)
 	}
 
@@ -82,13 +82,13 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 }
 
 // TestResolveSpawnPlanAgentKindRequiresModel covers the daemon-side half of
-// the redesign's required-model invariant: an "agent" kind spawn with no
+// the redesign's required-model invariant: a "fundi" kind spawn with no
 // resolvable model (neither SpawnRequest.Model nor a --model in ExtraArgs) is
 // rejected at spawn time with a clean control-plane error, rather than
 // exec'ing a child that immediately dies on `fundid agent`'s own flag-parse
 // error.
 func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
-	req := protocol.SpawnRequest{Kind: "agent"}
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi}
 	if _, _, _, err := resolveSpawnPlan(req, "c_test456", "/var/fundi-state"); err == nil {
 		t.Fatal("resolveSpawnPlan(agent kind, no model): want error, got nil")
 	}
@@ -98,7 +98,7 @@ func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
 // escape hatch still satisfies the required-model check: a caller can supply
 // --model through ExtraArgs instead of SpawnRequest.Model.
 func TestResolveSpawnPlanAgentKindModelViaExtraArgs(t *testing.T) {
-	req := protocol.SpawnRequest{Kind: "agent", ExtraArgs: []string{"--model", "anthropic/sonnet-latest"}}
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, ExtraArgs: []string{"--model", "anthropic/sonnet-latest"}}
 	if _, _, _, err := resolveSpawnPlan(req, "c_test789", "/var/fundi-state"); err != nil {
 		t.Fatalf("resolveSpawnPlan(agent kind, model via ExtraArgs): unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := protocol.SpawnRequest{Kind: "agent", ExtraArgs: tc.extraArgs}
+			req := protocol.SpawnRequest{Kind: protocol.KindFundi, ExtraArgs: tc.extraArgs}
 			if _, _, _, err := resolveSpawnPlan(req, "c_testbare", "/var/fundi-state"); err == nil {
 				t.Fatalf("resolveSpawnPlan(agent kind, %s): want error, got nil", tc.name)
 			}
@@ -133,7 +133,7 @@ func TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue(t *testing.T) {
 // req.Provider must be rejected at spawn time rather than silently dropped
 // or double-prefixed onto the reported model.
 func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
-	req := protocol.SpawnRequest{Kind: "agent", Model: "anthropic/sonnet-latest", Provider: "anthropic"}
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/sonnet-latest", Provider: "anthropic"}
 	if _, _, _, err := resolveSpawnPlan(req, "c_testprov", "/var/fundi-state"); err == nil {
 		t.Fatal("resolveSpawnPlan(agent kind, Provider set): want error, got nil")
 	}
@@ -157,7 +157,7 @@ func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
 // the rejoin is implemented, so it still catches a future re-break.
 func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
 	snap := childstore.Snapshot{
-		Kind:     "agent",
+		Kind:     protocol.KindFundi,
 		Cwd:      "/tmp/fundi-smoke",
 		Name:     "smoke6",
 		Provider: "anthropic",
@@ -181,7 +181,7 @@ func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
 // where no provider was ever recorded: joinModel must leave the model alone
 // rather than emitting a leading "/", which would resolve to a bogus provider.
 func TestResumeRequestFromSnapshotAgentBareModel(t *testing.T) {
-	snap := childstore.Snapshot{Kind: "agent", Model: "sonnet-latest"}
+	snap := childstore.Snapshot{Kind: protocol.KindFundi, Model: "sonnet-latest"}
 	req := resumeRequestFromSnapshot(snap, "")
 	if req.Model != "sonnet-latest" {
 		t.Errorf("Model = %q, want %q unchanged", req.Model, "sonnet-latest")
@@ -196,7 +196,7 @@ func TestResumeRequestFromSnapshotAgentBareModel(t *testing.T) {
 // tool set it was spawned with, not a silently shrunk one.
 func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
 	snap := childstore.Snapshot{
-		Kind:       "agent",
+		Kind:       protocol.KindFundi,
 		Model:      "anthropic/claude-sonnet-5",
 		SkillsDirs: []string{"/work/skills", "/other/skills"},
 		MCPConfig:  "/work/.mcp.json",
@@ -215,7 +215,7 @@ func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
 // request path emits only --spill-dir plus whatever ExtraArgs were given, with
 // none of the optional flags present when the request leaves them empty.
 func TestBuildAgentArgv_NoSkillsAndDefaults(t *testing.T) {
-	req := protocol.SpawnRequest{Kind: "agent", NoSkills: true}
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, NoSkills: true}
 	argv := buildAgentArgv(req, "c1", "/state")
 
 	joined := strings.Join(argv, " ")
@@ -264,7 +264,7 @@ func TestBuildAgentArgv_SpillDirPinnedBeforeExtraArgs(t *testing.T) {
 // straight from their own SpawnRequest fields.
 func TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig(t *testing.T) {
 	req := protocol.SpawnRequest{
-		Kind:       "agent",
+		Kind:       protocol.KindFundi,
 		Model:      "anthropic/claude-sonnet-5",
 		SkillsDirs: []string{"/a/skills", "/b/skills"},
 		MCPConfig:  "/cfg/.mcp.json",
@@ -288,7 +288,7 @@ func TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig(t *testing.T) {
 // omitted entirely when the request leaves them unset, matching the rest of
 // buildAgentArgv's "only emit what's set" convention.
 func TestBuildAgentArgv_OmitsUnsetKnobs(t *testing.T) {
-	req := protocol.SpawnRequest{Kind: "agent", Model: "anthropic/claude-sonnet-5"}
+	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/claude-sonnet-5"}
 	joined := strings.Join(buildAgentArgv(req, "child-1", "/state"), " ")
 	if strings.Contains(joined, "--skills-dir") || strings.Contains(joined, "--mcp-config") {
 		t.Errorf("unset knobs must not appear: %s", joined)
@@ -297,8 +297,8 @@ func TestBuildAgentArgv_OmitsUnsetKnobs(t *testing.T) {
 
 // TestSpawnKindLabel_Agent covers the fundi/kind auto-label for the new kind.
 func TestSpawnKindLabel_Agent(t *testing.T) {
-	if got := spawnKindLabel("agent"); got != "agent" {
-		t.Fatalf("spawnKindLabel(\"agent\") = %q, want \"agent\"", got)
+	if got := spawnKindLabel(protocol.KindFundi); got != protocol.KindFundi {
+		t.Fatalf("spawnKindLabel(%q) = %q, want %q", protocol.KindFundi, got, protocol.KindFundi)
 	}
 }
 
@@ -324,7 +324,7 @@ func TestForget_RemovesAgentSpillDir(t *testing.T) {
 	ctrl.st.Insert(&childstore.Session{
 		ChildID:      childID,
 		Status:       protocol.StatusExited,
-		Kind:         "agent",
+		Kind:         protocol.KindFundi,
 		Cwd:          t.TempDir(),
 		StartedAt:    now,
 		LastActivity: now,
@@ -359,7 +359,7 @@ func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 	ctrl.st.Insert(&childstore.Session{
 		ChildID:      childID,
 		Status:       protocol.StatusExited,
-		Kind:         "agent",
+		Kind:         protocol.KindFundi,
 		Cwd:          t.TempDir(),
 		StartedAt:    now,
 		LastActivity: now,
@@ -403,7 +403,7 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 			ctrl.st.Insert(&childstore.Session{
 				ChildID:      childID,
 				Status:       protocol.StatusIdle,
-				Kind:         "agent",
+				Kind:         protocol.KindFundi,
 				Cwd:          t.TempDir(),
 				StartedAt:    now,
 				LastActivity: now,
@@ -444,7 +444,7 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 // fails later in the respawn ceremony, which is fine — what matters is that it
 // is NOT refused up front with the agent-kind error.
 func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
-	for _, kind := range []string{"", "pi", "claude"} {
+	for _, kind := range []string{"", protocol.KindPi, protocol.KindClaude} {
 		t.Run("kind="+kind, func(t *testing.T) {
 			ctrl := newTestController(t)
 			const childID = "c_nonagent_session_switch"

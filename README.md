@@ -7,7 +7,7 @@ a daemon that hosts coding-agent children. One module, two surfaces:
   failover, and a DB-backed conversation store that captures every turn.
 - **fundi** — a daemon (`fundid`) that runs coding-agent children, multiplexes
   their event streams to concurrent clients, and exposes a control plane over a
-  Unix socket. Its native `agent` child kind drives the Anthropic API through
+  Unix socket. Its native `fundi` child kind drives the Anthropic API through
   this repo's own library rather than shelling out to Claude Code.
 
 They were separate repos until they weren't: fundi consumed rafiki as a pinned
@@ -31,7 +31,7 @@ pkg/agentcli/   the `rafiki agent` verb implementations
 
 pkg/agent/      fundi's agent runtime: turn engine, tools, context and skills
 pkg/child/      child process lifecycle and the per-backend providers
-pkg/inproc/     the child.Runner that runs an agent child as a goroutine
+pkg/inproc/     the child.Runner that runs a fundi child as a goroutine
                 over a pair of OS pipes
 pkg/control/    the daemon's control plane: dispatch and socket server
 pkg/childstore/ child session records and snapshots
@@ -46,7 +46,7 @@ pkg/models/     LLM model catalog enumeration
 pkg/version/    build-derived version string
 
 cmd/rafiki/     the proxy/server binary (serve, migrate, agent, --dev)
-cmd/fundid/     the fundi daemon, plus standalone `fundid agent` stdio mode
+cmd/fundid/     the fundi daemon, plus standalone `fundid fundi` stdio mode
 cmd/fundi/      the fundi CLI client
 attach/         fundi-attach, the TUI (TypeScript, built with bun)
 ```
@@ -139,25 +139,25 @@ behavior. See `pkg/routing/effortmap.go` (`EffortCache`) and `pkg/server/proxy.g
 
 fundi began as a fork of pi-controller and speaks the same JSONL wire protocol,
 so pi-controller's `pic` client and the pi TUI work against either. What it adds
-is a **native agent runtime**: the `agent` child kind drives the Anthropic API
+is a **native agent runtime**: the `fundi` child kind drives the Anthropic API
 through `pkg/llm` and `pkg/agentloop` directly rather than shelling out. That is
 what makes in-band abort possible — abort arrives as a protocol frame and the
 process stays resident.
 
 | Child kind | Backend |
 |---|---|
-| `agent` (default) | native loop over `pkg/agentloop` — in-band abort, per-turn token and cost accounting |
+| `fundi` (default) | native loop over `pkg/agentloop` — in-band abort, per-turn token and cost accounting |
 | `pi` | a pi process in `--mode rpc` |
 | `claude` | Claude Code |
 
 The kinds have **different model universes**, and `--model` completion is scoped
-to the one you picked. An `agent` child routes through this module, so it takes
+to the one you picked. A `fundi` child routes through this module, so it takes
 concrete Anthropic ids, `<family>-latest` aliases and any OpenRouter slash id. A
 `pi` child resolves the id against pi's *own* providers in
 `~/.pi/agent/models.json`, so an OpenRouter slash id means nothing to it — pick
 one and the child spawns, attaches, and then never answers.
 
-`agent` needs `ANTHROPIC_API_KEY` in the **daemon-visible** environment
+`fundi` needs `ANTHROPIC_API_KEY` in the **daemon-visible** environment
 (unconditionally — the client always builds an Anthropic sender), plus
 `OPENROUTER_API_KEY` for any non-`anthropic/` model. Both reach a child from the
 caller's shell via `fundi create --forward-env`, on by default. A missing key
@@ -169,7 +169,7 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 
 | Binary | Role |
 |---|---|
-| `fundid` | the daemon. It runs `agent`-kind children as goroutines inside itself; `pi` and `claude` children remain subprocesses. `fundid agent` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
+| `fundid` | the daemon. It runs `fundi`-kind children as goroutines inside itself; `pi` and `claude` children remain subprocesses. `fundid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
 | `fundi` | the CLI client — the one you type |
 | `fundi-attach` | the TUI, spawned by `fundi create` / `fundi attach` |
 
@@ -225,7 +225,7 @@ needed on the machine running `fundi`. See `docs/agent-cli.md` for the
 DSN-direct equivalent (`rafiki agent stats|search|export`), or
 `docs/reference/pi-controller-protocol.md` §6.17-6.19 for the wire commands.
 
-`fundid -h` and `fundid agent -h` document the two daemon process modes;
+`fundid -h` and `fundid fundi -h` document the two daemon process modes;
 `fundi --help` covers the client. See `docs/reference/pi-controller-protocol.md` for the
 wire protocol spec and `docs/plans/2026-07-20-fundi-design.md` for the
 architecture.
@@ -272,7 +272,7 @@ make run               # fundid in the foreground, proxy face on :8035
 `/v1/chat/completions` handlers `rafiki serve` does, on the same port, so
 anything already pointed at a local rafiki keeps working — and pi and claude
 children get capture, failover and model resolution without a second process
-anyone has to remember to start. The agent kind never uses it: it reaches the
+anyone has to remember to start. The fundi kind never uses it: it reaches the
 library in-process.
 
 The face binds **all interfaces** by default (`FUNDI_PROXY_LISTEN`, default

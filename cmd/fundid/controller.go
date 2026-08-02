@@ -264,7 +264,7 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 		// an empty render-ring must stay empty rather than dumping raw frames
 		// into the rendered view (matches the live path). pi's raw ring already
 		// IS pi-vocabulary, so pi rendered requests still fall through here.
-		if len(all) == 0 && (!q.Rendered || snap.Kind != "claude") {
+		if len(all) == 0 && (!q.Rendered || snap.Kind != protocol.KindClaude) {
 			all = snap.ExitedRing
 			if len(all) == 0 {
 				all = c.readDiskEvents(childID, "out.jsonl.gz")
@@ -528,7 +528,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 	}
 
 	// childID is minted before resolveSpawnPlan (rather than after, as
-	// before) because the "agent" kind needs it to pin --spill-dir
+	// before) because the "fundi" kind needs it to pin --spill-dir
 	// (see buildAgentArgv/agentSpillDir).
 	childID := newChildID()
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
@@ -540,7 +540,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 	}
 
 	env := c.buildEnv(req, childID, c.socketPath)
-	if req.Kind == "claude" {
+	if req.Kind == protocol.KindClaude {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
@@ -718,7 +718,7 @@ func (c *Controller) activateLiveChild(
 	if baseSnap == nil {
 		// Fresh Spawn path. Perform name reconciliation before reading final
 		// metadata so the returned SessionName reflects any rename.
-		if !stalled && req.Kind != "claude" && req.Name != "" && meta.SessionName != req.Name {
+		if !stalled && req.Kind != protocol.KindClaude && req.Name != "" && meta.SessionName != req.Name {
 			renameID := "controller-rename-1"
 			frame := []byte(fmt.Sprintf(`{"type":"set_session_name","id":%q,"name":%q}`, renameID, req.Name))
 			if err := ch.Send(frame); err == nil {
@@ -971,13 +971,13 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 	}
-	if snap.Kind == "claude" {
+	if snap.Kind == protocol.KindClaude {
 		req.ResumeSession = snap.SessionID
 	} else {
 		req.ResumeSession = snap.SessionFile
 	}
-	if snap.Kind == "agent" {
-		// The agent kind carries its provider inside the model id and
+	if snap.Kind == protocol.KindFundi {
+		// The fundi kind carries its provider inside the model id and
 		// resolveSpawnPlan rejects a separate Provider outright - but the
 		// snapshot stores the two halves split, because splitModel took them
 		// apart at spawn time. Rejoin them or resume fails for every
@@ -1090,13 +1090,13 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 
 	kind := snap.Kind
 	if kind == "" {
-		kind = "pi"
+		kind = protocol.KindPi
 	}
 
 	// Verify the session file exists for pi children that have one. Claude does
 	// not track a session file (it manages its own ~/.claude store keyed by
 	// session id), so there is nothing to stat.
-	if kind == "pi" && !snap.NoSession && snap.SessionFile != "" {
+	if kind == protocol.KindPi && !snap.NoSession && snap.SessionFile != "" {
 		if _, err := os.Stat(snap.SessionFile); err != nil {
 			return control.SpawnResult{}, &control.ControllerError{
 				Code:    protocol.ErrSessionFileMissing,
@@ -1116,7 +1116,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 	}
 
 	env := c.buildEnv(req, childID, c.socketPath)
-	if kind == "claude" {
+	if kind == protocol.KindClaude {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
@@ -1218,7 +1218,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	kind := snap.Kind
 	if kind == "" {
-		kind = "pi"
+		kind = protocol.KindPi
 	}
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
@@ -1230,7 +1230,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	}
 
 	env := c.buildEnv(req, childID, c.socketPath)
-	if kind == "claude" {
+	if kind == protocol.KindClaude {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
@@ -1437,7 +1437,7 @@ func (c *Controller) Forget(childID string) error {
 	if err := c.deleteLogDump(childID); err != nil {
 		slog.Warn("delete log dump", "childId", childID, "error", err)
 	}
-	if snap.Kind == "agent" {
+	if snap.Kind == protocol.KindFundi {
 		if err := c.deleteSpillDir(childID); err != nil {
 			slog.Warn("delete spill dir", "childId", childID, "error", err)
 		}
@@ -1462,7 +1462,7 @@ func (c *Controller) deleteLogDump(childID string) error {
 
 // deleteSpillDir removes an agent-kind child's clipped-tool-output spill
 // directory (see buildAgentArgv/agentSpillDir). Forget/ForgetAllExited call
-// this for "agent" kind children so 'fundi forget' fully removes the child's
+// this for "fundi" kind children so 'fundi forget' fully removes the child's
 // footprint, mirroring deleteLogDump. Missing directory is not an error (the
 // child may have exited before writing any spilled output).
 func (c *Controller) deleteSpillDir(childID string) error {
@@ -1491,7 +1491,7 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 		if err := c.deleteLogDump(s.ChildID); err != nil {
 			slog.Warn("delete log dump", "childId", s.ChildID, "error", err)
 		}
-		if s.Kind == "agent" {
+		if s.Kind == protocol.KindFundi {
 			if err := c.deleteSpillDir(s.ChildID); err != nil {
 				slog.Warn("delete spill dir", "childId", s.ChildID, "error", err)
 			}
@@ -1559,7 +1559,7 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 	// children and run the interrupt+resume cycle; pi children fall through and
 	// forward abort natively to --mode rpc.
 	if isAbortFrame(frame) {
-		if snap, ok := c.st.Get(childID); ok && snap.Kind == "claude" {
+		if snap, ok := c.st.Get(childID); ok && snap.Kind == protocol.KindClaude {
 			return c.handleClaudeAbort(childID)
 		}
 	}
@@ -1633,7 +1633,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision interceptDec
 	// dead child, which at least told the user something was wrong. Failing
 	// loudly is the honest replacement; it stays this way until agent
 	// conversations have an identity of their own, separate from the child id.
-	if snap.Kind == "agent" {
+	if snap.Kind == protocol.KindFundi {
 		return &control.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: string(decision.Type) + " is not supported for an agent child: an agent conversation is " +
@@ -2371,35 +2371,35 @@ func buildClaudeArgv(req protocol.SpawnRequest) []string {
 // request based on its Kind. Empty Kind defaults to "pi". Shared by Spawn and
 // Resume so the two paths can never diverge on protocol selection.
 //
-// childID and stateDir are only used by the "agent" kind, which needs both to
+// childID and stateDir are only used by the "fundi" kind, which needs both to
 // pin --spill-dir to a location Forget can find deterministically later (see
 // buildAgentArgv/agentSpillDir). claude/pi ignore them.
 func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin string, argv []string, prov child.ProtocolProvider, err error) {
 	kind := req.Kind
 	if kind == "" {
-		kind = "pi"
+		kind = protocol.KindPi
 	}
 	switch kind {
-	case "claude":
+	case protocol.KindClaude:
 		bin, err = resolveClaudeBinary(req.PiBinary)
 		return bin, buildClaudeArgv(req), child.ClaudeProvider{}, err
-	case "pi":
+	case protocol.KindPi:
 		bin, err = resolvePiBinary(req.PiBinary)
 		return bin, buildArgv(req), child.PiProvider{}, err
-	case "agent":
-		// The agent runtime is `fundid agent ...`: the daemon re-execs itself
+	case protocol.KindFundi:
+		// The fundi runtime is `fundid fundi ...`: the daemon re-execs itself
 		// rather than shelling out to a separate binary. It speaks pi's rpc
 		// protocol natively (internal/agent/frontend.go), so no translator is
 		// needed - child.PiProvider{} is the correct identity, same as the
 		// "pi" case above.
 		//
-		// --model is a required flag for `fundid agent` (parseAgentFlags):
+		// --model is a required flag for `fundid fundi` (parseAgentFlags):
 		// reject an unresolvable model here, at spawn time, rather than
 		// exec'ing a child that immediately dies on the flag-parse error.
 		if !agentSpawnHasModel(req) {
-			return "", nil, nil, errors.New(`agent kind requires a model: set SpawnRequest.Model (provider-qualified, e.g. "anthropic/sonnet-latest") or pass --model via ExtraArgs`)
+			return "", nil, nil, errors.New(`fundi kind requires a model: set SpawnRequest.Model (provider-qualified, e.g. "anthropic/sonnet-latest") or pass --model via ExtraArgs`)
 		}
-		// Unlike pi/claude, the agent kind carries its provider inside the
+		// Unlike pi/claude, the fundi kind carries its provider inside the
 		// model id itself (e.g. "anthropic/sonnet-latest" - see
 		// internal/agent/config.go's senderOptions); there is no separate
 		// --provider flag for `fundid agent` to consume. A caller-supplied
@@ -2408,11 +2408,11 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		// reject it explicitly rather than exec'ing a child whose model
 		// doesn't match what the caller asked for.
 		if req.Provider != "" {
-			return "", nil, nil, errors.New(`agent kind does not accept a separate Provider: fold it into a provider-qualified Model (e.g. "anthropic/sonnet-latest") instead`)
+			return "", nil, nil, errors.New(`fundi kind does not accept a separate Provider: fold it into a provider-qualified Model (e.g. "anthropic/sonnet-latest") instead`)
 		}
 		self, selfErr := os.Executable()
 		if selfErr != nil {
-			return "", nil, nil, fmt.Errorf("resolving own binary for agent kind: %w", selfErr)
+			return "", nil, nil, fmt.Errorf("resolving own binary for fundi kind: %w", selfErr)
 		}
 		return self, buildAgentArgv(req, childID, stateDir), child.PiProvider{}, nil
 	default:
@@ -2429,7 +2429,7 @@ func agentSpillDir(stateDir, childID string) string {
 	return filepath.Join(stateDir, "spill", childID)
 }
 
-// agentSpawnHasModel reports whether an "agent" kind SpawnRequest resolves to
+// agentSpawnHasModel reports whether a "fundi" kind SpawnRequest resolves to
 // a non-empty --model: either req.Model itself, or a "--model VALUE"/
 // "--model=VALUE" pair supplied through the ExtraArgs escape hatch
 // (buildAgentArgv appends ExtraArgs last, so an ExtraArgs --model can stand
@@ -2459,10 +2459,11 @@ func agentSpawnHasModel(req protocol.SpawnRequest) bool {
 	return false
 }
 
-// buildAgentArgv converts a SpawnRequest into the `fundid agent` CLI argument
+// buildAgentArgv converts a SpawnRequest into the `fundid fundi` CLI argument
 // list (excluding the binary itself), mirroring Task 14's flag contract
-// (cmd/fundid/agent.go's parseAgentFlags). The leading "agent" token is
-// required so main.go's `os.Args[1] == "agent"` dispatch fires on re-exec.
+// (cmd/fundid/agent.go's parseAgentFlags). The leading "fundi" token is
+// required so main.go's `os.Args[1] == protocol.KindFundi` dispatch fires on
+// re-exec.
 //
 // --spill-dir is always pinned to agentSpillDir(stateDir, childID) so the
 // daemon and the agent child agree on where clipped tool output lives,
@@ -2471,7 +2472,7 @@ func agentSpawnHasModel(req protocol.SpawnRequest) bool {
 // before req.ExtraArgs so the existing "extra args win last" escape hatch
 // (see buildArgv/buildClaudeArgv) still lets a caller override it.
 func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []string {
-	argv := []string{"agent"}
+	argv := []string{protocol.KindFundi}
 
 	if req.Model != "" {
 		argv = append(argv, "--model", req.Model)
@@ -2516,7 +2517,7 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 // matching resolveSpawnPlan's kind handling.
 func spawnKindLabel(kind string) string {
 	if kind == "" {
-		return "pi"
+		return protocol.KindPi
 	}
 	return kind
 }
@@ -2538,8 +2539,8 @@ func claudeEnv(configDir string) []string {
 //
 // The two reserved controller vars are always injected regardless of mode.
 //
-// Note on API key propagation for the "agent" kind: unlike pi/claude, `fundi
-// agent` has no --api-key flag (internal/agent.Config.AnthropicAPIKey /
+// Note on API key propagation for the "fundi" kind: unlike pi/claude, `fundid
+// fundi` has no --api-key flag (internal/agent.Config.AnthropicAPIKey /
 // OpenRouterAPIKey are read from the environment by cmd/fundid/agent.go's
 // runAgent, deliberately, so tests can exercise the missing-key path without
 // mutating the process env - see internal/agent/config.go's Config doc
@@ -2564,7 +2565,7 @@ func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath str
 		paths.ChildID+"="+childID,
 		paths.Socket+"="+socketPath,
 	)
-	if req.Kind == "agent" && req.APIKey != "" {
+	if req.Kind == protocol.KindFundi && req.APIKey != "" {
 		envVar := "OPENROUTER_API_KEY"
 		if strings.HasPrefix(req.Model, "anthropic/") {
 			envVar = "ANTHROPIC_API_KEY"
@@ -2589,7 +2590,7 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 	if v := paths.Get(paths.ProxyURL); v != "" {
 		url, token = v, paths.Get(paths.ProxyToken)
 	}
-	if url == "" || req.Kind == "agent" || !proxyRoutesKind(req.Kind) {
+	if url == "" || req.Kind == protocol.KindFundi || !proxyRoutesKind(req.Kind) {
 		return nil
 	}
 
@@ -2603,7 +2604,7 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 	}
 
 	switch req.Kind {
-	case "claude":
+	case protocol.KindClaude:
 		// Built by the same code as `rafiki claude`, so the two cannot drift.
 		// Passing a nil environ yields only the additions, which is what is
 		// wanted: the child inherits os.Environ and this is appended to it,
@@ -2629,7 +2630,7 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 func proxyRoutesKind(kind string) bool {
 	kinds := splitComma(paths.Get(paths.ProxyKinds))
 	if len(kinds) == 0 {
-		kinds = []string{"pi", "claude"}
+		kinds = []string{protocol.KindPi, protocol.KindClaude}
 	}
 	return slices.Contains(kinds, kind)
 }

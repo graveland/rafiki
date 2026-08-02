@@ -283,8 +283,8 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   "noExtensions":        false,
   "skills":              [],               // --skill <path> per entry
   "noSkills":            false,
-  "skillsDirs":          [],               // --skills-dir <dir> per entry; kind=agent only
-  "mcpConfig":           null,             // --mcp-config <path>; kind=agent only
+  "skillsDirs":          [],               // --skills-dir <dir> per entry; kind=fundi only
+  "mcpConfig":           null,             // --mcp-config <path>; kind=fundi only
   "promptTemplates":     [],               // --prompt-template <path>
   "noPromptTemplates":   false,
   "themes":              [],               // --theme <path>
@@ -723,7 +723,7 @@ Response:
 ### 6.17 `ctrl_conversation_stats`
 
 **fundi-specific.** Unlike every other command in this document, this is not answerable by a
-stock pi-controller daemon — it requires the `agent` child kind's database
+stock pi-controller daemon — it requires the `fundi` child kind's database
 (`FUNDI_AGENT_DB`), which pi-controller has no concept of. `pic` sending this to a real
 pi-controller daemon gets `unknown command`.
 

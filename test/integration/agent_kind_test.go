@@ -238,7 +238,7 @@ func assertNoRestartBetween(t *testing.T, sc *subConn, from, to int, childID str
 }
 
 // TestIntegration_AgentKind_AbortPreservesProcess is the Task 16 keystone
-// test: it spawns a real `fundid agent` child (kind="agent") against the
+// test: it spawns a real `fundid fundi` child (kind="fundi") against the
 // real daemon binary under test (this is why it lives in the subprocess
 // integration harness -- it exercises bootDaemon's real controller/store/
 // subscriber wiring end-to-end, not a property of the agent kind itself; as
@@ -249,7 +249,7 @@ func assertNoRestartBetween(t *testing.T, sc *subConn, from, to int, childID str
 // in-band (no restart) by witnessing the child's lifecycle events rather
 // than PID identity - the same forwarding path TestSend_PiAbortForwardedNatively
 // proves in-process for kind="pi" (Controller.Send only intercepts abort for
-// kind=="claude"; both "pi" and "agent" fall through to ch.Send, forwarded to
+// kind=="claude"; both "pi" and "fundi" fall through to ch.Send, forwarded to
 // the child's stdin/inproc.Runner natively).
 //
 // Because the scripted tool cannot finish on its own (the FIFO is never
@@ -289,9 +289,9 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	spawnReq := protocol.SpawnRequest{
 		Type: "ctrl_spawn",
 		ID:   "spawn1",
-		Kind: "agent",
+		Kind: protocol.KindFundi,
 		Cwd:  t.TempDir(),
-		// --model is required by `fundid agent` (parseAgentFlags) since the
+		// --model is required by `fundid fundi` (parseAgentFlags) since the
 		// provider/model redesign; --fake-turns replaces the sender, so the
 		// value itself is inert here beyond being provider-qualified.
 		Model:     "anthropic/claude-x",
@@ -391,7 +391,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 
 	// KEYSTONE ASSERTION: the abort must NOT have restarted the child.
 	//
-	// In-process children (kind="agent") have no pid: Runner.PID() returns 0
+	// In-process children (kind="fundi") have no pid: Runner.PID() returns 0
 	// (Task 3), so ChildSummary.PID is a non-nil pointer to 0 for the entire
 	// life of the child. That made the old `*after.PID != pidBefore` check
 	// compare 0 != 0, which can never fail -- the agent kind ended up with no

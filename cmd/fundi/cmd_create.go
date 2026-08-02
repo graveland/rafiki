@@ -69,8 +69,8 @@ scripting / AFK workflows, use --detached.)`,
 // addSpawnFlags registers the shared spawn-related flags on cmd.
 func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
-	cmd.Flags().String("kind", "agent", "Agent kind: agent (default; native fundi runtime, needs a provider-qualified --model), pi (a pi process in rpc mode), or claude (Claude Code)")
-	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind agent and --kind pi")
+	cmd.Flags().String("kind", protocol.KindFundi, "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model), pi (a pi process in rpc mode), or claude (Claude Code)")
+	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi and --kind pi")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
 	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via FUNDI_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
@@ -81,8 +81,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("extension", nil, "Load an extension (repeatable)")
 	cmd.Flags().Bool("verbose", false, "Verbose startup")
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
-	cmd.Flags().StringSlice("skills-dir", nil, "Additional skills directory for --kind agent (repeatable)")
-	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind agent (default: <cwd>/.mcp.json, else $FUNDI_MCP_CONFIG or <config dir>/mcp.json)")
+	cmd.Flags().StringSlice("skills-dir", nil, "Additional skills directory for --kind fundi (repeatable)")
+	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind fundi (default: <cwd>/.mcp.json, else $FUNDI_MCP_CONFIG or <config dir>/mcp.json)")
 	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see FUNDI_DEFAULT_LABELS")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 
@@ -247,7 +247,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// dropped). Skip the auto-install entirely for --kind claude.
 	kind, _ := cmd.Flags().GetString("kind")
 	noInstall, _ := cmd.Flags().GetBool("no-install-helpers")
-	if !noInstall && kind != "claude" {
+	if !noInstall && kind != protocol.KindClaude {
 		if err := ensureHelpersInstalled(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: fundi-helpers auto-install failed: %v\n", err)
 			// proceed anyway
