@@ -156,17 +156,25 @@ func bootDaemon(t *testing.T) *daemon {
 		logsDir:    filepath.Join(appDir, "logs"), // paths.LogsDir() == StateDir/logs
 	}
 
-	// Poll until the socket file appears (daemon creates it when ready).
+	// Poll until the daemon is actually accepting. Stat-ing the socket path is
+	// not enough: the file exists from the moment the listener is created, so a
+	// stat-based wait races the daemon's own startup and the first dial gets
+	// ECONNREFUSED. Connecting is the only proof there is something behind it.
 	deadline := time.Now().Add(10 * time.Second)
+	var lastErr error
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); err == nil {
+		conn, err := net.Dial("unix", socketPath)
+		if err == nil {
+			_ = conn.Close()
+			lastErr = nil
 			break
 		}
+		lastErr = err
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := os.Stat(socketPath); err != nil {
+	if lastErr != nil {
 		d.stopDaemon()
-		t.Fatalf("daemon socket never appeared: %v", err)
+		t.Fatalf("daemon never accepted on %s: %v", socketPath, lastErr)
 	}
 
 	t.Cleanup(d.stopDaemon)
