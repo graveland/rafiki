@@ -44,17 +44,17 @@ func TestMain(m *testing.M) {
 
 	fakePiPath = filepath.Join(root, "test", "integration", "fake-pi.sh")
 
-	binDir, err := os.MkdirTemp("", "fundi-build")
+	binDir, err := os.MkdirTemp("", "rafiki-build")
 	if err != nil {
 		log.Fatalf("mkdirtemp for build: %v", err)
 	}
 	defer os.RemoveAll(binDir)
 
 	// Both binaries land in the same directory, so their names must differ:
-	// fundid is the daemon, fundi the client.
+	// rafikid is the daemon, rafiki the client.
 	for _, cmd := range []struct{ bin, pkg string }{
-		{"fundid", "./cmd/fundid"},
-		{"fundi", "./cmd/fundi"},
+		{"rafikid", "./cmd/rafikid"},
+		{"rafiki", "./cmd/rafiki"},
 	} {
 		out := filepath.Join(binDir, cmd.bin)
 		build := exec.Command("go", "build", "-o", out, cmd.pkg)
@@ -64,9 +64,9 @@ func TestMain(m *testing.M) {
 			log.Fatalf("build %s: %v", cmd.bin, err)
 		}
 		switch cmd.bin {
-		case "fundid":
+		case "rafikid":
 			binaryPath = out
-		case "fundi":
+		case "rafiki":
 			cliPath = out
 		}
 	}
@@ -94,7 +94,7 @@ func findModuleRoot() (string, error) {
 
 // ─── daemon harness ───────────────────────────────────────────────────────────
 
-// daemon wraps a running fundi daemon subprocess with a temp HOME directory.
+// daemon wraps a running rafiki daemon subprocess with a temp HOME directory.
 type daemon struct {
 	socketPath string
 	proc       *exec.Cmd
@@ -115,7 +115,7 @@ func bootDaemon(t *testing.T) *daemon {
 	if runtime.GOOS == "darwin" {
 		base = "/tmp"
 	}
-	homeDir, err := os.MkdirTemp(base, "fundi-it")
+	homeDir, err := os.MkdirTemp(base, "rafiki-it")
 	if err != nil {
 		t.Fatalf("mkdirtemp: %v", err)
 	}

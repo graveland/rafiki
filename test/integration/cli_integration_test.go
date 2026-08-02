@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// TestCLI_Status verifies that `fundi status` returns a JSON object containing
+// TestCLI_Status verifies that `rafiki status` returns a JSON object containing
 // a "version" field.
 func TestCLI_Status(t *testing.T) {
 	t.Parallel()
@@ -88,7 +88,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// `fundi kill` auto-forgets on clean exit (commit 995a7e1), so `smoke`
+	// `rafiki kill` auto-forgets on clean exit (commit 995a7e1), so `smoke`
 	// should already be gone from the store.  Verify by attempting to get it.
 	getCmd := exec.Command(cliPath, "--socket", d.socketPath, "get", "smoke")
 	out, _ = getCmd.CombinedOutput()
@@ -104,7 +104,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 //	sleep 1
 //
 //	# Spawn a child interactively (attaches a TUI)
-//	./bin/fundi create demo --cwd /tmp --no-extensions \
+//	./bin/rafiki create demo --cwd /tmp --no-extensions \
 //	    --model anthropic/claude-haiku-4-5
 //
 //	# In the TUI:
@@ -114,31 +114,31 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 //	- Press Ctrl+D to detach
 //
 //	# In another shell, verify the child is still alive:
-//	./bin/fundi list
+//	./bin/rafiki list
 //	# status should be "idle" (the agent finished its turn)
 //
 //	# Reattach
-//	./bin/fundi attach demo
+//	./bin/rafiki attach demo
 //	# Verify the TUI re-renders the conversation history
 //
 //	# Quit with native semantics
-//	./bin/fundi attach demo --kill-on-exit
+//	./bin/rafiki attach demo --kill-on-exit
 //	# Press Ctrl+D
-//	./bin/fundi list
+//	./bin/rafiki list
 //	# demo should now be "exited"
 //
-//	./bin/fundi forget demo
+//	./bin/rafiki forget demo
 //	pkill pi-controller
 
-// TestCLI_CreateDetached verifies that `fundi create --detached` spawns a child
+// TestCLI_CreateDetached verifies that `rafiki create --detached` spawns a child
 // and returns JSON containing a childId, then confirms the child appears in
-// `fundi list`. Cleans up via kill + forget.
+// `rafiki list`. Cleans up via kill + forget.
 func TestCLI_CreateDetached(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
 
 	// create --detached: should spawn the child and print JSON without attaching.
-	// Capture stdout and stderr separately — fundi may emit a best-effort warning
+	// Capture stdout and stderr separately — rafiki may emit a best-effort warning
 	// on stderr (e.g. active-marker directory not found) that we don't want to
 	// confuse with the JSON payload on stdout.
 	createCmd := exec.Command(cliPath,
@@ -196,7 +196,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// `fundi kill` auto-forgets on clean exit (commit 995a7e1), so the child
+	// `rafiki kill` auto-forgets on clean exit (commit 995a7e1), so the child
 	// should already be gone from the store.
 	getCmd := exec.Command(cliPath, "--socket", d.socketPath, "get", "test-detached")
 	out, _ = getCmd.CombinedOutput()
@@ -205,7 +205,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	}
 }
 
-// TestCLI_AttachHelp verifies that `fundi attach --help` exits cleanly and
+// TestCLI_AttachHelp verifies that `rafiki attach --help` exits cleanly and
 // documents the --kill-on-exit flag.
 func TestCLI_AttachHelp(t *testing.T) {
 	t.Parallel()
@@ -221,7 +221,7 @@ func TestCLI_AttachHelp(t *testing.T) {
 	}
 }
 
-// TestCLI_CreateHelp verifies that `fundi create --help` exits cleanly and
+// TestCLI_CreateHelp verifies that `rafiki create --help` exits cleanly and
 // documents both --detached and --kill-on-exit flags.
 func TestCLI_CreateHelp(t *testing.T) {
 	t.Parallel()

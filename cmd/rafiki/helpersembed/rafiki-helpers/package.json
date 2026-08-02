@@ -1,0 +1,10 @@
+{
+    "name": "@graveland/rafiki-helpers",
+    "version": "0.1.3",
+    "type": "module",
+    "private": true,
+    "description": "Pi extension that exposes fundi-attach-aware slash commands",
+    "pi": {
+        "extensions": ["./index.ts"]
+    }
+}

@@ -10,9 +10,9 @@ BIN_DIR := bin
 # pi-controller install.
 DESTDIR ?= $(HOME)/.local/bin
 
-DAEMON_BIN := fundid
-CLI_BIN    := fundi
-ATTACH_BIN := fundi-attach
+DAEMON_BIN := rafikid
+CLI_BIN    := rafiki
+ATTACH_BIN := rafiki-attach
 
 # These must be defined ABOVE build-attach, not down in the pi section with the
 # rules that use them: make expands a prerequisite list when it parses the rule,
@@ -42,7 +42,7 @@ help: ## Display this help.
 
 ##@ Development
 
-# Run fundi in the foreground. fundid serves the proxy face itself on :8035 —
+# Run rafikid in the foreground. rafikid serves the proxy face itself on :8035 —
 # the port the old standalone `rafiki serve` used to hold — so anything already
 # pointed at a local rafiki keeps working, and pi/claude children get capture,
 # failover and model resolution without a second process to start.
@@ -57,12 +57,12 @@ help: ## Display this help.
 # and the agent runtime's are the same variable, sourced straight from .env.
 #
 # Note this does NOT migrate, where the old standalone `rafiki serve --dev` did:
-# run `go run ./cmd/fundid migrate` once against a fresh database.
+# run `go run ./cmd/rafikid migrate` once against a fresh database.
 .PHONY: run
-run: ## Run fundid in the foreground, serving the proxy face on :8035.
+run: ## Run rafikid in the foreground, serving the proxy face on :8035.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	export RAFIKI_SERVE_TOKEN="$${RAFIKI_SERVE_TOKEN:-dev}"; \
-	go run ./cmd/fundid
+	go run ./cmd/rafikid
 
 # NOTE (merge): fundi's `build` also depended on build-attach. It no longer
 # does. build-attach needs bun AND the pi submodule initialised, so folding it
@@ -74,47 +74,47 @@ run: ## Run fundid in the foreground, serving the proxy face on :8035.
 build: build-daemon build-cli ## Build both Go binaries into bin/.
 
 .PHONY: build-daemon
-build-daemon: ## Build the fundi daemon (bin/fundid).
+build-daemon: ## Build the rafiki daemon (bin/rafikid).
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/$(DAEMON_BIN) ./cmd/fundid
+	$(GO) build -o $(BIN_DIR)/$(DAEMON_BIN) ./cmd/rafikid
 
 .PHONY: build-cli
-build-cli: ## Build the fundi CLI client (bin/fundi).
+build-cli: ## Build the rafiki CLI client (bin/rafiki).
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/$(CLI_BIN) ./cmd/fundi
+	$(GO) build -o $(BIN_DIR)/$(CLI_BIN) ./cmd/rafiki
 
 # There is no CI on this repo, so nothing else exercises GOOS=linux — the
 # daemon and CLI silently bitrotted on Linux for an entire phase until this
-# target's absence was flagged in review. fundi-attach is excluded: it ships a
+# target's absence was flagged in review. rafiki-attach is excluded: it ships a
 # native binary via bun, which does not cross-compile from here.
 .PHONY: build-linux
 build-linux: ## Cross-compile for linux/amd64 (catches Linux-only breaks; no CI runs this).
 	mkdir -p $(BIN_DIR)/linux
 	GOOS=linux GOARCH=amd64 $(GO) vet ./...
-	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(DAEMON_BIN) ./cmd/fundid
-	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(CLI_BIN) ./cmd/fundi
+	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(DAEMON_BIN) ./cmd/rafikid
+	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(CLI_BIN) ./cmd/rafiki
 
-# fundi-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
+# rafiki-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
 # must be built first. Fail loudly if the submodule isn't initialised.
 .PHONY: build-attach
-build-attach: $(PI_MODULES) $(PI_DIST) ## Bundle the fundi-attach TUI binary (recompiles pi dist first).
+build-attach: $(PI_MODULES) $(PI_DIST) ## Bundle the rafiki-attach TUI binary (recompiles pi dist first).
 	@if command -v bun >/dev/null 2>&1; then \
 	    cd attach && bun install --silent && bun run build; \
 	else \
-	    echo "skipping fundi-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
+	    echo "skipping rafiki-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
 	fi
 
-# The paths package (via fundid -h) is the one authority for resolved config
+# The paths package (via rafikid -h) is the one authority for resolved config
 # paths — this used to hand-roll its own shell guesses and got all four of
-# these wrong: it hardcoded ~/.config/fundi ignoring $XDG_CONFIG_HOME, printed
+# these wrong: it hardcoded ~/.config/rafiki ignoring $XDG_CONFIG_HOME, printed
 # the literal unexpanded "~" instead of an actual path, read the invoking
 # shell's $RAFIKI_* values rather than what the daemon itself resolves, and
 # never mentioned presets.json at all. Shelling out to the built binary's own
 # -h output means this can never drift from the code again. Depends on
-# build-daemon (not build-cli): `fundid`, not `fundi`, is the process that
+# build-daemon (not build-cli): `rafikid`, not `rafiki`, is the process that
 # actually reads these paths at runtime.
 .PHONY: print-config
-print-config: build-daemon ## Show the resolved fundi config paths (shells out to fundid -h).
+print-config: build-daemon ## Show the resolved rafiki config paths (shells out to rafikid -h).
 	@$(BIN_DIR)/$(DAEMON_BIN) -h | awk '/^  socket /,/^  mcp /'
 	@printf "  %-12s %s\n" "agent db" "$${RAFIKI_DB:-<unset — NO COST DATA>}"
 
@@ -123,44 +123,44 @@ print-config: build-daemon ## Show the resolved fundi config paths (shells out t
 # RAFIKI_URL / RAFIKI_TOKEN override the target server (environment wins over
 # .env, which wins over the make-run defaults).
 #
-# The launch itself lives in `fundi claude`, not here. It was inline shell
+# The launch itself lives in `rafiki claude`, not here. It was inline shell
 # until it needed three things a Makefile recipe should not be doing: stripping
 # inherited ANTHROPIC_* vars so a nested session does not adopt its parent's
 # conversation, registering the model as a custom /model option so Claude Code
 # does not reject non-Anthropic ids against its client-side allowlist before a
 # request ever leaves, and pinning the auto-compact threshold to the model's
-# real context window from the OpenRouter catalog. See cmd/fundi/claude.go —
+# real context window from the OpenRouter catalog. See cmd/rafiki/claude.go —
 # and note that sourcing .env here is now safe precisely because the command
 # strips the provider keys itself.
 .PHONY: claude
 claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	go run ./cmd/fundi claude $(ARGS)
+	go run ./cmd/rafiki claude $(ARGS)
 
 ##@ Install
 
 # Copies the built binaries to $(DESTDIR) (default ~/.local/bin), then checks
 # whether that is actually the copy $PATH will find.
 #
-# The shadowing check is not paranoia: fundi began as a fork of pi-controller,
+# The shadowing check is not paranoia: rafiki began as a fork of pi-controller,
 # whose own install may already have put a `pi-controller` (and historically a
 # `pic`) on $PATH ahead of ~/.local/bin. Installing successfully and then
 # running a different binary than the one you just built is a genuinely
 # confusing failure, so say so at install time.
 #
-# fundi-attach is copied only when it has been built — build-attach needs bun
+# rafiki-attach is copied only when it has been built — build-attach needs bun
 # and the pi submodule, and skips itself when bun is absent.
 #
 # It does not travel alone. bun compiles it to a static binary, and pi's
 # config.js then resolves package assets relative to dirname(process.execPath)
 # — so package.json, theme/*.json and assets/ must sit NEXT TO the binary
 # wherever it lands, not merely in bin/. Copying only the executable produces a
-# fundi-attach that runs fine from bin/ and dies from $(DESTDIR) with
+# rafiki-attach that runs fine from bin/ and dies from $(DESTDIR) with
 # "ENOENT: .../theme/dark.json" followed by "Theme not initialized", which
 # reads like a TUI bug rather than a missing file. attach/scripts/copy-pi-assets.ts
 # is the authority for this list and documents the same contract.
 .PHONY: install
-install: build ## Install fundid + fundi (+ fundi-attach if built) to $(DESTDIR).
+install: build ## Install rafikid + rafiki (+ rafiki-attach if built) to $(DESTDIR).
 	@mkdir -p "$(DESTDIR)"
 	@for b in $(DAEMON_BIN) $(CLI_BIN); do \
 	    cp "$(BIN_DIR)/$$b" "$(DESTDIR)/$$b" || exit 1; \
@@ -175,7 +175,7 @@ install: build ## Install fundid + fundi (+ fundi-attach if built) to $(DESTDIR)
 	            cp -R "$(BIN_DIR)/$$a" "$(DESTDIR)/$$a" || exit 1; \
 	            echo "installed $(DESTDIR)/$$a"; \
 	        else \
-	            echo "warning: $(BIN_DIR)/$$a missing — fundi-attach will fail at startup;" >&2; \
+	            echo "warning: $(BIN_DIR)/$$a missing — rafiki-attach will fail at startup;" >&2; \
 	            echo "         re-run 'make build-attach'" >&2; \
 	        fi; \
 	    done; \
@@ -195,29 +195,29 @@ install: build ## Install fundid + fundi (+ fundi-attach if built) to $(DESTDIR)
 
 # The edit loop for daemon code: build, install, and bounce the running daemon
 # so it is actually executing what you just built. Without the restart, `make
-# install` leaves the old fundid resident and the change appears not to have
+# install` leaves the old rafikid resident and the change appears not to have
 # landed — the daemon answers RPCs (ctrl_list_models among them) from whatever
 # binary launchd started, not from $(DESTDIR).
 #
 # `service restart`, deliberately NOT `service install`. Install rewrites the
-# plist from a template carrying only HOME and PATH (cmd/fundi/service_darwin.go),
+# plist from a template carrying only HOME and PATH (cmd/rafiki/service_darwin.go),
 # so it silently drops any hand-added environment. RAFIKI_DB is the one
 # that matters: lose it and agent conversations go back to in-memory with no
 # per-turn cost recorded anywhere, and the only symptom is a "mem-" session id
 # where a UUIDv7 should be.
 #
 # The restart runs the just-installed binary by explicit path rather than
-# whatever `fundi` resolves to, so a shadowing install elsewhere on $PATH
+# whatever `rafiki` resolves to, so a shadowing install elsewhere on $PATH
 # cannot bounce the service with a different client's idea of where things
 # live — the same failure the warnings above exist to catch.
 .PHONY: redeploy
-redeploy: install ## Rebuild + install, then restart the fundi daemon.
+redeploy: install ## Rebuild + install, then restart the rafiki daemon.
 	@"$(DESTDIR)/$(CLI_BIN)" service restart
 	@"$(DESTDIR)/$(CLI_BIN)" service status
 
 ##@ pi submodule lifecycle
 
-# fundi-attach links against the bundled pi tree at $(PI_DIR), and the daemon
+# rafiki-attach links against the bundled pi tree at $(PI_DIR), and the daemon
 # spawns the matching pi binary off PATH. `pi-install` keeps the global install
 # in lock-step with the submodule pin.
 #
@@ -266,7 +266,7 @@ pi-not-initialised:
 	@echo "Run 'make bootstrap' (fresh clone), or:" >&2
 	@echo "    git submodule update --init --recursive" >&2
 	@echo >&2
-	@echo "Only the fundi-attach TUI needs it — 'make build' works without it." >&2
+	@echo "Only the rafiki-attach TUI needs it — 'make build' works without it." >&2
 	@exit 1
 
 .PHONY: pi-build

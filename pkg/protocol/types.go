@@ -170,7 +170,7 @@ type SpawnRequest struct {
 
 	// Identity
 	Name   string            `json:"name,omitempty"`
-	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; fundi/ prefix rejected
+	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; rafiki/ prefix rejected
 
 	// Working directory (required, absolute).
 	Cwd string `json:"cwd"`
@@ -221,11 +221,11 @@ type SpawnRequest struct {
 	// Escape hatch: appended last to argv, wins by last-flag-wins.
 	ExtraArgs []string `json:"extraArgs,omitempty"`
 
-	// ResumedFromSession is set by `fundi resume --pi-session` when spawning a
+	// ResumedFromSession is set by `rafiki resume --pi-session` when spawning a
 	// fresh child to continue a pi session.jsonl that was not previously
-	// managed by fundi.  When non-empty the daemon adds the reserved auto-label
-	// `fundi/resumed-from-session=<value>` to the new child.  Sent here (rather
-	// than in Labels) because the `fundi/` namespace is reserved for daemon
+	// managed by rafiki.  When non-empty the daemon adds the reserved auto-label
+	// `rafiki/resumed-from-session=<value>` to the new child.  Sent here (rather
+	// than in Labels) because the `rafiki/` namespace is reserved for daemon
 	// auto-labels; user-supplied Labels with that prefix are rejected.
 	ResumedFromSession string `json:"resumedFromSession,omitempty"`
 }
@@ -620,7 +620,7 @@ type CtrlChildRenamed struct {
 
 // SetLabelsRequest mutates the labels on an existing child (§6.17).
 // Set entries are applied first, then Remove entries are deleted.
-// Keys using the fundi/ prefix are reserved and rejected with ErrInvalidArgs.
+// Keys using the rafiki/ prefix are reserved and rejected with ErrInvalidArgs.
 type SetLabelsRequest struct {
 	Type    string            `json:"type"` // "ctrl_set_labels"
 	ID      string            `json:"id,omitempty"`

@@ -14,7 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// fakeTurnsScript writes a --fake-turns ndjson file (internal/fundi's hidden
+// fakeTurnsScript writes a --fake-turns ndjson file (pkg/fundi's hidden
 // test seam, LoadFakeSender) with two scripted assistant turns:
 //
 //  1. A tool_use call to the real "bash" tool running
@@ -28,7 +28,7 @@ import (
 //     abort to prove the same child process still works.
 //
 // Aborting mid-tool cancels the turn's context, which is what actually kills
-// the blocked read (see internal/fundi/tools/bash.go's Setpgid+cmd.Cancel
+// the blocked read (see pkg/fundi/tools/bash.go's Setpgid+cmd.Cancel
 // wiring) - the turn never reaches a second LLM call, so the fake sender's
 // second scripted message is left for the second prompt.
 func fakeTurnsScript(t *testing.T, markerPath, fifoPath string) string {
@@ -128,7 +128,7 @@ func waitForEventAfter(t *testing.T, sc *subConn, from int, predicate func(json.
 // Deliberately NOT a ctrl_child_status predicate, which is what this test used
 // to wait on. Status events are not a reliable witness of a turn: the daemon
 // DERIVES them by sampling ch.Status() once per bus frame monitorChild
-// receives (cmd/fundid/controller.go), while readStdout updates the state
+// receives (cmd/rafikid/controller.go), while readStdout updates the state
 // machine as it races ahead. A turn short enough to emit all its frames before
 // monitorChild's goroutine is next scheduled therefore completes its entire
 // streaming -> idle round trip between two samples and produces NO status
@@ -214,7 +214,7 @@ func assertNoErrorEventBetween(t *testing.T, sc *subConn, from, to int, childID 
 // real subprocess re-exec (pi, claude) or an in-process respawn (agent, no
 // pid), activateLiveChild's Resume/RespawnChild path re-emits
 // ctrl_child_spawned for the SAME childID to per-child subscribers
-// (cmd/fundid/controller.go), so absence of that frame between the abort and
+// (cmd/rafikid/controller.go), so absence of that frame between the abort and
 // the following idle states "the child was not restarted" directly, instead
 // of inferring it from PID identity (which is degenerate for the agent kind
 // -- see the KEYSTONE ASSERTION comment below).
@@ -238,11 +238,11 @@ func assertNoRestartBetween(t *testing.T, sc *subConn, from, to int, childID str
 }
 
 // TestIntegration_AgentKind_AbortPreservesProcess is the Task 16 keystone
-// test: it spawns a real `fundid fundi` child (kind="fundi") against the
+// test: it spawns a real `rafikid fundi` child (kind="fundi") against the
 // real daemon binary under test (this is why it lives in the subprocess
 // integration harness -- it exercises bootDaemon's real controller/store/
 // subscriber wiring end-to-end, not a property of the agent kind itself; as
-// of Task 5, the agent kind runs in-process inside fundid on a shared pool
+// of Task 5, the agent kind runs in-process inside rafikid on a shared pool
 // rather than self-exec'ing via os.Executable(), and has no pid of its own),
 // drives a prompt into a scripted tool_use turn that blocks on a FIFO read
 // the test never satisfies, aborts mid-turn, and proves the abort landed
@@ -291,7 +291,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		ID:   "spawn1",
 		Kind: protocol.KindFundi,
 		Cwd:  t.TempDir(),
-		// --model is required by `fundid fundi` (parseAgentFlags) since the
+		// --model is required by `rafikid fundi` (parseAgentFlags) since the
 		// provider/model redesign; --fake-turns replaces the sender, so the
 		// value itself is inert here beyond being provider-qualified.
 		Model:     "anthropic/claude-x",
@@ -399,7 +399,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	// respawn is a real subprocess re-exec (pi, claude) or an in-process
 	// respawn (agent), activateLiveChild's Resume/RespawnChild path re-emits
 	// ctrl_child_spawned for the SAME childID to per-child subscribers (see
-	// cmd/fundid/controller.go), so its absence between the abort and the turn
+	// cmd/rafikid/controller.go), so its absence between the abort and the turn
 	// settling states "not restarted" without relying on pid identity.
 	assertNoRestartBetween(t, sc, preAbortIdx, settledIdx, childID)
 
