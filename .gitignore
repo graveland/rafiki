@@ -46,3 +46,6 @@ go.work.sum
 # tasks/ predate this rule and are still tracked; untracking them is a
 # deliberate call, not a drive-by.
 /tasks/
+
+# superpowers SDD scratch — briefs, ledgers, review packages
+.superpowers/
