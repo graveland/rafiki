@@ -3,6 +3,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -173,5 +174,46 @@ func TestServiceEnvFile_HonoursOverride(t *testing.T) {
 	t.Setenv(EnvFile, "")
 	if got := ServiceEnvFile(); filepath.Base(got) != "service.env" {
 		t.Errorf("ServiceEnvFile() = %q, want it to end in service.env", got)
+	}
+}
+
+// parseEnvFile is the pure half of LoadEnvFile: it must report what a file
+// says without touching the process environment. MergeEnvFile depends on
+// that, because it has to learn a file's keys during an install without
+// applying anyone's credentials to the running command.
+func TestParseEnvFile_DoesNotTouchTheEnvironment(t *testing.T) {
+	const key = "RAFIKI_PARSE_PURITY_PROBE"
+	if _, ok := os.LookupEnv(key); ok {
+		t.Fatalf("%s is already set; pick a different probe name", key)
+	}
+
+	vars, warnings, err := parseEnvFile(strings.NewReader(key+"=value\n"), "probe.env")
+	if err != nil {
+		t.Fatalf("parseEnvFile: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none", warnings)
+	}
+	if len(vars) != 1 || vars[0].Key != key || vars[0].Value != "value" {
+		t.Fatalf("vars = %+v, want one %s=value", vars, key)
+	}
+	if _, ok := os.LookupEnv(key); ok {
+		t.Errorf("parseEnvFile exported %s into the environment", key)
+	}
+}
+
+// File order is preserved: MergeEnvFile reports a file's keys, and a shuffled
+// report is a confusing one.
+func TestParseEnvFile_PreservesOrder(t *testing.T) {
+	vars, _, err := parseEnvFile(strings.NewReader("B=2\nA=1\nC=3\n"), "probe.env")
+	if err != nil {
+		t.Fatalf("parseEnvFile: %v", err)
+	}
+	var got []string
+	for _, v := range vars {
+		got = append(got, v.Key)
+	}
+	if !slices.Equal(got, []string{"B", "A", "C"}) {
+		t.Errorf("got %v, want [B A C] in file order", got)
 	}
 }

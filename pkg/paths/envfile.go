@@ -3,6 +3,7 @@ package paths
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,88 @@ func ServiceEnvFile() string {
 		return v
 	}
 	return filepath.Join(ConfigDir(), "service.env")
+}
+
+// envAssignment is one KEY=VALUE parsed out of an environment file, in file
+// order.
+type envAssignment struct{ Key, Value string }
+
+// parseEnvFile parses the environment-file format from r. It is the pure half
+// of LoadEnvFile: it reports what the file says and changes nothing. name
+// appears in warnings only, so a caller with a path can produce the same
+// "path:line: ..." messages LoadEnvFile always has.
+func parseEnvFile(r io.Reader, name string) (vars []envAssignment, warnings []string, err error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var (
+		lineNo  int
+		pending strings.Builder // accumulates a double-quoted value spanning lines
+		key     string
+		inMulti bool
+	)
+	for sc.Scan() {
+		lineNo++
+		line := sc.Text()
+
+		if inMulti {
+			// Inside a double-quoted value: a line ending the quote closes it,
+			// everything else is literal content including the newline.
+			if rest, closed := closeQuoted(line); closed {
+				pending.WriteString(rest)
+				vars = append(vars, envAssignment{key, unescape(pending.String())})
+				inMulti = false
+				pending.Reset()
+			} else {
+				pending.WriteString(line)
+				pending.WriteByte('\n')
+			}
+			continue
+		}
+
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		trimmed = strings.TrimPrefix(trimmed, "export ")
+
+		k, v, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("%s:%d: not a KEY=VALUE assignment", name, lineNo))
+			continue
+		}
+		k = strings.TrimSpace(k)
+		if k == "" {
+			warnings = append(warnings, fmt.Sprintf("%s:%d: empty variable name", name, lineNo))
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(v, `"`):
+			if rest, closed := closeQuoted(v[1:]); closed {
+				vars = append(vars, envAssignment{k, unescape(rest)})
+			} else {
+				// Opens a multi-line value: this is how a literal newline gets
+				// into ANTHROPIC_CUSTOM_HEADERS, which is the one variable that
+				// demands one and cannot be expressed in a unit file at all.
+				key, inMulti = k, true
+				pending.WriteString(v[1:])
+				pending.WriteByte('\n')
+			}
+		case strings.HasPrefix(v, `'`):
+			// Single quotes are literal, shell-style: no escape processing.
+			if end := strings.LastIndex(v, `'`); end > 0 {
+				vars = append(vars, envAssignment{k, v[1:end]})
+			} else {
+				warnings = append(warnings, fmt.Sprintf("%s:%d: unterminated single quote", name, lineNo))
+			}
+		default:
+			vars = append(vars, envAssignment{k, strings.TrimSpace(v)})
+		}
+	}
+	if inMulti {
+		warnings = append(warnings, fmt.Sprintf("%s: unterminated quoted value for %s", name, key))
+	}
+	return vars, warnings, sc.Err()
 }
 
 // LoadEnvFile parses path and applies each assignment to the process
@@ -71,80 +154,12 @@ func LoadEnvFile(path string) (applied []string, warnings []string, err error) {
 		}
 	}
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var (
-		lineNo  int
-		pending strings.Builder // accumulates a double-quoted value spanning lines
-		key     string
-		inMulti bool
-	)
-	for sc.Scan() {
-		lineNo++
-		line := sc.Text()
-
-		if inMulti {
-			// Inside a double-quoted value: a line ending the quote closes it,
-			// everything else is literal content including the newline.
-			if rest, closed := closeQuoted(line); closed {
-				pending.WriteString(rest)
-				applyEnv(key, unescape(pending.String()), &applied)
-				inMulti = false
-				pending.Reset()
-			} else {
-				pending.WriteString(line)
-				pending.WriteByte('\n')
-			}
-			continue
-		}
-
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		trimmed = strings.TrimPrefix(trimmed, "export ")
-
-		k, v, ok := strings.Cut(trimmed, "=")
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf("%s:%d: not a KEY=VALUE assignment", path, lineNo))
-			continue
-		}
-		k = strings.TrimSpace(k)
-		if k == "" {
-			warnings = append(warnings, fmt.Sprintf("%s:%d: empty variable name", path, lineNo))
-			continue
-		}
-
-		switch {
-		case strings.HasPrefix(v, `"`):
-			if rest, closed := closeQuoted(v[1:]); closed {
-				applyEnv(k, unescape(rest), &applied)
-			} else {
-				// Opens a multi-line value: this is how a literal newline gets
-				// into ANTHROPIC_CUSTOM_HEADERS, which is the one variable that
-				// demands one and cannot be expressed in a unit file at all.
-				key, inMulti = k, true
-				pending.WriteString(v[1:])
-				pending.WriteByte('\n')
-			}
-		case strings.HasPrefix(v, `'`):
-			// Single quotes are literal, shell-style: no escape processing.
-			if end := strings.LastIndex(v, `'`); end > 0 {
-				applyEnv(k, v[1:end], &applied)
-			} else {
-				warnings = append(warnings, fmt.Sprintf("%s:%d: unterminated single quote", path, lineNo))
-			}
-		default:
-			applyEnv(k, strings.TrimSpace(v), &applied)
-		}
+	vars, parseWarnings, parseErr := parseEnvFile(f, path)
+	warnings = append(warnings, parseWarnings...)
+	for _, v := range vars {
+		applyEnv(v.Key, v.Value, &applied)
 	}
-	if inMulti {
-		warnings = append(warnings, fmt.Sprintf("%s: unterminated quoted value for %s", path, key))
-	}
-	if scanErr := sc.Err(); scanErr != nil {
-		return applied, warnings, scanErr
-	}
-	return applied, warnings, nil
+	return applied, warnings, parseErr
 }
 
 // closeQuoted reports whether s contains the closing double quote of a value,
