@@ -52,6 +52,41 @@ func TestLoadConfig_MissingFileIsAnError(t *testing.T) {
 	}
 }
 
+// A named config that cannot be parsed is fatal, not a silent fallback to
+// defaults: the operator named a file and got one back that doesn't parse,
+// which is exactly the case where guessing at defaults would serve the wrong
+// credentials.
+func TestLoadConfig_MalformedYAMLIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.yaml")
+	// Unclosed flow mapping: not valid YAML at any indentation.
+	body := "tokens: [this is not valid yaml"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil {
+		t.Error("loadConfig on malformed YAML should error, not silently yield defaults")
+	}
+}
+
+// default_model precedence: the config file wins when set; an empty config
+// value falls through to the environment variable.
+func TestResolveDefaultModel_ConfigWinsOverEnv(t *testing.T) {
+	t.Setenv("FUNDI_DEFAULT_MODEL", "env-model")
+	got := resolveDefaultModel(Config{DefaultModel: "config-model"})
+	if got != "config-model" {
+		t.Errorf("resolveDefaultModel = %q, want config-model (config should win over env)", got)
+	}
+}
+
+func TestResolveDefaultModel_FallsThroughToEnv(t *testing.T) {
+	t.Setenv("FUNDI_DEFAULT_MODEL", "env-model")
+	got := resolveDefaultModel(Config{})
+	if got != "env-model" {
+		t.Errorf("resolveDefaultModel = %q, want env-model (empty config should fall through to env)", got)
+	}
+}
+
 // The daemon's flags must not swallow a subcommand. `fundid agent --model x`
 // is dispatched before parsing; parseDaemonFlags only ever sees daemon args.
 func TestParseDaemonFlags(t *testing.T) {

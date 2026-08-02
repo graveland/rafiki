@@ -114,3 +114,31 @@ func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
 		t.Errorf("a token named in the config file was rejected as unauthorized: %s", body)
 	}
 }
+
+// A config file naming a client "fundi-child" must not be allowed to silently
+// overwrite the per-boot child secret: every real spawned child would then
+// present the true per-boot token and be rejected as "unknown token". This
+// must fail at startup, loudly, naming the offending key — not resolve the
+// collision quietly in either direction.
+func TestStartProxyFace_ReservedChildTokenNameIsRejected(t *testing.T) {
+	t.Setenv("FUNDI_PROXY_LISTEN", "127.0.0.1:0")
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	face, err := startProxyFace(ctx, faceOptions{
+		Logger:   slog.New(slog.DiscardHandler),
+		Registry: prometheus.NewRegistry(),
+		Config:   Config{Tokens: map[string]string{"fundi-child": "whatever"}},
+	})
+	if face != nil {
+		defer face.Close(ctx)
+	}
+	if err == nil {
+		t.Fatal("startProxyFace with a config token named \"fundi-child\" should fail, got nil error")
+	}
+	if !strings.Contains(err.Error(), "fundi-child") {
+		t.Errorf("error %q should name the offending key %q", err.Error(), "fundi-child")
+	}
+}

@@ -173,7 +173,6 @@ func main() {
 		Registry: reg,
 		Config:   cfg,
 		Listen:   flags.Listen,
-		Dev:      flags.Dev,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are

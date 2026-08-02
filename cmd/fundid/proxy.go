@@ -55,6 +55,19 @@ type proxyFace struct {
 // token anyone else could know.
 const defaultProxyListen = ":8035"
 
+// childTokenName and configuredTokenName are the two token-map keys the daemon
+// assigns itself; a config file naming a client either of these would either
+// silently overwrite the per-boot child secret (every real spawned child then
+// gets rejected as "unknown token") or the FUNDI_PROXY_TOKEN slot. Both are
+// therefore reserved — see the collision check in startProxyFace.
+//
+// A later task renames "fundi-child" to "rafiki-child"; keeping it a constant
+// makes that a one-line change instead of a grep across the package.
+const (
+	childTokenName      = "fundi-child"
+	configuredTokenName = "configured"
+)
+
 // faceOptions carries everything the proxy face needs from the daemon. A struct
 // rather than parameters because the fold (config, dev mode, listen override)
 // adds fields, and a seven-argument constructor is a bug waiting to happen.
@@ -65,7 +78,6 @@ type faceOptions struct {
 	Registry *prometheus.Registry // nil = metrics not mounted
 	Config   Config               // named client tokens, openai routes, default model
 	Listen   string               // overrides FUNDI_PROXY_LISTEN when non-empty
-	Dev      bool
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -83,10 +95,7 @@ type faceOptions struct {
 func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	logger := opts.Logger
 	pool := opts.Pool
-	defaultModel := opts.Config.DefaultModel
-	if defaultModel == "" {
-		defaultModel = paths.Get(paths.DefaultModel)
-	}
+	defaultModel := resolveDefaultModel(opts.Config)
 	anthropicKey := paths.Get("ANTHROPIC_API_KEY")
 	openrouterKey := paths.Get("OPENROUTER_API_KEY")
 	if anthropicKey == "" {
@@ -170,11 +179,20 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// port, and this one forwards to a paid API on the daemon's credentials.
 	// The per-boot token is generated fresh, written nowhere, and handed only
 	// to the children the daemon spawns.
-	tokens := map[string]string{"fundi-child": token}
+	tokens := map[string]string{childTokenName: token}
 
 	// Named tokens from the config file: each NAME becomes the captured owner
 	// identity, which is the one thing an environment variable cannot express.
+	// childTokenName and configuredTokenName are reserved — a config entry
+	// using either name would silently overwrite the per-boot child secret (or
+	// the FUNDI_PROXY_TOKEN slot below) and every real spawned child would
+	// then present the true per-boot token only to be rejected as "unknown
+	// token". That is a startup-time configuration error, not something to
+	// resolve silently in either direction.
 	for name, tok := range opts.Config.Tokens {
+		if name == childTokenName || name == configuredTokenName {
+			return nil, fmt.Errorf("config token name %q is reserved for the daemon's own use; rename it", name)
+		}
 		tokens[name] = tok
 	}
 
@@ -186,7 +204,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// host; the two never apply at once because the daemon is either serving
 	// the face or pointing away from it.
 	if extra := paths.Get(paths.ProxyToken); extra != "" && paths.Get(paths.ProxyURL) == "" {
-		tokens["configured"] = extra
+		tokens[configuredTokenName] = extra
 	}
 	tokenAuth := server.NewStaticTokenAuth(tokens)
 
@@ -258,6 +276,17 @@ func (f *proxyFace) Close(ctx context.Context) {
 	if err := f.srv.Shutdown(ctx); err != nil {
 		slog.Warn("proxy face shutdown", "error", err)
 	}
+}
+
+// resolveDefaultModel picks the model used when a request names none: the
+// config file's default_model wins when set, otherwise the environment
+// variable (FUNDI_DEFAULT_MODEL) is the fallback, matching `rafiki serve`'s
+// own config-over-env precedence.
+func resolveDefaultModel(cfg Config) string {
+	if cfg.DefaultModel != "" {
+		return cfg.DefaultModel
+	}
+	return paths.Get(paths.DefaultModel)
 }
 
 func randomToken() (string, error) {
