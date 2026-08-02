@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
@@ -127,7 +128,22 @@ func main() {
 	// that a second daemon someone must remember to start is how a child ends
 	// up talking to a provider directly. Serving it here means it cannot be
 	// down while the daemon is up.
-	face, err := startProxyFace(baseCtx, pool, slog.Default())
+	tp, shutdownTracing, err := setupTracing(baseCtx, slog.Default())
+	if err != nil {
+		slog.Error("otlp tracing setup failed; continuing without tracing", "error", err)
+		tp = nil
+	} else {
+		defer shutdownTracing()
+	}
+
+	reg := prometheus.NewRegistry()
+
+	face, err := startProxyFace(baseCtx, faceOptions{
+		Pool:     pool,
+		Logger:   slog.Default(),
+		Tracer:   tp,
+		Registry: reg,
+	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are
 		// unaffected, and killing the daemon would take them down for a face

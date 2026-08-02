@@ -13,6 +13,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/trace"
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -51,6 +55,16 @@ type proxyFace struct {
 // token anyone else could know.
 const defaultProxyListen = ":8035"
 
+// faceOptions carries everything the proxy face needs from the daemon. A struct
+// rather than parameters because the fold (config, dev mode, listen override)
+// adds fields, and a seven-argument constructor is a bug waiting to happen.
+type faceOptions struct {
+	Pool     *pgxpool.Pool        // nil = route but do not capture
+	Logger   *slog.Logger         // required
+	Tracer   trace.TracerProvider // nil = no-op
+	Registry *prometheus.Registry // nil = metrics not mounted
+}
+
 // startProxyFace binds the proxy face and serves it.
 //
 // A busy address is a hard error, not a reason to pick another port. The
@@ -63,7 +77,9 @@ const defaultProxyListen = ":8035"
 // routing, failover and model resolution are still worth having, and refusing
 // to start over a missing database would take pi and claude children down for a
 // feature they may not use.
-func startProxyFace(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (*proxyFace, error) {
+func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
+	logger := opts.Logger
+	pool := opts.Pool
 	anthropicKey := paths.Get("ANTHROPIC_API_KEY")
 	openrouterKey := paths.Get("OPENROUTER_API_KEY")
 	if anthropicKey == "" {
@@ -98,6 +114,9 @@ func startProxyFace(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger
 			llm.WithBreaker(15*time.Minute),
 		)
 	}
+	if opts.Tracer != nil {
+		llmOpts = append(llmOpts, llm.WithTracerProvider(opts.Tracer))
+	}
 	client, err := llm.NewClient(llmOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("build llm client: %w", err)
@@ -111,11 +130,25 @@ func startProxyFace(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger
 		messages.SetFallback(openrouterKey, "https://openrouter.ai/api", client.Breaker(llm.UpstreamAnthropic))
 	}
 
+	var metrics *server.Metrics
+	if opts.Registry != nil {
+		opts.Registry.MustRegister(
+			collectors.NewGoCollector(),
+			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		)
+		metrics = server.NewMetrics(opts.Registry)
+		metrics.WatchBreaker(string(llm.UpstreamAnthropic), client.Breaker(llm.UpstreamAnthropic))
+		messages.SetMetrics(metrics)
+	}
+
 	var chat *server.ChatCompletionsProxy
 	if openrouterKey != "" {
 		chat = server.NewChatCompletionsProxy(captureStore, auth,
 			[]server.OpenAIUpstream{{Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1", APIKey: openrouterKey}},
 			nil, "openrouter", logger)
+		if metrics != nil {
+			chat.SetMetrics(metrics)
+		}
 	}
 
 	token, err := randomToken()
@@ -142,8 +175,17 @@ func startProxyFace(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger
 
 	mux := http.NewServeMux()
 	h := &server.Handler{Messages: messages, Chat: chat}
-	h.Mount(mux, tokenAuth.Middleware)
+	h.Mount(mux, func(next http.Handler) http.Handler {
+		return tokenAuth.Middleware(traceMiddleware(next))
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+
+	// /metrics and /healthz sit deliberately OUTSIDE the token middleware:
+	// scrapers and probes do not carry client tokens. Only the LLM faces
+	// require authentication.
+	if opts.Registry != nil {
+		mux.Handle("/metrics", promhttp.HandlerFor(opts.Registry, promhttp.HandlerOpts{}))
+	}
 
 	addr := paths.Get("FUNDI_PROXY_LISTEN")
 	if addr == "" {
