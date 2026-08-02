@@ -27,7 +27,7 @@ pkg/server/     HTTP faces (/v1/messages, /v1/chat/completions), Authenticator
                 seam, static token auth, Prometheus metrics
 pkg/insights/   read-only queries over the captured corpus
 pkg/analyze/    LLM-driven skill-gap detection and finding triage
-pkg/agentcli/   the `rafiki agent` verb implementations
+pkg/agentcli/   the `fundid agent` verb implementations
 
 pkg/agent/      fundi's agent runtime: turn engine, tools, context and skills
 pkg/child/      child process lifecycle and the per-backend providers
@@ -45,9 +45,9 @@ pkg/skills/     skill discovery and loading
 pkg/models/     LLM model catalog enumeration
 pkg/version/    build-derived version string
 
-cmd/rafiki/     the proxy/server binary (serve, migrate, agent, --dev)
-cmd/fundid/     the fundi daemon, plus standalone `fundid fundi` stdio mode
-cmd/fundi/      the fundi CLI client
+cmd/fundid/     the fundi daemon: proxy face, standalone `fundid fundi` stdio
+                mode, the DSN-backed `fundid agent` insights CLI, and `migrate`
+cmd/fundi/      the fundi CLI client, plus `fundi claude` (the launcher)
 attach/         fundi-attach, the TUI (TypeScript, built with bun)
 ```
 
@@ -65,10 +65,11 @@ builder API + DB-backed `Conversation` (trim policy, cache breakpoints,
 write-ahead persistence); agent-loop primitives (`agentloop.Run`/`Resume`
 with fabricated-error crash recovery); both proxy faces — Anthropic
 `/v1/messages` and OpenAI `/v1/chat/completions` — behind an `Authenticator`
-seam; static bearer-token auth; Prometheus metrics; OTLP tracing; and the
-standalone binary (`cmd/rafiki serve|migrate`, `--dev` mode). sc imports the
-module in-process and mounts the same faces; sc's diagnose loop, Slack agent
-and core-dump analyzer run on the library.
+seam; static bearer-token auth; Prometheus metrics; OTLP tracing; and `--dev`
+mode. The standalone `rafiki serve`/`rafiki migrate` binary is gone — the
+`fundid` daemon now serves the proxy face itself, and `fundid migrate` applies
+the schema. sc imports the module in-process and mounts the same faces; sc's
+diagnose loop, Slack agent and core-dump analyzer run on the library.
 
 ## Model selection
 
@@ -98,9 +99,9 @@ falling back to a stale id. Slash ids and model aliases require
 `OPENROUTER_API_KEY`. The `/v1/chat/completions` face does no resolution —
 it takes raw ids and routes by configured prefix.
 
-## `rafiki agent`
+## `fundid agent`
 
-`rafiki agent <stats|search|export|analyze|findings>` is a DSN-backed CLI
+`fundid agent <stats|search|export|analyze|findings>` is a DSN-backed CLI
 over the captured `conversations` schema: read-only insights, the
 LLM-driven skill-gap detector, and finding triage. See
 [`docs/agent-cli.md`](docs/agent-cli.md) for every verb, flag, and the dev
@@ -108,10 +109,10 @@ loop.
 
 ```bash
 make install
-rafiki agent analyze --corpus DIR --compact --out DIR   # no DSN, no credentials
+fundid agent analyze --corpus DIR --compact --out DIR   # no DSN, no credentials
 ```
 
-Without installing, run it as `go run ./cmd/rafiki agent`.
+Without installing, run it as `go run ./cmd/fundid agent`.
 
 ## Schema ownership
 
@@ -222,7 +223,7 @@ These must reach the **daemon's** environment, not your shell's — see
 Once `FUNDI_AGENT_DB` is set, `fundi conversations stats|search|export` queries
 that persisted history through the daemon socket — no separate DB credentials
 needed on the machine running `fundi`. See `docs/agent-cli.md` for the
-DSN-direct equivalent (`rafiki agent stats|search|export`), or
+DSN-direct equivalent (`fundid agent stats|search|export`), or
 `docs/reference/pi-controller-protocol.md` §6.17-6.19 for the wire commands.
 
 `fundid -h` and `fundid fundi -h` document the two daemon process modes;
@@ -269,11 +270,11 @@ make run               # fundid in the foreground, proxy face on :8035
 ```
 
 **`fundid` serves the proxy itself.** It mounts the same `/v1/messages` and
-`/v1/chat/completions` handlers `rafiki serve` does, on the same port, so
-anything already pointed at a local rafiki keeps working — and pi and claude
-children get capture, failover and model resolution without a second process
-anyone has to remember to start. The fundi kind never uses it: it reaches the
-library in-process.
+`/v1/chat/completions` handlers the old standalone `rafiki serve` used to, on
+the same port, so anything already pointed at a local rafiki keeps working —
+and pi and claude children get capture, failover and model resolution without
+a second process anyone has to remember to start. The fundi kind never uses
+it: it reaches the library in-process.
 
 The face binds **all interfaces** by default (`FUNDI_PROXY_LISTEN`, default
 `:8035`), so other hosts on your network can use one capture store and one set
@@ -286,9 +287,9 @@ landing elsewhere would mean talking to whatever *did* claim it.
 Because `make run` is now the daemon, it and the installed `fundi service`
 cannot both hold the port. Use one or the other.
 
-`make run` does **not** migrate, where `rafiki serve --dev` did — run
-`go run ./cmd/rafiki migrate` once against a fresh database, or `make run-proxy`
-for the old standalone-proxy behaviour. Then, in another shell:
+`make run` does **not** migrate, where the old standalone `rafiki serve --dev`
+did — run `go run ./cmd/fundid migrate` once against a fresh database. Then,
+in another shell:
 
 ```bash
 make claude                                   # Claude Code through the local proxy
@@ -298,7 +299,7 @@ psql 'postgres://postgres:postgres@localhost:5433/rafiki_live' \
   -c 'select model, status, upstream from conversations.conversation_turn'
 ```
 
-`make claude` is a thin wrapper over `rafiki claude`, which preflights
+`make claude` is a thin wrapper over `fundi claude`, which preflights
 `/healthz` and fails with a hint if the server isn't up. `RAFIKI_URL` /
 `RAFIKI_TOKEN` / `RAFIKI_MODEL` retarget it, and everything after `--` is passed
 to claude verbatim.

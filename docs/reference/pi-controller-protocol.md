@@ -740,7 +740,7 @@ seconds (0/absent = unbounded).
 }
 ```
 
-Response `data` is the same JSON shape `rafiki agent stats -j` prints (`pkg/insights.Stats`):
+Response `data` is the same JSON shape `fundid agent stats -j` prints (`pkg/insights.Stats`):
 volume, adoption, token, cost, failure, latency, cache-waste, and prefix-reuse facets. See
 `docs/agent-cli.md` for the field-level description; not duplicated here since it's the exact
 same struct.
@@ -771,7 +771,7 @@ Response:
 {
   "type": "ctrl_response", "command": "ctrl_conversation_search", "id": "33",
   "success": true,
-  "data": { "rows": [ /* insights.ConversationSummary, same shape rafiki agent search -j prints */ ] }
+  "data": { "rows": [ /* insights.ConversationSummary, same shape fundid agent search -j prints */ ] }
 }
 ```
 
@@ -787,13 +787,13 @@ Error `no_agent_db` (§8) means the daemon has no database configured.
 { "type": "ctrl_conversation_export", "id": "35", "conversationId": "conv-abc" }
 ```
 
-Response `data` is `insights.Transcript` (same shape `rafiki agent export -j` prints):
+Response `data` is `insights.Transcript` (same shape `fundid agent export -j` prints):
 ordered turns with role, content, per-turn token/latency/model metrics, and the recovered
 skill catalog.
 
 Errors: `invalid_args` when `conversationId` is missing; `not_found` when no such conversation
 exists; `payload_too_large` (§8) when the transcript exceeds the maximum response size — export
-it via `rafiki agent export` instead; `no_agent_db` (§8) when the daemon has no database
+it via `fundid agent export` instead; `no_agent_db` (§8) when the daemon has no database
 configured.
 
 ## 7. Controller → client events

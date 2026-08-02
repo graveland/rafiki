@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // isHelpArg reports whether arg is a request for usage. Consulted by main
@@ -23,10 +24,21 @@ func isHelpArg(arg string) bool {
 	return false
 }
 
-// printRootUsage documents both process modes. fundid is one binary with two
-// entry points — the controller daemon (no flags) and `fundid fundi`, a single
-// agent child speaking pi's rpc protocol on stdio — so usage that mentioned only
-// one of them would hide the other entirely.
+// isSubcommand reports whether arg names a subcommand that must be dispatched
+// before the daemon's own flag parsing. Each is a separate process mode.
+func isSubcommand(arg string) bool {
+	switch arg {
+	case protocol.KindFundi, "agent", "migrate":
+		return true
+	}
+	return false
+}
+
+// printRootUsage documents every process mode. fundid is one binary with
+// several entry points — the controller daemon (no flags), `fundid fundi` (a
+// single agent child speaking pi's rpc protocol on stdio), `fundid agent` (the
+// DSN-backed insights CLI), and `fundid migrate` — so usage that mentioned
+// only one of them would hide the others entirely.
 func printRootUsage(w io.Writer) {
 	fmt.Fprint(w, `fundid — coding-agent controller daemon and native agent runtime.
 
@@ -34,6 +46,9 @@ Usage:
   fundid [flags]          Run the controller daemon.
   fundid fundi [flags]    Run one agent child on stdio (pi rpc protocol).
                           Spawned by the daemon; see 'fundid fundi -h'.
+  fundid agent <verb>     DSN-backed insights CLI: stats|search|export|
+                          analyze|findings. See 'fundid agent' with no verb.
+  fundid migrate [flags]  Apply the conversations schema migration chain.
   fundid -h | --help      Show this help.
 
 Daemon flags:

@@ -246,7 +246,7 @@ func (c Config) senderOptions() ([]llm.ClientOption, error) {
 		// WithBreaker is what makes Fallback(UpstreamOpenRouter) actually
 		// live: llm.Client.callModel bypasses the whole fallback chain
 		// whenever the primary's breaker is nil, regardless of how many
-		// fallbacks are configured. Mirrors rafiki's own cmd/rafiki/main.go,
+		// fallbacks are configured. Mirrors the daemon's own cmd/fundid/proxy.go,
 		// which enables the breaker under the identical condition.
 		opts = append(opts,
 			llm.WithUpstream(llm.UpstreamOpenRouter, llm.OpenRouter(c.OpenRouterAPIKey)),

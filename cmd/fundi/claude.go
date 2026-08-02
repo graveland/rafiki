@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -31,6 +32,24 @@ const (
 	// user wait costs every launch.
 	claudeCatalogBudget = 2 * time.Second
 )
+
+// newClaudeCmd wraps claudeCmd for cobra. claudeCmd owns its own flag.FlagSet
+// (DisableFlagParsing: true means cobra hands it the raw args after "claude"
+// untouched) so the pi-controller-style `-model`/`-url` flags it already
+// documents keep working unchanged under the client's cobra front end.
+func newClaudeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "claude [-- claude-args...]",
+		Short: "Launch Claude Code pointed at the rafiki proxy",
+		Long: "Resolves the proxy URL and token, sets the environment Claude Code needs,\n" +
+			"and execs your own claude binary. Not a daemon child — this runs in your\n" +
+			"terminal and is not supervised, listed, or attachable.",
+		DisableFlagParsing: true, // claudeCmd owns its flag set and passes the rest through
+		RunE: func(_ *cobra.Command, args []string) error {
+			return claudeCmd(args)
+		},
+	}
+}
 
 // claudeInvocation is the assembled environment and argument list for exec'ing
 // the claude binary. The environment itself is built by pkg/proxyenv, shared
@@ -72,7 +91,7 @@ func claudeAutoCompactWindow(ctx context.Context, model string, cacheDir string)
 	return routing.AutoCompactWindow(ctxLen, maxComp)
 }
 
-// claudeCmd runs `rafiki claude [flags] [-- claude flags...]`.
+// claudeCmd runs `fundi claude [flags] [-- claude flags...]`.
 func claudeCmd(args []string) error {
 	fs := flag.NewFlagSet("claude", flag.ExitOnError)
 	url := fs.String("url", envOr("RAFIKI_URL", "http://localhost:8035"), "rafiki proxy base URL (or RAFIKI_URL)")
@@ -80,12 +99,12 @@ func claudeCmd(args []string) error {
 	model := fs.String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
 	session := fs.String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), `usage: rafiki claude [flags] [-- claude flags...]
+		fmt.Fprint(fs.Output(), `usage: fundi claude [flags] [-- claude flags...]
 
 Launch Claude Code against a rafiki proxy, with capture, OpenRouter failover
 and model resolution. Everything after -- is passed to claude verbatim.
 
-  rafiki claude --model glm-5.2 -- --permission-mode plan
+  fundi claude --model glm-5.2 -- --permission-mode plan
 
 `)
 		fs.PrintDefaults()

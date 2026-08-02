@@ -25,13 +25,34 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// agentCmd dispatches `rafiki agent <subcommand>`, a DSN-backed CLI over the
+// migrateCmd applies the conversations schema migration chain (store.Migrate)
+// against --db (or $RAFIKI_DB). Copied verbatim from the doomed
+// cmd/rafiki/main.go: the daemon itself never needed this — it opens its own
+// pool and never migrates outside --dev — but operators still need a way to
+// run the chain by hand.
+func migrateCmd(args []string) error {
+	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+	db := fs.String("db", os.Getenv("RAFIKI_DB"), "postgres DSN (or RAFIKI_DB)")
+	_ = fs.Parse(args)
+	if *db == "" {
+		return errors.New("--db (or RAFIKI_DB) is required")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, *db)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	return store.Migrate(ctx, pool)
+}
+
+// agentCmd dispatches `fundid agent <subcommand>`, a DSN-backed CLI over the
 // same conversation store the proxy captures into: stats/search/export for
 // read-only insights, analyze for the LLM-driven skill-gap detector, and
 // findings for triaging what analyze produced.
 func agentCmd(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: rafiki agent <stats|search|export|analyze|findings> [flags]")
+		return errors.New("usage: fundid agent <stats|search|export|analyze|findings> [flags]")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
@@ -91,7 +112,7 @@ func bindFilterFlags(fs *flag.FlagSet) *agentcli.FilterVals {
 	return v
 }
 
-// agentStatsCmd runs `rafiki agent stats [conv-id]`.
+// agentStatsCmd runs `fundid agent stats [conv-id]`.
 func agentStatsCmd(args []string) error {
 	fs := flag.NewFlagSet("agent stats", flag.ExitOnError)
 	db := dbFlag(fs)
@@ -141,7 +162,7 @@ func agentStatsCmd(args []string) error {
 	return renderJSONOr(os.Stdout, st, *indent, *compact, func() error { return agentcli.RenderStats(os.Stdout, st) })
 }
 
-// agentSearchCmd runs `rafiki agent search [flags]`.
+// agentSearchCmd runs `fundid agent search [flags]`.
 func agentSearchCmd(args []string) error {
 	fs := flag.NewFlagSet("agent search", flag.ExitOnError)
 	db := dbFlag(fs)
@@ -172,14 +193,14 @@ func agentSearchCmd(args []string) error {
 	return renderJSONOr(os.Stdout, rows, *indent, *compact, func() error { return agentcli.RenderSearch(os.Stdout, rows) })
 }
 
-// agentExportCmd runs `rafiki agent export <conv-id>`.
+// agentExportCmd runs `fundid agent export <conv-id>`.
 func agentExportCmd(args []string) error {
 	fs := flag.NewFlagSet("agent export", flag.ExitOnError)
 	db := dbFlag(fs)
 	indent, compact := jsonFlags(fs)
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		return errors.New("usage: rafiki agent export <conv-id>")
+		return errors.New("usage: fundid agent export <conv-id>")
 	}
 
 	ctx := context.Background()
@@ -210,7 +231,7 @@ func renderJSONOr(w *os.File, v any, indent, compact bool, human func() error) e
 	}
 }
 
-// analyzeArgs is the parsed, validated result of `rafiki agent analyze`'s
+// analyzeArgs is the parsed, validated result of `fundid agent analyze`'s
 // arguments: exactly one population selector (ConversationIDs xor
 // CorpusDir), and at most one stage-stop flag.
 type analyzeArgs struct {
@@ -236,7 +257,7 @@ type analyzeArgs struct {
 	ProxyTok string
 }
 
-// parseAnalyzeArgs parses `rafiki agent analyze`'s flags and positional
+// parseAnalyzeArgs parses `fundid agent analyze`'s flags and positional
 // conversation ids, validating the mutual exclusions the brief requires:
 // exactly one stage-stop flag among --compact/--detect/--rank/--draft, and
 // exactly one population selector among conversation ids and --corpus.
@@ -566,7 +587,7 @@ func loadSkillFiles(repo string) ([]analyze.SkillFile, error) {
 	return out, nil
 }
 
-// agentAnalyzeCmd runs `rafiki agent analyze <conv-id>... | --corpus DIR`.
+// agentAnalyzeCmd runs `fundid agent analyze <conv-id>... | --corpus DIR`.
 func agentAnalyzeCmd(args []string) error {
 	a, err := parseAnalyzeArgs(args)
 	if err != nil {
@@ -816,9 +837,9 @@ func renderWrittenFiles(w io.Writer, files []string) error {
 	return nil
 }
 
-// agentFindingsCmd runs `rafiki agent findings [flags]` (the read-only list
+// agentFindingsCmd runs `fundid agent findings [flags]` (the read-only list
 // path) plus its `dismiss <id>`/`action <id>` sub-dispatch. --db/-j/-J are
-// parsed HERE, once, before dispatch — so `rafiki agent findings --db ...
+// parsed HERE, once, before dispatch — so `fundid agent findings --db ...
 // dismiss <id>` (a flag preceding the verb) reaches dismiss/action correctly.
 // Dispatching off the raw pre-parse args[0] (as this used to) only worked
 // when the verb happened to be first; a flag ahead of it silently fell
@@ -831,9 +852,9 @@ func agentFindingsCmd(args []string) error {
 		// writer (fs.Output(), normally stderr) with no meaningful recovery if
 		// the write itself fails — same convention as flag.FlagSet's own
 		// default Usage.
-		_, _ = fmt.Fprintln(out, "usage: rafiki agent findings [--axis ...] [--skill ...] [--status ...] [-j|-J]")
-		_, _ = fmt.Fprintln(out, "       rafiki agent findings dismiss <id> [--db ...] [-j|-J]")
-		_, _ = fmt.Fprintln(out, "       rafiki agent findings action <id> [--db ...] [-j|-J]")
+		_, _ = fmt.Fprintln(out, "usage: fundid agent findings [--axis ...] [--skill ...] [--status ...] [-j|-J]")
+		_, _ = fmt.Fprintln(out, "       fundid agent findings dismiss <id> [--db ...] [-j|-J]")
+		_, _ = fmt.Fprintln(out, "       fundid agent findings action <id> [--db ...] [-j|-J]")
 		fs.PrintDefaults()
 	}
 	db := dbFlag(fs)
@@ -878,14 +899,14 @@ func agentFindingsCmd(args []string) error {
 	return renderJSONOr(os.Stdout, rows, *indent, *compact, func() error { return agentcli.RenderFindings(os.Stdout, rows) })
 }
 
-// agentFindingsSetStatusCmd performs `rafiki agent findings dismiss|action
+// agentFindingsSetStatusCmd performs `fundid agent findings dismiss|action
 // <id>`'s mutation. db/indent/compact are already resolved by
 // agentFindingsCmd's single flag parse; ids must be exactly the one
 // remaining positional argument (agentFindingsCmd's own flag parse already
 // consumed --db/-j/-J and the verb itself, wherever in args they appeared).
 func agentFindingsSetStatusCmd(verb, db string, ids []string, indent, compact bool) error {
 	if len(ids) != 1 {
-		return fmt.Errorf("usage: rafiki agent findings %s <id> [--db ...] [-j|-J]", verb)
+		return fmt.Errorf("usage: fundid agent findings %s <id> [--db ...] [-j|-J]", verb)
 	}
 
 	status := "dismissed"

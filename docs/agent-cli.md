@@ -1,11 +1,11 @@
-# `rafiki agent` CLI
+# `fundid agent` CLI
 
-`rafiki agent <verb>` is a DSN-backed CLI over the same `conversations`
+`fundid agent <verb>` is a DSN-backed CLI over the same `conversations`
 schema the proxy captures into: read-only insights (`stats`/`search`/
 `export`), the LLM-driven skill-gap detector (`analyze`), and finding
 triage (`findings`). It talks to Postgres directly — no gRPC, no auth layer
 — via `pkg/agentcli.Backend`, implemented today by `pkg/agentcli/local.Backend`.
-See `cmd/rafiki/agent.go` for the flag/dispatch code this doc describes.
+See `cmd/fundid/agent_cli.go` for the flag/dispatch code this doc describes.
 
 Every subcommand accepts `-j` (indented JSON) or `-J` (compact JSON) instead
 of the human-readable table/markdown render.
@@ -15,12 +15,12 @@ of the human-readable table/markdown render.
 Global stats, or stats for one conversation if given a positional id.
 
 ```
-rafiki agent stats
-rafiki agent stats <conv-id>
-rafiki agent stats --since 24h --owner alice@example.com --model claude-sonnet-5
+fundid agent stats
+fundid agent stats <conv-id>
+fundid agent stats --since 24h --owner alice@example.com --model claude-sonnet-5
 ```
 
-Verified: `RAFIKI_DB=postgres://... rafiki agent stats` against a live DB
+Verified: `RAFIKI_DB=postgres://... fundid agent stats` against a live DB
 prints the real stats table.
 
 Filter flags (global stats only, ignored when a conv-id is given):
@@ -30,8 +30,8 @@ Filter flags (global stats only, ignored when a conv-id is given):
 ## `search`
 
 ```
-rafiki agent search --since 24h --status failed --min-tokens 5000 --limit 20
-rafiki agent search --text "skill gap"
+fundid agent search --since 24h --status failed --min-tokens 5000 --limit 20
+fundid agent search --text "skill gap"
 ```
 
 All the `stats` filter flags, plus `--status`, `--min-tokens`, `--text`
@@ -40,8 +40,8 @@ All the `stats` filter flags, plus `--status`, `--min-tokens`, `--text`
 ## `export`
 
 ```
-rafiki agent export <conv-id>
-rafiki agent export <conv-id> -j
+fundid agent export <conv-id>
+fundid agent export <conv-id> -j
 ```
 
 Requires exactly one positional conversation id. Renders the transcript as
@@ -58,8 +58,8 @@ JSON), then prints a summary.
 **Population** (choose exactly one):
 
 ```
-rafiki agent analyze <conv-id> [<conv-id> ...]     # named conversations from the DB
-rafiki agent analyze --corpus DIR                  # exported *.json transcripts, no DSN needed
+fundid agent analyze <conv-id> [<conv-id> ...]     # named conversations from the DB
+fundid agent analyze --corpus DIR                  # exported *.json transcripts, no DSN needed
 ```
 
 A `--corpus` run never persists analyses or findings, even without
@@ -114,20 +114,20 @@ Verified corpus run, no DSN or credentials at all (compact is a pure local
 transform):
 
 ```
-rafiki agent analyze --corpus DIR --compact --out DIR
+fundid agent analyze --corpus DIR --compact --out DIR
 ```
 
 Verified full pipeline through a rafiki proxy:
 
 ```
-rafiki agent analyze --corpus DIR --model claude-haiku-4-5 \
+fundid agent analyze --corpus DIR --model claude-haiku-4-5 \
   --proxy-url https://rafiki.example.com --proxy-token $TOKEN --out DIR
 ```
 
 ### `--compare`: model sweep over a corpus
 
 ```
-rafiki agent analyze --corpus DIR \
+fundid agent analyze --corpus DIR \
   --compare claude-haiku-4-5,claude-sonnet-5,deepseek/deepseek-v4-flash \
   --proxy-url https://rafiki.example.com --proxy-token $TOKEN --out DIR
 ```
@@ -143,10 +143,10 @@ tokens, cost, and status (`ok` or `ERROR: ...`).
 ## `findings`
 
 ```
-rafiki agent findings                        # open findings (default status)
-rafiki agent findings --axis skill-gap --skill td-go
-rafiki agent findings dismiss <finding-id>
-rafiki agent findings action <finding-id>
+fundid agent findings                        # open findings (default status)
+fundid agent findings --axis skill-gap --skill td-go
+fundid agent findings dismiss <finding-id>
+fundid agent findings action <finding-id>
 ```
 
 `--axis`, `--skill`, `--status` (default: open) filter the list. The
@@ -188,9 +188,9 @@ model calls:
 
 ## Relationship to `sc agent`
 
-`rafiki agent` and `sc agent` cover the same domain — conversation
+`fundid agent` and `sc agent` cover the same domain — conversation
 insights and skill-gap analysis over the same `conversations` schema — but
-differ in transport. `rafiki agent` talks straight to Postgres via
+differ in transport. `fundid agent` talks straight to Postgres via
 `pkg/agentcli/local.Backend`, useful for local/dev work against a DSN you hold
 directly. `sc agent` is expected to mount the same `pkg/agentcli.Backend`
 interface over a gRPC backend, adding what a multi-tenant

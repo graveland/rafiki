@@ -30,20 +30,34 @@ func main() {
 	// Load the environment file before anything reads configuration — that
 	// includes the XDG lookups below, since the file may legitimately set them.
 	//
-	// This runs ahead of the `agent` dispatch deliberately, so a hand-run
-	// `fundid agent` gets the same environment the daemon would have given it.
-	// That is safe because the real environment always wins: values the daemon
-	// sets explicitly when it spawns a child are already present and the file
-	// only fills gaps.
+	// This runs ahead of the subcommand dispatch deliberately, so a hand-run
+	// `fundid fundi` or `fundid agent` gets the same environment the daemon
+	// would have given it. That is safe because the real environment always
+	// wins: values the daemon sets explicitly when it spawns a child are
+	// already present and the file only fills gaps.
 	loadServiceEnv()
 
-	// Dispatch `fundid fundi ...` before any daemon setup below - it is a
-	// separate process mode (a single agent child speaking pi's rpc
-	// protocol on stdio) and must not fall through into the daemon's own
-	// flag-less startup. Every other invocation (including no args) runs the
-	// daemon unchanged.
-	if len(os.Args) > 1 && os.Args[1] == protocol.KindFundi {
-		os.Exit(runAgent(os.Args[2:]))
+	// Dispatch subcommands before any daemon setup below - each is a separate
+	// process mode and must not fall through into the daemon's own flag-less
+	// startup. Every other invocation (including no args) runs the daemon
+	// unchanged.
+	if len(os.Args) > 1 && isSubcommand(os.Args[1]) {
+		switch os.Args[1] {
+		case protocol.KindFundi:
+			os.Exit(runAgent(os.Args[2:]))
+		case "agent":
+			if err := agentCmd(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "fundid:", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		case "migrate":
+			if err := migrateCmd(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "fundid:", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 	}
 
 	// The daemon takes no flags, so without this `fundid -h` fell through into
