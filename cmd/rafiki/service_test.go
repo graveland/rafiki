@@ -157,14 +157,14 @@ func TestNewServiceBackend(t *testing.T) {
 // ─── daemon environment capture ────────────────────────────────────────────────
 
 func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
-	got, _ := captureDaemonEnv([]string{
-		"RAFIKI_DB=postgres://u@localhost/rafiki?sslmode=disable",
+	got, _, _ := captureDaemonEnv([]string{
+		"RAFIKI_SOCKET=/tmp/rafiki.sock",
 		"RAFIKI_DEFAULT_MODEL=anthropic/opus-latest",
 		"PATH=/usr/bin",
 		"UNRELATED=x",
 	})
 	want := map[string]string{
-		"RAFIKI_DB":            "postgres://u@localhost/rafiki?sslmode=disable",
+		"RAFIKI_SOCKET":        "/tmp/rafiki.sock",
 		"RAFIKI_DEFAULT_MODEL": "anthropic/opus-latest",
 	}
 	if !maps.Equal(got, want) {
@@ -176,24 +176,78 @@ func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
 // child and `rafikid agent` uses it as the default --ref, so a service-wide
 // value would collide every child onto one conversation.
 func TestCaptureDaemonEnv_ExcludesChildID(t *testing.T) {
-	got, _ := captureDaemonEnv([]string{"RAFIKI_CHILD_ID=c_123", "RAFIKI_DB=x"})
+	got, _, _ := captureDaemonEnv([]string{"RAFIKI_CHILD_ID=c_123", "RAFIKI_DB=x"})
 	if _, ok := got["RAFIKI_CHILD_ID"]; ok {
 		t.Error("RAFIKI_CHILD_ID was captured into the service environment")
 	}
 }
 
-// Credentials do not belong in a world-readable unit file.
-func TestCaptureDaemonEnv_ExcludesAPIKeys(t *testing.T) {
-	got, _ := captureDaemonEnv([]string{"ANTHROPIC_API_KEY=sk-ant", "OPENROUTER_API_KEY=sk-or"})
-	if len(got) != 0 {
-		t.Errorf("captured credentials into the unit: %v", got)
+// The regression this whole change exists for. A DSN carries a password and
+// unit files are 0644, so RAFIKI_DB must be routed to service.env — which the
+// list it used to sit in already said, about the API keys, while capturing it.
+func TestCaptureDaemonEnv_RoutesTheDSNToSecrets(t *testing.T) {
+	unit, secret, _ := captureDaemonEnv([]string{
+		"RAFIKI_DB=postgres://u:hunter2@localhost/rafiki",
+		"RAFIKI_DEFAULT_MODEL=anthropic/opus-latest",
+	})
+	if _, ok := unit["RAFIKI_DB"]; ok {
+		t.Error("RAFIKI_DB was captured into the world-readable unit")
+	}
+	if secret["RAFIKI_DB"] != "postgres://u:hunter2@localhost/rafiki" {
+		t.Errorf("secret[RAFIKI_DB] = %q, want the DSN", secret["RAFIKI_DB"])
+	}
+	if unit["RAFIKI_DEFAULT_MODEL"] != "anthropic/opus-latest" {
+		t.Error("a non-secret variable stopped reaching the unit")
+	}
+}
+
+// Credentials and tokens all take the same route.
+func TestCaptureDaemonEnv_RoutesCredentialsToSecrets(t *testing.T) {
+	unit, secret, _ := captureDaemonEnv([]string{
+		"ANTHROPIC_API_KEY=sk-ant",
+		"OPENROUTER_API_KEY=sk-or",
+		"RAFIKI_TOKEN=client",
+		"RAFIKI_SERVE_TOKEN=server",
+	})
+	if len(unit) != 0 {
+		t.Errorf("credentials reached the unit: %v", unit)
+	}
+	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "RAFIKI_TOKEN", "RAFIKI_SERVE_TOKEN"} {
+		if _, ok := secret[k]; !ok {
+			t.Errorf("%s was not routed to service.env", k)
+		}
+	}
+}
+
+// The newline restriction is a unit-file limitation, not a general one:
+// service.env quotes and escapes, so a secret carrying a newline is written
+// rather than skipped.
+func TestCaptureDaemonEnv_SecretsAreNotNewlineRestricted(t *testing.T) {
+	_, secret, skipped := captureDaemonEnv([]string{"RAFIKI_DB=postgres://u@h/db\n"})
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %v, want none: service.env can hold a newline", skipped)
+	}
+	if secret["RAFIKI_DB"] == "" {
+		t.Error("a secret with a newline was dropped")
+	}
+}
+
+// RAFIKI_PROXY_LISTEN is an address, not a secret, so it belongs in the unit —
+// and until now install could not carry it across a reinstall at all.
+func TestCaptureDaemonEnv_CapturesProxyListenIntoTheUnit(t *testing.T) {
+	unit, secret, _ := captureDaemonEnv([]string{"RAFIKI_PROXY_LISTEN=127.0.0.1:8035"})
+	if unit["RAFIKI_PROXY_LISTEN"] != "127.0.0.1:8035" {
+		t.Errorf("unit[RAFIKI_PROXY_LISTEN] = %q, want the address", unit["RAFIKI_PROXY_LISTEN"])
+	}
+	if _, ok := secret["RAFIKI_PROXY_LISTEN"]; ok {
+		t.Error("an address was treated as a credential")
 	}
 }
 
 // An empty value is not the same as an absent one: writing RAFIKI_DB=""
 // would turn a missing export into a configured-but-broken DSN.
 func TestCaptureDaemonEnv_SkipsEmpty(t *testing.T) {
-	got, _ := captureDaemonEnv([]string{"RAFIKI_DB="})
+	got, _, _ := captureDaemonEnv([]string{"RAFIKI_DB="})
 	if _, ok := got["RAFIKI_DB"]; ok {
 		t.Error("an empty value was captured")
 	}
@@ -217,9 +271,9 @@ func TestSortedEnv_IsDeterministic(t *testing.T) {
 // platform and not the other. Such values must be skipped and reported, not
 // written into a unit that then fails to parse.
 func TestCaptureDaemonEnv_SkipsNewlineValues(t *testing.T) {
-	captured, skipped := captureDaemonEnv([]string{
+	captured, _, skipped := captureDaemonEnv([]string{
 		"RAFIKI_DEFAULT_LABELS=a=1\nb=2",
-		"RAFIKI_DB=postgres://u@h/db",
+		"RAFIKI_SOCKET=/tmp/rafiki.sock",
 	})
 	if _, ok := captured["RAFIKI_DEFAULT_LABELS"]; ok {
 		t.Error("a newline-bearing value was written into the unit")
@@ -228,7 +282,7 @@ func TestCaptureDaemonEnv_SkipsNewlineValues(t *testing.T) {
 		t.Errorf("skipped = %v, want it to name RAFIKI_DEFAULT_LABELS", skipped)
 	}
 	// Skipping one must not cost the others.
-	if captured["RAFIKI_DB"] != "postgres://u@h/db" {
+	if captured["RAFIKI_SOCKET"] != "/tmp/rafiki.sock" {
 		t.Error("an unrelated variable was lost alongside the skipped one")
 	}
 }

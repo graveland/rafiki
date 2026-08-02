@@ -226,7 +226,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	addr := opts.Listen
 	if addr == "" {
-		addr = paths.Get("RAFIKI_PROXY_LISTEN")
+		addr = paths.Get(paths.ProxyListen)
 	}
 	if addr == "" {
 		addr = defaultProxyListen

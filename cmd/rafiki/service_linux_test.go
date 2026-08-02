@@ -160,6 +160,33 @@ func TestSystemctlCommands_UseSystemdUnitName(t *testing.T) {
 	}
 }
 
+// The plist is 0644. Whatever else changes, a DSN must never appear in it.
+func TestRenderUnit_NeverContainsADSN(t *testing.T) {
+	unit, secret, _ := captureDaemonEnv([]string{
+		"RAFIKI_DB=postgres://u:hunter2@localhost/rafiki",
+		"RAFIKI_DEFAULT_MODEL=anthropic/opus-latest",
+	})
+	out, err := renderServiceConfig(serviceSpec{
+		DaemonBinary: "/usr/local/bin/rafikid",
+		PathEnv:      "/usr/bin",
+		HomeEnv:      "/Users/test",
+		LogPath:      "/tmp/rafiki.log",
+		ExtraEnv:     unit,
+		SecretEnv:    secret,
+	})
+	if err != nil {
+		t.Fatalf("renderServiceConfig: %v", err)
+	}
+	for _, forbidden := range []string{"hunter2", "postgres://", "RAFIKI_DB"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("rendered plist contains %q:\n%s", forbidden, out)
+		}
+	}
+	if !strings.Contains(out, "RAFIKI_DEFAULT_MODEL") {
+		t.Error("a non-secret variable stopped being baked into the plist")
+	}
+}
+
 func TestRenderUnit_Deterministic(t *testing.T) {
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{"RAFIKI_DB": "db", "RAFIKI_SOCKET": "/s", "RAFIKI_PI_BINARY": "/pi"}

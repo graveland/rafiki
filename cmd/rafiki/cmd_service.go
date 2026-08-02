@@ -40,26 +40,25 @@ type serviceSpec struct {
 	// them would resolve differently from every CLI invocation.
 	LogPath string
 	// ExtraEnv are the rafiki variables baked into the unit so the daemon sees
-	// them. See daemonEnvVars.
+	// them. See unitEnvVars.
 	ExtraEnv map[string]string
+	// SecretEnv are the credentials that must not go in a world-readable unit.
+	// `service install` merges them into paths.ServiceEnvFile. See secretEnvVars.
+	SecretEnv map[string]string
 	// SkippedEnv names variables that were set but could not be represented in
 	// a unit file. Reported at install time so they are not lost silently.
 	SkippedEnv []string
 }
 
-// daemonEnvVars are the RAFIKI_* variables that configure the DAEMON, and so
-// must be captured into the service definition at install time.
+// unitEnvVars are the rafiki variables that configure the DAEMON and are safe
+// to write into a service definition. captureDaemonEnv bakes them into the
+// launchd plist / systemd unit at install time.
 //
-// These are documented as daemon-environment-only: `rafiki create --forward-env`
-// forwards the caller's environment to a child, but collectCallerEnv strips
-// every RAFIKI_* key first, so exporting them in an interactive shell does
-// nothing at all. launchd and systemd do not inherit a login shell either. The
-// unit is therefore the only place they can be set — and before this they were
-// not templated, so `service install` rewrote the unit with only HOME and PATH
-// and silently dropped anything added by hand. RAFIKI_DB is the one that
-// hurts: losing it reverts agent conversations to in-memory with no per-turn
-// cost recorded anywhere, and the only visible symptom is a "mem-" session id
-// where a UUIDv7 belongs.
+// These are daemon-environment-only: `rafiki create --forward-env` forwards
+// the caller's environment to a child, but collectCallerEnv strips every
+// RAFIKI_* key first, so exporting them in an interactive shell does nothing
+// at all. launchd and systemd do not inherit a login shell either. The unit
+// and secretEnvVars' environment file are the only two places they can be set.
 //
 // Deliberately absent:
 //   - paths.ChildID — the daemon sets it per child and `rafikid agent` uses it
@@ -68,15 +67,11 @@ type serviceSpec struct {
 //   - paths.AttachTail, paths.NoAutoInstallHelpers — read by the TUI and by
 //     `rafiki create` respectively, i.e. client-side. They reach those from the
 //     user's own shell and have no business in the daemon's unit.
-//   - ANTHROPIC_API_KEY / OPENROUTER_API_KEY / paths.Token / paths.ServeToken —
-//     unit files are world-readable (0644). Credentials belong in the
-//     environment file (paths.ServiceEnvFile), which the daemon reads at
-//     startup and which can be 0600. Note paths.URL and paths.ProxyKinds ARE
-//     captured: a URL and a list of kinds are not secrets, and having them in
-//     the unit means the routing is visible to anyone reading the service
-//     definition.
-var daemonEnvVars = []string{
-	paths.DB,
+//
+// paths.URL, paths.ProxyKinds and paths.ProxyListen ARE captured here: a URL,
+// a list of kinds and a bind address are not secrets, and having them in the
+// unit makes the routing visible to anyone reading the service definition.
+var unitEnvVars = []string{
 	paths.Socket,
 	paths.Instructions,
 	paths.SkillsDirsEnv,
@@ -88,42 +83,80 @@ var daemonEnvVars = []string{
 	paths.PiBinary,
 	paths.URL,
 	paths.ProxyKinds,
+	paths.ProxyListen,
 }
 
-// captureDaemonEnv returns the daemonEnvVars actually set in environ (in
-// os.Environ "K=V" form), plus the names it had to skip.
+// The two third-party credential names. They stay literals rather than moving
+// into pkg/paths/envvar.go, whose header states it names the variables rafiki
+// owns — these belong to Anthropic and OpenRouter.
+const (
+	anthropicAPIKeyEnv  = "ANTHROPIC_API_KEY"
+	openrouterAPIKeyEnv = "OPENROUTER_API_KEY"
+)
+
+// secretEnvVars are the daemon variables that must NOT be written into a unit
+// file: launchd plists and systemd units are world-readable (0644). They go to
+// paths.ServiceEnvFile instead, which MergeEnvFile creates 0600 and the daemon
+// reads at startup.
+//
+// paths.DB is here because a postgres DSN routinely carries a password. It
+// used to sit in the captured list — the same list whose comment already
+// excluded the API keys for exactly this reason — so the rule the code stated
+// was not the rule it followed.
+var secretEnvVars = []string{
+	paths.DB,
+	paths.Token,
+	paths.ServeToken,
+	anthropicAPIKeyEnv,
+	openrouterAPIKeyEnv,
+}
+
+// captureDaemonEnv sorts the variables set in environ (in os.Environ "K=V"
+// form) into the ones that belong in the unit, the ones that belong in the
+// environment file, and the ones it had to skip.
 //
 // Unset and empty variables are omitted rather than written through: an empty
-// RAFIKI_DB is not the same as an absent one to the daemon's "is
-// persistence configured" check, and writing one would turn a missing export
-// into a configured-but-broken DSN.
+// RAFIKI_DB is not the same as an absent one to the daemon's "is persistence
+// configured" check, and writing one would turn a missing export into a
+// configured-but-broken DSN.
 //
-// A value containing a newline is skipped, because no unit file can hold one.
-// systemd's Environment= is line-based, and a launchd plist would carry it but
-// only the systemd side would then be broken — a difference that would show up
-// as a service that installs on one platform and not the other. Such values
-// belong in the environment file (paths.ServiceEnvFile), which is also where
-// ANTHROPIC_CUSTOM_HEADERS has to live: a literal newline is the only separator
-// that variable accepts.
-func captureDaemonEnv(environ []string) (captured map[string]string, skipped []string) {
-	want := make(map[string]bool, len(daemonEnvVars))
-	for _, k := range daemonEnvVars {
-		want[k] = true
+// A unit value containing a newline is skipped, because no unit file can hold
+// one: systemd's Environment= is line-based, and a launchd plist would carry it
+// but only the systemd side would then be broken — a difference that shows up
+// as a service that installs on one platform and not the other. Secrets carry
+// no such restriction: MergeEnvFile quotes and escapes, which is what lets
+// ANTHROPIC_CUSTOM_HEADERS — whose only legal separator is a literal newline —
+// live in that file at all.
+func captureDaemonEnv(environ []string) (unit, secret map[string]string, skipped []string) {
+	wantUnit := make(map[string]bool, len(unitEnvVars))
+	for _, k := range unitEnvVars {
+		wantUnit[k] = true
 	}
-	captured = make(map[string]string)
+	wantSecret := make(map[string]bool, len(secretEnvVars))
+	for _, k := range secretEnvVars {
+		wantSecret[k] = true
+	}
+
+	unit = make(map[string]string)
+	secret = make(map[string]string)
 	for _, e := range environ {
 		k, v, ok := strings.Cut(e, "=")
-		if !ok || !want[k] || v == "" {
+		if !ok || v == "" {
 			continue
 		}
-		if strings.ContainsAny(v, "\n\r") {
-			skipped = append(skipped, k)
-			continue
+		switch {
+		case wantSecret[k]:
+			secret[k] = v
+		case wantUnit[k]:
+			if strings.ContainsAny(v, "\n\r") {
+				skipped = append(skipped, k)
+				continue
+			}
+			unit[k] = v
 		}
-		captured[k] = v
 	}
 	sort.Strings(skipped)
-	return captured, skipped
+	return unit, secret, skipped
 }
 
 // envKV is one captured variable. Templates render a sorted slice rather than
@@ -432,7 +465,7 @@ func buildServiceSpec(cmd *cobra.Command) (serviceSpec, error) {
 	spec.HomeEnv = home
 	spec.LogPath = paths.ServiceLogPath()
 	var skipped []string
-	spec.ExtraEnv, skipped = captureDaemonEnv(os.Environ())
+	spec.ExtraEnv, spec.SecretEnv, skipped = captureDaemonEnv(os.Environ())
 	spec.SkippedEnv = skipped
 
 	if v, _ := cmd.Flags().GetString("path-env"); v != "" {
