@@ -17,29 +17,29 @@ import { envValue } from "./env.ts";
 // ─── Socket resolution ────────────────────────────────────────────────────────
 
 /** The per-application leaf every XDG base directory gets. Mirrors paths.appName. */
-const APP_NAME = "fundi";
+const APP_NAME = "rafiki";
 
 /**
  * Resolve the daemon socket path the way the Go side does.
  *
  * This MUST agree with internal/paths.SocketPath and client.DefaultSocketPath,
  * or the TUI dials a socket nobody is listening on. It previously fell back to
- * ~/.pi/run/controller.sock — which is *pi-controller's* socket. fundi moved to
+ * ~/.pi/run/controller.sock — which is *pi-controller's* socket. rafiki moved to
  * XDG specifically so the two could coexist, and this half never got the memo,
  * so attaching without an explicitly exported socket path reached the wrong
  * daemon (or none at all).
  *
- * $FUNDI_SOCKET wins; fundi's CLI injects it when it spawns this process. The
+ * $RAFIKI_SOCKET wins; rafiki's CLI injects it when it spawns this process. The
  * pre-rename $PI_CONTROLLER_SOCKET spelling is still honoured.
  */
 export function defaultSocketPath(): string {
-    const explicit = envValue("FUNDI_SOCKET", "PI_CONTROLLER_SOCKET");
+    const explicit = envValue("RAFIKI_SOCKET", "PI_CONTROLLER_SOCKET");
     if (explicit) return explicit;
     return path.join(runtimeDir(), "controller.sock");
 }
 
 /**
- * Mirrors paths.RuntimeDir(): $XDG_RUNTIME_DIR/fundi when that is set to an
+ * Mirrors paths.RuntimeDir(): $XDG_RUNTIME_DIR/rafiki when that is set to an
  * absolute path, else the state dir. XDG_RUNTIME_DIR is a Linux/systemd
  * convention and normally unset on macOS, hence the fallback rather than a
  * path outside the spec. A relative value is ignored, as the spec requires.
@@ -55,7 +55,7 @@ function runtimeDir(): string {
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 export interface ClientOptions {
-    /** Defaults to defaultSocketPath(): $FUNDI_SOCKET, else the XDG runtime path. */
+    /** Defaults to defaultSocketPath(): $RAFIKI_SOCKET, else the XDG runtime path. */
     socket?: string;
     /** Default 30 000 ms */
     requestTimeoutMs?: number;

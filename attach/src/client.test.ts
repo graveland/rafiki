@@ -16,7 +16,7 @@ import { Client, FrameSplitter, defaultSocketPath } from "./client.ts";
 
 /** Creates a temp socket path that doesn't exist yet. */
 function tempSock(): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fundi-test-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rafiki-test-"));
     return path.join(dir, "ctrl.sock");
 }
 
@@ -170,7 +170,7 @@ describe("Client", () => {
 
     // 2. dial_failure_throws
     it("dial_failure_throws", async () => {
-        const badPath = "/tmp/fundi-test-nonexistent-" + Date.now() + ".sock";
+        const badPath = "/tmp/rafiki-test-nonexistent-" + Date.now() + ".sock";
         await expect(Client.dial({ socket: badPath })).rejects.toThrow();
     });
 
@@ -365,7 +365,7 @@ describe("Client", () => {
 
 describe("defaultSocketPath", () => {
     const SOCKET_VARS = [
-        "FUNDI_SOCKET",
+        "RAFIKI_SOCKET",
         "PI_CONTROLLER_SOCKET",
         "XDG_RUNTIME_DIR",
         "XDG_STATE_HOME",
@@ -388,8 +388,8 @@ describe("defaultSocketPath", () => {
         }
     });
 
-    it("prefers FUNDI_SOCKET", () => {
-        process.env["FUNDI_SOCKET"] = "/tmp/explicit.sock";
+    it("prefers RAFIKI_SOCKET", () => {
+        process.env["RAFIKI_SOCKET"] = "/tmp/explicit.sock";
         process.env["PI_CONTROLLER_SOCKET"] = "/tmp/old.sock";
         expect(defaultSocketPath()).toBe("/tmp/explicit.sock");
     });
@@ -400,28 +400,28 @@ describe("defaultSocketPath", () => {
     });
 
     it("treats an empty override as unset", () => {
-        process.env["FUNDI_SOCKET"] = "";
+        process.env["RAFIKI_SOCKET"] = "";
         process.env["XDG_STATE_HOME"] = "/tmp/state";
-        expect(defaultSocketPath()).toBe("/tmp/state/fundi/controller.sock");
+        expect(defaultSocketPath()).toBe("/tmp/state/rafiki/controller.sock");
     });
 
     it("uses XDG_RUNTIME_DIR ahead of XDG_STATE_HOME", () => {
         process.env["XDG_RUNTIME_DIR"] = "/run/user/1000";
         process.env["XDG_STATE_HOME"] = "/tmp/state";
-        expect(defaultSocketPath()).toBe("/run/user/1000/fundi/controller.sock");
+        expect(defaultSocketPath()).toBe("/run/user/1000/rafiki/controller.sock");
     });
 
     it("ignores a relative XDG value, as the spec requires", () => {
         process.env["XDG_RUNTIME_DIR"] = "relative/path";
         process.env["XDG_STATE_HOME"] = "/tmp/state";
-        expect(defaultSocketPath()).toBe("/tmp/state/fundi/controller.sock");
+        expect(defaultSocketPath()).toBe("/tmp/state/rafiki/controller.sock");
     });
 
     // The regression this whole function exists for: the old fallback was
-    // ~/.pi/run/controller.sock, which is pi-controller's socket, not fundi's.
+    // ~/.pi/run/controller.sock, which is pi-controller's socket, not rafiki's.
     it("falls back to the XDG state dir, never ~/.pi", () => {
         const got = defaultSocketPath();
-        expect(got).toBe(path.join(os.homedir(), ".local", "state", "fundi", "controller.sock"));
+        expect(got).toBe(path.join(os.homedir(), ".local", "state", "rafiki", "controller.sock"));
         expect(got).not.toContain(`${path.sep}.pi${path.sep}`);
     });
 });

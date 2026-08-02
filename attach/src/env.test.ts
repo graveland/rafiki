@@ -10,7 +10,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import { envValue, envFlag, envIsSet } from "./env.ts";
 
-const NEW = "FUNDI_TEST_VAR";
+const NEW = "RAFIKI_TEST_VAR";
 const OLD = "PIC_TEST_VAR";
 
 describe("env", () => {
@@ -61,7 +61,7 @@ describe("env", () => {
     it("envValue: works with no legacy name given", () => {
         process.env[NEW] = "new";
         expect(envValue(NEW)).toBe("new");
-        expect(envValue("FUNDI_UNSET_ENTIRELY")).toBeUndefined();
+        expect(envValue("RAFIKI_UNSET_ENTIRELY")).toBeUndefined();
     });
 
     it("envFlag: only exactly \"1\" is true", () => {

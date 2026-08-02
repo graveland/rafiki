@@ -1,5 +1,5 @@
 {
-    "name": "@graveland/fundi-attach",
+    "name": "@graveland/rafiki-attach",
     "version": "0.1.0",
     "type": "module",
     "private": true,
@@ -7,10 +7,10 @@
         "typecheck": "tsc --noEmit",
         "dev": "bun ./src/main.ts",
         "build": "bun scripts/build.ts && bun scripts/copy-pi-assets.ts",
-        "build:darwin-arm64": "bun build --compile --target=bun-darwin-arm64 ./src/main.ts --outfile ../bin/fundi-attach",
-        "build:darwin-x64": "bun build --compile --target=bun-darwin-x64   ./src/main.ts --outfile ../bin/fundi-attach",
-        "build:linux-x64": "bun build --compile --target=bun-linux-x64    ./src/main.ts --outfile ../bin/fundi-attach",
-        "build:linux-arm64": "bun build --compile --target=bun-linux-arm64  ./src/main.ts --outfile ../bin/fundi-attach"
+        "build:darwin-arm64": "bun build --compile --target=bun-darwin-arm64 ./src/main.ts --outfile ../bin/rafiki-attach",
+        "build:darwin-x64": "bun build --compile --target=bun-darwin-x64   ./src/main.ts --outfile ../bin/rafiki-attach",
+        "build:linux-x64": "bun build --compile --target=bun-linux-x64    ./src/main.ts --outfile ../bin/rafiki-attach",
+        "build:linux-arm64": "bun build --compile --target=bun-linux-arm64  ./src/main.ts --outfile ../bin/rafiki-attach"
     },
     "dependencies": {
         "@earendil-works/pi-agent-core": "file:../pi/packages/agent",

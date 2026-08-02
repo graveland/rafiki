@@ -281,16 +281,16 @@ function makeExtensionRunnerStub(): ExtensionRunner {
         // setUIContext is a no-op — we have no terminal UI in the daemon
         setUIContext: () => {},
         getUIContext: (): ExtensionUIContext => {
-            throw new Error("extensionRunner.getUIContext: not available in fundi-attach v1");
+            throw new Error("extensionRunner.getUIContext: not available in rafiki-attach v1");
         },
         bindCore: () => {},
         bindCommandContext: () => {},
         shutdown: () => {},
         createContext: (): ExtensionContext => {
-            throw new Error("extensionRunner.createContext: not available in fundi-attach v1");
+            throw new Error("extensionRunner.createContext: not available in rafiki-attach v1");
         },
         createCommandContext: (): ExtensionCommandContext => {
-            throw new Error("extensionRunner.createCommandContext: not available in fundi-attach v1");
+            throw new Error("extensionRunner.createCommandContext: not available in rafiki-attach v1");
         },
         emit: () => Promise.resolve(undefined),
         emitMessageEnd: () => Promise.resolve(undefined),
@@ -323,7 +323,7 @@ export class RemoteAgentSession {
     private _disposed = false;
 
     // Dedup window for the subscribe↔getRecent overlap (mirrors
-    // cmd/fundi/history.go). Frames already shown via primeHistory must not be
+    // cmd/rafiki/history.go). Frames already shown via primeHistory must not be
     // re-emitted to listeners when they also arrive live.
     private _primedKeys: Set<string> | undefined;
     private _dedupWindowOpen = false;
@@ -351,7 +351,7 @@ export class RemoteAgentSession {
     private readonly _resourceLoader: ResourceLoader;
     private readonly _extensionRunner: ExtensionRunner;
 
-    // Refresh handle from fundi-helpers; called after /reload so the autocomplete
+    // Refresh handle from rafiki-helpers; called after /reload so the autocomplete
     // cache picks up newly-added skills/extensions/prompts.
     private _refreshAutocomplete?: () => Promise<void>;
 
@@ -384,8 +384,8 @@ export class RemoteAgentSession {
             // surface via the unhandled-rejection path which we log.
             abort(): void {
                 void self.abort().catch((err) => {
-                    if (envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
-                        console.error("[fundi-attach] agent.abort forward failed:", err);
+                    if (envFlag("RAFIKI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
+                        console.error("[rafiki-attach] agent.abort forward failed:", err);
                     }
                 });
             },
@@ -420,7 +420,7 @@ export class RemoteAgentSession {
     private async consumeEvents(): Promise<void> {
         // _eventIter was registered in the constructor.
         if (!this._eventIter) this._eventIter = this._client.subscribe();
-        const debug = envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG");
+        const debug = envFlag("RAFIKI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG");
 
         try {
             for await (const frame of this._eventIter) {
@@ -429,7 +429,7 @@ export class RemoteAgentSession {
                     // Check before the per-child filter so it's never skipped.
                     if (frame["type"] === "ctrl_daemon_shutdown") {
                         const reason = (frame as { reason?: string }).reason ?? "unknown";
-                        console.error(`[fundi-attach] daemon shutting down (reason: ${reason})`);
+                        console.error(`[rafiki-attach] daemon shutting down (reason: ${reason})`);
                         // Self-signal SIGTERM instead of process.exit().  Signal
                         // delivery preempts the event loop — important here
                         // because pi's TUI is typically blocked on stdin and
@@ -448,7 +448,7 @@ export class RemoteAgentSession {
 
                     if (this._dedupWindowOpen && this._primedKeys) {
                         // drop the brief subscribe↔getRecent overlap already shown
-                        // by primeHistory (mirrors cmd/fundi/history.go dedup window)
+                        // by primeHistory (mirrors cmd/rafiki/history.go dedup window)
                         const key = JSON.stringify(inner);
                         if (this._primedKeys.has(key)) {
                             this._primedKeys.delete(key);
@@ -462,7 +462,7 @@ export class RemoteAgentSession {
 
                     if (debug) {
                         console.error(
-                            `[fundi-attach] event: type=${ev.type} listeners=${this._listeners.size}`
+                            `[rafiki-attach] event: type=${ev.type} listeners=${this._listeners.size}`
                         );
                     }
 
@@ -471,7 +471,7 @@ export class RemoteAgentSession {
                 } catch (err) {
                     // Per-event error: log and continue. One bad event must not kill the loop.
                     console.error(
-                        "[fundi-attach] event processing error:",
+                        "[rafiki-attach] event processing error:",
                         err instanceof Error ? err.message : String(err),
                         "\n  frame type:", frame["type"],
                         "\n  childId:", frame["childId"],
@@ -488,7 +488,7 @@ export class RemoteAgentSession {
             // Log regardless — even a noisy shutdown log beats silent data loss.
             if (!this._disposed) {
                 console.error(
-                    "[fundi-attach] event iterator terminated unexpectedly:",
+                    "[rafiki-attach] event iterator terminated unexpectedly:",
                     err instanceof Error ? err.message : String(err)
                 );
             }
@@ -509,8 +509,8 @@ export class RemoteAgentSession {
         try {
             frames = await this._client.getRecent(this._childId, limit);
         } catch (err) {
-            if (envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
-                console.error("[fundi-attach] primeHistory failed:", err);
+            if (envFlag("RAFIKI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
+                console.error("[rafiki-attach] primeHistory failed:", err);
             }
             return;
         }
@@ -1088,12 +1088,12 @@ export class RemoteAgentSession {
         _message: unknown,
         _options?: unknown
     ): Promise<void> {
-        throw new Error("sendCustomMessage is not supported in fundi-attach v1.");
+        throw new Error("sendCustomMessage is not supported in rafiki-attach v1.");
     }
 
     /**
      * Returns undefined — model cycling requires navigating the local model
-     * registry, which fundi-attach v1 does not have.  The TUI handles undefined
+     * registry, which rafiki-attach v1 does not have.  The TUI handles undefined
      * by showing "Only one model available" status, which is benign.
      * Use the model selector (Ctrl+M) or setModel() to change models.
      */
@@ -1161,13 +1161,13 @@ export class RemoteAgentSession {
      * Bind TUI-side extensions.
      *
      * When uiContext is present (interactive mode), calls setupTuiAutocomplete
-     * from fundi-helpers to register the slash-command completion provider. This
+     * from rafiki-helpers to register the slash-command completion provider. This
      * is the only local extension we load; all other extension work happens in
      * the daemon's pi child.
      */
     async bindExtensions(bindings: ExtensionBindings): Promise<void> {
         if (bindings.uiContext) {
-            // setupTuiAutocomplete reads FUNDI_ATTACH_CHILD_ID and FUNDI_SOCKET
+            // setupTuiAutocomplete reads RAFIKI_ATTACH_CHILD_ID and RAFIKI_SOCKET
             // from the environment (set by main.ts before TUI construction).
             const { refresh } = setupTuiAutocomplete(
                 // Cast to satisfy ExtensionUIContext.addAutocompleteProvider which expects
@@ -1217,7 +1217,7 @@ export class RemoteAgentSession {
     }
 
     /**
-     * Bash execution (! prefix) is not supported in fundi-attach v1.  The
+     * Bash execution (! prefix) is not supported in rafiki-attach v1.  The
      * daemon executes bash in its own session; there is no streaming chunk
      * relay from daemon to client.  The TUI catches this error and shows it
      * via showError(), so the user sees an actionable message rather than a
@@ -1229,7 +1229,7 @@ export class RemoteAgentSession {
         _options?: unknown
     ): Promise<BashResult> {
         throw new Error(
-            "Bash execution (! prefix) is not supported in fundi-attach v1. Run bash commands in the daemon session instead."
+            "Bash execution (! prefix) is not supported in rafiki-attach v1. Run bash commands in the daemon session instead."
         );
     }
 
@@ -1249,8 +1249,8 @@ export class RemoteAgentSession {
 
     /**
      * Not supported in v1: /tree and /fork tree navigation require session
-     * branching support that fundi-attach does not yet implement.
-     * Use `fundi` shell commands to manage sessions.
+     * branching support that rafiki-attach does not yet implement.
+     * Use `rafiki` shell commands to manage sessions.
      */
     async navigateTree(
         _targetId: string,
@@ -1261,7 +1261,7 @@ export class RemoteAgentSession {
         aborted?: boolean;
         summaryEntry?: BranchSummaryEntry;
     }> {
-        throw new Error("/tree and /fork navigation are not supported in fundi-attach v1. Use `fundi` shell commands to manage sessions.");
+        throw new Error("/tree and /fork navigation are not supported in rafiki-attach v1. Use `rafiki` shell commands to manage sessions.");
     }
 
     /** Stub: fork selector requires session JSONL tailing (Task 5). */
@@ -1274,19 +1274,19 @@ export class RemoteAgentSession {
         return undefined;
     }
 
-    /** /export and /share are not supported in fundi-attach v1 — the session data lives in the daemon. */
+    /** /export and /share are not supported in rafiki-attach v1 — the session data lives in the daemon. */
     async exportToHtml(_outputPath?: string): Promise<string> {
-        throw new Error("/export and /share are not supported in fundi-attach v1. Export directly from the daemon session.");
+        throw new Error("/export and /share are not supported in rafiki-attach v1. Export directly from the daemon session.");
     }
 
-    /** /export is not supported in fundi-attach v1 — the session data lives in the daemon. */
+    /** /export is not supported in rafiki-attach v1 — the session data lives in the daemon. */
     exportToJsonl(_outputPath?: string): string {
-        throw new Error("/export is not supported in fundi-attach v1. Export directly from the daemon session.");
+        throw new Error("/export is not supported in rafiki-attach v1. Export directly from the daemon session.");
     }
 
     /** Not supported in v1: session branching is managed by the daemon. */
     createReplacedSessionContext(): ReplacedSessionContext {
-        throw new Error("createReplacedSessionContext is not supported in fundi-attach v1. Use `fundi` shell commands to manage sessions.");
+        throw new Error("createReplacedSessionContext is not supported in rafiki-attach v1. Use `rafiki` shell commands to manage sessions.");
     }
 
     /**

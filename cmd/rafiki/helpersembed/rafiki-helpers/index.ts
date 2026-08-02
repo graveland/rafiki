@@ -4,13 +4,13 @@ import * as path from "node:path";
 
 // ─── Inline type stubs ────────────────────────────────────────────────────────
 //
-// fundi-helpers is loaded in two contexts:
+// rafiki-helpers is loaded in two contexts:
 //   - daemon's pi child (via jiti): @earendil-works/pi-coding-agent available
 //     through VIRTUAL_MODULES but NOT through normal module resolution.
-//   - fundi-attach build (via bun import in session.ts): node_modules live in
+//   - rafiki-attach build (via bun import in session.ts): node_modules live in
 //     attach/ which is a sibling, not a parent, of this file's location.
 //
-// Defining the types we need inline keeps fundi-helpers self-contained and avoids
+// Defining the types we need inline keeps rafiki-helpers self-contained and avoids
 // module-resolution issues in both contexts.
 
 interface ExtensionCommandContext {
@@ -30,16 +30,16 @@ interface ExtensionAPI {
 }
 
 /**
- * fundi-helpers — context-aware pi extension.
+ * rafiki-helpers — context-aware pi extension.
  *
- * Three contexts, gated on env vars set by the controller / fundi-attach:
+ * Three contexts, gated on env vars set by the controller / rafiki-attach:
  *
- * - Daemon's pi child (FUNDI_CHILD_ID set, FUNDI_ATTACH_TUI unset):
+ * - Daemon's pi child (RAFIKI_CHILD_ID set, RAFIKI_ATTACH_TUI unset):
  *   registers /reload.  Pi's interactive /reload builtin is TUI-only — in
  *   --mode rpc there's no builtin handler, so an extension command is the
- *   only way for fundi-attach to trigger ctx.reload() server-side.
+ *   only way for rafiki-attach to trigger ctx.reload() server-side.
  *
- * - fundi-attach TUI (FUNDI_ATTACH_TUI=1): factory is a no-op.
+ * - rafiki-attach TUI (RAFIKI_ATTACH_TUI=1): factory is a no-op.
  *   RemoteAgentSession.bindExtensions() calls setupTuiAutocomplete()
  *   directly to register an autocomplete provider that queries the daemon
  *   for available slash commands.
@@ -48,24 +48,24 @@ interface ExtensionAPI {
  *   ~/.pi/agent/extensions/ directory): factory is a no-op.  Don't shadow
  *   pi's interactive /reload builtin.
  *
- * Single source file, three roles. fundi-attach relative-imports this file at
- * compile time via attach/src/session.ts. `fundi install-extension` writes it
+ * Single source file, three roles. rafiki-attach relative-imports this file at
+ * compile time via attach/src/session.ts. `rafiki install-extension` writes it
  * to disk for the daemon's pi child to auto-discover.
  *
  * Type note: all types are defined inline above — no @earendil-works imports —
- * to keep fundi-helpers self-contained and avoid module-resolution issues in
- * both the daemon and the fundi-attach build contexts.
+ * to keep rafiki-helpers self-contained and avoid module-resolution issues in
+ * both the daemon and the rafiki-attach build contexts.
  */
 export default function (pi: ExtensionAPI): void {
     // The child-id variable is set by the daemon, so it must be read under the
     // name the daemon actually sets. This test was checking only
     // PI_CONTROLLER_CHILD_ID, which the daemon stopped setting when the Go side
-    // migrated to FUNDI_CHILD_ID — so inDaemonChild was permanently false and
+    // migrated to RAFIKI_CHILD_ID — so inDaemonChild was permanently false and
     // /reload was never registered at all. Accept both spellings, exactly as
     // internal/envvar.Get does.
     const inDaemonChild =
-        envIsSet("FUNDI_CHILD_ID", "PI_CONTROLLER_CHILD_ID") &&
-        !envFlag("FUNDI_ATTACH_TUI", "PIC_ATTACH_TUI");
+        envIsSet("RAFIKI_CHILD_ID", "PI_CONTROLLER_CHILD_ID") &&
+        !envFlag("RAFIKI_ATTACH_TUI", "PIC_ATTACH_TUI");
     if (inDaemonChild) {
         registerDaemonChildCommands(pi);
     }
@@ -81,7 +81,7 @@ function registerDaemonChildCommands(pi: ExtensionAPI): void {
     });
 }
 
-// ─── TUI autocomplete (fundi-attach context only) ───────────────────────────────
+// ─── TUI autocomplete (rafiki-attach context only) ───────────────────────────────
 
 /** Minimal command info shape — mirrors RpcSlashCommand from pi's RPC types. */
 interface CommandInfo {
@@ -149,20 +149,20 @@ function envIsSet(name: string, legacy?: string): boolean {
 }
 
 /** The per-application leaf every XDG base directory gets. Mirrors paths.appName. */
-const APP_NAME = "fundi";
+const APP_NAME = "rafiki";
 
 /**
  * Resolve the daemon socket path the way the Go side does.
  *
  * This used to fall back to ~/.pi/run/controller.sock — pi-controller's socket.
- * fundi moved to XDG precisely so the two can coexist, so that fallback reached
+ * rafiki moved to XDG precisely so the two can coexist, so that fallback reached
  * the wrong daemon whenever the socket path was not exported explicitly.
  */
 function defaultSocketPath(): string {
-    const explicit = envValue("FUNDI_SOCKET", "PI_CONTROLLER_SOCKET");
+    const explicit = envValue("RAFIKI_SOCKET", "PI_CONTROLLER_SOCKET");
     if (explicit) return explicit;
 
-    // paths.RuntimeDir(): $XDG_RUNTIME_DIR/fundi when absolute, else the state
+    // paths.RuntimeDir(): $XDG_RUNTIME_DIR/rafiki when absolute, else the state
     // dir — XDG_RUNTIME_DIR is a Linux/systemd convention, normally unset on
     // macOS. Relative values are ignored, as the spec requires.
     const runtime = process.env["XDG_RUNTIME_DIR"];
@@ -228,7 +228,7 @@ export function slashCommandsToCommandInfo(names: string[]): CommandInfo[] {
  * Wire the TUI autocomplete provider into the ExtensionUIContext.
  *
  * Called by RemoteAgentSession.bindExtensions() when uiContext is available.
- * Reads FUNDI_ATTACH_CHILD_ID and FUNDI_SOCKET from the environment
+ * Reads RAFIKI_ATTACH_CHILD_ID and RAFIKI_SOCKET from the environment
  * (both set by main.ts before the TUI starts). Fetches slash commands from
  * the daemon's pi child once at startup and caches them for the session.
  *
@@ -241,7 +241,7 @@ export function setupTuiAutocomplete(
     addProvider: (factory: (current: unknown) => unknown) => void
 ): { refresh: () => Promise<void> } {
     const socketPath = defaultSocketPath();
-    const childId = envValue("FUNDI_ATTACH_CHILD_ID", "PIC_ATTACH_CHILD_ID") ?? "";
+    const childId = envValue("RAFIKI_ATTACH_CHILD_ID", "PIC_ATTACH_CHILD_ID") ?? "";
 
     let cachedCommands: CommandInfo[] = [];
 
@@ -270,7 +270,7 @@ export function setupTuiAutocomplete(
             }
         } catch (err: unknown) {
             console.error(
-                "[fundi-helpers] failed to refresh daemon commands:",
+                "[rafiki-helpers] failed to refresh daemon commands:",
                 err instanceof Error ? err.message : String(err)
             );
         }

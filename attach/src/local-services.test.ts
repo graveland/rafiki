@@ -17,7 +17,7 @@ import {
 
 /** Write a minimal valid pi session JSONL to a temp file and return its path. */
 function writeTempSession(entries: number): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fundi-svc-test-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rafiki-svc-test-"));
     const filePath = path.join(dir, "session.jsonl");
 
     const lines: string[] = [

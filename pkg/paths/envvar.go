@@ -40,7 +40,7 @@ const (
 	// merged before any --label flags.
 	DefaultLabels = "RAFIKI_DEFAULT_LABELS"
 
-	// AttachTail bounds the scrollback fundi-attach replays into the TUI. Set by
+	// AttachTail bounds the scrollback rafiki-attach replays into the TUI. Set by
 	// `rafiki attach --tail` for the TUI process; read on the TypeScript side.
 	AttachTail = "RAFIKI_ATTACH_TAIL"
 
@@ -94,15 +94,15 @@ const (
 	MCPConfig = "RAFIKI_MCP_CONFIG"
 )
 
-// Variables consumed only by the TypeScript side (fundi-attach and the
-// fundi-helpers pi extension) are named here so this file stays the one
+// Variables consumed only by the TypeScript side (rafiki-attach and the
+// rafiki-helpers pi extension) are named here so this file stays the one
 // inventory of what rafiki reads from the environment, even though Go does
 // not read them.
 //
-//	RAFIKI_ATTACH_TUI       set by fundi-attach, read by fundi-helpers
-//	RAFIKI_ATTACH_CHILD_ID  set by fundi-attach, read by fundi-helpers
-//	RAFIKI_ATTACH_DEBUG     user-set, read by fundi-attach
-//	RAFIKI_KILL_ON_EXIT     user-set, read by fundi-attach
+//	RAFIKI_ATTACH_TUI       set by rafiki-attach, read by rafiki-helpers
+//	RAFIKI_ATTACH_CHILD_ID  set by rafiki-attach, read by rafiki-helpers
+//	RAFIKI_ATTACH_DEBUG     user-set, read by rafiki-attach
+//	RAFIKI_KILL_ON_EXIT     user-set, read by rafiki-attach
 
 // Get returns the value of name. The deprecation fallback this used to carry
 // is gone: the FUNDI_* and PIC_* spellings are retired, and a chain three

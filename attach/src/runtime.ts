@@ -8,7 +8,7 @@
  * ─── Kill-on-exit ────────────────────────────────────────────────────────────
  *
  * Default dispose() behaviour: close the UDS connection.  The daemon's child
- * keeps running; the user can re-attach via `fundi attach`.
+ * keeps running; the user can re-attach via `rafiki attach`.
  *
  * When constructed with killOnExit=true (set by CLI flag `--kill-on-exit`):
  * dispose() sends ctrl_kill to the daemon first, then closes the connection.
@@ -94,9 +94,9 @@ export class RemoteAgentSessionRuntime {
         const modelRegistry = await buildLocalModelRegistry(settingsManager);
         let sessionManager = await buildLocalSessionManager(meta.sessionFile);
 
-        // Scrollback bound: FUNDI_ATTACH_TAIL (set by `fundi attach --tail`),
+        // Scrollback bound: RAFIKI_ATTACH_TAIL (set by `rafiki attach --tail`),
         // -1 = all. Applied to both the claude seed fetch and primeHistory.
-        const tail = resolveTailLimit(envValue("FUNDI_ATTACH_TAIL", "PIC_ATTACH_TAIL"));
+        const tail = resolveTailLimit(envValue("RAFIKI_ATTACH_TAIL", "PIC_ATTACH_TAIL"));
 
         // For children with no pi-format session file (claude), the manager is
         // empty and pi's renderInitialMessages() — which paints from
@@ -110,8 +110,8 @@ export class RemoteAgentSessionRuntime {
                     sessionManager = seeded;
                 }
             } catch (err) {
-                if (envFlag("FUNDI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
-                    console.error("[fundi-attach] scrollback seed failed:", err);
+                if (envFlag("RAFIKI_ATTACH_DEBUG", "PIC_ATTACH_DEBUG")) {
+                    console.error("[rafiki-attach] scrollback seed failed:", err);
                 }
             }
         }
@@ -249,7 +249,7 @@ export class RemoteAgentSessionRuntime {
         }
         if (this.rebindSession) {
             // TODO (Task 8): re-fetch metadata and rebuild RemoteAgentSession.
-            console.warn("switch_session: rebind not fully implemented in fundi-attach v1");
+            console.warn("switch_session: rebind not fully implemented in rafiki-attach v1");
         }
         return { cancelled: false };
     }
@@ -297,21 +297,21 @@ export class RemoteAgentSessionRuntime {
     }
 
     /**
-     * Not supported in fundi-attach v1.  Use `fundi create --resume <file> --detached` instead.
+     * Not supported in rafiki-attach v1.  Use `rafiki create --resume <file> --detached` instead.
      */
     async importFromJsonl(
         _inputPath: string,
         _cwdOverride?: string
     ): Promise<{ cancelled: boolean }> {
         throw new Error(
-            "importFromJsonl: not supported in fundi-attach v1 — use `fundi create --resume <file> --detached` instead"
+            "importFromJsonl: not supported in rafiki-attach v1 — use `rafiki create --resume <file> --detached` instead"
         );
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /**
-     * Send ctrl_kill to the daemon for this child. Used by fundi-attach when the
+     * Send ctrl_kill to the daemon for this child. Used by rafiki-attach when the
      * user opts to terminate the session at TUI exit. Does NOT close the
      * connection — call dispose() after.
      */
@@ -322,7 +322,7 @@ export class RemoteAgentSessionRuntime {
                 childId: this._session.childId,
             });
         } catch (err) {
-            console.error("[fundi-attach] kill-child failed:", err);
+            console.error("[rafiki-attach] kill-child failed:", err);
         }
     }
 
@@ -368,13 +368,13 @@ export class RemoteAgentSessionRuntime {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Default scrollback replay when FUNDI_ATTACH_TAIL is unset (direct fundi-attach
+/** Default scrollback replay when RAFIKI_ATTACH_TAIL is unset (direct rafiki-attach
  * invocation). Bounded — an unbounded fetch of a large history produced a
  * ctrl_get_recent response past the 16 MiB frame cap and killed the connect. */
 export const DEFAULT_TAIL_LIMIT = 500;
 
 /**
- * Parse a FUNDI_ATTACH_TAIL value: N > 0 = last N events, 0 = none, -1 = all.
+ * Parse a RAFIKI_ATTACH_TAIL value: N > 0 = last N events, 0 = none, -1 = all.
  * Unset/empty/garbage falls back to DEFAULT_TAIL_LIMIT.
  */
 export function resolveTailLimit(raw: string | undefined): number {

@@ -1,5 +1,5 @@
 /**
- * Tests for the TUI autocomplete logic in fundi-helpers/index.ts.
+ * Tests for the TUI autocomplete logic in rafiki-helpers/index.ts.
  *
  * We test the suggestion-filtering behaviour by constructing a minimal
  * "recorded-call" harness: a fake base AutocompleteProvider that
@@ -7,9 +7,9 @@
  * factory registered via addAutocompleteProvider.
  *
  * Manual smoke test (requires a running daemon):
- *   make build                          # rebuild fundi-attach binary
- *   ./bin/fundi install-extension --force # refresh on-disk fundi-helpers
- *   fundi create test --no-extensions     # start a session
+ *   make build-attach                    # rebuild rafiki-attach binary
+ *   ./bin/rafiki install-extension --force # refresh on-disk rafiki-helpers
+ *   rafiki create test --no-extensions     # start a session
  *   # In TUI: type "/" then Tab
  *   # Expect: /reload appears in the completion list
  */
@@ -88,7 +88,7 @@ const fakeOpts = { signal: fakeSignal };
  * base provider, producing the wrapped AutocompleteProvider.
  *
  * Pre-loads the daemon command cache via `cachedCommands` by bypassing the
- * real UDS fetch (the fetch will fail / be skipped because FUNDI_ATTACH_CHILD_ID
+ * real UDS fetch (the fetch will fail / be skipped because RAFIKI_ATTACH_CHILD_ID
  * and PI_CONTROLLER_SOCKET are not set or the daemon isn't running in tests).
  *
  * To inject commands: after calling registerProvider, mutate the returned
@@ -124,7 +124,7 @@ describe("setupTuiAutocomplete", () => {
                 called = true;
             });
             // Provider is always registered; the daemon fetch is skipped when
-            // FUNDI_ATTACH_CHILD_ID is not set (which is the case in unit tests).
+            // RAFIKI_ATTACH_CHILD_ID is not set (which is the case in unit tests).
             expect(called).toBe(true);
         });
 
@@ -358,16 +358,16 @@ describe("setupTuiAutocomplete", () => {
  * The extension's default export registers /reload only when it decides it is
  * running inside the daemon's pi child. That decision reads an env var the *Go*
  * daemon sets, so it is a cross-language contract — and it silently broke once:
- * the Go side migrated PI_CONTROLLER_CHILD_ID to FUNDI_CHILD_ID, this file kept
+ * the Go side migrated PI_CONTROLLER_CHILD_ID to RAFIKI_CHILD_ID, this file kept
  * checking only the old name, and the condition became permanently false. No
  * error, no log; /reload simply stopped existing, which is the extension's only
  * job on the daemon side.
  */
 describe("extension factory: daemon-child detection", () => {
     const VARS = [
-        "FUNDI_CHILD_ID",
+        "RAFIKI_CHILD_ID",
         "PI_CONTROLLER_CHILD_ID",
-        "FUNDI_ATTACH_TUI",
+        "RAFIKI_ATTACH_TUI",
         "PIC_ATTACH_TUI",
     ] as const;
     let saved: Record<string, string | undefined> = {};
@@ -398,8 +398,8 @@ describe("extension factory: daemon-child detection", () => {
         }
     });
 
-    it("registers /reload under FUNDI_CHILD_ID — the name the daemon sets today", () => {
-        process.env["FUNDI_CHILD_ID"] = "child-1";
+    it("registers /reload under RAFIKI_CHILD_ID — the name the daemon sets today", () => {
+        process.env["RAFIKI_CHILD_ID"] = "child-1";
         const { registered, api } = fakePi();
         extensionFactory(api);
         expect(registered).toEqual(["reload"]);
@@ -413,15 +413,15 @@ describe("extension factory: daemon-child detection", () => {
     });
 
     it("registers nothing in the TUI process, which has its own autocomplete path", () => {
-        process.env["FUNDI_CHILD_ID"] = "child-1";
-        process.env["FUNDI_ATTACH_TUI"] = "1";
+        process.env["RAFIKI_CHILD_ID"] = "child-1";
+        process.env["RAFIKI_ATTACH_TUI"] = "1";
         const { registered, api } = fakePi();
         extensionFactory(api);
         expect(registered).toEqual([]);
     });
 
     it("honours the pre-rename PIC_ATTACH_TUI opt-out too", () => {
-        process.env["FUNDI_CHILD_ID"] = "child-1";
+        process.env["RAFIKI_CHILD_ID"] = "child-1";
         process.env["PIC_ATTACH_TUI"] = "1";
         const { registered, api } = fakePi();
         extensionFactory(api);

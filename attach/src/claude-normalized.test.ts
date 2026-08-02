@@ -1,5 +1,5 @@
 /**
- * claude-normalized.test.ts — verify fundi-attach consumes daemon-normalized
+ * claude-normalized.test.ts — verify rafiki-attach consumes daemon-normalized
  * claude frames.
  *
  * The pi-controller daemon translates Claude Code children's stream-json into
@@ -215,7 +215,7 @@ const DAEMON_TURN: Array<Record<string, unknown>> = [
 
 // ─── Test ─────────────────────────────────────────────────────────────────────
 
-describe("fundi-attach consumes daemon-normalized claude frames", () => {
+describe("rafiki-attach consumes daemon-normalized claude frames", () => {
     it("renders a claude tool turn: assistant text, toolCall, toolResult, clean end", async () => {
         const client = new FakeClient();
         const session = new RemoteAgentSession(makeInit(client));

@@ -1,12 +1,12 @@
 /**
  * copy-pi-assets.ts — post-build step
  *
- * When bun compiles fundi-attach to a static binary (isBunBinary = true), pi's
+ * When bun compiles rafiki-attach to a static binary (isBunBinary = true), pi's
  * config.js resolves package assets relative to dirname(process.execPath), i.e.
  * the bin/ directory. This script copies the necessary asset files there so the
  * TUI can find them at runtime.
  *
- * Files needed in bin/ alongside fundi-attach:
+ * Files needed in bin/ alongside rafiki-attach:
  *   package.json      — read at module init to get APP_NAME, VERSION, etc.
  *   theme/dark.json   — built-in TUI themes (loaded at startup)
  *   theme/light.json
