@@ -63,6 +63,9 @@ type faceOptions struct {
 	Logger   *slog.Logger         // required
 	Tracer   trace.TracerProvider // nil = no-op
 	Registry *prometheus.Registry // nil = metrics not mounted
+	Config   Config               // named client tokens, openai routes, default model
+	Listen   string               // overrides FUNDI_PROXY_LISTEN when non-empty
+	Dev      bool
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -80,6 +83,10 @@ type faceOptions struct {
 func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	logger := opts.Logger
 	pool := opts.Pool
+	defaultModel := opts.Config.DefaultModel
+	if defaultModel == "" {
+		defaultModel = paths.Get(paths.DefaultModel)
+	}
 	anthropicKey := paths.Get("ANTHROPIC_API_KEY")
 	openrouterKey := paths.Get("OPENROUTER_API_KEY")
 	if anthropicKey == "" {
@@ -102,8 +109,8 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		llm.WithUpstream(llm.UpstreamAnthropic, llm.Anthropic(anthropicKey)),
 		llm.WithLogger(logger),
 	}
-	if m := paths.Get(paths.DefaultModel); m != "" {
-		llmOpts = append(llmOpts, llm.WithDefaultModel(m))
+	if defaultModel != "" {
+		llmOpts = append(llmOpts, llm.WithDefaultModel(defaultModel))
 	}
 	if pool != nil {
 		llmOpts = append(llmOpts, llm.WithStore(pool))
@@ -125,7 +132,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	auth := server.ContextAuthenticator{}
 	messages := server.NewMessagesProxy(captureStore, auth, anthropicKey,
-		"https://api.anthropic.com", paths.Get(paths.DefaultModel), client.Catalog(), logger)
+		"https://api.anthropic.com", defaultModel, client.Catalog(), logger)
 	if openrouterKey != "" {
 		messages.SetFallback(openrouterKey, "https://openrouter.ai/api", client.Breaker(llm.UpstreamAnthropic))
 	}
@@ -143,9 +150,13 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	var chat *server.ChatCompletionsProxy
 	if openrouterKey != "" {
+		routes := make([]server.OpenAIRoute, 0, len(opts.Config.OpenAIRoutes))
+		for _, r := range opts.Config.OpenAIRoutes {
+			routes = append(routes, server.OpenAIRoute{Prefix: r.Prefix, Upstream: r.Upstream})
+		}
 		chat = server.NewChatCompletionsProxy(captureStore, auth,
 			[]server.OpenAIUpstream{{Name: "openrouter", BaseURL: "https://openrouter.ai/api/v1", APIKey: openrouterKey}},
-			nil, "openrouter", logger)
+			routes, "openrouter", logger)
 		if metrics != nil {
 			chat.SetMetrics(metrics)
 		}
@@ -160,6 +171,12 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// The per-boot token is generated fresh, written nowhere, and handed only
 	// to the children the daemon spawns.
 	tokens := map[string]string{"fundi-child": token}
+
+	// Named tokens from the config file: each NAME becomes the captured owner
+	// identity, which is the one thing an environment variable cannot express.
+	for name, tok := range opts.Config.Tokens {
+		tokens[name] = tok
+	}
 
 	// When the daemon is the face (no FUNDI_PROXY_URL redirecting elsewhere),
 	// FUNDI_PROXY_TOKEN names an ADDITIONAL accepted token — for humans and
@@ -187,7 +204,10 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		mux.Handle("/metrics", promhttp.HandlerFor(opts.Registry, promhttp.HandlerOpts{}))
 	}
 
-	addr := paths.Get("FUNDI_PROXY_LISTEN")
+	addr := opts.Listen
+	if addr == "" {
+		addr = paths.Get("FUNDI_PROXY_LISTEN")
+	}
 	if addr == "" {
 		addr = defaultProxyListen
 	}

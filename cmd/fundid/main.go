@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 func main() {
@@ -51,6 +52,22 @@ func main() {
 	if len(os.Args) > 1 && isHelpArg(os.Args[1]) {
 		printRootUsage(os.Stdout)
 		os.Exit(0)
+	}
+
+	flags, err := parseDaemonFlags(os.Args[1:])
+	if err != nil {
+		os.Exit(2) // flag package already printed the error and usage
+	}
+	cfg, err := loadConfig(flags.Config)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fundid:", err)
+		os.Exit(1)
+	}
+	if flags.Dev {
+		if cfg.Tokens == nil {
+			cfg.Tokens = map[string]string{}
+		}
+		cfg.Tokens["dev"] = "dev"
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
@@ -101,7 +118,11 @@ func main() {
 	// or close one themselves. A nil pool (FUNDI_AGENT_DB unset) means every
 	// agent conversation is in-memory, matching `fundid agent --db` unset.
 	var pool *pgxpool.Pool
-	if dsn := paths.Get(paths.AgentDB); dsn != "" {
+	dsn := flags.DB
+	if dsn == "" {
+		dsn = paths.Get(paths.AgentDB)
+	}
+	if dsn != "" {
 		pool, err = pgxpool.New(baseCtx, dsn)
 		if err != nil {
 			// Deliberately NOT fatal. pgxpool.New only PARSES the DSN, it does
@@ -117,6 +138,13 @@ func main() {
 			pool = nil
 		} else {
 			slog.Info("agent database pool opened")
+			if flags.Dev {
+				if err := store.Migrate(baseCtx, pool); err != nil {
+					slog.Error("dev mode: migrate failed", "error", err)
+					os.Exit(1)
+				}
+				slog.Info("dev mode: store migrated")
+			}
 		}
 	} else {
 		slog.Warn("no agent database configured; agent conversations are in-memory and no cost data will be recorded",
@@ -143,6 +171,9 @@ func main() {
 		Logger:   slog.Default(),
 		Tracer:   tp,
 		Registry: reg,
+		Config:   cfg,
+		Listen:   flags.Listen,
+		Dev:      flags.Dev,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are

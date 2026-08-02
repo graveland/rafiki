@@ -31,10 +31,16 @@ func printRootUsage(w io.Writer) {
 	fmt.Fprint(w, `fundid — coding-agent controller daemon and native agent runtime.
 
 Usage:
-  fundid                 Run the controller daemon (takes no flags).
-  fundid agent [flags]   Run one agent child on stdio (pi rpc protocol).
-                         Spawned by the daemon; see 'fundid agent -h'.
-  fundid -h | --help     Show this help.
+  fundid [flags]          Run the controller daemon.
+  fundid agent [flags]    Run one agent child on stdio (pi rpc protocol).
+                          Spawned by the daemon; see 'fundid agent -h'.
+  fundid -h | --help      Show this help.
+
+Daemon flags:
+  -config string   config file (named client tokens, openai routes, default model)
+  -listen string   proxy face listen address (overrides FUNDI_PROXY_LISTEN)
+  -db string       postgres DSN (overrides FUNDI_AGENT_DB)
+  -dev             dev mode: auto-migrate the schema, accept the token "dev"
 
 The command-line client is a separate binary, `+"`fundi`"+`.
 

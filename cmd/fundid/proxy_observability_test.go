@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -65,5 +67,50 @@ func TestProxyFace_MessagesStillRequiresToken(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("POST /v1/messages (no token) = %d, want 401", resp.StatusCode)
+	}
+}
+
+// A token named in the config file is accepted by the face, alongside the
+// per-boot child secret.
+//
+// This does NOT assert on status code alone: a request with a token our own
+// middleware accepts still gets forwarded upstream (ANTHROPIC_API_KEY is a
+// fake "test-key" here), and a live network path to api.anthropic.com — which
+// this environment has — legitimately returns its own 401 for the bad
+// upstream key. That is indistinguishable from OUR middleware's 401 by status
+// code alone. So the assertion instead checks the response body does not
+// carry StaticTokenAuth's own rejection text (see pkg/server/statictoken.go),
+// which is the one thing that can only come from OUR middleware refusing the
+// token, never from an upstream response.
+func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
+	t.Setenv("FUNDI_PROXY_LISTEN", "127.0.0.1:0")
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	face, err := startProxyFace(ctx, faceOptions{
+		Logger:   slog.New(slog.DiscardHandler),
+		Registry: prometheus.NewRegistry(),
+		Config:   Config{Tokens: map[string]string{"sentinel": "tok-sentinel"}},
+	})
+	if err != nil {
+		t.Fatalf("startProxyFace: %v", err)
+	}
+	defer face.Close(ctx)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, face.URL+"/v1/messages", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer tok-sentinel")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /v1/messages: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(string(body), "unknown token") {
+		t.Errorf("a token named in the config file was rejected as unauthorized: %s", body)
 	}
 }
