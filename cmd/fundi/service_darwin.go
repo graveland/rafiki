@@ -17,11 +17,10 @@ import (
 )
 
 // Distinct from pi-controller's own "dev.graveland.pi-controller": sharing the
-// label meant a `service uninstall` from a fundi checkout unloaded and deleted
-// the running pi-controller service, and install overwrote its plist.
-const launchdLabel = "dev.graveland.fundi"
+// label would make the two services clobber each other's plist.
+const launchdLabel = "dev.graveland.rafiki"
 
-// plistTemplate is the launchd property list for the fundi daemon.
+// plistTemplate is the launchd property list for the rafiki daemon.
 const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

@@ -10,9 +10,9 @@ import (
 // testSpec returns a minimal serviceSpec for template rendering tests.
 func testSpec() serviceSpec {
 	return serviceSpec{
-		DaemonBinary: "/usr/local/bin/fundi",
+		DaemonBinary: "/usr/local/bin/rafikid",
 		HomeEnv:      "/home/testuser",
-		LogPath:      "/home/testuser/.local/state/fundi/controller.log",
+		LogPath:      "/home/testuser/.local/state/rafiki/controller.log",
 		PathEnv:      "/usr/local/bin:/usr/bin:/bin",
 	}
 }
@@ -24,7 +24,7 @@ func TestRenderUnit_ContainsSpecFields(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"/usr/local/bin/fundi",
+		"/usr/local/bin/rafikid",
 		"/home/testuser",
 		"/usr/local/bin:/usr/bin:/bin",
 		"controller.log",
@@ -45,7 +45,7 @@ func TestRenderUnit_Format(t *testing.T) {
 		"[Unit]",
 		"[Service]",
 		"[Install]",
-		"Description=fundi daemon",
+		"Description=rafiki daemon",
 		"After=default.target",
 		"Restart=on-failure",
 		"WantedBy=default.target",

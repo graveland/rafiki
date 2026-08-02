@@ -15,11 +15,11 @@ import (
 )
 
 // Distinct from pi-controller's unit name — see launchdLabel in service_darwin.go.
-const systemdUnitName = "fundi"
+const systemdUnitName = "rafiki"
 
-// unitTemplate is the systemd user service unit for the fundi daemon.
+// unitTemplate is the systemd user service unit for the rafiki daemon.
 const unitTemplate = `[Unit]
-Description=fundi daemon
+Description=rafiki daemon
 After=default.target
 
 [Service]

@@ -188,7 +188,7 @@ pi-controller install instead of competing for its `~/.pi/run` socket:
 | logs | `~/.local/state/fundi/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/fundi` (instructions, skills, `mcp.json`, `presets.json`) | `$XDG_CONFIG_HOME` |
 
-Its launchd/systemd service identity is `dev.graveland.fundi` / `fundi`, again
+Its launchd/systemd service identity is `dev.graveland.rafiki` / `rafiki`, again
 distinct from pi-controller's.
 
 The one thing fundi writes outside its own directories is the `fundi-helpers`

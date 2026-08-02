@@ -45,7 +45,7 @@ func TestRenderPlist_Format(t *testing.T) {
 	checks := []string{
 		"<?xml version=\"1.0\"",
 		"<plist version=\"1.0\">",
-		"dev.graveland.fundi",
+		"dev.graveland.rafiki",
 		"<key>Label</key>",
 		"<key>RunAtLoad</key>",
 		"<true/>",
