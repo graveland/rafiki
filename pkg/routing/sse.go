@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -35,30 +36,35 @@ type wireUsage struct {
 // is reassembled into the final Message JSON so the stored `response` is always
 // a valid JSON Message (the same shape the in-process core stores), never raw
 // SSE. A non-SSE body is already a JSON Message and is returned unchanged.
-// Best-effort on content: malformed input yields zero values and (for SSE)
-// whatever Message could be accumulated. The returned error is non-nil only when
-// the SSE scanner itself failed (e.g. a token exceeding the buffer on a
-// truncated stream); callers should Warn on it but the values remain usable.
+//
+// The error is non-nil when the body is not a recognizable Message at all —
+// a gateway error page delivered with a success status, SDK/wire skew, or a
+// reassembly gap — in which case canonical is nil and the caller must mark the
+// turn errored: recording a zero-usage "completion" would both lie in the
+// metrics and crash the JSONB append (raw SSE is not a valid canonical).
 func ParseCapturedResponse(contentType string, body []byte) (string, CapturedUsage, []byte, error) {
 	if strings.Contains(contentType, "text/event-stream") {
 		return parseSSE(body)
 	}
-	stop, u := parseJSONMessage(body)
+	stop, u, err := parseJSONMessage(body)
+	if err != nil {
+		return "", CapturedUsage{}, nil, err
+	}
 	return stop, u, body, nil
 }
 
-func parseJSONMessage(body []byte) (string, CapturedUsage) {
+func parseJSONMessage(body []byte) (string, CapturedUsage, error) {
 	var m struct {
 		StopReason string    `json:"stop_reason"`
 		Model      string    `json:"model"`
 		Usage      wireUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &m); err != nil {
-		return "", CapturedUsage{}
+		return "", CapturedUsage{}, fmt.Errorf("response body is not a JSON Message: %w", err)
 	}
 	u := toCapturedUsage(m.Usage)
 	u.Model = m.Model
-	return m.StopReason, u
+	return m.StopReason, u, nil
 }
 
 // parseSSE walks the event stream once, extracting stop_reason + usage (output
@@ -134,16 +140,24 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 	msg.Usage.InputTokens = u.InputTokens
 	msg.Usage.CacheReadInputTokens = u.CacheReadTokens
 	msg.Usage.CacheCreationInputTokens = u.CacheCreationTokens
-	// Persist the reassembled message only if accumulation actually produced
-	// content; otherwise (SDK/wire skew, or deltas with no content_block_start)
-	// a zero-value Message still marshals to a valid-but-empty {"content":null}
-	// skeleton that would masquerade as a real empty completion — so fall back to
-	// the raw stream, which at least preserves the response for forensics.
-	canonical, err := json.Marshal(msg)
-	if err != nil || !accumulated || len(msg.Content) == 0 {
-		canonical = body
+	// Persist whatever the SDK accumulated — including a legitimately
+	// content-less Message (max_tokens can stop a turn before the first
+	// content block) — but only when SOMETHING accumulated. Nothing
+	// accumulating means the stream wasn't Anthropic wire format at all
+	// (a gateway error page with a success status, SDK/wire skew): that's a
+	// failed parse, not a zero-usage completion — recording it would lie in
+	// the metrics and crash the JSONB append on the raw bytes.
+	if scErr := sc.Err(); scErr != nil {
+		return stop, u, nil, scErr
 	}
-	return stop, u, canonical, sc.Err()
+	if !accumulated {
+		return stop, u, nil, fmt.Errorf("response stream did not reassemble into a Message (%d bytes captured)", len(body))
+	}
+	canonical, err := json.Marshal(msg)
+	if err != nil {
+		return stop, u, nil, fmt.Errorf("marshal reassembled message: %w", err)
+	}
+	return stop, u, canonical, nil
 }
 
 func toCapturedUsage(w wireUsage) CapturedUsage {

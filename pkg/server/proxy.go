@@ -283,6 +283,9 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Best-effort capture setup (never blocks the proxy on failure).
 	cr := p.beginCapture(r, reqBody, model)
+	// Whether the client asked for a stream decides what a well-formed 2xx
+	// Content-Type must be — see the guard in streamAndCapture.
+	stream := requestsStream(reqBody)
 
 	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, cr)
 	if handled {
@@ -312,7 +315,7 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer resp.Body.Close()
-	p.streamAndCapture(w, r, resp, cr, upstream, model, start)
+	p.streamAndCapture(w, r, resp, cr, upstream, model, start, stream)
 }
 
 // effortRetry inspects a 400 upstream response. If it is a provider rejection
@@ -484,18 +487,90 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 	return resp, "openrouter", err, false
 }
 
+// requestsStream reports whether the request body asked for a streamed (SSE)
+// response — which determines what Content-Type a well-formed 2xx must carry.
+func requestsStream(body []byte) bool {
+	var s struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &s)
+	return s.Stream
+}
+
+// contentTypeMatches reports whether a 2xx response's Content-Type is the one
+// the request asked for: text/event-stream for stream=true, JSON otherwise.
+func contentTypeMatches(ct string, stream bool) bool {
+	if stream {
+		return strings.Contains(ct, "text/event-stream")
+	}
+	return strings.Contains(ct, "json")
+}
+
+// handleMalformedSuccess surfaces a 2xx response whose Content-Type betrayed
+// it (a gateway error page, not an API response) as a 502 the client can
+// retry, preserving the upstream body in the log, the turn reason, and —
+// bounded — the client-facing error message. Mirrors handleUpstreamError.
+func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time, stream bool) {
+	// The body is a small error page in practice; cap the read anyway so a
+	// genuinely large mislabeled response can't be slurped unbounded.
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	elapsed := time.Since(start)
+	user := p.requestUser(r)
+	want := "application/json"
+	if stream {
+		want = "text/event-stream"
+	}
+	bodyPreview := boundedErrorBody(raw)
+	p.logger.Warn("proxy: upstream 2xx with wrong content type; surfacing as 502",
+		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
+		"status", resp.StatusCode, "content_type", resp.Header.Get("Content-Type"), "want", want,
+		"body", bodyPreview, "latency", latency(elapsed))
+	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	reason := "upstream " + strconv.Itoa(resp.StatusCode) + " content-type " + strconv.Quote(resp.Header.Get("Content-Type")) + " (want " + want + ")"
+	if rerr != nil {
+		reason += " (body read failed: " + rerr.Error() + ")"
+	}
+	if bodyPreview != "" {
+		reason += ": " + bodyPreview
+	}
+	p.failTurn(r, cr, reason)
+	msg := "upstream returned HTTP " + strconv.Itoa(resp.StatusCode) + " with an unexpected content type (" + resp.Header.Get("Content-Type") + ")"
+	if bodyPreview != "" {
+		msg += ": " + bodyPreview
+	}
+	clientBody, _ := json.Marshal(map[string]any{
+		"type":  "error",
+		"error": map[string]string{"type": "api_error", "message": msg},
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(clientBody)))
+	w.WriteHeader(http.StatusBadGateway)
+	if _, werr := w.Write(clientBody); werr != nil {
+		p.logger.Warn("proxy: client write failed on malformed-success response", "conversation", cr.convID, "error", werr)
+	}
+}
+
 // streamAndCapture transparently streams the upstream response to the client
 // while teeing a copy, then records the turn: a 4xx/5xx or a mid-stream read
 // error fails it; a clean stream completes it with the reassembled canonical
 // response. The per-turn "llm turn" log fires regardless of whether DB capture
 // is on, so a log-based consumer still sees every proxied turn.
-func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time) {
+func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time, stream bool) {
 	// A 4xx/5xx is a small, non-streamed error body — handle it before touching
 	// the streaming path so we can buffer, surface the provider's real message
 	// to the client, and capture it. (The Messages API never responds 3xx, so
 	// treating <400 as a stream to tee is safe.)
 	if resp.StatusCode >= 400 {
 		p.handleUpstreamError(w, r, resp, cr, upstream, model, start)
+		return
+	}
+	// A 2xx whose Content-Type doesn't match the requested shape is not a
+	// response — it's a gateway error page wearing a success status (seen from
+	// OpenRouter's shared pool under provider exhaustion: HTTP 200 with a plain
+	// text error body). Forwarding it hands the client an unparseable "success"
+	// it cannot retry; surface it as the upstream failure it actually is.
+	if !contentTypeMatches(resp.Header.Get("Content-Type"), stream) {
+		p.handleMalformedSuccess(w, r, resp, cr, upstream, model, start, stream)
 		return
 	}
 	for k, vs := range resp.Header {
@@ -577,7 +652,9 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	if perr != nil {
 		// A stream we could not parse must not be persisted as a clean
 		// completion — record it errored (the client already got the bytes).
-		p.logger.Warn("llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "error", perr)
+		// The body prefix is the only forensic trace of what the upstream
+		// actually sent; without it the body vanishes with the connection.
+		p.logger.Warn("llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "error", perr, "body_prefix", boundedErrorBody(acc.Bytes()))
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
 		p.failTurn(r, cr, "capture parse failed: "+perr.Error())
 		return

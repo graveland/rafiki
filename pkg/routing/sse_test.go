@@ -58,10 +58,12 @@ func TestParseCapturedResponseSSE(t *testing.T) {
 }
 
 func TestParseCapturedResponseSSEMissingContentBlockStart(t *testing.T) {
-	// A text_delta with no preceding content_block_start: the SDK can't attach it,
-	// so reassembly yields no content. Capture must fall back to the raw body
-	// rather than persist a valid-but-empty {"content":null} Message that would
-	// masquerade as a real empty completion.
+	// A text_delta with no preceding content_block_start: the SDK can't attach
+	// it, so that text is dropped from the canonical message. The stream IS
+	// Anthropic wire format though (message_start accumulated), so the turn is
+	// a real completion: persist the accumulated Message — a content-less
+	// skeleton faithfully reflects a stream that produced no attachable
+	// content (e.g. max_tokens before the first block).
 	sse := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1}}}` + "\n\n" +
 		"event: content_block_delta\n" +
@@ -71,17 +73,13 @@ func TestParseCapturedResponseSSEMissingContentBlockStart(t *testing.T) {
 		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
 	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte(sse))
 	if err != nil {
-		t.Fatalf("scanner error: %v", err)
+		t.Fatalf("well-formed stream must parse: %v", err)
 	}
-	// stop + usage are parsed independently of reassembly and stay correct.
 	if stop != "end_turn" || u.OutputTokens != 25 {
 		t.Errorf("stop=%q out=%d, want end_turn/25", stop, u.OutputTokens)
 	}
-	if string(canonical) != sse {
-		t.Errorf("canonical must fall back to the raw body on a reassembly gap; got %q", canonical)
-	}
-	if json.Valid(canonical) {
-		t.Error("expected the raw (non-JSON) body, not a reassembled empty Message")
+	if !json.Valid(canonical) {
+		t.Errorf("canonical response is not valid JSON: %s", canonical)
 	}
 }
 
@@ -104,7 +102,13 @@ func TestParseCapturedResponseJSON(t *testing.T) {
 }
 
 func TestParseCapturedResponseGarbageIsSafe(t *testing.T) {
-	stop, u, _, _ := ParseCapturedResponse("text/event-stream", []byte("event: junk\ndata: not json\n\n"))
+	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte("event: junk\ndata: not json\n\n"))
+	if err == nil {
+		t.Error("garbage stream must be a parse error, not a zero-usage completion")
+	}
+	if canonical != nil {
+		t.Errorf("canonical must be nil on garbage; got %q", canonical)
+	}
 	if stop != "" || u.InputTokens != 0 {
 		t.Errorf("garbage should yield zero values, got stop=%q usage=%+v", stop, u)
 	}
@@ -113,11 +117,63 @@ func TestParseCapturedResponseGarbageIsSafe(t *testing.T) {
 func TestParseCapturedResponseTruncatedStream(t *testing.T) {
 	sse := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}` + "\n\n"
-	stop, u, _, _ := ParseCapturedResponse("text/event-stream", []byte(sse))
+	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	// message_start accumulated, so the (content-less) Message persists; the
+	// usage extracted so far stays available to the caller.
+	if err != nil {
+		t.Fatalf("message_start-only stream must still persist: %v", err)
+	}
+	if !json.Valid(canonical) {
+		t.Errorf("canonical response is not valid JSON: %s", canonical)
+	}
 	if stop != "" {
 		t.Errorf("stop_reason = %q, want empty for truncated stream", stop)
 	}
 	if u.InputTokens != 100 || u.OutputTokens != 0 || u.CacheReadTokens != 0 || u.CacheCreationTokens != 0 {
 		t.Errorf("truncated stream usage = %+v, want InputTokens=100 OutputTokens=0", u)
+	}
+}
+
+func TestParseCapturedResponseNonJSONBodyIsError(t *testing.T) {
+	// A gateway error page delivered with a success status and a non-SSE
+	// content type: not a Message, and must not be stored as a completion.
+	_, _, canonical, err := ParseCapturedResponse("text/plain", []byte("error code: 521"))
+	if err == nil {
+		t.Error("non-JSON body must be a parse error")
+	}
+	if canonical != nil {
+		t.Errorf("canonical must be nil on a non-JSON body; got %q", canonical)
+	}
+}
+
+func TestParseCapturedResponsePingsDoNotBreakReassembly(t *testing.T) {
+	// Anthropic interleaves keep-alive pings into long turns; they must pass
+	// through the tee untouched (covered by the proxy fidelity tests) and be
+	// ignored by reassembly.
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":3,"output_tokens":1}}}` + "\n\n" +
+		"event: ping\n" +
+		`data: {"type":"ping"}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: ping\n" +
+		`data: {"type":"ping"}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	if err != nil {
+		t.Fatalf("ping-laden stream must parse: %v", err)
+	}
+	if stop != "end_turn" || u.OutputTokens != 2 {
+		t.Errorf("stop=%q usage=%+v", stop, u)
+	}
+	if !json.Valid(canonical) {
+		t.Errorf("canonical not valid JSON: %s", canonical)
 	}
 }

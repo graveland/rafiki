@@ -224,6 +224,71 @@ func TestMessagesProxyFailsTurnOnUpstreamError(t *testing.T) {
 	}
 }
 
+func TestMessagesProxyMalformedSuccessBecomes502(t *testing.T) {
+	// The OpenRouter shared-pool failure that motivated the guard: a streaming
+	// request gets HTTP 200 with a plain-text gateway error body. Forwarding
+	// that hands the client an unparseable "success" it cannot retry — surface
+	// it as the upstream failure it is, with the body preserved everywhere.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "error code: 521")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs // inject fake
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 for a malformed success", rec.Code)
+	}
+	// The client gets an Anthropic-style error envelope whose message carries
+	// the upstream body, so the failure is displayable and diagnosable.
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"error"`) || !strings.Contains(body, "error code: 521") {
+		t.Errorf("client body = %q, want an error envelope containing the upstream body", body)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("content-type = %q, want application/json", ct)
+	}
+	if fs.fails != 1 || fs.completes != 0 {
+		t.Errorf("capture: fails=%d completes=%d, want 1/0", fs.fails, fs.completes)
+	}
+	if !strings.Contains(fs.lastFailMsg, "text/plain") || !strings.Contains(fs.lastFailMsg, "error code: 521") {
+		t.Errorf("fail msg = %q, want the content type and the upstream body", fs.lastFailMsg)
+	}
+}
+
+func TestMessagesProxyNonStreamJSON200PassesThrough(t *testing.T) {
+	// The guard must not mangle a legitimate non-streaming response: no
+	// "stream" in the request → a JSON 200 is the expected shape.
+	msg := `{"id":"msg_1","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, msg)
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude"}`))
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 passed through", rec.Code)
+	}
+	if rec.Body.String() != msg {
+		t.Errorf("body mutated:\n got: %s\nwant: %s", rec.Body.String(), msg)
+	}
+}
+
 func TestBoundedErrorBody(t *testing.T) {
 	if got := boundedErrorBody([]byte("   ")); got != "" {
 		t.Errorf("blank body => %q, want empty", got)

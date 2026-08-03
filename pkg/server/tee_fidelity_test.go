@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -501,5 +502,108 @@ func TestParseOpenAIResponseToolCallsAndStrictness(t *testing.T) {
 	}
 	if _, _, _, err := parseOpenAIResponse("application/json", []byte("not json")); err == nil {
 		t.Error("undecodable JSON body must be a parse error")
+	}
+}
+
+// Liveness, not just fidelity: a chunk the proxy reads must reach a REAL
+// client socket promptly — flushed, not buffered — even when the upstream
+// then goes silent. Claude Code's stream idle watchdog
+// (CLAUDE_STREAM_IDLE_TIMEOUT_MS, default 300s) does not count SSE ping
+// events as activity, so during a long-thinking turn the only thing standing
+// between the client and "Response stalled mid-stream" is every upstream
+// byte being forwarded the moment it arrives. httptest.NewRecorder cannot
+// test this (it buffers everything), so this uses a real client/server pair:
+// the upstream parks after message_start + a ping, and the client must
+// observe the ping BEFORE the upstream is released.
+func TestMessagesTeeForwardsPingsDuringUpstreamSilence(t *testing.T) {
+	sseHead := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_ping","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}` + "\n\n"
+	ssePing := "event: ping\n" + `data: {"type":"ping"}` + "\n\n"
+	sseTail := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}` + "\n\n" +
+		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
+
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		// Envelope + first ping, then the "long thinking" silence: nothing
+		// more is sent until the test releases the stream.
+		_, _ = io.WriteString(w, sseHead)
+		_, _ = io.WriteString(w, ssePing)
+		flusher.Flush()
+		<-release
+		_, _ = io.WriteString(w, sseTail)
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(fidelityBody))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	lines := make(chan string)
+	readErr := make(chan error, 1)
+	go func() {
+		r := bufio.NewReader(resp.Body)
+		for {
+			line, rerr := r.ReadString('\n')
+			if line != "" {
+				lines <- line
+			}
+			if rerr != nil {
+				readErr <- rerr
+				return
+			}
+		}
+	}()
+
+	// The ping must arrive while the upstream is still parked. If the proxy
+	// buffered instead of flushing, nothing arrives here and the test times
+	// out — which is exactly the "client sees a stalled stream" failure.
+	var got strings.Builder
+	deadline := time.After(10 * time.Second)
+	for sawPing := false; !sawPing; {
+		select {
+		case line := <-lines:
+			got.WriteString(line)
+			sawPing = line == `data: {"type":"ping"}`+"\n"
+		case rerr := <-readErr:
+			t.Fatalf("stream ended before the ping arrived: %v (got %q)", rerr, got.String())
+		case <-deadline:
+			t.Fatalf("ping never reached the client during upstream silence; proxy is buffering (got %q)", got.String())
+		}
+	}
+	close(release)
+
+	// Drain to EOF: the whole stream must be byte-identical end to end.
+	for {
+		select {
+		case line := <-lines:
+			got.WriteString(line)
+		case rerr := <-readErr:
+			if rerr != io.EOF {
+				t.Fatalf("read: %v", rerr)
+			}
+			if want := sseHead + ssePing + sseTail; got.String() != want {
+				t.Errorf("stream mutated:\n got: %q\nwant: %q", got.String(), want)
+			}
+			return
+		case <-time.After(10 * time.Second):
+			t.Fatal("stream did not finish after upstream release")
+		}
 	}
 }
