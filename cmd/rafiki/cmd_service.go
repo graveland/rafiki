@@ -344,10 +344,23 @@ func installReport(spec serviceSpec, envFile string, res paths.MergeResult, merg
 		// The unit is already written and the service already running, so this
 		// is not an install failure — but it is the difference between a daemon
 		// that persists conversations and one that silently does not.
+		//
+		// MergeEnvFile categorizes into Added/Existing/Conflict BEFORE it ever
+		// attempts the write (pkg/paths/envfile.go), so a write failure only
+		// ever costs the keys in Added — Existing and Conflict were already
+		// correctly persisted from a prior run. Naming them here as failed
+		// would be false, and would send an operator hand-editing a file that
+		// is already correct. Fall back to every captured secret only when the
+		// failure happened before categorization ran at all (e.g. the existing
+		// file could not even be read).
+		failed := res.Added
+		if len(res.Added) == 0 && len(res.Existing) == 0 && len(res.Conflict) == 0 {
+			failed = sortedKeys(spec.SecretEnv)
+		}
 		fmt.Fprintf(&b, "\nCould not write %s: %v\n"+
 			"These did NOT reach the daemon's environment: %s\n"+
 			"Add them by hand and `chmod 600` the file.\n",
-			envFile, mergeErr, strings.Join(sortedKeys(spec.SecretEnv), ", "))
+			envFile, mergeErr, strings.Join(failed, ", "))
 	}
 
 	// The DSN is the one whose absence degrades silently: conversations revert

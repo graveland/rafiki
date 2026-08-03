@@ -399,3 +399,36 @@ func TestInstallReport_SurfacesAMergeError(t *testing.T) {
 		t.Errorf("report does not name what failed to reach the file:\n%s", out)
 	}
 }
+
+// MergeEnvFile categorizes into Added/Existing/Conflict BEFORE it ever attempts
+// the write, so a write failure (permission denied, disk full, ...) only ever
+// costs the keys in Added — Existing and Conflict were already correctly
+// persisted from a prior run. The merge-error branch must not claim an
+// already-persisted key "did NOT reach the daemon's environment": that is
+// false, and it invites an operator to hand-edit a file that is already
+// correct.
+func TestInstallReport_MergeErrorOnlyNamesTheKeysThatFailed(t *testing.T) {
+	spec := serviceSpec{SecretEnv: map[string]string{
+		"RAFIKI_DB":    "postgres://u@h/db",
+		"RAFIKI_TOKEN": "tok",
+	}}
+	res := paths.MergeResult{Existing: []string{"RAFIKI_TOKEN"}, Added: []string{"RAFIKI_DB"}}
+
+	out := installReport(spec, "/cfg/service.env", res, errors.New("disk full"))
+
+	var failedLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "These did NOT reach") {
+			failedLine = line
+		}
+	}
+	if failedLine == "" {
+		t.Fatalf("no failed-keys line in report:\n%s", out)
+	}
+	if !strings.Contains(failedLine, "RAFIKI_DB") {
+		t.Errorf("failed-keys line does not name the key that actually failed to write:\n%s", failedLine)
+	}
+	if strings.Contains(failedLine, "RAFIKI_TOKEN") {
+		t.Errorf("failed-keys line wrongly claims an already-persisted key failed to reach the file:\n%s", failedLine)
+	}
+}
