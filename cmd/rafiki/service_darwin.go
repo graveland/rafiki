@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/paths"
 )
@@ -153,21 +154,82 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 	// the live launchd job (and every env var it holds — this mechanism
 	// exists because RAFIKI_DB used to be one of them) keeps running under
 	// the stale one, and `service restart` only kickstarts *within* that
-	// stale definition rather than picking up the new one. Ignore the error:
-	// on a clean machine the job isn't loaded yet, and bootout failing with
-	// "not loaded" is the expected, unproblematic case — any real problem
-	// still surfaces below when bootstrap itself is attempted.
-	_, _ = runOSCmd("launchctl", "bootout", b.serviceTarget())
+	// stale definition rather than picking up the new one.
+	//
+	// bootout is ASYNCHRONOUS: it returns before the job is actually gone
+	// (the daemon takes ~250ms to shut down its DB pool). A bootstrap issued
+	// immediately after can therefore race the still-departing old job and
+	// fail — and the legacy `load` fallback below returns exit 0 without
+	// having loaded anything, which used to make Install return nil while
+	// the service sat completely unloaded. So: if bootout succeeded (or
+	// failed ambiguously — anything other than a clean "wasn't loaded"), the
+	// job may still be draining and we poll `launchctl print` until it is
+	// gone, capped at ~2s. Skip the poll only on the fast path where bootout
+	// itself reports the job was never loaded (a clean machine). Whether or
+	// not the cap expires, we always fall through to bootstrap below — never
+	// give up and leave the machine unloaded. The real gate is the
+	// post-bootstrap verification, not this poll.
+	bootoutOut, bootoutErr := runOSCmd("launchctl", "bootout", b.serviceTarget())
+	if bootoutErr == nil || !isServiceNotFoundOutput(bootoutOut) {
+		b.waitForUnload()
+	}
 
 	// Modern macOS: bootstrap. Fall back to legacy load on older versions.
-	_, err = runOSCmd("launchctl", "bootstrap", b.domainTarget(), plistPath)
+	bootstrapOut, err := runOSCmd("launchctl", "bootstrap", b.domainTarget(), plistPath)
 	if err != nil {
-		out2, err2 := runOSCmd("launchctl", "load", plistPath)
-		if err2 != nil {
-			return fmt.Errorf("launchctl bootstrap and legacy load both failed: %s", strings.TrimSpace(out2))
+		bootstrapOut, err = runOSCmd("launchctl", "load", plistPath)
+		if err != nil {
+			return fmt.Errorf("launchctl bootstrap and legacy load both failed: %s", strings.TrimSpace(bootstrapOut))
 		}
 	}
+
+	// VERIFY the service is actually loaded. Neither bootstrap's nor the
+	// legacy load's exit code is proof: the legacy fallback in particular
+	// returns exit 0 without loading anything against a job that failed to
+	// bootout in time. Trust launchctl print instead — the exact same
+	// not-found detection Status() uses.
+	verifyOut, verifyErr := runOSCmd("launchctl", "print", b.serviceTarget())
+	if verifyErr != nil && isServiceNotFoundOutput(verifyOut) {
+		return fmt.Errorf("service install did not take effect: launchctl print reports the job is not loaded after bootstrap/load (bootstrap output: %s); the rafiki daemon is NOT running — check `launchctl print %s` and retry `rafiki service install`",
+			strings.TrimSpace(bootstrapOut), b.serviceTarget())
+	}
 	return nil
+}
+
+// sleepFn is time.Sleep, stubbed in tests so the poll below runs instantly.
+var sleepFn = time.Sleep
+
+const (
+	installPollInterval = 50 * time.Millisecond
+	installPollCap      = 2 * time.Second
+)
+
+// waitForUnload polls `launchctl print` for the service target until it
+// reports not-found (the job is gone), or until installPollCap worth of
+// attempts is exhausted — whichever comes first. It never returns an error:
+// giving up here is fine, because Install always proceeds to bootstrap
+// afterward regardless, and verifies the real outcome itself.
+func (b *darwinBackend) waitForUnload() {
+	attempts := int(installPollCap / installPollInterval)
+	for i := 0; i < attempts; i++ {
+		out, err := runOSCmd("launchctl", "print", b.serviceTarget())
+		if err != nil && isServiceNotFoundOutput(out) {
+			return
+		}
+		sleepFn(installPollInterval)
+	}
+}
+
+// isServiceNotFoundOutput reports whether launchctl output indicates "no
+// such service is loaded", across the various phrasings launchctl uses
+// depending on macOS version and which subcommand produced it. Shared by
+// Status (interpreting a `print` failure) and Install (polling for a
+// bootout to complete) so both trust exactly the same detection.
+func isServiceNotFoundOutput(out string) bool {
+	outLower := strings.ToLower(out)
+	return strings.Contains(outLower, "could not find service") ||
+		strings.Contains(outLower, "no such process") ||
+		strings.Contains(outLower, "domain does not contain")
 }
 
 func (b *darwinBackend) Uninstall() error {
@@ -218,10 +280,7 @@ var launchdPIDRe = regexp.MustCompile(`\bpid\s*=\s*(\d+)`)
 func (b *darwinBackend) Status() (serviceStatus, error) {
 	out, err := runOSCmd("launchctl", "print", b.serviceTarget())
 	if err != nil {
-		outLower := strings.ToLower(out)
-		if strings.Contains(outLower, "could not find service") ||
-			strings.Contains(outLower, "no such process") ||
-			strings.Contains(outLower, "domain does not contain") {
+		if isServiceNotFoundOutput(out) {
 			return serviceStatus{Installed: false}, nil
 		}
 		// Ambiguous error. Check if the plist file exists to distinguish

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -472,11 +474,28 @@ func TestRunServiceInstall_WritesSecretsBeforeStartingTheDaemon(t *testing.T) {
 
 	orig := runOSCmd
 	defer func() { runOSCmd = orig }()
-	var sawSecretBeforeAnyOSCommand bool
-	runOSCmd = func(_ string, _ ...string) (string, error) {
+	var sawSecretBeforeAnyOSCommand, sawBootstrap bool
+	runOSCmd = func(_ string, args ...string) (string, error) {
 		b, err := os.ReadFile(envFile)
 		if err == nil && strings.Contains(string(b), "hunter2") {
 			sawSecretBeforeAnyOSCommand = true
+		}
+		if len(args) > 0 {
+			switch args[0] {
+			case "bootstrap":
+				sawBootstrap = true
+			case "print":
+				// On darwin, Install polls `launchctl print` after a
+				// successful bootout to wait for the old job to drain
+				// before bootstrapping. Report "gone" immediately so that
+				// poll resolves on its first attempt instead of burning
+				// the full ~2s cap in this test — the ordering this test
+				// actually cares about is unaffected either way. Report
+				// loaded again for the post-bootstrap verification print.
+				if !sawBootstrap {
+					return "Could not find service", errors.New("exit status 3")
+				}
+			}
 		}
 		return "", nil
 	}
@@ -503,5 +522,72 @@ func TestRunServiceInstall_WritesSecretsBeforeStartingTheDaemon(t *testing.T) {
 	}
 	if got, err := os.ReadFile(envFile); err != nil || !strings.Contains(string(got), "hunter2") {
 		t.Fatalf("service.env does not hold the secret after install: %v, %q", err, got)
+	}
+}
+
+// The regression this guards: on an Install failure, runServiceInstall used
+// to return before installReport ever ran — discarding the record of a
+// service.env write (or a chmod tightening) that had already happened on
+// disk by the time the reload itself failed. The operator must still see
+// that report, and must not see the success banner.
+func TestRunServiceInstall_PrintsReportEvenWhenInstallFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("RAFIKI_ENV_FILE", "")
+	t.Setenv("RAFIKI_DB", "postgres://u:hunter2@localhost/rafiki")
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "bootout" {
+			// Fast path: skip any darwin unload poll, straight to a
+			// failing bootstrap/load, so this test stays platform-neutral
+			// and fast regardless of which backend runs it.
+			return "Could not find service", errors.New("exit status 3")
+		}
+		return "boom", errors.New("exit status 1")
+	}
+
+	daemonBin := filepath.Join(home, "rafikid")
+	if err := os.WriteFile(daemonBin, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newServiceInstallCmd()
+	if err := cmd.Flags().Set("daemon-binary", daemonBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("path-env", "/usr/bin"); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	installErr := runServiceInstall(cmd, nil)
+	w.Close()
+	os.Stdout = origStdout
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	if installErr == nil {
+		t.Fatal("runServiceInstall: got nil error, want a failure — every launchctl/systemctl call was stubbed to fail")
+	}
+	if !strings.Contains(out, "RAFIKI_DB") {
+		t.Errorf("installReport output did not reach the operator on the Install-failure path:\n%s", out)
+	}
+	if strings.Contains(out, "hunter2") {
+		t.Error("report leaked a secret VALUE, not just its name")
+	}
+	if strings.Contains(out, "rafiki service installed") {
+		t.Error("success banner printed despite Install failing")
 	}
 }

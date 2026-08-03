@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testSpec returns a minimal serviceSpec for template rendering tests.
@@ -192,13 +193,20 @@ func TestDarwinInstall_BootsOutBeforeBootstrappingSoAReinstallActuallyReloads(t 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
 	orig := runOSCmd
 	defer func() { runOSCmd = orig }()
 
 	var calls [][]string
 	runOSCmd = func(name string, args ...string) (string, error) {
 		calls = append(calls, append([]string{name}, args...))
-		return "", nil // bootstrap succeeds; the legacy load fallback is never reached
+		// Every call, including `print`, reports success/loaded: bootstrap
+		// succeeds, the legacy load fallback is never reached, and the
+		// post-install verification print sees the job present.
+		return "", nil
 	}
 
 	b := &darwinBackend{}
@@ -238,11 +246,23 @@ func TestDarwinInstall_SucceedsWhenBootoutFailsBecauseNotLoaded(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
 	orig := runOSCmd
 	defer func() { runOSCmd = orig }()
+	var printCallsBeforeBootstrap int
+	var sawBootstrap bool
 	runOSCmd = func(_ string, args ...string) (string, error) {
 		if len(args) > 0 && args[0] == "bootout" {
 			return "Could not find service", errors.New("exit status 3")
+		}
+		if len(args) > 0 && args[0] == "bootstrap" {
+			sawBootstrap = true
+		}
+		if len(args) > 0 && args[0] == "print" && !sawBootstrap {
+			printCallsBeforeBootstrap++
 		}
 		return "", nil
 	}
@@ -255,5 +275,172 @@ func TestDarwinInstall_SucceedsWhenBootoutFailsBecauseNotLoaded(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")); err != nil {
 		t.Errorf("plist was not written: %v", err)
+	}
+	if printCallsBeforeBootstrap != 0 {
+		t.Errorf("expected the poll to be skipped on the bootout-not-found fast path, but launchctl print was called %d time(s) before bootstrap", printCallsBeforeBootstrap)
+	}
+}
+
+// The regression this guards, verified twice on real hardware: bootout is
+// async and returns before the old job is gone; bootstrap then races it and
+// fails; the legacy `load` fallback returns exit 0 without loading anything;
+// and a naive Install would return nil while `launchctl list` shows the
+// service completely unloaded and the daemon dead. Install must not trust
+// bootstrap/load exit codes — it must verify via `launchctl print` and
+// return a real error when that verification shows the job never loaded.
+func TestDarwinInstall_LyingLoadExitZeroStillReportsErrorWhenVerificationFindsNothingLoaded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "Could not find service", errors.New("exit status 3")
+		case "bootstrap":
+			return "service already loaded", errors.New("exit status 1")
+		case "load":
+			// The lying fallback: exit 0 without having loaded anything.
+			return "", nil
+		case "print":
+			return "Could not find service", errors.New("exit status 3")
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	spec := testSpec()
+	spec.LogPath = filepath.Join(home, "controller.log")
+	err := b.Install(spec)
+	if err == nil {
+		t.Fatal("Install: got nil error, want a real error — the service verifiably did not load")
+	}
+	if !strings.Contains(err.Error(), "not loaded") {
+		t.Errorf("Install error %q does not clearly say the service is not loaded", err.Error())
+	}
+}
+
+// bootout succeeding means a job really was loaded and is (asynchronously)
+// on its way out. Install must poll `launchctl print` until it reports gone
+// before bootstrapping, and stop polling as soon as it does — it must not
+// always burn the full cap.
+func TestDarwinInstall_PollsUntilUnloadedThenBootstraps(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	origSleep := sleepFn
+	var sleeps int
+	sleepFn = func(time.Duration) { sleeps++ }
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+
+	var printCalls, printCallsBeforeBootstrap int
+	var sawBootstrap bool
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "", nil // succeeds: the job was loaded
+		case "bootstrap":
+			sawBootstrap = true
+			return "", nil
+		case "print":
+			printCalls++
+			if !sawBootstrap {
+				printCallsBeforeBootstrap = printCalls
+			}
+			// Still loaded for the first two polls, gone on the third —
+			// and loaded again once bootstrap has run (post-install
+			// verification).
+			if printCalls <= 2 {
+				return "", nil
+			}
+			if printCalls == 3 {
+				return "Could not find service", errors.New("exit status 3")
+			}
+			return "", nil
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	spec := testSpec()
+	spec.LogPath = filepath.Join(home, "controller.log")
+	if err := b.Install(spec); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !sawBootstrap {
+		t.Fatal("Install never called launchctl bootstrap")
+	}
+	if printCallsBeforeBootstrap != 3 {
+		t.Errorf("expected the poll to stop as soon as print reported gone (3rd call), got %d print calls before bootstrap", printCallsBeforeBootstrap)
+	}
+	if sleeps == 0 {
+		t.Error("expected the poll to sleep between attempts")
+	}
+}
+
+// If the job never reports gone, Install must not give up on reloading the
+// machine: it still proceeds to bootstrap once the poll cap is exhausted.
+func TestDarwinInstall_PollCapExpiryStillAttemptsBootstrap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	origSleep := sleepFn
+	var sleeps int
+	sleepFn = func(time.Duration) { sleeps++ }
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+
+	var printCallsBeforeBootstrap int
+	var sawBootstrap bool
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "", nil // succeeds: the job was loaded
+		case "bootstrap":
+			sawBootstrap = true
+			return "", nil
+		case "print":
+			if !sawBootstrap {
+				printCallsBeforeBootstrap++
+			}
+			return "", nil // never reports gone
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	spec := testSpec()
+	spec.LogPath = filepath.Join(home, "controller.log")
+	if err := b.Install(spec); err != nil {
+		t.Fatalf("Install: %v, want the cap expiring to still fall through to bootstrap and succeed", err)
+	}
+	if !sawBootstrap {
+		t.Fatal("Install never called launchctl bootstrap after the poll cap expired")
+	}
+	wantAttempts := int(installPollCap / installPollInterval)
+	if printCallsBeforeBootstrap != wantAttempts {
+		t.Errorf("expected the poll to exhaust its full cap of %d attempts, got %d", wantAttempts, printCallsBeforeBootstrap)
+	}
+	if sleeps != wantAttempts {
+		t.Errorf("expected %d sleeps (one per poll attempt), got %d", wantAttempts, sleeps)
 	}
 }

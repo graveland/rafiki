@@ -319,12 +319,20 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	res, mergeErr := paths.MergeEnvFile(envFile, spec.SecretEnv, "added by rafiki service install on "+time.Now().Format("2006-01-02"))
 
 	b := newServiceBackend()
-	if err := b.Install(spec); err != nil {
-		return fmt.Errorf("install service: %w", err)
+	installErr := b.Install(spec)
+	if installErr == nil {
+		fmt.Printf("rafiki service installed.\nLog: %s\n", b.LogPath())
 	}
-	fmt.Printf("rafiki service installed.\nLog: %s\n", b.LogPath())
 
+	// Print the report even when Install failed: the unit file and secret
+	// writes above already happened on disk regardless of what Install did
+	// (including a service.env chmod tightening — a real, already-applied
+	// permission change) and the operator must not lose that record just
+	// because the reload itself came back with an error.
 	fmt.Print(installReport(spec, envFile, res, mergeErr))
+	if installErr != nil {
+		return fmt.Errorf("install service: %w", installErr)
+	}
 	return nil
 }
 
