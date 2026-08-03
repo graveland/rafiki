@@ -219,7 +219,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/rafiki/instructions.md`) |
 | `RAFIKI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/rafiki/skills`) |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
-| `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting** |
+| `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
 
 These must reach the **daemon's** environment, not your shell's — see
 `.env.example`, which documents why and how to verify it.
@@ -234,8 +234,8 @@ equivalent, or `docs/reference/control-protocol.md` §6.17-6.19 for the wire
 commands.
 
 Note that the two read whatever DSN each was given: `rafiki conversations` uses
-the **daemon's** `RAFIKI_DB` (baked into the unit at `service install` time),
-while `rafikid agent --db` defaults to your shell's `RAFIKI_DB`, then
+the **daemon's** `RAFIKI_DB` (written to `service.env` at `service install`
+time), while `rafikid agent --db` defaults to your shell's `RAFIKI_DB`, then
 `RAFIKI_TEST_DSN`. If their numbers disagree, check that first.
 
 `rafikid -h` and `rafikid fundi -h` document the two daemon process modes;

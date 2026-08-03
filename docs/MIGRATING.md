@@ -104,6 +104,31 @@ rafikid migrate --db "$RAFIKI_DB"   # schema unchanged; a no-op on a current dat
 rafiki service install
 ```
 
+### The DSN moved out of the unit file
+
+Installs from before this change wrote `RAFIKI_DB` into the launchd plist or
+systemd unit, both of which are world-readable (0644) — and a postgres DSN
+carries a password. It now goes to `~/.config/rafiki/service.env` (0600)
+alongside the API keys.
+
+Nothing rewrites an existing unit on its own. Re-run the install from a shell
+that has the DSN:
+
+```sh
+set -a; . ./.env; set +a
+rafiki service install
+rafiki service restart
+```
+
+Then confirm the unit is clean:
+
+```sh
+grep -c RAFIKI_DB ~/Library/LaunchAgents/dev.graveland.rafiki.plist   # expect 0
+grep -c RAFIKI_DB ~/.config/rafiki/service.env                        # expect 1
+```
+
+If the DSN's password was ever in a unit file, treat it as exposed and rotate it.
+
 **Clear stale binaries from `bin/`.** `rafiki attach` resolves its TUI binary as
 a sibling of whichever executable you ran, so a leftover `bin/fundi` will keep
 working and quietly mask the migration:

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -294,28 +295,89 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("install service: %w", err)
 	}
 	fmt.Printf("rafiki service installed.\nLog: %s\n", b.LogPath())
-	// Report what was baked in. These come from the installing shell and are
-	// invisible afterwards, so an install that captured nothing — the common
-	// mistake, running `service install` from a shell that never sourced .env —
-	// should say so here rather than surface later as conversations silently
-	// not persisting.
-	if captured := sortedEnv(spec.ExtraEnv); len(captured) > 0 {
-		fmt.Println("Captured from the current environment:")
-		for _, kv := range captured {
-			fmt.Printf("  %s\n", kv.Key)
-		}
-	} else {
-		fmt.Printf("No %s in this shell's environment — agent conversations will be\n"+
-			"in-memory and no per-turn cost will be recorded. Export it (or source\n"+
-			"your .env) and re-run `rafiki service install` to bake it in.\n", paths.DB)
-	}
-	if len(spec.SkippedEnv) > 0 {
-		fmt.Printf("\nNot baked in (a unit file cannot hold a newline): %s\n"+
-			"Put these in %s instead — the daemon reads it at startup, and it is\n"+
-			"also the right home for credentials, which a world-readable unit is not.\n",
-			strings.Join(spec.SkippedEnv, ", "), paths.ServiceEnvFile())
-	}
+
+	envFile := paths.ServiceEnvFile()
+	res, mergeErr := paths.MergeEnvFile(envFile, spec.SecretEnv, "added by rafiki service install")
+	fmt.Print(installReport(spec, envFile, res, mergeErr))
 	return nil
+}
+
+// installReport renders what `service install` tells the operator: where each
+// captured variable went, and what is still missing.
+//
+// Pure, and separate from the install itself, so the wording can be tested
+// without writing a unit file. Values are never printed — only names. The
+// whole point of routing these to a 0600 file is that they do not end up
+// somewhere readable, and a terminal scrollback is readable.
+func installReport(spec serviceSpec, envFile string, res paths.MergeResult, mergeErr error) string {
+	var b strings.Builder
+
+	if unit := sortedEnv(spec.ExtraEnv); len(unit) > 0 {
+		b.WriteString("\nBaked into the unit (not secret):\n")
+		for _, kv := range unit {
+			fmt.Fprintf(&b, "  %s\n", kv.Key)
+		}
+	}
+	if len(res.Added) > 0 {
+		fmt.Fprintf(&b, "\nWritten to %s (0600):\n", envFile)
+		for _, k := range res.Added {
+			fmt.Fprintf(&b, "  %s\n", k)
+		}
+	}
+	if len(res.Existing) > 0 {
+		b.WriteString("\nAlready set there, left alone:\n")
+		for _, k := range res.Existing {
+			fmt.Fprintf(&b, "  %s\n", k)
+		}
+	}
+	if len(res.Conflict) > 0 {
+		b.WriteString("\nAlready set there and left alone, but differs from this shell's value:\n")
+		for _, k := range res.Conflict {
+			fmt.Fprintf(&b, "  %s\n", k)
+		}
+		fmt.Fprintf(&b, "The file wins. Edit %s if the shell's value is the one you want.\n", envFile)
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(&b, "\nWarning: %s\n", w)
+	}
+	if mergeErr != nil {
+		// The unit is already written and the service already running, so this
+		// is not an install failure — but it is the difference between a daemon
+		// that persists conversations and one that silently does not.
+		fmt.Fprintf(&b, "\nCould not write %s: %v\n"+
+			"These did NOT reach the daemon's environment: %s\n"+
+			"Add them by hand and `chmod 600` the file.\n",
+			envFile, mergeErr, strings.Join(sortedKeys(spec.SecretEnv), ", "))
+	}
+
+	// The DSN is the one whose absence degrades silently: conversations revert
+	// to in-memory with no per-turn cost recorded, and the only visible symptom
+	// is a "mem-" session id where a UUIDv7 belongs. Warn only when it is in
+	// neither the shell nor the file — a DSN already in service.env is fine.
+	_, inShell := spec.SecretEnv[paths.DB]
+	if !inShell && !slices.Contains(res.Defined, paths.DB) {
+		fmt.Fprintf(&b, "\nNo %s in this shell's environment or in %s — agent\n"+
+			"conversations will be in-memory and no per-turn cost will be recorded.\n"+
+			"Export it (or source your .env) and re-run `rafiki service install`.\n",
+			paths.DB, envFile)
+	}
+
+	if len(spec.SkippedEnv) > 0 {
+		fmt.Fprintf(&b, "\nNot baked in (a unit file cannot hold a newline): %s\n"+
+			"Put these in %s instead — the daemon reads it at startup.\n",
+			strings.Join(spec.SkippedEnv, ", "), envFile)
+	}
+	return b.String()
+}
+
+// sortedKeys returns m's keys in a deterministic order, for messages.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func runServiceUninstall(_ *cobra.Command, _ []string) error {

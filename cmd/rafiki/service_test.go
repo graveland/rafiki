@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // TestFindDaemonBinaryFromSibling verifies that a daemon binary sitting next to
@@ -320,5 +323,79 @@ func TestServiceTailIsRegistered(t *testing.T) {
 	}
 	if !found {
 		t.Error("service tail not registered")
+	}
+}
+
+func TestInstallReport_ListsEachDestination(t *testing.T) {
+	spec := serviceSpec{
+		ExtraEnv:  map[string]string{"RAFIKI_PROXY_KINDS": "pi,claude"},
+		SecretEnv: map[string]string{"RAFIKI_DB": "postgres://u@h/db", "ANTHROPIC_API_KEY": "sk-ant"},
+	}
+	res := paths.MergeResult{
+		Added:    []string{"ANTHROPIC_API_KEY", "RAFIKI_DB"},
+		Existing: []string{"RAFIKI_SERVE_TOKEN"},
+		Defined:  []string{"RAFIKI_SERVE_TOKEN"},
+	}
+
+	out := installReport(spec, "/cfg/service.env", res, nil)
+
+	for _, want := range []string{"RAFIKI_PROXY_KINDS", "ANTHROPIC_API_KEY", "RAFIKI_DB", "RAFIKI_SERVE_TOKEN", "/cfg/service.env"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report does not mention %s:\n%s", want, out)
+		}
+	}
+	// The secret's VALUE must never be printed to a terminal or a scrollback.
+	for _, secret := range []string{"postgres://u@h/db", "sk-ant"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("report leaked a secret value %q:\n%s", secret, out)
+		}
+	}
+}
+
+// "Left alone" without this note quietly discards what the operator just
+// exported, which is the confusing outcome this whole command exists to avoid.
+func TestInstallReport_FlagsAConflictingValue(t *testing.T) {
+	spec := serviceSpec{SecretEnv: map[string]string{"RAFIKI_DB": "postgres://new@h/db"}}
+	res := paths.MergeResult{Conflict: []string{"RAFIKI_DB"}, Defined: []string{"RAFIKI_DB"}}
+
+	out := installReport(spec, "/cfg/service.env", res, nil)
+
+	if !strings.Contains(out, "RAFIKI_DB") {
+		t.Fatalf("report does not mention the conflicting key:\n%s", out)
+	}
+	if !strings.Contains(out, "differs") {
+		t.Errorf("report does not say the file's value differs from this shell's:\n%s", out)
+	}
+}
+
+// The missing-DSN warning is about the actual failure condition: no DSN
+// anywhere. A DSN already in service.env is not a problem to warn about.
+func TestInstallReport_NoDSNWarningWhenTheFileAlreadyHasOne(t *testing.T) {
+	spec := serviceSpec{SecretEnv: map[string]string{}} // nothing in this shell
+	res := paths.MergeResult{Defined: []string{"RAFIKI_DB"}}
+
+	if out := installReport(spec, "/cfg/service.env", res, nil); strings.Contains(out, "in-memory") {
+		t.Errorf("warned about a missing DSN that service.env already defines:\n%s", out)
+	}
+}
+
+func TestInstallReport_WarnsWhenNoDSNAnywhere(t *testing.T) {
+	out := installReport(serviceSpec{SecretEnv: map[string]string{}}, "/cfg/service.env", paths.MergeResult{}, nil)
+	if !strings.Contains(out, "in-memory") {
+		t.Errorf("no missing-DSN warning when neither the shell nor the file has one:\n%s", out)
+	}
+}
+
+// A service.env write failure must be loud but must not look like the install
+// itself failed — by then the unit is written and the service is running.
+func TestInstallReport_SurfacesAMergeError(t *testing.T) {
+	spec := serviceSpec{SecretEnv: map[string]string{"RAFIKI_DB": "postgres://u@h/db"}}
+	out := installReport(spec, "/cfg/service.env", paths.MergeResult{}, errors.New("permission denied"))
+
+	if !strings.Contains(out, "permission denied") {
+		t.Errorf("report does not surface the write error:\n%s", out)
+	}
+	if !strings.Contains(out, "RAFIKI_DB") {
+		t.Errorf("report does not name what failed to reach the file:\n%s", out)
 	}
 }
