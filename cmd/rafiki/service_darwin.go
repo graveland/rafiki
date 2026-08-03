@@ -170,13 +170,15 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 	// give up and leave the machine unloaded. The real gate is the
 	// post-bootstrap verification, not this poll.
 	bootoutOut, bootoutErr := runOSCmd("launchctl", "bootout", b.serviceTarget())
-	if bootoutErr == nil || !isServiceNotFoundOutput(bootoutOut) {
-		b.waitForUnload()
+	unloadConfirmed := bootoutErr != nil && isServiceNotFoundOutput(bootoutOut) // fast path: never loaded
+	if !unloadConfirmed {
+		unloadConfirmed = b.waitForUnload()
 	}
 
 	// Modern macOS: bootstrap. Fall back to legacy load on older versions.
 	bootstrapOut, err := runOSCmd("launchctl", "bootstrap", b.domainTarget(), plistPath)
-	if err != nil {
+	bootstrapFailed := err != nil
+	if bootstrapFailed {
 		bootstrapOut, err = runOSCmd("launchctl", "load", plistPath)
 		if err != nil {
 			return fmt.Errorf("launchctl bootstrap and legacy load both failed: %s", strings.TrimSpace(bootstrapOut))
@@ -193,6 +195,23 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 		return fmt.Errorf("service install did not take effect: launchctl print reports the job is not loaded after bootstrap/load (bootstrap output: %s); the rafiki daemon is NOT running — check `launchctl print %s` and retry `rafiki service install`",
 			strings.TrimSpace(bootstrapOut), b.serviceTarget())
 	}
+
+	// launchctl print reporting "loaded" here is NOT proof the new plist
+	// took effect: if the old job was never confirmed unloaded (the poll
+	// gave up before seeing it gone) and bootstrap itself failed — meaning
+	// we're relying on the legacy load fallback, which lies with exit 0
+	// whether or not it loaded anything — what's now "loaded" could equally
+	// be the stale job bootout was trying to replace, still running under
+	// its old environment. This is gated on the poll result, not on
+	// bootstrap failure alone: on an older macOS lacking `bootstrap`, that
+	// call always fails with an unrecognized-subcommand error and the
+	// legacy `load` genuinely does the work — but on such a machine the job
+	// was never loaded to begin with, so the fast path above already set
+	// unloadConfirmed, and this branch does not fire.
+	if !unloadConfirmed && bootstrapFailed {
+		return fmt.Errorf("service install may not have taken effect: launchctl print now reports the service loaded, but the previous job was never confirmed unloaded within %s and bootstrap failed — this may be the STALE job still running under its old environment, not the plist just written; run `launchctl bootout %s` by hand, confirm with `launchctl print %s` that it is gone, then retry `rafiki service install` (legacy load output: %s)",
+			installPollCap, b.serviceTarget(), b.serviceTarget(), strings.TrimSpace(bootstrapOut))
+	}
 	return nil
 }
 
@@ -206,18 +225,21 @@ const (
 
 // waitForUnload polls `launchctl print` for the service target until it
 // reports not-found (the job is gone), or until installPollCap worth of
-// attempts is exhausted — whichever comes first. It never returns an error:
-// giving up here is fine, because Install always proceeds to bootstrap
-// afterward regardless, and verifies the real outcome itself.
-func (b *darwinBackend) waitForUnload() {
+// attempts is exhausted — whichever comes first. It reports whether the
+// unload was confirmed; giving up without confirming is not itself an
+// error, since Install always proceeds to bootstrap afterward regardless —
+// but the caller uses the confirmation to decide whether a bootstrap
+// failure afterward can be trusted to mean anything benign.
+func (b *darwinBackend) waitForUnload() (confirmedGone bool) {
 	attempts := int(installPollCap / installPollInterval)
 	for i := 0; i < attempts; i++ {
 		out, err := runOSCmd("launchctl", "print", b.serviceTarget())
 		if err != nil && isServiceNotFoundOutput(out) {
-			return
+			return true
 		}
 		sleepFn(installPollInterval)
 	}
+	return false
 }
 
 // isServiceNotFoundOutput reports whether launchctl output indicates "no

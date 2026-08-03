@@ -444,3 +444,52 @@ func TestDarwinInstall_PollCapExpiryStillAttemptsBootstrap(t *testing.T) {
 		t.Errorf("expected %d sleeps (one per poll attempt), got %d", wantAttempts, sleeps)
 	}
 }
+
+// Controller-review regression: bootout succeeds (a job WAS loaded) but the
+// poll cap expires without ever confirming it gone; bootstrap then fails
+// (because the stale job is still bootstrapped); the legacy load fallback
+// lies with exit 0; and launchctl print afterward reports something loaded.
+// That "loaded" cannot be trusted -- it may be the fresh plist, or it may be
+// the exact stale job bootout exists to replace, still running under its
+// old environment. Since the poll never confirmed the old job was gone AND
+// bootstrap itself failed (we fell back to the fallback that lies), Install
+// must not report success here.
+func TestDarwinInstall_UnconfirmedUnloadWithFailedBootstrapIsAnError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "", nil // succeeds: a job WAS loaded
+		case "bootstrap":
+			return "service already bootstrapped", errors.New("exit status 1")
+		case "load":
+			// The lying fallback: exit 0 without having (re)loaded anything.
+			return "", nil
+		case "print":
+			// Always reports loaded: the poll never confirms the old job
+			// gone, and the post-install verification also sees "loaded" --
+			// indistinguishable from the stale job still being the live one.
+			return "", nil
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	spec := testSpec()
+	spec.LogPath = filepath.Join(home, "controller.log")
+	err := b.Install(spec)
+	if err == nil {
+		t.Fatal("Install: got nil error, want a real error -- the poll never confirmed the stale job was gone, bootstrap failed, and the lying legacy load cannot be trusted to have replaced it")
+	}
+}
