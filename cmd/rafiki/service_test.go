@@ -245,11 +245,17 @@ func TestCaptureDaemonEnv_CapturesProxyListenIntoTheUnit(t *testing.T) {
 }
 
 // An empty value is not the same as an absent one: writing RAFIKI_DB=""
-// would turn a missing export into a configured-but-broken DSN.
+// would turn a missing export into a configured-but-broken DSN. The rule
+// applies to both destinations, so both a secret (RAFIKI_DB) and a unit var
+// (RAFIKI_SOCKET) are exercised here — a regression that let an empty value
+// through to just one of the two maps would otherwise go undetected.
 func TestCaptureDaemonEnv_SkipsEmpty(t *testing.T) {
-	got, _, _ := captureDaemonEnv([]string{"RAFIKI_DB="})
-	if _, ok := got["RAFIKI_DB"]; ok {
-		t.Error("an empty value was captured")
+	unit, secret, _ := captureDaemonEnv([]string{"RAFIKI_DB=", "RAFIKI_SOCKET="})
+	if _, ok := secret["RAFIKI_DB"]; ok {
+		t.Error("an empty secret value was captured")
+	}
+	if _, ok := unit["RAFIKI_SOCKET"]; ok {
+		t.Error("an empty unit value was captured")
 	}
 }
 
