@@ -120,11 +120,24 @@ rafiki service install
 rafiki service restart
 ```
 
-Then confirm the unit is clean:
+`rafiki service install` fully reloads the daemon's live environment on both
+platforms, not just the file on disk. On macOS it now does a best-effort
+`launchctl bootout` before `bootstrap`, so an already-loaded job is replaced
+rather than left running under its old plist — without that, `bootstrap`
+fails silently against an already-loaded job, the legacy `load` fallback is
+equally a no-op, and the running daemon keeps the stale environment
+indefinitely. On Linux, `daemon-reload` picks up the new unit, but
+`systemctl enable --now` will not restart a unit that is already running,
+which is what the explicit `rafiki service restart` above is for.
+
+Then confirm the unit AND the live definition are clean — checking only the
+file on disk used to pass while the actual running launchd job still carried
+the old value, verified on a real machine before this was fixed:
 
 ```sh
-grep -c RAFIKI_DB ~/Library/LaunchAgents/dev.graveland.rafiki.plist   # expect 0
-grep -c RAFIKI_DB ~/.config/rafiki/service.env                        # expect 1
+grep -c RAFIKI_DB ~/Library/LaunchAgents/dev.graveland.rafiki.plist         # expect 0
+grep -c RAFIKI_DB ~/.config/rafiki/service.env                              # expect 1
+launchctl print "gui/$(id -u)/dev.graveland.rafiki" | grep -c RAFIKI_DB     # expect 0 (macOS)
 ```
 
 If the DSN's password was ever in a unit file, treat it as exposed and rotate it.

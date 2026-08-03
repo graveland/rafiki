@@ -63,13 +63,13 @@ func TestRenderUnit_Format(t *testing.T) {
 func TestRenderUnit_IncludesCapturedEnv(t *testing.T) {
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{
-		"RAFIKI_DB": "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
+		"RAFIKI_URL": "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
 	}
 	out, err := renderServiceConfig(spec)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
-	want := "Environment=RAFIKI_DB=postgres://postgres@localhost:5432/rafiki?sslmode=disable"
+	want := "Environment=RAFIKI_URL=postgres://postgres@localhost:5432/rafiki?sslmode=disable"
 	if !strings.Contains(out, want) {
 		t.Errorf("unit missing %q\n---\n%s", want, out)
 	}
@@ -160,7 +160,7 @@ func TestSystemctlCommands_UseSystemdUnitName(t *testing.T) {
 	}
 }
 
-// The plist is 0644. Whatever else changes, a DSN must never appear in it.
+// The unit is 0644. Whatever else changes, a DSN must never appear in it.
 func TestRenderUnit_NeverContainsADSN(t *testing.T) {
 	unit, secret, _ := captureDaemonEnv([]string{
 		"RAFIKI_DB=postgres://u:hunter2@localhost/rafiki",
@@ -179,17 +179,17 @@ func TestRenderUnit_NeverContainsADSN(t *testing.T) {
 	}
 	for _, forbidden := range []string{"hunter2", "postgres://", "RAFIKI_DB"} {
 		if strings.Contains(out, forbidden) {
-			t.Errorf("rendered plist contains %q:\n%s", forbidden, out)
+			t.Errorf("rendered unit contains %q:\n%s", forbidden, out)
 		}
 	}
 	if !strings.Contains(out, "RAFIKI_DEFAULT_MODEL") {
-		t.Error("a non-secret variable stopped being baked into the plist")
+		t.Error("a non-secret variable stopped being baked into the unit")
 	}
 }
 
 func TestRenderUnit_Deterministic(t *testing.T) {
 	spec := testSpec()
-	spec.ExtraEnv = map[string]string{"RAFIKI_DB": "db", "RAFIKI_SOCKET": "/s", "RAFIKI_PI_BINARY": "/pi"}
+	spec.ExtraEnv = map[string]string{"RAFIKI_URL": "url", "RAFIKI_SOCKET": "/s", "RAFIKI_PI_BINARY": "/pi"}
 	first, err := renderServiceConfig(spec)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)

@@ -72,6 +72,14 @@ type serviceSpec struct {
 // paths.URL, paths.ProxyKinds and paths.ProxyListen ARE captured here: a URL,
 // a list of kinds and a bind address are not secrets, and having them in the
 // unit makes the routing visible to anyone reading the service definition.
+//
+// paths.EnvFile is here too, and for a related reason: it is a path override
+// for paths.ServiceEnvFile, not a credential. If it is absent from the unit,
+// an operator with $RAFIKI_ENV_FILE exported gets secrets written to that
+// custom path at install time while the daemon — which never sees the
+// installing shell's environment — falls back to the default
+// ~/.config/rafiki/service.env and finds nothing there. Baking it in keeps
+// the daemon resolving the same file the installer just wrote.
 var unitEnvVars = []string{
 	paths.Socket,
 	paths.Instructions,
@@ -85,6 +93,7 @@ var unitEnvVars = []string{
 	paths.URL,
 	paths.ProxyKinds,
 	paths.ProxyListen,
+	paths.EnvFile,
 }
 
 // The two third-party credential names. They stay literals rather than moving
@@ -125,9 +134,13 @@ var secretEnvVars = []string{
 // one: systemd's Environment= is line-based, and a launchd plist would carry it
 // but only the systemd side would then be broken — a difference that shows up
 // as a service that installs on one platform and not the other. Secrets carry
-// no such restriction: MergeEnvFile quotes and escapes, which is what lets
-// ANTHROPIC_CUSTOM_HEADERS — whose only legal separator is a literal newline —
-// live in that file at all.
+// no such restriction: MergeEnvFile quotes and escapes, which is what lets a
+// newline-bearing value live in service.env at all.
+//
+// ANTHROPIC_CUSTOM_HEADERS is neither a unitEnvVars nor a secretEnvVars entry
+// — install never captures it, from the caller's shell or anywhere else. An
+// operator who needs it sets it directly in service.env by hand; see
+// .env.example.
 func captureDaemonEnv(environ []string) (unit, secret map[string]string, skipped []string) {
 	wantUnit := make(map[string]bool, len(unitEnvVars))
 	for _, k := range unitEnvVars {
@@ -290,14 +303,27 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Write secrets to service.env BEFORE starting the daemon. b.Install below
+	// bootstraps the launchd job (RunAtLoad) or runs `systemctl enable --now`,
+	// either of which spawns the daemon immediately — and the daemon reads
+	// service.env once, at startup (loadServiceEnv, very early in
+	// cmd/rafikid/main.go). Merging after install would mean the freshly
+	// spawned daemon reads the file before this call ever writes it, so on a
+	// clean machine it comes up with no DSN: in-memory conversations, no
+	// per-turn cost, until the next restart. A merge failure still does not
+	// fail the install (see installReport's mergeErr handling below) — by
+	// writing first we get to report a failure AND still let the install
+	// proceed, rather than trading one for the other.
+	envFile := paths.ServiceEnvFile()
+	res, mergeErr := paths.MergeEnvFile(envFile, spec.SecretEnv, "added by rafiki service install on "+time.Now().Format("2006-01-02"))
+
 	b := newServiceBackend()
 	if err := b.Install(spec); err != nil {
 		return fmt.Errorf("install service: %w", err)
 	}
 	fmt.Printf("rafiki service installed.\nLog: %s\n", b.LogPath())
 
-	envFile := paths.ServiceEnvFile()
-	res, mergeErr := paths.MergeEnvFile(envFile, spec.SecretEnv, "added by rafiki service install")
 	fmt.Print(installReport(spec, envFile, res, mergeErr))
 	return nil
 }
@@ -317,6 +343,9 @@ func installReport(spec serviceSpec, envFile string, res paths.MergeResult, merg
 		for _, kv := range unit {
 			fmt.Fprintf(&b, "  %s\n", kv.Key)
 		}
+	}
+	if res.Tightened != 0 {
+		fmt.Fprintf(&b, "\nTightened %s from %04o to 0600 — it now holds credentials.\n", envFile, res.Tightened)
 	}
 	if len(res.Added) > 0 {
 		fmt.Fprintf(&b, "\nWritten to %s (0600):\n", envFile)

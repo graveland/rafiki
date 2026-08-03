@@ -219,6 +219,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/rafiki/instructions.md`) |
 | `RAFIKI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/rafiki/skills`) |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
+| `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
 | `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
 
 These must reach the **daemon's** environment, not your shell's — see

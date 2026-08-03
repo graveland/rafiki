@@ -144,6 +144,21 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 		return fmt.Errorf("write plist %s: %w", plistPath, err)
 	}
 
+	// Best-effort bootout before bootstrap. `launchctl bootstrap` fails with
+	// "service already loaded" against a job that is already bootstrapped —
+	// which is exactly the case on a reinstall — and in that failure it does
+	// NOT replace the running job's definition. The subsequent legacy `load`
+	// fallback below is also a no-op against an already-loaded job. Without
+	// this bootout, `service install` can write a fresh plist to disk while
+	// the live launchd job (and every env var it holds — this mechanism
+	// exists because RAFIKI_DB used to be one of them) keeps running under
+	// the stale one, and `service restart` only kickstarts *within* that
+	// stale definition rather than picking up the new one. Ignore the error:
+	// on a clean machine the job isn't loaded yet, and bootout failing with
+	// "not loaded" is the expected, unproblematic case — any real problem
+	// still surfaces below when bootstrap itself is attempted.
+	_, _ = runOSCmd("launchctl", "bootout", b.serviceTarget())
+
 	// Modern macOS: bootstrap. Fall back to legacy load on older versions.
 	_, err = runOSCmd("launchctl", "bootstrap", b.domainTarget(), plistPath)
 	if err != nil {

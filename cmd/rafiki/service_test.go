@@ -179,9 +179,12 @@ func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
 // child and `rafikid agent` uses it as the default --ref, so a service-wide
 // value would collide every child onto one conversation.
 func TestCaptureDaemonEnv_ExcludesChildID(t *testing.T) {
-	got, _, _ := captureDaemonEnv([]string{"RAFIKI_CHILD_ID=c_123", "RAFIKI_DB=x"})
-	if _, ok := got["RAFIKI_CHILD_ID"]; ok {
-		t.Error("RAFIKI_CHILD_ID was captured into the service environment")
+	unit, secret, _ := captureDaemonEnv([]string{"RAFIKI_CHILD_ID=c_123", "RAFIKI_DB=x"})
+	if _, ok := unit["RAFIKI_CHILD_ID"]; ok {
+		t.Error("RAFIKI_CHILD_ID was captured into the unit")
+	}
+	if _, ok := secret["RAFIKI_CHILD_ID"]; ok {
+		t.Error("RAFIKI_CHILD_ID was captured into service.env")
 	}
 }
 
@@ -232,6 +235,21 @@ func TestCaptureDaemonEnv_SecretsAreNotNewlineRestricted(t *testing.T) {
 	}
 	if secret["RAFIKI_DB"] == "" {
 		t.Error("a secret with a newline was dropped")
+	}
+}
+
+// RAFIKI_ENV_FILE is a path override for paths.ServiceEnvFile, not a secret,
+// and must be in the unit: otherwise an operator with it exported gets
+// secrets written to the custom path at install time while the daemon —
+// which never sees the installing shell's environment — falls back to the
+// default service.env and finds nothing there, with no warning at all.
+func TestCaptureDaemonEnv_CapturesEnvFileOverrideIntoTheUnit(t *testing.T) {
+	unit, secret, _ := captureDaemonEnv([]string{"RAFIKI_ENV_FILE=/custom/service.env"})
+	if unit[paths.EnvFile] != "/custom/service.env" {
+		t.Errorf("unit[%s] = %q, want the override path", paths.EnvFile, unit[paths.EnvFile])
+	}
+	if _, ok := secret[paths.EnvFile]; ok {
+		t.Error("RAFIKI_ENV_FILE was treated as a credential")
 	}
 }
 
@@ -430,5 +448,60 @@ func TestInstallReport_MergeErrorOnlyNamesTheKeysThatFailed(t *testing.T) {
 	}
 	if strings.Contains(failedLine, "RAFIKI_TOKEN") {
 		t.Errorf("failed-keys line wrongly claims an already-persisted key failed to reach the file:\n%s", failedLine)
+	}
+}
+
+// The regression this test guards: b.Install bootstraps the launchd job (or
+// runs `systemctl enable --now`), either of which spawns the daemon
+// immediately, and the daemon reads service.env exactly once, at startup. If
+// runServiceInstall merged secrets into service.env AFTER calling b.Install,
+// a freshly installed daemon on a clean machine would read the file before
+// this call ever wrote it and come up with no DSN — in-memory conversations,
+// no per-turn cost — until the next restart. This stubs runOSCmd (the seam
+// every backend's Install uses to actually start the daemon) and checks that
+// by the time ANY such command runs, service.env already holds the secret.
+func TestRunServiceInstall_WritesSecretsBeforeStartingTheDaemon(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("RAFIKI_ENV_FILE", "")
+	t.Setenv("RAFIKI_DB", "postgres://u:hunter2@localhost/rafiki")
+
+	envFile := filepath.Join(home, "config", "rafiki", "service.env")
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	var sawSecretBeforeAnyOSCommand bool
+	runOSCmd = func(_ string, _ ...string) (string, error) {
+		b, err := os.ReadFile(envFile)
+		if err == nil && strings.Contains(string(b), "hunter2") {
+			sawSecretBeforeAnyOSCommand = true
+		}
+		return "", nil
+	}
+
+	daemonBin := filepath.Join(home, "rafikid")
+	if err := os.WriteFile(daemonBin, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newServiceInstallCmd()
+	if err := cmd.Flags().Set("daemon-binary", daemonBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("path-env", "/usr/bin"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runServiceInstall(cmd, nil); err != nil {
+		t.Fatalf("runServiceInstall: %v", err)
+	}
+	if !sawSecretBeforeAnyOSCommand {
+		t.Error("a daemon-starting OS command ran before service.env held the secret; " +
+			"a freshly installed daemon would come up with no DSN")
+	}
+	if got, err := os.ReadFile(envFile); err != nil || !strings.Contains(string(got), "hunter2") {
+		t.Fatalf("service.env does not hold the secret after install: %v, %q", err, got)
 	}
 }

@@ -211,11 +211,12 @@ func escapeEnvValue(v string) string { return `"` + envEscaper.Replace(v) + `"` 
 // MergeResult reports what a MergeEnvFile call did. Added, Existing and
 // Conflict are disjoint and cover every key passed in.
 type MergeResult struct {
-	Added    []string // appended to the file, sorted
-	Existing []string // already in the file with the same value, sorted
-	Conflict []string // already in the file with a DIFFERENT value, sorted
-	Defined  []string // every key the file defined BEFORE the merge, in file order
-	Warnings []string
+	Added     []string // appended to the file, sorted
+	Existing  []string // already in the file with the same value, sorted
+	Conflict  []string // already in the file with a DIFFERENT value, sorted
+	Defined   []string // every key the file defined BEFORE the merge, in file order
+	Warnings  []string
+	Tightened os.FileMode // the file's permission bits before MergeEnvFile chmod'ed it to 0600, or 0 if untouched
 }
 
 // MergeEnvFile appends to the environment file at path every assignment in
@@ -231,17 +232,28 @@ type MergeResult struct {
 // differs from the one offered, that is reported as a Conflict for the caller
 // to surface, because silently keeping either one loses information the
 // operator has.
+//
+// If the file already exists with looser-than-0600 permissions, what happens
+// depends on whether there is anything to append. When there is nothing new
+// (every key is already Existing or Conflict), this call only OBSERVES the
+// file, and observing does not justify touching its permissions — that is
+// reported as a warning and left alone, same as LoadEnvFile's read-side
+// warning. But when there IS something to append, this call is about to ADD a
+// credential to that file, and appending a secret into a file left readable by
+// everyone would defeat the reason this file exists at all — so the loose
+// permissions are tightened to 0600 first, and that is reported via
+// MergeResult.Tightened rather than done silently.
 func MergeEnvFile(path string, vars map[string]string, comment string) (MergeResult, error) {
 	var res MergeResult
 
 	defined := make(map[string]string)
+	var loosePerm os.FileMode
 	existing, err := os.ReadFile(path) //nolint:gosec // operator-supplied path, by design
 	switch {
 	case err == nil:
 		if fi, statErr := os.Stat(path); statErr == nil {
 			if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-				res.Warnings = append(res.Warnings, fmt.Sprintf(
-					"%s is mode %04o; it holds credentials and should be 0600 (chmod 600 %s)", path, perm, path))
+				loosePerm = perm
 			}
 		}
 		parsed, warnings, parseErr := parseEnvFile(bytes.NewReader(existing), path)
@@ -276,7 +288,21 @@ func MergeEnvFile(path string, vars map[string]string, comment string) (MergeRes
 	sort.Strings(res.Conflict)
 
 	if len(res.Added) == 0 {
+		// Nothing to write: this call only observed the file, so leave its
+		// permissions alone too — just warn, the same way LoadEnvFile does on
+		// its read path.
+		if loosePerm != 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"%s is mode %04o; it holds credentials and should be 0600 (chmod 600 %s)", path, loosePerm, path))
+		}
 		return res, nil // nothing to write; leave the file byte-identical
+	}
+
+	if loosePerm != 0 {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return res, fmt.Errorf("tighten permissions on %s from %04o to 0600: %w", path, loosePerm, err)
+		}
+		res.Tightened = loosePerm
 	}
 
 	var b strings.Builder

@@ -353,9 +353,13 @@ func TestMergeEnvFile_CreatesAt0600(t *testing.T) {
 	}
 }
 
-// An existing loose-permission file is warned about, not silently chmod'ed:
-// MergeEnvFile did not create it and does not own its policy.
-func TestMergeEnvFile_WarnsButDoesNotChmodAnExistingFile(t *testing.T) {
+// Appending a NEW credential into an existing loose-permission file tightens
+// it to 0600 first and reports having done so via MergeResult.Tightened —
+// this is the reversed decision: there is a difference between OBSERVING a
+// loose-permission file and actively ADDING a new credential to it, and once
+// a credential is about to be appended, leaving the file world-readable would
+// defeat the reason it exists.
+func TestMergeEnvFile_TightensLoosePermissionsBeforeAppendingACredential(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "service.env")
 	if err := os.WriteFile(path, []byte("EXISTING=1\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -365,6 +369,44 @@ func TestMergeEnvFile_WarnsButDoesNotChmodAnExistingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MergeEnvFile: %v", err)
 	}
+	if res.Tightened != 0644 {
+		t.Errorf("Tightened = %04o, want 0644 (the permissions it tightened FROM)", res.Tightened)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("mode = %04o after appending a credential, want 0600", perm)
+	}
+	// The credential itself must still have been written.
+	if got, err := os.ReadFile(path); err != nil || !strings.Contains(string(got), "NEW=") {
+		t.Fatalf("credential was not appended: %v, %q", err, got)
+	}
+}
+
+// When there is nothing new to append (every key is already Existing or
+// Conflict), MergeEnvFile only OBSERVED the file — it must warn about loose
+// permissions without touching them, the same as LoadEnvFile's read-side
+// warning. Tightening a file's permissions when nothing is actually being
+// added to it would be an unannounced side effect on a call that changed
+// nothing else.
+func TestMergeEnvFile_ObservingALoosePermissionFileWarnsWithoutChmod(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.env")
+	if err := os.WriteFile(path, []byte("EXISTING=1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := MergeEnvFile(path, map[string]string{"EXISTING": "1"}, "test") // already present, identical value
+	if err != nil {
+		t.Fatalf("MergeEnvFile: %v", err)
+	}
+	if len(res.Added) != 0 {
+		t.Fatalf("Added = %v, want none (this is a pure observe, nothing new)", res.Added)
+	}
+	if res.Tightened != 0 {
+		t.Errorf("Tightened = %04o, want 0: nothing was added, so permissions must be left alone", res.Tightened)
+	}
 	if len(res.Warnings) == 0 {
 		t.Fatal("no warning for a 0644 file holding credentials")
 	}
@@ -373,7 +415,7 @@ func TestMergeEnvFile_WarnsButDoesNotChmodAnExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if perm := fi.Mode().Perm(); perm != 0644 {
-		t.Errorf("mode changed to %04o; MergeEnvFile must not chmod a file it did not create", perm)
+		t.Errorf("mode changed to %04o; an observe-only merge must not chmod the file", perm)
 	}
 }
 
