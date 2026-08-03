@@ -55,6 +55,44 @@ var Defaults = []string{
 	"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1",
 }
 
+// toolSearchEnv governs Claude Code's deferred-tool ("tool search") mode: it
+// omits most tools from tools[] and sends tool_reference blocks the model
+// resolves on demand. Only Anthropic models can call a tool that was omitted,
+// so an OpenRouter-routed request carrying them comes back as a hard 400
+// ("Deferred custom tools are only supported on Anthropic models") on the
+// session's very first turn.
+//
+// Claude Code disables the mode itself behind a custom base URL — but the
+// check is Yd(), the SAME predicate _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL
+// above overrides for the byte watchdog. Setting that variable therefore
+// re-enables tool search as a side effect, and the two features cannot be
+// separated from the outside: the only remaining lever is this variable.
+// (claude v2.1.220: s3() → `!ENABLE_TOOL_SEARCH && provider==="firstParty" &&
+// !Yd()`; a falsy value short-circuits via WKr()==="standard".)
+const toolSearchEnv = "ENABLE_TOOL_SEARCH"
+
+// anthropicModel reports whether model is served by Anthropic, and so can use
+// the deferred tools Claude Code would otherwise send to a model that cannot
+// call them.
+//
+// This is a shape test rather than a catalog lookup on purpose: proxyenv is a
+// leaf package, the answer is needed before any network is available, and
+// being wrong in the "not Anthropic" direction only costs a fatter tools[]
+// while being wrong the other way costs the whole session.
+func anthropicModel(model string) bool {
+	if model == "" {
+		return true // no override: Claude Code picks one of its own Anthropic ids
+	}
+	m := strings.ToLower(strings.TrimPrefix(model, "~"))
+	m = strings.TrimPrefix(m, "anthropic/")
+	if strings.Contains(m, "/") {
+		return false // another provider's OpenRouter slash id
+	}
+	// A bare "<family>-latest" alias (opus-latest, fable-latest) is Anthropic's;
+	// every other provider is reachable only through a slash id, caught above.
+	return strings.HasPrefix(m, "claude") || strings.HasSuffix(m, "-latest")
+}
+
 // ClaudeOptions describes one proxied Claude Code session.
 type ClaudeOptions struct {
 	// URL is the rafiki base URL. Empty means "not proxied": Claude sets
@@ -112,6 +150,10 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 		if !present[k] {
 			env = append(env, d)
 		}
+	}
+
+	if !present[toolSearchEnv] && !anthropicModel(o.Model) {
+		env = append(env, toolSearchEnv+"=false")
 	}
 
 	if h := FormatHeaders(o.Headers); h != "" {

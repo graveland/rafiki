@@ -343,6 +343,18 @@ a thinking phase with more than 300s between content events dies with
 behaviour (`rafiki claude` and fundi-spawned claude children get it
 automatically).
 
+That variable has a second, less obvious effect, because Claude Code gates two
+features on the same "is this a first-party host" predicate: it also re-enables
+*deferred tools* (tool search), which omit most tools from `tools[]` and send
+`tool_reference` blocks instead. Only Anthropic models can call a tool that
+was omitted, so a session on an OpenRouter-routed model dies on its first turn
+with `400 Deferred custom tools are only supported on Anthropic models`. The
+launcher and the daemon therefore set `ENABLE_TOOL_SEARCH=false` whenever
+`--model` is not an Anthropic id; hand-configured clients pointing at a
+non-Anthropic model need it in their own env. An explicit `ENABLE_TOOL_SEARCH`
+in the environment always wins, so `true` / `auto` / `auto:N` remain available
+if a future upstream does support them.
+
 ## The rafiki TUI
 
 `rafiki-attach` is TypeScript, bundled with bun, and links against the `pi`

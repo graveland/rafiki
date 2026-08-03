@@ -117,6 +117,47 @@ func TestClaude_ModelUsesCustomOption(t *testing.T) {
 	}
 }
 
+// _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL suppresses Claude Code's own
+// "custom base URL, so no deferred tools" guard, so a non-Anthropic model
+// would be sent tool_reference blocks it cannot resolve and the first turn
+// would 400. Every non-Anthropic spelling must therefore turn tool search off
+// explicitly.
+func TestClaude_ToolSearchDisabledForNonAnthropicModels(t *testing.T) {
+	for _, model := range []string{"moonshotai/kimi-k3", "kimi-k3", "glm-5.2", "z-ai/glm-5.2", "~openai/gpt-latest"} {
+		env, _ := Claude(nil, ClaudeOptions{URL: "http://x", Model: model})
+		got, _ := envMap(t, env)
+		if got["ENABLE_TOOL_SEARCH"] != "false" {
+			t.Errorf("model %q: ENABLE_TOOL_SEARCH = %q, want false", model, got["ENABLE_TOOL_SEARCH"])
+		}
+	}
+}
+
+// Anthropic models keep the feature: rafiki forwards tool_reference blocks
+// untouched, so a proxied session should behave like a direct one.
+func TestClaude_ToolSearchLeftAloneForAnthropicModels(t *testing.T) {
+	for _, model := range []string{"", "claude-opus-5", "opus-latest", "anthropic/claude-opus-5", "~anthropic/claude-opus-latest"} {
+		env, _ := Claude(nil, ClaudeOptions{URL: "http://x", Model: model})
+		got, _ := envMap(t, env)
+		if v, ok := got["ENABLE_TOOL_SEARCH"]; ok {
+			t.Errorf("model %q: ENABLE_TOOL_SEARCH = %q, want unset", model, v)
+		}
+	}
+}
+
+// An explicit setting is the user's call — including "yes, my proxy forwards
+// tool_reference to this model, leave it on".
+func TestClaude_ToolSearchInheritedValueWins(t *testing.T) {
+	in := []string{"ENABLE_TOOL_SEARCH=auto:50", "HOME=/h"}
+	env, _ := Claude(in, ClaudeOptions{URL: "http://x", Model: "moonshotai/kimi-k3"})
+	got, dupes := envMap(t, env)
+	if got["ENABLE_TOOL_SEARCH"] != "auto:50" {
+		t.Errorf("explicit value overridden: %q", got["ENABLE_TOOL_SEARCH"])
+	}
+	if slices.Contains(dupes, "ENABLE_TOOL_SEARCH") {
+		t.Error("appended alongside the inherited value")
+	}
+}
+
 func TestClaude_AutoCompactOnlyWithModel(t *testing.T) {
 	env, _ := Claude(nil, ClaudeOptions{URL: "http://x", AutoCompactWindow: 180000})
 	got, _ := envMap(t, env)
