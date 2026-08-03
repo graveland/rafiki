@@ -203,11 +203,19 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 	// whether or not it loaded anything — what's now "loaded" could equally
 	// be the stale job bootout was trying to replace, still running under
 	// its old environment. This is gated on the poll result, not on
-	// bootstrap failure alone: on an older macOS lacking `bootstrap`, that
-	// call always fails with an unrecognized-subcommand error and the
-	// legacy `load` genuinely does the work — but on such a machine the job
-	// was never loaded to begin with, so the fast path above already set
-	// unloadConfirmed, and this branch does not fire.
+	// bootstrap failure alone, because a bootstrap failure is also what an
+	// older macOS lacking the subcommand looks like, and there the legacy
+	// `load` genuinely does the work.
+	//
+	// That gate is not airtight on such a machine: `bootout`, `bootstrap`
+	// and `print` all arrived together in the macOS 10.10 launchctl
+	// rewrite, so a launchctl without `bootstrap` has no `print` either —
+	// the poll can never confirm anything, and a reinstall there would take
+	// this branch and report a false failure. Accepted: Status() already
+	// hard-depends on `launchctl print` and is degraded on those machines
+	// regardless, so the legacy `load` path is vestigial. If it ever stops
+	// being vestigial, gate on a real launchctl-generation probe rather
+	// than widening this condition.
 	if !unloadConfirmed && bootstrapFailed {
 		return fmt.Errorf("service install may not have taken effect: launchctl print now reports the service loaded, but the previous job was never confirmed unloaded within %s and bootstrap failed — this may be the STALE job still running under its old environment, not the plist just written; run `launchctl bootout %s` by hand, confirm with `launchctl print %s` that it is gone, then retry `rafiki service install` (legacy load output: %s)",
 			installPollCap, b.serviceTarget(), b.serviceTarget(), strings.TrimSpace(bootstrapOut))
