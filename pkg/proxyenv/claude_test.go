@@ -78,6 +78,31 @@ func TestClaude_EmptyTokenGetsPlaceholder(t *testing.T) {
 	}
 }
 
+// A proxied child gets _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL so Claude
+// Code's byte watchdog (which lets SSE pings feed the stream idle watchdog)
+// stays on despite the non-Anthropic base URL host.
+func TestClaude_DefaultsFirstPartyAssume(t *testing.T) {
+	env, _ := Claude(nil, ClaudeOptions{URL: "http://x"})
+	got, _ := envMap(t, env)
+	if got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] != "1" {
+		t.Errorf("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL = %q, want 1", got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"])
+	}
+}
+
+// An explicit inherited value is a deliberate choice and must survive — a
+// default that overrode it would make distrusting a proxy impossible.
+func TestClaude_InheritedDefaultWins(t *testing.T) {
+	in := []string{"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=0", "HOME=/h"}
+	env, _ := Claude(in, ClaudeOptions{URL: "http://x"})
+	got, dupes := envMap(t, env)
+	if got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] != "0" {
+		t.Errorf("explicit value overridden: %q", got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"])
+	}
+	if slices.Contains(dupes, "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL") {
+		t.Error("default appended alongside the inherited value")
+	}
+}
+
 func TestClaude_ModelUsesCustomOption(t *testing.T) {
 	env, args := Claude(nil, ClaudeOptions{URL: "http://x", Model: "moonshotai/kimi-k3"})
 	got, _ := envMap(t, env)

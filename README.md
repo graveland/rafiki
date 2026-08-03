@@ -333,6 +333,16 @@ its turns on the outer session's captured conversation.
 Any other Anthropic-protocol client works the same way via
 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 
+One client-side caveat when pointing Claude Code at any proxy by hand: it
+attaches its byte watchdog — the mechanism that lets SSE keep-alive pings feed
+the 300s stream idle watchdog — only when the base URL host is exactly
+`api.anthropic.com`. On a custom base URL, pings stop counting as activity and
+a thinking phase with more than 300s between content events dies with
+"Response stalled mid-stream" even though bytes flowed the whole time. Set
+`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` to restore direct-connection
+behaviour (`rafiki claude` and fundi-spawned claude children get it
+automatically).
+
 ## The rafiki TUI
 
 `rafiki-attach` is TypeScript, bundled with bun, and links against the `pi`

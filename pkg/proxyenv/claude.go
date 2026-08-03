@@ -38,6 +38,23 @@ var Managed = []string{
 // key is the server's business and never the client's.
 var Credentials = []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"}
 
+// Defaults are appended only when the inherited environment says nothing about
+// them: each asserts a fact about the proxy, and an explicit user setting —
+// even a disagreeing one — outranks a default.
+var Defaults = []string{
+	// Claude Code feeds its 300s stream idle watchdog from raw socket bytes
+	// (so SSE keep-alive pings count as activity) only when a byte monitor is
+	// attached to the response — and it attaches that monitor only when the
+	// base URL host is exactly api.anthropic.com. Through any proxy the
+	// monitor is skipped, pings stop counting, and a thinking phase with more
+	// than 300s between content events dies with "Response stalled
+	// mid-stream" even though bytes flowed the whole time. rafiki's
+	// /v1/messages face is a byte-faithful passthrough, so declare it
+	// first-party and keep the watchdog fed. (Verified against claude
+	// v2.1.220: Yd→d6r→T1e host check gating _chunkTimes via uZc/MRg.)
+	"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1",
+}
+
 // ClaudeOptions describes one proxied Claude Code session.
 type ClaudeOptions struct {
 	// URL is the rafiki base URL. Empty means "not proxied": Claude sets
@@ -69,11 +86,13 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 	}
 
 	env = make([]string, 0, len(environ)+8)
+	present := make(map[string]bool, len(environ))
 	for _, e := range environ {
 		k, _, _ := strings.Cut(e, "=")
 		if slices.Contains(Managed, k) || slices.Contains(Credentials, k) {
 			continue
 		}
+		present[k] = true
 		env = append(env, e)
 	}
 
@@ -88,6 +107,12 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 		"ANTHROPIC_BASE_URL="+o.URL,
 		"ANTHROPIC_AUTH_TOKEN="+token,
 	)
+	for _, d := range Defaults {
+		k, _, _ := strings.Cut(d, "=")
+		if !present[k] {
+			env = append(env, d)
+		}
+	}
 
 	if h := FormatHeaders(o.Headers); h != "" {
 		env = append(env, "ANTHROPIC_CUSTOM_HEADERS="+h)
