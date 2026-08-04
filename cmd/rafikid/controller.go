@@ -33,6 +33,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/ring"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -67,6 +68,14 @@ type Controller struct {
 	proxyURL   string
 	proxyToken string
 
+	// catalog answers ContextWindow (ctrl_get/ctrl_list's ContextWindow/
+	// MaxCompletionTokens fields). Set once at startup via SetCatalog, from
+	// the SAME *routing.ModelCatalog instance the proxy face's llm.Client
+	// uses (main.go builds one and hands it to both) — a nil catalog here
+	// just means ContextWindow always returns ok=false, matching "the proxy
+	// face failed to start" or any other reason main.go has none to give.
+	catalog *routing.ModelCatalog
+
 	// baseCtx is the daemon's own context, threaded into inproc.Options.Parent
 	// so cancelling it stops every in-process agent child at once. Distinct
 	// from the per-request ctx passed to Spawn/Resume/RespawnChild, which only
@@ -98,6 +107,15 @@ type Controller struct {
 // accepts anything, so no child can observe it unset.
 func (c *Controller) SetProxy(url, token string) {
 	c.proxyURL, c.proxyToken = url, token
+}
+
+// SetCatalog records the daemon's shared model catalog, consulted by
+// ContextWindow. Called once at startup, before the socket accepts anything
+// — mirrors SetProxy. A nil cat is legal (main.go passes one through
+// regardless of whether the proxy face itself started) and just means every
+// ContextWindow call returns ok=false.
+func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
+	c.catalog = cat
 }
 
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, baseCtx context.Context) *Controller {

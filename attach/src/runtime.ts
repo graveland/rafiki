@@ -54,6 +54,17 @@ export interface ChildMetadata {
     sessionName?: string;
     model: string;
     thinking?: string;
+    /**
+     * The daemon's own model catalog answer for `model` (routing.ModelCatalog.ContextWindow,
+     * backed by OpenRouter's live model list — the same source pricing already uses).
+     * Undefined when the catalog has no entry: no catalog configured, a model
+     * it hasn't seen, or a cold/stale cache. Preferred over pi's local static
+     * catalog in resolveModelFromRegistry precisely because it covers models
+     * pi's own generated catalog doesn't happen to list (e.g. OpenRouter-only
+     * ids like "deepseek/deepseek-chat").
+     */
+    contextWindow?: number;
+    maxCompletionTokens?: number;
 }
 
 // ─── RemoteAgentSessionRuntime ────────────────────────────────────────────────
@@ -116,7 +127,7 @@ export class RemoteAgentSessionRuntime {
             }
         }
 
-        const model = resolveModelFromRegistry(modelRegistry, meta.model);
+        const model = resolveModelFromRegistry(modelRegistry, meta.model, meta);
         const thinking = (meta.thinking ?? "medium") as "low" | "medium" | "high";
 
         const session = new RemoteAgentSession({
@@ -399,12 +410,20 @@ async function fetchChildMetadata(client: Client, childId: string): Promise<Chil
         sessionName: data["name"] as string | undefined,
         model: data["model"] as string,
         thinking: data["thinking"] as string | undefined,
+        contextWindow: data["contextWindow"] as number | undefined,
+        maxCompletionTokens: data["maxCompletionTokens"] as number | undefined,
     };
 }
 
 /** The one ModelRegistry method resolveModelFromRegistry actually needs — narrowed so it's trivial to fake in a test. */
 export interface ModelFinder {
     find(provider: string, modelId: string): Model<Api> | undefined;
+}
+
+/** The subset of ChildMetadata's daemon-catalog fields resolveModelFromRegistry consumes. */
+export interface DaemonContextWindow {
+    contextWindow?: number;
+    maxCompletionTokens?: number;
 }
 
 /**
@@ -421,15 +440,34 @@ export interface ModelFinder {
  * InteractiveMode's footer reads `state.model.provider` directly and rendered
  * "(undefined)" for every fundi/claude child, with the 0% / 0-token context
  * stats that come from contextWindow being equally unset.
+ *
+ * daemon, when given, OVERRIDES contextWindow/maxTokens on top of whichever
+ * of the above applied — the daemon's own model catalog (live OpenRouter
+ * data, the same source pricing uses) is fresher and more complete than
+ * pi's checked-in generated one, which is missing entries for real,
+ * currently-served models (e.g. "deepseek/deepseek-chat": pi's catalog only
+ * lists "deepseek-v4-flash"/"deepseek-v4-pro"). This is deliberately an
+ * override, not just a miss-fallback: even a registry HIT should defer to
+ * the daemon's fresher number when the daemon has one.
  */
-export function resolveModelFromRegistry(registry: ModelFinder, modelStr: string): Model<Api> {
+export function resolveModelFromRegistry(registry: ModelFinder, modelStr: string, daemon?: DaemonContextWindow): Model<Api> {
     const slash = modelStr.indexOf("/");
+    let model: Model<Api>;
     if (slash < 0) {
-        return { id: modelStr, name: modelStr } as unknown as Model<Api>;
+        model = { id: modelStr, name: modelStr } as unknown as Model<Api>;
+    } else {
+        const provider = modelStr.slice(0, slash);
+        const id = modelStr.slice(slash + 1);
+        model = registry.find(provider, id) ?? ({ id, provider, name: modelStr } as unknown as Model<Api>);
     }
-    const provider = modelStr.slice(0, slash);
-    const id = modelStr.slice(slash + 1);
-    return registry.find(provider, id) ?? ({ id, provider, name: modelStr } as unknown as Model<Api>);
+    if (daemon?.contextWindow) {
+        model = {
+            ...model,
+            contextWindow: daemon.contextWindow,
+            ...(daemon.maxCompletionTokens ? { maxTokens: daemon.maxCompletionTokens } : {}),
+        } as Model<Api>;
+    }
+    return model;
 }
 
 /**

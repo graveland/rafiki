@@ -73,12 +73,13 @@ const (
 // rather than parameters because the fold (config, dev mode, listen override)
 // adds fields, and a seven-argument constructor is a bug waiting to happen.
 type faceOptions struct {
-	Pool     *pgxpool.Pool        // nil = route but do not capture
-	Logger   *slog.Logger         // required
-	Tracer   trace.TracerProvider // nil = no-op
-	Registry *prometheus.Registry // nil = metrics not mounted
-	Config   Config               // named client tokens, openai routes, default model
-	Listen   string               // overrides RAFIKI_PROXY_LISTEN when non-empty
+	Pool     *pgxpool.Pool         // nil = route but do not capture
+	Logger   *slog.Logger          // required
+	Tracer   trace.TracerProvider  // nil = no-op
+	Registry *prometheus.Registry  // nil = metrics not mounted
+	Config   Config                // named client tokens, openai routes, default model
+	Listen   string                // overrides RAFIKI_PROXY_LISTEN when non-empty
+	Catalog  *routing.ModelCatalog // shared with the Controller (ctrl_get/list's ContextWindow) via llm.WithCatalog; nil = the client builds its own
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -121,6 +122,9 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	}
 	if defaultModel != "" {
 		llmOpts = append(llmOpts, llm.WithDefaultModel(defaultModel))
+	}
+	if opts.Catalog != nil {
+		llmOpts = append(llmOpts, llm.WithCatalog(opts.Catalog))
 	}
 	if pool != nil {
 		llmOpts = append(llmOpts, llm.WithStore(pool))

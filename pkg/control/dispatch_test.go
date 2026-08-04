@@ -41,6 +41,7 @@ type fakeController struct {
 	onConnectionCloseFn     func(control.Connection)
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
+	contextWindowFn         func(string) (int, int, bool)
 	getStreamsResult        control.GetStreamsResult
 	getStreamsErr           error
 	conversationStatsFn     func(context.Context, insights.StatsFilter) (*insights.Stats, error)
@@ -218,6 +219,13 @@ func (f *fakeController) ListPresets(labels map[string]string, hasLabel []string
 		return f.listPresetsFn(labels, hasLabel)
 	}
 	return nil, nil
+}
+
+func (f *fakeController) ContextWindow(model string) (contextLen, maxCompletion int, ok bool) {
+	if f.contextWindowFn != nil {
+		return f.contextWindowFn(model)
+	}
+	return 0, 0, false
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -400,6 +408,75 @@ func TestDispatch_Get_Success(t *testing.T) {
 	}
 	if ch.ChildID != "c_001" || ch.Status != "streaming" {
 		t.Errorf("got %+v", ch)
+	}
+}
+
+// TestDispatch_Get_ContextWindow asserts ctrl_get consults Controller.ContextWindow
+// with the combined "provider/model" string and carries its answer on the
+// wire — the daemon's own model catalog, not whatever static list an
+// attaching client's TUI might carry locally.
+func TestDispatch_Get_ContextWindow(t *testing.T) {
+	snap := makeSnapshot("c_001", protocol.StatusStreaming)
+	var gotModel string
+	c := &fakeController{
+		getFn: func(id string) (childstore.Snapshot, bool) { return snap, true },
+		contextWindowFn: func(model string) (int, int, bool) {
+			gotModel = model
+			return 200000, 64000, true
+		},
+	}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_get","id":"2","childId":"c_001"}`)))
+
+	var ch protocol.ChildSummary
+	if err := json.Unmarshal(r.Data, &ch); err != nil {
+		t.Fatal(err)
+	}
+	if gotModel != "anthropic/claude-sonnet-4" {
+		t.Errorf("ContextWindow queried with %q, want the combined provider/model string", gotModel)
+	}
+	if ch.ContextWindow != 200000 || ch.MaxCompletionTokens != 64000 {
+		t.Errorf("ContextWindow=%d MaxCompletionTokens=%d, want 200000/64000", ch.ContextWindow, ch.MaxCompletionTokens)
+	}
+}
+
+// TestDispatch_Get_ContextWindowOmittedWhenUnresolved asserts a catalog miss
+// (ok=false) — or no contextWindowFn hook at all, mirroring a daemon with no
+// catalog configured — leaves ContextWindow/MaxCompletionTokens at their zero
+// value rather than publishing a false 0 as if the catalog actually said so.
+func TestDispatch_Get_ContextWindowOmittedWhenUnresolved(t *testing.T) {
+	snap := makeSnapshot("c_001", protocol.StatusStreaming)
+	c := &fakeController{getFn: func(id string) (childstore.Snapshot, bool) { return snap, true }}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_get","id":"2","childId":"c_001"}`)))
+
+	var ch protocol.ChildSummary
+	if err := json.Unmarshal(r.Data, &ch); err != nil {
+		t.Fatal(err)
+	}
+	if ch.ContextWindow != 0 || ch.MaxCompletionTokens != 0 {
+		t.Errorf("ContextWindow=%d MaxCompletionTokens=%d, want both 0 (no contextWindowFn hooked)", ch.ContextWindow, ch.MaxCompletionTokens)
+	}
+}
+
+// TestDispatch_List_ContextWindow asserts ctrl_list carries the same
+// ContextWindow/MaxCompletionTokens enrichment as ctrl_get — snapshotToSummary
+// is shared between the two handlers.
+func TestDispatch_List_ContextWindow(t *testing.T) {
+	snap := makeSnapshot("c_001", protocol.StatusStreaming)
+	c := &fakeController{
+		listFn:          func(protocol.ListFilter) []childstore.Snapshot { return []childstore.Snapshot{snap} },
+		contextWindowFn: func(model string) (int, int, bool) { return 1000000, 32000, true },
+	}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_list","id":"1"}`)))
+
+	var data protocol.ListResponseData
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Children) != 1 || data.Children[0].ContextWindow != 1000000 || data.Children[0].MaxCompletionTokens != 32000 {
+		t.Errorf("got %+v", data.Children)
 	}
 }
 

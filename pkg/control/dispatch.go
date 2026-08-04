@@ -107,6 +107,13 @@ type Controller interface {
 	// sources return no entries rather than errors.
 	ListModels(ctx context.Context, provider string) ([]protocol.ModelInfo, error)
 
+	// ContextWindow resolves model's context window and max completion
+	// tokens from the daemon's shared model catalog, for ChildSummary's
+	// ContextWindow/MaxCompletionTokens fields. ok is false when no catalog
+	// is configured or model isn't in the current snapshot — callers must
+	// leave those fields unset rather than publish a false zero.
+	ContextWindow(model string) (contextLen, maxCompletion int, ok bool)
+
 	// ListPresets enumerates presets from <config dir>/presets.json (paths.PresetsFile()).
 	// labels and hasLabel apply the same AND-match filter semantics as ctrl_list.
 	ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error)
@@ -263,7 +270,13 @@ func mapErr(cmd, id string, err error, fallbackCode string) []byte {
 // snapshotToSummary converts a childstore.Snapshot to the wire ChildSummary shape.
 // PID is omitted (nil) when the child has exited. Model is formatted as
 // "provider/model" when both fields are present.
-func snapshotToSummary(snap childstore.Snapshot) protocol.ChildSummary {
+//
+// contextWindow, when non-nil, is consulted for the resolved Model to fill
+// ContextWindow/MaxCompletionTokens — a func rather than a *routing.ModelCatalog
+// so this package (and its tests) need not depend on pkg/routing; callers pass
+// Controller.ContextWindow bound to the real implementation. A nil func or a
+// false ok leaves both fields at their zero value (omitted on the wire).
+func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string) (contextLen, maxCompletion int, ok bool)) protocol.ChildSummary {
 	model := snap.Model
 	if snap.Provider != "" && snap.Model != "" {
 		model = snap.Provider + "/" + snap.Model
@@ -293,6 +306,12 @@ func snapshotToSummary(snap childstore.Snapshot) protocol.ChildSummary {
 	if len(snap.SlashCommands) > 0 {
 		cs.SlashCommands = snap.SlashCommands
 	}
+	if contextWindow != nil && model != "" {
+		if cl, mc, ok := contextWindow(model); ok {
+			cs.ContextWindow = cl
+			cs.MaxCompletionTokens = mc
+		}
+	}
 	return cs
 }
 
@@ -310,7 +329,7 @@ func (d *dispatcher) list(frame []byte, id string) []byte {
 	snaps := d.c.List(filter)
 	children := make([]protocol.ChildSummary, len(snaps))
 	for i, s := range snaps {
-		children[i] = snapshotToSummary(s)
+		children[i] = snapshotToSummary(s, d.c.ContextWindow)
 	}
 	return okResponse(protocol.TypeCtrlList, id, protocol.ListResponseData{Children: children})
 }
@@ -327,7 +346,7 @@ func (d *dispatcher) get(frame []byte, id string) []byte {
 	if !ok {
 		return errResponse(protocol.TypeCtrlGet, id, protocol.ErrChildNotFound, "child not found: "+req.ChildID)
 	}
-	return okResponse(protocol.TypeCtrlGet, id, snapshotToSummary(snap))
+	return okResponse(protocol.TypeCtrlGet, id, snapshotToSummary(snap, d.c.ContextWindow))
 }
 
 func (d *dispatcher) getRecent(frame []byte, id string) []byte {

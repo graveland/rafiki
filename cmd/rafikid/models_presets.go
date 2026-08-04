@@ -12,6 +12,17 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
+// ContextWindow resolves model against the daemon's shared model catalog.
+// ok is false when the daemon has no catalog (c.catalog is nil — the proxy
+// face failed to start, or a build path that never wired one) or the model
+// isn't in the current snapshot.
+func (c *Controller) ContextWindow(model string) (contextLen, maxCompletion int, ok bool) {
+	if c.catalog == nil {
+		return 0, 0, false
+	}
+	return c.catalog.ContextWindow(model)
+}
+
 // ListModels enumerates LLM models from all configured sources.
 // When provider is non-empty, only models whose Provider field matches are
 // returned.  Best-effort: missing or unreachable sources produce no entries.

@@ -368,6 +368,52 @@ describe("resolveModelFromRegistry", () => {
         expect((model as unknown as { id: string }).id).toBe("no-provider-here");
         expect((model as unknown as { provider?: string }).provider).toBeUndefined();
     });
+
+    // Regression for "deepseek-v4-pro gets 1M properly, deepseek-chat gets
+    // 0.0%/0" — pi's checked-in generated catalog only lists two deepseek
+    // models (v4-flash, v4-pro), so a registry miss for a real, currently
+    // served model like "deepseek-chat" left contextWindow permanently
+    // unset. The daemon's own catalog (live OpenRouter data) covers it.
+
+    it("fills contextWindow/maxTokens from the daemon on a registry miss", () => {
+        const registry: ModelFinder = { find: () => undefined };
+
+        const model = resolveModelFromRegistry(registry, "deepseek/deepseek-chat", {
+            contextWindow: 163840,
+            maxCompletionTokens: 8192,
+        });
+
+        const m = model as unknown as { provider: string; id: string; contextWindow: number; maxTokens: number };
+        expect(m.provider).toBe("deepseek");
+        expect(m.id).toBe("deepseek-chat");
+        expect(m.contextWindow).toBe(163840);
+        expect(m.maxTokens).toBe(8192);
+    });
+
+    it("the daemon's contextWindow overrides a registry hit's own value — the daemon is fresher", () => {
+        const found: Model<Api> = {
+            provider: "deepseek", id: "deepseek-v4-pro", contextWindow: 999, name: "stale",
+        } as unknown as Model<Api>;
+        const registry: ModelFinder = { find: () => found };
+
+        const model = resolveModelFromRegistry(registry, "deepseek/deepseek-v4-pro", { contextWindow: 1000000 });
+
+        const m = model as unknown as { contextWindow: number; name: string };
+        expect(m.contextWindow).toBe(1000000);
+        expect(m.name).toBe("stale"); // everything else from the registry hit is preserved
+    });
+
+    it("no daemon data (undefined, or a response with contextWindow absent) leaves the registry/stub result untouched", () => {
+        const registry: ModelFinder = { find: () => undefined };
+
+        const withoutArg = resolveModelFromRegistry(registry, "moonshotai/kimi-k3");
+        const withEmptyDaemon = resolveModelFromRegistry(registry, "moonshotai/kimi-k3", {});
+
+        for (const model of [withoutArg, withEmptyDaemon]) {
+            const m = model as unknown as { contextWindow?: number };
+            expect(m.contextWindow).toBeUndefined();
+        }
+    });
 });
 
 describe("connect scrollback bound", () => {

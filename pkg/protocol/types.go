@@ -431,6 +431,13 @@ type ChildSummary struct {
 	ExitSignal    string            `json:"exitSignal,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	SlashCommands []string          `json:"slashCommands,omitempty"`
+	// ContextWindow/MaxCompletionTokens are the daemon's own model catalog's
+	// answer for Model (see routing.ModelCatalog.ContextWindow), independent
+	// of whatever static model list a client-side TUI might carry. Omitted
+	// (both zero) when the catalog has no entry for Model — an unconfigured
+	// catalog, a model the catalog hasn't seen, or a cold/stale cache.
+	ContextWindow       int `json:"contextWindow,omitempty"`
+	MaxCompletionTokens int `json:"maxCompletionTokens,omitempty"`
 }
 
 // ListResponseData is the data payload for ctrl_list responses.

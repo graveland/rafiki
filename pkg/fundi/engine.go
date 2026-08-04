@@ -552,11 +552,13 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			// multi-call tool-use loop, not a single proxied request.
 			if err != nil {
 				slog.Warn("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
-					"model", e.state.ModelID, "iteration", iteration, "latency", dur, "error", err)
+					"provider", e.state.Provider, "model", e.state.ModelID, "iteration", iteration,
+					"latency", dur, "error", err)
 			} else {
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
-					"model", e.state.ModelID, "iteration", iteration,
+					"provider", e.state.Provider, "model", e.state.ModelID, "iteration", iteration,
 					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
+					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
 					"stop_reason", resp.StopReason, "latency", dur)
 			}
 			// Reset for the next iteration regardless of outcome, BEFORE any

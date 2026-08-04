@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,8 +24,15 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
+
+// modelCatalogTTL matches llm.NewClient's own default (the catalog a
+// ClientOption-less client would build for itself) — sharing one instance
+// between the proxy face and the Controller (ctrl_get/list's ContextWindow)
+// only makes sense if both see the same refresh cadence.
+const modelCatalogTTL = time.Hour
 
 func main() {
 	// Load the environment file before anything reads configuration — that
@@ -180,6 +188,12 @@ func main() {
 
 	reg := prometheus.NewRegistry()
 
+	// One catalog shared between the proxy face's llm.Client and the
+	// Controller (ctrl_get/list's ContextWindow field) — built here,
+	// independent of whether the proxy face itself manages to start, so a
+	// failed face doesn't also cost ctrl_get its context-window data.
+	catalog := routing.NewModelCatalog(http.DefaultClient, modelCatalogTTL, slog.Default())
+
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:     pool,
 		Logger:   slog.Default(),
@@ -187,6 +201,7 @@ func main() {
 		Registry: reg,
 		Config:   cfg,
 		Listen:   flags.Listen,
+		Catalog:  catalog,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are
@@ -199,6 +214,7 @@ func main() {
 	st := childstore.New()
 	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, baseCtx)
+	ctrl.SetCatalog(catalog)
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
 	}
