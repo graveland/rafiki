@@ -12,8 +12,8 @@
 
 import {
     getAgentDir,
-    AuthStorage,
     ModelRegistry,
+    ModelRuntime,
     SessionManager,
     SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -47,14 +47,23 @@ export async function buildLocalSettingsManager(): Promise<SettingsManager> {
 /**
  * Construct a ModelRegistry backed by ~/.pi/agent/auth.json and models.json.
  *
- * The `_settings` parameter is accepted to make the dependency order explicit
- * at the call site (registry builds after settings), but ModelRegistry has its
- * own AuthStorage — it doesn't take a SettingsManager directly.
+ * Returns both the registry (for the session) and the underlying ModelRuntime
+ * (for AgentSessionServices). The daemon's pi child reads the same files
+ * (it inherits HOME), so settings and credentials agree across processes.
  */
-export async function buildLocalModelRegistry(_settings: SettingsManager): Promise<ModelRegistry> {
+export async function buildLocalModelRegistry(_settings: SettingsManager): Promise<{
+    modelRegistry: ModelRegistry;
+    modelRuntime: ModelRuntime;
+}> {
     const agentDir = getAgentDir();
-    const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
-    return ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+    const modelRuntime = await ModelRuntime.create({
+        authPath: join(agentDir, "auth.json"),
+        modelsPath: join(agentDir, "models.json"),
+    });
+    return {
+        modelRegistry: new ModelRegistry(modelRuntime),
+        modelRuntime,
+    };
 }
 
 /**

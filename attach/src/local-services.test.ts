@@ -182,10 +182,10 @@ describe("buildLocalSettingsManager", () => {
 describe("buildLocalModelRegistry", () => {
     it("smoke test — returns a ModelRegistry without throwing", async () => {
         const settings = await buildLocalSettingsManager();
-        const registry = await buildLocalModelRegistry(settings);
-        expect(registry).toBeDefined();
+        const { modelRegistry } = await buildLocalModelRegistry(settings);
+        expect(modelRegistry).toBeDefined();
         // getAll() returns the built-in model list even without configured auth.
-        expect(Array.isArray(registry.getAll())).toBe(true);
-        expect(registry.getAll().length).toBeGreaterThan(0);
+        expect(Array.isArray(modelRegistry.getAll())).toBe(true);
+        expect(modelRegistry.getAll().length).toBeGreaterThan(0);
     });
 });

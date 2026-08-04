@@ -20,11 +20,11 @@ import type {
     AgentSessionRuntimeDiagnostic,
     AgentSessionServices,
     ModelRegistry,
+    ModelRuntime,
     ResourceLoader,
     SessionManager,
     SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { AuthStorage } from "@earendil-works/pi-coding-agent";
 import {
     buildLocalModelRegistry,
     buildLocalSessionManager,
@@ -102,7 +102,7 @@ export class RemoteAgentSessionRuntime {
         }
 
         const settingsManager = await buildLocalSettingsManager();
-        const modelRegistry = await buildLocalModelRegistry(settingsManager);
+        const { modelRegistry, modelRuntime } = await buildLocalModelRegistry(settingsManager);
         let sessionManager = await buildLocalSessionManager(meta.sessionFile);
 
         // Scrollback bound: RAFIKI_ATTACH_TAIL (set by `rafiki attach --tail`),
@@ -147,7 +147,7 @@ export class RemoteAgentSessionRuntime {
         const services: AgentSessionServices = makeServicesStub({
             cwd: meta.cwd,
             settingsManager,
-            modelRegistry,
+            modelRuntime,
         });
 
         const runtime = new RemoteAgentSessionRuntime({
@@ -480,14 +480,13 @@ export function resolveModelFromRegistry(registry: ModelFinder, modelStr: string
 function makeServicesStub(opts: {
     cwd: string;
     settingsManager: SettingsManager;
-    modelRegistry: ModelRegistry;
+    modelRuntime: ModelRuntime;
 }): AgentSessionServices {
     return {
         cwd: opts.cwd,
         agentDir: "",
-        authStorage: AuthStorage.inMemory(),
+        modelRuntime: opts.modelRuntime,
         settingsManager: opts.settingsManager,
-        modelRegistry: opts.modelRegistry,
         resourceLoader: {} as unknown as ResourceLoader,
         diagnostics: [],
     };
