@@ -36,11 +36,8 @@ const (
 	// to bound a pathological loop that costs nothing to keep spinning (e.g. a
 	// tool that fails instantly and gets retried forever) — for anything with
 	// real per-call cost, Events.ShouldStop is the more meaningful guardrail
-	// (see drive). Ported from sc's diagnose loop at a much lower value (20);
-	// a general-purpose coding agent routinely needs more iterations than a
-	// bounded diagnostic loop ever did, so this is a coarse ceiling, not a
-	// task-length limit.
-	defaultMaxIterations = 100
+	// (see drive).
+	defaultMaxIterations = 250
 	maxConcurrentTools   = 6
 	maxToolResultSize    = 50 * 1024
 
