@@ -224,6 +224,11 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 // export under any of the three names still has no business reaching a
 // spawned child. FUNDI_* is the spelling most likely to still be sitting in
 // a user's shell, so it belongs in this set as much as the other two do.
+//
+// API-key variables (ANTHROPIC_API_KEY, OPENROUTER_API_KEY) are also stripped:
+// the daemon owns its own keys and the child inherits them through the daemon's
+// own os.Environ() — forwarding the caller's values would override the daemon's
+// and, for claude children, defeat the proxy's capture path.
 func collectCallerEnv() map[string]string {
 	environ := os.Environ()
 	out := make(map[string]string, len(environ))
@@ -234,6 +239,10 @@ func collectCallerEnv() map[string]string {
 		}
 		k := kv[:eq]
 		if strings.HasPrefix(k, "RAFIKI_") || strings.HasPrefix(k, "FUNDI_") || strings.HasPrefix(k, "PI_CONTROLLER_") {
+			continue
+		}
+		// Strip API keys: the daemon owns those credentials.
+		if k == "ANTHROPIC_API_KEY" || k == "OPENROUTER_API_KEY" {
 			continue
 		}
 		out[k] = kv[eq+1:]

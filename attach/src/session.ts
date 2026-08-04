@@ -111,6 +111,7 @@ import type {
     AgentTool,
     ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
+import { estimateContextTokens } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import type {
     AgentSession,
@@ -1269,9 +1270,32 @@ export class RemoteAgentSession {
         return [];
     }
 
-    /** Stub: context usage is tracked by the daemon-owned pi child. */
+    /**
+     * Estimate context usage from the current message cache.
+     *
+     * Delegates to pi-agent-core's estimateContextTokens, which uses the last
+     * assistant message's reported usage (when available — pi's own children
+     * populate usage on every assistant message; claude children carry it on
+     * the agent_end envelope) and falls back to a character-based heuristic
+     * for any trailing messages.
+     *
+     * Returns undefined when the model has no contextWindow (shouldn't happen:
+     * the daemon's catalog resolves this for every known model and the footer
+     * falls back to state.model.contextWindow regardless).
+     */
     getContextUsage(): ContextUsage | undefined {
-        return undefined;
+        const model = this._model as Model<any> | undefined;
+        if (!model) return undefined;
+        const contextWindow = (model as unknown as { contextWindow?: number }).contextWindow ?? 0;
+        if (contextWindow <= 0) return undefined;
+
+        const estimate = estimateContextTokens(this._messages);
+        const percent = (estimate.tokens / contextWindow) * 100;
+        return {
+            tokens: estimate.tokens,
+            contextWindow,
+            percent,
+        };
     }
 
     /** /export and /share are not supported in rafiki-attach v1 — the session data lives in the daemon. */
