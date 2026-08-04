@@ -223,7 +223,7 @@ redeploy: install ## Rebuild + install, then restart the rafiki daemon.
 #
 # NOTE (merge): the submodule points at a private host, so a public
 # `clone --recursive` breaks here. Replacing it with the published
-# @earendil-works/pi-* packages at 0.80.6 is a tracked follow-up; until it
+# @earendil-works/pi-* packages at 0.83.0 is a tracked follow-up; until it
 # lands this repo should not be pushed to its public remote.
 
 # Compile only — deliberately NOT `npm run build` at the pi root: packages/ai's
