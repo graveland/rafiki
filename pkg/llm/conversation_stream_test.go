@@ -348,6 +348,70 @@ func TestSend_StreamHandlerReceivesEventsAndAccumulates(t *testing.T) {
 	}
 }
 
+// TestSend_StreamBackfillsInputTokensFromMessageDelta is the regression for
+// a real bug: OpenRouter's Anthropic-compatible face reports input/cache
+// token usage as zero in message_start for at least two backends (deepseek,
+// moonshotai) and only fills in the correct cumulative counts in the final
+// message_delta — a shape the SDK's own Message.Accumulate silently drops
+// (it only merges OutputTokens from message_delta, since real Anthropic
+// never needs more than that — see backfillDeltaUsage's doc). Without the
+// backfill, every turn through one of these backends persisted and reported
+// 0 input/cache tokens despite a real, non-trivial prompt — visible in pi's
+// attach TUI as a permanent "0.0%" context usage indistinguishable from a
+// genuinely empty prompt.
+func TestSend_StreamBackfillsInputTokensFromMessageDelta(t *testing.T) {
+	events := []ssestream.Event{
+		sseEvent("message_start", `{"type":"message_start","message":{"id":"msg_or","type":"message",
+			"role":"assistant","model":"deepseek/deepseek-v4-pro","content":[],
+			"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`),
+		contentBlockStartEvent(),
+		textDeltaEvent("hi"),
+		contentBlockStopEvent(),
+		sseEvent("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},
+			"usage":{"input_tokens":101,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":3}}`),
+		messageStopEvent(),
+	}
+	sender := newFakeStreamingSender(events...)
+	conv := newTestConversation(t, sender)
+
+	msg, err := conv.Send(context.Background(), UserText("hi"), WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if msg.Usage.InputTokens != 101 {
+		t.Errorf("InputTokens = %d, want 101 (from the final message_delta, not message_start's 0)", msg.Usage.InputTokens)
+	}
+	if msg.Usage.CacheReadInputTokens != 20 {
+		t.Errorf("CacheReadInputTokens = %d, want 20", msg.Usage.CacheReadInputTokens)
+	}
+	if msg.Usage.CacheCreationInputTokens != 3 {
+		t.Errorf("CacheCreationInputTokens = %d, want 3", msg.Usage.CacheCreationInputTokens)
+	}
+	if msg.Usage.OutputTokens != 5 {
+		t.Errorf("OutputTokens = %d, want 5 (Accumulate's own existing behavior, unaffected by the backfill)", msg.Usage.OutputTokens)
+	}
+}
+
+// TestSend_StreamMessageDeltaNeverClobbersRealAnthropicInputTokens is the
+// safety net for the fix above: real Anthropic reports input tokens once,
+// correctly, in message_start, and never repeats them in message_delta
+// (whose own input/cache fields come back zero there). backfillDeltaUsage's
+// ">0" guard must leave message_start's value alone in that case — textStreamEvents'
+// messageStartEvent sets input_tokens=10 and messageDeltaEvent carries no
+// input_tokens field at all (unmarshals to 0), exactly that shape.
+func TestSend_StreamMessageDeltaNeverClobbersRealAnthropicInputTokens(t *testing.T) {
+	sender := newFakeStreamingSender(textStreamEvents("hi")...)
+	conv := newTestConversation(t, sender)
+
+	msg, err := conv.Send(context.Background(), UserText("hi"), WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if msg.Usage.InputTokens != 10 {
+		t.Errorf("InputTokens = %d, want 10 (message_start's real value, not clobbered by message_delta's zero)", msg.Usage.InputTokens)
+	}
+}
+
 func TestSend_FallsBackWhenSenderCannotStream(t *testing.T) {
 	sender := &nonStreamingFake{reply: "Hello"}
 	conv := newTestConversation(t, sender)

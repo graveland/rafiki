@@ -429,6 +429,7 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 			recordPrimaryResult(breaker, now, wrapped)
 			return nil, true, delivered, wrapped
 		}
+		backfillDeltaUsage(&acc, ev)
 	}
 	if serr := stream.Err(); serr != nil {
 		span.RecordError(serr)
@@ -486,6 +487,48 @@ func eventDeliversContent(ev anthropic.MessageStreamEventUnion) bool {
 		return false
 	default:
 		return true
+	}
+}
+
+// backfillDeltaUsage corrects a gap in the SDK's own Message.Accumulate:
+// message_delta only ever merges OutputTokens into the accumulated message,
+// because for real Anthropic the input/cache token counts are fixed and
+// reported once, correctly, in message_start — message_delta's own copies of
+// those fields come back zero there, which is exactly why Accumulate ignores
+// them.
+//
+// OpenRouter's Anthropic-compatible face does the reverse for at least two
+// non-Anthropic backends (deepseek, moonshotai): message_start reports all
+// prompt-side usage as zero, and the real cumulative input/cache token
+// counts only appear in the final message_delta — verified directly against
+// both APIs (a padded-prompt request against api.anthropic.com's real
+// streaming endpoint keeps input_tokens fixed from message_start onward; the
+// identical request against openrouter.ai/api's endpoint for
+// deepseek/deepseek-v4-pro reports input_tokens:0 in message_start and the
+// correct non-zero count only in message_delta). Accumulate silently drops
+// that correction, so every OpenRouter-routed turn through this path
+// persisted and displayed a real prompt with 0 input/cache tokens — visible
+// as "0.0%" context usage in pi's attach TUI with no way to tell it apart
+// from a genuinely token-free turn.
+//
+// Backfill whatever a delta actually populates (guarded on > 0, so a real
+// Anthropic delta's zeroed fields never clobber message_start's correct
+// values) — mirrors pkg/routing/sse.go's parseSSE, which already does this
+// for the proxy's raw-bytes-based capture path; this is the equivalent for
+// sendStreaming's typed-event path.
+func backfillDeltaUsage(acc *anthropic.Message, ev anthropic.MessageStreamEventUnion) {
+	delta, ok := ev.AsAny().(anthropic.MessageDeltaEvent)
+	if !ok {
+		return
+	}
+	if delta.Usage.InputTokens > 0 {
+		acc.Usage.InputTokens = delta.Usage.InputTokens
+	}
+	if delta.Usage.CacheReadInputTokens > 0 {
+		acc.Usage.CacheReadInputTokens = delta.Usage.CacheReadInputTokens
+	}
+	if delta.Usage.CacheCreationInputTokens > 0 {
+		acc.Usage.CacheCreationInputTokens = delta.Usage.CacheCreationInputTokens
 	}
 }
 
