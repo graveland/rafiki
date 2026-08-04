@@ -265,3 +265,21 @@ func TestGrepToolEmitsAbsolutePathsForRelativeBase(t *testing.T) {
 		t.Fatalf("read rejected grep's own output %q: %v", emitted, err)
 	}
 }
+
+func TestGrepToolSingleFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(p, []byte("package a\nfunc Foo() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fn := newGrepTool()
+	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"func Foo","path":%q}`, p)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%s:2:func Foo() {}\n", p)
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+}

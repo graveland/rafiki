@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -28,7 +29,7 @@ const (
 		"type": "object",
 		"properties": {
 			"pattern": {"type": "string", "description": "Regular expression (RE2 syntax) to search for."},
-			"path": {"type": "string", "description": "Base directory to search from. Required; must not be the filesystem root (\"/\")."},
+			"path": {"type": "string", "description": "File or directory to search. Required; must not be the filesystem root (\"/\")."},
 			"glob": {"type": "string", "description": "Optional glob pattern to restrict which files are searched, matched against each file's path relative to path. A pattern with no / (e.g. \"*.go\") matches by file name at any depth, like ripgrep's -g."},
 			"max_matches": {"type": "integer", "description": "Maximum number of matches to return. Defaults to 100."}
 		},
@@ -77,8 +78,60 @@ func newGrepTool() ToolFunc {
 		if err != nil {
 			return "", fmt.Errorf("grep: %w", err)
 		}
-		if !baseInfo.IsDir() {
-			return "", fmt.Errorf("grep: %q is not a directory", base)
+
+		// Accept both files and directories: a single file just searches
+		// that one file; a directory walks the tree as before.
+		var (
+			paths   []string
+			errList []error
+		)
+
+		if baseInfo.IsDir() {
+			walkErr := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				if err != nil {
+					slog.Warn("agent/tools: grep: skipping unreadable path", "path", p, "error", err)
+					if d != nil && d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if d.IsDir() {
+					if d.Name() == ".git" {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if in.Glob != "" {
+					rel, relErr := filepath.Rel(base, p)
+					if relErr != nil {
+						slog.Warn("agent/tools: grep: path is not relative to the search base, matching the glob against the full path", "base", base, "path", p, "error", relErr)
+						rel = p
+					}
+					ok, mErr := doublestar.Match(in.Glob, rel)
+					if mErr != nil {
+						return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
+					}
+					if !ok && !strings.ContainsRune(in.Glob, '/') {
+						ok, mErr = doublestar.Match(in.Glob, filepath.Base(rel))
+						if mErr != nil {
+							return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
+						}
+					}
+					if !ok {
+						return nil
+					}
+				}
+				paths = append(paths, p)
+				return nil
+			})
+			if walkErr != nil {
+				errList = append(errList, walkErr)
+			}
+		} else {
+			paths = []string{base}
 		}
 
 		maxMatches := in.MaxMatches
@@ -89,69 +142,18 @@ func newGrepTool() ToolFunc {
 		var out strings.Builder
 		shown := 0
 		total := 0
-		walkErr := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-			// Checked per visited entry (not just once up front) so an abort
-			// mid-walk over a large or slow (e.g. network-mounted) tree stops
-			// promptly instead of running to completion after the caller has
-			// moved on.
+
+		for _, p := range paths {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			if err != nil {
-				// A subtree we can't even stat (permission denied, race with
-				// a concurrent delete) shouldn't fail the whole search — log
-				// it and skip that subtree rather than aborting.
-				slog.Warn("agent/tools: grep: skipping unreadable path", "path", p, "error", err)
-				if d != nil && d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if d.IsDir() {
-				if d.Name() == ".git" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if in.Glob != "" {
-				rel, relErr := filepath.Rel(base, p)
-				if relErr != nil {
-					// p comes from WalkDir(base), so this should be
-					// unreachable — but if it ever fires, matching the glob
-					// against the full path silently changes what the filter
-					// means, which is exactly the kind of thing that must not
-					// happen quietly.
-					slog.Warn("agent/tools: grep: path is not relative to the search base, matching the glob against the full path", "base", base, "path", p, "error", relErr)
-					rel = p
-				}
-				ok, mErr := doublestar.Match(in.Glob, rel)
-				if mErr != nil {
-					return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
-				}
-				// doublestar's `*` does not cross a path separator, so a
-				// bare "*.go" would match only top-level files and silently
-				// under-report everything nested. The model's prior is
-				// ripgrep's -g '*.go', which matches at any depth: treat a
-				// separator-free pattern as a basename pattern.
-				if !ok && !strings.ContainsRune(in.Glob, '/') {
-					ok, mErr = doublestar.Match(in.Glob, filepath.Base(rel))
-					if mErr != nil {
-						return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
-					}
-				}
-				if !ok {
-					return nil
-				}
+				errList = append(errList, ctxErr)
+				break
 			}
 
 			f, openErr := os.Open(p)
 			if openErr != nil {
-				// Unreadable single file (permissions, broken symlink) — log
-				// and keep walking; one bad file shouldn't sink the search.
 				slog.Debug("agent/tools: grep: skipping unreadable file", "path", p, "error", openErr)
-				return nil
+				continue
 			}
-			defer f.Close()
 
 			scanner := bufio.NewScanner(f)
 			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -167,13 +169,14 @@ func newGrepTool() ToolFunc {
 					}
 				}
 			}
+			f.Close()
 			if scanErr := scanner.Err(); scanErr != nil {
 				slog.Debug("agent/tools: grep: stopped scanning file early", "path", p, "error", scanErr)
 			}
-			return nil
-		})
-		if walkErr != nil {
-			return "", fmt.Errorf("grep: %w", walkErr)
+		}
+
+		if len(errList) > 0 {
+			return "", fmt.Errorf("grep: %w", errors.Join(errList...))
 		}
 
 		if total == 0 {
