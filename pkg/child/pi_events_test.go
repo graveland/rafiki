@@ -200,8 +200,17 @@ func TestPiEvents_TypeDiscriminators(t *testing.T) {
 	if te["toolCallId"] != "t1" || te["isError"] != false {
 		t.Fatalf("tool_execution_end fields wrong: %v", te)
 	}
-	if _, ok := te["result"]; !ok {
-		t.Fatal("tool_execution_end missing result")
+	result, ok := te["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_execution_end result is not an object: %v", te["result"])
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) != 1 {
+		// pi's TUI reads a tool call's output exclusively from result.content
+		// and silently discards anything else — see PiToolExecutionEnd's doc.
+		// A bare string here (result == "ok") renders the tool call's command
+		// but never its output.
+		t.Fatalf("tool_execution_end result.content = %v, want a 1-element content array", result["content"])
 	}
 
 	ae := mustType(t, mustMarshal(t, PiAgentEnd([]json.RawMessage{mustMarshal(t, asst)}, nil)), "agent_end")

@@ -181,8 +181,20 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 	if teFrame["isError"] != false {
 		t.Fatalf("tool_execution_end isError = %v, want false", teFrame["isError"])
 	}
-	if !strings.Contains(teFrame["result"].(string), "go.mod") {
-		t.Fatalf("tool_execution_end result missing tool output: %v", teFrame["result"])
+	// result must be pi's {content:[...]} shape, not a bare string — pi's TUI
+	// (ToolExecutionComponent.updateResult) reads a tool call's output
+	// exclusively from result.content and silently discards anything else.
+	teResult, ok := teFrame["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_execution_end result is not an object: %v", teFrame["result"])
+	}
+	teContent, ok := teResult["content"].([]any)
+	if !ok || len(teContent) != 1 {
+		t.Fatalf("tool_execution_end result.content not a 1-element array: %v", teResult["content"])
+	}
+	teText, _ := teContent[0].(map[string]any)["text"].(string)
+	if !strings.Contains(teText, "go.mod") {
+		t.Fatalf("tool_execution_end result missing tool output: %v", teText)
 	}
 
 	// agent_end.messages: assistant(tool_use) + toolResult + assistant(text) = 3.

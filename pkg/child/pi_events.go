@@ -217,19 +217,44 @@ func PiToolExecutionStart(toolCallID, toolName string, args any, parentToolUseID
 	return piToolExecutionStart{Type: "tool_execution_start", ToolCallID: toolCallID, ToolName: toolName, Args: args, ParentToolUseID: parentToolUseID}
 }
 
-type piToolExecutionEnd struct {
-	Type            string `json:"type"`
-	ToolCallID      string `json:"toolCallId"`
-	ToolName        string `json:"toolName"`
-	Result          any    `json:"result"`
-	IsError         bool   `json:"isError"`
-	ParentToolUseID string `json:"parentToolUseId,omitempty"`
+// piToolResult is the {content:[...]} shape pi's TUI requires for
+// tool_execution_end's "result" field. See PiToolExecutionEnd's doc.
+type piToolResult struct {
+	Content []PiContentBlock `json:"content"`
 }
 
-// PiToolExecutionEnd builds a tool_execution_end frame. parentToolUseID is the
-// spawning Task call's id when this tool runs inside a sub-agent.
-func PiToolExecutionEnd(toolCallID, toolName string, result any, isError bool, parentToolUseID string) any {
-	return piToolExecutionEnd{Type: "tool_execution_end", ToolCallID: toolCallID, ToolName: toolName, Result: result, IsError: isError, ParentToolUseID: parentToolUseID}
+type piToolExecutionEnd struct {
+	Type            string       `json:"type"`
+	ToolCallID      string       `json:"toolCallId"`
+	ToolName        string       `json:"toolName"`
+	Result          piToolResult `json:"result"`
+	IsError         bool         `json:"isError"`
+	ParentToolUseID string       `json:"parentToolUseId,omitempty"`
+}
+
+// PiToolExecutionEnd builds a tool_execution_end frame. resultText is the
+// tool's plain-text output; parentToolUseID is the spawning Task call's id
+// when this tool runs inside a sub-agent.
+//
+// result is ALWAYS the {content:[{type:"text",text:resultText}]} shape, on
+// purpose — resultText takes a string specifically so no caller CAN pass
+// anything else. pi's TUI (ToolExecutionComponent.updateResult in
+// interactive-mode.ts) reads a tool call's output exclusively from
+// result.content, and silently discards anything not shaped that way — a
+// defensive normalization pi's TUI added for malformed MCP partial results
+// (content missing entirely) that also happens to catch a plain string,
+// since spreading a string in JS produces an object with no `content` key at
+// all. Before this function wrapped the text itself, both of its callers
+// (fundi's Emitter.ToolEnd, claudeProvider.emitUser) passed a raw string —
+// every fundi and claude child rendered a tool call's command in pi's attach
+// TUI but never its output.
+func PiToolExecutionEnd(toolCallID, toolName, resultText string, isError bool, parentToolUseID string) any {
+	return piToolExecutionEnd{
+		Type: "tool_execution_end", ToolCallID: toolCallID, ToolName: toolName,
+		Result:          piToolResult{Content: []PiContentBlock{PiTextBlock(resultText)}},
+		IsError:         isError,
+		ParentToolUseID: parentToolUseID,
+	}
 }
 
 type piAgentEnd struct {
