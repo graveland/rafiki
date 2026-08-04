@@ -627,7 +627,9 @@ func TestAgentEndResetsStartedSoNextTurnEmitsMessageStart(t *testing.T) {
 
 // TestStreamSequence_OrdersStartUpdatesEnd locks down frame ordering: a
 // StreamStart, N StreamDeltas, then StreamEnd must produce exactly
-// message_start, N message_update, message_end in that order.
+// message_start, N message_update, ONE MORE message_update (StreamEnd's own
+// final-state flush — see its doc comment for why that extra update is not
+// redundant), then message_end, in that order.
 func TestStreamSequence_OrdersStartUpdatesEnd(t *testing.T) {
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
@@ -639,7 +641,54 @@ func TestStreamSequence_OrdersStartUpdatesEnd(t *testing.T) {
 	e.StreamDelta(msg)
 	e.StreamEnd(msg)
 
-	assertFrameTypes(t, out.String(), []string{"message_start", "message_update", "message_update", "message_end"})
+	assertFrameTypes(t, out.String(),
+		[]string{"message_start", "message_update", "message_update", "message_update", "message_end"})
+}
+
+// TestStreamEnd_FinalUpdateCarriesCompleteArgsEvenWithNoInterveningDelta is
+// the regression this file exists to guard: a fast tool call whose whole turn
+// completes inside one streamFlushInterval window gets exactly ONE flush (at
+// StreamStart, before the tool_use block's JSON input has finished
+// accumulating) and then goes straight to StreamEnd with no StreamDelta in
+// between — the exact shape the real bug had. pi's TUI reads a tool call's
+// arguments from message_update.content[].arguments and never re-reads them
+// from message_end, so if StreamEnd's flush isn't there, the args a client
+// ever sees stay permanently empty even though the tool executed correctly
+// end to end (a real fundi turn against moonshotai/kimi-k3 rendered "$ ..."
+// with no command text in pi's attach TUI, though tool_execution_start/end
+// and the persisted transcript were both fine).
+func TestStreamEnd_FinalUpdateCarriesCompleteArgsEvenWithNoInterveningDelta(t *testing.T) {
+	var out bytes.Buffer
+	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+	e := NewEmitter(fe, "anthropic", nil)
+
+	early := child.PiAssistantMessage{Role: "assistant", Content: []child.PiContentBlock{
+		child.PiToolCallBlock("call-1", "bash", nil), // input JSON hasn't accumulated yet
+	}}
+	final := child.PiAssistantMessage{Role: "assistant", Content: []child.PiContentBlock{
+		child.PiToolCallBlock("call-1", "bash", map[string]any{"command": "date +%s"}),
+	}}
+
+	e.StreamStart(early) // message_start with empty arguments
+	e.StreamEnd(final)   // NO StreamDelta in between — the bug's exact shape
+
+	types := frameTypes(t, out.String())
+	if want := []string{"message_start", "message_update", "message_end"}; strings.Join(types, ",") != strings.Join(want, ",") {
+		t.Fatalf("frame sequence = %v, want %v", types, want)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var update struct {
+		Message child.PiAssistantMessage `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &update); err != nil { // message_update is frame index 1
+		t.Fatalf("unmarshal message_update: %v", err)
+	}
+	args := update.Message.Content[0].Arguments
+	if args == nil || (*args)["command"] != "date +%s" {
+		t.Fatalf("message_update args = %+v, want command=%q — the client's only source for a live tool call's "+
+			"arguments never saw the complete input", args, "date +%s")
+	}
 }
 
 // TestStreamDelta_DoesNotAccumulateOrFoldUsage guards against a delta being

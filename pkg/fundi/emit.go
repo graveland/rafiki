@@ -110,12 +110,30 @@ func (e *Emitter) StreamDelta(msg child.PiAssistantMessage) {
 	e.fe.Emit(child.PiMessageUpdate(msg, ""))
 }
 
-// StreamEnd emits message_end for the finished message, accumulates it for
-// the eventual agent_end frame, and folds its usage into the turn total —
-// the same bookkeeping AssistantTurn does, so per-turn cost cannot silently
-// diverge depending on whether the turn was streamed. It also resets the
-// started guard so the next turn's StreamStart fires again.
+// StreamEnd emits a final message_update carrying the complete message,
+// followed by message_end, accumulates it for the eventual agent_end frame,
+// and folds its usage into the turn total — the same bookkeeping
+// AssistantTurn does, so per-turn cost cannot silently diverge depending on
+// whether the turn was streamed. It also resets the started guard so the
+// next turn's StreamStart fires again.
+//
+// The final message_update is not redundant even though message_end carries
+// the same content: pi's TUI treats message_update as the ONLY source of
+// truth for an in-progress tool call's arguments (interactive-mode.ts builds
+// its ToolExecutionComponent from message_update's content[].arguments and
+// never re-reads args from message_end or the later, fully-correct
+// tool_execution_start event). The streaming handler's coalescing
+// (streamFlushInterval) can — and for any tool call whose whole turn
+// completes inside one flush window, WILL — mean the only message_update
+// sent shows a tool_use block's input mid-accumulation, e.g. {} for a bash
+// call before its "command" field has arrived. Without this final flush that
+// empty state is never corrected, and pi's TUI renders the tool call with a
+// permanently blank command ("$ ..." with no text) even though every other
+// frame (tool_execution_start/end, the persisted transcript) is correct.
+// AssistantTurn's message_start/message_update/message_end trio already
+// avoids this by construction; this mirrors it for the streamed path.
 func (e *Emitter) StreamEnd(msg child.PiAssistantMessage) {
+	e.fe.Emit(child.PiMessageUpdate(msg, ""))
 	e.fe.Emit(child.PiMessageEnd(msg, ""))
 	e.accumulate(msg)
 	e.addUsage(msg.Usage)
