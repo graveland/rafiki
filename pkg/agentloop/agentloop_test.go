@@ -81,6 +81,17 @@ func (s *scriptedSender) New(_ context.Context, _ anthropic.MessageNewParams) (*
 	return &m, nil
 }
 
+// erroringSender always fails — used where a test needs a genuine upstream
+// failure rather than a canned response (e.g. exercising Resume's attempt cap
+// without depending on agentloop's iteration-cap mechanics).
+type erroringSender struct {
+	err error
+}
+
+func (s *erroringSender) New(_ context.Context, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+	return nil, s.err
+}
+
 const respEndTurn = `{"id":"msg_e","type":"message","role":"assistant","model":"m",
 	"content":[{"type":"text","text":"final analysis"}],
 	"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`
@@ -189,7 +200,7 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 		OnToolCall:   func(name string, _ json.RawMessage) { events = append(events, "call:"+name) },
 		OnToolResult: func(name, _ string, _ error) { events = append(events, "result:"+name) },
 		OnText:       func(text string) { events = append(events, "text") },
-		OnTurn: func(resp *anthropic.Message, dur time.Duration, err error) {
+		OnTurn: func(_ int, resp *anthropic.Message, dur time.Duration, err error) {
 			turns++
 			if err == nil {
 				turnTokens += resp.Usage.InputTokens
@@ -375,20 +386,24 @@ func TestResumeAlreadyComplete(t *testing.T) {
 
 // The attempt cap: fourth Resume refuses and marks the conversation failed.
 // A second Resume never re-fabricates for an id that already has a result.
+//
+// The sender errors on every call rather than looping forever on canned
+// tool_use responses: hitting agentloop's iteration cap is no longer an
+// error (see wrapUp) — a genuine upstream failure is what this test needs to
+// keep Resume failing every time, independent of that redesign.
 func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
 	pool := testPool(t)
-	sender := &scriptedSender{scripts: []string{respTwoTools}} // loop never finishes
+	sender := &erroringSender{err: errors.New("upstream unavailable")}
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 	ctx := context.Background()
 
 	seedInterruptedBatch(t, pool, conv, nil)
 
-	// Resume 1: fabricates 2 synthetics, then the scripted sender returns
-	// ANOTHER tool_use batch; its tools execute; loop hits the same script
-	// forever → iteration cap error. That's fine — we only care about state.
+	// Resume 1: fabricates 2 synthetics, then the erroring sender fails the
+	// re-issued Continue call. That's fine — we only care about state.
 	if _, err := Resume(ctx, conv, tools, nil); err == nil {
-		t.Fatal("expected iteration-cap error from the everlasting script")
+		t.Fatal("expected an error from the erroring sender")
 	}
 
 	var syntheticRows int
@@ -402,12 +417,11 @@ func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
 	}
 
 	// Resumes 2 and 3: the seeded ids already have results — must not be
-	// fabricated again (later orphans from the everlasting script will be,
-	// but never the same id twice). Both still fail on the everlasting
-	// script's iteration cap — assert that rather than discarding the error.
+	// fabricated again. Both still fail on the erroring sender — assert that
+	// rather than discarding the error.
 	for i := 2; i <= 3; i++ {
-		if _, err := Resume(ctx, conv, tools, nil); err == nil || !strings.Contains(err.Error(), "maximum tool iterations") {
-			t.Fatalf("resume %d: err = %v, want iteration-cap error", i, err)
+		if _, err := Resume(ctx, conv, tools, nil); err == nil || !strings.Contains(err.Error(), "upstream unavailable") {
+			t.Fatalf("resume %d: err = %v, want upstream error", i, err)
 		}
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
@@ -933,4 +947,108 @@ func TestRunThreadsCallerSendOptionToContinue(t *testing.T) {
 	if result.Text != "streamed hello" {
 		t.Errorf("Text = %q", result.Text)
 	}
+}
+
+// toolAwareSender models a real model honoring an empty tools list: it
+// returns tool_use while the request offers tools, and a text reply once
+// tools are withheld. Unlike scriptedSender's blind canned-response replay,
+// this actually proves wrapUp's llm.WithTools(nil) reaches the request.
+type toolAwareSender struct{}
+
+const respWrappedUp = `{"id":"msg_w","type":"message","role":"assistant","model":"m",
+	"content":[{"type":"text","text":"wrapping up now"}],
+	"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`
+
+func (s *toolAwareSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	script := respTwoTools
+	if len(params.Tools) == 0 {
+		script = respWrappedUp
+	}
+	var m anthropic.Message
+	if err := json.Unmarshal([]byte(script), &m); err != nil {
+		panic(err)
+	}
+	return &m, nil
+}
+
+// Hitting the iteration cap must no longer hard-error the turn: the model
+// gets a forced, tools-disabled final call to explain itself, and the pending
+// tool_use blocks it never got to run are recorded as explanatory is_error
+// results rather than silently vanishing.
+func TestIterationCapEndsGracefullyInsteadOfErroring(t *testing.T) {
+	sender := &toolAwareSender{}
+	tools := &fakeTools{}
+	conv := newMemConv(t, sender)
+
+	var iterations []int
+	ev := &Events{
+		MaxIterations: 2,
+		OnTurn: func(iteration int, _ *anthropic.Message, _ time.Duration, _ error) {
+			iterations = append(iterations, iteration)
+		},
+	}
+
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.LimitReached {
+		t.Error("LimitReached = false, want true")
+	}
+	if !strings.Contains(result.LimitReason, "maximum tool iterations (2)") {
+		t.Errorf("LimitReason = %q", result.LimitReason)
+	}
+	if result.Text != "wrapping up now" {
+		t.Errorf("Text = %q, want the forced wrap-up call's own text", result.Text)
+	}
+	// Iteration 1's batch ran for real; iteration 2 hit the cap and its
+	// pending tool_use blocks were never executed.
+	if got := tools.executedNames(); len(got) != 2 {
+		t.Errorf("executed = %v, want exactly iteration 1's alpha+beta", got)
+	}
+	if want := []int{1, 2, 3}; !slicesEqualInt(iterations, want) {
+		t.Errorf("OnTurn iterations = %v, want %v (iteration 1, capped iteration 2, wrap-up call 3)", iterations, want)
+	}
+	if result.Stats.Iterations != 3 {
+		t.Errorf("Stats.Iterations = %d, want 3", result.Stats.Iterations)
+	}
+}
+
+// ShouldStop preempts a tool batch before it ever runs, distinct from the
+// iteration cap — a host's own guardrail (e.g. a cost budget) can end the
+// turn gracefully on the very first iteration.
+func TestShouldStopEndsTurnGracefully(t *testing.T) {
+	sender := &toolAwareSender{}
+	tools := &fakeTools{}
+	conv := newMemConv(t, sender)
+
+	ev := &Events{
+		ShouldStop: func() (bool, string) { return true, "cost budget exceeded" },
+	}
+
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.LimitReached || result.LimitReason != "cost budget exceeded" {
+		t.Errorf("LimitReached=%v LimitReason=%q, want true/%q", result.LimitReached, result.LimitReason, "cost budget exceeded")
+	}
+	if got := tools.executedNames(); len(got) != 0 {
+		t.Errorf("executed = %v, want none — ShouldStop should preempt the very first batch", got)
+	}
+	if result.Text != "wrapping up now" {
+		t.Errorf("Text = %q", result.Text)
+	}
+}
+
+func slicesEqualInt(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

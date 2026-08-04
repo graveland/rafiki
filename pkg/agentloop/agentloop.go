@@ -31,9 +31,18 @@ import (
 )
 
 const (
-	maxIterations      = 20
-	maxConcurrentTools = 6
-	maxToolResultSize  = 50 * 1024
+	// defaultMaxIterations is the unconditional backstop on tool-calling
+	// iterations per turn, used when Events.MaxIterations is unset. It exists
+	// to bound a pathological loop that costs nothing to keep spinning (e.g. a
+	// tool that fails instantly and gets retried forever) — for anything with
+	// real per-call cost, Events.ShouldStop is the more meaningful guardrail
+	// (see drive). Ported from sc's diagnose loop at a much lower value (20);
+	// a general-purpose coding agent routinely needs more iterations than a
+	// bounded diagnostic loop ever did, so this is a coarse ceiling, not a
+	// task-length limit.
+	defaultMaxIterations = 100
+	maxConcurrentTools   = 6
+	maxToolResultSize    = 50 * 1024
 
 	// DefaultResumeCap bounds Resume attempts per conversation.
 	DefaultResumeCap = 3
@@ -52,14 +61,19 @@ type ToolSet interface {
 	Execute(ctx context.Context, name string, input json.RawMessage) (string, error)
 }
 
-// Events are optional, nil-safe observation callbacks.
+// Events are optional, nil-safe observation callbacks plus a couple of
+// per-run tuning knobs (MaxIterations, ShouldStop) — those live here rather
+// than as their own parameter because, like PendingUser, they're host state
+// threaded through every drive() call for one run.
 type Events struct {
 	OnText       func(text string)
 	OnToolCall   func(name string, input json.RawMessage)
 	OnToolResult func(name string, result string, err error)
-	// OnTurn fires after each LLM call with its usage, duration and error —
-	// the host metrics hook (sc's ObserveClaudeRequest/RecordClaudeTokens).
-	OnTurn func(resp *anthropic.Message, dur time.Duration, err error)
+	// OnTurn fires after each LLM call (including the graceful wrap-up call,
+	// if one happens — see drive) with its 1-based iteration number, usage,
+	// duration and error — the host metrics hook (sc's
+	// ObserveClaudeRequest/RecordClaudeTokens).
+	OnTurn func(iteration int, resp *anthropic.Message, dur time.Duration, err error)
 	// OnToolStart/OnToolEnd mirror OnToolCall/OnToolResult but carry the
 	// tool_use id, so hosts can correlate execution events with the assistant
 	// message's tool_use blocks.
@@ -69,6 +83,16 @@ type Events struct {
 	// persisted and before the next Continue. Non-empty returned content is
 	// appended as an additional user message — the mid-turn steer seam.
 	PendingUser func() []anthropic.ContentBlockParamUnion
+
+	// MaxIterations overrides defaultMaxIterations for this run when positive.
+	MaxIterations int
+	// ShouldStop, when non-nil, is polled once per iteration — after a
+	// tool_use response, before its tools would run — and lets the host end
+	// the turn on its own terms (a cost budget, a wall-clock budget, whatever
+	// it tracks) without agentloop knowing anything about pricing. A true
+	// return ends the turn the same way hitting MaxIterations does: pending
+	// tool calls are NOT executed; see drive's wrapUp.
+	ShouldStop func() (stop bool, reason string)
 }
 
 func (e *Events) text(t string) {
@@ -110,10 +134,27 @@ func ToolCallID(ctx context.Context) string {
 	return id
 }
 
-func (e *Events) turn(resp *anthropic.Message, dur time.Duration, err error) {
+func (e *Events) turn(iteration int, resp *anthropic.Message, dur time.Duration, err error) {
 	if e != nil && e.OnTurn != nil {
-		e.OnTurn(resp, dur, err)
+		e.OnTurn(iteration, resp, dur, err)
 	}
+}
+
+// maxIterations resolves the effective iteration backstop for this run.
+func (e *Events) maxIterations() int {
+	if e != nil && e.MaxIterations > 0 {
+		return e.MaxIterations
+	}
+	return defaultMaxIterations
+}
+
+// shouldStop polls the host's own guardrail, if any. A nil Events or a nil
+// ShouldStop never stops the loop.
+func (e *Events) shouldStop() (bool, string) {
+	if e == nil || e.ShouldStop == nil {
+		return false, ""
+	}
+	return e.ShouldStop()
 }
 
 // Stats mirrors the diagnose loop's run statistics.
@@ -127,9 +168,17 @@ type Stats struct {
 // Result is a run outcome. On error, Run/Resume still return a non-nil
 // Result carrying the partial Stats accumulated before the failure (hosts
 // report token spend on failed runs too).
+//
+// LimitReached/LimitReason distinguish a turn that ended because it hit its
+// iteration cap or ShouldStop guardrail (nil error, Text is the model's own
+// forced wrap-up) from a normal end_turn completion (LimitReached false).
+// This is the signal a future coordinator would read to decide whether a
+// subagent's turn ended cleanly or ran out of budget — see Events.ShouldStop.
 type Result struct {
-	Text  string
-	Stats Stats
+	Text         string
+	Stats        Stats
+	LimitReached bool
+	LimitReason  string
 }
 
 // Run drives a fresh tool-use loop: append userContent, then iterate
@@ -311,16 +360,20 @@ func analyzeOrphans(history []store.Message) ([]orphan, *string) {
 // opts are extra llm.SendOptions forwarded to every Continue call, after
 // llm.WithTools(defs) (built once, loop-invariant, matching defs above it) so
 // a caller-supplied option can override tools if it ever needs to.
+//
+// A turn that would otherwise run past its guardrail (the iteration cap, or
+// ev.ShouldStop) never gets hard-killed: see wrapUp.
 func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, opts ...llm.SendOption) (*Result, error) {
 	defs := tools.Definitions()
 	sendOpts := append([]llm.SendOption{llm.WithTools(defs)}, opts...)
+	limit := ev.maxIterations()
 	var stats Stats
 
-	for iteration := 1; iteration <= maxIterations; iteration++ {
+	for iteration := 1; iteration <= limit; iteration++ {
 		stats.Iterations = iteration
 		start := time.Now()
 		resp, err := conv.Continue(ctx, sendOpts...)
-		ev.turn(resp, time.Since(start), err)
+		ev.turn(iteration, resp, time.Since(start), err)
 		if err != nil {
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: iteration %d: %w", iteration, err)
 		}
@@ -341,6 +394,15 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			if len(toolUses) == 0 {
 				return &Result{Stats: stats}, errors.New("agentloop: tool_use stop with no tool_use blocks")
 			}
+
+			stop, reason := ev.shouldStop()
+			if !stop && iteration == limit {
+				stop, reason = true, fmt.Sprintf("maximum tool iterations (%d) reached", limit)
+			}
+			if stop {
+				return wrapUp(ctx, conv, ev, sendOpts, toolUses, reason, iteration, &stats)
+			}
+
 			stats.ToolCalls += len(toolUses)
 			results := executeBatch(ctx, tools, ev, toolUses)
 			// Persist per tool, in the assistant's tool_use order: a crash
@@ -365,7 +427,54 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: unexpected stop reason %q", resp.StopReason)
 		}
 	}
-	return &Result{Stats: stats}, fmt.Errorf("agentloop: exceeded maximum tool iterations (%d)", maxIterations)
+	// Unreachable: iteration == limit always forces stop above, which returns
+	// via wrapUp before the loop variable can advance past limit. Kept as a
+	// defensive fallback because Go requires a return after the for-loop.
+	return &Result{Stats: stats}, fmt.Errorf("agentloop: exceeded maximum tool iterations (%d)", limit)
+}
+
+// wrapUp ends a turn that hit its iteration cap or ShouldStop guardrail while
+// the model still had pending tool_use blocks. Rather than executing those
+// tools and looping again, or returning a bare Go error the model never sees,
+// it tells the model why through the same tool_result channel it already
+// reads every turn, then forces one final call with no tools offered — so the
+// model is guaranteed to answer in text instead of requesting a tool the loop
+// can't honor. The result is a normal, non-error Result with LimitReached set,
+// carrying whatever the model said on its way out.
+func wrapUp(ctx context.Context, conv *llm.Conversation, ev *Events, sendOpts []llm.SendOption, toolUses []toolUse, reason string, iteration int, stats *Stats) (*Result, error) {
+	notice := fmt.Sprintf("Turn ended: %s. No further tool calls will run this turn — "+
+		"summarize what you've done and what remains, then stop.", reason)
+	results := make([]anthropic.ContentBlockParamUnion, len(toolUses))
+	for i, tu := range toolUses {
+		results[i] = anthropic.NewToolResultBlock(tu.id, notice, true)
+	}
+	if err := conv.AppendUser(ctx, results); err != nil {
+		return &Result{Stats: *stats}, fmt.Errorf("agentloop: persist wrap-up tool results: %w", err)
+	}
+
+	// llm.WithTools(nil) last always wins over sendOpts' own llm.WithTools(defs)
+	// (options apply in order; a later option on the same field overrides an
+	// earlier one) — no tools reach the request, so the model cannot respond
+	// with another tool_use regardless of what it was asked to do.
+	finalOpts := append(append([]llm.SendOption{}, sendOpts...), llm.WithTools(nil))
+	finalIteration := iteration + 1
+	start := time.Now()
+	resp, err := conv.Continue(ctx, finalOpts...)
+	ev.turn(finalIteration, resp, time.Since(start), err)
+	if err != nil {
+		return &Result{Stats: *stats}, fmt.Errorf("agentloop: wrap-up call: %w", err)
+	}
+	stats.Iterations = finalIteration
+	stats.InputTokens += resp.Usage.InputTokens
+	stats.OutputTokens += resp.Usage.OutputTokens
+
+	// Text may legitimately be absent (a sender that ignores the empty tools
+	// list and answers with something else anyway) — that is still not an
+	// error: the guardrail was honored, and an empty wrap-up text is better
+	// than failing a turn whose budget was already respected.
+	text, _ := firstText(resp.Content)
+	ev.text(text)
+	return &Result{Text: text, Stats: *stats, LimitReached: true, LimitReason: reason}, nil
 }
 
 type toolUse struct {

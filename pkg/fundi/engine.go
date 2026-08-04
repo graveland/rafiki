@@ -420,7 +420,7 @@ func (e *Engine) runTurn(text string) {
 	e.em.AgentStart()
 
 	events, streamOpt := e.events()
-	_, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserText(text), streamOpt)
+	result, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserText(text), streamOpt)
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
 	// otherwise make every failure look like an abort.
 	aborted := errors.Is(ctx.Err(), context.Canceled)
@@ -456,6 +456,13 @@ func (e *Engine) runTurn(text string) {
 	case err != nil:
 		slog.Error("agent: turn failed", "conversation", e.conv.ID, "error", err)
 		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+	case result.LimitReached:
+		// Not a failure: the model got a forced-text wrap-up call and
+		// answered (see agentloop.wrapUp) instead of being cut off
+		// mid-loop. Surfaced at Info so an operator (or a future
+		// coordinator watching this child) can tell a budget-limited turn
+		// apart from an ordinary clean completion.
+		slog.Info("agent: turn hit its guardrail and was wrapped up", "conversation", e.conv.ID, "reason", result.LimitReason)
 	}
 	e.em.AgentEnd()
 
@@ -535,7 +542,23 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 	}
 
 	ev := &agentloop.Events{
-		OnTurn: func(resp *anthropic.Message, _ time.Duration, err error) {
+		OnTurn: func(iteration int, resp *anthropic.Message, dur time.Duration, err error) {
+			// The fundi-side equivalent of the proxy's per-turn "llm turn"
+			// log line (pkg/server/proxy.go) — without it, a fundi child's
+			// turns are invisible in the daemon's own logs even though they
+			// are captured identically to a proxied turn in the DB. Fields
+			// are fundi-flavored (child name, loop iteration) rather than an
+			// exact mirror, since a fundi turn is one iteration of a
+			// multi-call tool-use loop, not a single proxied request.
+			if err != nil {
+				slog.Warn("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
+					"model", e.state.ModelID, "iteration", iteration, "latency", dur, "error", err)
+			} else {
+				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
+					"model", e.state.ModelID, "iteration", iteration,
+					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
+					"stop_reason", resp.StopReason, "latency", dur)
+			}
 			// Reset for the next iteration regardless of outcome, BEFORE any
 			// early return below, so a failed or non-streamed iteration never
 			// leaks state into the next conv.Continue call. lastFlush resets
