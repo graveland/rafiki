@@ -13,7 +13,14 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_TAIL_LIMIT, RemoteAgentSessionRuntime, resolveTailLimit } from "./runtime.ts";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+    DEFAULT_TAIL_LIMIT,
+    type ModelFinder,
+    RemoteAgentSessionRuntime,
+    resolveModelFromRegistry,
+    resolveTailLimit,
+} from "./runtime.ts";
 
 // ─── Server harness (mirrors client.test.ts) ──────────────────────────────────
 
@@ -307,6 +314,59 @@ describe("resolveTailLimit", () => {
         expect(resolveTailLimit("100")).toBe(100);
         expect(resolveTailLimit("0")).toBe(0);
         expect(resolveTailLimit("-1")).toBe(-1);
+    });
+});
+
+// ─── Model resolution ───────────────────────────────────────────────────────
+//
+// Regression coverage for the footer showing "(undefined)" and "0.0%/0" for
+// every fundi/claude child: resolveModelFromRegistry used to ignore its
+// registry argument entirely and return { id: modelStr, name: modelStr },
+// packing the whole "provider/id" string into `id` and leaving `provider`
+// (and contextWindow, reasoning, ...) unset. InteractiveMode's footer reads
+// state.model.provider directly.
+
+describe("resolveModelFromRegistry", () => {
+    it("returns the registry's real Model on a hit — provider/id split on the FIRST slash", () => {
+        const found: Model<Api> = {
+            provider: "deepseek",
+            id: "deepseek-v4-pro",
+            contextWindow: 128000,
+        } as unknown as Model<Api>;
+        const registry: ModelFinder = {
+            find: (provider, modelId) => (provider === "deepseek" && modelId === "deepseek-v4-pro" ? found : undefined),
+        };
+
+        const model = resolveModelFromRegistry(registry, "deepseek/deepseek-v4-pro");
+
+        expect(model).toBe(found);
+    });
+
+    it("on a registry miss, still splits provider from id instead of packing the whole string into id", () => {
+        const registry: ModelFinder = { find: () => undefined };
+
+        const model = resolveModelFromRegistry(registry, "moonshotai/kimi-k3");
+
+        expect((model as unknown as { provider: string; id: string }).provider).toBe("moonshotai");
+        expect((model as unknown as { provider: string; id: string }).id).toBe("kimi-k3");
+    });
+
+    it("splits on the FIRST slash only — an id with its own slashes stays whole", () => {
+        const registry: ModelFinder = { find: () => undefined };
+
+        const model = resolveModelFromRegistry(registry, "openrouter/org/sub-model");
+
+        expect((model as unknown as { provider: string; id: string }).provider).toBe("openrouter");
+        expect((model as unknown as { provider: string; id: string }).id).toBe("org/sub-model");
+    });
+
+    it("a bare id with no slash falls back to the old stub shape (no provider to split out)", () => {
+        const registry: ModelFinder = { find: () => undefined };
+
+        const model = resolveModelFromRegistry(registry, "no-provider-here");
+
+        expect((model as unknown as { id: string }).id).toBe("no-provider-here");
+        expect((model as unknown as { provider?: string }).provider).toBeUndefined();
     });
 });
 

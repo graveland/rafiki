@@ -402,15 +402,34 @@ async function fetchChildMetadata(client: Client, childId: string): Promise<Chil
     };
 }
 
+/** The one ModelRegistry method resolveModelFromRegistry actually needs — narrowed so it's trivial to fake in a test. */
+export interface ModelFinder {
+    find(provider: string, modelId: string): Model<Api> | undefined;
+}
+
 /**
- * Resolve a model from the registry, or synthesise a minimal stub.
+ * Resolve a model from the registry, splitting the daemon's provider-qualified
+ * identifier string (e.g. "anthropic/claude-sonnet-4", "deepseek/deepseek-v4-pro")
+ * on its FIRST "/" — mirroring rafiki's own convention exactly (see
+ * pkg/fundi/config.go's splitModel: the id half may itself contain further
+ * slashes, e.g. an OpenRouter "org/sub/model" id).
  *
- * The daemon provides a model identifier string (e.g. "anthropic/claude-sonnet-4").
- * In v1 the registry lookup is best-effort; a minimal stub is returned when the
- * registry has no matching entry.
+ * A registry hit returns the real Model (contextWindow, reasoning, etc. all
+ * populated); a miss (an OpenRouter-routed id pi's own catalog doesn't carry)
+ * still returns provider+id split apart rather than the previous "v1" stub,
+ * which packed the whole string into `id` and left `provider` unset —
+ * InteractiveMode's footer reads `state.model.provider` directly and rendered
+ * "(undefined)" for every fundi/claude child, with the 0% / 0-token context
+ * stats that come from contextWindow being equally unset.
  */
-function resolveModelFromRegistry(_registry: ModelRegistry, modelStr: string): Model<Api> {
-    return { id: modelStr, name: modelStr } as unknown as Model<Api>;
+export function resolveModelFromRegistry(registry: ModelFinder, modelStr: string): Model<Api> {
+    const slash = modelStr.indexOf("/");
+    if (slash < 0) {
+        return { id: modelStr, name: modelStr } as unknown as Model<Api>;
+    }
+    const provider = modelStr.slice(0, slash);
+    const id = modelStr.slice(slash + 1);
+    return registry.find(provider, id) ?? ({ id, provider, name: modelStr } as unknown as Model<Api>);
 }
 
 /**
