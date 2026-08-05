@@ -362,14 +362,22 @@ func analyzeOrphans(history []store.Message) ([]orphan, *string) {
 // ev.ShouldStop) never gets hard-killed: see wrapUp.
 func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Events, opts ...llm.SendOption) (*Result, error) {
 	defs := tools.Definitions()
-	sendOpts := append([]llm.SendOption{llm.WithTools(defs)}, opts...)
+	baseOpts := append([]llm.SendOption{llm.WithTools(defs)}, opts...)
 	limit := ev.maxIterations()
 	var stats Stats
+	baseCap := conv.OutputCap()
+	bumped := int64(0) // per-iteration bump; 0 = use conversation default
 
 	for iteration := 1; iteration <= limit; iteration++ {
 		stats.Iterations = iteration
 		start := time.Now()
-		resp, err := conv.Continue(ctx, sendOpts...)
+		turnOpts := baseOpts
+		if bumped > 0 {
+			// Append last so it overrides any baseOpts max_tokens (WithMaxTokens
+			// is a SendOption, and later options win for same-field config).
+			turnOpts = append(append([]llm.SendOption{}, baseOpts...), llm.WithMaxTokens(bumped))
+		}
+		resp, err := conv.Continue(ctx, turnOpts...)
 		ev.turn(iteration, resp, time.Since(start), err)
 		if err != nil {
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: iteration %d: %w", iteration, err)
@@ -384,6 +392,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			return &Result{Text: text, Stats: stats}, nil
 
 		case "tool_use":
+			bumped = 0 // model had room to produce a tool call — reset bump
 			toolUses := extractToolUses(resp.Content)
 			if len(toolUses) == 0 {
 				return &Result{Stats: stats}, errors.New("agentloop: tool_use stop with no tool_use blocks")
@@ -394,25 +403,49 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 				stop, reason = true, fmt.Sprintf("maximum tool iterations (%d) reached", limit)
 			}
 			if stop {
-				return wrapUp(ctx, conv, ev, sendOpts, toolUses, reason, iteration, &stats)
+				return wrapUp(ctx, conv, ev, baseOpts, toolUses, reason, iteration, &stats)
 			}
 
 			stats.ToolCalls += len(toolUses)
 			results := executeBatch(ctx, tools, ev, toolUses)
-			// Persist per tool, in the assistant's tool_use order: a crash
-			// mid-persist leaves an in-order prefix; unpersisted results
-			// become orphans that Resume resolves synthetically.
 			for _, r := range results {
 				if err := conv.AppendUser(ctx, []anthropic.ContentBlockParamUnion{r}); err != nil {
 					return &Result{Stats: stats}, fmt.Errorf("agentloop: persist tool result: %w", err)
 				}
 			}
-			// Mid-turn steer seam: inject any pending user content after the
-			// batch's results are persisted, before the next Continue.
 			if ev != nil && ev.PendingUser != nil {
 				if extra := ev.PendingUser(); len(extra) > 0 {
 					if err := conv.AppendUser(ctx, extra); err != nil {
 						return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content: %w", err)
+					}
+				}
+			}
+
+		case "max_tokens":
+			// The model hit the output cap. Bump it for the next iteration so the
+			// continuation isn't immediately truncated again.
+			if bumped == 0 {
+				bumped = baseCap * 2
+			} else {
+				bumped *= 2
+			}
+			// Tool calls from a truncated message may have incomplete arguments —
+			// fail them all so the model can re-issue them on the next turn.
+			if toolUses := extractToolUses(resp.Content); len(toolUses) > 0 {
+				stats.ToolCalls += len(toolUses)
+				for _, tu := range toolUses {
+					result := anthropic.NewToolResultBlock(tu.id,
+						fmt.Sprintf("Response hit output token limit — tool call %q may have truncated arguments. Re-issue if needed.", tu.name),
+						true)
+					if err := conv.AppendUser(ctx, []anthropic.ContentBlockParamUnion{result}); err != nil {
+						return &Result{Stats: stats}, fmt.Errorf("agentloop: persist truncated tool result: %w", err)
+					}
+				}
+				if ev != nil && ev.PendingUser != nil {
+					if extra := ev.PendingUser(); len(extra) > 0 {
+						if err := conv.AppendUser(ctx, extra); err != nil {
+							return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content: %w", err)
+						}
 					}
 				}
 			}

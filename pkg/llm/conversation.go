@@ -353,6 +353,11 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	return resp, nil
 }
 
+// OutputCap returns the conversation's per-turn output token budget (the
+// max_tokens value sent to the upstream API). Callers can use this to
+// auto-bump the cap when a turn is truncated.
+func (conv *Conversation) OutputCap() int64 { return conv.cfg.maxTokens }
+
 // History returns the stored messages (ordinal order) — the agent loop's
 // orphan-analysis input.
 func (conv *Conversation) History(ctx context.Context) ([]store.Message, error) {

@@ -183,6 +183,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 	return fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
+		MaxOutputTokens:      f.maxOutputTokens,
 		SystemPromptOverride: f.systemPrompt,
 		AppendSystemPrompt:   f.appendSystemPrompt,
 		Cwd:                  cwd,

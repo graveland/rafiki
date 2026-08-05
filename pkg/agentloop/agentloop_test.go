@@ -578,6 +578,79 @@ func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
 	}
 }
 
+// A max_tokens stop during a Run (not Resume) is not an error — the loop
+// continues and the model gets another turn to finish. The continuation
+// request receives a doubled output cap so the model doesn't immediately
+// hit the limit again.
+func TestDriveHandlesMaxTokensTextOnly(t *testing.T) {
+	pool := testPool(t)
+	sender := &trackingSender{scripts: []string{
+		`{"id":"msg1","type":"message","role":"assistant","model":"m",
+		  "content":[{"type":"text","text":"I'll start by "}],
+		  "stop_reason":"max_tokens","usage":{"input_tokens":10,"output_tokens":3}}`,
+		respEndTurn,
+	}}
+	conv := newConv(t, pool, sender)
+	result, err := Run(context.Background(), conv, &fakeTools{}, nil, llm.UserText("go"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Text != "final analysis" {
+		t.Errorf("Text = %q, want 'final analysis'", result.Text)
+	}
+	params := sender.allParams()
+	if len(params) != 2 {
+		t.Fatalf("got %d calls, want 2", len(params))
+	}
+	// First call uses the conversation default (4096).
+	if params[0].MaxTokens != 4096 {
+		t.Errorf("call 0 MaxTokens = %d, want 4096 (conversation default)", params[0].MaxTokens)
+	}
+	// Second call is the bump: 4096 * 2 = 8192.
+	if params[1].MaxTokens != 8192 {
+		t.Errorf("call 1 MaxTokens = %d, want 8192 (bump after truncation)", params[1].MaxTokens)
+	}
+}
+
+// When max_tokens truncates a tool_use turn, every tool call must be failed
+// (is_error) — the model had its output cap hit and the arguments may be
+// incomplete, so executing them is unsafe.
+func TestDriveHandlesMaxTokensWithToolCalls(t *testing.T) {
+	pool := testPool(t)
+	sender := &scriptedSender{scripts: []string{
+		`{"id":"msg1","type":"message","role":"assistant","model":"m",
+		  "content":[{"type":"tool_use","id":"toolu_x","name":"alpha","input":{"k":"partial"}},
+		             {"type":"tool_use","id":"toolu_y","name":"beta","input":{"k":"also_partial"}}],
+		  "stop_reason":"max_tokens","usage":{"input_tokens":20,"output_tokens":8}}`,
+		respEndTurn,
+	}}
+	tools := &fakeTools{}
+	conv := newConv(t, pool, sender)
+	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("go"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// No tools should have been executed — both were truncated.
+	if got := tools.executedNames(); len(got) != 0 {
+		t.Errorf("executed = %v, want none (truncated tool calls must not execute)", got)
+	}
+	if result.Text != "final analysis" {
+		t.Errorf("Text = %q, want 'final analysis'", result.Text)
+	}
+	// The conversation must contain is_error results for both tools.
+	rows := messageRows(t, pool, conv.ID)
+	found := 0
+	for _, row := range rows {
+		if strings.Contains(row, "tool_result") && strings.Contains(row, `"is_error": true`) &&
+			strings.Contains(row, "truncated") {
+			found++
+		}
+	}
+	if found != 2 {
+		t.Errorf("found %d is_error tool_results with 'truncated' in the message, want 2", found)
+	}
+}
+
 // A failing tool becomes an is_error result and the loop continues — never a
 // loop error.
 func TestToolErrorBecomesIsErrorResultAndLoopContinues(t *testing.T) {

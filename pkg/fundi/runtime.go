@@ -21,6 +21,7 @@ import (
 type RuntimeOptions struct {
 	Model                string
 	ThinkingBudget       int64
+	MaxOutputTokens      int // 0 = default (4096); per-turn output cap sent to upstream
 	SystemPromptOverride string
 	AppendSystemPrompt   string
 	Cwd                  string // must be absolute
@@ -151,6 +152,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	cfg := Config{
 		Model:                opts.Model,
 		ThinkingBudget:       opts.ThinkingBudget,
+		MaxOutputTokens:      opts.MaxOutputTokens,
 		SystemPromptOverride: opts.SystemPromptOverride,
 		AppendSystemPrompt:   opts.AppendSystemPrompt,
 		ContextFiles:         contextFiles,

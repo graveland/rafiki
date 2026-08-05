@@ -61,8 +61,15 @@ type Config struct {
 	// still use) is passed straight to rafiki uninterpreted.
 	Model string
 	// ThinkingBudget is the resolved extended-thinking token budget (0
-	// disables it) - see ThinkingBudgetFor.
+	// disables it) — see ThinkingBudgetFor.
 	ThinkingBudget int64
+
+	// MaxOutputTokens is the per-turn output cap sent as max_tokens to the
+	// upstream API. Zero means use the default (4096). This is NOT a hard
+	// limit the agent enforces — the upstream enforces it — and hitting it
+	// is recoverable: the agent loop fails any truncated tool calls and
+	// continues to give the model another turn budget.
+	MaxOutputTokens int
 
 	// System prompt sections assembled via BuildSystemPrompt.
 	// SystemPromptOverride replaces the runtime's default base prompt when
@@ -163,6 +170,9 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	}
 	if c.Ref != "" {
 		convOpts = append(convOpts, llm.ByExternalRef(c.Ref))
+	}
+	if c.MaxOutputTokens > 0 {
+		convOpts = append(convOpts, llm.MaxTokens(int64(c.MaxOutputTokens)))
 	}
 	// rafiki routes on the model id alone (an "anthropic/" prefix always
 	// wins native Anthropic; SendParams zeroes the fallback on its own for an

@@ -35,6 +35,7 @@ func (s *stringSliceFlag) Set(v string) error {
 type agentFlags struct {
 	model              string
 	thinking           string
+	maxOutputTokens    int
 	systemPrompt       string
 	appendSystemPrompt string
 	noContextFiles     bool
@@ -189,6 +190,7 @@ func runAgent(args []string) int {
 	opts := fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
+		MaxOutputTokens:      f.maxOutputTokens,
 		SystemPromptOverride: f.systemPrompt,
 		AppendSystemPrompt:   f.appendSystemPrompt,
 		Cwd:                  cwd,
