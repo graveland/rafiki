@@ -786,3 +786,126 @@ func TestSendStreaming_RecordsResultIntoBreaker(t *testing.T) {
 		t.Error("streamed failure was not recorded — the breaker cannot open from the streaming path")
 	}
 }
+
+func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
+	sender := &fakeStreamingSender{scripts: []streamScript{
+		{openErr: rateLimitErr()},
+		{events: textStreamEvents("after retry")},
+	}}
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, sender),
+		WithDefaultModel("claude-haiku-4-5"),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.modelGate = NewModelGate(10*time.Millisecond, 50*time.Millisecond)
+	conv, err := c.Conversation(context.Background(),
+		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var seen []string
+	msg, err := conv.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(ev anthropic.MessageStreamEventUnion) {
+			if d := textOf(ev); d != "" {
+				seen = append(seen, d)
+			}
+		}))
+	if err != nil {
+		t.Fatalf("Send with rate-limit retry: %v", err)
+	}
+	if got := textOfMessage(msg); got != "after retry" {
+		t.Errorf("message = %q, want %q", got, "after retry")
+	}
+	if got := strings.Join(seen, ""); got != "after retry" {
+		t.Errorf("handler saw %q, want only the retry's content", got)
+	}
+	if sender.streamCalls != 2 {
+		t.Errorf("streamCalls = %d, want 2 (failed + retry)", sender.streamCalls)
+	}
+}
+
+func TestSend_StreamDoesNotRetryAfterDeliveryEvenForRateLimit(t *testing.T) {
+	sender := &fakeStreamingSender{scripts: []streamScript{
+		{
+			events:   []ssestream.Event{messageStartEvent(), contentBlockStartEvent(), textDeltaEvent("partial")},
+			trailErr: rateLimitErr(),
+		},
+		{events: textStreamEvents("SHOULD NOT APPEAR")},
+	}}
+	conv := newTestConversation(t, sender)
+
+	var seen []string
+	_, err := conv.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(ev anthropic.MessageStreamEventUnion) {
+			if d := textOf(ev); d != "" {
+				seen = append(seen, d)
+			}
+		}))
+	if err == nil {
+		t.Fatal("Send must fail: delivered content + 429 cannot retry")
+	}
+	if isRL, _ := isRateLimit(err); !isRL {
+		t.Errorf("expected rate limit error to surface, got: %v", err)
+	}
+	if sender.streamCalls != 1 {
+		t.Errorf("streamCalls = %d, want 1 (must NOT retry after delivery)", sender.streamCalls)
+	}
+	if strings.Join(seen, "") != "partial" {
+		t.Errorf("handler saw %q, want only the first attempt's partial content", strings.Join(seen, ""))
+	}
+}
+
+func TestSend_StreamDoesNotRetryNonRateLimitErrors(t *testing.T) {
+	sender := &fakeStreamingSender{scripts: []streamScript{
+		{openErr: authErr()},
+		{events: textStreamEvents("SHOULD NOT APPEAR")},
+	}}
+	conv := newTestConversation(t, sender)
+
+	_, err := conv.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+	if err == nil {
+		t.Fatal("Send must fail: 401 is not retryable")
+	}
+	if sender.streamCalls != 1 {
+		t.Errorf("streamCalls = %d, want 1 (non-429 must not retry)", sender.streamCalls)
+	}
+}
+
+func TestSend_StreamRespectsRateLimitPolicyMaxRetries(t *testing.T) {
+	gate := NewModelGate(10*time.Millisecond, 50*time.Millisecond)
+	sender := &fakeStreamingSender{scripts: []streamScript{
+		{openErr: rateLimitErr()},
+	}}
+
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, sender),
+		WithDefaultModel("claude-haiku-4-5"),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.modelGate = gate
+
+	conv, err := c.Conversation(context.Background(),
+		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
+		WithRateLimitPolicy(RateLimitPolicy{MaxRetries: 2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = conv.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+	if err == nil {
+		t.Fatal("Send must fail after 2 retries")
+	}
+	// 1 initial + 2 retries = 3 total.
+	if sender.streamCalls != 3 {
+		t.Errorf("streamCalls = %d, want 3 (1 initial + 2 retries)", sender.streamCalls)
+	}
+}

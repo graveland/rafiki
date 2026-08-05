@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,27 @@ func promptTooLargeErr() *anthropic.Error {
 	e.Request = req
 	e.Response = &http.Response{StatusCode: http.StatusBadRequest}
 	_ = e.UnmarshalJSON([]byte(`{"error":{"type":"invalid_request_error","message":"prompt is too long: too many tokens"}}`))
+	return e
+}
+
+func rateLimitErr() *anthropic.Error {
+	e := &anthropic.Error{StatusCode: http.StatusTooManyRequests}
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	e.Request = req
+	e.Response = &http.Response{StatusCode: http.StatusTooManyRequests}
+	_ = e.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error"}}`))
+	return e
+}
+
+func rateLimitErrWithRetryAfter(secs int) *anthropic.Error {
+	e := &anthropic.Error{StatusCode: http.StatusTooManyRequests}
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	e.Request = req
+	e.Response = &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{"Retry-After": {strconv.Itoa(secs)}},
+	}
+	_ = e.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error"}}`))
 	return e
 }
 
