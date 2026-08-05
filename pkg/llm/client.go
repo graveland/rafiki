@@ -358,7 +358,31 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 // is its own SendParams call and so its own turn row) — two real requests
 // were made here (one streamed and rejected, one non-streamed and
 // resolved), so two rows accurately reflect that.
-func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
+func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (*anthropic.Message, bool, bool, error) {
+	rlp := meta.RateLimit.effective()
+	model := string(params.Model)
+
+	for attempt := 0; attempt <= rlp.MaxRetries; attempt++ {
+		msg, attempted, delivered, err := c.sendStreamingAttempt(ctx, meta, params, handler)
+		if err == nil || !attempted {
+			return msg, attempted, delivered, err
+		}
+		// A streaming error with delivered==true is never retryable.
+		if delivered {
+			return msg, attempted, delivered, err
+		}
+		isRL, retryAfter := isRateLimit(err)
+		if !isRL || attempt >= rlp.MaxRetries {
+			return msg, attempted, delivered, err
+		}
+		c.modelGate.record429(model, retryAfter)
+		c.logger.Warn("rate limit hit; retrying after backoff",
+			"model", model, "attempt", attempt+1, "max", rlp.MaxRetries)
+	}
+	return nil, true, false, fmt.Errorf("llm: rate limit retries exhausted for model %s", model)
+}
+
+func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
 	ctx, span, primary, fallbacks, params := c.prepareSend(ctx, meta, params)
 	defer span.End()
 
@@ -462,6 +486,7 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 	}
 
 	recordPrimaryResult(breaker, now, nil)
+	c.modelGate.recordSuccess(string(params.Model))
 	latency := int(time.Since(start).Milliseconds())
 	span.SetAttributes(
 		attribute.String("rafiki.upstream", string(primary)),
