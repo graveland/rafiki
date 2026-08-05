@@ -341,6 +341,7 @@ check-naming: ## Fail if `fundi` survives anywhere it should not.
 	  | grep -v "^\./rafiki\.md" \
 	  | grep -v "^\./rafiki-prev\.md" \
 	  | grep -v "^\./docs/MIGRATING\.md" \
+  | grep -v "^\./docs/rafiki\.md" \
 	  | grep -v "^\./cmd/rafiki/cmd_create\.go" \
 	  | grep -v "^\./cmd/rafikid/proxy\.go" \
 	  | grep -v "^\./pkg/paths/envvar\.go" \
