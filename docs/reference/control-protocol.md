@@ -216,23 +216,33 @@ Response:
   "data": {
     "children": [
       {
-        "childId":     "c_01HX...",
-        "pid":         12345,             // null when status == "exited"
-        "cwd":         "/Users/.../dev",
-        "name":        "afk-impl",        // user-visible label, mutable
-        "model":       "anthropic/claude-sonnet-4",
-        "sessionId":   "abc123",          // pi internal
-        "sessionFile": "/Users/.../session-abc.jsonl",
-        "status":      "streaming",       // see §11
-        "startedAt":   1716636789,
-        "lastActivity":1716636890,
-        "exitCode":    null,              // populated when exited
-        "exitSignal":  null
+        "childId":            "c_01HX...",
+        "pid":                12345,             // null when status == "exited"
+        "cwd":                "/Users/.../dev",
+        "name":               "afk-impl",        // user-visible label, mutable
+        "model":              "anthropic/claude-sonnet-4",
+        "sessionId":          "abc123",          // pi internal
+        "sessionFile":        "/Users/.../session-abc.jsonl",
+        "status":             "streaming",       // see §11
+        "startedAt":          1716636789,
+        "lastActivity":       1716636890,
+        "exitCode":           null,              // populated when exited
+        "exitSignal":         null,
+        "contextWindow":      200000,            // omitted when the daemon's
+        "maxCompletionTokens":64000               // model catalog has no entry for "model"
       }
     ]
   }
 }
 ```
+
+`contextWindow`/`maxCompletionTokens` come from the daemon's own shared
+model catalog (`routing.ModelCatalog.ContextWindow`, backed by OpenRouter's
+live model list — the same data source pricing already uses), independent
+of whatever static model list a client-side TUI carries. Both are omitted
+(zero value, `omitempty`) when the catalog has no entry for the child's
+`model` — no catalog configured, a model the catalog hasn't seen, or a
+cold/stale cache.
 
 Default sort: `startedAt` desc. Entries in the grace window (status
 `exited`) are included by default; filter on `status` to narrow.
