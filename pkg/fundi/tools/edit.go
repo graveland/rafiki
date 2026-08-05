@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	editDescription = "Replace text in a file. path must be absolute and must have been read " +
-		"(via the read tool) since its last on-disk modification. old_string must " +
-		"match the file's current contents exactly once unless replace_all is set, " +
-		"in which case every occurrence is replaced."
+	editDescription = "Replace text in a file. Use parameter `path` (absolute path, required) " +
+		"— the file must have been read via the read tool in this session, or the " +
+		"edit will fail. `old_string` must match the file's current contents " +
+		"exactly once; set `replace_all: true` to replace every occurrence instead."
 	editSchema = `{
 		"type": "object",
 		"properties": {
