@@ -553,13 +553,13 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			if err != nil {
 				slog.Warn("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", e.state.Provider, "model", e.state.ModelID, "iteration", iteration,
-					"latency", dur, "error", err)
+					"latency", dur.Round(100*time.Millisecond), "error", err)
 			} else {
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", e.state.Provider, "model", e.state.ModelID, "iteration", iteration,
 					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
 					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
-					"stop_reason", resp.StopReason, "latency", dur)
+					"stop_reason", resp.StopReason, "latency", dur.Round(100*time.Millisecond))
 			}
 			// Reset for the next iteration regardless of outcome, BEFORE any
 			// early return below, so a failed or non-streamed iteration never
