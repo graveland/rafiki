@@ -566,7 +566,7 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
 					"cache_pct", cachePct,
 					"stop_reason", resp.StopReason, "latency", dur.Round(100*time.Millisecond),
-					"cost_turn", turnCost.Total, "cost_total", runningTotal)
+					"cost_turn", fmt.Sprintf("%.6f", turnCost.Total), "cost_total", fmt.Sprintf("%.2f", runningTotal))
 			}
 			// Reset for the next iteration regardless of outcome, BEFORE any
 			// early return below, so a failed or non-streamed iteration never
