@@ -718,8 +718,28 @@ export class RemoteAgentSession {
 
     // ── Implemented: prompting ────────────────────────────────────────────────
 
-    /** Send a prompt to the daemon-owned pi child. */
+    /**
+     * Send a prompt to the daemon-owned pi child.
+     *
+     * When streamingBehavior is set, routes to steer() / followUp() so the
+     * daemon sends a steer/follow_up frame rather than a prompt — the fundi
+     * engine injects those at the next tool-call boundary instead of queuing
+     * them as a new turn.  This mirrors pi's own AgentSession.prompt(), which
+     * calls _queueSteer() / _queueFollowUp() internally when isStreaming is
+     * true and streamingBehavior is supplied (the TUI always sets it while
+     * the agent is active).
+     */
     async prompt(text: string, options?: PromptOptions): Promise<void> {
+        // Mid-turn routing: the TUI sets streamingBehavior when the agent is
+        // active, and pi's native prompt() delegates to steal/followUp in that
+        // case.  Do the same here so a steer lands at the next tool iteration
+        // rather than waiting for the whole turn to finish.
+        if (options?.streamingBehavior === "steer") {
+            return this.steer(text, options?.images);
+        }
+        if (options?.streamingBehavior === "followUp") {
+            return this.followUp(text, options?.images);
+        }
         const resp = await this._client.request({
             type: "ctrl_send",
             childId: this._childId,
@@ -727,7 +747,6 @@ export class RemoteAgentSession {
                 type: "prompt",
                 message: text,
                 images: options?.images,
-                streamingBehavior: options?.streamingBehavior,
                 source: options?.source,
             },
         });

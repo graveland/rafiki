@@ -553,6 +553,11 @@ func (c *Child) supervise() {
 			out := c.provider.EncodeOutbound(frame)
 			if out == nil {
 				// Provider dropped a frame unsupported by this protocol.
+				// The sender already got a success response (Send only
+				// checks channel acceptance), so this is the only
+				// visibility into a silently-lost command.
+				slog.Warn("frame dropped by provider (unsupported)", "child", c.ID,
+					"frame_type", frameType(frame))
 				continue
 			}
 			if _, err := c.stdin.Write(out); err != nil {
@@ -706,6 +711,22 @@ func isMessageUpdate(line []byte) bool {
 		return false
 	}
 	return hdr.Type == "message_update"
+}
+
+// frameType extracts the "type" field from a JSON-encoded outbound frame for
+// logging.  Returns "?" on parse failure; the caller must handle the nil-output
+// path, not this helper.
+func frameType(line []byte) string {
+	var hdr struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(line, &hdr); err != nil {
+		return "?"
+	}
+	if hdr.Type == "" {
+		return "?"
+	}
+	return hdr.Type
 }
 
 // handleFrame routes one stdout line through the child's ProtocolProvider and
