@@ -224,7 +224,10 @@ func skillsInMessage(role string, content []byte) []string {
 	return dedupe(skills)
 }
 
-// skillsInContent scans content blocks for {"type":"tool_use","name":"Skill","input":{"skill":"..."}}.
+// skillsInContent scans content blocks for {"type":"tool_use","name":<skill tool>,"input":{"skill":"..."}}.
+// The tool name is matched case-insensitively: Claude Code's tool is "Skill"
+// while fundi's is "skill" (pkg/fundi/tools/skill.go), and both kinds of
+// child's transcripts land in this export path.
 func skillsInContent(content []byte) []string {
 	var blocks []struct {
 		Type  string          `json:"type"`
@@ -236,7 +239,7 @@ func skillsInContent(content []byte) []string {
 	}
 	var out []string
 	for _, b := range blocks {
-		if b.Type == "tool_use" && b.Name == "Skill" {
+		if b.Type == "tool_use" && strings.EqualFold(b.Name, "skill") {
 			var in struct {
 				Skill string `json:"skill"`
 			}

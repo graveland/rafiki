@@ -150,6 +150,39 @@ func TestDiscoverSkillsMissingDirIsNotFatal(t *testing.T) {
 	}
 }
 
+// TestDiscoverSkillsFollowsSymlinks pins the symlink-traversal behaviour: a
+// skills dir assembled from symlinks (e.g. ~/.config/rafiki/skills entries
+// pointing into ~/.claude/skills, the layout ~/.claude-work/skills itself
+// uses) must discover the linked skill - DirEntry.IsDir reports the link
+// itself, not the target, so a symlink to a directory is skipped unless the
+// entry is stat'ed. A broken symlink must be skipped, not fatal.
+func TestDiscoverSkillsFollowsSymlinks(t *testing.T) {
+	real := t.TempDir()
+	writeSkill(t, real, "linked", "linked", "linked description", "linked body")
+
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(real, "linked"), filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(real, "gone"), filepath.Join(dir, "broken")); err != nil {
+		t.Fatal(err)
+	}
+
+	skills, err := DiscoverSkills([]string{dir}, nil)
+	if err != nil {
+		t.Fatalf("expected the broken symlink to be skipped, not fatal: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "linked" {
+		t.Fatalf("expected the symlinked skill to be discovered, got %+v", skills)
+	}
+	// Dir/Path point at the symlink inside the scanned dir, not the resolved
+	// target: reads through them work either way, and the path the skill tool
+	// reports as the skill's base directory is the one the user configured.
+	if skills[0].Dir != filepath.Join(dir, "linked") {
+		t.Fatalf("expected Dir to be the symlink path, got %q", skills[0].Dir)
+	}
+}
+
 // TestSkillsInventoryRendering covers the "- name: description" line format
 // consumed by BuildSystemPrompt's SkillsInventory section.
 func TestSkillsInventoryRendering(t *testing.T) {

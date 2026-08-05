@@ -69,9 +69,18 @@ func DiscoverSkills(dirs []string, only []string) ([]SkillMeta, error) {
 
 		var names []string
 		for _, e := range entries {
-			if e.IsDir() {
-				names = append(names, e.Name())
+			// os.Stat follows symlinks; e.IsDir does not (a DirEntry
+			// reports the link itself). A skills dir assembled from
+			// symlinks - e.g. ~/.config/rafiki/skills entries pointing
+			// into ~/.claude/skills or a plugin cache, matching how
+			// Claude Code traverses its own skills dir - must discover
+			// the target, not skip the link. A broken symlink fails
+			// Stat and is skipped like any other non-skill entry.
+			info, err := os.Stat(filepath.Join(dir, e.Name()))
+			if err != nil || !info.IsDir() {
+				continue
 			}
+			names = append(names, e.Name())
 		}
 		sort.Strings(names)
 

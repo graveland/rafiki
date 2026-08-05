@@ -66,6 +66,27 @@ func TestExport_SkillUsage(t *testing.T) {
 	}
 }
 
+// TestSkillsInContentToolNameCase pins the case-insensitive skill-tool match:
+// Claude Code's transcripts carry name "Skill" while fundi's carry "skill"
+// (pkg/fundi/tools/skill.go registers the lowercase spelling) — both must be
+// detected. Pure (no pool) so it cannot silently skip without RAFIKI_TEST_DSN.
+func TestSkillsInContentToolNameCase(t *testing.T) {
+	for _, name := range []string{"Skill", "skill", "SKILL"} {
+		content := `[{"type":"tool_use","name":"` + name + `","input":{"skill":"brainstorming"}}]`
+		got := skillsInContent([]byte(content))
+		if len(got) != 1 || got[0] != "brainstorming" {
+			t.Errorf("tool name %q: skillsInContent = %v, want [brainstorming]", name, got)
+		}
+	}
+
+	// A non-skill tool_use (even one with a "skill"-shaped input key) must not match.
+	content := `[{"type":"tool_use","name":"bash","input":{"skill":"brainstorming"}},` +
+		`{"type":"tool_use","name":"skilled","input":{"skill":"brainstorming"}}]`
+	if got := skillsInContent([]byte(content)); len(got) != 0 {
+		t.Errorf("non-skill tools: skillsInContent = %v, want empty", got)
+	}
+}
+
 func TestExport_AttachesTurnMetrics(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)
