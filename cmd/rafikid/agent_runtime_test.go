@@ -138,10 +138,11 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 	}
 }
 
-// TestAgentRunnerEnvOverlay proves the two names an in-process child can
-// actually receive from req.Env (ANTHROPIC_API_KEY/OPENROUTER_API_KEY) reach
-// RuntimeOptions, that req.Env wins over the ambient daemon environment, and
-// that an explicit req.APIKey still wins over a forwarded req.Env value
+// TestAgentRunnerEnvOverlay proves that forwarded env vars reach
+// RuntimeOptions.Env and that API keys are extracted into the named fields
+// (AnthropicAPIKey/OpenRouterAPIKey) rather than landing in Env where
+// os.Setenv would expose them to subprocesses. Also proves that
+// req.APIKey wins over a forwarded req.Env value
 // (daemon env < forwarded env < explicit key).
 func TestAgentRunnerEnvOverlay(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "ambient-anthropic")
@@ -166,6 +167,16 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 	}
 	if ro.OpenRouterAPIKey != "ambient-openrouter" {
 		t.Errorf("OpenRouterAPIKey = %q, want the ambient daemon env preserved (req.Env didn't touch this key)", ro.OpenRouterAPIKey)
+	}
+	// API keys must NOT land in Env where os.Setenv would expose them.
+	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} {
+		if _, ok := ro.Env[key]; ok {
+			t.Errorf("Env[%q] should be absent (API keys must not reach os.Setenv)", key)
+		}
+	}
+	// Non-API env vars must reach Env.
+	if got := ro.Env["http_proxy"]; got != "http://example.invalid:8080" {
+		t.Errorf("Env[http_proxy] = %q, want http://example.invalid:8080", got)
 	}
 
 	// An explicit req.APIKey must still win over a forwarded req.Env value.

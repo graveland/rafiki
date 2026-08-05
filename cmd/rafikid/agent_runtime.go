@@ -105,18 +105,21 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// none), but it CAN forward the caller's env vars through os.Setenv at
 	// engine startup: the caller's shell env is identical across all of that
 	// caller's children, and the tools that spawn subprocesses (bash, MCP)
-	// inherit them from the daemon process environment. API keys are also
+	// inherit them from the daemon process environment.
+	//
+	// API keys are deliberately NOT forwarded through os.Setenv — they are
 	// extracted into the RuntimeOptions named fields below so the runtime
-	// (which reads them by name) doesn't depend on the process environment
-	// alone. Daemon env < forwarded env < explicit key.
+	// reads them directly without exposing them to subprocesses. Daemon env <
+	// forwarded env < explicit key.
 	ro.Env = make(map[string]string, len(req.Env))
 	for k, v := range req.Env {
-		ro.Env[k] = v
 		switch k {
 		case "ANTHROPIC_API_KEY":
 			ro.AnthropicAPIKey = v
 		case "OPENROUTER_API_KEY":
 			ro.OpenRouterAPIKey = v
+		default:
+			ro.Env[k] = v
 		}
 	}
 
