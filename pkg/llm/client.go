@@ -142,6 +142,7 @@ type SendMeta struct {
 	DrivenBy         store.DrivenBy
 	Owner            string
 	Persona          string
+	Name             string
 	ExternalRef      string
 	Ordinal          int
 	Source           string
@@ -653,7 +654,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	}
 	convRef := routing.ConversationRef{
 		ID: meta.ConversationID, OriginEntrypoint: meta.OriginEntrypoint, DrivenBy: string(drivenBy),
-		Owner: meta.Owner, Persona: meta.Persona, Model: string(params.Model), ExternalRef: meta.ExternalRef,
+		Owner: meta.Owner, Persona: meta.Persona, Model: string(params.Model), Name: meta.Name, ExternalRef: meta.ExternalRef,
 	}
 	var convID string
 	var err error

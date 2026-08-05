@@ -17,8 +17,9 @@ import (
 
 func newConversationsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "conversations",
-		Short: "Query persisted conversation history from the daemon's agent database",
+		Use:     "conversations",
+		Aliases: []string{"c", "conv"},
+		Short:   "Query persisted conversation history from the daemon's agent database",
 		Long: `Global stats, search, and transcript export over the conversations schema
 the daemon persists to when RAFIKI_DB is set. Unlike "rafiki search" (live,
 in-memory, currently-running children only), these query history in Postgres
@@ -154,10 +155,11 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 
 func newConversationsSearchCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "search",
-		Short: "Search persisted conversation history",
-		Args:  cobra.NoArgs,
-		RunE:  runConversationsSearch,
+		Use:     "search",
+		Aliases: []string{"ls", "list"},
+		Short:   "Search persisted conversation history",
+		Args:    cobra.NoArgs,
+		RunE:    runConversationsSearch,
 	}
 	bindConversationFilterFlags(cmd)
 	cmd.Flags().String("status", "", "filter by status")

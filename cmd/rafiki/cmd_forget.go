@@ -13,8 +13,9 @@ import (
 
 func newForgetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "forget [id|name...]",
-		Short: "Drop exited children from the controller",
+		Use:     "forget [id|name...]",
+		Aliases: []string{"rm"},
+		Short:   "Drop exited children from the controller",
 		Long: `Drop one or more exited children from the controller's in-memory store.
 Disk artifacts (logs, state record) are NOT removed.
 

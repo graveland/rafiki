@@ -9,6 +9,7 @@ import (
 func newCompletionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:                   "completion [bash|zsh|fish|powershell]",
+		Aliases:               []string{"comp"},
 		Short:                 "Generate shell completion script",
 		Long:                  "Generate a shell completion script.\n\nTo enable completions:\n  source <(rafiki completion bash)\n  rafiki completion zsh > \"${fpath[1]}/_pic\"",
 		DisableFlagsInUseLine: true,

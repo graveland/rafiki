@@ -150,6 +150,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		llm.Entrypoint("agent"),
 		llm.Model(c.Model),
 		llm.ThinkingBudget(c.ThinkingBudget),
+		llm.WithName(c.Name),
 		llm.SystemText(BuildSystemPrompt(SysPromptConfig{
 			Base:            defaultBasePrompt,
 			Override:        c.SystemPromptOverride,

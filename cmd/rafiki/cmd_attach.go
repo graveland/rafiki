@@ -12,8 +12,9 @@ import (
 
 func newAttachCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "attach [id|name]",
-		Short: "Attach the pi TUI to an existing child",
+		Use:     "attach [id|name]",
+		Aliases: []string{"a"},
+		Short:   "Attach the pi TUI to an existing child",
 		Long: `Open the pi TUI driving an existing daemon-managed child.
 
 When the TUI quits (Ctrl+D, /quit), rafiki asks whether to terminate the session

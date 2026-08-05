@@ -24,11 +24,11 @@ func RenderSearch(w io.Writer, rows []insights.ConversationSummary) error {
 	t.SetOutputMirror(w)
 	t.SetStyle(table.StyleRounded)
 	t.SetTitle("Conversations (%d)", len(rows))
-	t.AppendHeader(table.Row{"Id", "Created At", "Owner", "Persona", "Source", "Model", "Driven By",
+	t.AppendHeader(table.Row{"Id", "Name", "Created At", "Owner", "Persona", "Source", "Model", "Driven By",
 		"Status", "Turns", "Input Tokens", "Output Tokens", "Cache Read Tokens", "First Message"})
 	for _, r := range rows {
 		t.AppendRow(table.Row{
-			r.ID, r.CreatedAt.Local().Format("2006-01-02 15:04"), r.Owner, r.Persona, r.Source, r.Model,
+			r.ID, r.Name, r.CreatedAt.Local().Format("2006-01-02 15:04"), r.Owner, r.Persona, r.Source, r.Model,
 			r.DrivenBy, r.Status, r.Turns, r.InputTokens, r.OutputTokens, r.CacheReadTokens,
 			truncateCell(r.FirstMessage),
 		})

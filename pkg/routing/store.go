@@ -28,6 +28,7 @@ type ConversationRef struct {
 	Owner            string
 	Persona          string
 	Model            string
+	Name             string
 	ExternalRef      string
 }
 
@@ -41,9 +42,9 @@ type ConversationRef struct {
 func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationRef) (string, error) {
 	if ref.ID != "" {
 		_, err := s.pool.Exec(ctx,
-			`INSERT INTO conversations.conversation (id, owner, persona, model, origin_entrypoint, driven_by, external_ref)
-			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING`,
-			ref.ID, nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.ExternalRef),
+			`INSERT INTO conversations.conversation (id, owner, persona, model, origin_entrypoint, driven_by, name, external_ref)
+			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING`,
+			ref.ID, nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
 		)
 		if err != nil {
 			return "", err
@@ -52,9 +53,9 @@ func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationR
 	}
 	var id string
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, external_ref)
-		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id::text`,
-		nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.ExternalRef),
+		`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id::text`,
+		nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
 	).Scan(&id)
 	return id, err
 }
@@ -72,10 +73,10 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 		// loser gets no row and falls through to SELECT the existing one.
 		var id string
 		err := s.pool.QueryRow(ctx,
-			`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, external_ref)
-			 VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
+			`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
 			 RETURNING id::text`,
-			nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, ref.ExternalRef,
+			nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), ref.ExternalRef,
 		).Scan(&id)
 		if err == nil {
 			return id, nil
@@ -91,7 +92,7 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 	}
 	return s.EnsureConversation(ctx, ConversationRef{
 		OriginEntrypoint: ref.OriginEntrypoint, DrivenBy: ref.DrivenBy,
-		Owner: ref.Owner, Persona: ref.Persona, Model: ref.Model, ExternalRef: ref.ExternalRef,
+		Owner: ref.Owner, Persona: ref.Persona, Model: ref.Model, Name: ref.Name, ExternalRef: ref.ExternalRef,
 	})
 }
 

@@ -35,6 +35,7 @@ type SearchFilter struct {
 // per-conversation turn aggregate and the first user message snippet.
 type ConversationSummary struct {
 	ID       string `json:"id"`
+	Name     string `json:"name"`
 	Owner    string `json:"owner"`
 	Persona  string `json:"persona"`
 	Source   string `json:"source"`
@@ -137,7 +138,7 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 	}
 
 	query := `
-SELECT c.id::text, coalesce(c.owner,''), coalesce(c.persona,''),
+SELECT c.id::text, coalesce(c.name,''), coalesce(c.owner,''), coalesce(c.persona,''),
        coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at,
        coalesce(t.turns,0), coalesce(t.in_tok,0), coalesce(t.out_tok,0), coalesce(t.cache_read,0),
        coalesce(left(fm.first_text, 200), '')
@@ -174,7 +175,7 @@ LIMIT ` + limitArg
 	var out []ConversationSummary
 	for rows.Next() {
 		var s ConversationSummary
-		if err := rows.Scan(&s.ID, &s.Owner, &s.Persona, &s.Source, &s.Model, &s.Status, &s.DrivenBy,
+		if err := rows.Scan(&s.ID, &s.Name, &s.Owner, &s.Persona, &s.Source, &s.Model, &s.Status, &s.DrivenBy,
 			&s.CreatedAt, &s.Turns, &s.InputTokens, &s.OutputTokens, &s.CacheReadTokens, &s.FirstMessage); err != nil {
 			return nil, fmt.Errorf("scan conversation summary: %w", err)
 		}

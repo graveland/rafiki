@@ -39,8 +39,9 @@ const (
 // documents keep working unchanged under the client's cobra front end.
 func newClaudeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "claude [-- claude-args...]",
-		Short: "Launch Claude Code pointed at the rafiki proxy",
+		Use:     "claude [-- claude-args...]",
+		Aliases: []string{"cl"},
+		Short:   "Launch Claude Code pointed at the rafiki proxy",
 		Long: "Resolves the proxy URL and token, sets the environment Claude Code needs,\n" +
 			"and execs your own claude binary. Not a daemon child — this runs in your\n" +
 			"terminal and is not supervised, listed, or attachable.",

@@ -14,8 +14,9 @@ import (
 
 func newResumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "resume [id|name]",
-		Short: "Resume an exited child, or spawn a new child from any pi session file",
+		Use:     "resume [id|name]",
+		Aliases: []string{"res"},
+		Short:   "Resume an exited child, or spawn a new child from any pi session file",
 		Long: `Resume a rafiki-managed child that has exited, or spawn a fresh child continuing
 any pi session — including sessions that were never managed by rafiki — by pointing
 directly at the session's .jsonl file.

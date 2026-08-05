@@ -45,6 +45,7 @@ type convConfig struct {
 	owner       string
 	entrypoint  string
 	persona     string
+	name        string
 
 	// send defaults
 	model          string // resolved to a concrete id at Conversation()
@@ -79,6 +80,9 @@ func Entrypoint(e string) ConvOption { return func(c *convConfig) { c.entrypoint
 
 // Persona records the persona used for this conversation.
 func Persona(p string) ConvOption { return func(c *convConfig) { c.persona = p } }
+
+// WithName sets a human-readable name on the conversation.
+func WithName(n string) ConvOption { return func(c *convConfig) { c.name = n } }
 
 // Model sets the conversation's model. Aliases ("<family>-latest", short
 // model aliases like "kimi-k3") resolve to a concrete id once, at
@@ -201,7 +205,7 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	}
 	ref := routing.ConversationRef{
 		OriginEntrypoint: cfg.entrypoint, DrivenBy: string(store.DrivenByServer),
-		Owner: cfg.owner, Persona: cfg.persona, Model: cfg.model, ExternalRef: cfg.externalRef,
+		Owner: cfg.owner, Persona: cfg.persona, Model: cfg.model, Name: cfg.name, ExternalRef: cfg.externalRef,
 	}
 	var convID string
 	if cfg.externalRef != "" {
@@ -481,6 +485,7 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		DrivenBy:         store.DrivenByServer,
 		Owner:            conv.cfg.owner,
 		Persona:          conv.cfg.persona,
+		Name:             conv.cfg.name,
 		Ordinal:          ordinal, // history-derived: stable across handles and resumes
 		Source:           scfg.source,
 		Author:           scfg.author,

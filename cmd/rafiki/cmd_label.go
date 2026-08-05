@@ -13,8 +13,9 @@ import (
 
 func newLabelCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "label <id> [k=v ...]",
-		Short: "Add, update, or remove labels on a child",
+		Use:     "label <id> [k=v ...]",
+		Aliases: []string{"lab"},
+		Short:   "Add, update, or remove labels on a child",
 		Long: `Add, update, or remove labels on a running or exited child.
 
 Labels are arbitrary key=value metadata. Specify k=v pairs as positional

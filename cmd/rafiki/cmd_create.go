@@ -16,8 +16,9 @@ import (
 
 func newCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "create [name]",
-		Short: "Spawn a new pi child and attach a local TUI to it",
+		Use:     "create [name]",
+		Aliases: []string{"cr"},
+		Short:   "Spawn a new pi child and attach a local TUI to it",
 		Long: `Spawn a new pi child via the controller, then open the pi TUI driving it.
 
 The rafiki-helpers pi extension is auto-installed (or upgraded) into
