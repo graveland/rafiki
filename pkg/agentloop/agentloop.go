@@ -379,10 +379,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 
 		switch resp.StopReason {
 		case "end_turn":
-			text, ok := firstText(resp.Content)
-			if !ok {
-				return &Result{Stats: stats}, errors.New("agentloop: no text in final response")
-			}
+			text, _ := firstText(resp.Content)
 			ev.text(text)
 			return &Result{Text: text, Stats: stats}, nil
 

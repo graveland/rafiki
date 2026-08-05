@@ -73,6 +73,7 @@ func (m *Messages) Append(ctx context.Context, conversationID string, ordinal in
 	if err != nil {
 		return fmt.Errorf("append message: marshal content: %w", err)
 	}
+	content = jsonbSafe(content)
 	var inTok, outTok *int64
 	stopReason := any(nil)
 	if meta != nil {
