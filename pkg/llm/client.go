@@ -150,6 +150,7 @@ type SendMeta struct {
 	Source           string
 	Author           string
 	AuthorKind       string
+	RateLimit        RateLimitPolicy
 
 	Primary  Upstream   // empty = UpstreamAnthropic
 	Fallback []Upstream // tried in order on retryable primary failure

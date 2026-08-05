@@ -58,6 +58,7 @@ type convConfig struct {
 	maxTokens      int64
 	trim           TrimPolicy
 	authorKind     string
+	rateLimit      RateLimitPolicy
 	cache          *CachePolicy
 }
 
@@ -133,6 +134,12 @@ func WithTrimPolicy(p TrimPolicy) ConvOption { return func(c *convConfig) { c.tr
 
 // AuthorKind stamps turn provenance ('human' | 'agent' | 'system').
 func AuthorKind(k string) ConvOption { return func(c *convConfig) { c.authorKind = k } }
+
+// WithRateLimitPolicy sets the per-conversation rate-limit retry behaviour.
+// Zero values mean "use defaults" (10 retries, 10s base, 300s cap).
+func WithRateLimitPolicy(p RateLimitPolicy) ConvOption {
+	return func(c *convConfig) { c.rateLimit = p }
+}
 
 // CachePolicy controls where the conversation places prompt-cache
 // breakpoints when assembling each request. SystemTTL caches the static
@@ -495,6 +502,7 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		Source:           scfg.source,
 		Author:           scfg.author,
 		AuthorKind:       conv.cfg.authorKind,
+		RateLimit:        conv.cfg.rateLimit,
 		Primary:          conv.cfg.primary,
 		Fallback:         conv.cfg.fallback,
 	}
