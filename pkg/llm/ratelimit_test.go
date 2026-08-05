@@ -185,3 +185,13 @@ func TestRateLimitPolicyEffective(t *testing.T) {
 		t.Error("custom values were overwritten")
 	}
 }
+
+func TestIsRateLimitWithRetryAfterHelper(t *testing.T) {
+	rl, ra := isRateLimit(rateLimitErrWithRetryAfter(45))
+	if !rl {
+		t.Error("expected 429 with Retry-After to be a rate limit")
+	}
+	if ra != 45*time.Second {
+		t.Errorf("retryAfter = %v, want 45s", ra)
+	}
+}

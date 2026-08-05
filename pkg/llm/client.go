@@ -625,7 +625,6 @@ func (c *Client) recordModelResult(params anthropic.MessageNewParams, err error)
 	}
 }
 
-
 // callModel routes primary-with-breaker then the fallback chain. Fallback
 // sends rewrite the model via the catalog (Anthropic id → OpenRouter id when
 // the fallback is OpenRouter). A send with NO fallback configured bypasses
