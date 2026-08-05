@@ -41,6 +41,15 @@ type RuntimeOptions struct {
 	// not need postgres.
 	Pool *pgxpool.Pool
 
+	// Env carries per-child environment variables forwarded from the caller's
+	// shell (via `rafiki create --forward-env` / SpawnRequest.Env). BuildRuntime
+	// sets each via os.Setenv before constructing the engine, so tools that
+	// spawn subprocesses (bash, MCP) inherit them. Keys that the runtime itself
+	// reads (AnthropicAPIKey, OpenRouterAPIKey) are extracted into the named
+	// fields above rather than relying on the process environment; they still
+	// appear in Env as well so subprocesses can see them.
+	Env map[string]string
+
 	// OnFatal is the owner's hook for ending this child when a turn panics. It
 	// is passed straight through to EngineConfig.OnFatal, whose doc comment
 	// carries the contract. Nil is legal and means "log it and stop taking
@@ -90,6 +99,16 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engine, func(), error) {
 	if !filepath.IsAbs(opts.Cwd) {
 		return nil, nil, fmt.Errorf("runtime: cwd must be absolute: %q", opts.Cwd)
+	}
+
+	// Forward the caller's environment into the daemon process so subprocesses
+	// spawned by tools (bash, MCP) inherit it. os.Setenv is process-global, but
+	// the caller's shell env vars are identical across all of that caller's
+	// children — and the only alternative (per-Command.Env on every exec) would
+	// require threading this map through every tool, which is more invasive and
+	// error-prone.
+	for k, v := range opts.Env {
+		os.Setenv(k, v)
 	}
 
 	spillDir := opts.SpillDir

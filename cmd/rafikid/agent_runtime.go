@@ -3,9 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -103,17 +101,24 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// req.Env is buildEnv's second payload for the subprocess path (alongside
 	// the API key handled below) - forwarded-caller-environment, default-on
 	// via `rafiki create --forward-env` (cmd/rafiki/cmd_create.go). An
-	// in-process child cannot receive it: there is no per-goroutine
-	// environment in Go, and os.Setenv is process-global, so setting it here
-	// would corrupt every other concurrently-running child. Only the two
-	// names this runtime actually reads are honoured; everything else is
-	// logged (names only - this map routinely holds credentials) so a caller
-	// whose e.g. http_proxy silently stopped applying can find out why,
-	// rather than debugging a mystery. This overlays on top of
-	// toRuntimeOptions' os.Getenv-sourced daemon defaults, and is itself
-	// overlaid by an explicit req.APIKey below - daemon env < forwarded env <
-	// explicit key.
-	overlayAgentEnv(childID, req.Env, &ro)
+	// in-process child cannot receive a per-goroutine environment (Go has
+	// none), but it CAN forward the caller's env vars through os.Setenv at
+	// engine startup: the caller's shell env is identical across all of that
+	// caller's children, and the tools that spawn subprocesses (bash, MCP)
+	// inherit them from the daemon process environment. API keys are also
+	// extracted into the RuntimeOptions named fields below so the runtime
+	// (which reads them by name) doesn't depend on the process environment
+	// alone. Daemon env < forwarded env < explicit key.
+	ro.Env = make(map[string]string, len(req.Env))
+	for k, v := range req.Env {
+		ro.Env[k] = v
+		switch k {
+		case "ANTHROPIC_API_KEY":
+			ro.AnthropicAPIKey = v
+		case "OPENROUTER_API_KEY":
+			ro.OpenRouterAPIKey = v
+		}
+	}
 
 	// An in-process child inherits no environment at all, so req.APIKey - the
 	// channel the subprocess path uses via buildEnv's
@@ -137,33 +142,6 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		}
 	}
 	return ro, nil
-}
-
-// overlayAgentEnv honours the only two names from req.Env an in-process agent
-// child can actually receive (ANTHROPIC_API_KEY/OPENROUTER_API_KEY, read
-// directly by name - unlike the req.APIKey overlay, no model-prefix rule is
-// needed here since req.Env already tells us which env var name the caller
-// meant). Every other name in req.Env is unreachable for this child (full
-// per-child environment forwarding is not achievable at all for an in-process
-// child - see the caller's doc comment) and is logged once, by name only, so
-// a caller relying on a forwarded variable can discover why it didn't apply.
-func overlayAgentEnv(childID string, env map[string]string, ro *fundi.RuntimeOptions) {
-	var dropped []string
-	for k, v := range env {
-		switch k {
-		case "ANTHROPIC_API_KEY":
-			ro.AnthropicAPIKey = v
-		case "OPENROUTER_API_KEY":
-			ro.OpenRouterAPIKey = v
-		default:
-			dropped = append(dropped, k)
-		}
-	}
-	if len(dropped) > 0 {
-		sort.Strings(dropped)
-		slog.Warn("in-process agent child cannot receive forwarded environment variables beyond ANTHROPIC_API_KEY/OPENROUTER_API_KEY; dropping",
-			"child_id", childID, "dropped_env_names", dropped)
-	}
 }
 
 // toRuntimeOptions converts parsed agent flags into the options an in-process
