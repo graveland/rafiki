@@ -39,6 +39,7 @@ type Client struct {
 
 	breakerWindow time.Duration
 	defaultModel  string
+	modelGate     *ModelGate
 }
 
 type ClientOption func(*Client)
@@ -118,6 +119,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		c.capture = routing.NewCaptureStore(c.pool)
 		c.messages = store.NewMessages(c.pool)
 	}
+	c.modelGate = NewModelGate(10*time.Second, 300*time.Second)
 	return c, nil
 }
 
@@ -225,6 +227,10 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
 	ctx, span, primary, fallbacks, params := c.prepareSend(ctx, meta, params)
 	defer span.End()
+
+	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
+		return nil, err
+	}
 
 	turnID, turnCreatedAt, capturing := c.beginTurn(ctx, meta, params)
 
@@ -354,6 +360,10 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
 	ctx, span, primary, fallbacks, params := c.prepareSend(ctx, meta, params)
 	defer span.End()
+
+	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
+		return nil, false, false, err
+	}
 
 	sender := c.senders[primary]
 	streamer, canStream := sender.(StreamingSender)
@@ -578,6 +588,18 @@ func recordPrimaryResult(breaker *routing.Breaker, now time.Time, err error) {
 	}
 }
 
+// recordModelResult updates the model gate from a callModel result.
+func (c *Client) recordModelResult(params anthropic.MessageNewParams, err error) {
+	if err == nil {
+		c.modelGate.recordSuccess(string(params.Model))
+		return
+	}
+	if isRL, retryAfter := isRateLimit(err); isRL {
+		c.modelGate.record429(string(params.Model), retryAfter)
+	}
+}
+
+
 // callModel routes primary-with-breaker then the fallback chain. Fallback
 // sends rewrite the model via the catalog (Anthropic id → OpenRouter id when
 // the fallback is OpenRouter). A send with NO fallback configured bypasses
@@ -594,12 +616,14 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 
 	if breaker == nil {
 		resp, err := sender.New(ctx, params)
+		c.recordModelResult(params, err)
 		return resp, primary, err
 	}
 
 	if usePrimary {
 		resp, err := sender.New(ctx, params)
 		recordPrimaryResult(breaker, now, err)
+		c.recordModelResult(params, err)
 		if err == nil {
 			return resp, primary, nil
 		}
@@ -624,6 +648,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 		}
 		resp, err := fbSender.New(ctx, fbParams)
 		if err == nil {
+			c.modelGate.recordSuccess(string(params.Model))
 			return resp, fb, nil
 		}
 		lastErr = err
