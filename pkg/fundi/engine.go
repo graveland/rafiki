@@ -173,7 +173,8 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 			cat.Warm()
 		}()
 	}
-	slog.Info("agent: engine started", "conversation", conv.ID, "provider", cfg.Provider, "model", cfg.ModelID)
+	slog.Info("agent: engine started", "conversation", conv.ID,
+		"provider", upstreamLabel(cfg.Provider), "model", fullModel(cfg.Provider, cfg.ModelID))
 	return e, nil
 }
 
@@ -552,13 +553,13 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			// multi-call tool-use loop, not a single proxied request.
 			if err != nil {
 				slog.Warn("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
-					"provider", e.state.Provider, "model", e.state.ModelID, "iteration", iteration,
+					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
 					"latency", dur.Round(100*time.Millisecond), "cost_total", e.em.usage.Cost.Total, "error", err)
 			} else {
 				turnCost := costOf(e.em.pricer, string(resp.Model), resp.Usage)
 				runningTotal := e.em.usage.Cost.Total + turnCost.Total
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
-					"provider", e.state.Provider, "model", e.state.ModelID, "iteration", iteration,
+					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
 					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
 					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
 					"stop_reason", resp.StopReason, "latency", dur.Round(100*time.Millisecond),
@@ -632,6 +633,26 @@ func hasContent(m *anthropic.Message) bool {
 		}
 	}
 	return false
+}
+
+// upstreamLabel maps a model prefix (from splitModel) to the upstream provider
+// name used in log lines: "anthropic" stays "anthropic"; everything else is
+// "openrouter" (the only two upstreams fundi's sender supports).
+func upstreamLabel(modelPrefix string) string {
+	if modelPrefix == "anthropic" {
+		return "anthropic"
+	}
+	return "openrouter"
+}
+
+// fullModel reconstructs the provider-qualified model id from the split
+// components stored in StateData (e.g. "deepseek" + "deepseek-v4-pro" →
+// "deepseek/deepseek-v4-pro"). A bare model with no prefix returns as-is.
+func fullModel(prefix, bareID string) string {
+	if prefix == "" {
+		return bareID
+	}
+	return prefix + "/" + bareID
 }
 
 // drainSteers is the loop's mid-turn steer seam: it takes everything buffered
