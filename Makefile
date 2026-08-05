@@ -210,8 +210,16 @@ install: build ## Install rafikid + rafiki (+ rafiki-attach if built) to $(DESTD
 # whatever `rafiki` resolves to, so a shadowing install elsewhere on $PATH
 # cannot bounce the service with a different client's idea of where things
 # live — the same failure the warnings above exist to catch.
+#
+# build-attach runs before install (prerequisite order, not just listed for
+# documentation) so its output is on disk in time for install's `[ -x
+# $(BIN_DIR)/$(ATTACH_BIN) ]` check — otherwise redeploy silently ships
+# whatever rafiki-attach happened to be built last, or skips it entirely on a
+# machine that has never run build-attach. It degrades the same way
+# build-attach always has: no bun on PATH just skips with a warning, it does
+# not fail the daemon redeploy.
 .PHONY: redeploy
-redeploy: install ## Rebuild + install, then restart the rafiki daemon.
+redeploy: build-attach install ## Rebuild (incl. rafiki-attach) + install, then restart the rafiki daemon.
 	@"$(DESTDIR)/$(CLI_BIN)" service restart
 	@"$(DESTDIR)/$(CLI_BIN)" service status
 
