@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -558,10 +559,12 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			} else {
 				turnCost := costOf(e.em.pricer, string(resp.Model), resp.Usage)
 				runningTotal := e.em.usage.Cost.Total + turnCost.Total
+				cachePct := cacheHitPct(resp.Usage)
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
 					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
 					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
+					"cache_pct", cachePct,
 					"stop_reason", resp.StopReason, "latency", dur.Round(100*time.Millisecond),
 					"cost_turn", turnCost.Total, "cost_total", runningTotal)
 			}
@@ -653,6 +656,17 @@ func fullModel(prefix, bareID string) string {
 		return bareID
 	}
 	return prefix + "/" + bareID
+}
+
+// cacheHitPct returns the cache-read hit rate for an input as a percentage
+// rounded to one decimal place (e.g. 75.3). Returns 0 when there are no
+// input tokens.
+func cacheHitPct(u anthropic.Usage) float64 {
+	total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	if total == 0 {
+		return 0
+	}
+	return math.Round(float64(u.CacheReadInputTokens)/float64(total)*1000) / 10
 }
 
 // drainSteers is the loop's mid-turn steer seam: it takes everything buffered
