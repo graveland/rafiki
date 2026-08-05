@@ -19,7 +19,6 @@ import type {
     AgentSession,
     AgentSessionRuntimeDiagnostic,
     AgentSessionServices,
-    ModelRegistry,
     ModelRuntime,
     ResourceLoader,
     SessionManager,
@@ -141,7 +140,7 @@ export class RemoteAgentSessionRuntime {
             thinkingLevel: thinking,
             sessionManager,
             settingsManager,
-            modelRegistry,
+            modelRuntime,
         });
 
         const services: AgentSessionServices = makeServicesStub({

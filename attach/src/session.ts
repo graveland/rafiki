@@ -17,7 +17,7 @@
  *                                                      stub: abort() + waitForIdle() + signal
  *  [impl]  2. sessionManager: SessionManager         — readonly property
  *  [impl]  3. settingsManager: SettingsManager       — readonly property
- *  [impl]  4. modelRegistry: ModelRegistry           — getter
+ *  [impl]  4. modelRuntime: ModelRuntime             — getter
  *  [impl]  5. state: AgentState                      — getter (proxy to cached fields)
  *  [impl]  6. model: Model<any> | undefined          — getter
  *  [impl]  7. thinkingLevel: ThinkingLevel           — getter
@@ -127,7 +127,7 @@ import type {
     ExtensionRunner,
     ExtensionUIContext,
     ModelCycleResult,
-    ModelRegistry,
+    ModelRuntime,
     PromptOptions,
     PromptTemplate,
     ResolvedCommand,
@@ -189,7 +189,7 @@ export interface RemoteSessionInit {
     thinkingLevel: ThinkingLevel;
     sessionManager: SessionManager;
     settingsManager: SettingsManager;
-    modelRegistry: ModelRegistry;
+    modelRuntime: ModelRuntime;
 }
 
 // ─── Stub helpers ─────────────────────────────────────────────────────────────
@@ -247,7 +247,9 @@ function makeResourceLoaderStub(): ResourceLoader {
         getThemes: () => ({ themes: [], diagnostics: [] }),
         getAgentsFiles: () => ({ agentsFiles: [] }),
         getSystemPrompt: () => undefined,
+        getSystemPromptSource: () => undefined,
         getAppendSystemPrompt: () => [],
+        getAppendSystemPromptSources: () => [],
         extendResources: () => {},
         reload: () => Promise.resolve(),
     } as unknown as ResourceLoader;
@@ -348,7 +350,7 @@ export class RemoteAgentSession {
     private _errorMessage: string | undefined = undefined;
 
     // ── Stubs ────────────────────────────────────────────────────────────────
-    private readonly _modelRegistry: ModelRegistry;
+    private readonly _modelRuntime: ModelRuntime;
     private readonly _resourceLoader: ResourceLoader;
     private readonly _extensionRunner: ExtensionRunner;
 
@@ -367,7 +369,7 @@ export class RemoteAgentSession {
 
         this.sessionManager = init.sessionManager;
         this.settingsManager = init.settingsManager;
-        this._modelRegistry = init.modelRegistry;
+        this._modelRuntime = init.modelRuntime;
         this._resourceLoader = makeResourceLoaderStub();
         this._extensionRunner = makeExtensionRunnerStub();
 
@@ -913,8 +915,8 @@ export class RemoteAgentSession {
 
     // ── Getters ───────────────────────────────────────────────────────────────
 
-    get modelRegistry(): ModelRegistry {
-        return this._modelRegistry;
+    get modelRuntime(): ModelRuntime {
+        return this._modelRuntime;
     }
 
     /**

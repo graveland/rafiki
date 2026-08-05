@@ -8,7 +8,7 @@
 import { describe, expect, it, beforeEach, afterEach, spyOn } from "bun:test";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { ModelRegistry, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { RemoteAgentSession, type RemoteSessionInit } from "./session.ts";
 import type { Response } from "./client.ts";
 
@@ -136,7 +136,7 @@ function makeInit(client: FakeClient, childId = "child-1"): RemoteSessionInit {
         thinkingLevel: FAKE_THINKING_LEVEL,
         sessionManager: {} as unknown as SessionManager,
         settingsManager: {} as unknown as SettingsManager,
-        modelRegistry: {} as unknown as ModelRegistry,
+        modelRuntime: {} as unknown as ModelRuntime,
     };
 }
 
