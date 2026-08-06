@@ -256,11 +256,10 @@ func TestGetRecentByteBudget(t *testing.T) {
 	}
 }
 
-// TestGetRecentFundiDiskFallback verifies that a fundi child (PiProvider — no
-// render ring) falls back to out.jsonl.gz when both in-memory snapshots are
-// empty.  This is the post-restart recovery path: loadOrphans has no
-// ExitedRing, ExitedRenderRing doesn't exist for fundi, and render.jsonl.gz
-// is never written — only out.jsonl.gz survives.
+// TestGetRecentFundiDiskFallback validates that a fundi child whose in-memory
+// exit snapshots are empty (post-restart) falls back to out.jsonl.gz on the
+// exited path.  The live-path equivalent (ring bootstrap events prepended with
+// disk history) is tested by TestGetRecentFundiAliveDiskMerge.
 func TestGetRecentFundiDiskFallback(t *testing.T) {
 	t.Parallel()
 
@@ -297,5 +296,81 @@ func TestGetRecentFundiDiskFallback(t *testing.T) {
 	}
 	if len(raw.Events) != 1 || string(raw.Events[0]) != string(out[0]) {
 		t.Fatalf("raw events = %v, want the disk out frame", raw.Events)
+	}
+}
+
+// TestGetRecentFundiAliveDiskMerge verifies the live-path fix: a fundi child
+// that is alive (in cm) with a near-empty ring (only bootstrap events from
+// the fresh engine) gets its previous-run conversation history prepended from
+// out.jsonl.gz.  Without this, attach after a daemon restart sees a blank
+// scrollback because the bootstrap get_state response fills the ring but
+// carries no conversation content.
+func TestGetRecentFundiAliveDiskMerge(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTestController(t)
+
+	// Spawn a real child (fake-pi script) so the child manager has a live entry
+	// with a ring.  The fake-pi emits a get_state response, populating the ring
+	// with a bootstrap event — exactly the scenario that broke the previous
+	// len(events)==0 guard.
+	childID := spawnTestChild(t, ctrl, nil)
+
+	// Override the store: the fake-pi spawn sets Kind="" (→"pi").  Replace it
+	// with KindFundi so the alive-disk-merge path fires.
+	if err := ctrl.st.Update(childID, func(s *childstore.Session) {
+		s.Kind = protocol.KindFundi
+	}); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	// Write disk events using the actual child ID — these are the previous
+	// run's conversation history that survived the daemon restart.
+	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
+	diskOut := [][]byte{
+		[]byte(`{"type":"agent_start"}`),
+		[]byte(`{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]}`),
+	}
+	if err := dumper.Dump(childID, nil, diskOut, nil, nil,
+		persist.Meta{ChildID: childID}, persist.ExitInfo{}); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	// Raw request: PiProvider does not normalize, so the raw path reads the ring
+	// (bootstrap events) then prepends disk events.
+	raw, err := ctrl.GetRecent(childID, control.RecentQuery{Rendered: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// We should get at least the 2 disk events.  The ring also has bootstrap
+	// events (get_state response), so total ≥ 2.
+	if len(raw.Events) < 2 {
+		t.Fatalf("raw events = %v (len=%d), want ≥ 2 events (disk prepended to ring)", raw.Events, len(raw.Events))
+	}
+
+	// The first events should be the disk events (prepended).
+	foundStart := false
+	foundEnd := false
+	for _, ev := range raw.Events {
+		s := string(ev)
+		if s == `{"type":"agent_start"}` {
+			foundStart = true
+		}
+		if s == `{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"hello"}]}]}` {
+			foundEnd = true
+		}
+	}
+	if !foundStart || !foundEnd {
+		t.Fatalf("disk events missing from merged result; raw events = %v", raw.Events)
+	}
+
+	// Rendered request: same chain, ring + disk merge.
+	rendered, err := ctrl.GetRecent(childID, control.RecentQuery{Rendered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendered.Events) < 2 {
+		t.Fatalf("rendered events = %v (len=%d), want ≥ 2 events", rendered.Events, len(rendered.Events))
 	}
 }

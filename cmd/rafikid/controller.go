@@ -267,27 +267,35 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 			events = r.Recent(ring.Query{Limit: q.Limit, Since: q.Since})
 			total, _, oldestTS = r.Stats()
 		}
-		// A freshly-resumed fundi child (PiProvider) has an empty ring but the
-		// previous run's events are on disk. The raw ring IS pi vocabulary, so
-		// the dump is readable without translation — same reason the exited path
-		// below falls through to out.jsonl.gz for non-claude children.
-		if len(events) == 0 && snap.Kind == protocol.KindFundi {
-			all := c.readDiskEvents(childID, "out.jsonl.gz")
-			total = len(all)
-			if len(all) > 0 {
-				oldestTS = all[0].Timestamp
-			}
-			if q.Since > 0 {
-				i := 0
-				for i < len(all) && all[i].Timestamp != 0 && all[i].Timestamp < q.Since {
-					i++
+		// A freshly-resumed fundi child (PiProvider) starts its engine with a
+		// pristine ring. The only events in it are bootstrap probes (get_state
+		// response), so the ring is never literally empty — the len(events)==0
+		// guard that worked for the original PiProvider path misses fundi. The
+		// previous run's events are on disk in out.jsonl.gz; prepend them to
+		// the ring events so the full conversation history is visible on attach.
+		// Same reasoning as the exited path below: the raw ring IS pi
+		// vocabulary, so disk frames are readable without translation.
+		if snap.Kind == protocol.KindFundi {
+			disk := c.readDiskEvents(childID, "out.jsonl.gz")
+			if len(disk) > 0 {
+				// Apply Since/Limit to the disk portion independently before
+				// prepending — the ring portion was already filtered above.
+				if q.Since > 0 {
+					i := 0
+					for i < len(disk) && disk[i].Timestamp != 0 && disk[i].Timestamp < q.Since {
+						i++
+					}
+					disk = disk[i:]
 				}
-				all = all[i:]
+				if q.Limit > 0 && len(disk) > q.Limit {
+					disk = disk[len(disk)-q.Limit:]
+				}
+				events = append(disk, events...)
+				total = len(disk) + total
+				if len(disk) > 0 {
+					oldestTS = disk[0].Timestamp
+				}
 			}
-			if q.Limit > 0 && len(all) > q.Limit {
-				all = all[len(all)-q.Limit:]
-			}
-			events = all
 		}
 	} else {
 		// Exited: pick the snapshot, falling back to the on-disk dump for
