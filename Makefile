@@ -163,10 +163,12 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 install: build ## Install rafikid + rafiki (+ rafiki-attach if built) to $(DESTDIR).
 	@mkdir -p "$(DESTDIR)"
 	@for b in $(DAEMON_BIN) $(CLI_BIN); do \
+	    rm -f "$(DESTDIR)/$$b"; \
 	    cp "$(BIN_DIR)/$$b" "$(DESTDIR)/$$b" || exit 1; \
 	    echo "installed $(DESTDIR)/$$b"; \
 	done
 	@if [ -x "$(BIN_DIR)/$(ATTACH_BIN)" ]; then \
+	    rm -f "$(DESTDIR)/$(ATTACH_BIN)"; \
 	    cp "$(BIN_DIR)/$(ATTACH_BIN)" "$(DESTDIR)/$(ATTACH_BIN)" || exit 1; \
 	    echo "installed $(DESTDIR)/$(ATTACH_BIN)"; \
 	    for a in package.json theme assets; do \
