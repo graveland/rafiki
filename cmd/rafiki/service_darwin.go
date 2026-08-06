@@ -297,10 +297,41 @@ func (b *darwinBackend) Stop() error {
 }
 
 func (b *darwinBackend) Restart() error {
-	// kickstart -k kills any running instance and starts fresh.
-	out, err := runOSCmd("launchctl", "kickstart", "-k", b.serviceTarget())
+	// Graceful restart: bootout (launchd sends the job SIGTERM and waits for it
+	// to exit, bounded by ExitTimeOut — 200s in our plist), poll to confirm it
+	// is gone, then bootstrap a fresh instance. This replaces the previous
+	// kickstart -k, which sent SIGKILL with no chance to drain.
+	plistPath, err := b.plistPath()
 	if err != nil {
-		return fmt.Errorf("launchctl kickstart -k: %s", strings.TrimSpace(out))
+		return err
+	}
+
+	// Best-effort bootout first. It may fail if the job was never loaded; that
+	// is fine — the bootstrap below will load it regardless.
+	bootoutOut, bootoutErr := runOSCmd("launchctl", "bootout", b.serviceTarget())
+	unloadConfirmed := bootoutErr != nil && isServiceNotFoundOutput(bootoutOut) // fast path: never loaded
+	if !unloadConfirmed {
+		unloadConfirmed = b.waitForUnload()
+	}
+
+	// Bootstrap the fresh instance; fall back to legacy load.
+	bootstrapOut, err := runOSCmd("launchctl", "bootstrap", b.domainTarget(), plistPath)
+	bootstrapFailed := err != nil
+	if bootstrapFailed {
+		bootstrapOut, err = runOSCmd("launchctl", "load", plistPath)
+		if err != nil {
+			return fmt.Errorf("launchctl bootstrap and legacy load both failed during restart: %s", strings.TrimSpace(bootstrapOut))
+		}
+	}
+
+	// Verify the service actually loaded, same post-condition Install enforces.
+	verifyOut, verifyErr := runOSCmd("launchctl", "print", b.serviceTarget())
+	if verifyErr != nil && isServiceNotFoundOutput(verifyOut) {
+		return fmt.Errorf("restart: service did not reload — launchctl print reports the job is not loaded after bootstrap/load (bootstrap output: %s)", strings.TrimSpace(bootstrapOut))
+	}
+	if !unloadConfirmed && bootstrapFailed {
+		return fmt.Errorf("restart: previous job was never confirmed unloaded within %s and bootstrap failed — the running instance may be the stale job; run `launchctl bootout %s` by hand and retry",
+			installPollCap, b.serviceTarget())
 	}
 	return nil
 }

@@ -493,3 +493,233 @@ func TestDarwinInstall_UnconfirmedUnloadWithFailedBootstrapIsAnError(t *testing.
 		t.Fatal("Install: got nil error, want a real error -- the poll never confirmed the stale job was gone, bootstrap failed, and the lying legacy load cannot be trusted to have replaced it")
 	}
 }
+
+// --- Restart tests ---
+
+// Happy path: the job is loaded, bootout succeeds, the poll confirms it gone,
+// bootstrap reloads it, and the post-restart verification passes.
+func TestDarwinRestart_BootoutThenBootstrap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+
+	var cmds []string
+	var sawBootstrap bool
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		cmds = append(cmds, args[0])
+		switch args[0] {
+		case "bootout":
+			return "", nil
+		case "print":
+			if !sawBootstrap {
+				return "Could not find service", errors.New("exit status 3")
+			}
+			return "", nil
+		case "bootstrap":
+			sawBootstrap = true
+			return "", nil
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	if err := b.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+
+	if len(cmds) < 3 {
+		t.Fatalf("expected at least bootout, print, bootstrap; got %v", cmds)
+	}
+	if cmds[0] != "bootout" {
+		t.Errorf("expected bootout first, got %s", cmds[0])
+	}
+	if cmds[1] != "print" {
+		t.Errorf("expected print (poll) second, got %s", cmds[1])
+	}
+	if cmds[2] != "bootstrap" {
+		t.Errorf("expected bootstrap third, got %s", cmds[2])
+	}
+}
+
+// Fast path: the job was never loaded.  bootout returns not-found, the poll
+// is skipped, and bootstrap loads it fresh.
+func TestDarwinRestart_NotLoadedSkipsPollAndBootstraps(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+
+	var printCallsBeforeBootstrap int
+	var sawBootstrap bool
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "Could not find service", errors.New("exit status 3")
+		case "bootstrap":
+			sawBootstrap = true
+			return "", nil
+		case "print":
+			if !sawBootstrap {
+				printCallsBeforeBootstrap++
+			}
+			return "", nil
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	if err := b.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if !sawBootstrap {
+		t.Fatal("Restart never called launchctl bootstrap")
+	}
+	if printCallsBeforeBootstrap != 0 {
+		t.Errorf("expected the poll to be skipped on the bootout-not-found fast path, but launchctl print was called %d time(s) before bootstrap", printCallsBeforeBootstrap)
+	}
+}
+
+// The job is running.  bootout succeeds (SIGTERM), but the job takes a few
+// poll cycles to drain.  Restart must wait for the "not found" confirmation
+// before bootstrapping the new instance.
+func TestDarwinRestart_PollsUntilUnloadedThenBootstraps(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origSleep := sleepFn
+	var sleeps int
+	sleepFn = func(time.Duration) { sleeps++ }
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+
+	var printCalls int
+	var sawBootstrap bool
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "", nil
+		case "bootstrap":
+			sawBootstrap = true
+			return "", nil
+		case "print":
+			printCalls++
+			if !sawBootstrap {
+				if printCalls <= 2 {
+					return "", nil
+				}
+				return "Could not find service", errors.New("exit status 3")
+			}
+			return "", nil
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	if err := b.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if !sawBootstrap {
+		t.Fatal("Restart never called launchctl bootstrap")
+	}
+	if sleeps == 0 {
+		t.Error("expected the poll to sleep between attempts")
+	}
+}
+
+// If the job never reports gone within the poll cap, Restart must not give
+// up: it still proceeds to bootstrap, and verification afterward still
+// passes (the job is loaded, the cap just expired before print confirmed it).
+func TestDarwinRestart_PollCapExpiryStillBootstraps(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+
+	var sawBootstrap bool
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "", nil
+		case "bootstrap":
+			sawBootstrap = true
+			return "", nil
+		case "print":
+			return "", nil
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{}
+	if err := b.Restart(); err != nil {
+		t.Fatalf("Restart: %v, want the cap expiring to still fall through to bootstrap and succeed", err)
+	}
+	if !sawBootstrap {
+		t.Fatal("Restart never called launchctl bootstrap after the poll cap expired")
+	}
+}
