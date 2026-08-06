@@ -267,6 +267,28 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 			events = r.Recent(ring.Query{Limit: q.Limit, Since: q.Since})
 			total, _, oldestTS = r.Stats()
 		}
+		// A freshly-resumed fundi child (PiProvider) has an empty ring but the
+		// previous run's events are on disk. The raw ring IS pi vocabulary, so
+		// the dump is readable without translation — same reason the exited path
+		// below falls through to out.jsonl.gz for non-claude children.
+		if len(events) == 0 && snap.Kind == protocol.KindFundi {
+			all := c.readDiskEvents(childID, "out.jsonl.gz")
+			total = len(all)
+			if len(all) > 0 {
+				oldestTS = all[0].Timestamp
+			}
+			if q.Since > 0 {
+				i := 0
+				for i < len(all) && all[i].Timestamp != 0 && all[i].Timestamp < q.Since {
+					i++
+				}
+				all = all[i:]
+			}
+			if q.Limit > 0 && len(all) > q.Limit {
+				all = all[len(all)-q.Limit:]
+			}
+			events = all
+		}
 	} else {
 		// Exited: pick the snapshot, falling back to the on-disk dump for
 		// orphans reloaded after a restart (in-memory snapshots are lost then).

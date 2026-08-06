@@ -255,3 +255,47 @@ func TestGetRecentByteBudget(t *testing.T) {
 		t.Fatalf("small history: TruncatedBySize=%v len=%d, want false/1", small.TruncatedBySize, len(small.Events))
 	}
 }
+
+// TestGetRecentFundiDiskFallback verifies that a fundi child (PiProvider — no
+// render ring) falls back to out.jsonl.gz when both in-memory snapshots are
+// empty.  This is the post-restart recovery path: loadOrphans has no
+// ExitedRing, ExitedRenderRing doesn't exist for fundi, and render.jsonl.gz
+// is never written — only out.jsonl.gz survives.
+func TestGetRecentFundiDiskFallback(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTestController(t)
+	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
+	out := [][]byte{[]byte(`{"type":"agent_end","messages":[{"role":"assistant"}]}`)}
+	// render.jsonl.gz intentionally absent — PiProvider children never produce one.
+	if err := dumper.Dump("f1", nil, out, nil, nil,
+		persist.Meta{ChildID: "f1"}, persist.ExitInfo{}); err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: "f1",
+		Kind:    protocol.KindFundi,
+		Status:  protocol.StatusExited,
+		// ExitedRing / ExitedRenderRing intentionally empty (lost on restart).
+	})
+
+	// Rendered request: ExitedRenderRing nil → render.jsonl.gz absent →
+	// fundi is not claude so falls through to ExitedRing → out.jsonl.gz.
+	rendered, err := ctrl.GetRecent("f1", control.RecentQuery{Rendered: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendered.Events) != 1 {
+		t.Fatalf("rendered events = %v, want 1 event from out.jsonl.gz disk fallback", rendered.Events)
+	}
+
+	// Raw request: same chain, just without the render.jsonl.gz detour.
+	raw, err := ctrl.GetRecent("f1", control.RecentQuery{Rendered: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Events) != 1 || string(raw.Events[0]) != string(out[0]) {
+		t.Fatalf("raw events = %v, want the disk out frame", raw.Events)
+	}
+}
