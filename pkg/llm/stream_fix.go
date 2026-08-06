@@ -3,6 +3,9 @@
 package llm
 
 import (
+	"encoding/json"
+	"log/slog"
+
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
@@ -55,4 +58,35 @@ func FixAccumulatedEmptyToolInput(acc *anthropic.Message, ev anthropic.MessageSt
 		return true
 	}
 	return false
+}
+
+// SanitizeInvalidAccumulatedInput is a backstop for content_block.Input
+// corruption that FixEmptyToolInput/FixAccumulatedEmptyToolInput don't catch.
+// Both of those target one specific provider quirk (literal "input":"" from
+// content_block_start); this instead enforces the invariant the SDK actually
+// needs — Input must be nil or valid JSON — right before the two Accumulate
+// event types that marshal it (messageutil.go: ContentBlockStopEvent marshals
+// the last block, MessageStopEvent marshals the whole message). A non-nil,
+// invalid Input at that point means some upstream step (a non-Anthropic
+// provider's streaming quirk, an InputJSONDelta append racing a corrupt seed
+// value, etc.) left the block's JSON incomplete or malformed; there's no safe
+// way to salvage partial tool-call arguments, so this drops them to "{}"
+// rather than let Message.Accumulate fail the whole turn on a
+// json.Marshal/json.RawMessage error ("unexpected end of JSON input").
+//
+// Must be called BEFORE acc.Accumulate(ev) — by the time Accumulate returns
+// an error from the marshal, the turn has already failed and there's nothing
+// left to patch.
+func SanitizeInvalidAccumulatedInput(acc *anthropic.Message, ev anthropic.MessageStreamEventUnion) {
+	if ev.Type != "content_block_stop" && ev.Type != "message_stop" {
+		return
+	}
+	for i := range acc.Content {
+		cb := &acc.Content[i]
+		if cb.Input == nil || json.Valid(cb.Input) {
+			continue
+		}
+		slog.Warn("llm: dropping invalid accumulated tool input", "index", i, "input", string(cb.Input))
+		cb.Input = []byte("{}")
+	}
 }

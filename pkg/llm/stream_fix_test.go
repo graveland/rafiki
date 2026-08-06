@@ -111,10 +111,78 @@ func TestFixEmptyToolInputAndAccumulate(t *testing.T) {
 				if err := json.Unmarshal([]byte(`{"type":"content_block_stop","index":0}`), &stopEv); err != nil {
 					t.Fatalf("unmarshal stop: %v", err)
 				}
+				SanitizeInvalidAccumulatedInput(&acc, stopEv)
 				if aerr := acc.Accumulate(stopEv); aerr != nil {
 					t.Fatalf("accumulate content_block_stop: %v", aerr)
 				}
 			}
 		})
+	}
+}
+
+// TestSanitizeInvalidAccumulatedInput covers corruption that the two
+// "" -> {} fixes above don't target: an Input left as truncated/malformed
+// JSON (e.g. by an interrupted delta sequence) rather than the empty-string
+// seed value they specifically look for. Without the sanitize call,
+// acc.Accumulate on the stop event fails with "unexpected end of JSON input"
+// because json.RawMessage.MarshalJSON validates its bytes as JSON.
+func TestSanitizeInvalidAccumulatedInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     json.RawMessage
+		wantValid bool // whether Input is untouched (nil or already valid)
+	}{
+		{name: "truncated object", input: json.RawMessage(`{"co`), wantValid: false},
+		{name: "empty non-nil", input: json.RawMessage{}, wantValid: false},
+		{name: "nil left alone", input: nil, wantValid: true},
+		{name: "valid object left alone", input: json.RawMessage(`{"path":"/foo"}`), wantValid: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			acc := anthropic.Message{
+				Content: []anthropic.ContentBlockUnion{{Type: "tool_use", ID: "toolu_01", Name: "read", Input: tt.input}},
+			}
+			stopEv := anthropic.MessageStreamEventUnion{}
+			if err := json.Unmarshal([]byte(`{"type":"content_block_stop","index":0}`), &stopEv); err != nil {
+				t.Fatalf("unmarshal stop: %v", err)
+			}
+
+			SanitizeInvalidAccumulatedInput(&acc, stopEv)
+
+			if tt.wantValid {
+				if string(acc.Content[0].Input) != string(tt.input) {
+					t.Errorf("Input mutated: got %q, want untouched %q", acc.Content[0].Input, tt.input)
+				}
+			} else if !json.Valid(acc.Content[0].Input) {
+				t.Errorf("Input still invalid after sanitize: %q", acc.Content[0].Input)
+			}
+
+			if aerr := acc.Accumulate(stopEv); aerr != nil {
+				t.Fatalf("accumulate content_block_stop after sanitize: %v", aerr)
+			}
+		})
+	}
+}
+
+// TestSanitizeInvalidAccumulatedInput_MessageStop covers the message_stop
+// path, which marshals the whole accumulated message rather than only the
+// last content block.
+func TestSanitizeInvalidAccumulatedInput_MessageStop(t *testing.T) {
+	acc := anthropic.Message{
+		Content: []anthropic.ContentBlockUnion{
+			{Type: "text", Text: "hi"},
+			{Type: "tool_use", ID: "toolu_01", Name: "read", Input: json.RawMessage(`{"pa`)},
+		},
+	}
+	stopEv := anthropic.MessageStreamEventUnion{}
+	if err := json.Unmarshal([]byte(`{"type":"message_stop"}`), &stopEv); err != nil {
+		t.Fatalf("unmarshal message_stop: %v", err)
+	}
+
+	SanitizeInvalidAccumulatedInput(&acc, stopEv)
+
+	if aerr := acc.Accumulate(stopEv); aerr != nil {
+		t.Fatalf("accumulate message_stop after sanitize: %v", aerr)
 	}
 }

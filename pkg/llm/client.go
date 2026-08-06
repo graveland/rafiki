@@ -459,6 +459,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 			delivered = true
 		}
 		handler(ev)
+		SanitizeInvalidAccumulatedInput(&acc, ev)
 		if aerr := acc.Accumulate(ev); aerr != nil {
 			wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
 			span.RecordError(wrapped)
