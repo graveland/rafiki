@@ -245,8 +245,12 @@ redeploy: build-attach install ## Rebuild (incl. rafiki-attach) + install, then 
 $(PI_DIST): $(PI_PKG)/package.json $(PI_SRC)
 	cd $(PI_DIR) && npm install
 	cd $(PI_DIR)/packages/tui && npm run build
+	cd $(PI_DIR)/packages/telemetry && npm run build
 	cd $(PI_DIR)/packages/ai && npx tsgo -p tsconfig.build.json
 	cd $(PI_DIR)/packages/agent && npm run build
+	cd $(PI_DIR)/packages/protocol && npm run build
+	cd $(PI_DIR)/packages/client && npm run build
+	cd $(PI_DIR)/packages/server && npm run build
 	cd $(PI_DIR)/packages/coding-agent && npm run build
 	cd $(PI_DIR)/packages/orchestrator && npm run build
 
