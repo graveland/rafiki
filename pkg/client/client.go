@@ -6,11 +6,13 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"sync"
 	"sync/atomic"
 
@@ -66,6 +68,69 @@ func DefaultSocketPath() string {
 		return p
 	}
 	return paths.SocketPath()
+}
+
+// ─── Remote (TCP/TLS) dialing ──────────────────────────────────────────────────
+
+// DialURL opens a TLS connection to rawURL and authenticates via ctrl_auth.
+// rawURL must be "tls://host:port". token is sent as the first frame.
+//
+// Auth success is implicit — the server keeps the connection open.
+// Auth failure is detected when the server closes the connection: the
+// subsequent read in readLoop will fail with an auth-related read error.
+// System root CAs are used.
+//
+// DialURL blocks until the TLS dial completes or ctx expires.
+func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
+	u, err := parseControlURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := &tls.Dialer{Config: &tls.Config{MinVersion: tls.VersionTLS12}}
+	rawConn, err := dialer.DialContext(ctx, "tcp", u.Host)
+	if err != nil {
+		return nil, fmt.Errorf("tls dial %s: %w", u.Host, err)
+	}
+
+	// Auth handshake: send ctrl_auth. The server reads one frame, validates
+	// the token, and either proceeds silently (success) or closes the
+	// connection after writing an error frame (failure). On success we
+	// build the Client and start the readLoop — the first frame the
+	// readLoop sees will be a real event or response, not an auth confirmation.
+	authReq := protocol.AuthRequest{Type: protocol.TypeCtrlAuth, ID: "0", Token: token}
+	authB, _ := json.Marshal(authReq)
+	if err := protocol.WriteFrame(rawConn, authB); err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("send auth: %w", err)
+	}
+
+	// Auth succeeded (server didn't close the connection). Build a Client
+	// around the TLS conn. If auth actually failed, the server-side close
+	// will cause readLoop to fail, and the next Request/Subscribe will
+	// surface the error.
+	c := &Client{
+		conn:    rawConn,
+		closeCh: make(chan struct{}),
+		subs:    make(map[uint64]chan []byte),
+	}
+	go c.readLoop()
+	return c, nil
+}
+
+// parseControlURL validates and parses a control URL. Scheme must be "tls".
+func parseControlURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse control-url: %w", err)
+	}
+	if u.Scheme != "tls" {
+		return nil, fmt.Errorf("control-url scheme must be 'tls', got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, errors.New("control-url missing host")
+	}
+	return u, nil
 }
 
 // Request sends a typed request and waits for the matching response.
