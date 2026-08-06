@@ -60,6 +60,15 @@ type EngineConfig struct {
 	// context.Background(), matching every pre-Task-14 caller.
 	BaseCtx context.Context
 
+	// AutoResume asks the engine to call agentloop.Resume on its
+	// conversation before accepting any inbound prompts. The daemon sets
+	// this on boot-time auto-recovery of fundi children whose persisted
+	// LastStatus indicates they were alive when the daemon went down.
+	// agentloop.Resume handles every recoverable state (clean end_turn,
+	// dangling tool_use, truncated max_tokens) and reports failure only
+	// when resume is impossible (cap exceeded, empty history).
+	AutoResume bool
+
 	// OnFatal is called at most once, from the turn worker, when the engine
 	// has hit something it cannot continue past — today that means a panic
 	// escaped a turn. The engine has already stopped accepting work and
@@ -86,11 +95,12 @@ type EngineConfig struct {
 // loop's PendingUser seam; a steer arriving while idle is just a prompt. An
 // abort cancels the running turn's context.
 type Engine struct {
-	conv  *llm.Conversation
-	tools agentloop.ToolSet
-	fe    *Frontend
-	em    *Emitter
-	state StateData
+	conv       *llm.Conversation
+	tools      agentloop.ToolSet
+	fe         *Frontend
+	em         *Emitter
+	state      StateData
+	autoResume bool
 	// baseCtx is the engine-lifetime root every turn's cancellable context
 	// derives from — the single seam for wiring process shutdown (a
 	// signal.NotifyContext parent) into in-flight turns.
@@ -272,8 +282,13 @@ func (e *Engine) Wait() { e.wg.Wait() }
 func (e *Engine) Close() { close(e.wake) }
 
 // worker drains the prompt queue serially for the engine's lifetime, and
-// stops for good the first time a turn panics.
+// stops for good the first time a turn panics. When AutoResume is set, it
+// calls agentloop.Resume on startup to finalise any incomplete previous turn
+// (dangling tool_use, truncated max_tokens) before accepting inbound prompts.
 func (e *Engine) worker() {
+	if e.autoResume {
+		e.startupResume()
+	}
 	for range e.wake {
 		for {
 			e.mu.Lock()
@@ -289,6 +304,34 @@ func (e *Engine) worker() {
 				return // fatal() has already been called; this child is ending
 			}
 		}
+	}
+}
+
+// startupResume calls agentloop.Resume on the conversation once, before any
+// inbound prompt arrives. Called by worker when EngineConfig.AutoResume is set.
+//
+// agentloop.Resume handles every recoverable state: a clean end_turn returns
+// immediately; a dangling tool_use fabricates synthetic is_error results and
+// Continues; a truncated max_tokens Continues. Failure (cap exceeded, empty
+// history) emits an agent_error frame and ends the child via fatal.
+func (e *Engine) startupResume() {
+	e.em.AgentStart()
+	events, streamOpt := e.events()
+	result, err := agentloop.Resume(context.Background(), e.conv, e.tools, events, streamOpt)
+	switch {
+	case err != nil:
+		slog.Error("agent: startup resume failed; ending this child",
+			"conversation", e.conv.ID, "error", err)
+		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+		e.fatal(err)
+	case result.LimitReached:
+		slog.Info("agent: startup resume wrapped up by guardrail",
+			"conversation", e.conv.ID, "reason", result.LimitReason)
+		e.em.AgentEnd()
+	default:
+		slog.Info("agent: startup resume completed",
+			"conversation", e.conv.ID)
+		e.em.AgentEnd()
 	}
 }
 

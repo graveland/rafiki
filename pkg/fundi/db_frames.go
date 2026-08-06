@@ -19,10 +19,13 @@ import (
 // Each message produces a message_start / message_end pair. Streaming deltas
 // (message_update) and tool-execution lifecycle frames (tool_execution_start/
 // tool_execution_end) are not synthesised; completed messages carry all the
-// content the TUI needs. An agent_start frame is prepended so consumers see a
-// coherent stream start.
+// content the TUI needs. An agent_start frame is prepended and an agent_end
+// frame (carrying the full Anthropic messages array) is appended so the TUI's
+// AgentSession can seed its message cache — see the attach TUI's primeHistory
+// and updateCacheFromEvent, which populate _messages from agent_end's messages
+// field.
 func DBToPiFrames(msgs []anthropic.MessageParam) []json.RawMessage {
-	out := make([]json.RawMessage, 0, len(msgs)*2+1)
+	out := make([]json.RawMessage, 0, len(msgs)*2+2)
 
 	// Start the session so the TUI knows a stream is beginning.
 	if b, err := json.Marshal(child.PiAgentStart()); err == nil {
@@ -39,6 +42,28 @@ func DBToPiFrames(msgs []anthropic.MessageParam) []json.RawMessage {
 			out = append(out, frames...)
 		}
 	}
+
+	// Terminal agent_end carrying the full Anthropic-formatted message list.
+	// The TUI's AgentSession seeds its message cache from agent_end.messages
+	// (see attach/src/session.ts updateCacheFromEvent), and the individual
+	// message_start/message_end frames above populate user/assistant bubbles
+	// during replay. Without agent_end, the TUI never gets the authoritative
+	// Anthropic message list and shows no history.
+	rawMsgs := make([]json.RawMessage, len(msgs))
+	for i, m := range msgs {
+		b, err := json.Marshal(m)
+		if err != nil {
+			// A malformed MessageParam (should never reach the DB) is logged
+			// by the caller via its load warning; skip it here so the rest
+			// of the agent_end payload is still valid.
+			continue
+		}
+		rawMsgs[i] = b
+	}
+	if b, err := json.Marshal(child.PiAgentEnd(rawMsgs, nil)); err == nil {
+		out = append(out, b)
+	}
+
 	return out
 }
 

@@ -42,6 +42,10 @@ type RuntimeOptions struct {
 	// not need postgres.
 	Pool *pgxpool.Pool
 
+	// AutoResume asks the engine to call agentloop.Resume before accepting
+	// any inbound prompts — see EngineConfig.AutoResume.
+	AutoResume bool
+
 	// Env carries per-child environment variables forwarded from the caller's
 	// shell (via `rafiki create --forward-env` / SpawnRequest.Env). BuildRuntime
 	// sets each via os.Setenv before constructing the engine, so tools that
@@ -128,7 +132,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	registry := tools.NewRegistry()
-	tools.RegisterFileTools(registry, tools.NewFileTracker())
+	tools.RegisterFileTools(registry, tools.NewFileTracker(), opts.Cwd)
 	tools.RegisterBash(registry, outputPolicy, opts.Cwd)
 	if len(discovered) > 0 {
 		tools.RegisterSkillTool(registry, discovered)
@@ -165,6 +169,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		OpenRouterAPIKey:     opts.OpenRouterAPIKey,
 		Pool:                 opts.Pool,
 		Tools:                registry,
+		AutoResume:           opts.AutoResume,
 		OnFatal:              opts.OnFatal,
 	}
 

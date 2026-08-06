@@ -58,12 +58,13 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 
 // agentRunner builds the in-process runner for an agent child. Returns a nil
 // Runner (and nil error) for every other kind, which leaves SpawnSpec on the
-// subprocess path unchanged.
-func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string) (child.Runner, error) {
+// subprocess path unchanged. autoResume asks the engine to call
+// agentloop.Resume before accepting inbound prompts.
+func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool) (child.Runner, error) {
 	if req.Kind != protocol.KindFundi {
 		return nil, nil
 	}
-	ro, err := c.agentRuntimeOptions(req, childID)
+	ro, err := c.agentRuntimeOptions(req, childID, autoResume)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +84,7 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string) (chi
 // source of per-child agent config) and then parsed back with parseAgentFlags
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string) (fundi.RuntimeOptions, error) {
+func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
 		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
 	}
@@ -144,6 +145,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			ro.OpenRouterAPIKey = req.APIKey
 		}
 	}
+	ro.AutoResume = autoResume
 	return ro, nil
 }
 

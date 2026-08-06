@@ -186,9 +186,13 @@ func (c *Controller) sweepExpired() {
 	}
 }
 
-// loadOrphans inserts persisted records into the store as exited sessions and
-// SIGTERMs any process whose PID is still alive.
+// loadOrphans inserts persisted records into the store as exited sessions,
+// SIGTERMs any process whose PID is still alive, and auto-resumes fundi
+// children whose LastStatus indicates they were alive at daemon shutdown
+// (idle, streaming, etc.) rather than deliberately killed or exited.
 func (c *Controller) loadOrphans(records []persist.Record) {
+	var fundiCandidates []string
+
 	for _, rec := range records {
 		if rec.PID > 0 {
 			if err := syscall.Kill(rec.PID, 0); err == nil {
@@ -201,6 +205,36 @@ func (c *Controller) loadOrphans(records []persist.Record) {
 		sess := sessionFromRecord(rec)
 		sess.Status = protocol.StatusExited
 		c.st.Insert(sess)
+
+		// Fundi children whose LastStatus indicates they were alive when the
+		// daemon went down — not marked "exited" or "shutting_down" by a
+		// deliberate shutdown — are candidates for auto-recovery.
+		if rec.Kind == protocol.KindFundi &&
+			rec.LastStatus != "" &&
+			rec.LastStatus != string(protocol.StatusExited) &&
+			rec.LastStatus != string(protocol.StatusShuttingDown) {
+			fundiCandidates = append(fundiCandidates, rec.ChildID)
+		}
+	}
+
+	// Auto-resume fundi children. The daemon's environment holds the API
+	// keys; apiKey="" tells Resume to use the daemon's own credentials.
+	// Each resume deletes the old exited entry, spawns an in-process engine
+	// that reconnects to the same DB-backed conversation (same --ref), and
+	// registers it as a live child via activateLiveChild.
+	for _, childID := range fundiCandidates {
+		slog.Info("auto-resuming fundi child", "childId", childID)
+		go func(id string) {
+			// Use a fresh context with a generous timeout — the engine may
+			// need to call agentloop.Resume on startup, which can involve
+			// an API call if the last turn was interrupted mid-stream.
+			ctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
+			defer cancel()
+			if _, err := c.resumeWithAutoRecovery(ctx, id); err != nil {
+				slog.Warn("auto-resume failed; child stays exited",
+					"childId", id, "error", err)
+			}
+		}(childID)
 	}
 }
 
@@ -570,7 +604,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
-	runner, err := c.agentRunner(req, childID)
+	runner, err := c.agentRunner(req, childID, false)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1080,6 +1114,18 @@ func (s *childClaimSet) release(id string) {
 }
 
 func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (control.SpawnResult, error) {
+	return c.resumeInternal(ctx, childID, apiKey, false)
+}
+
+// resumeWithAutoRecovery is the auto-recovery version of Resume: it sets
+// AutoResume on the engine so the worker calls agentloop.Resume on startup
+// (finalising any incomplete previous turn) before accepting inbound prompts.
+func (c *Controller) resumeWithAutoRecovery(ctx context.Context, childID string) (control.SpawnResult, error) {
+	return c.resumeInternal(ctx, childID, "", true)
+}
+
+// resumeInternal is the shared implementation of Resume and auto-recovery resume.
+func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey string, autoResume bool) (control.SpawnResult, error) {
 	// Claim childID for the whole check-then-act window below: from before
 	// the exited-status check, through the child.Spawn fork, to after the
 	// old exited record is replaced by activateLiveChild. See childClaimSet's
@@ -1146,7 +1192,7 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
-	runner, err := c.agentRunner(req, childID)
+	runner, err := c.agentRunner(req, childID, autoResume)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1260,7 +1306,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
-	runner, err := c.agentRunner(req, childID)
+	runner, err := c.agentRunner(req, childID, false)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -2163,14 +2209,18 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// ExitedRenderRing stays consistent with the live render path.
 	renderEvents := ch.RenderRecent(ring.Query{})
 
+	// Persist the record BEFORE MarkExited so LastStatus reflects the pre-exit
+	// state (idle, streaming, etc.) rather than just "exited". The persisted
+	// LastStatus is what loadOrphans reads to decide whether a fundi child
+	// should be auto-resumed on daemon restart.
+	if err := c.writeRecordLastStatus(childID, lastStatus); err != nil {
+		slog.Warn("write state record on exit", "childId", childID, "error", err)
+	}
+
 	// MarkExited sets Status, ExitedAt, ExitCode, ExitSignal, and ExitedRing
 	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
 	// observe Status=Exited with ExitedRing still nil.
 	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot, renderEvents)
-
-	if err := c.writeRecord(childID); err != nil {
-		slog.Warn("write state record on exit", "childId", childID, "error", err)
-	}
 
 	// Dump logs before removing from the manager so per-child subscribers are
 	// still reachable for the exit event delivery below.
@@ -2238,6 +2288,22 @@ func (c *Controller) writeRecord(childID string) error {
 		return nil
 	}
 	rec := recordFromSnapshot(snap)
+	return c.records.Write(rec)
+}
+
+// writeRecordLastStatus persists the child's record with the given lastStatus
+// (the pre-exit state recorded in handleChildExit) rather than the store's
+// current Status (which is already "exited" after MarkExited). Used by
+// handleChildExit so the on-disk record's LastStatus reflects the child's
+// actual last state, enabling loadOrphans to distinguish a clean exit from a
+// crash during auto-recovery.
+func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) error {
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return nil
+	}
+	rec := recordFromSnapshot(snap)
+	rec.LastStatus = lastStatus
 	return c.records.Write(rec)
 }
 

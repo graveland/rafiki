@@ -15,7 +15,7 @@ func TestAgentRunnerKind(t *testing.T) {
 	c := newTestController(t)
 	for _, kind := range []string{protocol.KindPi, protocol.KindClaude} {
 		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
-		runner, err := c.agentRunner(req, "c_"+kind)
+		runner, err := c.agentRunner(req, "c_"+kind, false)
 		if err != nil {
 			t.Fatalf("agentRunner(kind=%s): %v", kind, err)
 		}
@@ -25,7 +25,7 @@ func TestAgentRunnerKind(t *testing.T) {
 	}
 
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5"}
-	runner, err := c.agentRunner(req, "c_agent")
+	runner, err := c.agentRunner(req, "c_agent", false)
 	if err != nil {
 		t.Fatalf("agentRunner(kind=agent): %v", err)
 	}
@@ -49,7 +49,7 @@ func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 		Model:     "anthropic/claude-sonnet-4-5",
 		ExtraArgs: []string{"--ref", "spoofed-child-id"},
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_authoritative")
+	ro, err := c.agentRuntimeOptions(req, "c_authoritative", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		Model:  "anthropic/claude-sonnet-4-5",
 		APIKey: "sk-ant-test-key",
 	}
-	ro, err := c.agentRuntimeOptions(anthropicReq, "c_key_anthropic")
+	ro, err := c.agentRuntimeOptions(anthropicReq, "c_key_anthropic", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		Model:  "deepseek/deepseek-chat",
 		APIKey: "sk-or-test-key",
 	}
-	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter")
+	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 		ExtraArgs: []string{"--model", "deepseek/y"},
 		APIKey:    "sk-test-key",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_model_override_key")
+	ro, err := c.agentRuntimeOptions(req, "c_model_override_key", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 			"http_proxy":        "http://example.invalid:8080",
 		},
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_env_overlay")
+	ro, err := c.agentRuntimeOptions(req, "c_env_overlay", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 
 	// An explicit req.APIKey must still win over a forwarded req.Env value.
 	req.APIKey = "explicit-key"
-	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins")
+	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 			Model:     "anthropic/claude-sonnet-4-5",
 			ExtraArgs: extraArgs,
 		}
-		if _, err := c.agentRuntimeOptions(req, "c_explicit_db"); err == nil {
+		if _, err := c.agentRuntimeOptions(req, "c_explicit_db", false); err == nil {
 			t.Errorf("agentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
 		}
 	}
@@ -243,7 +243,7 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	if _, err := c.agentRuntimeOptions(req, "c_env_default_db"); err != nil {
+	if _, err := c.agentRuntimeOptions(req, "c_env_default_db", false); err != nil {
 		t.Errorf("agentRuntimeOptions with only $RAFIKI_DB set (no explicit --db): got error %v, want nil", err)
 	}
 }

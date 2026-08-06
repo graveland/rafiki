@@ -118,6 +118,10 @@ type Config struct {
 	// ending this child when a turn panics. See EngineConfig.OnFatal. Nil is
 	// legal (a standalone `rafikid fundi` process has nothing to hand back to).
 	OnFatal func(error)
+
+	// AutoResume asks the engine to call agentloop.Resume before accepting
+	// any inbound prompts — see EngineConfig.AutoResume.
+	AutoResume bool
 }
 
 // BuildEngine constructs the llm.Client (wiring c.Pool via llm.WithStore when
@@ -184,14 +188,15 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 
 	provider, modelID := splitModel(c.Model)
 	eng, err := NewEngine(EngineConfig{
-		Client:   client,
-		ConvOpts: convOpts,
-		Tools:    c.Tools,
-		Provider: provider,
-		ModelID:  modelID,
-		Name:     c.Name,
-		BaseCtx:  ctx,
-		OnFatal:  c.OnFatal,
+		Client:     client,
+		ConvOpts:   convOpts,
+		Tools:      c.Tools,
+		Provider:   provider,
+		ModelID:    modelID,
+		Name:       c.Name,
+		BaseCtx:    ctx,
+		AutoResume: c.AutoResume,
+		OnFatal:    c.OnFatal,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)
