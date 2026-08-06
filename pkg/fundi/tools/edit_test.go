@@ -200,3 +200,220 @@ func TestEditToolRelativePathRejected(t *testing.T) {
 		t.Fatalf("expected an absolute-path error, got %v", err)
 	}
 }
+
+func TestEditToolCRLFFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("hello\r\nworld\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	// old_string uses LF — edit normalizes both file content and old_string to LF.
+	if _, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"old_string":"hello\nworld","new_string":"hi\nthere"}`, p),
+	)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	// The file should keep its original CRLF line endings.
+	if got != "hi\r\nthere\r\n" {
+		t.Fatalf("expected 'hi\\r\\nthere\\r\\n', got %q", got)
+	}
+}
+
+func TestEditToolBOMHandling(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("\uFEFFhello\nworld\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	// old_string does NOT include the BOM (the model won't emit invisible BOM).
+	if _, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"old_string":"hello\n","new_string":"hi\n"}`, p),
+	)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	if got != "\uFEFFhi\nworld\n" {
+		t.Fatalf("expected BOM-preserved content, got %q", got)
+	}
+}
+
+func TestEditToolFuzzySmartQuotes(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	// File has straight quotes.
+	if err := os.WriteFile(p, []byte(`var msg = "hello world"`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	// Model emits curly quotes — fuzzy matching normalizes them.
+	curly := json.RawMessage(fmt.Sprintf(
+		`{"path":%q,"old_string":%q,"new_string":%q}`, p,
+		"var msg = \u201Chello world\u201D",
+		`var msg = "hi there"`,
+	))
+	_, err := editFn(context.Background(), curly)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	if got != "var msg = \"hi there\"\n" {
+		t.Fatalf("fuzzy smart-quote edit failed, got %q", got)
+	}
+}
+
+func TestEditToolFuzzyTrailingWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	// File has no trailing whitespace.
+	if err := os.WriteFile(p, []byte("func foo() {\n    bar()\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	// Model emits old_string with trailing spaces (common LLM artifact).
+	_, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"old_string":"    bar()  ","new_string":"    baz()"}`, p),
+	))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	if got != "func foo() {\n    baz()\n}\n" {
+		t.Fatalf("trailing-whitespace fuzzy edit failed, got %q", got)
+	}
+}
+
+func TestEditToolFuzzyUnicodeDash(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	// File uses ASCII hyphen.
+	if err := os.WriteFile(p, []byte("long-term\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	// Model emits en-dash.
+	_, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"old_string":"long\u2013term","new_string":"short-term"}`, p),
+	))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	if got != "short-term\n" {
+		t.Fatalf("unicode-dash fuzzy edit failed, got %q", got)
+	}
+}
+
+func TestEditToolMultiEditExact(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("a=1\nb=2\nc=3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	_, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"edits":[
+			{"old_string":"a=1","new_string":"a=10"},
+			{"old_string":"c=3","new_string":"c=30"}
+		]}`, p),
+	))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	if got != "a=10\nb=2\nc=30\n" {
+		t.Fatalf("multi-edit failed, got %q", got)
+	}
+}
+
+func TestEditToolMultiEditOverlapRejected(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	_, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"edits":[
+			{"old_string":"hello world","new_string":"hi there"},
+			{"old_string":"world","new_string":"planet"}
+		]}`, p),
+	))
+	if err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("expected overlap error, got %v", err)
+	}
+}
+
+func TestEditToolFuzzyPreservesUnchangedLines(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	// File uses tabs for indentation on unchanged lines.
+	content := "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n\tfmt.Println(\"world\")  \n}\n"
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr)
+	editFn := newEditTool(tr)
+	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+		t.Fatal(err)
+	}
+	// Fuzzy match needed on the line we're editing (has trailing spaces on
+	// one line, which triggers fuzzy matching for the whole edit).
+	// The untouched lines should keep their original tabs.
+	_, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"path":%q,"old_string":"\tfmt.Println(\"world\")  ","new_string":"\tfmt.Println(\"universe\")"}`, p),
+	))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	want := "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n\tfmt.Println(\"universe\")\n}\n"
+	if got != want {
+		t.Fatalf("unchanged-line preservation failed: got %q, want %q", got, want)
+	}
+}

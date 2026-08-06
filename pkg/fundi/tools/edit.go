@@ -7,35 +7,59 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
-	editDescription = "Replace text in a file. Use parameter `path` (absolute path, required) " +
-		"— the file must have been read via the read tool in this session, or the " +
-		"edit will fail. `old_string` must match the file's current contents " +
-		"exactly once; set `replace_all: true` to replace every occurrence instead."
+	editDescription = "Edit a file using exact text replacement (fuzzy fallback). " +
+		"Use `path` (absolute path, required) — the file must have been read via " +
+		"the read tool in this session, or the edit will fail. " +
+		"Provide one or more replacements in `edits[]`, each with `old_string` and " +
+		"`new_string`. All edits are matched against the same original content " +
+		"(not incrementally). Overlapping or nested edits are rejected — merge " +
+		"adjacent changes into one edit instead. " +
+		"Also accepts legacy `old_string` + `new_string` top-level fields for a " +
+		"single replacement. Set `replace_all: true` to replace every occurrence."
 	editSchema = `{
 		"type": "object",
 		"properties": {
 			"path": {"type": "string", "description": "Absolute path to the file to edit."},
+			"edits": {
+				"type": "array",
+				"description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally.",
+				"items": {
+					"type": "object",
+					"properties": {
+						"old_string": {"type": "string", "description": "Exact text to replace. Must match exactly once in the original file."},
+						"new_string": {"type": "string", "description": "Text to replace old_string with."}
+					},
+					"required": ["old_string", "new_string"]
+				}
+			},
 			"old_string": {"type": "string", "description": "Exact text to replace. Must match exactly once unless replace_all is true."},
 			"new_string": {"type": "string", "description": "Text to replace old_string with."},
 			"replace_all": {"type": "boolean", "description": "Replace every occurrence of old_string instead of requiring exactly one match."}
 		},
-		"required": ["path", "old_string", "new_string"]
+		"required": ["path"]
 	}`
 )
 
 type editInput struct {
-	Path       string `json:"path"`
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all"`
+	Path       string     `json:"path"`
+	Edits      []editPair `json:"edits"`
+	OldString  string     `json:"old_string"`
+	NewString  string     `json:"new_string"`
+	ReplaceAll bool       `json:"replace_all"`
 }
 
-// newEditTool builds the edit ToolFunc. It requires tr to already hold a
-// fresh read of path (see FileTracker.Verify) and records its own edit in tr
-// so a chained edit on the same path doesn't need a redundant read.
+type editPair struct {
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
+// newEditTool builds the edit ToolFunc. It requires tr to already hold a fresh
+// read of path (see FileTracker.Verify) and records its own edit in tr so a
+// chained edit on the same path doesn't need a redundant read.
 func newEditTool(tr *FileTracker) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in editInput
@@ -48,22 +72,21 @@ func newEditTool(tr *FileTracker) ToolFunc {
 		if !filepath.IsAbs(in.Path) {
 			return "", fmt.Errorf("edit: path must be absolute, got %q", in.Path)
 		}
-		if in.OldString == "" {
-			return "", fmt.Errorf("edit: old_string is required")
+
+		// Normalize: legacy top-level old_string/new_string → single-entry edits.
+		edits := in.Edits
+		if len(edits) == 0 && in.OldString != "" {
+			edits = []editPair{{OldString: in.OldString, NewString: in.NewString}}
 		}
-		// Fail fast on an already-aborted turn rather than doing work whose
-		// result nobody will see — agentloop runs a batch of tool calls
-		// concurrently, so a call can still be starting after the turn's
-		// context was canceled.
+		if len(edits) == 0 {
+			return "", fmt.Errorf("edit: at least one edit in edits[] or old_string is required")
+		}
+
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		// Everything from here down is a read-modify-write. rafiki's agentloop
-		// runs a tool batch concurrently, and a model emitting two edits on
-		// one file in a single batch is routine — without this lock both would
-		// verify, both would read the pre-state, and the second write would
-		// silently discard the first while reporting success. Hold it across
-		// verify, read, compute, write, and RecordRead.
+
+		// Lock → verify → read → match → write → record.
 		unlock := tr.Lock(in.Path)
 		defer unlock()
 
@@ -71,39 +94,77 @@ func newEditTool(tr *FileTracker) ToolFunc {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 
-		content, err := os.ReadFile(in.Path)
+		raw, err := os.ReadFile(in.Path)
 		if err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
-		text := string(content)
-		count := strings.Count(text, in.OldString)
-		switch {
-		case count == 0:
-			return "", fmt.Errorf("edit: old_string not found in %s", in.Path)
-		case count > 1 && !in.ReplaceAll:
-			return "", fmt.Errorf("edit: old_string matches %d times in %s; add more surrounding context to make it unique, or set replace_all", count, in.Path)
+
+		// Prepare content: strip BOM, normalize line endings.
+		rawStr := string(raw)
+		hasBOM := strings.HasPrefix(rawStr, "\uFEFF")
+		lfContent, origLE := prepContent(rawStr)
+
+		// Handle replace_all with the legacy interface.
+		if in.ReplaceAll && in.OldString != "" {
+			lfOld := normalizeToLF(in.OldString)
+			lfNew := normalizeToLF(in.NewString)
+			count := strings.Count(lfContent, lfOld)
+			if count == 0 {
+				return "", fmt.Errorf("edit: old_string not found in %s", in.Path)
+			}
+			updated := strings.ReplaceAll(lfContent, lfOld, lfNew)
+			final := restoreLineEndings(updated, origLE)
+			if hasBOM {
+				final = "\uFEFF" + final
+			}
+			if err := writeFinal(in.Path, rawStr, final); err != nil {
+				return "", fmt.Errorf("edit: %w", err)
+			}
+			tr.RecordRead(in.Path, fileMtime(in.Path))
+			return fmt.Sprintf("replaced %d occurrence(s) in %s", count, in.Path), nil
 		}
 
-		var updated string
-		if in.ReplaceAll {
-			updated = strings.ReplaceAll(text, in.OldString, in.NewString)
-		} else {
-			updated = strings.Replace(text, in.OldString, in.NewString, 1)
-		}
-
-		existing, err := os.Stat(in.Path)
+		// Apply edits through the fuzzy-aware pipeline.
+		_, newContent, err := applyEdits(lfContent, edits)
 		if err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
-		if err := os.WriteFile(in.Path, []byte(updated), existing.Mode()); err != nil {
+
+		// Restore BOM and line endings, then write.
+		final := restoreLineEndings(newContent, origLE)
+		if hasBOM {
+			final = "\uFEFF" + final
+		}
+
+		if err := writeFinal(in.Path, rawStr, final); err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 
-		info, err := os.Stat(in.Path)
-		if err != nil {
-			return "", fmt.Errorf("edit: %w", err)
+		tr.RecordRead(in.Path, fileMtime(in.Path))
+		n := len(edits)
+		if n == 1 {
+			return fmt.Sprintf("replaced 1 block in %s", in.Path), nil
 		}
-		tr.RecordRead(in.Path, info.ModTime())
-		return fmt.Sprintf("replaced %d occurrence(s) in %s", count, in.Path), nil
+		return fmt.Sprintf("replaced %d blocks in %s", n, in.Path), nil
 	}
+}
+
+// writeFinal overwrites path with content, preserving the original file mode.
+func writeFinal(path, original, content string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), info.Mode())
+}
+
+// fileMtime returns the mod time of path, panicking on error since we just
+// verified and wrote it.
+func fileMtime(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		// We just wrote the file; this shouldn't happen.
+		return time.Time{}
+	}
+	return info.ModTime()
 }
