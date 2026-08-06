@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -17,42 +16,45 @@ const (
 	// not this tool's job.
 	defaultReadLimit = 2000
 
-	readDescription = "Read a file from the local filesystem. path must be absolute. " +
-		"Output is numbered like `cat -n` (1-indexed). By default reads from the " +
-		"start of the file, up to 2000 lines; if the file is longer, a trailing " +
-		"note tells you the offset to continue from. Pass offset/limit to page " +
-		"through a large file explicitly."
+	readDescription = "Read a file from the local filesystem. " +
+		"Use `path` (or `file_path`, an alias) — absolute or relative to the " +
+		"working directory. Output is numbered like `cat -n` (1-indexed). By " +
+		"default reads from the start of the file, up to 2000 lines; if the " +
+		"file is longer, a trailing note tells you the offset to continue from. " +
+		"Pass offset/limit to page through a large file explicitly."
 	readSchema = `{
 		"type": "object",
 		"properties": {
-			"path": {"type": "string", "description": "Absolute path to the file to read."},
+			"path": {"type": "string", "description": "Path to the file to read (absolute or relative). Also accepts file_path as an alias."},
+			"file_path": {"type": "string", "description": "Alias for path."},
 			"offset": {"type": "integer", "description": "1-indexed line number to start reading from. Defaults to 1."},
 			"limit": {"type": "integer", "description": "Maximum number of lines to return. Defaults to 2000."}
 		},
-		"required": ["path"]
+		"required": []
 	}`
 )
 
 type readInput struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
+	Path     string `json:"path"`
+	FilePath string `json:"file_path"`
+	Offset   int    `json:"offset"`
+	Limit    int    `json:"limit"`
 }
 
 // newReadTool builds the read ToolFunc, recording every successful read's
 // path+mtime in tr so write/edit can verify freshness later.
-func newReadTool(tr *FileTracker) ToolFunc {
+func newReadTool(tr *FileTracker, cwd string) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in readInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("read: invalid input: %w", err)
 		}
-		if in.Path == "" {
-			return "", fmt.Errorf("read: path is required")
+
+		absPath, err := resolveToolPath(in.Path, in.FilePath, cwd)
+		if err != nil {
+			return "", fmt.Errorf("read: %w", err)
 		}
-		if !filepath.IsAbs(in.Path) {
-			return "", fmt.Errorf("read: path must be absolute, got %q", in.Path)
-		}
+
 		// Fail fast on an already-aborted turn rather than doing work whose
 		// result nobody will see — agentloop runs a batch of tool calls
 		// concurrently, so a call can still be starting after the turn's
@@ -67,18 +69,18 @@ func newReadTool(tr *FileTracker) ToolFunc {
 		// file between the two and hand the model torn content, then record an
 		// mtime for that non-state. Hold the same per-path lock write and edit
 		// hold, across the stat, the scan, and the RecordRead.
-		unlock := tr.Lock(in.Path)
+		unlock := tr.Lock(absPath)
 		defer unlock()
 
-		info, err := os.Stat(in.Path)
+		info, err := os.Stat(absPath)
 		if err != nil {
 			return "", fmt.Errorf("read: %w", err)
 		}
 		if info.IsDir() {
-			return "", fmt.Errorf("read: %q is a directory, not a file", in.Path)
+			return "", fmt.Errorf("read: %q is a directory, not a file", absPath)
 		}
 
-		f, err := os.Open(in.Path)
+		f, err := os.Open(absPath)
 		if err != nil {
 			return "", fmt.Errorf("read: %w", err)
 		}
@@ -121,7 +123,7 @@ func newReadTool(tr *FileTracker) ToolFunc {
 		// Record the read BEFORE returning any error-shaped output below —
 		// a paging hint or empty-file marker is still a completed, honest
 		// read of what's on disk right now.
-		tr.RecordRead(in.Path, info.ModTime())
+		tr.RecordRead(absPath, info.ModTime())
 
 		if shown == 0 {
 			if lineNo == 0 {

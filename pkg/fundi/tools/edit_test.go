@@ -19,8 +19,8 @@ func TestEditToolNoMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -37,8 +37,8 @@ func TestEditToolMultipleMatchesWithoutReplaceAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +59,8 @@ func TestEditToolReplaceAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +80,8 @@ func TestEditToolStaleMtime(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -117,8 +117,8 @@ func TestEditToolChainedEditsNeedOnlyOneRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -155,8 +155,8 @@ func TestEditToolConcurrentEditsAreNotLost(t *testing.T) {
 	}
 
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestEditToolConcurrentEditsAreNotLost(t *testing.T) {
 
 func TestEditToolRelativePathRejected(t *testing.T) {
 	tr := NewFileTracker()
-	editFn := newEditTool(tr)
+	editFn := newEditTool(tr, "")
 	_, err := editFn(context.Background(), json.RawMessage(`{"path":"rel.txt","old_string":"a","new_string":"b"}`))
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("expected an absolute-path error, got %v", err)
@@ -208,8 +208,8 @@ func TestEditToolCRLFFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -234,8 +234,8 @@ func TestEditToolBOMHandling(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -260,8 +260,8 @@ func TestEditToolFuzzySmartQuotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -290,8 +290,8 @@ func TestEditToolFuzzyTrailingWhitespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -317,8 +317,8 @@ func TestEditToolFuzzyUnicodeDash(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -343,8 +343,8 @@ func TestEditToolMultiEditExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -371,8 +371,8 @@ func TestEditToolMultiEditOverlapRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -396,8 +396,8 @@ func TestEditToolFuzzyPreservesUnchangedLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	editFn := newEditTool(tr)
+	readFn := newReadTool(tr, "")
+	editFn := newEditTool(tr, "")
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -415,5 +415,74 @@ func TestEditToolFuzzyPreservesUnchangedLines(t *testing.T) {
 	want := "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n\tfmt.Println(\"universe\")\n}\n"
 	if got != want {
 		t.Fatalf("unchanged-line preservation failed: got %q, want %q", got, want)
+	}
+}
+
+func TestEditToolFilePathAlias(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr, dir)
+	editFn := newEditTool(tr, dir)
+	// Read via file_path alias.
+	if _, err := readFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"file_path":%q}`, p),
+	)); err != nil {
+		t.Fatalf("read via file_path failed: %v", err)
+	}
+	// Edit via file_path alias.
+	if _, err := editFn(context.Background(), json.RawMessage(
+		fmt.Sprintf(`{"file_path":%q,"old_string":"hello","new_string":"hi"}`, p),
+	)); err != nil {
+		t.Fatalf("edit via file_path failed: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "hi world" {
+		t.Fatalf("content = %q", b)
+	}
+}
+
+func TestEditToolRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sub", "a.txt")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("hello relative"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr, dir)
+	editFn := newEditTool(tr, dir)
+	// Read with a relative path resolved against cwd.
+	if _, err := readFn(context.Background(), json.RawMessage(`{"path":"sub/a.txt"}`)); err != nil {
+		t.Fatalf("read relative failed: %v", err)
+	}
+	// Edit with a relative path.
+	if _, err := editFn(context.Background(), json.RawMessage(
+		`{"path":"sub/a.txt","old_string":"hello relative","new_string":"bye relative"}`,
+	)); err != nil {
+		t.Fatalf("edit relative failed: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "bye relative" {
+		t.Fatalf("content = %q", b)
+	}
+}
+
+func TestEditToolTildeExpansion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	p := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(p, []byte("tilde test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr := NewFileTracker()
+	readFn := newReadTool(tr, dir)
+	if _, err := readFn(context.Background(), json.RawMessage(`{"path":"~/a.txt"}`)); err != nil {
+		t.Fatalf("read via ~ failed: %v", err)
 	}
 }

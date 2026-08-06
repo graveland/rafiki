@@ -30,7 +30,7 @@ func TestEditRequiresPriorRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, tr := NewRegistry(), NewFileTracker()
-	RegisterFileTools(r, tr)
+	RegisterFileTools(r, tr, dir)
 	_, err := r.Execute(context.Background(), "edit",
 		json.RawMessage(`{"path":"`+p+`","old_string":"hello","new_string":"bye"}`))
 	if err == nil || !strings.Contains(err.Error(), "read") {
@@ -54,7 +54,7 @@ func TestEditRequiresPriorRead(t *testing.T) {
 
 func TestDefinitionsSortedByName(t *testing.T) {
 	r, tr := NewRegistry(), NewFileTracker()
-	RegisterFileTools(r, tr)
+	RegisterFileTools(r, tr, t.TempDir())
 	defs := r.Definitions()
 	names := toolNames(defs)
 	if !sort.StringsAreSorted(names) {

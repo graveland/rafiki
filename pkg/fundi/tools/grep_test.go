@@ -261,7 +261,7 @@ func TestGrepToolEmitsAbsolutePathsForRelativeBase(t *testing.T) {
 
 	// The real contract: the emitted path must be directly usable by read.
 	tr := NewFileTracker()
-	if _, err := newReadTool(tr)(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, emitted))); err != nil {
+	if _, err := newReadTool(tr, "")(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, emitted))); err != nil {
 		t.Fatalf("read rejected grep's own output %q: %v", emitted, err)
 	}
 }

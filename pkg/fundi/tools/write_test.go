@@ -16,7 +16,7 @@ func TestWriteToolCreatesNewFileAndParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "deeper", "new.txt")
 	tr := NewFileTracker()
-	fn := newWriteTool(tr)
+	fn := newWriteTool(tr, "")
 
 	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"content":"hello"}`, p)))
 	if err != nil {
@@ -38,7 +38,7 @@ func TestWriteToolRefusesUnreadExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	fn := newWriteTool(tr)
+	fn := newWriteTool(tr, "")
 
 	_, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"content":"clobber"}`, p)))
 	if err == nil || !strings.Contains(err.Error(), "read") {
@@ -60,8 +60,8 @@ func TestWriteToolAllowsOverwriteAfterRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
-	writeFn := newWriteTool(tr)
+	readFn := newReadTool(tr, "")
+	writeFn := newWriteTool(tr, "")
 
 	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestWriteToolAllowsOverwriteAfterRead(t *testing.T) {
 
 func TestWriteToolRefusesRelativePath(t *testing.T) {
 	tr := NewFileTracker()
-	fn := newWriteTool(tr)
+	fn := newWriteTool(tr, "")
 	_, err := fn(context.Background(), json.RawMessage(`{"path":"rel.txt","content":"x"}`))
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("expected an absolute-path error, got %v", err)
@@ -98,8 +98,8 @@ func TestWriteToolConcurrentWritesAreSerialized(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "contended.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr)
-	editFn := newEditTool(tr)
+	writeFn := newWriteTool(tr, "")
+	editFn := newEditTool(tr, "")
 
 	payloads := make([]string, n)
 	for i := range payloads {
@@ -162,7 +162,7 @@ func TestWriteToolExcludesASecondWriterAfterParentDirsAppear(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "deeper", "contended.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr)
+	writeFn := newWriteTool(tr, "")
 
 	// Writer one: lock first, create the parents second — write.go's order.
 	unlock := tr.Lock(p)
@@ -225,7 +225,7 @@ func TestWriteToolConcurrentWritesIntoUncreatedDirsAreSerialized(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "deeper", "contended.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr)
+	writeFn := newWriteTool(tr, "")
 
 	payloads := make([]string, n)
 	for i := range payloads {
@@ -273,8 +273,8 @@ func TestWriteThenEditWithoutSeparateRead(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "roundtrip.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr)
-	editFn := newEditTool(tr)
+	writeFn := newWriteTool(tr, "")
+	editFn := newEditTool(tr, "")
 
 	if _, err := writeFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"content":"hello world"}`, p))); err != nil {
 		t.Fatal(err)

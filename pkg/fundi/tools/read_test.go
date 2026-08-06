@@ -136,7 +136,7 @@ func TestReadTool(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := NewFileTracker()
-			fn := newReadTool(tr)
+			fn := newReadTool(tr, "")
 			out, err := fn(context.Background(), json.RawMessage(tc.input))
 			if tc.wantErr {
 				if err == nil {
@@ -164,7 +164,7 @@ func TestReadToolRecordsTrackerState(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	fn := newReadTool(tr)
+	fn := newReadTool(tr, "")
 	if _, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestReadToolTakesPerPathLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr)
+	readFn := newReadTool(tr, "")
 
 	unlock := tr.Lock(p)
 

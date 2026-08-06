@@ -132,11 +132,12 @@ func Def(name, description, jsonSchema string) anthropic.ToolUnionParam {
 }
 
 // RegisterFileTools registers read, write, edit, glob, and grep against r,
-// sharing tr as their read-before-write tracking state.
-func RegisterFileTools(r *Registry, tr *FileTracker) {
-	r.Register(Def("read", readDescription, readSchema), newReadTool(tr))
-	r.Register(Def("write", writeDescription, writeSchema), newWriteTool(tr))
-	r.Register(Def("edit", editDescription, editSchema), newEditTool(tr))
+// sharing tr as their read-before-write tracking state. cwd is the working
+// directory for resolving relative paths and ~ in the file tools.
+func RegisterFileTools(r *Registry, tr *FileTracker, cwd string) {
+	r.Register(Def("read", readDescription, readSchema), newReadTool(tr, cwd))
+	r.Register(Def("write", writeDescription, writeSchema), newWriteTool(tr, cwd))
+	r.Register(Def("edit", editDescription, editSchema), newEditTool(tr, cwd))
 	r.Register(Def("glob", globDescription, globSchema), newGlobTool())
 	r.Register(Def("grep", grepDescription, grepSchema), newGrepTool())
 }

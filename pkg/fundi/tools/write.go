@@ -9,42 +9,45 @@ import (
 )
 
 const (
-	writeDescription = "Write content to a file, replacing it entirely. path must be absolute. " +
-		"Creates parent directories as needed. If the file already exists, it must " +
-		"have been read (via the read tool) since its last on-disk modification — " +
-		"write refuses to blindly overwrite a file it hasn't seen the current " +
-		"contents of."
+	writeDescription = "Write content to a file, replacing it entirely. " +
+		"Use `path` (or `file_path`, an alias) — absolute or relative to the " +
+		"working directory. Creates parent directories as needed. If the file " +
+		"already exists, it must have been read (via the read tool) since its " +
+		"last on-disk modification — write refuses to blindly overwrite a file " +
+		"it hasn't seen the current contents of."
 	writeSchema = `{
 		"type": "object",
 		"properties": {
-			"path": {"type": "string", "description": "Absolute path to the file to write."},
+			"path": {"type": "string", "description": "Path to the file to write (absolute or relative). Also accepts file_path as an alias."},
+			"file_path": {"type": "string", "description": "Alias for path."},
 			"content": {"type": "string", "description": "Full content to write to the file."}
 		},
-		"required": ["path", "content"]
+		"required": ["content"]
 	}`
 )
 
 type writeInput struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path     string `json:"path"`
+	FilePath string `json:"file_path"`
+	Content  string `json:"content"`
 }
 
 // newWriteTool builds the write ToolFunc. It consults tr to refuse
 // overwriting an existing file that hasn't been read since its last
 // modification, and records its own write in tr so an immediately following
 // edit doesn't need a redundant read.
-func newWriteTool(tr *FileTracker) ToolFunc {
+func newWriteTool(tr *FileTracker, cwd string) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in writeInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("write: invalid input: %w", err)
 		}
-		if in.Path == "" {
-			return "", fmt.Errorf("write: path is required")
+
+		absPath, err := resolveToolPath(in.Path, in.FilePath, cwd)
+		if err != nil {
+			return "", fmt.Errorf("write: %w", err)
 		}
-		if !filepath.IsAbs(in.Path) {
-			return "", fmt.Errorf("write: path must be absolute, got %q", in.Path)
-		}
+
 		// Fail fast on an already-aborted turn rather than doing work whose
 		// result nobody will see — agentloop runs a batch of tool calls
 		// concurrently, so a call can still be starting after the turn's
@@ -58,15 +61,15 @@ func newWriteTool(tr *FileTracker) ToolFunc {
 		// so hold the per-path lock across the whole sequence — otherwise a
 		// concurrent write or edit on the same file can interleave between the
 		// verify and the write and have its change silently discarded.
-		unlock := tr.Lock(in.Path)
+		unlock := tr.Lock(absPath)
 		defer unlock()
 
 		mode := os.FileMode(0o644)
-		if existing, err := os.Stat(in.Path); err == nil {
+		if existing, err := os.Stat(absPath); err == nil {
 			if existing.IsDir() {
-				return "", fmt.Errorf("write: %q is a directory, not a file", in.Path)
+				return "", fmt.Errorf("write: %q is a directory, not a file", absPath)
 			}
-			if err := tr.Verify(in.Path); err != nil {
+			if err := tr.Verify(absPath); err != nil {
 				return "", fmt.Errorf("write: %w", err)
 			}
 			mode = existing.Mode()
@@ -74,18 +77,18 @@ func newWriteTool(tr *FileTracker) ToolFunc {
 			return "", fmt.Errorf("write: %w", err)
 		}
 
-		if err := os.MkdirAll(filepath.Dir(in.Path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 			return "", fmt.Errorf("write: create parent directories: %w", err)
 		}
-		if err := os.WriteFile(in.Path, []byte(in.Content), mode); err != nil {
+		if err := os.WriteFile(absPath, []byte(in.Content), mode); err != nil {
 			return "", fmt.Errorf("write: %w", err)
 		}
 
-		info, err := os.Stat(in.Path)
+		info, err := os.Stat(absPath)
 		if err != nil {
 			return "", fmt.Errorf("write: %w", err)
 		}
-		tr.RecordRead(in.Path, info.ModTime())
-		return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path), nil
+		tr.RecordRead(absPath, info.ModTime())
+		return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), absPath), nil
 	}
 }

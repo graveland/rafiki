@@ -5,15 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
 const (
 	editDescription = "Edit a file using exact text replacement (fuzzy fallback). " +
-		"Use `path` (absolute path, required) — the file must have been read via " +
-		"the read tool in this session, or the edit will fail. " +
+		"Use `path` (or `file_path`, an alias) — absolute or relative to the " +
+		"working directory. The file must have been read via the read tool in " +
+		"this session, or the edit will fail. " +
 		"Provide one or more replacements in `edits[]`, each with `old_string` and " +
 		"`new_string`. All edits are matched against the same original content " +
 		"(not incrementally). Overlapping or nested edits are rejected — merge " +
@@ -23,7 +23,8 @@ const (
 	editSchema = `{
 		"type": "object",
 		"properties": {
-			"path": {"type": "string", "description": "Absolute path to the file to edit."},
+			"path": {"type": "string", "description": "Path to the file to edit (absolute or relative). Also accepts file_path as an alias."},
+			"file_path": {"type": "string", "description": "Alias for path."},
 			"edits": {
 				"type": "array",
 				"description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally.",
@@ -40,12 +41,13 @@ const (
 			"new_string": {"type": "string", "description": "Text to replace old_string with."},
 			"replace_all": {"type": "boolean", "description": "Replace every occurrence of old_string instead of requiring exactly one match."}
 		},
-		"required": ["path"]
+		"required": []
 	}`
 )
 
 type editInput struct {
 	Path       string     `json:"path"`
+	FilePath   string     `json:"file_path"`
 	Edits      []editPair `json:"edits"`
 	OldString  string     `json:"old_string"`
 	NewString  string     `json:"new_string"`
@@ -60,17 +62,16 @@ type editPair struct {
 // newEditTool builds the edit ToolFunc. It requires tr to already hold a fresh
 // read of path (see FileTracker.Verify) and records its own edit in tr so a
 // chained edit on the same path doesn't need a redundant read.
-func newEditTool(tr *FileTracker) ToolFunc {
+func newEditTool(tr *FileTracker, cwd string) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in editInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("edit: invalid input: %w", err)
 		}
-		if in.Path == "" {
-			return "", fmt.Errorf("edit: path is required")
-		}
-		if !filepath.IsAbs(in.Path) {
-			return "", fmt.Errorf("edit: path must be absolute, got %q", in.Path)
+
+		absPath, err := resolveToolPath(in.Path, in.FilePath, cwd)
+		if err != nil {
+			return "", fmt.Errorf("edit: %w", err)
 		}
 
 		// Normalize: legacy top-level old_string/new_string → single-entry edits.
@@ -87,14 +88,14 @@ func newEditTool(tr *FileTracker) ToolFunc {
 		}
 
 		// Lock → verify → read → match → write → record.
-		unlock := tr.Lock(in.Path)
+		unlock := tr.Lock(absPath)
 		defer unlock()
 
-		if err := tr.Verify(in.Path); err != nil {
+		if err := tr.Verify(absPath); err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 
-		raw, err := os.ReadFile(in.Path)
+		raw, err := os.ReadFile(absPath)
 		if err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
@@ -110,18 +111,18 @@ func newEditTool(tr *FileTracker) ToolFunc {
 			lfNew := normalizeToLF(in.NewString)
 			count := strings.Count(lfContent, lfOld)
 			if count == 0 {
-				return "", fmt.Errorf("edit: old_string not found in %s", in.Path)
+				return "", fmt.Errorf("edit: old_string not found in %s", absPath)
 			}
 			updated := strings.ReplaceAll(lfContent, lfOld, lfNew)
 			final := restoreLineEndings(updated, origLE)
 			if hasBOM {
 				final = "\uFEFF" + final
 			}
-			if err := writeFinal(in.Path, rawStr, final); err != nil {
+			if err := writeFinal(absPath, rawStr, final); err != nil {
 				return "", fmt.Errorf("edit: %w", err)
 			}
-			tr.RecordRead(in.Path, fileMtime(in.Path))
-			return fmt.Sprintf("replaced %d occurrence(s) in %s", count, in.Path), nil
+			tr.RecordRead(absPath, fileMtime(absPath))
+			return fmt.Sprintf("replaced %d occurrence(s) in %s", count, absPath), nil
 		}
 
 		// Apply edits through the fuzzy-aware pipeline.
@@ -136,16 +137,16 @@ func newEditTool(tr *FileTracker) ToolFunc {
 			final = "\uFEFF" + final
 		}
 
-		if err := writeFinal(in.Path, rawStr, final); err != nil {
+		if err := writeFinal(absPath, rawStr, final); err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 
-		tr.RecordRead(in.Path, fileMtime(in.Path))
+		tr.RecordRead(absPath, fileMtime(absPath))
 		n := len(edits)
 		if n == 1 {
-			return fmt.Sprintf("replaced 1 block in %s", in.Path), nil
+			return fmt.Sprintf("replaced 1 block in %s", absPath), nil
 		}
-		return fmt.Sprintf("replaced %d blocks in %s", n, in.Path), nil
+		return fmt.Sprintf("replaced %d blocks in %s", n, absPath), nil
 	}
 }
 
