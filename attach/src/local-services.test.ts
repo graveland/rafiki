@@ -10,7 +10,9 @@ import {
     buildLocalModelRegistry,
     buildLocalSessionManager,
     buildLocalSettingsManager,
+    sanitizeSessionManager,
     seedSessionManagerFromFrames,
+    SessionManager,
 } from "./local-services.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -187,5 +189,82 @@ describe("buildLocalModelRegistry", () => {
         // getAll() returns the built-in model list even without configured auth.
         expect(Array.isArray(modelRegistry.getAll())).toBe(true);
         expect(modelRegistry.getAll().length).toBeGreaterThan(0);
+    });
+});
+
+// ─── sanitizeSessionManager ─────────────────────────────────────────────────
+
+describe("sanitizeSessionManager", () => {
+    it("fills missing usage on assistant messages so the footer doesn't crash", () => {
+        const raw = SessionManager.inMemory("/tmp");
+        // appendMessage expects a full Message shape; cast through unknown to
+        // inject an assistant message with a missing `usage` field.
+        const base = {
+            role: "assistant",
+            content: [{ type: "text", text: "hello" }],
+            api: "anthropic",
+            provider: "anthropic",
+            model: "claude-sonnet-4",
+            stopReason: "stop",
+            timestamp: 1,
+        };
+        (raw as unknown as { appendMessage: (m: unknown) => void }).appendMessage(base);
+
+        // A non-sanitized SessionManager would crash pi's FooterComponent when
+        // it calls addUsageToTotals(totals, entry.message.usage) — usage is undefined.
+        const wrapped = sanitizeSessionManager(raw);
+        const entries = wrapped.getEntries();
+        expect(entries).toHaveLength(1);
+        const msgEntry = entries[0];
+        expect(msgEntry!.type).toBe("message");
+        const usage = (msgEntry as { message: { usage?: unknown } }).message.usage;
+        expect(usage).toBeDefined();
+        expect((usage as { input: number }).input).toBe(0);
+    });
+
+    it("leaves existing usage data intact", () => {
+        const raw = SessionManager.inMemory("/tmp");
+        const msg = {
+            role: "assistant",
+            content: [{ type: "text", text: "yo" }],
+            api: "anthropic",
+            provider: "anthropic",
+            model: "claude-sonnet-4",
+            stopReason: "stop",
+            timestamp: 1,
+            usage: { input: 500, output: 300, cacheRead: 10, cacheWrite: 5, totalTokens: 815, cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 } },
+        };
+        (raw as unknown as { appendMessage: (m: unknown) => void }).appendMessage(msg);
+
+        const wrapped = sanitizeSessionManager(raw);
+        const entries = wrapped.getEntries();
+        expect(entries).toHaveLength(1);
+        const usage = (entries[0] as { message: { usage: { input: number; output: number } } }).message.usage;
+        expect(usage.input).toBe(500);
+        expect(usage.output).toBe(300);
+    });
+
+    it("passes through non-message and non-assistant entries unchanged", () => {
+        const raw = SessionManager.inMemory("/tmp");
+        (raw as unknown as { appendMessage: (m: unknown) => void }).appendMessage({
+            role: "user",
+            content: [{ type: "text", text: "ping" }],
+            timestamp: 1,
+        });
+
+        const wrapped = sanitizeSessionManager(raw);
+        const entries = wrapped.getEntries();
+        expect(entries).toHaveLength(1);
+        const msg = (entries[0] as { message: { role: string; usage?: unknown } }).message;
+        expect(msg.role).toBe("user");
+        // User messages never carry usage; sanitizer must not inject one.
+        expect(msg.usage).toBeUndefined();
+    });
+
+    it("forwards non-getEntries property access to the underlying SessionManager", () => {
+        const raw = SessionManager.inMemory("/home/user/proj");
+        const wrapped = sanitizeSessionManager(raw);
+        expect(wrapped.getCwd()).toBe("/home/user/proj");
+        expect(wrapped.getSessionFile()).toBeUndefined();
     });
 });

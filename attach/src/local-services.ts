@@ -17,8 +17,55 @@ import {
     SessionManager,
     SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+
+// Re-export SessionManager for tests.
+export { SessionManager };
+import type { Usage } from "@earendil-works/pi-ai/compat";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+
+/**
+ * Default zero-usage sentinel for assistant messages that lack usage data.
+ * Pi's FooterComponent iterates getEntries() and unconditionally reads
+ * entry.message.usage.input (etc.) for every assistant message — this stub
+ * prevents a TypeError when the daemon session file or claude-translated
+ * frames contain assistant messages without usage (e.g. pre-usage sessions,
+ * some providers, or older pi versions).
+ */
+const ZERO_USAGE: Usage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+/**
+ * Wrap a SessionManager so that getEntries() guarantees every assistant
+ * message carries a Usage object. Pi's FooterComponent.render() and
+ * AgentSession.getSessionStats() dereference message.usage without a guard;
+ * this proxy prevents crashes on sessions whose assistant messages were
+ * saved before usage was tracked or whose provider didn't return usage.
+ */
+export function sanitizeSessionManager(sm: SessionManager): SessionManager {
+    return new Proxy(sm, {
+        get(target, prop, receiver) {
+            const value = Reflect.get(target, prop, receiver);
+            if (prop !== "getEntries" || typeof value !== "function") return value;
+            return function (this: unknown, ...args: unknown[]) {
+                const entries = (value as () => unknown[]).apply(target, args);
+                for (const entry of entries as Array<Record<string, unknown>>) {
+                    const msg = entry["message"] as Record<string, unknown> | undefined;
+                    if (entry["type"] === "message" && msg?.["role"] === "assistant" && msg["usage"] == null) {
+                        msg["usage"] = ZERO_USAGE;
+                    }
+                }
+                return entries;
+            };
+        },
+    }) as SessionManager;
+}
 
 /**
  * Construct a local SessionManager pointed at an existing session JSONL file.
@@ -28,10 +75,13 @@ import { join } from "node:path";
  * The returned object is a read-only snapshot; we never call append/save on it.
  */
 export async function buildLocalSessionManager(sessionFile: string): Promise<SessionManager> {
+    let sm: SessionManager;
     if (!sessionFile || !(await fileExists(sessionFile))) {
-        return SessionManager.inMemory(process.cwd());
+        sm = SessionManager.inMemory(process.cwd());
+    } else {
+        sm = SessionManager.open(sessionFile);
     }
-    return SessionManager.open(sessionFile);
+    return sanitizeSessionManager(sm);
 }
 
 /**
@@ -105,7 +155,7 @@ export function seedSessionManagerFromFrames(
         const m = f["messages"];
         if (Array.isArray(m) && m.length > 0) messages = m;
     }
-    if (!messages) return sm;
+    if (!messages) return sanitizeSessionManager(sm);
     for (const msg of messages) {
         const role = (msg as { role?: unknown } | null)?.role;
         if (typeof role !== "string" || !APPENDABLE_ROLES.has(role)) continue;
@@ -115,7 +165,7 @@ export function seedSessionManagerFromFrames(
             // Skip anything appendMessage still rejects (best-effort seeding).
         }
     }
-    return sm;
+    return sanitizeSessionManager(sm);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
