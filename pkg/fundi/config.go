@@ -215,7 +215,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		repairCancel()
 		if rErr != nil {
 			slog.Error("agent: boot-time orphan repair failed", "conversation", eng.conv.ID, "error", rErr)
-		} else {
+		} else if repaired > 0 {
 			slog.Info("agent: boot-time orphan repair", "conversation", eng.conv.ID, "repaired", repaired)
 		}
 	}
