@@ -7,6 +7,9 @@ package control
 
 import (
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -52,7 +55,7 @@ type FuncHandler FrameHandler
 func (f FuncHandler) HandleFrame(conn Connection, frame []byte) []byte { return f(conn, frame) }
 func (f FuncHandler) HandleClose(_ Connection)                         {}
 
-// Server is a running Unix-domain-socket listener. Call Close to stop it.
+// Server is a running listener. Call Close to stop it.
 type Server struct {
 	ln      net.Listener
 	handler ConnectionLifecycleHandler
@@ -62,6 +65,10 @@ type Server struct {
 	conns   map[Connection]struct{}
 	connsMu sync.Mutex
 }
+
+// Addr returns the listener's network address. For a UDS server this is
+// the socket path; for a TCP server it is the bound host:port.
+func (s *Server) Addr() net.Addr { return s.ln.Addr() }
 
 // Listen creates a Unix-domain-socket listener at path. If a stale socket
 // file exists at path and no process is actively listening on it, the file is
@@ -317,4 +324,105 @@ func (s *Server) Close() error {
 	err := s.ln.Close()
 	s.wg.Wait()
 	return err
+}
+
+// ─── TCP/TLS listener ──────────────────────────────────────────────────────────
+
+// ListenTCP starts a TLS-wrapped TCP listener that enforces ctrl_auth as the
+// mandatory first frame. tlsConfig.Certificates MUST be set before calling —
+// TLS is mandatory, no plaintext ever. The handler receives only
+// successfully-authed connections.
+func ListenTCP(addr string, wantToken string, tlsConfig *tls.Config, handler ConnectionLifecycleHandler) (*Server, error) {
+	ln, err := tls.Listen("tcp", addr, tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{
+		ln:      ln,
+		handler: handler,
+		ctx:     ctx,
+		cancel:  cancel,
+		conns:   make(map[Connection]struct{}),
+	}
+	go s.acceptTCPLoop(wantToken)
+	return s, nil
+}
+
+func (s *Server) acceptTCPLoop(wantToken string) {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			if s.ctx.Err() != nil {
+				return
+			}
+			slog.Warn("server: tcp accept", "error", err)
+			continue
+		}
+		if s.ctx.Err() != nil {
+			conn.Close()
+			return
+		}
+
+		// Auth handshake: read the first frame, validate it is ctrl_auth
+		// with the correct token. This blocks the accept loop for one
+		// frame read per connection — acceptable because auth is tiny and
+		// clients are expected to send it immediately after TLS handshake.
+		if !s.authHandshake(conn, wantToken) {
+			conn.Close()
+			continue
+		}
+
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleConn(conn)
+		}()
+	}
+}
+
+// authHandshake reads one frame from conn and validates it as a ctrl_auth
+// with a matching token. Returns true on success. On failure writes the
+// appropriate error frame before returning false.
+func (s *Server) authHandshake(conn net.Conn, wantToken string) bool {
+	remote := conn.RemoteAddr()
+	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
+	frame, err := r.ReadFrame()
+	if err != nil {
+		slog.Warn("server: auth read first frame", "remote", remote, "error", err)
+		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
+		return false
+	}
+
+	var req protocol.AuthRequest
+	if err := json.Unmarshal(frame, &req); err != nil || req.Type != protocol.TypeCtrlAuth {
+		slog.Warn("server: auth: non-ctrl_auth first frame", "remote", remote)
+		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
+		return false
+	}
+
+	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(wantToken)) != 1 {
+		slog.Warn("server: auth: invalid token", "remote", remote)
+		s.writeAuthError(conn, protocol.ErrAuthInvalid, "invalid auth token")
+		return false
+	}
+
+	return true
+}
+
+// writeAuthError sends an auth-failure ctrl_response frame and closes the
+// connection's write side (a TLS conn will then fail on next read).  Best-effort:
+// if the write itself fails the connection is already dead and the caller closes it.
+func (s *Server) writeAuthError(conn net.Conn, code, msg string) {
+	resp := protocol.Response{
+		Type:    protocol.TypeCtrlResponse,
+		Command: protocol.TypeCtrlAuth,
+		ID:      "0",
+		Success: false,
+		Error:   &protocol.ErrorBody{Code: code, Message: msg},
+	}
+	if b, err := json.Marshal(resp); err == nil {
+		// Best-effort write — if it fails the caller closes conn anyway.
+		_ = protocol.WriteFrame(conn, b)
+	}
 }
