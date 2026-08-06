@@ -97,6 +97,26 @@ const (
 
 	// MCPConfig is the path to a global .mcp.json, merged under the per-cwd one.
 	MCPConfig = "RAFIKI_MCP_CONFIG"
+
+	// ControlListen is the address the daemon's TCP control plane binds
+	// (e.g. "tcp:8036"). Unset = UDS only.
+	ControlListen = "RAFIKI_CONTROL_LISTEN"
+
+	// ControlToken is the shared secret for control-plane auth.
+	// Daemon checks it; clients present it as the first frame on TCP.
+	ControlToken = "RAFIKI_CONTROL_TOKEN"
+
+	// ControlTLSCert is the PEM TLS certificate path for the control
+	// plane's TCP listener. Mandatory when ControlListen is set.
+	ControlTLSCert = "RAFIKI_CONTROL_TLS_CERT"
+
+	// ControlTLSKey is the PEM TLS private key path for the control
+	// plane's TCP listener. Mandatory when ControlListen is set.
+	ControlTLSKey = "RAFIKI_CONTROL_TLS_KEY"
+
+	// ControlURL is the remote rafikid URL a client dials
+	// (e.g. "tls://rafiki.graveland.dev:443"). Wins over RAFIKI_SOCKET.
+	ControlURL = "RAFIKI_CONTROL_URL"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the
