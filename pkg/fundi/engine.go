@@ -506,6 +506,7 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 	var lastFlush time.Time
 
 	handler := func(ev anthropic.MessageStreamEventUnion) {
+		llm.FixEmptyToolInput(&ev)
 		if err := acc.Accumulate(ev); err != nil {
 			slog.Warn("agent: accumulate stream event", "error", err)
 			return

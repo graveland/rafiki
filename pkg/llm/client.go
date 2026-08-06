@@ -450,6 +450,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	acc := anthropic.Message{}
 	for stream.Next() {
 		ev := stream.Current()
+		FixEmptyToolInput(&ev)
 		// Only content-bearing events count as delivered. message_start
 		// carries no text, so treating it as delivery would make the failover
 		// branch below unreachable for the common "connected, then died before
