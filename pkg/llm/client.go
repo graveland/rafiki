@@ -466,6 +466,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 			recordPrimaryResult(breaker, now, wrapped)
 			return nil, true, delivered, wrapped
 		}
+		FixAccumulatedEmptyToolInput(&acc, ev)
 		backfillDeltaUsage(&acc, ev)
 	}
 	if serr := stream.Err(); serr != nil {

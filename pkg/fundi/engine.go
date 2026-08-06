@@ -511,6 +511,7 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			slog.Warn("agent: accumulate stream event", "error", err)
 			return
 		}
+		llm.FixAccumulatedEmptyToolInput(&acc, ev)
 		// Emit only once content actually exists: a trim-retry fails before
 		// any content event, so this keeps message_start off the wire until
 		// the attempt is real. See hasContent's doc.
