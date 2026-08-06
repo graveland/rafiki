@@ -149,7 +149,7 @@ func applyEdits(lfContent string, edits []editPair) (baseContent, newContent str
 		if idx < 0 {
 			// Retry against fully fuzzy content.
 			fuzzyBase = normalizeForFuzzyMatch(baseForMatch)
-			idx, usedFuzzy, _ = fuzzyFind(fuzzyBase, e.oldText)
+			idx, _, _ = fuzzyFind(fuzzyBase, e.oldText)
 			if idx < 0 {
 				return "", "", fmt.Errorf("old_string in edits[%d] not found in file", i)
 			}

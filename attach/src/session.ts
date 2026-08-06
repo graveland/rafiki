@@ -278,6 +278,9 @@ function makeExtensionRunnerStub(): ExtensionRunner {
         getCommandDiagnostics: () => [],
         getCommand: () => undefined,
         getMessageRenderer: () => undefined,
+        // pi >=0.84.0: markdown/entry transformers for rendering custom content blocks
+        getMarkdownTransformers: () => [],
+        getEntryRenderer: () => undefined,
         onError: () => () => {},
         emitError: () => {},
         invalidate: () => {},

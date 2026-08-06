@@ -189,6 +189,12 @@ type Child struct {
 
 	sm       *StateMachine
 	provider ProtocolProvider
+	// preShutdownStatus is the status before BeginShutdown was called, captured
+	// so handleChildExit can record the child's real pre-exit state (idle,
+	// streaming, etc.) rather than "shutting_down" which is an artifact of the
+	// daemon's own graceful-shutdown sequence. Read via PreShutdownStatus(); set
+	// by BeginShutdown under metaMu.
+	preShutdownStatus protocol.Status
 	// metaMu protects meta, sm and transitions to allow Status()/Metadata()
 	// concurrent reads.
 	metaMu sync.Mutex
@@ -337,6 +343,19 @@ func (c *Child) Status() protocol.Status {
 	return c.sm.Current()
 }
 
+// PreShutdownStatus returns the status the child had before BeginShutdown
+// transitioned it to shutting_down. Calling this is meaningless on a child
+// for which BeginShutdown was never called — it returns the zero value of
+// protocol.Status (""), which is not a valid status and never matches any
+// real state. This exists solely so handleChildExit can record the child's
+// real pre-exit status rather than "shutting_down" when the daemon is
+// gracefully shutting down.
+func (c *Child) PreShutdownStatus() protocol.Status {
+	c.metaMu.Lock()
+	defer c.metaMu.Unlock()
+	return c.preShutdownStatus
+}
+
 // recordTransition queues a status change for DrainTransitions and wakes the
 // consumer. changed/prev are exactly what the StateMachine's On* methods
 // return, so a no-op call (changed==false) is free and every caller can pass
@@ -413,7 +432,11 @@ func (c *Child) DrainTransitions() []Transition {
 func (c *Child) BeginShutdown() (changed bool, prev protocol.Status) {
 	c.metaMu.Lock()
 	defer c.metaMu.Unlock()
-	return c.sm.OnShutdownStart()
+	changed, prev = c.sm.OnShutdownStart()
+	if changed {
+		c.preShutdownStatus = prev
+	}
+	return
 }
 
 // InSnapshot returns a defensive copy of all stdin frames captured since spawn.

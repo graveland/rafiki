@@ -2200,6 +2200,15 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// Determine last known status before marking exited.
 	snap, _ := c.st.Get(childID)
 	lastStatus := string(snap.Status)
+	// When the daemon gracefully shut this child down, the store status is
+	// "shutting_down" — but the record's LastStatus must reflect the child's
+	// real pre-exit state (idle, streaming, etc.) so loadOrphans can decide
+	// whether it should be auto-recovered on daemon restart.
+	if lastStatus == string(protocol.StatusShuttingDown) {
+		if ps := ch.PreShutdownStatus(); ps != "" {
+			lastStatus = string(ps)
+		}
+	}
 
 	// Snapshot the ring before removing the child so ctrl_get_recent continues
 	// to work after the child is gone (spec §11.4).
