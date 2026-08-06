@@ -174,13 +174,17 @@ func (e *Emitter) ToolEnd(id, name, result string, isErr bool) {
 }
 
 // AgentEnd emits the terminal agent_end frame (carrying every accumulated
-// message in order plus the turn's summed usage) followed by agent_settled,
-// then resets accumulated state for the next turn.
+// message in order plus the turn's summed usage) followed by agent_settled.
+//
+// Messages are retained across turns so each agent_end reflects the full
+// conversation history — matching ClaudeProvider's snapshotMessages()
+// behaviour. This is necessary for the attach TUI to reconstruct the
+// complete transcript from the ring (seedSessionManagerFromFrames picks the
+// last agent_end's messages array). Per-turn usage is still reset.
 func (e *Emitter) AgentEnd() {
 	usage := e.usage
 	e.fe.Emit(child.PiAgentEnd(e.messages, &usage))
 	e.fe.Emit(child.PiAgentSettled())
-	e.messages = nil
 	e.usage = child.PiUsage{}
 	// Also reset the streaming guard: a stream that failed or was aborted
 	// after content arrived never reaches StreamEnd, and a surviving
