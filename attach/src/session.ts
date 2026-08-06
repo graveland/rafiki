@@ -577,6 +577,15 @@ export class RemoteAgentSession {
      * Keeps local fields consistent so getters reflect real-time daemon state.
      */
     private updateCacheFromEvent(ev: AgentSessionEvent): void {
+        // agent_error is not part of the AgentSessionEvent union but is
+        // emitted by rafikid fundi children on turn failure.  Read its
+        // error field via a type assertion so the switch type-narrows
+        // correctly for all the standard members.
+        const evType: string = ev.type;
+        if (evType === "agent_error") {
+            this._errorMessage = (ev as unknown as { error?: string }).error ?? "unknown error";
+            return;
+        }
         switch (ev.type) {
             case "agent_start":
                 this._isStreaming = true;
