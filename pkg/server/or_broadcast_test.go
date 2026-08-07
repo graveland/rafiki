@@ -52,7 +52,7 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 		t.Fatalf("create broadcast table: %v", err)
 	}
 	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DROP TABLE IF EXISTS openrouter.broadcast`)
+		_, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS openrouter.broadcast`)
 	})
 
 	handler := HandleOTLP(pool, testBroadcastLogger())

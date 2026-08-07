@@ -24,11 +24,11 @@ type otlpPayload struct {
 }
 
 type otlpSpan struct {
-	TraceID   string `json:"traceId"`
-	SpanID    string `json:"spanId"`
-	Name      string `json:"name"`
-	StartUnix string `json:"startTimeUnixNano"`
-	EndUnix   string `json:"endTimeUnixNano"`
+	TraceID    string `json:"traceId"`
+	SpanID     string `json:"spanId"`
+	Name       string `json:"name"`
+	StartUnix  string `json:"startTimeUnixNano"`
+	EndUnix    string `json:"endTimeUnixNano"`
 	Attributes []struct {
 		Key   string `json:"key"`
 		Value struct {
