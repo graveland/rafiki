@@ -61,9 +61,9 @@ func TestDBToPiFrames_AssistantText(t *testing.T) {
 		),
 	}
 	frames := DBToPiFrames(msgs)
-	// agent_start + message_start(assistant) + message_end(assistant) + agent_end = 4
-	if len(frames) != 4 {
-		t.Fatalf("got %d frames, want 4", len(frames))
+	// agent_start + message_start + message_update + message_end + agent_end = 5
+	if len(frames) != 5 {
+		t.Fatalf("got %d frames, want 5", len(frames))
 	}
 	var env struct {
 		Type    string `json:"type"`
@@ -75,6 +75,7 @@ func TestDBToPiFrames_AssistantText(t *testing.T) {
 			} `json:"content"`
 		} `json:"message"`
 	}
+	// frame 1: message_start
 	if err := json.Unmarshal(frames[1], &env); err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +84,16 @@ func TestDBToPiFrames_AssistantText(t *testing.T) {
 	}
 	if len(env.Message.Content) != 1 || env.Message.Content[0].Text != "pong" {
 		t.Errorf("content = %+v, want [{text pong}]", env.Message.Content)
+	}
+	// frame 2: message_update
+	var upd struct{ Type string }
+	if err := json.Unmarshal(frames[2], &upd); err != nil || upd.Type != "message_update" {
+		t.Errorf("frame 2 type = %s, want message_update", frames[2])
+	}
+	// frame 3: message_end
+	var end struct{ Type string }
+	if err := json.Unmarshal(frames[3], &end); err != nil || end.Type != "message_end" {
+		t.Errorf("frame 3 type = %s, want message_end", frames[3])
 	}
 }
 
@@ -93,9 +104,10 @@ func TestDBToPiFrames_ToolUse(t *testing.T) {
 		),
 	}
 	frames := DBToPiFrames(msgs)
-	// agent_start + message_start(tool_use) + message_end(tool_use) + agent_end = 4
-	if len(frames) != 4 {
-		t.Fatalf("got %d frames, want 4", len(frames))
+	// agent_start + message_start + message_update + message_end + agent_end = 5
+	// (No tool_execution_start — there is no matching tool_result.)
+	if len(frames) != 5 {
+		t.Fatalf("got %d frames, want 5", len(frames))
 	}
 	var env struct {
 		Type    string `json:"type"`
@@ -108,6 +120,7 @@ func TestDBToPiFrames_ToolUse(t *testing.T) {
 			} `json:"content"`
 		} `json:"message"`
 	}
+	// frame 1: message_start carries the tool_use block
 	if err := json.Unmarshal(frames[1], &env); err != nil {
 		t.Fatal(err)
 	}
@@ -129,41 +142,69 @@ func TestDBToPiFrames_ToolUse(t *testing.T) {
 func TestDBToPiFrames_UserWithToolResult(t *testing.T) {
 	isError := true
 	msgs := []anthropic.MessageParam{
+		anthropic.NewAssistantMessage(
+			anthropic.NewToolUseBlock("toolu_01", map[string]any{"cmd": "ls"}, "bash"),
+		),
 		anthropic.NewUserMessage(
-			anthropic.NewToolResultBlock("toolu_01", "[]", isError),
+			anthropic.NewToolResultBlock("toolu_01", "file1.txt\nfile2.txt", isError),
 		),
 	}
 	frames := DBToPiFrames(msgs)
-	// agent_start + message_start(user tool_result) + message_end(user tool_result) + agent_end = 4
-	if len(frames) != 4 {
-		t.Fatalf("got %d frames, want 4", len(frames))
+	// agent_start
+	//   + message_start(assistant) + message_update + tool_execution_start + message_end
+	//   + tool_execution_end
+	//   + agent_end
+	// = 7
+	if len(frames) != 7 {
+		t.Fatalf("got %d frames, want 7", len(frames))
 	}
-	var env struct {
-		Type    string `json:"type"`
-		Message struct {
-			Role    string `json:"role"`
+
+	// Frame 3: tool_execution_start
+	var start struct {
+		Type       string `json:"type"`
+		ToolCallID string `json:"toolCallId"`
+		ToolName   string `json:"toolName"`
+	}
+	if err := json.Unmarshal(frames[3], &start); err != nil {
+		t.Fatalf("frame 3 (tool_execution_start): %v", err)
+	}
+	if start.Type != "tool_execution_start" {
+		t.Errorf("frame 3 type = %q, want tool_execution_start", start.Type)
+	}
+	if start.ToolCallID != "toolu_01" {
+		t.Errorf("tool_execution_start toolCallId = %q, want toolu_01", start.ToolCallID)
+	}
+	if start.ToolName != "bash" {
+		t.Errorf("tool_execution_start toolName = %q, want bash", start.ToolName)
+	}
+
+	// Frame 5: tool_execution_end
+	var end struct {
+		Type       string `json:"type"`
+		ToolCallID string `json:"toolCallId"`
+		ToolName   string `json:"toolName"`
+		IsError    bool   `json:"isError"`
+		Result     struct {
 			Content []struct {
-				Type      string `json:"type"`
-				ToolUseID string `json:"tool_use_id"`
-				IsError   bool   `json:"is_error"`
+				Type string `json:"type"`
+				Text string `json:"text"`
 			} `json:"content"`
-		} `json:"message"`
+		} `json:"result"`
 	}
-	if err := json.Unmarshal(frames[1], &env); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal(frames[5], &end); err != nil {
+		t.Fatalf("frame 5 (tool_execution_end): %v", err)
 	}
-	if env.Message.Role != "user" {
-		t.Errorf("role = %q, want user", env.Message.Role)
+	if end.Type != "tool_execution_end" {
+		t.Errorf("frame 5 type = %q, want tool_execution_end", end.Type)
 	}
-	b := env.Message.Content[0]
-	if b.Type != "tool_result" {
-		t.Errorf("block type = %q, want tool_result", b.Type)
+	if end.ToolCallID != "toolu_01" {
+		t.Errorf("tool_execution_end toolCallId = %q, want toolu_01", end.ToolCallID)
 	}
-	if b.ToolUseID != "toolu_01" {
-		t.Errorf("tool_use_id = %q", b.ToolUseID)
+	if !end.IsError {
+		t.Error("tool_execution_end isError = false, want true")
 	}
-	if !b.IsError {
-		t.Error("is_error = false, want true")
+	if len(end.Result.Content) != 1 || end.Result.Content[0].Text != "file1.txt\nfile2.txt" {
+		t.Errorf("tool_execution_end result = %+v, want {text 'file1.txt\\nfile2.txt'}", end.Result.Content)
 	}
 }
 
@@ -178,9 +219,9 @@ func TestDBToPiFrames_Limit(t *testing.T) {
 		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply2")),
 	}
 	frames := DBToPiFrames(msgs)
-	// agent_start + 4 message pairs + agent_end = 10 frames
-	if len(frames) != 10 {
-		t.Fatalf("got %d frames, want 10 (agent_start + 4 message pairs + agent_end)", len(frames))
+	// agent_start + (2 user messages × 2 frames) + (2 assistant messages × 3 frames) + agent_end = 12
+	if len(frames) != 12 {
+		t.Fatalf("got %d frames, want 12 (agent_start + 2 user pairs + 2 assistant trios + agent_end)", len(frames))
 	}
 }
 
@@ -205,7 +246,7 @@ func TestDBToPiFrames_AgentEndCarriesMessages(t *testing.T) {
 	if len(end.Messages) != 2 {
 		t.Fatalf("agent_end messages = %d, want 2 (user + assistant)", len(end.Messages))
 	}
-	// Each message must be a valid Anthropic MessageParam.
+	// Each message must be a valid Pi-format message (PiUserMessage, PiAssistantMessage).
 	for i, m := range end.Messages {
 		var msg struct {
 			Role    string          `json:"role"`

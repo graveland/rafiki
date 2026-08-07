@@ -16,124 +16,131 @@ import (
 // children once the DB is the canonical store — the ring buffer is bypassed
 // entirely.
 //
-// Each message produces a message_start / message_end pair. Streaming deltas
-// (message_update) and tool-execution lifecycle frames (tool_execution_start/
-// tool_execution_end) are not synthesised; completed messages carry all the
-// content the TUI needs. An agent_start frame is prepended and an agent_end
-// frame (carrying the full Anthropic messages array) is appended so the TUI's
-// AgentSession can seed its message cache — see the attach TUI's primeHistory
-// and updateCacheFromEvent, which populate _messages from agent_end's messages
-// field.
+// Every message produces frames that mirror what the live fundi Emitter would
+// have produced: user prompts get message_start/message_end, assistant turns
+// get message_start/message_update/message_end plus tool_execution_start for
+// each tool_use, and tool results get tool_execution_end. An agent_start frame
+// is prepended and an agent_end frame carrying the Pi-format accumulated
+// messages is appended so the TUI's AgentSession can seed its message cache.
 func DBToPiFrames(msgs []anthropic.MessageParam) []json.RawMessage {
-	out := make([]json.RawMessage, 0, len(msgs)*2+2)
+	// Phase 1: collect tool_use blocks and resolved tool_use ids (those with
+	// a matching tool_result) so tool_execution_start is only emitted when a
+	// result follows and tool_execution_end can recover the tool name.
+	uses, resolved := toolUseMap(msgs)
 
-	// Start the session so the TUI knows a stream is beginning.
-	if b, err := json.Marshal(child.PiAgentStart()); err == nil {
-		out = append(out, b)
-	}
+	// Phase 2: build frames and accumulate Pi-format messages for agent_end.
+	out := make([]json.RawMessage, 0, len(msgs)*3+2)
+	piMsgs := make([]json.RawMessage, 0, len(msgs))
+
+	out = appendFrame(out, child.PiAgentStart())
 
 	for _, m := range msgs {
 		switch m.Role {
 		case "user":
-			frames := dbUserFrames(m)
+			frames, piMsgsFor := dbUserFramesWithTools(m, uses)
 			out = append(out, frames...)
+			piMsgs = append(piMsgs, piMsgsFor...)
 		case "assistant":
-			frames := dbAssistantFrames(m)
+			frames, piMsg := dbAssistantFramesWithTools(m, uses, resolved)
 			out = append(out, frames...)
+			piMsgs = appendPiMsg(piMsgs, piMsg)
 		}
 	}
 
-	// Terminal agent_end carrying the full Anthropic-formatted message list.
-	// The TUI's AgentSession seeds its message cache from agent_end.messages
-	// (see attach/src/session.ts updateCacheFromEvent), and the individual
-	// message_start/message_end frames above populate user/assistant bubbles
-	// during replay. Without agent_end, the TUI never gets the authoritative
-	// Anthropic message list and shows no history.
-	rawMsgs := make([]json.RawMessage, len(msgs))
-	for i, m := range msgs {
-		b, err := json.Marshal(m)
-		if err != nil {
-			// A malformed MessageParam (should never reach the DB) is logged
-			// by the caller via its load warning; skip it here so the rest
-			// of the agent_end payload is still valid.
-			continue
-		}
-		rawMsgs[i] = b
-	}
-	if b, err := json.Marshal(child.PiAgentEnd(rawMsgs, nil)); err == nil {
-		out = append(out, b)
-	}
+	out = appendFrame(out, child.PiAgentEnd(piMsgs, nil))
 
 	return out
 }
 
-// dbUserFrames produces message_start / message_end for a user message.
-// Content is extracted from text blocks into a plain string; tool_result
-// blocks are preserved as structured content.
-func dbUserFrames(m anthropic.MessageParam) []json.RawMessage {
+// toolUseInfo carries the fields a tool_execution_end frame needs to pair a
+// tool_result block with its originating tool_use.
+type toolUseInfo struct {
+	name  string
+	input json.RawMessage
+}
+
+// toolUseMap scans messages for tool_use blocks and tool_result blocks,
+// returning (1) a map from tool_use id → {name, input} for name recovery in
+// tool_execution_end, and (2) the set of tool_use ids that have a matching
+// tool_result — only those ids get tool_execution_start frames.
+func toolUseMap(msgs []anthropic.MessageParam) (map[string]toolUseInfo, map[string]bool) {
+	m := make(map[string]toolUseInfo)
+	resolved := make(map[string]bool)
+	for _, msg := range msgs {
+		for _, block := range msg.Content {
+			if tu := block.OfToolUse; tu != nil && tu.ID != "" {
+				input, _ := json.Marshal(tu.Input)
+				m[tu.ID] = toolUseInfo{name: tu.Name, input: input}
+			}
+			if tr := block.OfToolResult; tr != nil && tr.ToolUseID != "" {
+				resolved[tr.ToolUseID] = true
+			}
+		}
+	}
+	return m, resolved
+}
+
+// dbUserFramesWithTools produces frames and Pi-format messages for a user
+// message. Tool_result blocks emit tool_execution_end (the TUI renders tool
+// output from tool_execution_start/end, not from message content blocks).
+// Pure tool_result messages do NOT get a user message_start/message_end —
+// the live Emitter accumulates PiToolResultMessage but does not echo user
+// message frames for tool results.
+func dbUserFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo) ([]json.RawMessage, []json.RawMessage) {
 	ts := time.Now().UnixMilli()
 	id := fmt.Sprintf("user-%d", ts)
 
-	// User messages in the DB may have text, tool_result, or both.
-	// PiUserMessage.Content is `any`, so we can pass either a string or a
-	// []any of blocks. The TUI handles both.
-	hasToolResults := false
-	var textParts []string
+	var (
+		frames []json.RawMessage
+		piMsgs []json.RawMessage
+		texts  []string
+	)
+
 	for _, block := range m.Content {
-		if block.OfText != nil && block.OfText.Text != "" {
-			textParts = append(textParts, block.OfText.Text)
-		}
-		if block.OfToolResult != nil {
-			hasToolResults = true
-		}
-		// Other block types (image, document, thinking) don't appear in
-		// user messages from fundi's agent loop.
-	}
-
-	if hasToolResults {
-		// Emit as a structured user message so tool_result blocks survive.
-		// Convert Anthropic content blocks to generic maps — the TUI
-		// uses the tool_use_id and content fields from tool_result blocks.
-		blocks := make([]map[string]any, 0, len(m.Content))
-		for _, block := range m.Content {
-			switch {
-			case block.OfText != nil:
-				blocks = append(blocks, map[string]any{
-					"type": "text",
-					"text": block.OfText.Text,
-				})
-			case block.OfToolResult != nil:
-				blocks = append(blocks, map[string]any{
-					"type":        "tool_result",
-					"tool_use_id": block.OfToolResult.ToolUseID,
-					"content":     block.OfToolResult.Content,
-					"is_error":    block.OfToolResult.IsError.Value,
-				})
+		switch {
+		case block.OfText != nil && block.OfText.Text != "":
+			texts = append(texts, block.OfText.Text)
+		case block.OfToolResult != nil:
+			tr := block.OfToolResult
+			resultText := toolResultText(tr.Content)
+			isErr := tr.IsError.Value
+			name := ""
+			if u, ok := uses[tr.ToolUseID]; ok {
+				name = u.name
 			}
+			frames = appendFrame(frames, child.PiToolExecutionEnd(tr.ToolUseID, name, resultText, isErr, ""))
+			piMsgs = appendPiMsg(piMsgs, child.PiToolResultMessage{
+				Role:       "toolResult",
+				ToolCallID: tr.ToolUseID,
+				ToolName:   name,
+				Content:    []child.PiContentBlock{child.PiTextBlock(resultText)},
+				IsError:    isErr,
+				Timestamp:  ts,
+			})
 		}
-		msg := child.PiUserMessage{Role: "user", ID: id, Content: blocks, Timestamp: ts}
-		start, _ := json.Marshal(child.PiUserMessageStart(msg))
-		end, _ := json.Marshal(child.PiUserMessageEnd(msg))
-		return []json.RawMessage{start, end}
 	}
 
-	// Plain text user message.
-	text := ""
-	if len(textParts) > 0 {
-		text = textParts[0]
+	if len(texts) > 0 {
+		// This is a user prompt or steer — emit message_start/message_end.
+		text := texts[0]
+		msg := child.PiUserMessage{Role: "user", ID: id, Content: text, Timestamp: ts}
+		frames = append(frames,
+			mustFrame(child.PiUserMessageStart(msg)),
+			mustFrame(child.PiUserMessageEnd(msg)),
+		)
+		piMsgs = appendPiMsg(piMsgs, msg)
 	}
-	msg := child.PiUserMessage{Role: "user", ID: id, Content: text, Timestamp: ts}
-	start, _ := json.Marshal(child.PiUserMessageStart(msg))
-	end, _ := json.Marshal(child.PiUserMessageEnd(msg))
-	return []json.RawMessage{start, end}
+
+	return frames, piMsgs
 }
 
-// dbAssistantFrames produces message_start / message_end for an assistant
-// message stored in the DB. Anthropic content blocks are mapped to their
-// PiContentBlock equivalents: text → PiTextBlock, thinking → PiThinkingBlock,
-// tool_use → PiToolCallBlock.
-func dbAssistantFrames(m anthropic.MessageParam) []json.RawMessage {
+// dbAssistantFramesWithTools produces frames and a Pi-format message for an
+// assistant message. In addition to message_start/message_update/message_end,
+// it emits tool_execution_start for each tool_use block that has a matching
+// tool_result later in the conversation.
+func dbAssistantFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo, resolved map[string]bool) ([]json.RawMessage, json.RawMessage) {
 	blocks := make([]child.PiContentBlock, 0, len(m.Content))
+	hasToolUse := false
 	for _, block := range m.Content {
 		switch {
 		case block.OfText != nil && block.OfText.Text != "":
@@ -141,11 +148,16 @@ func dbAssistantFrames(m anthropic.MessageParam) []json.RawMessage {
 		case block.OfThinking != nil && block.OfThinking.Thinking != "":
 			blocks = append(blocks, child.PiThinkingBlock(block.OfThinking.Thinking))
 		case block.OfToolUse != nil:
+			hasToolUse = true
 			args := toolUseArgs(block.OfToolUse.Input)
 			blocks = append(blocks, child.PiToolCallBlock(block.OfToolUse.ID, block.OfToolUse.Name, args))
 		}
 	}
 
+	stopReason := "stop"
+	if hasToolUse {
+		stopReason = "toolUse"
+	}
 	msg := child.PiAssistantMessage{
 		Role:       "assistant",
 		Content:    blocks,
@@ -153,12 +165,72 @@ func dbAssistantFrames(m anthropic.MessageParam) []json.RawMessage {
 		Provider:   "", // unknown from DB messages alone; zero is acceptable
 		Model:      "", // unknown from DB messages alone; zero is acceptable
 		Usage:      child.PiUsage{},
-		StopReason: "stop",
+		StopReason: stopReason,
 		Timestamp:  time.Now().UnixMilli(),
 	}
-	start, _ := json.Marshal(child.PiMessageStart(msg, ""))
-	end, _ := json.Marshal(child.PiMessageEnd(msg, ""))
-	return []json.RawMessage{start, end}
+
+	var frames []json.RawMessage
+	frames = appendFrame(frames, child.PiMessageStart(msg, ""))
+	frames = appendFrame(frames, child.PiMessageUpdate(msg, ""))
+	// Emit tool_execution_start for each tool_use that has a matching
+	// tool_result, mirroring what the live Emitter does (ToolStart before
+	// message_end). Without these, the TUI shows the tool_use block but not
+	// the tool-execution lifecycle that renders the output.
+	for _, block := range m.Content {
+		if tu := block.OfToolUse; tu != nil && resolved[tu.ID] {
+			args := toolUseArgs(tu.Input)
+			frames = appendFrame(frames, child.PiToolExecutionStart(tu.ID, tu.Name, args, ""))
+		}
+	}
+	frames = appendFrame(frames, child.PiMessageEnd(msg, ""))
+
+	piMsg := mustFrame(msg)
+	return frames, piMsg
+}
+
+// toolResultText extracts a plain-text representation from the SDK's
+// ToolResultBlockParamContentUnion array. Each element is typically OfText.
+func toolResultText(content []anthropic.ToolResultBlockParamContentUnion) string {
+	for _, c := range content {
+		if c.OfText != nil {
+			return c.OfText.Text
+		}
+	}
+	// Fallback: marshal the whole thing. This shouldn't be reached for
+	// normal tool_result content (which always has OfText blocks).
+	if b, err := json.Marshal(content); err == nil && len(b) > 0 {
+		return string(b)
+	}
+	return ""
+}
+
+// appendFrame marshals v and appends the result to out. Marshal failures are
+// silently dropped (v is always a well-formed child.Pi* type).
+func appendFrame(out []json.RawMessage, v any) []json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return out
+	}
+	return append(out, b)
+}
+
+// mustFrame marshals v and returns the result, or nil on error.
+func mustFrame(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// appendPiMsg marshals v and appends the result to out. Nil entries are
+// skipped, not appended.
+func appendPiMsg(out []json.RawMessage, v any) []json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil || b == nil {
+		return out
+	}
+	return append(out, b)
 }
 
 // toolUseArgs converts a tool_use block's input (json.RawMessage or map) into
