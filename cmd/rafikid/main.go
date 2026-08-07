@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
@@ -29,6 +30,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 // modelCatalogTTL matches llm.NewClient's own default (the catalog a
@@ -41,60 +43,162 @@ func main() {
 	// Load the environment file before anything reads configuration — that
 	// includes the XDG lookups below, since the file may legitimately set them.
 	//
-	// This runs ahead of the subcommand dispatch deliberately, so a hand-run
+	// This runs ahead of cobra dispatch deliberately, so a hand-run
 	// `rafikid fundi` or `rafikid agent` gets the same environment the daemon
 	// would have given it. That is safe because the real environment always
 	// wins: values the daemon sets explicitly when it spawns a child are
 	// already present and the file only fills gaps.
 	loadServiceEnv()
 
-	// Dispatch subcommands before any daemon setup below - each is a separate
-	// process mode and must not fall through into the daemon's own flag-less
-	// startup. Every other invocation (including no args) runs the daemon
-	// unchanged.
-	if len(os.Args) > 1 && isSubcommand(os.Args[1]) {
-		switch os.Args[1] {
-		case protocol.KindFundi:
-			os.Exit(runAgent(os.Args[2:]))
-		case "agent":
-			if err := agentCmd(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "rafikid:", err)
-				os.Exit(1)
-			}
-			os.Exit(0)
-		case "migrate":
-			if err := migrateCmd(os.Args[2:]); err != nil {
-				fmt.Fprintln(os.Stderr, "rafikid:", err)
-				os.Exit(1)
-			}
-			os.Exit(0)
-		}
-	}
+	root := newRootCmd()
 
-	// The daemon takes no flags, so without this `rafikid -h` fell through into
-	// startup and failed on the controller socket instead of printing anything.
-	// Help goes to stdout and exits 0 — it was asked for, it isn't an error.
-	if len(os.Args) > 1 && isHelpArg(os.Args[1]) {
-		printRootUsage(os.Stdout)
-		os.Exit(0)
-	}
+	// Resolve the config paths once at startup for the help text.
+	root.Long = rootLong()
 
-	flags, err := parseDaemonFlags(os.Args[1:])
-	if err != nil {
-		os.Exit(2) // flag package already printed the error and usage
-	}
-	cfg, err := loadConfig(flags.Config)
-	if err != nil {
+	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "rafikid:", err)
 		os.Exit(1)
 	}
-	if flags.Dev {
-		if cfg.Tokens == nil {
-			cfg.Tokens = map[string]string{}
+}
+
+// rootLong returns the full daemon usage string with resolved config paths.
+func rootLong() string {
+	var b strings.Builder
+	fmt.Fprintln(&b, `rafikid — coding-agent controller daemon and native agent runtime.
+
+Subcommands:
+  fundi     Run one agent child on stdio (pi rpc protocol).
+            Spawned by the daemon; see 'rafikid fundi -h'.
+  agent     DSN-backed insights CLI: stats|search|export|
+            analyze|findings. See 'rafikid agent' with no verb.
+  migrate   Apply the conversations schema migration chain.
+
+The command-line client is a separate binary, "rafiki".
+
+The daemon listens on a unix socket and stores its state under the XDG base
+directories (override with the standard XDG_* variables). These are this
+process's own resolved paths — a client (rafiki, or a launchd/systemd unit
+with a different environment) may resolve differently if its HOME or XDG_*
+variables disagree with the daemon's:`)
+	fmt.Fprintf(&b, "\n  %-12s %s\n", "socket", paths.SocketPath())
+	fmt.Fprintf(&b, "  %-12s %s\n", "records", paths.RecordsDir())
+	fmt.Fprintf(&b, "  %-12s %s\n", "logs", paths.LogsDir())
+	fmt.Fprintf(&b, "  %-12s %s\n", "instructions", paths.InstructionsFile())
+	for i, d := range paths.SkillsDirs() {
+		label := ""
+		if i == 0 {
+			label = "skills"
 		}
-		cfg.Tokens["dev"] = "dev"
+		fmt.Fprintf(&b, "  %-12s %s\n", label, d)
+	}
+	fmt.Fprintf(&b, "  %-12s %s\n", "presets", paths.PresetsFile())
+	fmt.Fprintf(&b, "  %-12s %s\n", "mcp", paths.GlobalMCPConfig())
+	fmt.Fprint(&b, `
+$RAFIKI_SOCKET overrides the socket path for both the daemon's clients
+and any child it spawns. $RAFIKI_INSTRUCTIONS, $RAFIKI_SKILLS_DIRS, and
+$RAFIKI_MCP_CONFIG override the instructions/skills/mcp paths above.
+`)
+	return b.String()
+}
+
+func newRootCmd() *cobra.Command {
+	var configPath string
+	var listenAddr string
+	var dbDSN string
+	var dev bool
+
+	root := &cobra.Command{
+		Use:           "rafikid",
+		Short:         "Coding-agent controller daemon and native agent runtime",
+		Version:       version.String(),
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(configPath)
+			if err != nil {
+				return err
+			}
+			if dev {
+				if cfg.Tokens == nil {
+					cfg.Tokens = map[string]string{}
+				}
+				cfg.Tokens["dev"] = "dev"
+			}
+			return runDaemon(runDaemonOpts{
+				Config: cfg,
+				Listen: listenAddr,
+				DB:     dbDSN,
+				Dev:    dev,
+			})
+		},
 	}
 
+	root.Flags().StringVar(&configPath, "config", "", "config file (named client tokens, openai routes, default model)")
+	root.Flags().StringVar(&listenAddr, "listen", "", "proxy face listen address (overrides RAFIKI_PROXY_LISTEN)")
+	root.Flags().StringVar(&dbDSN, "db", "", "postgres DSN (overrides RAFIKI_DB)")
+	root.Flags().BoolVar(&dev, "dev", false, "dev mode: auto-migrate the schema, accept the token \"dev\"")
+
+	root.AddCommand(newFundiCmd())
+	root.AddCommand(newAgentCmd())
+	root.AddCommand(newMigrateCmd())
+
+	return root
+}
+
+func newFundiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                protocol.KindFundi,
+		Short:              "Run one agent child on stdio (pi rpc protocol)",
+		DisableFlagParsing: true,
+		SilenceUsage:       true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			code := runAgent(args)
+			if code != 0 {
+				// runAgent already printed errors via slog; just exit with the
+				// right code. Don't let cobra print anything.
+				os.Exit(code)
+			}
+			return nil
+		},
+	}
+}
+
+func newAgentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                "agent",
+		Short:              "DSN-backed insights CLI",
+		DisableFlagParsing: true,
+		SilenceUsage:       true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return agentCmd(args)
+		},
+	}
+}
+
+func newMigrateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                "migrate",
+		Short:              "Apply the conversations schema migration chain",
+		DisableFlagParsing: true,
+		SilenceUsage:       true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return migrateCmd(args)
+		},
+	}
+}
+
+// runDaemonOpts is the cobra-parsed daemon configuration.
+type runDaemonOpts struct {
+	Config Config
+	Listen string
+	DB     string
+	Dev    bool
+}
+
+// runDaemon is the daemon's main loop, extracted from the old main() body.
+// It owns everything from flag parsing onward and never returns on success
+// (it blocks until signalled).
+func runDaemon(opts runDaemonOpts) error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
@@ -143,7 +247,7 @@ func main() {
 	// or close one themselves. A nil pool (RAFIKI_DB unset) means every
 	// agent conversation is in-memory, matching `rafikid agent --db` unset.
 	var pool *pgxpool.Pool
-	dsn := flags.DB
+	dsn := opts.DB
 	if dsn == "" {
 		dsn = paths.Get(paths.DB)
 	}
@@ -163,7 +267,7 @@ func main() {
 			pool = nil
 		} else {
 			slog.Info("agent database pool opened")
-			if flags.Dev {
+			if opts.Dev {
 				if err := store.Migrate(baseCtx, pool); err != nil {
 					slog.Error("dev mode: migrate failed", "error", err)
 					os.Exit(1)
@@ -202,8 +306,8 @@ func main() {
 		Logger:   slog.Default(),
 		Tracer:   tp,
 		Registry: reg,
-		Config:   cfg,
-		Listen:   flags.Listen,
+		Config:   opts.Config,
+		Listen:   opts.Listen,
 		Catalog:  catalog,
 	})
 	if err != nil {
@@ -367,6 +471,7 @@ func main() {
 	}
 
 	slog.Info("done")
+	return nil
 }
 
 // poolCloseTimeout bounds the wait on pgxpool.Pool.Close at daemon exit. Sized

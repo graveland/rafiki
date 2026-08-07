@@ -76,12 +76,14 @@ build: build-daemon build-cli ## Build both Go binaries into bin/.
 .PHONY: build-daemon
 build-daemon: ## Build the rafiki daemon (bin/rafikid).
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/$(DAEMON_BIN) ./cmd/rafikid
+	$(eval GO_VERSION := $(shell git describe --always --dirty))
+	$(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/$(DAEMON_BIN) ./cmd/rafikid
 
 .PHONY: build-cli
 build-cli: ## Build the rafiki CLI client (bin/rafiki).
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/$(CLI_BIN) ./cmd/rafiki
+	$(eval GO_VERSION := $(shell git describe --always --dirty))
+	$(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/$(CLI_BIN) ./cmd/rafiki
 
 # There is no CI on this repo, so nothing else exercises GOOS=linux — the
 # daemon and CLI silently bitrotted on Linux for an entire phase until this
@@ -91,8 +93,9 @@ build-cli: ## Build the rafiki CLI client (bin/rafiki).
 build-linux: ## Cross-compile for linux/amd64 (catches Linux-only breaks; no CI runs this).
 	mkdir -p $(BIN_DIR)/linux
 	GOOS=linux GOARCH=amd64 $(GO) vet ./...
-	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(DAEMON_BIN) ./cmd/rafikid
-	GOOS=linux GOARCH=amd64 $(GO) build -o $(BIN_DIR)/linux/$(CLI_BIN) ./cmd/rafiki
+	$(eval GO_VERSION := $(shell git describe --always --dirty))
+	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/linux/$(DAEMON_BIN) ./cmd/rafikid
+	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/linux/$(CLI_BIN) ./cmd/rafiki
 
 # rafiki-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
 # must be built first. Fail loudly if the submodule isn't initialised.

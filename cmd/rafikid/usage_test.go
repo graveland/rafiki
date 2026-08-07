@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // `rafikid fundi -h` must print usage. It previously exited 0 having printed
@@ -56,104 +54,6 @@ func errorsIsHelp(err error) bool {
 		err = u.Unwrap()
 	}
 	return false
-}
-
-// The top-level binary has two modes (the daemon, and `rafikid fundi`), so its
-// usage must name both — `rafikid -h` used to fall through into daemon startup
-// and fail on the controller socket instead of printing anything.
-func TestPrintRootUsageCoversBothModes(t *testing.T) {
-	var buf bytes.Buffer
-	printRootUsage(&buf)
-	out := buf.String()
-
-	if strings.TrimSpace(out) == "" {
-		t.Fatal("printRootUsage wrote nothing")
-	}
-	for _, want := range []string{"agent", "daemon"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("root usage missing %q; got:\n%s", want, out)
-		}
-	}
-
-	// The daemon must call itself rafikid. Usage that suggested running the
-	// bare `rafiki` client to start the daemon would be wrong — `rafikid fundi`
-	// (the stdio agent-child subcommand) is the only place "fundi " may
-	// legitimately appear, so strip that phrase before checking for a stray one.
-	if !strings.Contains(out, "rafikid") {
-		t.Errorf("root usage does not name the rafikid binary; got:\n%s", out)
-	}
-	stripped := strings.ReplaceAll(out, "rafikid fundi", "")
-	if strings.Contains(stripped, "fundi ") {
-		t.Errorf("root usage refers to `fundi ` as if it were the daemon; got:\n%s", out)
-	}
-}
-
-// printRootUsage is the only place the daemon reports where it resolved its
-// own config paths — `make print-config` shells out to `rafikid -h` rather
-// than re-guessing them, so this output IS the config-discoverability
-// feature (task H5), not just documentation. If instructions/skills/presets/
-// mcp ever drop out of this listing, `make print-config` silently regresses
-// back to reporting nothing about them with no test noticing.
-//
-// The env vars are pinned so the assertions check against a resolved path
-// this test controls, not whatever happens to be in the developer's real
-// $HOME.
-func TestPrintRootUsageListsResolvedConfigPaths(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "cfg"))
-	t.Setenv("RAFIKI_INSTRUCTIONS", "")
-	t.Setenv("RAFIKI_SKILLS_DIRS", "")
-	t.Setenv("RAFIKI_MCP_CONFIG", "")
-
-	var buf bytes.Buffer
-	printRootUsage(&buf)
-	out := buf.String()
-
-	for _, label := range []string{"instructions", "skills", "presets", "mcp"} {
-		if !strings.Contains(out, label) {
-			t.Errorf("root usage missing %q label; got:\n%s", label, out)
-		}
-	}
-
-	for _, want := range []string{
-		paths.InstructionsFile(),
-		paths.PresetsFile(),
-		paths.GlobalMCPConfig(),
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("root usage missing resolved path %q; got:\n%s", want, out)
-		}
-	}
-	for _, d := range paths.SkillsDirs() {
-		if !strings.Contains(out, d) {
-			t.Errorf("root usage missing skills dir %q; got:\n%s", d, out)
-		}
-	}
-}
-
-// A default-config daemon still has exactly one skills directory, so this is
-// the only place multi-directory rendering (task H5's per-line loop in
-// printRootUsage) gets exercised at all.
-func TestPrintRootUsageListsAllSkillsDirs(t *testing.T) {
-	sep := string(os.PathListSeparator)
-	t.Setenv("RAFIKI_SKILLS_DIRS", "/a"+sep+"/b"+sep+"/c")
-
-	var buf bytes.Buffer
-	printRootUsage(&buf)
-	out := buf.String()
-
-	for _, d := range []string{"/a", "/b", "/c"} {
-		if !strings.Contains(out, d) {
-			t.Errorf("root usage missing skills dir %q; got:\n%s", d, out)
-		}
-	}
-	// Only the first line of a multi-dir listing carries the "  skills " label
-	// (anchored on the leading two-space path-block indent, since the prose
-	// elsewhere in this output also mentions "skills" in passing); continuation
-	// lines must NOT repeat it, or grep-based consumers (e.g. `make
-	// print-config`'s awk range) would misparse the block.
-	if got, want := strings.Count(out, "\n  skills "), 1; got != want {
-		t.Errorf("root usage has %d occurrences of the \"  skills \" label line, want %d (only the first dir should be labelled); got:\n%s", got, want, out)
-	}
 }
 
 // TestMCPConfigPrecedence_CwdBeatsGlobal covers task A6 step 4: a project's
@@ -214,21 +114,5 @@ func TestMCPConfigPrecedence_ExplicitFlagWinsOutright(t *testing.T) {
 	explicit := "/explicit/.mcp.json"
 	if got := resolveMCPConfig(explicit, cwd); got != explicit {
 		t.Fatalf("resolveMCPConfig = %q, want the explicit flag value %q", got, explicit)
-	}
-}
-
-// isHelpArg is what main() consults before any daemon setup. It must catch the
-// conventional spellings and nothing else — treating a stray arg as help would
-// silently refuse to start the daemon.
-func TestIsHelpArg(t *testing.T) {
-	for _, arg := range []string{"-h", "--help", "help"} {
-		if !isHelpArg(arg) {
-			t.Errorf("isHelpArg(%q) = false, want true", arg)
-		}
-	}
-	for _, arg := range []string{"", "agent", "-v", "--version", "serve", "helpful"} {
-		if isHelpArg(arg) {
-			t.Errorf("isHelpArg(%q) = true, want false", arg)
-		}
 	}
 }

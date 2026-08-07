@@ -3,7 +3,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
@@ -43,29 +42,4 @@ func loadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 	return cfg, nil
-}
-
-// daemonFlags is the daemon's own flag set. It had none before the standalone
-// `rafiki serve` was folded in.
-type daemonFlags struct {
-	Config string
-	Listen string
-	DB     string
-	Dev    bool
-}
-
-// parseDaemonFlags parses the daemon's arguments. Subcommands (agent, migrate)
-// are dispatched by main() BEFORE this runs, so args here are only ever the
-// daemon's own.
-func parseDaemonFlags(args []string) (daemonFlags, error) {
-	var f daemonFlags
-	fs := flag.NewFlagSet("rafikid", flag.ContinueOnError)
-	fs.StringVar(&f.Config, "config", "", "config file (named client tokens, openai routes, default model)")
-	fs.StringVar(&f.Listen, "listen", "", "proxy face listen address (overrides RAFIKI_PROXY_LISTEN)")
-	fs.StringVar(&f.DB, "db", "", "postgres DSN (overrides RAFIKI_DB)")
-	fs.BoolVar(&f.Dev, "dev", false, "dev mode: auto-migrate the schema, accept the token \"dev\"")
-	if err := fs.Parse(args); err != nil {
-		return f, err
-	}
-	return f, nil
 }

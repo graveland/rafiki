@@ -1,0 +1,9 @@
+docs/
+.git/
+.gitea/
+chart/
+*.md
+.claude/
+tasks/
+/bin/
+/rafikid

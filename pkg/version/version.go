@@ -1,14 +1,24 @@
 // Package version exposes the build's git-derived version string.
-// Populated automatically by `go build` from VCS info; returns "unknown"
-// for `go run` or non-git builds.
+// Populated via ldflags at build time; falls back to runtime/debug's VCS
+// info for `go run` or non-ldflags builds. Returns "unknown" only when
+// neither source is available.
 package version
 
 import "runtime/debug"
 
-// String returns the short git commit hash, with "-dirty" suffix if the
-// working tree had uncommitted changes at build time. Returns "unknown"
-// when no VCS info is embedded.
+// Version is set at build time via -ldflags "-X go.graveland.dev/rafiki/pkg/version.Version=<hash>".
+// When empty (go run, plain go build), String() falls back to the embedded VCS info.
+var Version string
+
+// String returns the build version string. When the package-level Version
+// variable is set (via ldflags), it is returned unchanged — the caller owns
+// the exact string. Otherwise the embedded VCS info is consulted: short git
+// commit hash, with "-dirty" suffix when the working tree had uncommitted
+// changes at build time. Returns "unknown" when neither source is available.
 func String() string {
+	if Version != "" {
+		return Version
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "unknown"

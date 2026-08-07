@@ -86,25 +86,3 @@ func TestResolveDefaultModel_FallsThroughToEnv(t *testing.T) {
 		t.Errorf("resolveDefaultModel = %q, want env-model (empty config should fall through to env)", got)
 	}
 }
-
-// The daemon's flags must not swallow a subcommand. `rafikid agent --model x`
-// is dispatched before parsing; parseDaemonFlags only ever sees daemon args.
-func TestParseDaemonFlags(t *testing.T) {
-	f, err := parseDaemonFlags([]string{"--dev", "--listen", "127.0.0.1:9000", "--config", "/tmp/c.yaml"})
-	if err != nil {
-		t.Fatalf("parseDaemonFlags: %v", err)
-	}
-	if !f.Dev || f.Listen != "127.0.0.1:9000" || f.Config != "/tmp/c.yaml" {
-		t.Errorf("parsed %+v, want dev=true listen=127.0.0.1:9000 config=/tmp/c.yaml", f)
-	}
-}
-
-func TestParseDaemonFlags_NoArgs(t *testing.T) {
-	f, err := parseDaemonFlags(nil)
-	if err != nil {
-		t.Fatalf("parseDaemonFlags(nil): %v", err)
-	}
-	if f.Dev || f.Listen != "" || f.Config != "" || f.DB != "" {
-		t.Errorf("no args should yield a zero daemonFlags, got %+v", f)
-	}
-}
