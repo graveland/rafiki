@@ -114,6 +114,10 @@ const (
 	// plane's TCP listener. Mandatory when ControlListen is set.
 	ControlTLSKey = "RAFIKI_CONTROL_TLS_KEY"
 
+	// BroadcastListen, when set, binds a dedicated HTTP listener for
+	// OpenRouter's OTLP broadcast webhook. Empty = disabled.
+	BroadcastListen = "RAFIKI_BROADCAST_LISTEN"
+
 	// ControlURL is the remote rafikid URL a client dials
 	// (e.g. "tls://rafiki.graveland.dev:443"). Wins over RAFIKI_SOCKET.
 	ControlURL = "RAFIKI_CONTROL_URL"
