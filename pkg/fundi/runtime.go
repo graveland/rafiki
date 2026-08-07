@@ -131,12 +131,13 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		return nil, nil, err
 	}
 
-	registry := tools.NewRegistry()
-	tools.RegisterFileTools(registry, tools.NewFileTracker(), opts.Cwd)
-	tools.RegisterBash(registry, outputPolicy, opts.Cwd)
-	if len(discovered) > 0 {
-		tools.RegisterSkillTool(registry, discovered)
+	toolOpts := tools.ToolOpts{
+		Cwd:          opts.Cwd,
+		FileTracker:  tools.NewFileTracker(),
+		OutputPolicy: outputPolicy,
+		Skills:       discovered,
 	}
+	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 
 	mcpShutdown := func() {}
 	if opts.MCPConfig != "" {
