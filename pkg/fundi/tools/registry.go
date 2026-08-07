@@ -197,3 +197,19 @@ func RegisterFileTools(r *Registry, tr *FileTracker, cwd string) {
 	r.Register(Def("glob", globDescription, globSchema), newGlobTool())
 	r.Register(Def("grep", grepDescription, grepSchema), newGrepTool())
 }
+
+// RegisterTool registers a Tool on the registry. The tool's definition is
+// built from its Name(), Description(), and InputSchema().JSON().
+func (r *Registry) RegisterTool(t Tool) {
+	def := BuildDef(t)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.defs[def.OfTool.Name] = def
+	r.fns[def.OfTool.Name] = func(ctx context.Context, input json.RawMessage) (string, error) {
+		result, err := t.Execute(ctx, ToolInput(input))
+		if err != nil {
+			return "", err
+		}
+		return result.Text, nil
+	}
+}
