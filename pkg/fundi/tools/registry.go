@@ -45,6 +45,32 @@ func NewErrorResult(err error) ToolResult {
 	return ToolResult{Text: err.Error()}
 }
 
+// Tool is the interface every agent tool implements. A tool value that
+// implements the full interface can be registered on a Registry.
+type Tool interface {
+	Name() string
+	Description() string
+	InputSchema() Schema
+	Execute(ctx context.Context, input ToolInput) (ToolResult, error)
+}
+
+// ToolOpts carries the per-agent runtime state a Materializer needs to
+// build a concrete Tool from a blueprint that carries only its static
+// metadata (name, description, input schema).
+type ToolOpts struct {
+	Cwd          string
+	FileTracker  *FileTracker
+	OutputPolicy OutputPolicy
+}
+
+// Materializer is an optional extension of Tool that a blueprint implements
+// when its concrete Execute needs runtime state. Blueprints without runtime
+// state (glob, grep) are their own concrete tools and do not implement
+// Materializer.
+type Materializer interface {
+	Materialize(opts ToolOpts) (Tool, error)
+}
+
 // ToolFunc executes one tool call given its raw JSON input and returns the
 // text result the model sees. Returning a non-nil error is normal control
 // flow, not an exception path: rafiki's agentloop converts it into an
