@@ -15,6 +15,36 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
+// ToolInput is the raw JSON input a tool receives from the model. It is a
+// named type wrapping json.RawMessage so the tool interface is
+// self-documenting.
+type ToolInput json.RawMessage
+
+// Unmarshal decodes this input into v using encoding/json.
+func (i ToolInput) Unmarshal(v any) error {
+	return json.Unmarshal(json.RawMessage(i), v)
+}
+
+// ToolResult is the text result a tool hands back to the model. A zero-value
+// ToolResult has Text == ""; IsEmpty reports true.
+type ToolResult struct {
+	Text string
+}
+
+// IsEmpty reports whether this result carries no text.
+func (r ToolResult) IsEmpty() bool { return r.Text == "" }
+
+// NewTextResult builds a ToolResult from a plain string.
+func NewTextResult(s string) ToolResult { return ToolResult{Text: s} }
+
+// NewErrorResult builds a ToolResult from an error value's message.
+func NewErrorResult(err error) ToolResult {
+	if err == nil {
+		return ToolResult{}
+	}
+	return ToolResult{Text: err.Error()}
+}
+
 // ToolFunc executes one tool call given its raw JSON input and returns the
 // text result the model sees. Returning a non-nil error is normal control
 // flow, not an exception path: rafiki's agentloop converts it into an
