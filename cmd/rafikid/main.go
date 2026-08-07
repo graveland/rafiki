@@ -6,13 +6,16 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -231,6 +234,45 @@ func main() {
 	}
 	slog.Info("rafiki daemon listening", "socket", socketPath)
 
+	// TCP control listener (optional — for remote attach, k8s deployment).
+	var tcpSrv *control.Server
+	if addr := parseControlListenAddr(); addr != "" {
+		controlToken := paths.Get(paths.ControlToken)
+		if controlToken == "" {
+			slog.Error("RAFIKI_CONTROL_TOKEN must be set when RAFIKI_CONTROL_LISTEN is set")
+			os.Exit(1)
+		}
+		certFile := paths.Get(paths.ControlTLSCert)
+		keyFile := paths.Get(paths.ControlTLSKey)
+		if certFile == "" || keyFile == "" {
+			slog.Error("RAFIKI_CONTROL_TLS_CERT and RAFIKI_CONTROL_TLS_KEY must be set when RAFIKI_CONTROL_LISTEN is set")
+			os.Exit(1)
+		}
+		initialCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			slog.Error("failed to load TLS cert/key for control plane", "cert", certFile, "key", keyFile, "error", err)
+			os.Exit(1)
+		}
+		tlsConfig := &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{initialCert},
+			GetCertificate: func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+				if err != nil {
+					slog.Error("control: TLS cert reload failed; using last known good cert", "error", err)
+					return nil, nil // fall back to Certificates[0]
+				}
+				return &cert, nil
+			},
+		}
+		tcpSrv, err = control.ListenTCP(addr, controlToken, tlsConfig, handler)
+		if err != nil {
+			slog.Error("TCP control listener failed", "addr", addr, "error", err)
+			os.Exit(1)
+		}
+		slog.Info("rafiki daemon listening (TCP/TLS)", "addr", addr)
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	sig := <-sigCh
@@ -282,6 +324,11 @@ func main() {
 	ctrl.Stop() // wait for sweeper goroutine to exit
 	if err := srv.Close(); err != nil {
 		slog.Warn("server close", "error", err)
+	}
+	if tcpSrv != nil {
+		if err := tcpSrv.Close(); err != nil {
+			slog.Warn("TCP server close", "error", err)
+		}
 	}
 
 	// Close the pool only after ShutdownAllChildren has returned: every
@@ -343,6 +390,22 @@ func closePoolBounded(pool *pgxpool.Pool, timeout time.Duration) {
 			"A connection is still held by work no context could cancel — most likely an abandoned child",
 			"waited", timeout)
 	}
+}
+
+// parseControlListenAddr returns the TCP address string from
+// RAFIKI_CONTROL_LISTEN, stripping an optional "tcp:" prefix. Returns ""
+// when the env var is unset or not a valid host:port.
+func parseControlListenAddr() string {
+	v := paths.Get(paths.ControlListen)
+	if v == "" {
+		return ""
+	}
+	addr := strings.TrimPrefix(v, "tcp:")
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		slog.Warn("RAFIKI_CONTROL_LISTEN is not a valid address; ignoring", "value", v, "error", err)
+		return ""
+	}
+	return addr
 }
 
 // loadServiceEnv applies the daemon's environment file (see
