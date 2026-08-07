@@ -679,6 +679,8 @@ func hasContent(m *anthropic.Message) bool {
 			return true
 		case b.Type == "tool_use":
 			return true
+		case b.Type == "thinking" && b.Thinking != "":
+			return true
 		}
 	}
 	return false

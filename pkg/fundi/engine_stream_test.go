@@ -64,6 +64,17 @@ func streamBlockStop(index int) ssestream.Event {
 	return sseEvt("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, index))
 }
 
+func streamThinkingBlockStart(index int) ssestream.Event {
+	return sseEvt("content_block_start", fmt.Sprintf(
+		`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, index))
+}
+
+func streamThinkingDelta(index int, thinking string) ssestream.Event {
+	b, _ := json.Marshal(thinking)
+	return sseEvt("content_block_delta", fmt.Sprintf(
+		`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":%s}}`, index, b))
+}
+
 func streamMessageDelta(stopReason string, outputTokens int) ssestream.Event {
 	return sseEvt("message_delta", fmt.Sprintf(
 		`{"type":"message_delta","delta":{"stop_reason":%q},"usage":{"output_tokens":%d}}`, stopReason, outputTokens))
@@ -95,6 +106,36 @@ func toolUseTurnEvents(model, toolID, toolName string, jsonParts []string) []sse
 	}
 	ev = append(ev, streamBlockStop(0), streamMessageDelta("tool_use", 10), streamMessageStop())
 	return ev
+}
+
+// thinkingTurnEvents scripts a complete thinking-only streamed turn ending in
+// end_turn, split across the given deltas — the shape needed to prove
+// thinking blocks trigger live message_update emission via hasContent.
+func thinkingTurnEvents(model, thinking string, outputTokens int) []ssestream.Event {
+	parts := splitThinking(thinking)
+	ev := []ssestream.Event{streamMessageStart(model), streamThinkingBlockStart(0)}
+	for _, p := range parts {
+		ev = append(ev, streamThinkingDelta(0, p))
+	}
+	ev = append(ev, streamBlockStop(0), streamMessageDelta("end_turn", outputTokens), streamMessageStop())
+	return ev
+}
+
+// splitThinking splits a thinking string into chunks to simulate deltas.
+func splitThinking(s string) []string {
+	if s == "" {
+		return nil
+	}
+	const chunk = 10
+	var parts []string
+	for i := 0; i < len(s); i += chunk {
+		end := i + chunk
+		if end > len(s) {
+			end = len(s)
+		}
+		parts = append(parts, s[i:end])
+	}
+	return parts
 }
 
 // preContentFailureEvents scripts the SDK's own structural events
@@ -905,5 +946,213 @@ func TestEngine_MessageUpdateCarriesPartialText(t *testing.T) {
 	const final = "Hello world"
 	if last := texts[len(texts)-1]; !strings.HasPrefix(final, last) {
 		t.Errorf("last update text = %q, not a prefix of the final message %q", last, final)
+	}
+}
+
+// ---- thinking-only stream tests ----
+
+// thinkingUpdateTexts returns the concatenated thinking content of every
+// message_update frame in out, in order — the analogue of assistantUpdateTexts
+// for thinking blocks rather than text.
+func thinkingUpdateTexts(t *testing.T, out string) []string {
+	t.Helper()
+	var texts []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l == "" {
+			continue
+		}
+		var typ struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(l), &typ); err != nil {
+			t.Fatalf("bad frame %q: %v", l, err)
+		}
+		if typ.Type != "message_update" {
+			continue
+		}
+		var f struct {
+			Message struct {
+				Content []struct {
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Thinking string `json:"thinking"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(l), &f); err != nil {
+			t.Fatalf("bad message_update frame %q: %v", l, err)
+		}
+		var b strings.Builder
+		for _, c := range f.Message.Content {
+			if c.Type == "thinking" {
+				b.WriteString(c.Thinking)
+			}
+		}
+		texts = append(texts, b.String())
+	}
+	return texts
+}
+
+// lastAssistantThinking returns the thinking content of the LAST message_end
+// frame in out — mirrors lastAssistantText but reads thinking blocks.
+func lastAssistantThinking(t *testing.T, out string) string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var f struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []struct {
+					Type     string `json:"type"`
+					Thinking string `json:"thinking"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &f); err != nil {
+			t.Fatalf("bad frame %q: %v", lines[i], err)
+		}
+		if f.Type != "message_end" {
+			continue
+		}
+		var b strings.Builder
+		for _, c := range f.Message.Content {
+			if c.Type == "thinking" {
+				b.WriteString(c.Thinking)
+			}
+		}
+		return b.String()
+	}
+	t.Fatalf("no message_end frame found in output: %q", out)
+	return ""
+}
+
+// TestEngine_ThinkingOnlyStreamEmitsLiveUpdates proves that a stream whose
+// only content is thinking blocks triggers live message_update emission
+// (via hasContent) rather than waiting for OnTurn's AssistantTurn fallback.
+func TestEngine_ThinkingOnlyStreamEmitsLiveUpdates(t *testing.T) {
+	release := make(chan struct{})
+	sender := &blockingStreamingSender{
+		prefix: []ssestream.Event{
+			streamMessageStart("deepseek/deepseek-v4-pro"),
+			streamThinkingBlockStart(0),
+			streamThinkingDelta(0, "I should check options."),
+		},
+		suffix: []ssestream.Event{
+			streamThinkingDelta(0, " 1) merge, 2) push, 3) keep."),
+			streamBlockStop(0),
+			streamMessageDelta("end_turn", 5),
+			streamMessageStop(),
+		},
+		release: release,
+	}
+	ts := fakeToolSet{}
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi")
+
+	// A live message_update must surface mid-stream, before the turn completes.
+	waitFor(t, 5*time.Second, func() bool {
+		return countOfType(frameTypes(t, out.String()), "message_update") >= 1
+	})
+
+	// The turn must still be in flight.
+	if n := countOfType(frameTypes(t, out.String()), "agent_end"); n != 0 {
+		t.Fatalf("agent_end already emitted (%d) before the thinking stream was released", n)
+	}
+
+	// Live message_update must carry the partial thinking text.
+	texts := thinkingUpdateTexts(t, out.String())
+	if len(texts) < 1 || texts[0] != "I should check options." {
+		t.Fatalf("mid-stream thinking update texts = %q, want [\"I should check options.\"]", texts)
+	}
+
+	close(release)
+	eng.Wait()
+
+	// Final message_end must carry the complete thinking text.
+	if got := lastAssistantThinking(t, out.String()); got != "I should check options. 1) merge, 2) push, 3) keep." {
+		t.Fatalf("final thinking = %q, want full accumulated text", got)
+	}
+
+	// The full frame sequence must be well-formed.
+	types := frameTypes(t, out.String())
+	want := []string{
+		"message_start", "message_end", // user echo
+		"agent_start",
+		"message_start",
+	}
+	if !strings.HasPrefix(strings.Join(types, ","), strings.Join(want, ",")) {
+		t.Fatalf("frame prefix = %v, want prefix %v", types, want)
+	}
+	rest := types[len(want):]
+	tail := rest[len(rest)-2:]
+	if tail[0] != "agent_end" || tail[1] != "agent_settled" {
+		t.Fatalf("tail frames = %v, want [agent_end agent_settled]", tail)
+	}
+}
+
+// TestEngine_ThinkingContentReachesFinalFrames proves that a thinking-only
+// response — even a fast one that completes within one coalesce window —
+// still produces the proper message_start/message_update/message_end
+// sequence with thinking blocks intact in the final message.
+func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
+	ts := fakeToolSet{}
+	sender := newScriptedStreamingSender(streamScript{
+		events: thinkingTurnEvents("deepseek/deepseek-v4-pro", "Let me think about this...", 3),
+	})
+	eng, out := newTestEngineWithSender(t, ts, sender)
+
+	eng.HandlePrompt("hi")
+	eng.Wait()
+
+	// Full frame sequence: user echo + assistant turn with thinking blocks.
+	types := frameTypes(t, out.String())
+	// With hasContent fixed, a fast thinking-only turn still gets at least one
+	// message_update (from the first delta), plus StreamEnd's final pair.
+	nUpdates := countOfType(types, "message_update")
+	if nUpdates == 0 {
+		t.Fatalf("no message_update frames emitted: %v — thinking-only response was suppressed", types)
+	}
+	if n := countOfType(types, "message_start"); n != 2 {
+		t.Fatalf("message_start emitted %d times, want 2 (user echo + assistant): %v", n, types)
+	}
+
+	// The final message_end must carry the thinking block content.
+	if got := lastAssistantThinking(t, out.String()); got != "Let me think about this..." {
+		t.Fatalf("final thinking = %q, want %q", got, "Let me think about this...")
+	}
+
+	// The agent_end message array must also include the thinking blocks.
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var agentEnd struct {
+		Type     string            `json:"type"`
+		Messages []json.RawMessage `json:"messages"`
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if err := json.Unmarshal([]byte(lines[i]), &agentEnd); err == nil && agentEnd.Type == "agent_end" {
+			break
+		}
+	}
+	if agentEnd.Type != "agent_end" {
+		t.Fatal("no agent_end frame")
+	}
+	var foundThinking bool
+	for _, raw := range agentEnd.Messages {
+		var content struct {
+			Content []struct {
+				Type     string `json:"type"`
+				Thinking string `json:"thinking"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(raw, &content) == nil {
+			for _, c := range content.Content {
+				if c.Type == "thinking" && c.Thinking != "" {
+					foundThinking = true
+				}
+			}
+		}
+	}
+	if !foundThinking {
+		t.Fatal("thinking content missing from agent_end messages array")
 	}
 }
