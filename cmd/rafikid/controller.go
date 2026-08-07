@@ -1477,29 +1477,36 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 }
 
 func (c *Controller) Forget(childID string) error {
-	snap, ok := c.st.Get(childID)
-	if !ok {
-		return &control.ControllerError{Code: protocol.ErrNotFound, Message: "child not found: " + childID}
-	}
-	if snap.Status != protocol.StatusExited {
-		return &control.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
-	}
-
 	// Wait for handleChildExit (running on monitorChild's goroutine) to finish
-	// before we delete on-disk state.  MarkExited (which flips status to
-	// exited) and writeRecord (which atomically writes the .json) happen
-	// inside handleChildExit, and the FINAL step of that function is
-	// cm.Remove(childID).  Without this wait, our delete can race with the
-	// atomic-rename: writeRecord's .tmp is in-progress when Forget runs
-	// os.Remove(.json) — finds nothing — then writeRecord completes the
-	// rename, leaving an orphan .json that rafiki ls picks up on the next
-	// daemon restart via loadOrphans.
+	// before we touch on-disk state. Two races are possible when forget arrives
+	// immediately after a kill:
+	//
+	//  1. MarkExited hasn't run yet — snap.Status is still streaming/idle, not
+	//     "exited".  cm still holds the child.
+	//  2. MarkExited has run (status=exited) but cm.Remove hasn't yet — the
+	//     child is still in cm.  Without this wait, our delete can race with
+	//     writeRecord's atomic-rename: writeRecord's .tmp is in-progress when
+	//     Forget runs os.Remove(.json) — finds nothing — then writeRecord
+	//     completes the rename, leaving an orphan .json that rafiki ls picks
+	//     up on the next daemon restart via loadOrphans.
+	//
+	// Both resolve when cm.Remove(childID) runs (the final step of
+	// handleChildExit), so we spin on that.  While we wait, re-read the store
+	// snapshot: the initial read may have preceded MarkExited (race 1).
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, alive := c.cm.Get(childID); !alive {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return &control.ControllerError{Code: protocol.ErrNotFound, Message: "child not found: " + childID}
+	}
+	if snap.Status != protocol.StatusExited {
+		return &control.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
 	}
 
 	c.st.Delete(childID)
