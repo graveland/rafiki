@@ -118,6 +118,7 @@ func sampleSearchRows() []insights.ConversationSummary {
 			ID: "conv-abc", Owner: "alice", Persona: "reviewer", Source: "cli", Model: "claude-sonnet-5",
 			Status: "completed", DrivenBy: "client", CreatedAt: time.Unix(1716000000, 0),
 			Turns: 7, InputTokens: 900, OutputTokens: 120, CacheReadTokens: 2400,
+			CacheHitRatio: 0.727, TotalCostUSD: 0.042,
 			FirstMessage: "why do the stats disagree",
 		},
 	}

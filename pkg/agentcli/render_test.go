@@ -45,7 +45,8 @@ func TestRenderStatsEmpty(t *testing.T) {
 func TestRenderSearch(t *testing.T) {
 	rows := []insights.ConversationSummary{{
 		ID: "019f-aaaa", Owner: "bob", Source: "claude", Model: "m", Status: "active",
-		DrivenBy: "client", CreatedAt: time.Now(), Turns: 5, InputTokens: 100, FirstMessage: "hello there",
+		DrivenBy: "client", CreatedAt: time.Now(), Turns: 5, InputTokens: 100, CacheReadTokens: 50,
+		CacheHitRatio: 0.33, TotalCostUSD: 0.42, FirstMessage: "hello there",
 	}}
 	var b bytes.Buffer
 	if err := RenderSearch(&b, rows); err != nil {

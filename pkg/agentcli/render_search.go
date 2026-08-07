@@ -12,8 +12,8 @@ import (
 )
 
 // RenderSearch renders search results as a rounded table: identity columns,
-// then per-conversation turn/token aggregates, then the first message
-// snippet.
+// then per-conversation turn/token aggregates, then cache hit ratio, total
+// cost, and the first message snippet.
 func RenderSearch(w io.Writer, rows []insights.ConversationSummary) error {
 	if len(rows) == 0 {
 		_, err := fmt.Fprintln(w, "no conversations found")
@@ -25,11 +25,12 @@ func RenderSearch(w io.Writer, rows []insights.ConversationSummary) error {
 	t.SetStyle(table.StyleRounded)
 	t.SetTitle("Conversations (%d)", len(rows))
 	t.AppendHeader(table.Row{"Id", "Name", "Created At", "Owner", "Persona", "Source", "Model", "Driven By",
-		"Status", "Turns", "Input Tokens", "Output Tokens", "Cache Read Tokens", "First Message"})
+		"Status", "Turns", "Input Tokens", "Output Tokens", "Cache %", "Cost", "First Message"})
 	for _, r := range rows {
 		t.AppendRow(table.Row{
 			r.ID, r.Name, r.CreatedAt.Local().Format("2006-01-02 15:04"), r.Owner, r.Persona, r.Source, r.Model,
-			r.DrivenBy, r.Status, r.Turns, r.InputTokens, r.OutputTokens, r.CacheReadTokens,
+			r.DrivenBy, r.Status, r.Turns, r.InputTokens, r.OutputTokens,
+			pct(r.CacheHitRatio), dollars(r.TotalCostUSD),
 			truncateCell(r.FirstMessage),
 		})
 	}

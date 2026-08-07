@@ -11,17 +11,17 @@ import (
 )
 
 func TestConversationSummary_JSONTags(t *testing.T) {
-	b, err := json.Marshal(ConversationSummary{ID: "x", DrivenBy: "client", InputTokens: 42})
+	b, err := json.Marshal(ConversationSummary{ID: "x", DrivenBy: "client", InputTokens: 42, CacheHitRatio: 0.75, TotalCostUSD: 1.23})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	got := string(b)
-	for _, want := range []string{`"driven_by"`, `"input_tokens"`, `"cache_read_tokens"`, `"first_message"`} {
+	for _, want := range []string{`"driven_by"`, `"input_tokens"`, `"cache_read_tokens"`, `"first_message"`, `"cache_hit_ratio"`, `"total_cost_usd"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("marshaled summary %s missing %s", got, want)
 		}
 	}
-	if strings.Contains(got, `"DrivenBy"`) || strings.Contains(got, `"InputTokens"`) {
+	if strings.Contains(got, `"DrivenBy"`) || strings.Contains(got, `"InputTokens"`) || strings.Contains(got, `"TotalCostUSD"`) || strings.Contains(got, `"CacheHitRatio"`) {
 		t.Errorf("marshaled summary %s still has CamelCase keys", got)
 	}
 }

@@ -50,6 +50,9 @@ type ConversationSummary struct {
 	OutputTokens    int64 `json:"output_tokens"`
 	CacheReadTokens int64 `json:"cache_read_tokens"`
 
+	CacheHitRatio float64 `json:"cache_hit_ratio"`
+	TotalCostUSD  float64 `json:"total_cost_usd"`
+
 	FirstMessage string `json:"first_message"`
 }
 
@@ -141,6 +144,8 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 SELECT c.id::text, coalesce(c.name,''), coalesce(c.owner,''), coalesce(c.persona,''),
        coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at,
        coalesce(t.turns,0), coalesce(t.in_tok,0), coalesce(t.out_tok,0), coalesce(t.cache_read,0),
+       coalesce(tc.cost_usd, 0),
+       coalesce(t.cache_read,0) * 1.0 / nullif(coalesce(t.in_tok,0) + coalesce(t.cache_read,0), 0),
        coalesce(left(fm.first_text, 200), '')
 FROM ` + from + `
 LEFT JOIN LATERAL (
@@ -150,6 +155,16 @@ LEFT JOIN LATERAL (
            min(source) AS source
     FROM conversations.conversation_turn WHERE conversation_id = c.id
 ) t ON true
+LEFT JOIN LATERAL (
+    SELECT coalesce(sum(
+        coalesce(tt.input_tokens, 0)  * coalesce(p.prompt_usd, 0) +
+        coalesce(tt.output_tokens, 0) * coalesce(p.completion_usd, 0) +
+        coalesce(tt.cache_read_tokens, 0) * coalesce(p.cache_read_usd, 0)
+    ), 0) AS cost_usd
+    FROM conversations.conversation_turn tt
+    LEFT JOIN conversations.model_pricing p ON p.model_id = tt.model
+    WHERE tt.conversation_id = c.id
+) tc ON true
 LEFT JOIN LATERAL (
     -- Extract the message's actual text, not raw JSONB: content is either an
     -- array of blocks (take the first type=text block's .text) or a plain
@@ -176,7 +191,8 @@ LIMIT ` + limitArg
 	for rows.Next() {
 		var s ConversationSummary
 		if err := rows.Scan(&s.ID, &s.Name, &s.Owner, &s.Persona, &s.Source, &s.Model, &s.Status, &s.DrivenBy,
-			&s.CreatedAt, &s.Turns, &s.InputTokens, &s.OutputTokens, &s.CacheReadTokens, &s.FirstMessage); err != nil {
+			&s.CreatedAt, &s.Turns, &s.InputTokens, &s.OutputTokens, &s.CacheReadTokens,
+			&s.TotalCostUSD, &s.CacheHitRatio, &s.FirstMessage); err != nil {
 			return nil, fmt.Errorf("scan conversation summary: %w", err)
 		}
 		out = append(out, s)
