@@ -45,6 +45,128 @@ const (
 	}`
 )
 
+func init() { DefaultBlueprint.Register(&EditBlueprint{}) }
+
+type EditBlueprint struct{}
+
+func (EditBlueprint) Name() string        { return "edit" }
+func (EditBlueprint) Description() string { return editDescription }
+func (EditBlueprint) InputSchema() Schema {
+	return Schema{
+		Type: "object",
+		Properties: []SchemaProperty{
+			{Name: "path", Type: "string", Description: "Path to the file to edit (absolute or relative). Also accepts file_path as an alias."},
+			{Name: "file_path", Type: "string", Description: "Alias for path."},
+			{Name: "edits", Type: "array", Description: "One or more targeted replacements. Each edit is matched against the original file, not incrementally.",
+				Items: &Schema{
+					Type: "object",
+					Properties: []SchemaProperty{
+						{Name: "old_string", Type: "string", Description: "Exact text to replace. Must match exactly once in the original file."},
+						{Name: "new_string", Type: "string", Description: "Text to replace old_string with."},
+					},
+					Required: []string{"old_string", "new_string"},
+				},
+			},
+			{Name: "old_string", Type: "string", Description: "Exact text to replace. Must match exactly once unless replace_all is true."},
+			{Name: "new_string", Type: "string", Description: "Text to replace old_string with."},
+			{Name: "replace_all", Type: "boolean", Description: "Replace every occurrence of old_string instead of requiring exactly one match."},
+		},
+	}
+}
+func (EditBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
+	panic("blueprint: call Materialize first")
+}
+
+func (EditBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	return &editTool{EditBlueprint: EditBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd}, nil
+}
+
+type editTool struct {
+	EditBlueprint
+	tr  *FileTracker
+	cwd string
+}
+
+func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+	var in editInput
+	if err := input.Unmarshal(&in); err != nil {
+		return ToolResult{}, fmt.Errorf("edit: invalid input: %w", err)
+	}
+
+	absPath, err := resolveToolPath(in.Path, in.FilePath, et.cwd)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("edit: %w", err)
+	}
+
+	edits := in.Edits
+	if len(edits) == 0 && in.OldString != "" {
+		edits = []editPair{{OldString: in.OldString, NewString: in.NewString}}
+	}
+	if len(edits) == 0 {
+		return ToolResult{}, fmt.Errorf("edit: at least one edit in edits[] or old_string is required")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
+	}
+
+	unlock := et.tr.Lock(absPath)
+	defer unlock()
+
+	if err := et.tr.Verify(absPath); err != nil {
+		return ToolResult{}, fmt.Errorf("edit: %w", err)
+	}
+
+	raw, err := os.ReadFile(absPath)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("edit: %w", err)
+	}
+
+	rawStr := string(raw)
+	hasBOM := strings.HasPrefix(rawStr, "\uFEFF")
+	lfContent, origLE := prepContent(rawStr)
+
+	if in.ReplaceAll && in.OldString != "" {
+		lfOld := normalizeToLF(in.OldString)
+		lfNew := normalizeToLF(in.NewString)
+		count := strings.Count(lfContent, lfOld)
+		if count == 0 {
+			return ToolResult{}, fmt.Errorf("edit: old_string not found in %s", absPath)
+		}
+		updated := strings.ReplaceAll(lfContent, lfOld, lfNew)
+		final := restoreLineEndings(updated, origLE)
+		if hasBOM {
+			final = "\uFEFF" + final
+		}
+		if err := writeFinal(absPath, rawStr, final); err != nil {
+			return ToolResult{}, fmt.Errorf("edit: %w", err)
+		}
+		et.tr.RecordRead(absPath, fileMtime(absPath))
+		return NewTextResult(fmt.Sprintf("replaced %d occurrence(s) in %s", count, absPath)), nil
+	}
+
+	_, newContent, err := applyEdits(lfContent, edits)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("edit: %w", err)
+	}
+
+	final := restoreLineEndings(newContent, origLE)
+	if hasBOM {
+		final = "\uFEFF" + final
+	}
+
+	if err := writeFinal(absPath, rawStr, final); err != nil {
+		return ToolResult{}, fmt.Errorf("edit: %w", err)
+	}
+
+	et.tr.RecordRead(absPath, fileMtime(absPath))
+	n := len(edits)
+	if n == 1 {
+		return NewTextResult(fmt.Sprintf("replaced 1 block in %s", absPath)), nil
+	}
+	return NewTextResult(fmt.Sprintf("replaced %d blocks in %s", n, absPath)), nil
+}
+
 type editInput struct {
 	Path       string     `json:"path"`
 	FilePath   string     `json:"file_path"`
@@ -59,9 +181,6 @@ type editPair struct {
 	NewString string `json:"new_string"`
 }
 
-// newEditTool builds the edit ToolFunc. It requires tr to already hold a fresh
-// read of path (see FileTracker.Verify) and records its own edit in tr so a
-// chained edit on the same path doesn't need a redundant read.
 func newEditTool(tr *FileTracker, cwd string) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in editInput
@@ -74,7 +193,6 @@ func newEditTool(tr *FileTracker, cwd string) ToolFunc {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 
-		// Normalize: legacy top-level old_string/new_string → single-entry edits.
 		edits := in.Edits
 		if len(edits) == 0 && in.OldString != "" {
 			edits = []editPair{{OldString: in.OldString, NewString: in.NewString}}
@@ -87,7 +205,6 @@ func newEditTool(tr *FileTracker, cwd string) ToolFunc {
 			return "", err
 		}
 
-		// Lock → verify → read → match → write → record.
 		unlock := tr.Lock(absPath)
 		defer unlock()
 
@@ -100,12 +217,10 @@ func newEditTool(tr *FileTracker, cwd string) ToolFunc {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 
-		// Prepare content: strip BOM, normalize line endings.
 		rawStr := string(raw)
 		hasBOM := strings.HasPrefix(rawStr, "\uFEFF")
 		lfContent, origLE := prepContent(rawStr)
 
-		// Handle replace_all with the legacy interface.
 		if in.ReplaceAll && in.OldString != "" {
 			lfOld := normalizeToLF(in.OldString)
 			lfNew := normalizeToLF(in.NewString)
@@ -125,13 +240,11 @@ func newEditTool(tr *FileTracker, cwd string) ToolFunc {
 			return fmt.Sprintf("replaced %d occurrence(s) in %s", count, absPath), nil
 		}
 
-		// Apply edits through the fuzzy-aware pipeline.
 		_, newContent, err := applyEdits(lfContent, edits)
 		if err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 
-		// Restore BOM and line endings, then write.
 		final := restoreLineEndings(newContent, origLE)
 		if hasBOM {
 			final = "\uFEFF" + final
@@ -150,7 +263,6 @@ func newEditTool(tr *FileTracker, cwd string) ToolFunc {
 	}
 }
 
-// writeFinal overwrites path with content, preserving the original file mode.
 func writeFinal(path, original, content string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -159,12 +271,9 @@ func writeFinal(path, original, content string) error {
 	return os.WriteFile(path, []byte(content), info.Mode())
 }
 
-// fileMtime returns the mod time of path, panicking on error since we just
-// verified and wrote it.
 func fileMtime(path string) time.Time {
 	info, err := os.Stat(path)
 	if err != nil {
-		// We just wrote the file; this shouldn't happen.
 		return time.Time{}
 	}
 	return info.ModTime()

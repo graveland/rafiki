@@ -10,10 +10,6 @@ import (
 )
 
 const (
-	// defaultReadLimit is the line cap applied when the caller doesn't
-	// specify limit. Large files are handled by paging (offset/limit), not
-	// by spilling to a side channel — that's Task 9's output-policy layer,
-	// not this tool's job.
 	defaultReadLimit = 2000
 
 	readDescription = "Read a file from the local filesystem. " +
@@ -34,6 +30,122 @@ const (
 	}`
 )
 
+func init() { DefaultBlueprint.Register(&ReadBlueprint{}) }
+
+// ReadBlueprint is the static metadata for the read tool.
+type ReadBlueprint struct{}
+
+func (ReadBlueprint) Name() string        { return "read" }
+func (ReadBlueprint) Description() string { return readDescription }
+func (ReadBlueprint) InputSchema() Schema {
+	return Schema{
+		Type: "object",
+		Properties: []SchemaProperty{
+			{Name: "path", Type: "string", Description: "Path to the file to read (absolute or relative). Also accepts file_path as an alias."},
+			{Name: "file_path", Type: "string", Description: "Alias for path."},
+			{Name: "offset", Type: "integer", Description: "1-indexed line number to start reading from. Defaults to 1."},
+			{Name: "limit", Type: "integer", Description: "Maximum number of lines to return. Defaults to 2000."},
+		},
+	}
+}
+func (ReadBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
+	panic("blueprint: call Materialize first")
+}
+
+func (ReadBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	return &readTool{
+		ReadBlueprint: ReadBlueprint{},
+		tr:            opts.FileTracker,
+		cwd:           opts.Cwd,
+	}, nil
+}
+
+type readTool struct {
+	ReadBlueprint
+	tr  *FileTracker
+	cwd string
+}
+
+func (rt *readTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+	var in readInput
+	if err := input.Unmarshal(&in); err != nil {
+		return ToolResult{}, fmt.Errorf("read: invalid input: %w", err)
+	}
+
+	absPath, err := resolveToolPath(in.Path, in.FilePath, rt.cwd)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("read: %w", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
+	}
+
+	unlock := rt.tr.Lock(absPath)
+	defer unlock()
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("read: %w", err)
+	}
+	if info.IsDir() {
+		return ToolResult{}, fmt.Errorf("read: %q is a directory, not a file", absPath)
+	}
+
+	f, err := os.Open(absPath)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("read: %w", err)
+	}
+	defer f.Close()
+
+	offset := in.Offset
+	if offset < 1 {
+		offset = 1
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = defaultReadLimit
+	}
+
+	var out strings.Builder
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
+	lineNo := 0
+	shown := 0
+	lastShown := offset - 1
+	truncated := false
+	for scanner.Scan() {
+		lineNo++
+		if lineNo < offset {
+			continue
+		}
+		if shown == limit {
+			truncated = true
+			break
+		}
+		fmt.Fprintf(&out, "%6d\t%s\n", lineNo, scanner.Text())
+		shown++
+		lastShown = lineNo
+	}
+	if err := scanner.Err(); err != nil {
+		return ToolResult{}, fmt.Errorf("read: %w", err)
+	}
+
+	rt.tr.RecordRead(absPath, info.ModTime())
+
+	if shown == 0 {
+		if lineNo == 0 {
+			return NewTextResult("(empty file)\n"), nil
+		}
+		return NewTextResult(fmt.Sprintf("(no lines at or after offset %d; file has %d lines)\n", offset, lineNo)), nil
+	}
+	if truncated {
+		fmt.Fprintf(&out, "\n[showing lines %d-%d; more lines remain — pass offset=%d to continue]\n", offset, lastShown, lastShown+1)
+	}
+	return NewTextResult(out.String()), nil
+}
+
 type readInput struct {
 	Path     string `json:"path"`
 	FilePath string `json:"file_path"`
@@ -41,8 +153,6 @@ type readInput struct {
 	Limit    int    `json:"limit"`
 }
 
-// newReadTool builds the read ToolFunc, recording every successful read's
-// path+mtime in tr so write/edit can verify freshness later.
 func newReadTool(tr *FileTracker, cwd string) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in readInput
@@ -55,20 +165,10 @@ func newReadTool(tr *FileTracker, cwd string) ToolFunc {
 			return "", fmt.Errorf("read: %w", err)
 		}
 
-		// Fail fast on an already-aborted turn rather than doing work whose
-		// result nobody will see — agentloop runs a batch of tool calls
-		// concurrently, so a call can still be starting after the turn's
-		// context was canceled.
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 
-		// rafiki's agentloop runs a tool batch concurrently, so a read can land
-		// in the middle of a write or edit on the same path. os.WriteFile is
-		// O_TRUNC then Write — not atomic — so an unlocked read can scan the
-		// file between the two and hand the model torn content, then record an
-		// mtime for that non-state. Hold the same per-path lock write and edit
-		// hold, across the stat, the scan, and the RecordRead.
 		unlock := tr.Lock(absPath)
 		defer unlock()
 
@@ -120,9 +220,6 @@ func newReadTool(tr *FileTracker, cwd string) ToolFunc {
 			return "", fmt.Errorf("read: %w", err)
 		}
 
-		// Record the read BEFORE returning any error-shaped output below —
-		// a paging hint or empty-file marker is still a completed, honest
-		// read of what's on disk right now.
 		tr.RecordRead(absPath, info.ModTime())
 
 		if shown == 0 {

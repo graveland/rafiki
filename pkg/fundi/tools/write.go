@@ -26,16 +26,89 @@ const (
 	}`
 )
 
+func init() { DefaultBlueprint.Register(&WriteBlueprint{}) }
+
+type WriteBlueprint struct{}
+
+func (WriteBlueprint) Name() string        { return "write" }
+func (WriteBlueprint) Description() string { return writeDescription }
+func (WriteBlueprint) InputSchema() Schema {
+	return Schema{
+		Type: "object",
+		Properties: []SchemaProperty{
+			{Name: "path", Type: "string", Description: "Path to the file to write (absolute or relative). Also accepts file_path as an alias."},
+			{Name: "file_path", Type: "string", Description: "Alias for path."},
+			{Name: "content", Type: "string", Description: "Full content to write to the file."},
+		},
+		Required: []string{"content"},
+	}
+}
+func (WriteBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
+	panic("blueprint: call Materialize first")
+}
+
+func (WriteBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	return &writeTool{WriteBlueprint: WriteBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd}, nil
+}
+
+type writeTool struct {
+	WriteBlueprint
+	tr  *FileTracker
+	cwd string
+}
+
+func (wt *writeTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+	var in writeInput
+	if err := input.Unmarshal(&in); err != nil {
+		return ToolResult{}, fmt.Errorf("write: invalid input: %w", err)
+	}
+
+	absPath, err := resolveToolPath(in.Path, in.FilePath, wt.cwd)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("write: %w", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
+	}
+
+	unlock := wt.tr.Lock(absPath)
+	defer unlock()
+
+	mode := os.FileMode(0o644)
+	if existing, err := os.Stat(absPath); err == nil {
+		if existing.IsDir() {
+			return ToolResult{}, fmt.Errorf("write: %q is a directory, not a file", absPath)
+		}
+		if err := wt.tr.Verify(absPath); err != nil {
+			return ToolResult{}, fmt.Errorf("write: %w", err)
+		}
+		mode = existing.Mode()
+	} else if !os.IsNotExist(err) {
+		return ToolResult{}, fmt.Errorf("write: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		return ToolResult{}, fmt.Errorf("write: create parent directories: %w", err)
+	}
+	if err := os.WriteFile(absPath, []byte(in.Content), mode); err != nil {
+		return ToolResult{}, fmt.Errorf("write: %w", err)
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("write: %w", err)
+	}
+	wt.tr.RecordRead(absPath, info.ModTime())
+	return NewTextResult(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), absPath)), nil
+}
+
 type writeInput struct {
 	Path     string `json:"path"`
 	FilePath string `json:"file_path"`
 	Content  string `json:"content"`
 }
 
-// newWriteTool builds the write ToolFunc. It consults tr to refuse
-// overwriting an existing file that hasn't been read since its last
-// modification, and records its own write in tr so an immediately following
-// edit doesn't need a redundant read.
 func newWriteTool(tr *FileTracker, cwd string) ToolFunc {
 	return func(ctx context.Context, input json.RawMessage) (string, error) {
 		var in writeInput
@@ -48,19 +121,10 @@ func newWriteTool(tr *FileTracker, cwd string) ToolFunc {
 			return "", fmt.Errorf("write: %w", err)
 		}
 
-		// Fail fast on an already-aborted turn rather than doing work whose
-		// result nobody will see — agentloop runs a batch of tool calls
-		// concurrently, so a call can still be starting after the turn's
-		// context was canceled.
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 
-		// Everything from here down is a read-modify-write (stat, verify,
-		// write, record). rafiki's agentloop runs a tool batch concurrently,
-		// so hold the per-path lock across the whole sequence — otherwise a
-		// concurrent write or edit on the same file can interleave between the
-		// verify and the write and have its change silently discarded.
 		unlock := tr.Lock(absPath)
 		defer unlock()
 
