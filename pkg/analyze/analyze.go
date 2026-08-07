@@ -86,7 +86,7 @@ type Profile struct {
 
 	// MaxOutputTokens is the output budget for the forced-tool Detect/Draft
 	// calls; 0 = default 16384 (applied by Defaults). Reasoning-heavy models
-	// (kimi, o-series style) can burn the llm default of 4096 tokens on
+	// (kimi, o-series style) can burn the llm default of 16384 tokens on
 	// preamble before completing the tool call, failing with
 	// stop_reason=max_tokens, and need headroom above 16384 (kimi observed
 	// 8,871 alone). Models with a low output cap or slow throughput need it

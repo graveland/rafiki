@@ -65,7 +65,7 @@ type Config struct {
 	ThinkingBudget int64
 
 	// MaxOutputTokens is the per-turn output cap sent as max_tokens to the
-	// upstream API. Zero means use the default (4096). This is NOT a hard
+	// upstream API. Zero means use the default (16384). This is NOT a hard
 	// limit the agent enforces — the upstream enforces it — and hitting it
 	// is recoverable: the agent loop fails any truncated tool calls and
 	// continues to give the model another turn budget.

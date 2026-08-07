@@ -609,7 +609,7 @@ func TestDefaultTrimPolicyKeepsFirstAndRecent(t *testing.T) {
 func TestAssembleAppliesCachePolicy(t *testing.T) {
 	conv := &Conversation{cfg: convConfig{
 		model:     "claude-haiku-4-5",
-		maxTokens: 4096,
+		maxTokens: 16384,
 		system: []anthropic.TextBlockParam{
 			{Text: "part one"},
 			{Text: "part two"},

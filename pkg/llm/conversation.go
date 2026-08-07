@@ -112,7 +112,7 @@ func Temperature(t float64) ConvOption { return func(c *convConfig) { c.temperat
 // TopK sets the top-K sampling default.
 func TopK(k int64) ConvOption { return func(c *convConfig) { c.topK = &k } }
 
-// MaxTokens sets the default output cap (4096 when unset).
+// MaxTokens sets the default output cap (16384 when unset).
 func MaxTokens(n int64) ConvOption { return func(c *convConfig) { c.maxTokens = n } }
 
 // System sets the system prompt blocks. Prompt-cache breakpoints are applied
@@ -180,7 +180,7 @@ func WithCache(p CachePolicy) ConvOption {
 // DB-backed (captured, resumable); without, it degrades to an in-memory
 // history with identical loop semantics.
 func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Conversation, error) {
-	cfg := convConfig{maxTokens: 4096, trim: defaultTrimPolicy{}, authorKind: "agent"}
+	cfg := convConfig{maxTokens: 16384, trim: defaultTrimPolicy{}, authorKind: "agent"}
 	for _, opt := range opts {
 		opt(&cfg)
 	}

@@ -602,13 +602,13 @@ func TestDriveHandlesMaxTokensTextOnly(t *testing.T) {
 	if len(params) != 2 {
 		t.Fatalf("got %d calls, want 2", len(params))
 	}
-	// First call uses the conversation default (4096).
-	if params[0].MaxTokens != 4096 {
-		t.Errorf("call 0 MaxTokens = %d, want 4096 (conversation default)", params[0].MaxTokens)
+	// First call uses the conversation default (16384).
+	if params[0].MaxTokens != 16384 {
+		t.Errorf("call 0 MaxTokens = %d, want 16384 (conversation default)", params[0].MaxTokens)
 	}
-	// Second call is the bump: 4096 * 2 = 8192.
-	if params[1].MaxTokens != 8192 {
-		t.Errorf("call 1 MaxTokens = %d, want 8192 (bump after truncation)", params[1].MaxTokens)
+	// Second call is the bump: 16384 * 2 = 32768.
+	if params[1].MaxTokens != 32768 {
+		t.Errorf("call 1 MaxTokens = %d, want 32768 (bump after truncation)", params[1].MaxTokens)
 	}
 }
 
