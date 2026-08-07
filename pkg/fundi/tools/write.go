@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -107,52 +106,4 @@ type writeInput struct {
 	Path     string `json:"path"`
 	FilePath string `json:"file_path"`
 	Content  string `json:"content"`
-}
-
-func newWriteTool(tr *FileTracker, cwd string) ToolFunc {
-	return func(ctx context.Context, input json.RawMessage) (string, error) {
-		var in writeInput
-		if err := json.Unmarshal(input, &in); err != nil {
-			return "", fmt.Errorf("write: invalid input: %w", err)
-		}
-
-		absPath, err := resolveToolPath(in.Path, in.FilePath, cwd)
-		if err != nil {
-			return "", fmt.Errorf("write: %w", err)
-		}
-
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-
-		unlock := tr.Lock(absPath)
-		defer unlock()
-
-		mode := os.FileMode(0o644)
-		if existing, err := os.Stat(absPath); err == nil {
-			if existing.IsDir() {
-				return "", fmt.Errorf("write: %q is a directory, not a file", absPath)
-			}
-			if err := tr.Verify(absPath); err != nil {
-				return "", fmt.Errorf("write: %w", err)
-			}
-			mode = existing.Mode()
-		} else if !os.IsNotExist(err) {
-			return "", fmt.Errorf("write: %w", err)
-		}
-
-		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-			return "", fmt.Errorf("write: create parent directories: %w", err)
-		}
-		if err := os.WriteFile(absPath, []byte(in.Content), mode); err != nil {
-			return "", fmt.Errorf("write: %w", err)
-		}
-
-		info, err := os.Stat(absPath)
-		if err != nil {
-			return "", fmt.Errorf("write: %w", err)
-		}
-		tr.RecordRead(absPath, info.ModTime())
-		return fmt.Sprintf("wrote %d bytes to %s", len(in.Content), absPath), nil
-	}
 }

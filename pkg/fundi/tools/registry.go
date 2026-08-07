@@ -74,47 +74,38 @@ type Materializer interface {
 	Materialize(opts ToolOpts) (Tool, error)
 }
 
-// ToolFunc executes one tool call given its raw JSON input and returns the
-// text result the model sees. Returning a non-nil error is normal control
-// flow, not an exception path: rafiki's agentloop converts it into an
-// is_error tool result the model can react to, so a descriptive error for
-// bad input (missing file, stale read, bad regex, ...) is correct behavior.
-type ToolFunc func(ctx context.Context, input json.RawMessage) (string, error)
-
 // Registry is a name -> (definition, executor) map implementing rafiki's
-// agentloop.ToolSet. The loop runs a tool batch concurrently (errgroup,
+// agentloop.ToolSet. The loop runs a tool batch concurrently (ergroup,
 // concurrency limit 6), so every Registry method is safe to call from
-// multiple goroutines at once; individual ToolFunc implementations are
-// responsible for their own concurrency safety over any state they share
-// (see FileTracker).
+// multiple goroutines at once.
 type Registry struct {
 	mu   sync.RWMutex
 	defs map[string]anthropic.ToolUnionParam
-	fns  map[string]ToolFunc
+	fns  map[string]func(context.Context, json.RawMessage) (string, error)
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{
 		defs: make(map[string]anthropic.ToolUnionParam),
-		fns:  make(map[string]ToolFunc),
+		fns:  make(map[string]func(context.Context, json.RawMessage) (string, error)),
 	}
 }
 
-// Register adds one tool under the name carried by def. def must be the
-// "custom" tool variant built by Def — Register panics on any other variant,
-// since that indicates a programming error in the caller (a hand-built
-// ToolUnionParam using some other SDK-provided tool type) rather than a
-// runtime condition.
-func (r *Registry) Register(def anthropic.ToolUnionParam, fn ToolFunc) {
-	if def.OfTool == nil {
-		panic("tools: Register requires a custom tool definition built by Def")
-	}
-	name := def.OfTool.Name
+// Register adds a Tool to the registry. The tool's Anthropic definition is
+// built from its Name(), Description(), and InputSchema().JSON().
+func (r *Registry) Register(t Tool) {
+	def := BuildDef(t)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.defs[name] = def
-	r.fns[name] = fn
+	r.defs[def.OfTool.Name] = def
+	r.fns[def.OfTool.Name] = func(ctx context.Context, input json.RawMessage) (string, error) {
+		result, err := t.Execute(ctx, ToolInput(input))
+		if err != nil {
+			return "", err
+		}
+		return result.Text, nil
+	}
 }
 
 // Definitions returns every registered tool's definition, sorted by name.
@@ -136,25 +127,17 @@ func (r *Registry) Definitions() []anthropic.ToolUnionParam {
 	return out
 }
 
-// Execute runs the named tool's ToolFunc. An unknown name is a returned
-// error, not a panic — agentloop converts it to an is_error tool result the
-// model can see.
+// Execute runs the named tool. An unknown name is a returned error, not a
+// panic — agentloop converts it to an is_error tool result the model can see.
 //
-// A panic inside a ToolFunc is recovered here and converted into that same
-// returned error. This is the containment boundary for the ENTIRE tool
-// surface — the file tools, bash, skill, and every MCP tool, since all of
-// them are registered as ToolFuncs on this Registry — and it is the only
-// place that containment can live: agentloop runs each tool call on its own
-// errgroup goroutine (one g.Go per tool_use block) and errgroup deliberately
-// does not recover. Without this, a panic in any tool body unwinds a
-// goroutine nothing owns and kills the whole daemon, taking every unrelated
-// conversation with it.
-//
-// Converting the panic to an error rather than re-raising it is the right
-// shape, not a convenience: agentloop turns a tool error into an is_error
-// tool_result the model can see and react to, so the turn survives and the
-// model is told what happened. No partial result is preserved — a tool that
-// panicked mid-write has no output worth showing.
+// A panic inside a tool's Execute is recovered here and converted into that
+// same returned error. This is the containment boundary for the ENTIRE tool
+// surface — the file tools, bash, skill, and every MCP tool — and it is the
+// only place that containment can live: agentloop runs each tool call on its
+// own errgroup goroutine (one g.Go per tool_use block) and errgroup
+// deliberately does not recover. Without this, a panic in any tool body
+// unwinds a goroutine nothing owns and kills the whole daemon, taking every
+// unrelated conversation with it.
 func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessage) (result string, err error) {
 	r.mu.RLock()
 	fn, ok := r.fns[name]
@@ -171,48 +154,4 @@ func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessa
 		}
 	}()
 	return fn(ctx, input)
-}
-
-// Def builds a custom-tool definition from a name, a model-facing
-// description, and a JSON Schema (draft 2020-12) object describing its
-// input. jsonSchema is always a literal baked in by the caller (see the
-// per-tool *Schema consts in read.go, write.go, etc.) — a malformed literal
-// is a programmer error caught immediately by any test that calls
-// RegisterFileTools, so Def panics rather than threading a startup error
-// through every registration call site.
-func Def(name, description, jsonSchema string) anthropic.ToolUnionParam {
-	var schema anthropic.ToolInputSchemaParam
-	if err := json.Unmarshal([]byte(jsonSchema), &schema); err != nil {
-		panic(fmt.Sprintf("tools: invalid json schema for %q: %v", name, err))
-	}
-	def := anthropic.ToolUnionParamOfTool(schema, name)
-	def.OfTool.Description = anthropic.String(description)
-	return def
-}
-
-// RegisterFileTools registers read, write, edit, glob, and grep against r,
-// sharing tr as their read-before-write tracking state. cwd is the working
-// directory for resolving relative paths and ~ in the file tools.
-func RegisterFileTools(r *Registry, tr *FileTracker, cwd string) {
-	r.Register(Def("read", readDescription, readSchema), newReadTool(tr, cwd))
-	r.Register(Def("write", writeDescription, writeSchema), newWriteTool(tr, cwd))
-	r.Register(Def("edit", editDescription, editSchema), newEditTool(tr, cwd))
-	r.Register(Def("glob", globDescription, globSchema), newGlobTool())
-	r.Register(Def("grep", grepDescription, grepSchema), newGrepTool())
-}
-
-// RegisterTool registers a Tool on the registry. The tool's definition is
-// built from its Name(), Description(), and InputSchema().JSON().
-func (r *Registry) RegisterTool(t Tool) {
-	def := BuildDef(t)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.defs[def.OfTool.Name] = def
-	r.fns[def.OfTool.Name] = func(ctx context.Context, input json.RawMessage) (string, error) {
-		result, err := t.Execute(ctx, ToolInput(input))
-		if err != nil {
-			return "", err
-		}
-		return result.Text, nil
-	}
 }

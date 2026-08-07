@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
@@ -191,13 +190,7 @@ func registerMCPServerTools(ctx context.Context, r *Registry, serverName string,
 	normServer := normalizeMCPName(serverName)
 	var spillCounter atomic.Int64
 	for _, t := range res.Tools {
-		def, err := mcpToolDef(normServer, t)
-		if err != nil {
-			slog.Error("agent/tools: mcp: skipping tool with unusable input schema", "server", serverName, "tool", t.Name, "error", err)
-			continue
-		}
-
-		name := def.OfTool.Name
+		name := fmt.Sprintf("mcp__%s__%s", normServer, normalizeMCPName(t.Name))
 		if !anthropicToolNameRE.MatchString(name) {
 			// A single invalid name 400s the ENTIRE tools array on the next
 			// turn, disabling every tool - so this tool is skipped rather
@@ -211,30 +204,83 @@ func registerMCPServerTools(ctx context.Context, r *Registry, serverName string,
 		}
 
 		registeredNames[name] = fmt.Sprintf("server %q, tool %q", serverName, t.Name)
-		r.Register(def, newMCPToolFunc(session, t.Name, name, p, &spillCounter))
+		adapter := &mcpAdapter{
+			name:            name,
+			description:     t.Description,
+			rawSchema:       rawSchemaJSON(t.InputSchema),
+			session:         session,
+			toolName:        t.Name,
+			registeredName:  name,
+			p:               p,
+			spillCounter:    &spillCounter,
+		}
+		r.Register(adapter)
 	}
 	return nil
 }
 
-// mcpToolDef builds the Anthropic tool definition for one MCP tool, passing
-// its input schema through verbatim (see ConnectMCP's doc comment).
-func mcpToolDef(normServer string, t *mcp.Tool) (anthropic.ToolUnionParam, error) {
-	name := fmt.Sprintf("mcp__%s__%s", normServer, normalizeMCPName(t.Name))
+// mcpAdapter wraps an MCP tool as a Tool, so it can be registered on a
+// Registry via Register().
+type mcpAdapter struct {
+	name            string
+	description     string
+	rawSchema       json.RawMessage
+	session         *mcp.ClientSession
+	toolName        string
+	registeredName  string
+	p               OutputPolicy
+	spillCounter    *atomic.Int64
+}
 
-	var schema anthropic.ToolInputSchemaParam
-	if t.InputSchema != nil {
-		schemaBytes, err := json.Marshal(t.InputSchema)
-		if err != nil {
-			return anthropic.ToolUnionParam{}, fmt.Errorf("marshaling input schema for %q: %w", t.Name, err)
-		}
-		if err := json.Unmarshal(schemaBytes, &schema); err != nil {
-			return anthropic.ToolUnionParam{}, fmt.Errorf("converting input schema for %q: %w", t.Name, err)
+func (a *mcpAdapter) Name() string        { return a.name }
+func (a *mcpAdapter) Description() string { return a.description }
+func (a *mcpAdapter) InputSchema() Schema { return SchemaFromRaw(a.rawSchema) }
+
+func (a *mcpAdapter) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+	var args any
+	rawIn := json.RawMessage(input)
+	if len(rawIn) > 0 {
+		args = rawIn
+	}
+
+	res, err := a.session.CallTool(ctx, &mcp.CallToolParams{Name: a.toolName, Arguments: args})
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("mcp: calling tool %q: %w", a.toolName, err)
+	}
+	if res == nil {
+		return ToolResult{}, fmt.Errorf("mcp: tool %q returned no result", a.toolName)
+	}
+
+	var text strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			text.WriteString(tc.Text)
 		}
 	}
 
-	def := anthropic.ToolUnionParamOfTool(schema, name)
-	def.OfTool.Description = anthropic.String(t.Description)
-	return def, nil
+	spillName := agentloop.ToolCallID(ctx)
+	if spillName == "" {
+		spillName = fmt.Sprintf("%s_%d", a.registeredName, a.spillCounter.Add(1))
+	}
+	out := a.p.Clip(text.String(), spillName)
+
+	if res.IsError {
+		return ToolResult{}, fmt.Errorf("mcp: tool %q returned an error: %s", a.toolName, out)
+	}
+	return NewTextResult(out), nil
+}
+
+// rawSchemaJSON marshals an MCP tool's input schema to a JSON blob suitable
+// for SchemaFromRaw. If the schema is nil, it returns an empty object.
+func rawSchemaJSON(schema any) json.RawMessage {
+	if schema == nil {
+		return json.RawMessage(`{}`)
+	}
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(b)
 }
 
 // nonTokenChars matches every rune not allowed to appear as-is in a
@@ -260,56 +306,4 @@ var anthropicToolNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // underscore (see nonTokenChars).
 func normalizeMCPName(s string) string {
 	return nonTokenChars.ReplaceAllString(s, "_")
-}
-
-// newMCPToolFunc returns the ToolFunc that dispatches a call to toolName on
-// session. registeredName (the mcp__server__tool form) is used as the
-// fallback spill file name when agentloop.ToolCallID(ctx) is empty (e.g. a
-// direct Execute call outside a real agentloop turn) - spillCounter keeps
-// concurrent fallback names distinct without a mutex, mirroring bash.go.
-func newMCPToolFunc(session *mcp.ClientSession, toolName, registeredName string, p OutputPolicy, spillCounter *atomic.Int64) ToolFunc {
-	return func(ctx context.Context, input json.RawMessage) (string, error) {
-		var args any
-		if len(input) > 0 {
-			args = json.RawMessage(input)
-		}
-
-		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: toolName, Arguments: args})
-		if err != nil {
-			return "", fmt.Errorf("mcp: calling tool %q: %w", toolName, err)
-		}
-		// A third-party server is not obliged to behave: nothing in the SDK's
-		// signature rules out a nil result alongside a nil error, and res is
-		// dereferenced immediately below. Report it as a tool error the model
-		// can see rather than taking a nil-pointer panic out to a goroutine
-		// (agentloop runs each tool on its own errgroup goroutine) that would
-		// otherwise be contained only by Registry.Execute's recover.
-		if res == nil {
-			return "", fmt.Errorf("mcp: tool %q returned no result", toolName)
-		}
-
-		var text strings.Builder
-		for _, c := range res.Content {
-			if tc, ok := c.(*mcp.TextContent); ok {
-				text.WriteString(tc.Text)
-			}
-		}
-
-		spillName := agentloop.ToolCallID(ctx)
-		if spillName == "" {
-			spillName = fmt.Sprintf("%s_%d", registeredName, spillCounter.Add(1))
-		}
-		out := p.Clip(text.String(), spillName)
-
-		if res.IsError {
-			// Per the MCP spec (and this SDK's CallToolResult.IsError doc),
-			// a tool-level error is reported inside Content, not as a
-			// protocol error - CallTool above returned err == nil. Turning
-			// it into a Go error here is what lets rafiki's agentloop mark
-			// this an is_error tool result the model can see and recover
-			// from, matching every other ToolFunc in this package.
-			return "", fmt.Errorf("mcp: tool %q returned an error: %s", toolName, out)
-		}
-		return out, nil
-	}
 }

@@ -71,7 +71,7 @@ func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 		} else {
 			t = bp
 		}
-		r.RegisterTool(t)
+		r.Register(t)
 	}
 	return r
 }

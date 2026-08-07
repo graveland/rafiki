@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,9 +15,9 @@ func TestWriteToolCreatesNewFileAndParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "deeper", "new.txt")
 	tr := NewFileTracker()
-	fn := newWriteTool(tr, "")
+	writeTool := testWriteTool(t, tr, "")
 
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"content":"hello"}`, p)))
+	out, err := writeTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"content":"hello"}`, p)))
 	if err != nil {
 		t.Fatalf("unexpected error: %v (%s)", err, out)
 	}
@@ -38,9 +37,9 @@ func TestWriteToolRefusesUnreadExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	fn := newWriteTool(tr, "")
+	writeTool := testWriteTool(t, tr, "")
 
-	_, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"content":"clobber"}`, p)))
+	_, err := writeTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"content":"clobber"}`, p)))
 	if err == nil || !strings.Contains(err.Error(), "read") {
 		t.Fatalf("expected a read-before-write error, got %v", err)
 	}
@@ -60,13 +59,13 @@ func TestWriteToolAllowsOverwriteAfterRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	writeFn := newWriteTool(tr, "")
+	readTool := testReadTool(t, tr, "")
+	writeTool := testWriteTool(t, tr, "")
 
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writeFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"content":"replaced"}`, p))); err != nil {
+	if _, err := writeTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"content":"replaced"}`, p))); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	b, err := os.ReadFile(p)
@@ -80,8 +79,8 @@ func TestWriteToolAllowsOverwriteAfterRead(t *testing.T) {
 
 func TestWriteToolRefusesRelativePath(t *testing.T) {
 	tr := NewFileTracker()
-	fn := newWriteTool(tr, "")
-	_, err := fn(context.Background(), json.RawMessage(`{"path":"rel.txt","content":"x"}`))
+	writeTool := testWriteTool(t, tr, "")
+	_, err := writeTool.Execute(context.Background(), ToolInput(`{"path":"rel.txt","content":"x"}`))
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("expected an absolute-path error, got %v", err)
 	}
@@ -98,8 +97,8 @@ func TestWriteToolConcurrentWritesAreSerialized(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "contended.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr, "")
-	editFn := newEditTool(tr, "")
+	writeTool := testWriteTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
 
 	payloads := make([]string, n)
 	for i := range payloads {
@@ -112,7 +111,7 @@ func TestWriteToolConcurrentWritesAreSerialized(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = writeFn(context.Background(), json.RawMessage(
+			_, errs[i] = writeTool.Execute(context.Background(), ToolInput(
 				fmt.Sprintf(`{"path":%q,"content":%q}`, p, payloads[i])))
 		}(i)
 	}
@@ -140,7 +139,7 @@ func TestWriteToolConcurrentWritesAreSerialized(t *testing.T) {
 		t.Fatalf("final content is not any single payload verbatim (torn write): %q", got)
 	}
 
-	if _, err := editFn(context.Background(), json.RawMessage(
+	if _, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"old_string":"payload-","new_string":"done-"}`, p))); err != nil {
 		t.Fatalf("expected the tracker to be left consistent after concurrent writes, got %v", err)
 	}
@@ -162,7 +161,7 @@ func TestWriteToolExcludesASecondWriterAfterParentDirsAppear(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "deeper", "contended.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr, "")
+	writeTool := testWriteTool(t, tr, "")
 
 	// Writer one: lock first, create the parents second — write.go's order.
 	unlock := tr.Lock(p)
@@ -173,7 +172,7 @@ func TestWriteToolExcludesASecondWriterAfterParentDirsAppear(t *testing.T) {
 	// Writer two arrives with the directories already on disk.
 	done := make(chan error, 1)
 	go func() {
-		_, err := writeFn(context.Background(), json.RawMessage(
+		_, err := writeTool.Execute(context.Background(), ToolInput(
 			fmt.Sprintf(`{"path":%q,"content":"second"}`, p)))
 		done <- err
 	}()
@@ -225,7 +224,7 @@ func TestWriteToolConcurrentWritesIntoUncreatedDirsAreSerialized(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "deeper", "contended.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr, "")
+	writeTool := testWriteTool(t, tr, "")
 
 	payloads := make([]string, n)
 	for i := range payloads {
@@ -240,7 +239,7 @@ func TestWriteToolConcurrentWritesIntoUncreatedDirsAreSerialized(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, errs[i] = writeFn(context.Background(), json.RawMessage(
+			_, errs[i] = writeTool.Execute(context.Background(), ToolInput(
 				fmt.Sprintf(`{"path":%q,"content":%q}`, p, payloads[i])))
 		}(i)
 	}
@@ -273,13 +272,13 @@ func TestWriteThenEditWithoutSeparateRead(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "roundtrip.txt")
 	tr := NewFileTracker()
-	writeFn := newWriteTool(tr, "")
-	editFn := newEditTool(tr, "")
+	writeTool := testWriteTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
 
-	if _, err := writeFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"content":"hello world"}`, p))); err != nil {
+	if _, err := writeTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"content":"hello world"}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := editFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"hello","new_string":"bye"}`, p))); err != nil {
+	if _, err := editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":"hello","new_string":"bye"}`, p))); err != nil {
 		t.Fatalf("expected edit to succeed right after write without a read, got %v", err)
 	}
 	b, err := os.ReadFile(p)

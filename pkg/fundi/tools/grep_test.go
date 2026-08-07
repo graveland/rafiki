@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,11 +15,12 @@ func TestGrepToolFindsMatchesInPathLineTextFormat(t *testing.T) {
 	if err := os.WriteFile(p, []byte("package a\nfunc Foo() {}\nfunc Bar() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"func Foo","path":%q}`, dir)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"func Foo","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	want := fmt.Sprintf("%s:2:func Foo() {}\n", p)
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
@@ -39,11 +39,12 @@ func TestGrepToolExcludesGitDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "real.txt"), []byte("needle\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q}`, dir)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if strings.Contains(out, ".git") {
 		t.Fatalf("expected .git to be excluded, got %q", out)
 	}
@@ -60,11 +61,12 @@ func TestGrepToolGlobFilter(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("needle\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"*.go"}`, dir)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"*.go"}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if strings.Contains(out, "b.txt") {
 		t.Fatalf("expected b.txt to be filtered out, got %q", out)
 	}
@@ -93,11 +95,12 @@ func TestGrepToolGlobFilterMatchesNestedFiles(t *testing.T) {
 		}
 	}
 
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"*.go"}`, dir)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"*.go"}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if !strings.Contains(out, top) {
 		t.Errorf("expected the top-level %q in %q", top, out)
 	}
@@ -126,11 +129,12 @@ func TestGrepToolGlobWithSeparatorStaysPathRelative(t *testing.T) {
 		}
 	}
 
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"sub/*.go"}`, dir)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q,"glob":"sub/*.go"}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if !strings.Contains(out, inSub) {
 		t.Errorf("expected %q in %q", inSub, out)
 	}
@@ -148,11 +152,12 @@ func TestGrepToolMaxMatchesTrailer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q,"max_matches":3}`, dir)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q,"max_matches":3}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	got := strings.Count(out, "needle")
 	// 3 shown occurrences on their own lines + the trailer does not itself
 	// contain the literal word "needle".
@@ -169,11 +174,12 @@ func TestGrepToolNoMatches(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"zzz","path":%q}`, dir)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"zzz","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if !strings.Contains(out, "no") {
 		t.Fatalf("expected a no-matches message, got %q", out)
 	}
@@ -181,8 +187,8 @@ func TestGrepToolNoMatches(t *testing.T) {
 
 func TestGrepToolInvalidPattern(t *testing.T) {
 	dir := t.TempDir()
-	fn := newGrepTool()
-	_, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"(","path":%q}`, dir)))
+	tool := &GrepTool{}
+	_, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"(","path":%q}`, dir)))
 	if err == nil {
 		t.Fatal("expected a regexp compile error")
 	}
@@ -200,8 +206,8 @@ func TestGrepToolRespectsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	fn := newGrepTool()
-	_, err := fn(ctx, json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q}`, dir)))
+	tool := &GrepTool{}
+	_, err := tool.Execute(ctx, ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q}`, dir)))
 	if err == nil {
 		t.Fatal("expected an error for an already-canceled context")
 	}
@@ -211,8 +217,8 @@ func TestGrepToolRespectsCanceledContext(t *testing.T) {
 }
 
 func TestGrepToolRequiresPath(t *testing.T) {
-	fn := newGrepTool()
-	_, err := fn(context.Background(), json.RawMessage(`{"pattern":"needle"}`))
+	tool := &GrepTool{}
+	_, err := tool.Execute(context.Background(), ToolInput(`{"pattern":"needle"}`))
 	if err == nil {
 		t.Fatal("expected an error for a missing path")
 	}
@@ -221,8 +227,8 @@ func TestGrepToolRequiresPath(t *testing.T) {
 // TestGrepToolRejectsFilesystemRoot guards against a model (accidentally or
 // otherwise) walking the entire disk via path:"/".
 func TestGrepToolRejectsFilesystemRoot(t *testing.T) {
-	fn := newGrepTool()
-	_, err := fn(context.Background(), json.RawMessage(`{"pattern":"needle","path":"/"}`))
+	tool := &GrepTool{}
+	_, err := tool.Execute(context.Background(), ToolInput(`{"pattern":"needle","path":"/"}`))
 	if err == nil {
 		t.Fatal("expected an error for path \"/\"")
 	}
@@ -244,11 +250,12 @@ func TestGrepToolEmitsAbsolutePathsForRelativeBase(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(`{"pattern":"needle","path":"sub"}`))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(`{"pattern":"needle","path":"sub"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 
 	line := strings.TrimRight(out, "\n")
 	emitted, _, ok := strings.Cut(line, ":")
@@ -261,7 +268,7 @@ func TestGrepToolEmitsAbsolutePathsForRelativeBase(t *testing.T) {
 
 	// The real contract: the emitted path must be directly usable by read.
 	tr := NewFileTracker()
-	if _, err := newReadTool(tr, "")(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, emitted))); err != nil {
+	if _, err := testReadTool(t, tr, "").Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, emitted))); err != nil {
 		t.Fatalf("read rejected grep's own output %q: %v", emitted, err)
 	}
 }
@@ -273,11 +280,12 @@ func TestGrepToolSingleFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fn := newGrepTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"func Foo","path":%q}`, p)))
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"func Foo","path":%q}`, p)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	want := fmt.Sprintf("%s:2:func Foo() {}\n", p)
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)

@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,12 +18,12 @@ func TestEditToolNoMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	_, err := editFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"nope","new_string":"x"}`, p)))
+	_, err := editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":"nope","new_string":"x"}`, p)))
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected a not-found error, got %v", err)
 	}
@@ -37,12 +36,12 @@ func TestEditToolMultipleMatchesWithoutReplaceAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	_, err := editFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"foo","new_string":"bar"}`, p)))
+	_, err := editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":"foo","new_string":"bar"}`, p)))
 	if err == nil || !strings.Contains(err.Error(), "3") {
 		t.Fatalf("expected an error mentioning the 3 matches, got %v", err)
 	}
@@ -59,12 +58,12 @@ func TestEditToolReplaceAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := editFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"foo","new_string":"bar","replace_all":true}`, p))); err != nil {
+	if _, err := editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":"foo","new_string":"bar","replace_all":true}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
@@ -80,9 +79,9 @@ func TestEditToolStaleMtime(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -100,7 +99,7 @@ func TestEditToolStaleMtime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = editFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"hello","new_string":"bye"}`, p)))
+	_, err = editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":"hello","new_string":"bye"}`, p)))
 	if err == nil {
 		t.Fatal("expected a staleness error")
 	}
@@ -117,16 +116,16 @@ func TestEditToolChainedEditsNeedOnlyOneRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := editFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"one","new_string":"1"}`, p))); err != nil {
+	if _, err := editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":"one","new_string":"1"}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	// Second edit relies on the first edit's own RecordRead, not a fresh read.
-	if _, err := editFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q,"old_string":"two","new_string":"2"}`, p))); err != nil {
+	if _, err := editTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"old_string":"two","new_string":"2"}`, p))); err != nil {
 		t.Fatalf("expected chained edit to succeed, got %v", err)
 	}
 	b, _ := os.ReadFile(p)
@@ -155,9 +154,9 @@ func TestEditToolConcurrentEditsAreNotLost(t *testing.T) {
 	}
 
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,7 +166,7 @@ func TestEditToolConcurrentEditsAreNotLost(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = editFn(context.Background(), json.RawMessage(
+			_, errs[i] = editTool.Execute(context.Background(), ToolInput(
 				fmt.Sprintf(`{"path":%q,"old_string":"t%d","new_string":"X%d"}`, p, i, i)))
 		}(i)
 	}
@@ -194,8 +193,8 @@ func TestEditToolConcurrentEditsAreNotLost(t *testing.T) {
 
 func TestEditToolRelativePathRejected(t *testing.T) {
 	tr := NewFileTracker()
-	editFn := newEditTool(tr, "")
-	_, err := editFn(context.Background(), json.RawMessage(`{"path":"rel.txt","old_string":"a","new_string":"b"}`))
+	editTool := testEditTool(t, tr, "")
+	_, err := editTool.Execute(context.Background(), ToolInput(`{"path":"rel.txt","old_string":"a","new_string":"b"}`))
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("expected an absolute-path error, got %v", err)
 	}
@@ -208,13 +207,13 @@ func TestEditToolCRLFFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	// old_string uses LF — edit normalizes both file content and old_string to LF.
-	if _, err := editFn(context.Background(), json.RawMessage(
+	if _, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"old_string":"hello\nworld","new_string":"hi\nthere"}`, p),
 	)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -234,13 +233,13 @@ func TestEditToolBOMHandling(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	// old_string does NOT include the BOM (the model won't emit invisible BOM).
-	if _, err := editFn(context.Background(), json.RawMessage(
+	if _, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"old_string":"hello\n","new_string":"hi\n"}`, p),
 	)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -260,18 +259,18 @@ func TestEditToolFuzzySmartQuotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	// Model emits curly quotes — fuzzy matching normalizes them.
-	curly := json.RawMessage(fmt.Sprintf(
+	curly := ToolInput(fmt.Sprintf(
 		`{"path":%q,"old_string":%q,"new_string":%q}`, p,
 		"var msg = \u201Chello world\u201D",
 		`var msg = "hi there"`,
 	))
-	_, err := editFn(context.Background(), curly)
+	_, err := editTool.Execute(context.Background(), curly)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -290,13 +289,13 @@ func TestEditToolFuzzyTrailingWhitespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	// Model emits old_string with trailing spaces (common LLM artifact).
-	_, err := editFn(context.Background(), json.RawMessage(
+	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"old_string":"    bar()  ","new_string":"    baz()"}`, p),
 	))
 	if err != nil {
@@ -317,13 +316,13 @@ func TestEditToolFuzzyUnicodeDash(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	// Model emits en-dash.
-	_, err := editFn(context.Background(), json.RawMessage(
+	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"old_string":"long\u2013term","new_string":"short-term"}`, p),
 	))
 	if err != nil {
@@ -343,12 +342,12 @@ func TestEditToolMultiEditExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	_, err := editFn(context.Background(), json.RawMessage(
+	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"edits":[
 			{"old_string":"a=1","new_string":"a=10"},
 			{"old_string":"c=3","new_string":"c=30"}
@@ -371,12 +370,12 @@ func TestEditToolMultiEditOverlapRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	_, err := editFn(context.Background(), json.RawMessage(
+	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"edits":[
 			{"old_string":"hello world","new_string":"hi there"},
 			{"old_string":"world","new_string":"planet"}
@@ -396,15 +395,15 @@ func TestEditToolFuzzyPreservesUnchangedLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
-	editFn := newEditTool(tr, "")
-	if _, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	readTool := testReadTool(t, tr, "")
+	editTool := testEditTool(t, tr, "")
+	if _, err := readTool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	// Fuzzy match needed on the line we're editing (has trailing spaces on
 	// one line, which triggers fuzzy matching for the whole edit).
 	// The untouched lines should keep their original tabs.
-	_, err := editFn(context.Background(), json.RawMessage(
+	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"old_string":"\tfmt.Println(\"world\")  ","new_string":"\tfmt.Println(\"universe\")"}`, p),
 	))
 	if err != nil {
@@ -425,16 +424,16 @@ func TestEditToolFilePathAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, dir)
-	editFn := newEditTool(tr, dir)
+	readTool := testReadTool(t, tr, dir)
+	editTool := testEditTool(t, tr, dir)
 	// Read via file_path alias.
-	if _, err := readFn(context.Background(), json.RawMessage(
+	if _, err := readTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"file_path":%q}`, p),
 	)); err != nil {
 		t.Fatalf("read via file_path failed: %v", err)
 	}
 	// Edit via file_path alias.
-	if _, err := editFn(context.Background(), json.RawMessage(
+	if _, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"file_path":%q,"old_string":"hello","new_string":"hi"}`, p),
 	)); err != nil {
 		t.Fatalf("edit via file_path failed: %v", err)
@@ -455,14 +454,14 @@ func TestEditToolRelativePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, dir)
-	editFn := newEditTool(tr, dir)
+	readTool := testReadTool(t, tr, dir)
+	editTool := testEditTool(t, tr, dir)
 	// Read with a relative path resolved against cwd.
-	if _, err := readFn(context.Background(), json.RawMessage(`{"path":"sub/a.txt"}`)); err != nil {
+	if _, err := readTool.Execute(context.Background(), ToolInput(`{"path":"sub/a.txt"}`)); err != nil {
 		t.Fatalf("read relative failed: %v", err)
 	}
 	// Edit with a relative path.
-	if _, err := editFn(context.Background(), json.RawMessage(
+	if _, err := editTool.Execute(context.Background(), ToolInput(
 		`{"path":"sub/a.txt","old_string":"hello relative","new_string":"bye relative"}`,
 	)); err != nil {
 		t.Fatalf("edit relative failed: %v", err)
@@ -481,8 +480,9 @@ func TestEditToolTildeExpansion(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, dir)
-	if _, err := readFn(context.Background(), json.RawMessage(`{"path":"~/a.txt"}`)); err != nil {
+	readTool := testReadTool(t, tr, dir)
+	if _, err := readTool.Execute(context.Background(), ToolInput(`{"path":"~/a.txt"}`)); err != nil {
 		t.Fatalf("read via ~ failed: %v", err)
 	}
 }
+

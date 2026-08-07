@@ -3,7 +3,6 @@ package tools
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -151,86 +150,4 @@ type readInput struct {
 	FilePath string `json:"file_path"`
 	Offset   int    `json:"offset"`
 	Limit    int    `json:"limit"`
-}
-
-func newReadTool(tr *FileTracker, cwd string) ToolFunc {
-	return func(ctx context.Context, input json.RawMessage) (string, error) {
-		var in readInput
-		if err := json.Unmarshal(input, &in); err != nil {
-			return "", fmt.Errorf("read: invalid input: %w", err)
-		}
-
-		absPath, err := resolveToolPath(in.Path, in.FilePath, cwd)
-		if err != nil {
-			return "", fmt.Errorf("read: %w", err)
-		}
-
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-
-		unlock := tr.Lock(absPath)
-		defer unlock()
-
-		info, err := os.Stat(absPath)
-		if err != nil {
-			return "", fmt.Errorf("read: %w", err)
-		}
-		if info.IsDir() {
-			return "", fmt.Errorf("read: %q is a directory, not a file", absPath)
-		}
-
-		f, err := os.Open(absPath)
-		if err != nil {
-			return "", fmt.Errorf("read: %w", err)
-		}
-		defer f.Close()
-
-		offset := in.Offset
-		if offset < 1 {
-			offset = 1
-		}
-		limit := in.Limit
-		if limit <= 0 {
-			limit = defaultReadLimit
-		}
-
-		var out strings.Builder
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-
-		lineNo := 0
-		shown := 0
-		lastShown := offset - 1
-		truncated := false
-		for scanner.Scan() {
-			lineNo++
-			if lineNo < offset {
-				continue
-			}
-			if shown == limit {
-				truncated = true
-				break
-			}
-			fmt.Fprintf(&out, "%6d\t%s\n", lineNo, scanner.Text())
-			shown++
-			lastShown = lineNo
-		}
-		if err := scanner.Err(); err != nil {
-			return "", fmt.Errorf("read: %w", err)
-		}
-
-		tr.RecordRead(absPath, info.ModTime())
-
-		if shown == 0 {
-			if lineNo == 0 {
-				return "(empty file)\n", nil
-			}
-			return fmt.Sprintf("(no lines at or after offset %d; file has %d lines)\n", offset, lineNo), nil
-		}
-		if truncated {
-			fmt.Fprintf(&out, "\n[showing lines %d-%d; more lines remain — pass offset=%d to continue]\n", offset, lastShown, lastShown+1)
-		}
-		return out.String(), nil
-	}
 }

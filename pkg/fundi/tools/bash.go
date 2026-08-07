@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -152,75 +151,3 @@ func bashTimeout(timeoutMs int) time.Duration {
 	return time.Duration(timeoutMs) * time.Millisecond
 }
 
-func RegisterBash(r *Registry, p OutputPolicy, cwd string) {
-	var fallbackCounter atomic.Int64
-
-	r.Register(Def("bash", bashDescription, bashSchema), func(ctx context.Context, input json.RawMessage) (string, error) {
-		var in bashInput
-		if err := json.Unmarshal(input, &in); err != nil {
-			return "", fmt.Errorf("bash: invalid input: %w", err)
-		}
-		if in.Command == "" {
-			return "", fmt.Errorf("bash: command is required")
-		}
-
-		timeout := bashTimeout(in.TimeoutMs)
-
-		cctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-
-		cmd := exec.CommandContext(cctx, "bash", "-c", in.Command)
-		cmd.Dir = cwd
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return os.ErrProcessDone
-			}
-			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-				if errors.Is(err, syscall.ESRCH) {
-					return os.ErrProcessDone
-				}
-				return err
-			}
-			return nil
-		}
-		cmd.WaitDelay = bashWaitDelay
-
-		outBytes, runErr := cmd.CombinedOutput()
-		out := string(outBytes)
-
-		if runErr != nil {
-			switch {
-			case errors.Is(cctx.Err(), context.DeadlineExceeded):
-				out += fmt.Sprintf("\n[bash: command timed out after %s and was killed]\n", timeout)
-			case errors.Is(cctx.Err(), context.Canceled):
-				out += "\n[bash: command was canceled and killed]\n"
-			default:
-				var exitErr *exec.ExitError
-				var startErr *exec.Error
-				switch {
-				case errors.As(runErr, &exitErr):
-					out += "\n" + exitErr.Error() + "\n"
-				case errors.Is(runErr, exec.ErrWaitDelay):
-					slog.Warn("agent/tools: bash: wait delay expired, background processes still hold the output pipes",
-						"command", in.Command, "error", runErr)
-					out += "\n[bash: command exited but left background processes holding its output pipes]\n"
-				case errors.As(runErr, &startErr),
-					errors.Is(runErr, exec.ErrNotFound),
-					errors.Is(runErr, os.ErrPermission):
-					return "", fmt.Errorf("bash: %w", runErr)
-				default:
-					slog.Error("agent/tools: bash: unexpected error running command",
-						"command", in.Command, "error", runErr)
-					out += fmt.Sprintf("\n[bash: %v]\n", runErr)
-				}
-			}
-		}
-
-		spillName := agentloop.ToolCallID(ctx)
-		if spillName == "" {
-			spillName = fmt.Sprintf("bash_%d", fallbackCounter.Add(1))
-		}
-		return p.Clip(out, spillName), nil
-	})
-}

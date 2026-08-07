@@ -19,6 +19,17 @@ import (
 	"time"
 )
 
+// testBashTool returns a materialized bash tool for tests.
+func testBashTool(t *testing.T, p OutputPolicy, cwd string) Tool {
+	t.Helper()
+	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{OutputPolicy: p, Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tool
+}
+
+
 // uniqueSleepArg returns a `sleep` argument unique to this run, long enough
 // (≈11 days) that the process can only disappear by being killed. Used as a
 // needle in ps output so a test can prove an OS process actually died rather
@@ -133,7 +144,7 @@ func killSurvivors(t *testing.T, needle string) {
 // nil from Execute), not a tool error — the model sees it in the text.
 func TestBashMergesStderrAndReportsExit(t *testing.T) {
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"echo out; echo err >&2; exit 3"}`))
 	if err != nil {
@@ -151,7 +162,7 @@ func TestBashMergesStderrAndReportsExit(t *testing.T) {
 // trailer.
 func TestBashSuccessHasNoExitNote(t *testing.T) {
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	out, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +180,7 @@ func TestBashSuccessHasNoExitNote(t *testing.T) {
 func TestBashHonorsCwd(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, dir)
+	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, dir))
 	out, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"pwd"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +202,7 @@ func TestBashHonorsCwd(t *testing.T) {
 // any process is spawned.
 func TestBashMissingCommandIsToolError(t *testing.T) {
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	if _, err := r.Execute(context.Background(), "bash", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected error for missing command")
 	}
@@ -242,7 +253,7 @@ func TestBashTimeoutFires(t *testing.T) {
 	t.Cleanup(func() { killSurvivors(t, needle) })
 
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	start := time.Now()
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"sleep `+sleepArg+` && echo never","timeout_ms":200}`))
@@ -281,7 +292,7 @@ func TestBashCtxCancellationKillsProcessTree(t *testing.T) {
 	t.Cleanup(func() { killSurvivors(t, needle) })
 
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -333,7 +344,7 @@ func TestBashBackgroundProcessKeepsOutput(t *testing.T) {
 	logged := captureSlog(t)
 
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"echo hi; sleep `+sleepArg+` &"}`))
@@ -358,7 +369,7 @@ func TestBashBackgroundProcessKeepsOutput(t *testing.T) {
 func TestBashOutputGoesThroughSpillPolicy(t *testing.T) {
 	spillDir := t.TempDir()
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 200, SpillDir: spillDir}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 200, SpillDir: spillDir}, t.TempDir()))
 
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"printf 'x%.0s' {1..2000}"}`))
@@ -395,7 +406,7 @@ func TestBashOutputGoesThroughSpillPolicy(t *testing.T) {
 func TestBashSpillNameFallbackIsRaceSafe(t *testing.T) {
 	spillDir := t.TempDir()
 	r := NewRegistry()
-	RegisterBash(r, OutputPolicy{Budget: 100, SpillDir: spillDir}, t.TempDir())
+	r.Register(testBashTool(t, OutputPolicy{Budget: 100, SpillDir: spillDir}, t.TempDir()))
 
 	const n = 8
 	var wg sync.WaitGroup

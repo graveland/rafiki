@@ -34,7 +34,7 @@ func TestSkillToolReturnsBodyAndBaseDir(t *testing.T) {
 	meta := writeSkill(t, dir, "reviewer", "reviews code", "REVIEWER_BODY_MARKER\nstep one\n")
 
 	r := NewRegistry()
-	RegisterSkillTool(r, []skillspkg.SkillMeta{meta})
+	skillT, _ := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: []skillspkg.SkillMeta{meta}}); r.Register(skillT)
 
 	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"reviewer"}`))
 	if err != nil {
@@ -62,7 +62,7 @@ func TestSkillToolUnknownNameListsAvailable(t *testing.T) {
 	m2 := writeSkill(t, dir, "beta", "beta desc", "beta body")
 
 	r := NewRegistry()
-	RegisterSkillTool(r, []skillspkg.SkillMeta{m1, m2})
+	skillT, _ := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: []skillspkg.SkillMeta{m1, m2}}); r.Register(skillT)
 
 	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"nonexistent"}`))
 	if err == nil {
@@ -77,7 +77,7 @@ func TestSkillToolUnknownNameListsAvailable(t *testing.T) {
 // and appears in Definitions().
 func TestSkillToolRegistersUnderName(t *testing.T) {
 	r := NewRegistry()
-	RegisterSkillTool(r, nil)
+	skillT, _ := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: nil}); r.Register(skillT)
 
 	found := false
 	for _, def := range r.Definitions() {

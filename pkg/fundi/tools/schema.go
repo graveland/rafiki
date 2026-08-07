@@ -13,11 +13,23 @@ import (
 // The builder covers the subset of JSON Schema draft 2020-12 that the Anthropic
 // API accepts: top-level "type", "properties", "required", and per-property
 // "type", "description", "items", and nested "properties"/"required".
+//
+// When raw is non-nil, JSON() returns it verbatim. This is used by MCP tools
+// whose input schemas are third-party JSON. All exported fields are ignored
+// in that case.
 type Schema struct {
 	Type        string
 	Description string
 	Properties  []SchemaProperty
 	Required    []string
+	raw         json.RawMessage
+}
+
+// SchemaFromRaw wraps a pre-built JSON Schema blob that JSON() returns
+// verbatim, bypassing the builder. Used for MCP tools whose input schemas
+// are constructed by third-party servers.
+func SchemaFromRaw(raw json.RawMessage) Schema {
+	return Schema{raw: raw}
 }
 
 // SchemaProperty describes one property in a Schema's "properties" map.
@@ -37,6 +49,9 @@ type SchemaProperty struct {
 // valid JSON — Schema validates its own structure and panics on programmer
 // errors (missing "type" on a top-level schema, for example).
 func (s Schema) JSON() json.RawMessage {
+	if len(s.raw) > 0 {
+		return s.raw
+	}
 	b, err := json.Marshal(jsonSchemaValue(s))
 	if err != nil {
 		panic(fmt.Sprintf("tools: schema.JSON failed to marshal: %v", err))

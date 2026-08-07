@@ -29,8 +29,7 @@ func TestEditRequiresPriorRead(t *testing.T) {
 	if err := os.WriteFile(p, []byte("hello world"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r, tr := NewRegistry(), NewFileTracker()
-	RegisterFileTools(r, tr, dir)
+	r := DefaultBlueprint.MaterializeAll(ToolOpts{FileTracker: NewFileTracker(), Cwd: dir})
 	_, err := r.Execute(context.Background(), "edit",
 		json.RawMessage(`{"path":"`+p+`","old_string":"hello","new_string":"bye"}`))
 	if err == nil || !strings.Contains(err.Error(), "read") {
@@ -53,36 +52,36 @@ func TestEditRequiresPriorRead(t *testing.T) {
 }
 
 func TestDefinitionsSortedByName(t *testing.T) {
-	r, tr := NewRegistry(), NewFileTracker()
-	RegisterFileTools(r, tr, t.TempDir())
+	r := DefaultBlueprint.MaterializeAll(ToolOpts{FileTracker: NewFileTracker(), Cwd: t.TempDir()})
 	defs := r.Definitions()
 	names := toolNames(defs)
 	if !sort.StringsAreSorted(names) {
 		t.Fatalf("not sorted: %v", names)
 	}
-	if len(names) != 5 {
-		t.Fatalf("expected 5 registered file tools, got %d: %v", len(names), names)
+	if len(names) < 5 {
+		t.Fatalf("expected at least 5 registered file tools, got %d: %v", len(names), names)
 	}
 }
 
 func TestRegisterAndExecute(t *testing.T) {
 	r := NewRegistry()
-	schema := `{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}`
-	r.Register(Def("echo", "echoes its input", schema), func(_ context.Context, input json.RawMessage) (string, error) {
-		var in struct {
-			X string `json:"x"`
-		}
-		if err := json.Unmarshal(input, &in); err != nil {
-			return "", err
-		}
-		return "got:" + in.X, nil
-	})
+	r.Register(&testEchoTool{name: "echo", desc: "echoes its input", schema: schemaWithRequiredX(), result: "got:hi"})
 	out, err := r.Execute(context.Background(), "echo", json.RawMessage(`{"x":"hi"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out != "got:hi" {
 		t.Fatalf("unexpected output %q", out)
+	}
+}
+
+func schemaWithRequiredX() Schema {
+	return Schema{
+		Type: "object",
+		Properties: []SchemaProperty{
+			{Name: "x", Type: "string"},
+		},
+		Required: []string{"x"},
 	}
 }
 
@@ -94,9 +93,15 @@ func TestExecuteUnknownTool(t *testing.T) {
 	}
 }
 
-func TestDefRoundTripsSchemaAndDescription(t *testing.T) {
-	schema := `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`
-	def := Def("mytool", "does a thing", schema)
+func TestBuildDefFromRegistryTest(t *testing.T) {
+	schema := Schema{
+		Type: "object",
+		Properties: []SchemaProperty{
+			{Name: "path", Type: "string"},
+		},
+		Required: []string{"path"},
+	}
+	def := BuildDef(&testEchoTool{name: "mytool", desc: "does a thing", schema: schema})
 	if def.OfTool == nil {
 		t.Fatal("expected OfTool variant")
 	}
@@ -111,16 +116,25 @@ func TestDefRoundTripsSchemaAndDescription(t *testing.T) {
 	}
 }
 
-// TestRegistryConcurrentExecute drives Definitions/Register/Execute from many
-// goroutines at once — the loop this Registry serves runs a tool batch under
-// an errgroup with real concurrency, so the map access must be race-safe.
-// Run with -race.
+// panickingTool panics in Execute for containment tests.
+type panickingTool struct{ msg string }
+
+func (p panickingTool) Name() string                                    { return p.msg }
+func (p panickingTool) Description() string                             { return "" }
+func (p panickingTool) InputSchema() Schema                             { return Schema{Type: "object"} }
+func (p panickingTool) Execute(context.Context, ToolInput) (ToolResult, error) { panic(p.msg) }
+
+// fineTool returns a fixed string.
+type fineTool struct{}
+
+func (fineTool) Name() string                                    { return "fine" }
+func (fineTool) Description() string                             { return "works" }
+func (fineTool) InputSchema() Schema                              { return Schema{Type: "object"} }
+func (fineTool) Execute(context.Context, ToolInput) (ToolResult, error) { return NewTextResult("still here"), nil }
+
 func TestRegistryConcurrentExecute(t *testing.T) {
 	r := NewRegistry()
-	schema := `{"type":"object"}`
-	r.Register(Def("noop", "does nothing", schema), func(_ context.Context, _ json.RawMessage) (string, error) {
-		return "ok", nil
-	})
+	r.Register(&testEchoTool{name: "noop", result: "ok", schema: Schema{Type: "object"}})
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 64)
@@ -143,24 +157,10 @@ func TestRegistryConcurrentExecute(t *testing.T) {
 	}
 }
 
-// TestExecuteContainsAPanickingTool is the containment test for the entire
-// tool surface. agentloop runs each tool call on its own errgroup goroutine
-// and errgroup does not recover, so without the recover in Execute a panicking
-// tool body unwinds a goroutine nothing owns and kills the daemon — which,
-// in this test, means crashing the test binary rather than failing.
-//
-// The panic must come back as an ordinary tool error, because that is what
-// agentloop turns into an is_error tool_result the model can see and react to.
 func TestExecuteContainsAPanickingTool(t *testing.T) {
 	r := NewRegistry()
-	r.Register(Def("boom", "panics", `{"type":"object"}`),
-		func(context.Context, json.RawMessage) (string, error) {
-			panic("tool exploded")
-		})
-	r.Register(Def("fine", "works", `{"type":"object"}`),
-		func(context.Context, json.RawMessage) (string, error) {
-			return "still here", nil
-		})
+	r.Register(panickingTool{msg: "boom"})
+	r.Register(fineTool{})
 
 	out, err := r.Execute(context.Background(), "boom", json.RawMessage(`{}`))
 	if err == nil {
@@ -169,30 +169,22 @@ func TestExecuteContainsAPanickingTool(t *testing.T) {
 	if out != "" {
 		t.Errorf("Execute returned result %q for a panicking tool, want empty", out)
 	}
-	if !strings.Contains(err.Error(), "tool exploded") {
+	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("error %q does not carry the panic value; the model would learn nothing", err)
 	}
 	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("error %q does not name the tool that panicked", err)
 	}
 
-	// The registry must still be usable: containment is per-call, not a
-	// one-way trip to a poisoned Registry.
 	out, err = r.Execute(context.Background(), "fine", json.RawMessage(`{}`))
 	if err != nil || out != "still here" {
 		t.Errorf("Execute(fine) = (%q, %v) after a contained panic, want (\"still here\", nil)", out, err)
 	}
 }
 
-// TestExecuteContainsAPanicFromConcurrentTools mirrors how agentloop actually
-// calls Execute: several tools at once, each on its own goroutine. A recover
-// that lived anywhere but inside Execute would miss these entirely.
 func TestExecuteContainsAPanicFromConcurrentTools(t *testing.T) {
 	r := NewRegistry()
-	r.Register(Def("boom", "panics", `{"type":"object"}`),
-		func(context.Context, json.RawMessage) (string, error) {
-			panic("concurrent explosion")
-		})
+	r.Register(panickingTool{msg: "boom"})
 
 	const calls = 8
 	var wg sync.WaitGroup

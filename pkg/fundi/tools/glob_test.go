@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,11 +32,12 @@ func TestGlobToolMatchesAndSortsByMtimeDescending(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fn := newGlobTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"*.go","path":%q}`, dir)))
+	tool := &GlbTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.go","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 matches, got %v", lines)
@@ -52,11 +52,12 @@ func TestGlobToolMatchesAndSortsByMtimeDescending(t *testing.T) {
 
 func TestGlobToolNoMatches(t *testing.T) {
 	dir := t.TempDir()
-	fn := newGlobTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"*.nope","path":%q}`, dir)))
+	tool := &GlbTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.nope","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if !strings.Contains(out, "no") {
 		t.Fatalf("expected a no-matches message, got %q", out)
 	}
@@ -70,11 +71,12 @@ func TestGlobToolCapsAt200(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fn := newGlobTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"*.txt","path":%q}`, dir)))
+	tool := &GlbTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.txt","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	// 200 matched paths + one "[+N more]" trailer line.
 	if len(lines) != 201 {
@@ -95,11 +97,12 @@ func TestGlobToolRecursivePattern(t *testing.T) {
 	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fn := newGlobTool()
-	out, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"**/*.go","path":%q}`, dir)))
+	tool := &GlbTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"**/*.go","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if !strings.Contains(out, p) {
 		t.Fatalf("expected recursive match to include %q, got %q", p, out)
 	}
@@ -120,12 +123,13 @@ func TestGlobToolAbsolutePatternInsideBase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fn := newGlobTool()
-	out, err := fn(context.Background(), json.RawMessage(
+	tool := &GlbTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"pattern":%q,"path":%q}`, filepath.Join(dir, "**", "*.go"), dir)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if !strings.Contains(out, p) {
 		t.Fatalf("expected an absolute pattern inside path to be rebased and match %q, got %q", p, out)
 	}
@@ -137,8 +141,8 @@ func TestGlobToolAbsolutePatternOutsideBase(t *testing.T) {
 	dir := t.TempDir()
 	other := t.TempDir()
 
-	fn := newGlobTool()
-	_, err := fn(context.Background(), json.RawMessage(
+	tool := &GlbTool{}
+	_, err := tool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"pattern":%q,"path":%q}`, filepath.Join(other, "*.go"), dir)))
 	if err == nil {
 		t.Fatal("expected an explicit error for an absolute pattern outside path, got nil")
@@ -160,8 +164,8 @@ func TestGlobToolRespectsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	fn := newGlobTool()
-	_, err := fn(ctx, json.RawMessage(fmt.Sprintf(`{"pattern":"*.go","path":%q}`, dir)))
+	tool := &GlbTool{}
+	_, err := tool.Execute(ctx, ToolInput(fmt.Sprintf(`{"pattern":"*.go","path":%q}`, dir)))
 	if err == nil {
 		t.Fatal("expected an error for an already-canceled context")
 	}
@@ -214,11 +218,12 @@ func TestGlobToolDefaultsToWorkingDirectory(t *testing.T) {
 		}
 	}()
 
-	fn := newGlobTool()
-	out, err := fn(context.Background(), json.RawMessage(`{"pattern":"*.go"}`))
+	tool := &GlbTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(`{"pattern":"*.go"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := res.Text
 	if !strings.Contains(out, "cwd-match.go") {
 		t.Fatalf("expected default path to be the working directory, got %q", out)
 	}

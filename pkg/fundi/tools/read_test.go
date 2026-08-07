@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -136,8 +135,12 @@ func TestReadTool(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := NewFileTracker()
-			fn := newReadTool(tr, "")
-			out, err := fn(context.Background(), json.RawMessage(tc.input))
+			rt, matErr := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+			if matErr != nil {
+				t.Fatal(matErr)
+			}
+			outResult, err := rt.Execute(context.Background(), ToolInput(tc.input))
+			out := outResult.Text
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got output %q", out)
@@ -164,8 +167,11 @@ func TestReadToolRecordsTrackerState(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	fn := newReadTool(tr, "")
-	if _, err := fn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
+	rt, matErr := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+	if matErr != nil {
+		t.Fatal(matErr)
+	}
+	if _, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
 	if err := tr.Verify(p); err != nil {
@@ -186,13 +192,16 @@ func TestReadToolTakesPerPathLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewFileTracker()
-	readFn := newReadTool(tr, "")
+	rt, matErr := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+	if matErr != nil {
+		t.Fatal(matErr)
+	}
 
 	unlock := tr.Lock(p)
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := readFn(context.Background(), json.RawMessage(fmt.Sprintf(`{"path":%q}`, p)))
+		_, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
 		done <- err
 	}()
 

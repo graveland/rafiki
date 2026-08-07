@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -157,98 +156,6 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 type globInput struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`
-}
-
-// newGlobTool builds the glob ToolFunc. It has no shared state, so unlike
-// read/write/edit it takes no FileTracker.
-func newGlobTool() ToolFunc {
-	return func(ctx context.Context, input json.RawMessage) (string, error) {
-		var in globInput
-		if err := json.Unmarshal(input, &in); err != nil {
-			return "", fmt.Errorf("glob: invalid input: %w", err)
-		}
-		if in.Pattern == "" {
-			return "", fmt.Errorf("glob: pattern is required")
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-
-		base := in.Path
-		if base == "" {
-			wd, err := os.Getwd()
-			if err != nil {
-				return "", fmt.Errorf("glob: %w", err)
-			}
-			base = wd
-		}
-		base, err := filepath.Abs(base)
-		if err != nil {
-			return "", fmt.Errorf("glob: %w", err)
-		}
-		baseInfo, err := os.Stat(base)
-		if err != nil {
-			return "", fmt.Errorf("glob: %w", err)
-		}
-		if !baseInfo.IsDir() {
-			return "", fmt.Errorf("glob: %q is not a directory", base)
-		}
-
-		pattern := in.Pattern
-		if filepath.IsAbs(pattern) {
-			rel, relErr := filepath.Rel(base, filepath.Clean(pattern))
-			if relErr != nil {
-				return "", fmt.Errorf("glob: pattern %q is absolute and could not be interpreted relative to path %s: %w; pattern is relative to path", in.Pattern, base, relErr)
-			}
-			if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return "", fmt.Errorf("glob: pattern %q is absolute and falls outside path %s; pattern is relative to path — pass the containing directory as path and a relative pattern such as \"**/*.go\"", in.Pattern, base)
-			}
-			pattern = rel
-		}
-
-		matches, err := doublestar.Glob(ctxFS{FS: os.DirFS(base), ctx: ctx}, pattern, doublestar.WithFailOnIOErrors())
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return "", ctxErr
-			}
-			return "", fmt.Errorf("glob: invalid pattern %q: %w", in.Pattern, err)
-		}
-		if len(matches) == 0 {
-			return "no files matched", nil
-		}
-
-		type entry struct {
-			path  string
-			mtime time.Time
-		}
-		entries := make([]entry, 0, len(matches))
-		for _, m := range matches {
-			full := filepath.Join(base, m)
-			info, err := os.Stat(full)
-			if err != nil {
-				slog.Debug("agent/tools: glob: skipping match that could not be stat'd", "path", full, "error", err)
-				continue
-			}
-			entries = append(entries, entry{path: full, mtime: info.ModTime()})
-		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].mtime.After(entries[j].mtime) })
-
-		truncated := len(entries) > maxGlobResults
-		total := len(entries)
-		if truncated {
-			entries = entries[:maxGlobResults]
-		}
-
-		var out strings.Builder
-		for _, e := range entries {
-			out.WriteString(e.path)
-			out.WriteByte('\n')
-		}
-		if truncated {
-			fmt.Fprintf(&out, "[+%d more]\n", total-maxGlobResults)
-		}
-		return out.String(), nil
-	}
 }
 
 // ctxFS wraps an fs.FS and fails Open/ReadDir once ctx is done, so a

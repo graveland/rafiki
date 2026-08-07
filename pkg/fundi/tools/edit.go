@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -179,88 +178,6 @@ type editInput struct {
 type editPair struct {
 	OldString string `json:"old_string"`
 	NewString string `json:"new_string"`
-}
-
-func newEditTool(tr *FileTracker, cwd string) ToolFunc {
-	return func(ctx context.Context, input json.RawMessage) (string, error) {
-		var in editInput
-		if err := json.Unmarshal(input, &in); err != nil {
-			return "", fmt.Errorf("edit: invalid input: %w", err)
-		}
-
-		absPath, err := resolveToolPath(in.Path, in.FilePath, cwd)
-		if err != nil {
-			return "", fmt.Errorf("edit: %w", err)
-		}
-
-		edits := in.Edits
-		if len(edits) == 0 && in.OldString != "" {
-			edits = []editPair{{OldString: in.OldString, NewString: in.NewString}}
-		}
-		if len(edits) == 0 {
-			return "", fmt.Errorf("edit: at least one edit in edits[] or old_string is required")
-		}
-
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-
-		unlock := tr.Lock(absPath)
-		defer unlock()
-
-		if err := tr.Verify(absPath); err != nil {
-			return "", fmt.Errorf("edit: %w", err)
-		}
-
-		raw, err := os.ReadFile(absPath)
-		if err != nil {
-			return "", fmt.Errorf("edit: %w", err)
-		}
-
-		rawStr := string(raw)
-		hasBOM := strings.HasPrefix(rawStr, "\uFEFF")
-		lfContent, origLE := prepContent(rawStr)
-
-		if in.ReplaceAll && in.OldString != "" {
-			lfOld := normalizeToLF(in.OldString)
-			lfNew := normalizeToLF(in.NewString)
-			count := strings.Count(lfContent, lfOld)
-			if count == 0 {
-				return "", fmt.Errorf("edit: old_string not found in %s", absPath)
-			}
-			updated := strings.ReplaceAll(lfContent, lfOld, lfNew)
-			final := restoreLineEndings(updated, origLE)
-			if hasBOM {
-				final = "\uFEFF" + final
-			}
-			if err := writeFinal(absPath, rawStr, final); err != nil {
-				return "", fmt.Errorf("edit: %w", err)
-			}
-			tr.RecordRead(absPath, fileMtime(absPath))
-			return fmt.Sprintf("replaced %d occurrence(s) in %s", count, absPath), nil
-		}
-
-		_, newContent, err := applyEdits(lfContent, edits)
-		if err != nil {
-			return "", fmt.Errorf("edit: %w", err)
-		}
-
-		final := restoreLineEndings(newContent, origLE)
-		if hasBOM {
-			final = "\uFEFF" + final
-		}
-
-		if err := writeFinal(absPath, rawStr, final); err != nil {
-			return "", fmt.Errorf("edit: %w", err)
-		}
-
-		tr.RecordRead(absPath, fileMtime(absPath))
-		n := len(edits)
-		if n == 1 {
-			return fmt.Sprintf("replaced 1 block in %s", absPath), nil
-		}
-		return fmt.Sprintf("replaced %d blocks in %s", n, absPath), nil
-	}
 }
 
 func writeFinal(path, original, content string) error {
