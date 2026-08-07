@@ -485,4 +485,3 @@ func TestEditToolTildeExpansion(t *testing.T) {
 		t.Fatalf("read via ~ failed: %v", err)
 	}
 }
-

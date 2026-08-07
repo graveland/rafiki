@@ -205,14 +205,14 @@ func registerMCPServerTools(ctx context.Context, r *Registry, serverName string,
 
 		registeredNames[name] = fmt.Sprintf("server %q, tool %q", serverName, t.Name)
 		adapter := &mcpAdapter{
-			name:            name,
-			description:     t.Description,
-			rawSchema:       rawSchemaJSON(t.InputSchema),
-			session:         session,
-			toolName:        t.Name,
-			registeredName:  name,
-			p:               p,
-			spillCounter:    &spillCounter,
+			name:           name,
+			description:    t.Description,
+			rawSchema:      rawSchemaJSON(t.InputSchema),
+			session:        session,
+			toolName:       t.Name,
+			registeredName: name,
+			p:              p,
+			spillCounter:   &spillCounter,
 		}
 		r.Register(adapter)
 	}
@@ -222,14 +222,14 @@ func registerMCPServerTools(ctx context.Context, r *Registry, serverName string,
 // mcpAdapter wraps an MCP tool as a Tool, so it can be registered on a
 // Registry via Register().
 type mcpAdapter struct {
-	name            string
-	description     string
-	rawSchema       json.RawMessage
-	session         *mcp.ClientSession
-	toolName        string
-	registeredName  string
-	p               OutputPolicy
-	spillCounter    *atomic.Int64
+	name           string
+	description    string
+	rawSchema      json.RawMessage
+	session        *mcp.ClientSession
+	toolName       string
+	registeredName string
+	p              OutputPolicy
+	spillCounter   *atomic.Int64
 }
 
 func (a *mcpAdapter) Name() string        { return a.name }

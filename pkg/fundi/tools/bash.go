@@ -150,4 +150,3 @@ func bashTimeout(timeoutMs int) time.Duration {
 	}
 	return time.Duration(timeoutMs) * time.Millisecond
 }
-

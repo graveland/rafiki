@@ -119,18 +119,20 @@ func TestBuildDefFromRegistryTest(t *testing.T) {
 // panickingTool panics in Execute for containment tests.
 type panickingTool struct{ msg string }
 
-func (p panickingTool) Name() string                                    { return p.msg }
-func (p panickingTool) Description() string                             { return "" }
-func (p panickingTool) InputSchema() Schema                             { return Schema{Type: "object"} }
+func (p panickingTool) Name() string                                           { return p.msg }
+func (p panickingTool) Description() string                                    { return "" }
+func (p panickingTool) InputSchema() Schema                                    { return Schema{Type: "object"} }
 func (p panickingTool) Execute(context.Context, ToolInput) (ToolResult, error) { panic(p.msg) }
 
 // fineTool returns a fixed string.
 type fineTool struct{}
 
-func (fineTool) Name() string                                    { return "fine" }
-func (fineTool) Description() string                             { return "works" }
-func (fineTool) InputSchema() Schema                              { return Schema{Type: "object"} }
-func (fineTool) Execute(context.Context, ToolInput) (ToolResult, error) { return NewTextResult("still here"), nil }
+func (fineTool) Name() string        { return "fine" }
+func (fineTool) Description() string { return "works" }
+func (fineTool) InputSchema() Schema { return Schema{Type: "object"} }
+func (fineTool) Execute(context.Context, ToolInput) (ToolResult, error) {
+	return NewTextResult("still here"), nil
+}
 
 func TestRegistryConcurrentExecute(t *testing.T) {
 	r := NewRegistry()

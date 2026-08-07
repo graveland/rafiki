@@ -198,4 +198,3 @@ type grepInput struct {
 	Glob       string `json:"glob"`
 	MaxMatches int    `json:"max_matches"`
 }
-

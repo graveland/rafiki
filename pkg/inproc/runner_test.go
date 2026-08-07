@@ -38,6 +38,16 @@ const sampleEndTurn = `{"id":"msg_1","type":"message","role":"assistant","model"
 // anthropic.Message values (loaded by fundi.LoadFakeSender) — NOT literal reply
 // text. package fundi has its own writeFakeTurns helper, but it is an
 // unexported test helper in another package, so this test needs its own.
+// panickingBashTool is a tools.Tool whose Execute always panics.
+type panickingBashTool struct{}
+
+func (panickingBashTool) Name() string              { return "bash" }
+func (panickingBashTool) Description() string       { return "panics on purpose" }
+func (panickingBashTool) InputSchema() tools.Schema { return tools.Schema{Type: "object"} }
+func (panickingBashTool) Execute(context.Context, tools.ToolInput) (tools.ToolResult, error) {
+	panic("tool exploded inside a real turn")
+}
+
 func writeFakeTurns(t *testing.T, bodies ...string) string {
 	t.Helper()
 	lines := make([]string, 0, len(bodies))
@@ -778,10 +788,7 @@ func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
 			return nil, nil, err
 		}
 		reg := tools.NewRegistry()
-		reg.Register(tools.Def("bash", "panics on purpose", `{"type":"object"}`),
-			func(context.Context, json.RawMessage) (string, error) {
-				panic("tool exploded inside a real turn")
-			})
+		reg.Register(panickingBashTool{})
 		eng, err := fundi.NewEngine(fundi.EngineConfig{
 			Client:   client,
 			Tools:    reg,

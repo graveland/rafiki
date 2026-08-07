@@ -16,9 +16,9 @@ type testEchoTool struct {
 	result string
 }
 
-func (t *testEchoTool) Name() string                { return t.name }
-func (t *testEchoTool) Description() string          { return t.desc }
-func (t *testEchoTool) InputSchema() Schema          { return t.schema }
+func (t *testEchoTool) Name() string        { return t.name }
+func (t *testEchoTool) Description() string { return t.desc }
+func (t *testEchoTool) InputSchema() Schema { return t.schema }
 func (t *testEchoTool) Execute(_ context.Context, in ToolInput) (ToolResult, error) {
 	var m map[string]any
 	if err := in.Unmarshal(&m); err != nil {

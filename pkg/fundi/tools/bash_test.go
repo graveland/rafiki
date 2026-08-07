@@ -29,7 +29,6 @@ func testBashTool(t *testing.T, p OutputPolicy, cwd string) Tool {
 	return tool
 }
 
-
 // uniqueSleepArg returns a `sleep` argument unique to this run, long enough
 // (≈11 days) that the process can only disappear by being killed. Used as a
 // needle in ps output so a test can prove an OS process actually died rather

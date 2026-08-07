@@ -85,4 +85,3 @@ func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 type skillInput struct {
 	Skill string `json:"skill"`
 }
-
