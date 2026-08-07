@@ -221,6 +221,11 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
 | `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
+| `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only |
+| `RAFIKI_CONTROL_TOKEN` | shared secret for control-plane auth; daemon checks it, clients present it |
+| `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
+| `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
+| `RAFIKI_CONTROL_URL` | client-side: remote rafikid URL to dial (e.g. `tls://rafiki.graveland.dev:443`). Wins over `RAFIKI_SOCKET` |
 
 These must reach the **daemon's** environment, not your shell's — see
 `.env.example`, which documents why and how to verify it.

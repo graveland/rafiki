@@ -34,13 +34,23 @@ Two transports, identical framing and protocol.
   the only authentication.
 - Stream-oriented (`SOCK_STREAM`). Multiple concurrent client connections.
 
-### 2.2 Localhost TCP (optional)
+### 2.2 Remote TCP/TLS (optional)
 
-- Address: `$PI_CONTROLLER_TCP_ADDR` (default off).
-- Authentication: shared-secret. The first frame on a TCP connection must be
-  `ctrl_auth`; see §6.6. Token is stored at `~/.pi/run/controller.token`
-  (mode `0600`), generated on first controller start.
-- Plain TCP. Localhost only; no TLS in v1.
+- Address: `RAFIKI_CONTROL_LISTEN` (e.g. `tcp:8036`). Unset → TCP disabled;
+  the daemon listens on the UDS only.
+- TLS is **mandatory** on TCP — the daemon refuses to start without
+  `RAFIKI_CONTROL_TLS_CERT`, `RAFIKI_CONTROL_TLS_KEY`, and
+  `RAFIKI_CONTROL_TOKEN` all set. No plaintext TCP control plane, ever.
+- Certificates are re-read from disk per handshake via
+  `tls.Config.GetCertificate`, so cert-manager rotation needs no pod restart.
+  Minimum TLS version: 1.2.
+- Authentication: shared-secret, mandatory. The first frame on a TCP
+  connection must be `ctrl_auth` (see §6.6). The token is the daemon's
+  `RAFIKI_CONTROL_TOKEN` value (env-var only, no file fallback on the
+  daemon side). Clients resolve it from `RAFIKI_CONTROL_TOKEN` env, else
+  `~/.config/rafiki/control.token` (0600).
+- UDS connections skip auth entirely — local filesystem permissions
+  (0600 socket, 0700 directory) are the only trust mechanism.
 
 ## 3. Framing
 
@@ -484,15 +494,18 @@ Errors: `child_not_found`, `child_exited` (already gone).
 `escalated: true` if SIGTERM or SIGKILL was needed; `false` if pi exited
 from stdin EOF alone.
 
-### 6.6 `ctrl_auth` (TCP only)
+### 6.6 `ctrl_auth` (TCP/TLS only)
 
 ```jsonc
 { "type": "ctrl_auth", "id": "0", "token": "..." }
 ```
 
-Must be the first frame on a TCP connection. On success, the connection
-proceeds normally. On failure, the controller sends an error response
-and closes the connection. UDS connections skip this entirely.
+Must be the first frame on a TCP connection. TCP connections run over
+mandatory TLS (see §2.2); there is no plaintext TCP control plane.
+On success, the connection proceeds normally — no explicit success response
+is written. On failure (missing token, wrong token, or a non-`ctrl_auth`
+first frame) the controller sends an error response and closes the
+connection. UDS connections skip auth entirely.
 
 ### 6.7 `ctrl_subscribe`
 
