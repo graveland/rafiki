@@ -30,3 +30,30 @@ export function envFlag(name: string, legacy?: string): boolean {
 export function envIsSet(name: string, legacy?: string): boolean {
     return envValue(name, legacy) !== undefined;
 }
+
+/**
+ * Returns the remote control URL (e.g. "tls://rafiki.graveland.dev:443").
+ * When set it wins over RAFIKI_SOCKET for selecting the daemon to dial.
+ */
+export function controlURL(): string | null {
+    return process.env["RAFIKI_CONTROL_URL"] || null;
+}
+
+/**
+ * Returns the control-plane auth token: RAFIKI_CONTROL_TOKEN env, else the
+ * content of ~/.config/rafiki/control.token, else null.
+ */
+export function controlToken(): string | null {
+    const env = process.env["RAFIKI_CONTROL_TOKEN"];
+    if (env) return env;
+    try {
+        const { readFileSync } = require("node:fs");
+        const { homedir } = require("node:os");
+        const p = require("node:path");
+        const tokenPath = p.join(homedir(), ".config", "rafiki", "control.token");
+        const content = readFileSync(tokenPath, "utf8") as string;
+        return content.trim() || null;
+    } catch {
+        return null;
+    }
+}

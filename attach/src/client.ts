@@ -191,7 +191,7 @@ export class Client {
         this.startReadLoop();
     }
 
-    // ─── Static factory ──────────────────────────────────────────────────────
+    // ─── Static factories ──────────────────────────────────────────────────────
 
     /**
      * Opens a UDS connection and returns a ready Client.
@@ -211,6 +211,44 @@ export class Client {
                 reject(err);
             });
         });
+    }
+
+    /**
+     * Opens a TLS connection to url, authenticates via ctrl_auth, and
+     * returns a ready Client. url must be "tls://host:port". On auth
+     * failure the server closes the connection, which surfaces as a
+     * connect error or read error.
+     */
+    static async dialURL(url: string, token: string): Promise<Client> {
+        const u = new URL(url);
+        if (u.protocol !== "tls:") {
+            throw new Error(`control-url scheme must be "tls:", got "${u.protocol}"`);
+        }
+        const port = u.port ? parseInt(u.port, 10) : 443;
+
+        const tls = await import("node:tls");
+        const sock = await new Promise<tls.TLSSocket>((resolve, reject) => {
+            const s = tls.connect({
+                host: u.hostname,
+                port,
+                rejectUnauthorized: true,
+            });
+            s.once("connect", () => {
+                s.removeAllListeners("error");
+                resolve(s);
+            });
+            s.once("error", reject);
+        });
+
+        // Send auth frame. Auth success is implicit — the server keeps
+        // the connection open. Auth failure means the server closes the
+        // connection after writing an error frame; the read loop will
+        // fire the "end"/"error" event and close the Client.
+        const authFrame = JSON.stringify({ type: "ctrl_auth", id: "0", token }) + "\n";
+        sock.write(authFrame, "utf8");
+
+        const opts = Client.resolveTLSOpts();
+        return new Client(sock, opts);
     }
 
     // ─── Public API ───────────────────────────────────────────────────────────
@@ -395,6 +433,16 @@ export class Client {
             socket: opts?.socket ?? defaultSocketPath(),
             requestTimeoutMs: opts?.requestTimeoutMs ?? 30_000,
             maxFrameBytes: opts?.maxFrameBytes ?? 16 << 20,
+        };
+    }
+
+    // resolveTLSOpts returns default ClientOptions for a TLS connection
+    // (no socket path — the underlying socket is already connected).
+    private static resolveTLSOpts(): Required<ClientOptions> {
+        return {
+            socket: "", // unused — the socket is already connected
+            requestTimeoutMs: 30_000,
+            maxFrameBytes: 16 << 20,
         };
     }
 }
