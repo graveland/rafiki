@@ -284,6 +284,40 @@ func (f *proxyFace) Close(ctx context.Context) {
 	}
 }
 
+// startBroadcastListener binds a dedicated HTTP listener for OpenRouter's OTLP
+// broadcast webhook, gated by RAFIKI_BROADCAST_LISTEN. Returns (nil, nil) when
+// the var is unset (the feature is off). The listener runs on its own port with
+// no auth — it receives only from OpenRouter, not rafiki clients.
+func startBroadcastListener(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (*http.Server, error) {
+	addr := paths.Get(paths.BroadcastListen)
+	if addr == "" {
+		return nil, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", server.HandleOTLP(pool, logger))
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("broadcast listener on %s: %w", addr, err)
+	}
+
+	go func() {
+		logger.Info("broadcast listener started", "addr", addr)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("broadcast listener stopped", "error", err)
+		}
+	}()
+
+	return srv, nil
+}
+
 // resolveDefaultModel picks the model used when a request names none: the
 // config file's default_model wins when set, otherwise the environment
 // variable (RAFIKI_DEFAULT_MODEL) is the fallback, matching `rafiki serve`'s

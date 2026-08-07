@@ -214,6 +214,13 @@ func main() {
 			"error", err)
 	}
 
+	// OpenRouter OTLP broadcast receiver (opt-in, separate port).
+	broadcastSrv, err := startBroadcastListener(baseCtx, pool, slog.Default())
+	if err != nil {
+		slog.Error("failed to start broadcast listener", "error", err)
+		os.Exit(1)
+	}
+
 	st := childstore.New()
 	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, baseCtx)
@@ -320,6 +327,14 @@ func main() {
 	// After the children are down: nothing is left to serve, and shutting it
 	// earlier would fail their final in-flight turns.
 	face.Close(shutdownCtx)
+
+	if broadcastSrv != nil {
+		bcCtx, bcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer bcCancel()
+		if err := broadcastSrv.Shutdown(bcCtx); err != nil {
+			slog.Warn("broadcast listener shutdown error", "error", err)
+		}
+	}
 
 	ctrl.Stop() // wait for sweeper goroutine to exit
 	if err := srv.Close(); err != nil {
