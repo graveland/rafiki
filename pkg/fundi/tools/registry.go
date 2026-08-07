@@ -13,6 +13,8 @@ import (
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	skillspkg "go.graveland.dev/rafiki/pkg/skills"
 )
 
 // ToolInput is the raw JSON input a tool receives from the model. It is a
@@ -61,6 +63,7 @@ type ToolOpts struct {
 	Cwd          string
 	FileTracker  *FileTracker
 	OutputPolicy OutputPolicy
+	Skills       []skillspkg.SkillMeta
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements
