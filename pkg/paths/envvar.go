@@ -121,6 +121,10 @@ const (
 	// ControlURL is the remote rafikid URL a client dials
 	// (e.g. "tls://rafiki.graveland.dev:443"). Wins over RAFIKI_SOCKET.
 	ControlURL = "RAFIKI_CONTROL_URL"
+
+	// RecordRequests, when "1", enables raw HTTP request/response capture to
+	// the conversations.raw_http_request hypertable. Debug-only; off by default.
+	RecordRequests = "RAFIKI_RECORD_REQUESTS"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the
