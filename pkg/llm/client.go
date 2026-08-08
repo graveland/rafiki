@@ -40,6 +40,8 @@ type Client struct {
 	breakerWindow time.Duration
 	defaultModel  string
 	modelGate     *ModelGate
+
+	rawTrace *routing.RawTraceStore // nil when disabled
 }
 
 type ClientOption func(*Client)
@@ -81,6 +83,12 @@ func WithLogger(l *slog.Logger) ClientOption {
 // per-conversation model, resolution errors rather than silently picking one.
 func WithDefaultModel(m string) ClientOption {
 	return func(c *Client) { c.defaultModel = m }
+}
+
+// WithRecordRequests enables raw HTTP request/response capture to the debug
+// raw_http_request hypertable. Pass nil to disable (the default).
+func WithRecordRequests(s *routing.RawTraceStore) ClientOption {
+	return func(c *Client) { c.rawTrace = s }
 }
 
 // WithTracerProvider injects OpenTelemetry tracing. The library never
@@ -243,6 +251,8 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	if err != nil {
 		span.RecordError(err)
 		c.failTurn(ctx, capturing, turnID, turnCreatedAt, err)
+		// Raw trace: non-streaming error path.
+		c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, latency, err)
 		return nil, err
 	}
 
@@ -256,6 +266,8 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	if capturing {
 		c.completeTurn(ctx, turnID, turnCreatedAt, resp, servedBy, latency)
 	}
+	// Raw trace: non-streaming success path.
+	c.recordRawTrace(ctx, meta, turnID, params, resp, 200, servedBy, latency, nil)
 	return resp, nil
 }
 
@@ -444,6 +456,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// sendWithTrim's own retry loop (not SendParams) re-attempts via
 		// streaming again, instead of wastefully re-issuing to the same
 		// primary sender.
+		c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
 		return nil, true, false, serr
 	}
 
@@ -465,6 +478,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 			span.RecordError(wrapped)
 			c.failTurn(ctx, capturing, turnID, turnCreatedAt, wrapped)
 			recordPrimaryResult(breaker, now, wrapped)
+			c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped)
 			return nil, true, delivered, wrapped
 		}
 		FixAccumulatedEmptyToolInput(&acc, ev)
@@ -485,6 +499,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// regardless of breaker state) or breaker is nil (bypass, no handoff
 		// exists to defer to): this IS the final result, so record it.
 		recordPrimaryResult(breaker, now, serr)
+		c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
 		return nil, true, delivered, serr
 	}
 
@@ -501,6 +516,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	if capturing {
 		c.completeTurn(ctx, turnID, turnCreatedAt, &acc, primary, latency)
 	}
+	c.recordRawTrace(ctx, meta, turnID, params, &acc, 200, primary, latency, nil)
 	return &acc, true, delivered, nil
 }
 
@@ -775,4 +791,56 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 			c.logger.Warn("capture: fail-turn fallback write failed", "error", ferr)
 		}
 	}
+}
+
+// recordRawTrace writes a debug raw_http_request row for one LLM API call.
+// Best-effort: runs on a detached context so a slow insert cannot block the
+// hot path. Errors are logged, never surfaced. No-op when c.rawTrace is nil.
+func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, params anthropic.MessageNewParams, resp *anthropic.Message, status int, upstream Upstream, latency int, err error) {
+	if c.rawTrace == nil {
+		return
+	}
+	reqJSON, mErr := json.Marshal(params)
+	if mErr != nil {
+		c.logger.Warn("raw trace: marshal request failed", "error", mErr)
+		return
+	}
+	var respJSON json.RawMessage
+	if resp != nil {
+		respJSON, _ = json.Marshal(resp)
+	}
+
+	var respStatus *int
+	if status > 0 {
+		respStatus = &status
+	}
+	errStr := ""
+	if err != nil {
+		errStr = err.Error()
+	}
+
+	r := routing.RawHTTPRequest{
+		Source:      "fundi",
+		Model:       string(params.Model),
+		Upstream:    string(upstream),
+		ReqMethod:   "POST",
+		ReqPath:     "/v1/messages",
+		ReqHeaders:  json.RawMessage(`{"Content-Type":"application/json"}`),
+		ReqBody:     reqJSON,
+		RespStatus:  respStatus,
+		RespHeaders: json.RawMessage(`{}`),
+		RespBody:    respJSON,
+		LatencyMS:   latency,
+		Error:       errStr,
+	}
+	if meta.ConversationID != "" {
+		r.ConversationID = &meta.ConversationID
+	}
+	if turnID != "" {
+		r.TurnID = &turnID
+	}
+
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	c.rawTrace.Insert(capCtx, r)
 }
