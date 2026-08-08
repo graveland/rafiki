@@ -11,6 +11,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/skills"
 )
 
@@ -62,6 +63,11 @@ type RuntimeOptions struct {
 	// the daemon, which supplies one (inproc.Runner) so a panicked
 	// conversation becomes an ordinary child exit rather than a wedged child.
 	OnFatal func(error)
+
+	// RawTrace, when non-nil, enables raw LLM API request/response capture to
+	// the debug raw_http_request hypertable. Created at daemon startup when
+	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
+	RawTrace *routing.RawTraceStore
 }
 
 // resolveContent loads the cwd-relative context files and discovers skills.
@@ -172,6 +178,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Tools:                registry,
 		AutoResume:           opts.AutoResume,
 		OnFatal:              opts.OnFatal,
+		RawTrace:             opts.RawTrace,
 	}
 
 	eng, engShutdown, err := cfg.BuildEngine(ctx, fe)

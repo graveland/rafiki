@@ -12,6 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 // thinkingBudgets maps the --thinking flag's named levels to the Anthropic
@@ -122,6 +123,10 @@ type Config struct {
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
+
+	// RawTrace, when non-nil, enables raw LLM API request/response capture.
+	// Nil disables capture; passed directly to llm.WithRecordRequests.
+	RawTrace *routing.RawTraceStore
 }
 
 // BuildEngine constructs the llm.Client (wiring c.Pool via llm.WithStore when
@@ -150,6 +155,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	if pool != nil {
 		clientOpts = append(clientOpts, llm.WithStore(pool))
 	}
+	clientOpts = append(clientOpts, llm.WithRecordRequests(c.RawTrace))
 	shutdown := func() {}
 
 	client, err := llm.NewClient(clientOpts...)
