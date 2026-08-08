@@ -4,12 +4,21 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
 
 const (
 	defaultReadLimit = 2000
+	// maxLineChars caps a single line; longer lines are truncated with a
+	// "… (line truncated)" suffix. Matches opencode's proven value.
+	maxLineChars = 2000
+	// maxReadBytes is the total output byte budget for one read call.
+	maxReadBytes = 50 * 1024
+	// binaryCheckBytes is how many bytes at the head of the file are
+	// scanned for a NUL byte to detect binary content.
+	binaryCheckBytes = 8192
 
 	readDescription = "Read a file from the local filesystem. " +
 		"Use `path` (or `file_path`, an alias) — absolute or relative to the " +
@@ -87,6 +96,22 @@ func (rt *readTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	}
 	defer f.Close()
 
+	// Binary detection: scan the first 8 KB for a NUL byte.
+	header := make([]byte, binaryCheckBytes)
+	n, readErr := io.ReadFull(f, header)
+	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+		return ToolResult{}, fmt.Errorf("read: %w", readErr)
+	}
+	for _, b := range header[:n] {
+		if b == 0 {
+			return ToolResult{}, fmt.Errorf("read: %q appears to be a binary file", absPath)
+		}
+	}
+	// Rewind to the start so the scanner sees the full file.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ToolResult{}, fmt.Errorf("read: %w", err)
+	}
+
 	offset := in.Offset
 	if offset < 1 {
 		offset = 1
@@ -113,7 +138,22 @@ func (rt *readTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 			truncated = true
 			break
 		}
-		fmt.Fprintf(&out, "%6d\t%s\n", lineNo, scanner.Text())
+
+		line := scanner.Text()
+		if len(line) > maxLineChars {
+			line = line[:maxLineChars] + "… (line truncated)"
+		}
+
+		formatted := fmt.Sprintf("%6d\t%s\n", lineNo, line)
+
+		// Byte budget: stop if adding this line would exceed maxReadBytes,
+		// but always emit at least one line.
+		if out.Len()+len(formatted) > maxReadBytes && shown > 0 {
+			truncated = true
+			break
+		}
+
+		out.WriteString(formatted)
 		shown++
 		lastShown = lineNo
 	}

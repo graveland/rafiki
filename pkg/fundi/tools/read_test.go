@@ -221,3 +221,215 @@ func TestReadToolTakesPerPathLock(t *testing.T) {
 		t.Fatal("read never completed after the lock was released")
 	}
 }
+
+func TestReadToolLineTruncation(t *testing.T) {
+	dir := t.TempDir()
+	// One 10 KB line, then two normal lines.
+	longLine := strings.Repeat("x", 10*1024)
+	content := longLine + "\nline2\nline3\n"
+	p := filepath.Join(dir, "long.txt")
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := NewFileTracker()
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.Text
+
+	// The long line must be truncated with the suffix.
+	if !strings.Contains(out, "… (line truncated)") {
+		t.Fatalf("expected line truncation suffix, got:\n%q", out)
+	}
+	// The suffix must appear on line 1.
+	if !strings.Contains(out, fmt.Sprintf("%6d\t", 1)) {
+		t.Fatalf("expected line 1 to be present, got:\n%q", out)
+	}
+	// Lines 2 and 3 must be intact.
+	if !strings.Contains(out, "\n"+fmt.Sprintf("%6d\t%s\n", 2, "line2")) {
+		t.Fatalf("expected line 2 intact, got:\n%q", out)
+	}
+	if !strings.Contains(out, "\n"+fmt.Sprintf("%6d\t%s\n", 3, "line3")) {
+		t.Fatalf("expected line 3 intact, got:\n%q", out)
+	}
+}
+
+func TestReadToolByteBudget(t *testing.T) {
+	dir := t.TempDir()
+	// Build a file large enough to exceed 50 KB.
+	var lines []string
+	for i := 1; i <= 800; i++ {
+		lines = append(lines, fmt.Sprintf("line-%04d-%s", i, strings.Repeat("x", 100)))
+	}
+	p := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := NewFileTracker()
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.Text
+
+	// The output must be roughly <= 50 KB.
+	if len(out) > 52*1024 {
+		t.Fatalf("output too large: %d bytes", len(out))
+	}
+
+	// A continuation hint must be present.
+	if !strings.Contains(out, "offset=") {
+		t.Fatalf("expected continuation hint, got tail: %q", out[len(out)-200:])
+	}
+
+	// Extract the reported offset and verify it points to the NEXT line
+	// after the last one shown.
+	linesOut := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	lastLine := linesOut[len(linesOut)-1]
+	// Parse the offset from "... offset=N ..."
+	var offset int
+	if _, scanErr := fmt.Sscanf(lastLine, "[showing lines %d-%d; more lines remain — pass offset=%d to continue]", new(int), new(int), &offset); scanErr != nil {
+		t.Fatalf("could not parse offset from %q: %v", lastLine, scanErr)
+	}
+	// The offset must be > 0 and correspond to the next line.
+	if offset <= 1 {
+		t.Fatalf("expected offset > 1, got %d", offset)
+	}
+}
+
+func TestReadToolBinaryDetection(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "binary.bin")
+	// File with a NUL byte early.
+	data := []byte("hello\x00world\n")
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := NewFileTracker()
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+	if err == nil {
+		t.Fatal("expected an error for binary file")
+	}
+	if !strings.Contains(err.Error(), "binary") && !strings.Contains(err.Error(), "Binary") {
+		t.Fatalf("expected error to mention binary, got %v", err)
+	}
+}
+
+func TestReadToolUnderBudgetsUnchanged(t *testing.T) {
+	// A small file under all budgets must produce byte-identical output to
+	// the existing behaviour.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "small.txt")
+	content := "line1\nline2\nline3\n"
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := NewFileTracker()
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.Text
+	want := fmt.Sprintf("%6d\t%s\n%6d\t%s\n%6d\t%s\n", 1, "line1", 2, "line2", 3, "line3")
+	if out != want {
+		t.Fatalf("got:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestReadToolRoundTripContinueOffset(t *testing.T) {
+	dir := t.TempDir()
+	// Build a file larger than 50 KB so the first read is byte-capped.
+	var lines []string
+	for i := 1; i <= 1000; i++ {
+		lines = append(lines, fmt.Sprintf("L%06d:%s", i, strings.Repeat("y", 80)))
+	}
+	p := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := NewFileTracker()
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var seenLines []string
+	offset := 0
+	for {
+		offset++
+		input := fmt.Sprintf(`{"path":%q}`, p)
+		if offset > 1 {
+			input = fmt.Sprintf(`{"path":%q,"offset":%d}`, p, offset)
+		}
+		res, err := rt.Execute(context.Background(), ToolInput(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := res.Text
+
+		// Parse emitted lines (skip the continuation trailer).
+		rawLines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+		nextOffset := 0
+		for _, line := range rawLines {
+			if strings.HasPrefix(line, "[showing lines") {
+				fmt.Sscanf(line, "[showing lines %d-%d; more lines remain — pass offset=%d to continue]", new(int), new(int), &nextOffset)
+				break
+			}
+			// Each line is like "     1\tL000001:..."
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) == 2 {
+				seenLines = append(seenLines, strings.TrimSpace(parts[1]))
+			}
+		}
+
+		if nextOffset == 0 {
+			break
+		}
+		offset = nextOffset - 1 // the loop does offset++
+	}
+
+	// No line should appear twice.
+	seen := make(map[string]bool)
+	for _, l := range seenLines {
+		if seen[l] {
+			t.Fatalf("duplicate line: %q", l)
+		}
+		seen[l] = true
+	}
+
+	// We should have seen many lines.
+	if len(seenLines) < 100 {
+		t.Fatalf("expected at least 100 unique lines from round-trip, got %d", len(seenLines))
+	}
+
+	// Verify no gap: the first line should be L000001.
+	if !strings.HasPrefix(seenLines[0], "L000001:") {
+		t.Fatalf("first line should be L000001, got %q", seenLines[0])
+	}
+	// The last line should be L001000 (end of file).
+	if !strings.HasPrefix(seenLines[len(seenLines)-1], "L001000:") {
+		t.Fatalf("last line should be L001000, got %q", seenLines[len(seenLines)-1])
+	}
+}
