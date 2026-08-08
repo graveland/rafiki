@@ -842,5 +842,5 @@ func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID strin
 
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	c.rawTrace.Insert(capCtx, r)
+	_ = c.rawTrace.Insert(capCtx, r)
 }

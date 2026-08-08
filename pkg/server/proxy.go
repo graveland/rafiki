@@ -689,7 +689,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	if p.rawTrace != nil {
 		respStatus := resp.StatusCode
 		convID := cr.convID
-		p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
+		_ = p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
 			Source:         "proxy",
 			Model:          model,
 			Upstream:       upstream,
@@ -856,7 +856,7 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	if p.rawTrace != nil {
 		respStatus := resp.StatusCode
 		convID := cr.convID
-		p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
+		_ = p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
 			Source:         "proxy",
 			Model:          model,
 			Upstream:       upstream,

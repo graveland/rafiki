@@ -27,11 +27,11 @@ func NewRawTraceStore(pool *pgxpool.Pool) *RawTraceStore {
 
 // RawHTTPRequest is one recorded LLM API call.
 type RawHTTPRequest struct {
-	ConversationID *string         // nullable UUID
-	TurnID         *string         // nullable UUID
+	ConversationID *string // nullable UUID
+	TurnID         *string // nullable UUID
 	Model          string
-	Upstream       string          // "anthropic" | "openrouter"
-	Source         string          // "proxy" | "fundi"
+	Upstream       string // "anthropic" | "openrouter"
+	Source         string // "proxy" | "fundi"
 	ReqMethod      string
 	ReqPath        string
 	ReqHeaders     json.RawMessage // marshal-safe, nil-ok

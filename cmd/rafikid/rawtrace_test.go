@@ -38,6 +38,11 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 func TestRawTrace_Insert(t *testing.T) {
 	pool := openTestPool(t)
 
+	// Clean any leftover rows from prior runs.
+	if _, err := pool.Exec(t.Context(), `DELETE FROM conversations.raw_http_request`); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+
 	store := routing.NewRawTraceStore(pool)
 	if store == nil {
 		t.Fatal("NewRawTraceStore returned nil")
