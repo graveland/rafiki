@@ -282,11 +282,11 @@ func (p *MessagesProxy) adaptEffortMap(body map[string]any, model string) bool {
 // completion helpers don't each take four positional args. on=false means
 // capture is disabled for this turn (the proxy still forwards).
 type captureRef struct {
-	convID      string
-	turnID      string
-	createdAt   time.Time
-	on          bool
-	reqBody     []byte // decomposed post-stream in streamAndCapture (see beginCapture)
+	convID         string
+	turnID         string
+	createdAt      time.Time
+	on             bool
+	reqBody        []byte // decomposed post-stream in streamAndCapture (see beginCapture)
 	prefixHash     string
 	nextOrdinal    int  // ordinal for the assistant response message (= request message count)
 	recordRequests bool // per-session recording opt-in (X-Rafiki-Record-Requests)
@@ -690,11 +690,17 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
 		"stop_reason", stop, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
+	// Detached: a mid-stream client disconnect cancels r.Context(), but capture
+	// writes (including the raw trace below) happen after streaming ends and
+	// must still complete so the turn isn't stranded 'pending' and the trace
+	// isn't silently dropped by the same cancellation.
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
 	// Raw trace: record the debug request/response pair.
 	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
 		respStatus := resp.StatusCode
 		convID := cr.convID
-		_ = p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
+		_ = p.rawTrace.Insert(capCtx, routing.RawHTTPRequest{
 			Source:         "proxy",
 			Model:          model,
 			Upstream:       upstream,
@@ -712,11 +718,6 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	if !cr.on {
 		return
 	}
-	// Detached: a mid-stream client disconnect cancels r.Context(), but the
-	// capture write happens after streaming ends and must still complete so the
-	// turn isn't stranded 'pending'.
-	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-	defer cancel()
 	if cerr := p.store.CompleteTurn(capCtx, routing.TurnResult{
 		TurnID: cr.turnID, CreatedAt: cr.createdAt, Model: usage.Model, Response: nil, StopReason: stop, Upstream: upstream,
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
@@ -857,11 +858,15 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	}
 	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	// Detached: r.Context() may already be canceled (client hung up) by the time
+	// these capture writes — including the raw trace below — run.
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
 	// Raw trace: record the failed request/response pair.
 	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
 		respStatus := resp.StatusCode
 		convID := cr.convID
-		_ = p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
+		_ = p.rawTrace.Insert(capCtx, routing.RawHTTPRequest{
 			Source:         "proxy",
 			Model:          model,
 			Upstream:       upstream,
@@ -878,11 +883,9 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 		})
 	}
 	// Resolve the failed turn and decompose the request (so the turn is inspectable —
-	// the messages/prefix that triggered the error are what you need to see) under one
-	// shared detached context; r.Context() may already be canceled (client hung up).
+	// the messages/prefix that triggered the error are what you need to see) under the
+	// same shared detached context.
 	if cr.on {
-		capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-		defer cancel()
 		p.failTurnCtx(capCtx, cr, reason)
 		p.decomposeRequestCtx(capCtx, cr)
 	}

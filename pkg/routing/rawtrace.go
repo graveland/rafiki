@@ -85,9 +85,26 @@ func nullStr(s string) any {
 	return s
 }
 
+// nilJSON prepares a raw byte payload for insertion into a JSONB column.
+// Valid JSON (the common case: headers, and JSON-bodied requests/responses)
+// passes through unchanged. Non-JSON payloads — an SSE stream body, an HTML
+// error page from a load balancer — are wrapped as a JSON string so the
+// INSERT can never fail with "invalid input syntax for type json" and the
+// capture is still stored, queryable, and byte-for-byte recoverable. Empty
+// input maps to SQL NULL.
 func nilJSON(b json.RawMessage) any {
 	if len(b) == 0 {
 		return nil
 	}
-	return b
+	if json.Valid(b) {
+		return b
+	}
+	wrapped, err := json.Marshal(string(b))
+	if err != nil {
+		// json.Marshal of a string only fails for invalid UTF-8, which string(b)
+		// cannot produce (it replaces invalid sequences) — unreachable in practice.
+		slog.Warn("raw trace: wrapping non-JSON payload failed", "error", err)
+		return nil
+	}
+	return wrapped
 }
