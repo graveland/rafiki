@@ -413,3 +413,47 @@ func prepContent(raw string) (lfContent, lineEnding string) {
 	lfContent = normalizeToLF(lfContent)
 	return lfContent, le
 }
+
+// applyEditsSequential applies edits one at a time against the current content,
+// with each edit seeing the result of the previous one. Each edit must match
+// exactly once in the content at the time it is applied. Fuzzy matching is
+// attempted when an exact match fails.
+func applyEditsSequential(lfContent string, edits []editPair) (string, error) {
+	current := lfContent
+	for i, e := range edits {
+		oldLF := normalizeToLF(e.OldString)
+		newLF := normalizeToLF(e.NewString)
+		if len(oldLF) == 0 {
+			return "", fmt.Errorf("old_string in edits[%d] must not be empty", i)
+		}
+
+		idx := strings.Index(current, oldLF)
+		if idx < 0 {
+			// Try fuzzy.
+			fuzzyCurrent := normalizeForFuzzyMatch(current)
+			fuzzyOld := normalizeForFuzzyMatch(oldLF)
+			idx = strings.Index(fuzzyCurrent, fuzzyOld)
+			if idx < 0 {
+				return "", fmt.Errorf("old_string in edits[%d] not found in file", i)
+			}
+			// For fuzzy matches, apply in the fuzzy-normalized space then
+			// preserve unchanged lines from the original current.
+			count := strings.Count(fuzzyCurrent, fuzzyOld)
+			if count > 1 {
+				return "", fmt.Errorf("old_string in edits[%d] matches %d times; add more surrounding context to make it unique", i, count)
+			}
+			op := editOp{matchIndex: idx, matchLength: len(fuzzyOld), newText: newLF}
+			current = applyReplacementsPreserve(current, fuzzyCurrent, []editOp{op})
+		} else {
+			count := strings.Count(current, oldLF)
+			if count > 1 {
+				return "", fmt.Errorf("old_string in edits[%d] matches %d times; add more surrounding context to make it unique", i, count)
+			}
+			current = current[:idx] + newLF + current[idx+len(oldLF):]
+		}
+	}
+	if current == lfContent {
+		return "", fmt.Errorf("no changes made; replacement produced identical content")
+	}
+	return current, nil
+}

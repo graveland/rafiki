@@ -14,9 +14,10 @@ const (
 		"working directory. The file must have been read via the read tool in " +
 		"this session, or the edit will fail. " +
 		"Provide one or more replacements in `edits[]`, each with `old_string` and " +
-		"`new_string`. All edits are matched against the same original content " +
-		"(not incrementally). Overlapping or nested edits are rejected — merge " +
-		"adjacent changes into one edit instead. " +
+		"`new_string`. By default all edits are matched against the same original " +
+		"content (not incrementally) — overlapping or nested edits are rejected. " +
+		"Set `sequential: true` to apply edits in order, each seeing the result " +
+		"of the previous one. " +
 		"Also accepts legacy `old_string` + `new_string` top-level fields for a " +
 		"single replacement. Set `replace_all: true` to replace every occurrence."
 )
@@ -33,11 +34,11 @@ func (EditBlueprint) InputSchema() Schema {
 		Properties: []SchemaProperty{
 			{Name: "path", Type: "string", Description: "Path to the file to edit (absolute or relative). Also accepts file_path as an alias."},
 			{Name: "file_path", Type: "string", Description: "Alias for path."},
-			{Name: "edits", Type: "array", Description: "One or more targeted replacements. Each edit is matched against the original file, not incrementally.",
+			{Name: "edits", Type: "array", Description: "One or more targeted replacements. By default matched against the original file, not incrementally.",
 				Items: &Schema{
 					Type: "object",
 					Properties: []SchemaProperty{
-						{Name: "old_string", Type: "string", Description: "Exact text to replace. Must match exactly once in the original file."},
+						{Name: "old_string", Type: "string", Description: "Exact text to replace. Must match exactly once in the target content."},
 						{Name: "new_string", Type: "string", Description: "Text to replace old_string with."},
 					},
 					Required: []string{"old_string", "new_string"},
@@ -46,6 +47,7 @@ func (EditBlueprint) InputSchema() Schema {
 			{Name: "old_string", Type: "string", Description: "Exact text to replace. Must match exactly once unless replace_all is true."},
 			{Name: "new_string", Type: "string", Description: "Text to replace old_string with."},
 			{Name: "replace_all", Type: "boolean", Description: "Replace every occurrence of old_string instead of requiring exactly one match."},
+			{Name: "sequential", Type: "boolean", Description: "When true, apply edits in order, each seeing the result of the previous edit. Default (false) matches all edits against the original content."},
 		},
 	}
 }
@@ -121,9 +123,18 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		return NewTextResult(fmt.Sprintf("replaced %d occurrence(s) in %s", count, absPath)), nil
 	}
 
-	_, newContent, err := applyEdits(lfContent, edits)
-	if err != nil {
-		return ToolResult{}, fmt.Errorf("edit: %w", err)
+	var newContent string
+	if in.Sequential {
+		var err error
+		newContent, err = applyEditsSequential(lfContent, edits)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("edit: %w", err)
+		}
+	} else {
+		_, newContent, err = applyEdits(lfContent, edits)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("edit: %w", err)
+		}
 	}
 
 	final := restoreLineEndings(newContent, origLE)
@@ -150,6 +161,7 @@ type editInput struct {
 	OldString  string     `json:"old_string"`
 	NewString  string     `json:"new_string"`
 	ReplaceAll bool       `json:"replace_all"`
+	Sequential bool       `json:"sequential"`
 }
 
 type editPair struct {
