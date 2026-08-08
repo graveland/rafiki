@@ -25,3 +25,12 @@ jobs:
           docker build --build-arg VERSION="$SHORT_SHA" -t "$IMAGE:sha-$SHORT_SHA" -t "$IMAGE:latest" .
           docker push "$IMAGE:sha-$SHORT_SHA"
           docker push "$IMAGE:latest"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      - name: Bump rafiki image tag in graveland-iac
+        run: |
+          curl -sf -X POST \
+            "https://git.graveland.dev/api/v1/repos/graveland.dev/graveland-iac/actions/workflows/bump-chart.yaml/dispatches" \
+            -H "Authorization: token ${{ secrets.DISPATCH_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"ref":"main","inputs":{"chart":"rafiki","tier":"workloads","version":"1.0.0","image_tag":"sha-'"${SHORT_SHA}"'"}}'
