@@ -794,8 +794,18 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 }
 
 // recordRawTrace writes a debug raw_http_request row for one LLM API call.
-// Best-effort: runs on a detached context so a slow insert cannot block the
-// hot path. Errors are logged, never surfaced. No-op when c.rawTrace is nil.
+// Best-effort: the insert itself runs in a background goroutine so a slow or
+// unreachable database cannot add latency to the hot path (context.WithoutCancel
+// only detaches the insert from the caller's cancellation, which is not enough
+// on its own — the pgx call underneath is synchronous). The goroutine's context
+// is still derived from ctx via WithoutCancel so the insert survives the
+// request being cancelled or completing. Nothing joins the goroutine directly,
+// but it is not a leak: it runs its single Exec against the same *pgxpool.Pool
+// the daemon closes at shutdown, and pgxpool.Pool.Close blocks until every
+// acquired connection is released, so daemon shutdown (see closePoolBounded in
+// cmd/rafikid/main.go) already drains any insert still in flight, bounded by
+// that same timeout. Errors are logged, never surfaced. No-op when c.rawTrace
+// is nil.
 func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, params anthropic.MessageNewParams, resp *anthropic.Message, status int, upstream Upstream, latency int, err error) {
 	if c.rawTrace == nil {
 		return
@@ -840,7 +850,13 @@ func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID strin
 		r.TurnID = &turnID
 	}
 
-	capCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	_ = c.rawTrace.Insert(capCtx, r)
+	// detachedCtx, not ctx: the insert must survive the caller returning (or
+	// being cancelled), and everything captured below (r, c.rawTrace, c.logger)
+	// is either already-marshaled JSON or safe for concurrent use.
+	detachedCtx := context.WithoutCancel(ctx)
+	go func() {
+		capCtx, cancel := context.WithTimeout(detachedCtx, 5*time.Second)
+		defer cancel()
+		_ = c.rawTrace.Insert(capCtx, r)
+	}()
 }
