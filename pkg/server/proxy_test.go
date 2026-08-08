@@ -456,6 +456,19 @@ func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
 		if r.Header.Get("x-api-key") != "" {
 			t.Errorf("OR should not receive x-api-key, got %q", r.Header.Get("x-api-key"))
 		}
+		if got := r.Header.Get("Referer"); got != "https://github.com/graveland/rafiki" {
+			t.Errorf("OR Referer = %q, want https://github.com/graveland/rafiki", got)
+		}
+		if got := r.Header.Get("X-Openrouter-Title"); got != "rafiki" {
+			t.Errorf("OR X-OpenRouter-Title = %q, want rafiki", got)
+		}
+		if got := r.Header.Get("x-session-id"); got == "" {
+			t.Error("OR x-session-id is empty")
+		}
+		// Source defaults to "claude" when unset → no categories.
+		if got := r.Header.Get("X-Openrouter-Categories"); got != "" {
+			t.Errorf("OR X-OpenRouter-Categories = %q, want empty (source is not rafiki-claude)", got)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_delta\n"+
 			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`+"\n\n"+
@@ -478,6 +491,24 @@ func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
 	}
 	if fs.lastUpstream != "openrouter" {
 		t.Errorf("captured upstream=%q, want openrouter", fs.lastUpstream)
+	}
+
+	// rafiki-claude source → categories header expected.
+	catsSeen := false
+	orSrv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Openrouter-Categories"); got == "cli-agent" {
+			catsSeen = true
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_stop\n"+
+			`data: {"type":"message_stop"}`+"\n\n")
+	})
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
+	req2.Header.Set("X-Rafiki-Source", "rafiki-claude")
+	p.ServeHTTP(rec2, req2)
+	if !catsSeen {
+		t.Error("OR X-OpenRouter-Categories missing; want cli-agent when source is rafiki-claude")
 	}
 }
 

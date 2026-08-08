@@ -58,6 +58,9 @@ func OpenRouter(apiKey string) Sender {
 	return sdkSender{client: anthropic.NewClient(
 		option.WithBaseURL(openRouterBaseURL),
 		option.WithAPIKey(apiKey),
+		option.WithHeader("Referer", "https://github.com/graveland/rafiki"),
+		option.WithHeader("X-OpenRouter-Title", "rafiki"),
+		option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
 	)}
 }
 

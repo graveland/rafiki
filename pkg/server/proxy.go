@@ -132,6 +132,12 @@ func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer 
 		if sid != "" {
 			up.Header.Set("x-session-id", sid)
 		}
+		// OpenRouter app attribution: identify rafiki as the calling app.
+		up.Header.Set("X-OpenRouter-Title", "rafiki")
+		src := r.Header.Get("X-Rafiki-Source")
+		if src == "rafiki-claude" || src == "fundi" {
+			up.Header.Set("X-OpenRouter-Categories", "cli-agent")
+		}
 	}
 	up.Header.Set("Content-Type", "application/json")
 	if bearer {
@@ -144,6 +150,14 @@ func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer 
 	}
 	if b := r.Header.Get("anthropic-beta"); b != "" {
 		up.Header.Set("anthropic-beta", b)
+	}
+	// Forward the Referer header that OpenRouter uses for app attribution
+	// in their dashboard and OTLP traces.  Use the client-supplied value
+	// when present; otherwise default to rafiki itself.
+	if v := r.Header.Get("Referer"); v != "" {
+		up.Header.Set("Referer", v)
+	} else {
+		up.Header.Set("Referer", "https://github.com/graveland/rafiki")
 	}
 	return p.httpClient.Do(up)
 }
