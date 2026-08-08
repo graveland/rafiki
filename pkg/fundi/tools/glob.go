@@ -23,14 +23,6 @@ const (
 		"recursive matching), rooted at path (defaults to the current working " +
 		"directory). Results are sorted by modification time, newest first, and " +
 		"capped at 200 matches."
-	globSchema = `{
-		"type": "object",
-		"properties": {
-			"pattern": {"type": "string", "description": "Glob pattern (doublestar syntax, supports **) to match file paths against. Relative to path — use \"**/*.go\", not an absolute path."},
-			"path": {"type": "string", "description": "Base directory to search from. Defaults to the current working directory."}
-		},
-		"required": ["pattern"]
-	}`
 )
 
 func init() { DefaultBlueprint.Register(&GlbTool{}) }

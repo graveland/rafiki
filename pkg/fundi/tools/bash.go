@@ -25,14 +25,6 @@ const (
 		"120s timeout; pass timeout_ms to override, up to a 600s maximum. " +
 		"Large output is clipped (head and tail kept, middle elided) with the " +
 		"full output spilled to a file whose path is named in the result."
-	bashSchema = `{
-		"type": "object",
-		"properties": {
-			"command": {"type": "string", "description": "Shell command to run via bash -c."},
-			"timeout_ms": {"type": "integer", "description": "Timeout in milliseconds. Defaults to 120000 (120s); clamped to a 600000 (600s) maximum."}
-		},
-		"required": ["command"]
-	}`
 )
 
 func init() { DefaultBlueprint.Register(&BashBlueprint{}) }

@@ -17,16 +17,6 @@ const (
 		"default reads from the start of the file, up to 2000 lines; if the " +
 		"file is longer, a trailing note tells you the offset to continue from. " +
 		"Pass offset/limit to page through a large file explicitly."
-	readSchema = `{
-		"type": "object",
-		"properties": {
-			"path": {"type": "string", "description": "Path to the file to read (absolute or relative). Also accepts file_path as an alias."},
-			"file_path": {"type": "string", "description": "Alias for path."},
-			"offset": {"type": "integer", "description": "1-indexed line number to start reading from. Defaults to 1."},
-			"limit": {"type": "integer", "description": "Maximum number of lines to return. Defaults to 2000."}
-		},
-		"required": []
-	}`
 )
 
 func init() { DefaultBlueprint.Register(&ReadBlueprint{}) }

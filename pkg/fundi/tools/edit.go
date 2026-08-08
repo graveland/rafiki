@@ -19,29 +19,6 @@ const (
 		"adjacent changes into one edit instead. " +
 		"Also accepts legacy `old_string` + `new_string` top-level fields for a " +
 		"single replacement. Set `replace_all: true` to replace every occurrence."
-	editSchema = `{
-		"type": "object",
-		"properties": {
-			"path": {"type": "string", "description": "Path to the file to edit (absolute or relative). Also accepts file_path as an alias."},
-			"file_path": {"type": "string", "description": "Alias for path."},
-			"edits": {
-				"type": "array",
-				"description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally.",
-				"items": {
-					"type": "object",
-					"properties": {
-						"old_string": {"type": "string", "description": "Exact text to replace. Must match exactly once in the original file."},
-						"new_string": {"type": "string", "description": "Text to replace old_string with."}
-					},
-					"required": ["old_string", "new_string"]
-				}
-			},
-			"old_string": {"type": "string", "description": "Exact text to replace. Must match exactly once unless replace_all is true."},
-			"new_string": {"type": "string", "description": "Text to replace old_string with."},
-			"replace_all": {"type": "boolean", "description": "Replace every occurrence of old_string instead of requiring exactly one match."}
-		},
-		"required": []
-	}`
 )
 
 func init() { DefaultBlueprint.Register(&EditBlueprint{}) }

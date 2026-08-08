@@ -24,16 +24,6 @@ const (
 		"path. .git directories are always excluded. Optionally restrict the " +
 		"search to files matching a glob. Output is one \"path:line:text\" line " +
 		"per match, capped at 100 matches by default."
-	grepSchema = `{
-		"type": "object",
-		"properties": {
-			"pattern": {"type": "string", "description": "Regular expression (RE2 syntax) to search for."},
-			"path": {"type": "string", "description": "File or directory to search. Required; must not be the filesystem root (\"/\")."},
-			"glob": {"type": "string", "description": "Optional glob pattern to restrict which files are searched, matched against each file's path relative to path. A pattern with no / (e.g. \"*.go\") matches by file name at any depth, like ripgrep's -g."},
-			"max_matches": {"type": "integer", "description": "Maximum number of matches to return. Defaults to 100."}
-		},
-		"required": ["pattern", "path"]
-	}`
 )
 
 func init() { DefaultBlueprint.Register(&GrepTool{}) }

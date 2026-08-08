@@ -14,15 +14,6 @@ const (
 		"already exists, it must have been read (via the read tool) since its " +
 		"last on-disk modification — write refuses to blindly overwrite a file " +
 		"it hasn't seen the current contents of."
-	writeSchema = `{
-		"type": "object",
-		"properties": {
-			"path": {"type": "string", "description": "Path to the file to write (absolute or relative). Also accepts file_path as an alias."},
-			"file_path": {"type": "string", "description": "Alias for path."},
-			"content": {"type": "string", "description": "Full content to write to the file."}
-		},
-		"required": ["content"]
-	}`
 )
 
 func init() { DefaultBlueprint.Register(&WriteBlueprint{}) }
