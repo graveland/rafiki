@@ -52,6 +52,7 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.StringVar(&f.name, "name", "", "session name reported through get_state")
 	fs.IntVar(&f.maxOutputTokens, "max-output-tokens", 0, "per-turn output token cap sent to upstream (0 = default 16384)")
 	fs.BoolVar(&f.recordRequests, "record-requests", false, "Record raw LLM API requests and responses for debugging")
+	fs.StringVar(&f.bashRTK, "bash-rtk", "", "route bash commands through rtk for output compression: auto, on, or off (overrides $RAFIKI_BASH_RTK)")
 
 	return fs
 }

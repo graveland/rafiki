@@ -50,6 +50,7 @@ type agentFlags struct {
 	name               string
 	fakeTurns          string
 	recordRequests     bool
+	bashRTK            string
 }
 
 // parseAgentFlags parses the rafikid agent flag set. It is a pure function of
@@ -83,6 +84,18 @@ func assembleSkillDirs(cwd string, flagDirs []string) []string {
 	dirs = append(dirs, filepath.Join(cwd, ".claude", "skills"))
 	dirs = append(dirs, filepath.Join(cwd, ".rafiki", "skills"))
 	return append(dirs, flagDirs...)
+}
+
+// bashRTKValue resolves the --bash-rtk flag precedence: explicit flag beats
+// $RAFIKI_BASH_RTK beats the "auto" default.
+func bashRTKValue(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if env := paths.Get(paths.BashRTK); env != "" {
+		return env
+	}
+	return "auto"
 }
 
 // standaloneFatal builds the EngineConfig.OnFatal hook for `rafikid agent`, plus
@@ -209,7 +222,8 @@ func runAgent(args []string) int {
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
 		Pool:                 pool,
 		OnFatal:              onFatal,
-		RTK:                  paths.Get(paths.BashRTK),
+		RTK:                  bashRTKValue(f.bashRTK),
+		ToolsWeb:             paths.Get(paths.ToolsWeb) == "1",
 	}
 	if f.recordRequests {
 		// NewRawTraceStore(nil) is documented to return nil, so this is safe

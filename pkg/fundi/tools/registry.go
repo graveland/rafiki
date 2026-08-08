@@ -120,6 +120,7 @@ type ToolOpts struct {
 	OutputPolicy OutputPolicy
 	Skills       []skillspkg.SkillMeta
 	RTK          RTKMode
+	Web          bool
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements

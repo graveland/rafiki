@@ -206,6 +206,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
 		Pool:                 pool,
-		RTK:                  paths.Get(paths.BashRTK),
+		RTK:                  bashRTKValue(f.bashRTK),
+		ToolsWeb:             paths.Get(paths.ToolsWeb) == "1",
 	}, nil
 }

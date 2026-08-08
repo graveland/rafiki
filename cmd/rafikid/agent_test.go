@@ -315,3 +315,54 @@ func silenceStandaloneLogs(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 }
+
+// TestBashRTKValuePrecedence verifies the --bash-rtk flag precedence:
+// explicit flag beats $RAFIKI_BASH_RTK beats the "auto" default.
+func TestBashRTKValuePrecedence(t *testing.T) {
+	// Default (no flag, no env) → "auto"
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("RAFIKI_BASH_RTK", "")
+		if got := bashRTKValue(""); got != "auto" {
+			t.Errorf("bashRTKValue(\"\") = %q, want auto", got)
+		}
+	})
+
+	// Env var only → use env var
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("RAFIKI_BASH_RTK", "off")
+		if got := bashRTKValue(""); got != "off" {
+			t.Errorf("bashRTKValue(\"\") = %q, want off", got)
+		}
+	})
+
+	// Explicit flag beats env var
+	t.Run("flag-beats-env", func(t *testing.T) {
+		t.Setenv("RAFIKI_BASH_RTK", "off")
+		if got := bashRTKValue("on"); got != "on" {
+			t.Errorf("bashRTKValue(\"on\") = %q, want on (explicit flag must beat env)", got)
+		}
+	})
+}
+
+// TestParseAgentFlagsBashRTK verifies the --bash-rtk flag is actually read
+// by parseAgentFlags. This is the exact check that would have caught
+// --record-requests before it shipped parsed-but-unread.
+func TestParseAgentFlagsBashRTK(t *testing.T) {
+	// Flag passed → f.bashRTK is set
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--bash-rtk", "on"})
+	if err != nil {
+		t.Fatalf("parseAgentFlags: %v", err)
+	}
+	if f.bashRTK != "on" {
+		t.Errorf("bashRTK = %q, want on", f.bashRTK)
+	}
+
+	// Flag not passed → empty
+	f2, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
+	if err != nil {
+		t.Fatalf("parseAgentFlags: %v", err)
+	}
+	if f2.bashRTK != "" {
+		t.Errorf("bashRTK = %q, want empty (flag not passed)", f2.bashRTK)
+	}
+}

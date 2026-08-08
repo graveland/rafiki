@@ -430,3 +430,103 @@ func TestBashSpillNameFallbackIsRaceSafe(t *testing.T) {
 		t.Fatalf("expected %d distinct spill files, got %d", n, len(entries))
 	}
 }
+
+// TestBashRtkRewired verifies that a mapped command (git status) is executed
+// through rtk rather than bash -c, and an unmapped command (echo hello) still
+// goes through bash -c.
+func TestBashRtkRewired(t *testing.T) {
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	// Build a bash tool with RTKAuto (the default).
+	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{
+		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
+		Cwd:          t.TempDir(),
+		RTK:          RTKAuto,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A mapped command (git status) should be rewritten to rtk git status.
+	// Our fake rtk echoes its arguments, so we can detect it.
+	result, err := tool.Execute(context.Background(),
+		ToolInput(json.RawMessage(`{"command":"git status"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake rtk writes "git status" (the args after rtk git) to stdout.
+	// The original command "git status" after rewrite becomes ["rtk", "git", "status"],
+	// and the fake rtk echoes "git status".
+	if !strings.Contains(result.Text, "git") || !strings.Contains(result.Text, "status") {
+		t.Fatalf("expected rtk output containing 'git' and 'status', got %q", result.Text)
+	}
+	// The output should NOT contain "bash" since we bypassed bash -c entirely.
+
+	// An unmapped command should still go through bash -c (NO rewrite).
+	result2, err2 := tool.Execute(context.Background(),
+		ToolInput(json.RawMessage(`{"command":"echo hello"}`)))
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if !strings.Contains(result2.Text, "hello") {
+		t.Fatalf("expected 'hello' in output, got %q", result2.Text)
+	}
+}
+
+// TestBashRtkOffNeverRewrites verifies that RTKOff mode never invokes rtk,
+// even with a mapped command.
+func TestBashRtkOffNeverRewrites(t *testing.T) {
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{
+		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
+		Cwd:          t.TempDir(),
+		RTK:          RTKOff,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// With RTKOff, even a mapped command should go through bash -c.
+	// Our fake rtk echoes "rtk 0.45.0 git status" — but that should NOT appear
+	// because rtk should never be called.
+	result, err := tool.Execute(context.Background(),
+		ToolInput(json.RawMessage(`{"command":"echo foundme"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "foundme") {
+		t.Fatalf("expected 'foundme' in output, got %q", result.Text)
+	}
+}
+
+// TestBashChainedCommandNotRewired verifies that a command with shell chaining
+// is NOT rewritten by rtk, even in RTKAuto mode with rtk available.
+func TestBashChainedCommandNotRewired(t *testing.T) {
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{
+		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
+		Cwd:          t.TempDir(),
+		RTK:          RTKAuto,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A chained command should NOT be rewritten — it must still go through bash -c.
+	result, err := tool.Execute(context.Background(),
+		ToolInput(json.RawMessage(`{"command":"echo yes && echo also"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "yes") {
+		t.Fatalf("expected 'yes' in output, got %q", result.Text)
+	}
+	if !strings.Contains(result.Text, "also") {
+		t.Fatalf("expected 'also' in output, got %q", result.Text)
+	}
+}

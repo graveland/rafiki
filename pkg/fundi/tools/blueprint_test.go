@@ -166,3 +166,32 @@ func TestMaterializeAllWithMaterializer(t *testing.T) {
 		t.Fatalf("Execute(mat) = (%q, %v)", out, err)
 	}
 }
+
+// webAwareBlueprint records whether Materialize received Web=true.
+type webAwareBlueprint struct {
+	testEchoTool
+	gotWeb *bool
+}
+
+func (b *webAwareBlueprint) Name() string { return "web-aware" }
+func (b *webAwareBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	*b.gotWeb = opts.Web
+	return &testEchoTool{name: "web-aware", result: "ok"}, nil
+}
+
+func TestToolOptsWebFlowsToMaterialize(t *testing.T) {
+	var gotWeb bool
+	br := &BlueprintRegistry{}
+	br.Register(&webAwareBlueprint{gotWeb: &gotWeb})
+
+	br.MaterializeAll(ToolOpts{Web: true})
+	if !gotWeb {
+		t.Fatal("Materialize received Web=false when ToolOpts.Web was true")
+	}
+
+	gotWeb = false
+	br.MaterializeAll(ToolOpts{})
+	if gotWeb {
+		t.Fatal("Materialize received Web=true when ToolOpts.Web was false (zero value)")
+	}
+}

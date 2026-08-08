@@ -222,3 +222,28 @@ resolution, and tailnet-routed connectivity. The CLI surface
 — only the `Backend` implementation changes. `rafiki conversations` is the
 first proof that the seam holds: a different transport reusing every renderer
 unchanged.
+
+## `rafikid fundi` flags
+
+`rafikid fundi` runs a single agent child on stdio. Its flags configure the
+agent runtime (model, thinking, tools, persistence). Every flag has a
+corresponding `RAFIKI_*` env var default; an explicit flag always wins.
+
+| Flag | Env var / default | Description |
+|------|-------------------|-------------|
+| `--model` | *(required)* | provider-qualified model id |
+| `--thinking` | `off` | extended-thinking level: `off`, `low`, `medium`, `high`, `xhigh` |
+| `--bash-rtk` | `$RAFIKI_BASH_RTK` / `auto` | route bash through rtk: `auto`, `on`, `off` |
+| `--record-requests` | `$RAFIKI_RECORD_REQUESTS` | capture raw LLM API requests/responses |
+| `--db` | `$RAFIKI_DB` | postgres DSN for conversation persistence |
+| `--ref` | `$RAFIKI_CHILD_ID` | conversation ref for reattachment |
+| `--no-context-files` | — | skip CLAUDE.md/AGENTS.md context |
+| `--no-skills` | — | disable skill discovery |
+| `--skills-dir` | *(repeatable)* | additional skills directories |
+| `--skills` | — | comma-separated skill allowlist |
+| `--mcp-config` | `$RAFIKI_MCP_CONFIG` | path to .mcp.json |
+| `--spill-dir` | *(derived)* | directory for clipped tool output |
+| `--max-output-tokens` | `0` (default 16384) | per-turn output token cap |
+| `--system-prompt` | — | override the base system prompt |
+| `--append-system-prompt` | — | append to the system prompt |
+| `--fake-turns` | — | replay a recorded turn file for testing |

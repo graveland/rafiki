@@ -73,6 +73,10 @@ type RuntimeOptions struct {
 	// RTK selects the bash tool's rtk mode: "auto", "on", or "off".
 	// Empty means auto. See tools.ParseRTKMode.
 	RTK string
+
+	// ToolsWeb enables the fundi webfetch and websearch tools when true.
+	// Default false: fundi runs unattended and may have no egress.
+	ToolsWeb bool
 }
 
 // resolveContent loads the cwd-relative context files and discovers skills.
@@ -163,6 +167,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		OutputPolicy: outputPolicy,
 		Skills:       discovered,
 		RTK:          tools.ParseRTKMode(opts.RTK),
+		Web:          opts.ToolsWeb,
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 

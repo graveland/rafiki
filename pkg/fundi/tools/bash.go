@@ -48,13 +48,20 @@ func (BashBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 }
 
 func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	return &bashTool{BashBlueprint: BashBlueprint{}, p: opts.OutputPolicy, cwd: opts.Cwd}, nil
+	bt := &bashTool{
+		BashBlueprint: BashBlueprint{},
+		p:             opts.OutputPolicy,
+		cwd:           opts.Cwd,
+		rtkMode:       opts.RTK,
+	}
+	return bt, nil
 }
 
 type bashTool struct {
 	BashBlueprint
 	p        OutputPolicy
 	cwd      string
+	rtkMode  RTKMode
 	fallback atomic.Int64
 }
 
@@ -72,7 +79,14 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, "bash", "-c", in.Command)
+	// Try rtk rewrite first. When applied, exec the rtk argv directly
+	// instead of wrapping in bash -c.
+	var cmd *exec.Cmd
+	if rtkArgv, rtkApplied := rtkRewrite(bt.rtkMode, in.Command); rtkApplied {
+		cmd = exec.CommandContext(cctx, rtkArgv[0], rtkArgv[1:]...)
+	} else {
+		cmd = exec.CommandContext(cctx, "bash", "-c", in.Command)
+	}
 	cmd.Dir = bt.cwd
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

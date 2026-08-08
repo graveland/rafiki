@@ -130,6 +130,10 @@ const (
 	// rtk for output compression: "auto" (default, use it when installed),
 	// "on" (require it), or "off".
 	BashRTK = "RAFIKI_BASH_RTK"
+
+	// ToolsWeb, when "1", enables the fundi webfetch and websearch tools.
+	// Default off: fundi runs unattended and may have no egress.
+	ToolsWeb = "RAFIKI_TOOLS_WEB"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the
