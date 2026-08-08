@@ -13,7 +13,9 @@ import (
 func TestWebfetchFetchesHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte("hello from http"))
+		if _, err := w.Write([]byte("hello from http")); err != nil {
+			panic(err)
+		}
 	}))
 	defer srv.Close()
 
@@ -63,7 +65,9 @@ func TestWebfetchCapsBodyAt100KB(t *testing.T) {
 	payload := strings.Repeat("x", 200*1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte(payload))
+		if _, err := w.Write([]byte(payload)); err != nil {
+			panic(err)
+		}
 	}))
 	defer srv.Close()
 
@@ -88,7 +92,9 @@ func TestWebfetchCapsBodyAt100KB(t *testing.T) {
 
 func TestWebfetchBlocksLoopback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("secret"))
+		if _, err := w.Write([]byte("secret")); err != nil {
+			panic(err)
+		}
 	}))
 	defer srv.Close()
 

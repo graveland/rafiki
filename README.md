@@ -226,6 +226,27 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_URL` | client-side: remote rafikid URL to dial (e.g. `tls://rafiki.graveland.dev:443`). Wins over `RAFIKI_SOCKET` |
+| `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
+
+**Web access (webfetch / websearch).** The fundi runtime includes two opt-in web
+tools: `webfetch` fetches a URL and returns its text, and `websearch` queries
+DuckDuckGo and returns the top results. Both are **off by default** because a
+fundi child may run unattended without egress; set `RAFIKI_TOOLS_WEB=1` in the
+**daemon's** environment to enable them. When disabled the tools never appear in
+`tools[]` — they decline materialization rather than advertising an operation
+the model cannot use.
+
+**Security posture:**
+- `webfetch` resolves the host and checks the **resolved IP**, not the hostname
+  string, before making a request. Blocked: loopback (`127.0.0.0/8`, `::1`),
+  link-local (`169.254.0.0/16`, notably the cloud metadata endpoint at
+  `169.254.169.254`), RFC 1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`), and IPv6 unique local (`fc00::/7`). A DNS name pointing
+  at a private address is blocked.
+- Body reads are capped at 100 KB via `io.LimitReader` — the cap is enforced
+  **while reading**, not after, so a hostile server cannot exhaust memory.
+- `websearch` uses DuckDuckGo Lite, the anonymous HTML-only endpoint — no API
+  key, no credential plumbing. Results are limited to 20 (default 10).
 
 These must reach the **daemon's** environment, not your shell's — see
 `.env.example`, which documents why and how to verify it.
