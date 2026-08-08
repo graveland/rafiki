@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/skills"
 )
 
 // fakeRuntimeOptions returns options that build a working engine with no API
@@ -126,6 +129,66 @@ func TestBuildRuntimeNilPoolIsInMemory(t *testing.T) {
 	defer shutdown()
 	if eng == nil {
 		t.Fatal("nil engine")
+	}
+}
+
+// hasToolNamed reports whether registry advertises a tool with the given
+// name, via the same Definitions() list sent to the model on every turn.
+func hasToolNamed(registry *tools.Registry, name string) bool {
+	for _, def := range registry.Definitions() {
+		if def.OfTool != nil && def.OfTool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestMaterializeAllOmitsSkillToolWithZeroSkills is the regression guard for
+// the refactor that swapped an explicit, guarded skill-tool registration for
+// tools.DefaultBlueprint.MaterializeAll. MaterializeAll used to register every
+// blueprint unconditionally, including SkillBlueprint, whose Materialize
+// happily built a working "skill" tool over an empty skill set. That tool
+// could only ever respond "unknown skill; available skills: " to every call,
+// and it silently broke --no-skills' promise (usage.go: "disables skill
+// discovery and the skill tool entirely") since NoSkills only ever affected
+// discovery, never registration.
+func TestMaterializeAllOmitsSkillToolWithZeroSkills(t *testing.T) {
+	registry := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{})
+	if hasToolNamed(registry, "skill") {
+		t.Fatal("skill tool advertised despite zero discovered skills")
+	}
+}
+
+// TestMaterializeAllIncludesSkillToolWithSkills is the positive-side
+// discriminator: it proves SkillBlueprint declines conditionally on
+// opts.Skills, rather than the skill tool having been dropped outright.
+func TestMaterializeAllIncludesSkillToolWithSkills(t *testing.T) {
+	registry := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
+		Skills: []skills.SkillMeta{{Name: "reviewer", Description: "reviews code"}},
+	})
+	if !hasToolNamed(registry, "skill") {
+		t.Fatal("skill tool missing despite a non-empty discovered skill set")
+	}
+}
+
+// TestBuildRuntimeNoSkillsOmitsSkillTool exercises the same guarantee through
+// the real BuildRuntime → resolveContent → MaterializeAll path, pinning that
+// NoSkills actually reaches materialization and not just discovery.
+func TestBuildRuntimeNoSkillsOmitsSkillTool(t *testing.T) {
+	opts := fakeRuntimeOptions(t, t.TempDir())
+	opts.NoSkills = true
+
+	_, discovered, err := resolveContent(opts)
+	if err != nil {
+		t.Fatalf("resolveContent: %v", err)
+	}
+	if len(discovered) != 0 {
+		t.Fatalf("NoSkills discovered %d skills, want 0", len(discovered))
+	}
+
+	registry := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{Skills: discovered})
+	if hasToolNamed(registry, "skill") {
+		t.Fatal("skill tool advertised with --no-skills set")
 	}
 }
 

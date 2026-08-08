@@ -15,13 +15,6 @@ const (
 		"descriptions are listed in the system prompt's skills inventory. Call " +
 		"this with the skill's name when its description matches what you're " +
 		"about to do."
-	skillSchema = `{
-		"type": "object",
-		"properties": {
-			"skill": {"type": "string", "description": "The name of the skill to load, as it appears in the skills inventory."}
-		},
-		"required": ["skill"]
-	}`
 )
 
 func init() { DefaultBlueprint.Register(&SkillBlueprint{}) }
@@ -43,7 +36,15 @@ func (SkillBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 	panic("blueprint: call Materialize first")
 }
 
+// Materialize declines (returns a nil Tool) when there are no skills to load.
+// A skill tool over an empty inventory can only ever answer `unknown skill %q;
+// available skills: `, so advertising it burns a turn for nothing — and
+// --no-skills, which reaches here as an empty opts.Skills, promises in its own
+// help text to disable "skill discovery and the skill tool entirely".
 func (SkillBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	if len(opts.Skills) == 0 {
+		return nil, nil
+	}
 	byName := make(map[string]skillspkg.SkillMeta, len(opts.Skills))
 	names := make([]string, 0, len(opts.Skills))
 	for _, s := range opts.Skills {

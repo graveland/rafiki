@@ -124,10 +124,8 @@ func dbUserFramesWithTools(m anthropic.MessageParam, uses map[string]toolUseInfo
 		// This is a user prompt or steer — emit message_start/message_end.
 		text := texts[0]
 		msg := child.PiUserMessage{Role: "user", ID: id, Content: text, Timestamp: ts}
-		frames = append(frames,
-			mustFrame(child.PiUserMessageStart(msg)),
-			mustFrame(child.PiUserMessageEnd(msg)),
-		)
+		frames = appendFrame(frames, child.PiUserMessageStart(msg))
+		frames = appendFrame(frames, child.PiUserMessageEnd(msg))
 		piMsgs = appendPiMsg(piMsgs, msg)
 	}
 
@@ -225,9 +223,20 @@ func mustFrame(v any) json.RawMessage {
 
 // appendPiMsg marshals v and appends the result to out. Nil entries are
 // skipped, not appended.
+//
+// Callers sometimes pass an already-marshaled json.RawMessage (e.g. the
+// return of mustFrame, which is nil when marshaling failed upstream). A nil
+// or empty json.RawMessage must be special-cased BEFORE the marshal below:
+// json.RawMessage.MarshalJSON returns the literal `null` for an empty
+// receiver, never a nil slice or an error, so checking json.Marshal's result
+// for b == nil never catches this case — it would instead append a literal
+// JSON `null` into agent_end.messages.
 func appendPiMsg(out []json.RawMessage, v any) []json.RawMessage {
+	if raw, ok := v.(json.RawMessage); ok && len(raw) == 0 {
+		return out
+	}
 	b, err := json.Marshal(v)
-	if err != nil || b == nil {
+	if err != nil {
 		return out
 	}
 	return append(out, b)

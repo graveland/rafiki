@@ -70,6 +70,10 @@ type ToolOpts struct {
 // when its concrete Execute needs runtime state. Blueprints without runtime
 // state (glob, grep) are their own concrete tools and do not implement
 // Materializer.
+//
+// Returning (nil, nil) declines the tool for these opts: MaterializeAll leaves
+// it out of the Registry entirely. Use that instead of returning a tool that
+// can only fail when opts lack what it needs.
 type Materializer interface {
 	Materialize(opts ToolOpts) (Tool, error)
 }

@@ -260,3 +260,44 @@ func TestDBToPiFrames_AgentEndCarriesMessages(t *testing.T) {
 		}
 	}
 }
+
+// TestAppendPiMsg_SkipsNilRawMessage guards the fix for appendPiMsg's dead
+// nil check: a nil json.RawMessage (what mustFrame returns when marshaling
+// fails) must be skipped, not appended as a literal JSON `null`.
+// json.Marshal(json.RawMessage(nil)) returns the 4 bytes `null` with a nil
+// error, which is why the old `b == nil` check after marshaling never fired.
+func TestAppendPiMsg_SkipsNilRawMessage(t *testing.T) {
+	out := appendPiMsg(nil, json.RawMessage(nil))
+	if len(out) != 0 {
+		t.Fatalf("got %d entries, want 0 (nil json.RawMessage must be skipped)", len(out))
+	}
+
+	out = appendPiMsg(nil, json.RawMessage{})
+	if len(out) != 0 {
+		t.Fatalf("got %d entries, want 0 (empty json.RawMessage must be skipped)", len(out))
+	}
+}
+
+// TestAppendPiMsg_AppendsNonNilValues is the positive-side discriminator for
+// TestAppendPiMsg_SkipsNilRawMessage: both an already-marshaled
+// json.RawMessage and a raw struct must still be appended, so the nil guard
+// above cannot be satisfied by a change that skips everything.
+func TestAppendPiMsg_AppendsNonNilValues(t *testing.T) {
+	out := appendPiMsg(nil, json.RawMessage(`{"role":"user"}`))
+	if len(out) != 1 {
+		t.Fatalf("got %d entries, want 1 for a non-nil json.RawMessage", len(out))
+	}
+	if string(out[0]) != `{"role":"user"}` {
+		t.Errorf("entry = %s, want the original raw message unchanged", out[0])
+	}
+
+	out = appendPiMsg(nil, struct {
+		Role string `json:"role"`
+	}{Role: "assistant"})
+	if len(out) != 1 {
+		t.Fatalf("got %d entries, want 1 for a plain struct", len(out))
+	}
+	if string(out[0]) != `{"role":"assistant"}` {
+		t.Errorf("entry = %s, want marshaled struct", out[0])
+	}
+}

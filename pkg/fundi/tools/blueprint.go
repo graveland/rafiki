@@ -58,6 +58,12 @@ func BuildDef(t Tool) anthropic.ToolUnionParam {
 // MaterializeAll iterates every registered blueprint and builds a per-agent
 // Registry. Blueprints that implement Materializer are materialized with opts;
 // blueprints that don't are registered directly as their own concrete tools.
+//
+// A Materializer may decline to produce a tool for a given opts by returning a
+// nil Tool and a nil error; the blueprint is then simply absent from the
+// returned Registry. That is how a tool whose whole purpose depends on data
+// opts does not carry (SkillBlueprint with zero skills) keeps itself out of
+// the model's tools[] instead of advertising an operation that can only fail.
 func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 	r := NewRegistry()
 	for _, bp := range br.All() {
@@ -67,6 +73,9 @@ func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 			t, err = m.Materialize(opts)
 			if err != nil {
 				panic(fmt.Sprintf("tools: MaterializeAll: %q: %v", bp.Name(), err))
+			}
+			if t == nil {
+				continue
 			}
 		} else {
 			t = bp

@@ -37,6 +37,20 @@ func (m *matTestBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 	return &testEchoTool{name: "mat", result: "materialized with cwd=" + opts.Cwd}, nil
 }
 
+// decliningTestBlueprint is a Materializer that opts out for empty opts, the
+// way SkillBlueprint does when there are no skills to load.
+type decliningTestBlueprint struct {
+	testEchoTool
+}
+
+func (decliningTestBlueprint) Name() string { return "declines" }
+func (d *decliningTestBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	if opts.Cwd == "" {
+		return nil, nil
+	}
+	return &testEchoTool{name: "declines", result: "materialized"}, nil
+}
+
 func TestBlueprintRegistryRegisterAndAll(t *testing.T) {
 	br := &BlueprintRegistry{}
 	t1 := &testEchoTool{name: "echo", desc: "echoes", schema: Schema{Type: "object"}}
@@ -116,6 +130,29 @@ func TestMaterializeAllStatelessTools(t *testing.T) {
 	out, err := r.Execute(context.Background(), "a", json.RawMessage(`{}`))
 	if err != nil || out != "a ok" {
 		t.Fatalf("Execute(a) = (%q, %v)", out, err)
+	}
+}
+
+// TestMaterializeAllSkipsDecliningMaterializer pins the (nil, nil) contract:
+// a blueprint that declines is absent from the Registry entirely rather than
+// registered as a nil Tool (which would panic on the next Definitions call).
+func TestMaterializeAllSkipsDecliningMaterializer(t *testing.T) {
+	br := &BlueprintRegistry{}
+	br.Register(&decliningTestBlueprint{})
+	br.Register(&testEchoTool{name: "kept", result: "kept ok"})
+
+	declined := br.MaterializeAll(ToolOpts{})
+	if got := len(declined.Definitions()); got != 1 {
+		t.Fatalf("declining blueprint: got %d definitions, want 1 (only \"kept\")", got)
+	}
+	if _, err := declined.Execute(context.Background(), "declines", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("declined tool is still executable")
+	}
+
+	// Same registry, opts that satisfy it: the tool comes back.
+	accepted := br.MaterializeAll(ToolOpts{Cwd: "/tmp"})
+	if got := len(accepted.Definitions()); got != 2 {
+		t.Fatalf("satisfied blueprint: got %d definitions, want 2", got)
 	}
 }
 

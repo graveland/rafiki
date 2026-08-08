@@ -76,10 +76,13 @@ func TestSkillToolUnknownNameListsAvailable(t *testing.T) {
 }
 
 // TestSkillToolRegistersUnderName asserts the tool is registered as "skill"
-// and appears in Definitions().
+// and appears in Definitions(). It must materialize with a non-empty skill
+// set: Materialize declines (returns a nil Tool) for an empty one, which
+// TestSkillBlueprintDeclinesWithoutSkills covers.
 func TestSkillToolRegistersUnderName(t *testing.T) {
 	r := NewRegistry()
-	skillT, _ := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: nil})
+	meta := writeSkill(t, t.TempDir(), "reviewer", "reviews code", "body\n")
+	skillT, _ := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: []skillspkg.SkillMeta{meta}})
 	r.Register(skillT)
 
 	found := false
@@ -90,5 +93,29 @@ func TestSkillToolRegistersUnderName(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected a \"skill\" tool to be registered")
+	}
+}
+
+// TestSkillBlueprintDeclinesWithoutSkills pins the contract that keeps a
+// useless skill tool out of the model's tools[]: with no skills discovered
+// (also how --no-skills arrives here), Materialize returns a nil Tool and a
+// nil error rather than a tool whose every call answers "unknown skill".
+func TestSkillBlueprintDeclinesWithoutSkills(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		skills []skillspkg.SkillMeta
+	}{
+		{"nil", nil},
+		{"empty", []skillspkg.SkillMeta{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: tc.skills})
+			if err != nil {
+				t.Fatalf("Materialize returned an error: %v", err)
+			}
+			if got != nil {
+				t.Fatalf("Materialize returned a tool %q, want nil (declined)", got.Name())
+			}
+		})
 	}
 }
