@@ -168,6 +168,43 @@ func TestListenTCP_NonAuthFirstFrame(t *testing.T) {
 	}
 }
 
+// TestListenTCP_PipelinedRequestAfterAuth guards against a regression where
+// authHandshake's FrameReader (and whatever it had already buffered off the
+// socket via its internal bufio.Reader) was discarded when handleConn wrapped
+// the raw conn in a brand-new FrameReader. A real client (control.DialURL)
+// writes the ctrl_auth frame and returns immediately, so its first real
+// request frequently lands in the same TCP segment / same read syscall as
+// the auth frame — anything the auth handshake's bufio.Reader pulled off the
+// socket past the auth frame's trailing newline must survive into the
+// request-handling loop, or the request is silently dropped and the client
+// hangs waiting for a response that will never come.
+//
+// This test writes both frames in a single conn.Write call (no dial/write
+// interleaving that a scheduler could paper over) and asserts the server
+// still answers the second frame.
+func TestListenTCP_PipelinedRequestAfterAuth(t *testing.T) {
+	addr, cleanup := tlsServer(t, "secret")
+	defer cleanup()
+
+	conn := tlsDialRaw(t, addr)
+	defer conn.Close()
+
+	auth := `{"type":"ctrl_auth","id":"0","token":"secret"}` + "\n"
+	req := `{"type":"ctrl_status","id":"1"}` + "\n"
+	if _, err := conn.Write([]byte(auth + req)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	resp := readFrameString(t, conn)
+	want := `echo:{"type":"ctrl_status","id":"1"}`
+	if resp != want {
+		t.Fatalf("pipelined request after auth: got %q, want %q (request frame was dropped)", resp, want)
+	}
+}
+
 func TestListenTCP_PlaintextRefused(t *testing.T) {
 	addr, cleanup := tlsServer(t, "secret")
 	defer cleanup()

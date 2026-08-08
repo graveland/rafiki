@@ -139,7 +139,7 @@ func (s *Server) acceptLoop() {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.handleConn(conn)
+			s.handleConn(conn, nil)
 		}()
 	}
 }
@@ -243,7 +243,11 @@ func (c *netConn) Deliver(frame []byte) {
 	}
 }
 
-func (s *Server) handleConn(conn net.Conn) {
+// handleConn drives the frame-read loop for one connection. r, if non-nil,
+// is a FrameReader already positioned past a prior auth handshake read (see
+// the comment above its use below); pass nil for connections with no
+// handshake (the plain UDS listener).
+func (s *Server) handleConn(conn net.Conn, r *protocol.FrameReader) {
 	defer conn.Close()
 
 	// Close this connection when the server shuts down so ReadFrame unblocks.
@@ -270,7 +274,18 @@ func (s *Server) handleConn(conn net.Conn) {
 	}()
 
 	defer s.handler.HandleClose(nc)
-	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
+	// r is non-nil when a preceding auth handshake (TCP/TLS path) already
+	// constructed a FrameReader and read the auth frame off conn: that
+	// bufio.Reader may have buffered bytes past the auth frame's trailing
+	// newline (a client's first real request landing in the same TCP
+	// segment as ctrl_auth is common — client.DialURL writes auth and
+	// returns immediately). Reusing it, instead of wrapping conn in a
+	// second FrameReader here, is what keeps those buffered bytes from
+	// being silently dropped. The plain UDS path (Listen/acceptLoop) has
+	// no handshake, so r is nil and gets a fresh FrameReader as before.
+	if r == nil {
+		r = protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
+	}
 	for {
 		frame, err := r.ReadFrame()
 		if err != nil {
@@ -364,50 +379,78 @@ func (s *Server) acceptTCPLoop(wantToken string) {
 			return
 		}
 
-		// Auth handshake: read the first frame, validate it is ctrl_auth
-		// with the correct token. This blocks the accept loop for one
-		// frame read per connection — acceptable because auth is tiny and
-		// clients are expected to send it immediately after TLS handshake.
-		if !s.authHandshake(conn, wantToken) {
-			conn.Close()
-			continue
-		}
-
+		// Auth handshake runs inside the per-connection goroutine, not
+		// here: it used to run inline in this loop, which meant a client
+		// that completed the TLS handshake and then sent nothing wedged
+		// the accept loop forever — no further connection, from any
+		// client, would ever be accepted. authHandshakeTimeout bounds the
+		// read so a stalled client only ever costs one goroutine, not the
+		// whole control plane.
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.handleConn(conn)
+			r, ok := s.authHandshake(conn, wantToken)
+			if !ok {
+				conn.Close()
+				return
+			}
+			s.handleConn(conn, r)
 		}()
 	}
 }
 
+// authHandshakeTimeout bounds how long a TCP client has to send a valid
+// ctrl_auth frame after TLS establishes. Set as a read deadline for the
+// duration of the handshake only and cleared before control passes to
+// handleConn, so it never affects the normal request path's read timing.
+const authHandshakeTimeout = 10 * time.Second
+
 // authHandshake reads one frame from conn and validates it as a ctrl_auth
-// with a matching token. Returns true on success. On failure writes the
-// appropriate error frame before returning false.
-func (s *Server) authHandshake(conn net.Conn, wantToken string) bool {
+// with a matching token. On success it returns the FrameReader used to read
+// that frame (which may already hold buffered bytes from a request the
+// client pipelined right after auth — see handleConn) and true. On failure
+// it writes the appropriate error frame and returns (nil, false).
+func (s *Server) authHandshake(conn net.Conn, wantToken string) (*protocol.FrameReader, bool) {
 	remote := conn.RemoteAddr()
+
+	if err := conn.SetReadDeadline(time.Now().Add(authHandshakeTimeout)); err != nil {
+		slog.Warn("server: auth: set read deadline", "remote", remote, "error", err)
+		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
+		return nil, false
+	}
+
 	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
 	frame, err := r.ReadFrame()
 	if err != nil {
 		slog.Warn("server: auth read first frame", "remote", remote, "error", err)
 		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
-		return false
+		return nil, false
 	}
 
 	var req protocol.AuthRequest
 	if err := json.Unmarshal(frame, &req); err != nil || req.Type != protocol.TypeCtrlAuth {
 		slog.Warn("server: auth: non-ctrl_auth first frame", "remote", remote)
 		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
-		return false
+		return nil, false
 	}
 
 	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(wantToken)) != 1 {
 		slog.Warn("server: auth: invalid token", "remote", remote)
 		s.writeAuthError(conn, protocol.ErrAuthInvalid, "invalid auth token")
-		return false
+		return nil, false
 	}
 
-	return true
+	// Clear the deadline before handleConn takes over: a stale deadline
+	// left in place would leak into the normal request path and cause
+	// spurious read timeouts unrelated to authHandshakeTimeout's purpose.
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		slog.Warn("server: auth: clear read deadline", "remote", remote, "error", err)
+		// Fall through: the handshake itself succeeded, and refusing the
+		// connection over a failed deadline-clear would be a worse outcome
+		// than the (rare) risk of a stale deadline on this conn.
+	}
+
+	return r, true
 }
 
 // writeAuthError sends an auth-failure ctrl_response frame and closes the
