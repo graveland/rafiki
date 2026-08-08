@@ -56,6 +56,12 @@ type Controller struct {
 	// conversation is in-memory. Owned and closed by main.go, not here.
 	pool *pgxpool.Pool
 
+	// rawTrace, when non-nil, enables raw LLM API request/response capture to
+	// the debug raw_http_request hypertable. Created at daemon startup when
+	// RAFIKI_RECORD_REQUESTS=1. Handed to agent children via
+	// fundi.RuntimeOptions.RawTrace.
+	rawTrace *routing.RawTraceStore
+
 	// insights answers the ctrl_conversation_* RPCs. Always constructed —
 	// agentcli/local.New is nil-pool-safe, so a nil pool just means every
 	// read method below returns local.ErrNoPool instead of panicking.
@@ -118,7 +124,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	c.catalog = cat
 }
 
-func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, baseCtx context.Context) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *routing.RawTraceStore, baseCtx context.Context) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -136,6 +142,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		stateDir:    stateDir,
 		graceWindow: gw,
 		pool:        pool,
+		rawTrace:    rawTrace,
 		insights:    local.New(local.Options{Pool: pool}),
 		baseCtx:     baseCtx,
 	}

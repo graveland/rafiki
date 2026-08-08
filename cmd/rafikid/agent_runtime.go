@@ -146,6 +146,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		}
 	}
 	ro.AutoResume = autoResume
+	ro.RawTrace = c.rawTrace
 	return ro, nil
 }
 

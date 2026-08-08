@@ -25,7 +25,7 @@ func TestIntegration_CtrlConversationStats_NoAgentDB(t *testing.T) {
 	logsDir := filepath.Join(dir, "logs")
 
 	st := childstore.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, t.Context())
+	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, t.Context())
 
 	handler := control.NewDispatch(ctrl)
 	srv, err := control.Listen(socketPath, handler)
