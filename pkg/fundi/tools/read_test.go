@@ -394,7 +394,7 @@ func TestReadToolRoundTripContinueOffset(t *testing.T) {
 		nextOffset := 0
 		for _, line := range rawLines {
 			if strings.HasPrefix(line, "[showing lines") {
-				fmt.Sscanf(line, "[showing lines %d-%d; more lines remain — pass offset=%d to continue]", new(int), new(int), &nextOffset)
+				_, _ = fmt.Sscanf(line, "[showing lines %d-%d; more lines remain — pass offset=%d to continue]", new(int), new(int), &nextOffset)
 				break
 			}
 			// Each line is like "     1\tL000001:..."
