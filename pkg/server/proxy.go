@@ -54,10 +54,16 @@ type MessagesProxy struct {
 	effortCache *routing.EffortCache
 
 	metrics *Metrics // optional Prometheus instrumentation
+
+	rawTrace *routing.RawTraceStore // nil when disabled
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
 func (p *MessagesProxy) SetMetrics(m *Metrics) { p.metrics = m }
+
+// SetRawTrace enables raw HTTP request/response capture for debug. Pass nil to
+// disable (the default).
+func (p *MessagesProxy) SetRawTrace(s *routing.RawTraceStore) { p.rawTrace = s }
 
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
@@ -679,6 +685,25 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
 		"stop_reason", stop, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
+	// Raw trace: record the debug request/response pair.
+	if p.rawTrace != nil {
+		respStatus := resp.StatusCode
+		convID := cr.convID
+		p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
+			Source:         "proxy",
+			Model:          model,
+			Upstream:       upstream,
+			ReqMethod:      "POST",
+			ReqPath:        "/v1/messages",
+			ReqHeaders:     upstreamReqHeaders(r),
+			ReqBody:        cr.reqBody,
+			RespStatus:     &respStatus,
+			RespHeaders:    upstreamRespHeaders(resp),
+			RespBody:       acc.Bytes(),
+			LatencyMS:      int(elapsed.Milliseconds()),
+			ConversationID: &convID,
+		})
+	}
 	if !cr.on {
 		return
 	}
@@ -827,6 +852,26 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	}
 	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	// Raw trace: record the failed request/response pair.
+	if p.rawTrace != nil {
+		respStatus := resp.StatusCode
+		convID := cr.convID
+		p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
+			Source:         "proxy",
+			Model:          model,
+			Upstream:       upstream,
+			ReqMethod:      "POST",
+			ReqPath:        "/v1/messages",
+			ReqHeaders:     upstreamReqHeaders(r),
+			ReqBody:        cr.reqBody,
+			RespStatus:     &respStatus,
+			RespHeaders:    upstreamRespHeaders(resp),
+			RespBody:       raw,
+			Error:          errBody,
+			LatencyMS:      int(elapsed.Milliseconds()),
+			ConversationID: &convID,
+		})
+	}
 	// Resolve the failed turn and decompose the request (so the turn is inspectable —
 	// the messages/prefix that triggered the error are what you need to see) under one
 	// shared detached context; r.Context() may already be canceled (client hung up).
@@ -977,4 +1022,33 @@ func countRequestMessages(reqBody []byte) int {
 		return 0
 	}
 	return len(body.Messages)
+}
+
+// upstreamReqHeaders builds a JSON object of headers the proxy forwarded to the
+// upstream. API key values are masked.
+func upstreamReqHeaders(r *http.Request) json.RawMessage {
+	h := map[string]string{
+		"Content-Type": "application/json",
+	}
+	if v := r.Header.Get("anthropic-version"); v != "" {
+		h["anthropic-version"] = v
+	}
+	if b := r.Header.Get("anthropic-beta"); b != "" {
+		h["anthropic-beta"] = b
+	}
+	out, _ := json.Marshal(h)
+	return out
+}
+
+// upstreamRespHeaders builds a JSON object of headers the upstream returned.
+func upstreamRespHeaders(resp *http.Response) json.RawMessage {
+	h := map[string]string{}
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		h["Content-Type"] = ct
+	}
+	if rid := resp.Header.Get("x-request-id"); rid != "" {
+		h["x-request-id"] = rid
+	}
+	out, _ := json.Marshal(h)
+	return out
 }
