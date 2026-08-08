@@ -55,17 +55,18 @@ func spanAttrs(sp otlpSpan) map[string]string {
 	return m
 }
 
-// parseNanos parses an OTLP nanosecond-unix timestamp string, returning a
-// zero time on failure (the span is still valid, just missing timing).
-func parseNanos(s string) time.Time {
+// parseNanos parses an OTLP nanosecond-unix timestamp string. ok is false
+// when s is empty or malformed, in which case the returned time is the zero
+// value and must not be used by the caller.
+func parseNanos(s string) (t time.Time, ok bool) {
 	if s == "" {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	var ns int64
 	if _, err := fmt.Sscanf(s, "%d", &ns); err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return time.Unix(0, ns)
+	return time.Unix(0, ns), true
 }
 
 // HandleOTLP is an HTTP handler that accepts OTLP JSON broadcast traces from
@@ -99,12 +100,22 @@ func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		// RAFIKI_BROADCAST_LISTEN is deliberately auth-less (only OpenRouter is
+		// expected to reach it), so a client that hangs mid-request or a stalled
+		// DB pool must not leave this goroutine (and its DB connection) blocked
+		// forever. The batch write is also fire-and-forget from OR's side — we
+		// always answer 200 regardless of outcome — so a client disconnect
+		// partway through a multi-span batch shouldn't abort inserts already in
+		// flight; derive from r.Context() for tracing/cancellation-propagation
+		// hygiene but strip its cancellation, bounding total work with an
+		// explicit deadline instead.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+		defer cancel()
 		count := 0
 		for _, rs := range payload.ResourceSpans {
 			for _, ss := range rs.ScopeSpans {
 				for _, sp := range ss.Spans {
-					if err := insertSpan(ctx, pool, insertSQL, sp, body); err != nil {
+					if err := insertSpan(ctx, pool, insertSQL, sp, logger); err != nil {
 						logger.Warn("or_broadcast: insert span failed", "span_id", sp.SpanID, "error", err)
 						continue
 					}
@@ -118,7 +129,7 @@ func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 	}
 }
 
-func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan, rawBody []byte) error {
+func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan, logger *slog.Logger) error {
 	attrs := spanAttrs(sp)
 
 	sessionID := attrs["session.id"]
@@ -135,12 +146,23 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 
 	costUSD := parseFloatOr(attrs["gen_ai.usage.cost"], 0)
 
-	createdAt := parseNanos(sp.StartUnix)
+	createdAt, ok := parseNanos(sp.StartUnix)
+	if !ok {
+		// created_at is TIMESTAMPTZ NOT NULL and the hypertable's
+		// tsdb.partition_column: the zero time.Time (0001-01-01) would create a
+		// far-past chunk and poison every time-ordered query and retention
+		// policy on openrouter.broadcast. Fall back to "now" and log it loudly
+		// enough to notice if OpenRouter starts omitting the attribute.
+		createdAt = time.Now()
+		logger.Warn("or_broadcast: missing/invalid startTimeUnixNano, falling back to now",
+			"span_id", sp.SpanID, "trace_id", sp.TraceID, "start_time_unix_nano", sp.StartUnix)
+	}
+
 	latencyMS := 0
 	if sp.StartUnix != "" && sp.EndUnix != "" {
-		start := parseNanos(sp.StartUnix)
-		end := parseNanos(sp.EndUnix)
-		if !start.IsZero() && !end.IsZero() {
+		start, startOK := parseNanos(sp.StartUnix)
+		end, endOK := parseNanos(sp.EndUnix)
+		if startOK && endOK {
 			latencyMS = int(end.Sub(start).Milliseconds())
 		}
 	}
@@ -150,7 +172,16 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 		attrs["gen_ai.response.stop_reason"],
 	)
 
-	_, err := pool.Exec(ctx, sql,
+	// raw_payload stores this span's own OTLP JSON for schema-evolution
+	// debugging (see migration 0009's comment) — not the whole batch body,
+	// which would duplicate the same multi-MB blob into every row of a
+	// multi-span payload.
+	rawSpan, err := json.Marshal(sp)
+	if err != nil {
+		return fmt.Errorf("marshal span for raw_payload: %w", err)
+	}
+
+	_, err = pool.Exec(ctx, sql,
 		nullStr(sessionID),
 		nullStr(generationID),
 		nullStr(sp.TraceID),
@@ -164,7 +195,7 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 		nullStr(provider),
 		nullStr(finishReason),
 		createdAt,
-		rawBody,
+		rawSpan,
 	)
 	return err
 }
