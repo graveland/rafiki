@@ -23,11 +23,13 @@ FROM debian:trixie-slim AS release
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -r -g 1000 rafiki && useradd -r -u 1000 -g rafiki -s /usr/sbin/nologin rafiki
+RUN groupadd -r -g 1000 rafiki && useradd -r -m -u 1000 -g rafiki -s /usr/sbin/nologin rafiki
 
 COPY --from=build /out/rafikid /usr/local/bin/rafikid
 COPY --from=build /out/rafiki /usr/local/bin/rafiki
 
 EXPOSE 8035 8036
+
+USER rafiki
 
 ENTRYPOINT ["rafikid"]
