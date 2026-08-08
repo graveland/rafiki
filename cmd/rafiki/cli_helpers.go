@@ -20,11 +20,21 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// mustDial connects to the daemon's UDS using the --socket flag value
-// (default: client.DefaultSocketPath, the XDG runtime path). Exits with code 2
-// on failure so connection errors are distinguishable from user-input errors
-// (exit 1).
+// mustDial connects to the daemon. If RAFIKI_CONTROL_URL is set it dials the
+// remote daemon over TCP+TLS; otherwise it connects to the local UDS.
+// The --socket flag overrides the local UDS path when no CONTROL_URL is set.
+// Exits with code 2 on failure so connection errors are distinguishable from
+// user-input errors (exit 1).
 func mustDial(cmd *cobra.Command) *client.Client {
+	if url := paths.Get(paths.ControlURL); url != "" {
+		token := paths.ControlTokenFromEnv()
+		c, err := client.DialURL(cmdCtx(cmd), url, token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: connect %s: %v\n", url, err)
+			os.Exit(2)
+		}
+		return c
+	}
 	socket, _ := cmd.Flags().GetString("socket")
 	c, err := client.Dial(socket)
 	if err != nil {
