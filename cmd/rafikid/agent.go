@@ -48,6 +48,7 @@ type agentFlags struct {
 	spillDir           string
 	name               string
 	fakeTurns          string
+	recordRequests     bool
 }
 
 // parseAgentFlags parses the rafikid agent flag set. It is a pure function of

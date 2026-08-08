@@ -86,6 +86,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind fundi (default: <cwd>/.mcp.json, else $RAFIKI_MCP_CONFIG or <config dir>/mcp.json)")
 	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see RAFIKI_DEFAULT_LABELS")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
+	cmd.Flags().Bool("record-requests", false, "Record raw LLM API requests and responses for debugging")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -185,6 +186,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		env = collectCallerEnv()
 	}
 
+	recordRequests, _ := cmd.Flags().GetBool("record-requests")
+
 	return protocol.SpawnRequest{
 		Type:               protocol.TypeCtrlSpawn,
 		Name:               name,
@@ -205,6 +208,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		MCPConfig:          mcpConfig,
 		Labels:             labels,
 		Env:                env,
+		RecordRequests:     recordRequests,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
 		// caller-forwarded vars win on duplicate keys.  This is what users
 		// usually want — SSH_AUTH_SOCK, *_API_KEY, GOOGLE_APPLICATION_CREDENTIALS,

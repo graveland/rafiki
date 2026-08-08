@@ -51,6 +51,7 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: <XDG_CACHE_HOME>/rafiki/spill/<ref>)")
 	fs.StringVar(&f.name, "name", "", "session name reported through get_state")
 	fs.IntVar(&f.maxOutputTokens, "max-output-tokens", 0, "per-turn output token cap sent to upstream (0 = default 16384)")
+	fs.BoolVar(&f.recordRequests, "record-requests", false, "Record raw LLM API requests and responses for debugging")
 
 	return fs
 }

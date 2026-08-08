@@ -2619,6 +2619,9 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 	if req.MCPConfig != "" {
 		argv = append(argv, "--mcp-config", req.MCPConfig)
 	}
+	if req.RecordRequests {
+		argv = append(argv, "--record-requests")
+	}
 	argv = append(argv, "--spill-dir", agentSpillDir(stateDir, childID))
 
 	// Extra args are appended last (last-flag-wins override), same convention

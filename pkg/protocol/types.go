@@ -228,6 +228,11 @@ type SpawnRequest struct {
 	// than in Labels) because the `rafiki/` namespace is reserved for daemon
 	// auto-labels; user-supplied Labels with that prefix are rejected.
 	ResumedFromSession string `json:"resumedFromSession,omitempty"`
+
+	// RecordRequests, when true, records raw LLM API request/response pairs
+	// to the debug raw_http_request hypertable (agent-kind only; requires
+	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).
+	RecordRequests bool `json:"recordRequests,omitempty"`
 }
 
 // ResumeRequest re-spawns a child against its persisted state record (§6.4).
