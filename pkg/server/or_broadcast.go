@@ -104,7 +104,7 @@ func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 		for _, rs := range payload.ResourceSpans {
 			for _, ss := range rs.ScopeSpans {
 				for _, sp := range ss.Spans {
-					if err := insertSpan(ctx, pool, insertSQL, sp); err != nil {
+					if err := insertSpan(ctx, pool, insertSQL, sp, body); err != nil {
 						logger.Warn("or_broadcast: insert span failed", "span_id", sp.SpanID, "error", err)
 						continue
 					}
@@ -118,7 +118,7 @@ func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 	}
 }
 
-func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan) error {
+func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan, rawBody []byte) error {
 	attrs := spanAttrs(sp)
 
 	sessionID := attrs["session.id"]
@@ -150,12 +150,7 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 		attrs["gen_ai.response.stop_reason"],
 	)
 
-	rawJSON, err := json.Marshal(sp)
-	if err != nil {
-		return fmt.Errorf("marshal span: %w", err)
-	}
-
-	_, err = pool.Exec(ctx, sql,
+	_, err := pool.Exec(ctx, sql,
 		nullStr(sessionID),
 		nullStr(generationID),
 		nullStr(sp.TraceID),
@@ -169,7 +164,7 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 		nullStr(provider),
 		nullStr(finishReason),
 		createdAt,
-		rawJSON,
+		rawBody,
 	)
 	return err
 }
