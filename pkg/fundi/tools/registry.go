@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -121,6 +122,11 @@ type ToolOpts struct {
 	Skills       []skillspkg.SkillMeta
 	RTK          RTKMode
 	Web          bool
+
+	// HTTPClient, when non-nil, is used for outbound HTTP requests.
+	// nil means the tool creates its own client with SSRF protection.
+	// Set by tests that provide an httptest server on loopback.
+	HTTPClient *http.Client
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements
