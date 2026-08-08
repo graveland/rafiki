@@ -164,8 +164,8 @@ func TestGrepToolMaxMatchesTrailer(t *testing.T) {
 	if got != 3 {
 		t.Fatalf("expected 3 shown matches, got %d in %q", got, out)
 	}
-	if !strings.Contains(out, "+7") {
-		t.Fatalf("expected a trailer mentioning 7 more, got %q", out)
+	if !strings.Contains(out, "more") {
+		t.Fatalf("expected a trailer mentioning more matches, got %q", out)
 	}
 }
 
@@ -289,5 +289,71 @@ func TestGrepToolSingleFile(t *testing.T) {
 	want := fmt.Sprintf("%s:2:func Foo() {}\n", p)
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+// TestGrepToolExcludesGitignoredFiles verifies that .gitignore is honoured
+// via SearchContent's ripgrep backend.
+func TestGrepToolExcludesGitignoredFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kept.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q}`, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.Text
+	if !strings.Contains(out, "kept.txt") {
+		t.Fatalf("expected kept.txt to be included, got %q", out)
+	}
+	if strings.Contains(out, "ignored.txt") {
+		t.Fatalf("expected ignored.txt to be excluded by .gitignore, got %q", out)
+	}
+}
+
+// TestGrepToolNoMatchesErrorMessage verifies that zero matches returns
+// the "no matches" message and not an error.
+func TestGrepToolNoMatchesErrorMessage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("nothing here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q}`, dir)))
+	if err != nil {
+		t.Fatalf("zero matches must not be an error, got %v", err)
+	}
+	if res.Text != "no matches" {
+		t.Fatalf("expected 'no matches', got %q", res.Text)
+	}
+}
+
+// TestGrepToolMaxMatchesHonouredWithGlob verifies max_matches works
+// together with a glob filter.
+func TestGrepToolMaxMatchesHonouredWithGlob(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("needle\nneedle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &GrepTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"needle","path":%q,"max_matches":1,"glob":"*.go"}`, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.Text
+	got := strings.Count(out, "needle")
+	if got != 1 {
+		t.Fatalf("expected 1 shown match, got %d in %q", got, out)
 	}
 }

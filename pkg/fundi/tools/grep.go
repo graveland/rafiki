@@ -1,23 +1,16 @@
 package tools
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-
-	"github.com/bmatcuk/doublestar/v4"
 )
 
 const (
 	// defaultGrepMaxMatches caps how many matches grep returns by default;
-	// beyond this a "[+N more]" trailer reports the overflow.
+	// beyond this a trailer reports the overflow.
 	defaultGrepMaxMatches = 100
 
 	grepDescription = "Search file contents for a regular expression (RE2 syntax), walking " +
@@ -55,10 +48,6 @@ func (GrepTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error
 	if in.Pattern == "" {
 		return ToolResult{}, fmt.Errorf("grep: pattern is required")
 	}
-	re, err := regexp.Compile(in.Pattern)
-	if err != nil {
-		return ToolResult{}, fmt.Errorf("grep: invalid pattern %q: %w", in.Pattern, err)
-	}
 
 	if in.Path == "" {
 		return ToolResult{}, fmt.Errorf("grep: path is required")
@@ -70,62 +59,9 @@ func (GrepTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error
 	if base == string(filepath.Separator) {
 		return ToolResult{}, fmt.Errorf("grep: refusing to search the filesystem root (%s); pass a narrower path", base)
 	}
-	baseInfo, err := os.Stat(base)
+	_, err = os.Stat(base)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("grep: %w", err)
-	}
-
-	var (
-		paths   []string
-		errList []error
-	)
-
-	if baseInfo.IsDir() {
-		walkErr := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			if err != nil {
-				slog.Warn("agent/tools: grep: skipping unreadable path", "path", p, "error", err)
-				if d != nil && d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if d.IsDir() {
-				if d.Name() == ".git" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if in.Glob != "" {
-				rel, relErr := filepath.Rel(base, p)
-				if relErr != nil {
-					slog.Warn("agent/tools: grep: path is not relative to the search base, matching the glob against the full path", "base", base, "path", p, "error", relErr)
-					rel = p
-				}
-				ok, mErr := doublestar.Match(in.Glob, rel)
-				if mErr != nil {
-					return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
-				}
-				if !ok && !strings.ContainsRune(in.Glob, '/') {
-					ok, mErr = doublestar.Match(in.Glob, filepath.Base(rel))
-					if mErr != nil {
-						return fmt.Errorf("invalid glob %q: %w", in.Glob, mErr)
-					}
-				}
-				if !ok {
-					return nil
-				}
-			}
-			paths = append(paths, p)
-			return nil
-		})
-		if walkErr != nil {
-			errList = append(errList, walkErr)
-		}
-	} else {
-		paths = []string{base}
 	}
 
 	maxMatches := in.MaxMatches
@@ -133,52 +69,36 @@ func (GrepTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error
 		maxMatches = defaultGrepMaxMatches
 	}
 
-	var out strings.Builder
-	shown := 0
-	total := 0
-
-	for _, p := range paths {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			errList = append(errList, ctxErr)
-			break
-		}
-
-		f, openErr := os.Open(p)
-		if openErr != nil {
-			slog.Debug("agent/tools: grep: skipping unreadable file", "path", p, "error", openErr)
-			continue
-		}
-
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		lineNo := 0
-		for scanner.Scan() {
-			lineNo++
-			line := scanner.Text()
-			if re.MatchString(line) {
-				total++
-				if shown < maxMatches {
-					fmt.Fprintf(&out, "%s:%d:%s\n", p, lineNo, line)
-					shown++
-				}
-			}
-		}
-		f.Close()
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Debug("agent/tools: grep: stopped scanning file early", "path", p, "error", scanErr)
-		}
+	// Request one more than the cap to detect overflow via SearchContent's
+	// truncated return, so we can emit a "[more matches omitted]" trailer.
+	matches, truncated, err := SearchContent(ctx, ContentQuery{
+		Root:    base,
+		Pattern: in.Pattern,
+		Glob:    in.Glob,
+		Limit:   maxMatches + 1,
+	})
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("grep: %w", err)
 	}
 
-	if len(errList) > 0 {
-		return ToolResult{}, fmt.Errorf("grep: %w", errors.Join(errList...))
-	}
-
-	if total == 0 {
+	if len(matches) == 0 {
 		return NewTextResult("no matches"), nil
 	}
-	if total > maxMatches {
-		fmt.Fprintf(&out, "[+%d more]\n", total-maxMatches)
+
+	overflow := truncated
+	if len(matches) > maxMatches {
+		overflow = true
+		matches = matches[:maxMatches]
 	}
+
+	var out strings.Builder
+	for _, m := range matches {
+		fmt.Fprintf(&out, "%s:%d:%s\n", m.Path, m.Line, m.Text)
+	}
+	if overflow {
+		fmt.Fprintf(&out, "[more matches omitted]\n")
+	}
+
 	return NewTextResult(out.String()), nil
 }
 
