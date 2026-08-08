@@ -55,6 +55,11 @@ type Record struct {
 	PiBinary           string   `json:"piBinary,omitempty"`
 	ExtraArgs          []string `json:"extraArgs,omitempty"`
 
+	// RecordRequests is an additive field (like SkillsDirs/MCPConfig above):
+	// records written before its introduction lack the key, which
+	// deserialises to false — the same as never having set it.
+	RecordRequests bool `json:"recordRequests,omitempty"`
+
 	SpawnedAt     int64  `json:"spawnedAt"`
 	LastSeenAlive int64  `json:"lastSeenAlive"`
 	PID           int    `json:"pid"`

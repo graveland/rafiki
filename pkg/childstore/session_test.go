@@ -48,6 +48,20 @@ func TestSession_Snapshot_CopiesExitCode(t *testing.T) {
 	}
 }
 
+func TestSession_Snapshot_CopiesRecordRequests(t *testing.T) {
+	s := &childstore.Session{ChildID: "c_1", RecordRequests: true}
+	snap := s.Snapshot()
+	if !snap.RecordRequests {
+		t.Fatal("snapshot did not carry RecordRequests=true")
+	}
+
+	s2 := &childstore.Session{ChildID: "c_2", RecordRequests: false}
+	snap2 := s2.Snapshot()
+	if snap2.RecordRequests {
+		t.Fatal("snapshot should not set RecordRequests when the session did not")
+	}
+}
+
 func TestSession_Snapshot_CopiesSlices(t *testing.T) {
 	s := &childstore.Session{
 		ChildID:    "c_1",

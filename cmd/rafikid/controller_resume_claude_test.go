@@ -71,3 +71,24 @@ func TestResumeRequestFromSnapshot_Pi(t *testing.T) {
 		t.Fatalf("pi must resume by session file path, got %q", req.ResumeSession)
 	}
 }
+
+// TestResumeRequestFromSnapshot_CarriesRecordRequests guards against the bug
+// where a child spawned with --record-requests silently stopped capturing on
+// its very first resume: resumeRequestFromSnapshot rebuilt ~30 spawn fields
+// but dropped RecordRequests, and agentRuntimeOptions nils out ro.RawTrace
+// whenever req.RecordRequests is false (see agent_runtime.go). Covers both
+// values so a future change that hardcodes true cannot pass silently.
+func TestResumeRequestFromSnapshot_CarriesRecordRequests(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		snap := childstore.Snapshot{
+			Cwd:            "/tmp",
+			Kind:           "", // pi
+			SessionFile:    "/tmp/sessions/s.jsonl",
+			RecordRequests: want,
+		}
+		req := resumeRequestFromSnapshot(snap, "")
+		if req.RecordRequests != want {
+			t.Fatalf("RecordRequests = %v, want %v — resumed child must keep the flag it was spawned with", req.RecordRequests, want)
+		}
+	}
+}

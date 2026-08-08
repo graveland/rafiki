@@ -711,6 +711,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		Verbose:            req.Verbose,
 		PiBinary:           bin,
 		ExtraArgs:          req.ExtraArgs,
+		RecordRequests:     req.RecordRequests,
 	}
 	c.st.Insert(sess)
 
@@ -964,6 +965,7 @@ func (c *Controller) activateLiveChild(
 		Verbose:            snap.Verbose,
 		PiBinary:           piBin,
 		ExtraArgs:          snap.ExtraArgs,
+		RecordRequests:     snap.RecordRequests,
 	}
 	c.st.Insert(sess)
 	c.cm.Add(childID, ch)
@@ -1037,6 +1039,7 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		Verbose:            snap.Verbose,
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
+		RecordRequests:     snap.RecordRequests,
 	}
 	if snap.Kind == protocol.KindClaude {
 		req.ResumeSession = snap.SessionID
@@ -2894,6 +2897,7 @@ func sessionFromRecord(rec persist.Record) *childstore.Session {
 		Verbose:            rec.Verbose,
 		PiBinary:           rec.PiBinary,
 		ExtraArgs:          rec.ExtraArgs,
+		RecordRequests:     rec.RecordRequests,
 		StartedAt:          time.UnixMilli(rec.SpawnedAt),
 		LastActivity:       time.UnixMilli(rec.LastSeenAlive),
 		ExitedAt:           time.UnixMilli(rec.ExitedAt),
@@ -2938,6 +2942,7 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 		Verbose:            snap.Verbose,
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
+		RecordRequests:     snap.RecordRequests,
 		SpawnedAt:          snap.StartedAt.UnixMilli(),
 		LastSeenAlive:      snap.LastActivity.UnixMilli(),
 		LastStatus:         string(snap.Status),

@@ -102,6 +102,28 @@ func TestParseAgentFlagsThinkingLevel(t *testing.T) {
 	}
 }
 
+// TestParseAgentFlagsRecordRequests guards the `rafikid fundi --record-requests`
+// flag: parseAgentFlags must actually set f.recordRequests, since runAgent
+// gates whether opts.RawTrace is populated on this field (and previously did
+// not read it at all — the flag parsed but silently did nothing).
+func TestParseAgentFlagsRecordRequests(t *testing.T) {
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--record-requests"})
+	if err != nil {
+		t.Fatalf("parseAgentFlags: %v", err)
+	}
+	if !f.recordRequests {
+		t.Error("recordRequests = false, want true")
+	}
+
+	f2, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
+	if err != nil {
+		t.Fatalf("parseAgentFlags: %v", err)
+	}
+	if f2.recordRequests {
+		t.Error("recordRequests = true, want false (flag not passed)")
+	}
+}
+
 func TestParseAgentFlagsRejectsUnknownFlag(t *testing.T) {
 	if _, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--not-a-real-flag"}); err == nil {
 		t.Fatal("parseAgentFlags with an unknown flag: want error, got nil")

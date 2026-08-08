@@ -25,3 +25,27 @@ func TestRecordRoundTrip_KindAndConfigDir(t *testing.T) {
 		t.Fatalf("session-from-record dropped fields: kind=%q configDir=%q", got.Kind, got.ConfigDir)
 	}
 }
+
+// TestRecordRoundTrip_RecordRequests guards against a child spawned with
+// --record-requests losing that setting the moment it is persisted to disk
+// and reloaded — e.g. across a daemon restart (loadOrphans/resumeWithAuto-
+// Recovery) or a RespawnChild (new_session/switch_session interception),
+// both of which rebuild the live Session from a persist.Record.
+func TestRecordRoundTrip_RecordRequests(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		snap := childstore.Snapshot{
+			ChildID:        "c1",
+			Cwd:            "/tmp",
+			Status:         "exited",
+			RecordRequests: want,
+		}
+		rec := recordFromSnapshot(snap)
+		if rec.RecordRequests != want {
+			t.Fatalf("record dropped RecordRequests: got %v, want %v", rec.RecordRequests, want)
+		}
+		got := sessionFromRecord(rec).Snapshot()
+		if got.RecordRequests != want {
+			t.Fatalf("session-from-record dropped RecordRequests: got %v, want %v", got.RecordRequests, want)
+		}
+	}
+}

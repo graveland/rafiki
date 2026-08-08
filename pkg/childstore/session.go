@@ -81,6 +81,12 @@ type Session struct {
 	PiBinary           string
 	ExtraArgs          []string
 
+	// RecordRequests, when true, enables raw LLM API request/response capture
+	// for this child (see protocol.SpawnRequest.RecordRequests). Persisted and
+	// carried across resume so a child started with --record-requests keeps
+	// capturing after the daemon restarts or the session is respawned.
+	RecordRequests bool
+
 	// Counters
 	ExtensionErrors int
 	AutoRetries     int
@@ -159,6 +165,8 @@ type Snapshot struct {
 	PiBinary           string
 	ExtraArgs          []string
 
+	RecordRequests bool
+
 	ExtensionErrors int
 	AutoRetries     int
 	LastRetryError  string
@@ -218,6 +226,8 @@ func (s *Session) Snapshot() Snapshot {
 		SystemPrompt:      s.SystemPrompt, AppendSystemPrompt: s.AppendSystemPrompt,
 		Verbose: s.Verbose, PiBinary: s.PiBinary,
 		ExtraArgs: copyStrings(s.ExtraArgs),
+
+		RecordRequests: s.RecordRequests,
 
 		ExtensionErrors:  s.ExtensionErrors,
 		AutoRetries:      s.AutoRetries,
