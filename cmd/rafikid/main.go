@@ -301,11 +301,18 @@ func runDaemon(opts runDaemonOpts) error {
 	// failed face doesn't also cost ctrl_get its context-window data.
 	catalog := routing.NewModelCatalog(http.DefaultClient, modelCatalogTTL, slog.Default())
 
-	// Raw request/response trace, enabled by RAFIKI_RECORD_REQUESTS=1.
+	// Raw request/response trace store. Created whenever the daemon has a
+	// database pool so per-session opt-in via --record-requests always works.
+	// RAFIKI_RECORD_REQUESTS=1 lifts the per-session gate: every session (and
+	// every proxied request, regardless of header) is recorded unconditionally.
 	var rawTrace *routing.RawTraceStore
-	if paths.Get(paths.RecordRequests) == "1" && pool != nil {
+	rawTraceAll := false
+	if pool != nil {
 		rawTrace = routing.NewRawTraceStore(pool)
-		slog.Info("raw request capture enabled (RAFIKI_RECORD_REQUESTS=1)")
+		if paths.Get(paths.RecordRequests) == "1" {
+			rawTraceAll = true
+			slog.Info("raw request capture enabled (RAFIKI_RECORD_REQUESTS=1, record-all)")
+		}
 	}
 
 	face, err := startProxyFace(baseCtx, faceOptions{
@@ -316,7 +323,8 @@ func runDaemon(opts runDaemonOpts) error {
 		Config:   opts.Config,
 		Listen:   opts.Listen,
 		Catalog:  catalog,
-		RawTrace: rawTrace,
+		RawTrace:    rawTrace,
+		RawTraceAll: rawTraceAll,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are

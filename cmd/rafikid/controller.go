@@ -2721,6 +2721,10 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 		"X-Rafiki-Source":  req.Kind,
 	}
 
+	if req.RecordRequests {
+		headers["X-Rafiki-Record-Requests"] = "1"
+	}
+
 	switch req.Kind {
 	case protocol.KindClaude:
 		// Built by the same code as `rafiki claude`, so the two cannot drift.

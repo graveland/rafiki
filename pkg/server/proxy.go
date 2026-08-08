@@ -55,7 +55,8 @@ type MessagesProxy struct {
 
 	metrics *Metrics // optional Prometheus instrumentation
 
-	rawTrace *routing.RawTraceStore // nil when disabled
+	rawTrace    *routing.RawTraceStore // nil when no pool configured
+	rawTraceAll bool                   // record all sessions (RAFIKI_RECORD_REQUESTS=1); else per-session via X-Rafiki-Record-Requests header
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -63,7 +64,10 @@ func (p *MessagesProxy) SetMetrics(m *Metrics) { p.metrics = m }
 
 // SetRawTrace enables raw HTTP request/response capture for debug. Pass nil to
 // disable (the default).
-func (p *MessagesProxy) SetRawTrace(s *routing.RawTraceStore) { p.rawTrace = s }
+func (p *MessagesProxy) SetRawTrace(s *routing.RawTraceStore, recordAll bool) {
+	p.rawTrace = s
+	p.rawTraceAll = recordAll
+}
 
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
@@ -283,8 +287,9 @@ type captureRef struct {
 	createdAt   time.Time
 	on          bool
 	reqBody     []byte // decomposed post-stream in streamAndCapture (see beginCapture)
-	prefixHash  string
-	nextOrdinal int // ordinal for the assistant response message (= request message count)
+	prefixHash     string
+	nextOrdinal    int  // ordinal for the assistant response message (= request message count)
+	recordRequests bool // per-session recording opt-in (X-Rafiki-Record-Requests)
 }
 
 func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -686,7 +691,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"stop_reason", stop, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
 	// Raw trace: record the debug request/response pair.
-	if p.rawTrace != nil {
+	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
 		respStatus := resp.StatusCode
 		convID := cr.convID
 		_ = p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
@@ -853,7 +858,7 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 	// Raw trace: record the failed request/response pair.
-	if p.rawTrace != nil {
+	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
 		respStatus := resp.StatusCode
 		convID := cr.convID
 		_ = p.rawTrace.Insert(r.Context(), routing.RawHTTPRequest{
@@ -1007,6 +1012,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	return captureRef{
 		convID: convID, turnID: turnID, createdAt: createdAt, on: true,
 		reqBody: reqBody, prefixHash: prefixHash, nextOrdinal: countRequestMessages(reqBody),
+		recordRequests: r.Header.Get("X-Rafiki-Record-Requests") == "1",
 	}
 }
 

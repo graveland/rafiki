@@ -80,7 +80,8 @@ type faceOptions struct {
 	Config   Config                 // named client tokens, openai routes, default model
 	Listen   string                 // overrides RAFIKI_PROXY_LISTEN when non-empty
 	Catalog  *routing.ModelCatalog  // shared with the Controller (ctrl_get/list's ContextWindow) via llm.WithCatalog; nil = the client builds its own
-	RawTrace *routing.RawTraceStore // nil when RAFIKI_RECORD_REQUESTS is not set
+	RawTrace    *routing.RawTraceStore // nil when no pool configured
+	RawTraceAll bool                   // RAFIKI_RECORD_REQUESTS=1: record all sessions unconditionally
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -152,7 +153,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		messages.SetFallback(openrouterKey, "https://openrouter.ai/api", client.Breaker(llm.UpstreamAnthropic))
 	}
 	if opts.RawTrace != nil {
-		messages.SetRawTrace(opts.RawTrace)
+		messages.SetRawTrace(opts.RawTrace, opts.RawTraceAll)
 	}
 
 	var metrics *server.Metrics
