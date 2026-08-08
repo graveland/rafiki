@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // defaultOutputBudget is OutputPolicy's byte budget when Budget is left at
@@ -87,4 +88,40 @@ func (p OutputPolicy) Clip(s, name string) string {
 
 	marker := fmt.Sprintf("\n[... elided %d bytes: full output at %s ...]\n", elided, spillPath)
 	return head + marker + tail
+}
+
+// lineTruncSuffix marks a line shortened by Budget.MaxLineChars.
+const lineTruncSuffix = "… (line truncated)"
+
+// Budget bounds one tool result in three dimensions. A zero field means
+// that dimension is unbounded (MaxBytes zero falls back to
+// defaultOutputBudget, matching Clip).
+type Budget struct {
+	MaxBytes     int
+	MaxLines     int
+	MaxLineChars int
+}
+
+// ClipBudget applies b to s and then spills and clips exactly as Clip
+// does. Per-line truncation and the line cap are applied first, so the
+// byte budget sees the already-reduced text.
+func (p OutputPolicy) ClipBudget(s, name string, b Budget) string {
+	if b.MaxLineChars > 0 || b.MaxLines > 0 {
+		lines := strings.Split(s, "\n")
+		if b.MaxLines > 0 && len(lines) > b.MaxLines {
+			lines = lines[:b.MaxLines]
+		}
+		if b.MaxLineChars > 0 {
+			for i, line := range lines {
+				if len(line) > b.MaxLineChars {
+					lines[i] = line[:b.MaxLineChars] + lineTruncSuffix
+				}
+			}
+		}
+		s = strings.Join(lines, "\n")
+	}
+	if b.MaxBytes > 0 {
+		return OutputPolicy{Budget: b.MaxBytes, SpillDir: p.SpillDir}.Clip(s, name)
+	}
+	return p.Clip(s, name)
 }

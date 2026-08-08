@@ -174,3 +174,34 @@ func TestClipZeroSpillDirFallsBackToTempDir(t *testing.T) {
 		t.Fatalf("spilled content differs from input")
 	}
 }
+
+func TestClipBudgetTruncatesLongLines(t *testing.T) {
+	p := OutputPolicy{SpillDir: t.TempDir()}
+	in := strings.Repeat("x", 100) + "\nshort\n"
+	got := p.ClipBudget(in, "t", Budget{MaxLineChars: 10})
+	for _, line := range strings.Split(got, "\n") {
+		if len(line) > 10+len(lineTruncSuffix) {
+			t.Fatalf("line exceeds per-line cap: %q", line)
+		}
+	}
+	if !strings.Contains(got, "short") {
+		t.Fatal("short line was altered")
+	}
+}
+
+func TestClipBudgetCapsLines(t *testing.T) {
+	p := OutputPolicy{SpillDir: t.TempDir()}
+	in := strings.Repeat("line\n", 50)
+	got := p.ClipBudget(in, "t", Budget{MaxLines: 5})
+	if n := strings.Count(got, "line"); n != 5 {
+		t.Fatalf("got %d lines, want 5", n)
+	}
+}
+
+func TestClipBudgetZeroBudgetMatchesClip(t *testing.T) {
+	p := OutputPolicy{SpillDir: t.TempDir()}
+	in := strings.Repeat("y", defaultOutputBudget*2)
+	if p.ClipBudget(in, "t", Budget{}) != p.Clip(in, "t") {
+		t.Fatal("zero Budget must behave exactly like Clip")
+	}
+}
