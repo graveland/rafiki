@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // rgPath resolves ripgrep once. ripgrep is a required runtime dependency
@@ -67,21 +70,37 @@ func rgError(err error, stderr string) error {
 // it detects a .git directory, which is not the property this package
 // exists to provide. Never add -L (follow symlinks lets rg escape Root
 // into module caches or the nix store, chase cycles, and pin every
-// core) or --no-ignore (defeats the entire purpose of this helper).
+// core), --no-ignore (defeats the entire purpose of this helper), or
+// --glob (overrides gitignore — ripgrep docs: "This always overrides any
+// other ignore logic"; glob filtering is applied in Go instead).
 var baseArgs = []string{"--no-require-git"}
+
+// globMatch reports whether path (relative to root) matches pattern.
+// A pattern without a path separator (e.g. "*.go") matches the basename
+// at any depth, mirroring ripgrep's -g behaviour.
+func globMatch(pattern, rel string) (bool, error) {
+	ok, err := doublestar.Match(pattern, rel)
+	if err != nil {
+		return false, err
+	}
+	if !ok && !strings.ContainsRune(pattern, '/') {
+		return doublestar.Match(pattern, filepath.Base(rel))
+	}
+	return ok, nil
+}
 
 // DiscoverFiles lists files under q.Root, honouring .gitignore. It never
 // follows symlinks: -L lets rg escape the root into module caches or the
-// nix store, chase cycles, and pin every core.
+// nix store, chase cycles, and pin every core. Glob filtering is applied
+// in Go rather than via ripgrep's --glob, because --glob overrides
+// .gitignore (documented ripgrep behaviour).
 func DiscoverFiles(ctx context.Context, q FileQuery) ([]string, bool, error) {
 	if rgPath() == "" {
 		return nil, false, fmt.Errorf("ripgrep (rg) not found on PATH")
 	}
 	args := append([]string{}, baseArgs...)
 	args = append(args, "--files", "--null")
-	if q.Glob != "" {
-		args = append(args, "--glob", q.Glob)
-	}
+	// --glob is deliberately not used: it overrides .gitignore.
 	args = append(args, q.Root)
 
 	cmd := exec.CommandContext(ctx, rgPath(), args...)
@@ -99,6 +118,16 @@ func DiscoverFiles(ctx context.Context, q FileQuery) ([]string, bool, error) {
 	for _, p := range strings.Split(string(out), "\x00") {
 		if p == "" {
 			continue
+		}
+		if q.Glob != "" {
+			rel, relErr := filepath.Rel(q.Root, p)
+			if relErr != nil {
+				continue
+			}
+			ok, mErr := globMatch(q.Glob, rel)
+			if mErr != nil || !ok {
+				continue
+			}
 		}
 		if q.Limit > 0 && len(paths) == q.Limit {
 			truncated = true
@@ -121,16 +150,15 @@ type rgEvent struct {
 
 // SearchContent runs a content search under q.Root, honouring .gitignore.
 // It uses --json because plain output is ambiguous on paths containing a
-// colon.
+// colon. Glob filtering is applied in Go rather than via ripgrep's --glob,
+// because --glob overrides .gitignore (documented ripgrep behaviour).
 func SearchContent(ctx context.Context, q ContentQuery) ([]Match, bool, error) {
 	if rgPath() == "" {
 		return nil, false, fmt.Errorf("ripgrep (rg) not found on PATH")
 	}
 	args := append([]string{}, baseArgs...)
 	args = append(args, "--json", "-H", "-n")
-	if q.Glob != "" {
-		args = append(args, "--glob", q.Glob)
-	}
+	// --glob is deliberately not used: it overrides .gitignore.
 	args = append(args, q.Pattern, q.Root)
 
 	cmd := exec.CommandContext(ctx, rgPath(), args...)
@@ -152,6 +180,16 @@ func SearchContent(ctx context.Context, q ContentQuery) ([]Match, bool, error) {
 		var ev rgEvent
 		if json.Unmarshal(scanner.Bytes(), &ev) != nil || ev.Type != "match" {
 			continue
+		}
+		if q.Glob != "" {
+			rel, relErr := filepath.Rel(q.Root, ev.Data.Path.Text)
+			if relErr != nil {
+				continue
+			}
+			ok, mErr := globMatch(q.Glob, rel)
+			if mErr != nil || !ok {
+				continue
+			}
 		}
 		if q.Limit > 0 && len(matches) == q.Limit {
 			truncated = true

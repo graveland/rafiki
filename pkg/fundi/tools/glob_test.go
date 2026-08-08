@@ -82,8 +82,8 @@ func TestGlobToolCapsAt200(t *testing.T) {
 	if len(lines) != 201 {
 		t.Fatalf("expected 201 output lines (200 matches + trailer), got %d", len(lines))
 	}
-	if !strings.Contains(lines[len(lines)-1], "+50") {
-		t.Fatalf("expected a trailer mentioning 50 more, got %q", lines[len(lines)-1])
+	if !strings.Contains(lines[len(lines)-1], "more") {
+		t.Fatalf("expected a trailer mentioning more matches, got %q", lines[len(lines)-1])
 	}
 }
 
@@ -174,31 +174,6 @@ func TestGlobToolRespectsCanceledContext(t *testing.T) {
 	}
 }
 
-func TestCtxFSFailsOnceContextIsDone(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cfs := ctxFS{FS: os.DirFS(dir), ctx: ctx}
-
-	if _, err := cfs.Open("a.txt"); err != nil {
-		t.Fatalf("expected Open to succeed before cancellation, got %v", err)
-	}
-	if _, err := cfs.ReadDir("."); err != nil {
-		t.Fatalf("expected ReadDir to succeed before cancellation, got %v", err)
-	}
-
-	cancel()
-	if _, err := cfs.Open("a.txt"); err == nil {
-		t.Fatal("expected Open to fail after cancellation")
-	}
-	if _, err := cfs.ReadDir("."); err == nil {
-		t.Fatal("expected ReadDir to fail after cancellation")
-	}
-}
-
 func TestGlobToolDefaultsToWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cwd-match.go")
@@ -226,5 +201,33 @@ func TestGlobToolDefaultsToWorkingDirectory(t *testing.T) {
 	out := res.Text
 	if !strings.Contains(out, "cwd-match.go") {
 		t.Fatalf("expected default path to be the working directory, got %q", out)
+	}
+}
+
+// TestGlobToolExcludesGitignoredFiles verifies that .gitignore is honoured
+// via DiscoverFiles' ripgrep backend (--no-require-git).
+func TestGlobToolExcludesGitignoredFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kept.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &GlbTool{}
+	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.txt","path":%q}`, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.Text
+	if !strings.Contains(out, "kept.txt") {
+		t.Fatalf("expected kept.txt to be included, got %q", out)
+	}
+	if strings.Contains(out, "ignored.txt") {
+		t.Fatalf("expected ignored.txt to be excluded by .gitignore, got %q", out)
 	}
 }

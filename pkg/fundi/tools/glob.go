@@ -3,20 +3,17 @@ package tools
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/bmatcuk/doublestar/v4"
 )
 
 const (
 	// maxGlobResults caps how many matches glob returns; beyond this a
-	// "[+N more]" trailer reports the overflow instead of flooding the model.
+	// trailer reports the overflow instead of flooding the model.
 	maxGlobResults = 200
 
 	globDescription = "Find files by glob pattern (doublestar syntax: * ? [...] and ** for " +
@@ -93,18 +90,17 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 		pattern = rel
 	}
 
-	matches, err := doublestar.Glob(ctxFS{FS: os.DirFS(base), ctx: ctx}, pattern, doublestar.WithFailOnIOErrors())
+	// Request one more than the cap to detect overflow via DiscoverFiles'
+	// truncated return while still collecting exactly maxGlobResults + 1
+	// entries for the mtime sort.
+	paths, truncated, err := DiscoverFiles(ctx, FileQuery{Root: base, Glob: pattern, Limit: maxGlobResults + 1})
 	if err != nil {
-		// A canceled turn surfaces as an I/O error from ctxFS deep inside
-		// doublestar's walk (WithFailOnIOErrors makes that abort the walk
-		// instead of being silently swallowed) — report the real cause
-		// rather than a confusing "invalid pattern".
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ToolResult{}, ctxErr
 		}
 		return ToolResult{}, fmt.Errorf("glob: invalid pattern %q: %w", in.Pattern, err)
 	}
-	if len(matches) == 0 {
+	if len(paths) == 0 {
 		return NewTextResult("no files matched"), nil
 	}
 
@@ -112,24 +108,17 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 		path  string
 		mtime time.Time
 	}
-	entries := make([]entry, 0, len(matches))
-	for _, m := range matches {
-		full := filepath.Join(base, m)
-		info, err := os.Stat(full)
+	entries := make([]entry, 0, len(paths))
+	for _, p := range paths {
+		info, err := os.Stat(p)
 		if err != nil {
-			// Raced away between Glob and Stat (deleted/renamed
-			// concurrently) — not a tool failure, just one fewer result.
-			// Still say so: a silently dropped match is indistinguishable
-			// from a pattern that never matched.
-			slog.Debug("agent/tools: glob: skipping match that could not be stat'd", "path", full, "error", err)
+			slog.Debug("agent/tools: glob: skipping match that could not be stat'd", "path", p, "error", err)
 			continue
 		}
-		entries = append(entries, entry{path: full, mtime: info.ModTime()})
+		entries = append(entries, entry{path: p, mtime: info.ModTime()})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].mtime.After(entries[j].mtime) })
 
-	truncated := len(entries) > maxGlobResults
-	total := len(entries)
 	if truncated {
 		entries = entries[:maxGlobResults]
 	}
@@ -140,7 +129,7 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 		out.WriteByte('\n')
 	}
 	if truncated {
-		fmt.Fprintf(&out, "[+%d more]\n", total-maxGlobResults)
+		fmt.Fprintf(&out, "[more matches omitted]\n")
 	}
 	return NewTextResult(out.String()), nil
 }
@@ -148,33 +137,4 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 type globInput struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`
-}
-
-// ctxFS wraps an fs.FS and fails Open/ReadDir once ctx is done, so a
-// doublestar walk over a large or slow (e.g. network-mounted) tree — driven
-// entirely inside the library, with no callback of our own to check — aborts
-// promptly instead of running to completion after the caller has moved on.
-// Paired with doublestar.WithFailOnIOErrors, which is required for this
-// synthetic I/O error to actually stop the walk rather than being silently
-// skipped like a real permission error.
-type ctxFS struct {
-	fs.FS
-	ctx context.Context
-}
-
-func (c ctxFS) Open(name string) (fs.File, error) {
-	if err := c.ctx.Err(); err != nil {
-		return nil, err
-	}
-	return c.FS.Open(name)
-}
-
-func (c ctxFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	if err := c.ctx.Err(); err != nil {
-		return nil, err
-	}
-	if rdfs, ok := c.FS.(fs.ReadDirFS); ok {
-		return rdfs.ReadDir(name)
-	}
-	return fs.ReadDir(c.FS, name)
 }
