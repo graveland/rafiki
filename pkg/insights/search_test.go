@@ -260,6 +260,29 @@ func TestSearch_TurnFiltersRequireOneMatchingTurn(t *testing.T) {
 	}
 }
 
+// TestSearch_ZeroTokenConversationHasZeroCacheHitRatio covers a conversation
+// created (via EnsureConversationByExternalRef) before its first turn
+// completes: in_tok and cache_read are both 0, so the ratio's denominator is
+// nullif(0+0, 0) = NULL. Without the outer coalesce, the column scans NULL
+// into the bare float64 CacheHitRatio field and Search fails outright — not
+// just for that row, for the whole call.
+func TestSearch_ZeroTokenConversationHasZeroCacheHitRatio(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	insertConversation(t, pool, "client", "alice") // no turns: in_tok=cache_read=0
+
+	rows, err := New(pool).Search(ctx, SearchFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("results = %d, want 1", len(rows))
+	}
+	if rows[0].CacheHitRatio != 0 {
+		t.Errorf("cache_hit_ratio = %v, want 0", rows[0].CacheHitRatio)
+	}
+}
+
 func TestSearch_FiltersByEntrypoint(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)

@@ -145,7 +145,7 @@ SELECT c.id::text, coalesce(c.name,''), coalesce(c.owner,''), coalesce(c.persona
        coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at,
        coalesce(t.turns,0), coalesce(t.in_tok,0), coalesce(t.out_tok,0), coalesce(t.cache_read,0),
        coalesce(tc.cost_usd, 0),
-       coalesce(t.cache_read,0) * 1.0 / nullif(coalesce(t.in_tok,0) + coalesce(t.cache_read,0), 0),
+       coalesce(coalesce(t.cache_read,0) * 1.0 / nullif(coalesce(t.in_tok,0) + coalesce(t.cache_read,0), 0), 0),
        coalesce(left(fm.first_text, 200), '')
 FROM ` + from + `
 LEFT JOIN LATERAL (
