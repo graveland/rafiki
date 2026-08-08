@@ -209,6 +209,7 @@ func runAgent(args []string) int {
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
 		Pool:                 pool,
 		OnFatal:              onFatal,
+		RTK:                  paths.Get(paths.BashRTK),
 	}
 	if f.recordRequests {
 		// NewRawTraceStore(nil) is documented to return nil, so this is safe

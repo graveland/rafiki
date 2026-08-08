@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/inproc"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -205,5 +206,6 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
 		Pool:                 pool,
+		RTK:                  paths.Get(paths.BashRTK),
 	}, nil
 }
