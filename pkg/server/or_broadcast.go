@@ -32,9 +32,9 @@ type otlpSpan struct {
 	Attributes []struct {
 		Key   string `json:"key"`
 		Value struct {
-			StringValue string  `json:"stringValue"`
-			IntValue    string  `json:"intValue"`
-			DoubleValue float64 `json:"doubleValue"`
+			StringValue string      `json:"stringValue"`
+			IntValue    json.Number `json:"intValue,omitempty"`
+			DoubleValue float64     `json:"doubleValue"`
 		} `json:"value"`
 	} `json:"attributes"`
 }
@@ -45,7 +45,7 @@ func spanAttrs(sp otlpSpan) map[string]string {
 	for _, a := range sp.Attributes {
 		v := a.Value.StringValue
 		if v == "" {
-			v = a.Value.IntValue
+			v = a.Value.IntValue.String()
 		}
 		if v == "" && a.Value.DoubleValue != 0 {
 			v = fmt.Sprintf("%f", a.Value.DoubleValue)
@@ -83,11 +83,13 @@ func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK) // acknowledge immediately
-
 		body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20)) // 16 MiB
 		if err != nil {
 			logger.Warn("or_broadcast: read body failed", "error", err)
+			return
+		}
+		if len(body) == 0 {
+			logger.Warn("or_broadcast: empty body")
 			return
 		}
 

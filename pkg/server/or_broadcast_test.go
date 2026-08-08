@@ -79,50 +79,50 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 								Attributes: []struct {
 									Key   string `json:"key"`
 									Value struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									} `json:"value"`
 								}{
 									{Key: "session.id", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{StringValue: "conv-uuid-123"}},
 									{Key: "gen_ai.generation.id", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{StringValue: "gen-test-999"}},
 									{Key: "gen_ai.request.model", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{StringValue: "deepseek/deepseek-v4-pro"}},
 									{Key: "gen_ai.response.provider", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{StringValue: "DeepInfra"}},
 									{Key: "gen_ai.usage.input_tokens", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{IntValue: "150"}},
 									{Key: "gen_ai.usage.output_tokens", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{IntValue: "50"}},
 									{Key: "gen_ai.usage.cost", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{DoubleValue: 0.00042}},
 									{Key: "gen_ai.response.finish_reason", Value: struct {
-										StringValue string  `json:"stringValue"`
-										IntValue    string  `json:"intValue"`
-										DoubleValue float64 `json:"doubleValue"`
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
 									}{StringValue: "stop"}},
 								},
 							},
