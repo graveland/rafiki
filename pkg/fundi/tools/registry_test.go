@@ -45,6 +45,24 @@ func TestToolResultContentBlocksPrefersExplicitBlocks(t *testing.T) {
 	}
 }
 
+func TestParseRTKMode(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want RTKMode
+	}{
+		{"", RTKAuto},
+		{"auto", RTKAuto},
+		{"on", RTKOn},
+		{"off", RTKOff},
+		{"OFF", RTKOff},
+		{"nonsense", RTKAuto},
+	} {
+		if got := ParseRTKMode(tc.in); got != tc.want {
+			t.Fatalf("ParseRTKMode(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func toolNames(defs []anthropic.ToolUnionParam) []string {
 	names := make([]string, len(defs))
 	for i, d := range defs {

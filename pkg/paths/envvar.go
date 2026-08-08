@@ -125,6 +125,11 @@ const (
 	// RecordRequests, when "1", enables raw HTTP request/response capture to
 	// the conversations.raw_http_request hypertable. Debug-only; off by default.
 	RecordRequests = "RAFIKI_RECORD_REQUESTS"
+
+	// BashRTK controls whether the fundi bash tool routes commands through
+	// rtk for output compression: "auto" (default, use it when installed),
+	// "on" (require it), or "off".
+	BashRTK = "RAFIKI_BASH_RTK"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the

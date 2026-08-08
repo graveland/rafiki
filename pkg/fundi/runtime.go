@@ -69,6 +69,10 @@ type RuntimeOptions struct {
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
 	RawTrace *routing.RawTraceStore
+
+	// RTK selects the bash tool's rtk mode: "auto", "on", or "off".
+	// Empty means auto. See tools.ParseRTKMode.
+	RTK string
 }
 
 // resolveContent loads the cwd-relative context files and discovers skills.
@@ -158,6 +162,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		FileTracker:  tools.NewFileTracker(),
 		OutputPolicy: outputPolicy,
 		Skills:       discovered,
+		RTK:          tools.ParseRTKMode(opts.RTK),
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 

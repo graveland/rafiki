@@ -82,6 +82,35 @@ type Tool interface {
 	Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 }
 
+// RTKMode controls whether the bash tool routes commands through rtk, a
+// CLI proxy that compresses dev-command output. Phase 2 supplies the
+// command mapping; this type is the switch.
+type RTKMode string
+
+const (
+	// RTKAuto uses rtk when it is installed and the command maps to a
+	// known rtk subcommand, and runs bash directly otherwise.
+	RTKAuto RTKMode = "auto"
+	// RTKOn behaves like RTKAuto but makes a missing rtk a startup error.
+	RTKOn RTKMode = "on"
+	// RTKOff never invokes rtk.
+	RTKOff RTKMode = "off"
+)
+
+// ParseRTKMode maps a config value to a mode, defaulting to RTKAuto for
+// empty or unrecognised input: an unreadable setting must not disable a
+// tool outright.
+func ParseRTKMode(s string) RTKMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "on":
+		return RTKOn
+	case "off":
+		return RTKOff
+	default:
+		return RTKAuto
+	}
+}
+
 // ToolOpts carries the per-agent runtime state a Materializer needs to
 // build a concrete Tool from a blueprint that carries only its static
 // metadata (name, description, input schema).
@@ -90,6 +119,7 @@ type ToolOpts struct {
 	FileTracker  *FileTracker
 	OutputPolicy OutputPolicy
 	Skills       []skillspkg.SkillMeta
+	RTK          RTKMode
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements
