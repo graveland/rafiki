@@ -13,6 +13,38 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
+func TestToolResultContentBlocksFromText(t *testing.T) {
+	r := NewTextResult("hello")
+	blocks := r.ContentBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(blocks))
+	}
+	tb, ok := blocks[0].(TextBlock)
+	if !ok {
+		t.Fatalf("got block type %T, want TextBlock", blocks[0])
+	}
+	if tb.Text != "hello" {
+		t.Fatalf("got %q, want %q", tb.Text, "hello")
+	}
+}
+
+func TestToolResultContentBlocksEmptyTextYieldsNoBlocks(t *testing.T) {
+	if got := len(ToolResult{}.ContentBlocks()); got != 0 {
+		t.Fatalf("got %d blocks for a zero-value result, want 0", got)
+	}
+}
+
+func TestToolResultContentBlocksPrefersExplicitBlocks(t *testing.T) {
+	r := ToolResult{Text: "ignored", Blocks: []ContentBlock{TextBlock{Text: "explicit"}}}
+	blocks := r.ContentBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1", len(blocks))
+	}
+	if blocks[0].(TextBlock).Text != "explicit" {
+		t.Fatalf("Blocks did not take precedence over Text")
+	}
+}
+
 func toolNames(defs []anthropic.ToolUnionParam) []string {
 	names := make([]string, len(defs))
 	for i, d := range defs {

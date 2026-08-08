@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -27,10 +28,22 @@ func (i ToolInput) Unmarshal(v any) error {
 	return json.Unmarshal(json.RawMessage(i), v)
 }
 
-// ToolResult is the text result a tool hands back to the model. A zero-value
-// ToolResult has Text == ""; IsEmpty reports true.
+// ContentBlock is one piece of a tool result. Today every result is text;
+// the interface exists so a non-text block (an image, say) can be added
+// without changing Tool, Registry, or any existing tool.
+type ContentBlock interface{ isContentBlock() }
+
+// TextBlock is a plain-text content block.
+type TextBlock struct{ Text string }
+
+func (TextBlock) isContentBlock() {}
+
+// ToolResult is what a tool hands back to the model. Text carries the
+// common case; Blocks is nil for every tool today and takes precedence
+// over Text when set.
 type ToolResult struct {
-	Text string
+	Text   string
+	Blocks []ContentBlock
 }
 
 // IsEmpty reports whether this result carries no text.
@@ -45,6 +58,19 @@ func NewErrorResult(err error) ToolResult {
 		return ToolResult{}
 	}
 	return ToolResult{Text: err.Error()}
+}
+
+// ContentBlocks normalizes a result into blocks. A result with explicit
+// Blocks yields those; otherwise a non-empty Text yields one TextBlock;
+// an empty result yields none.
+func (r ToolResult) ContentBlocks() []ContentBlock {
+	if len(r.Blocks) > 0 {
+		return r.Blocks
+	}
+	if r.Text == "" {
+		return nil
+	}
+	return []ContentBlock{TextBlock{Text: r.Text}}
 }
 
 // Tool is the interface every agent tool implements. A tool value that
@@ -108,7 +134,13 @@ func (r *Registry) Register(t Tool) {
 		if err != nil {
 			return "", err
 		}
-		return result.Text, nil
+		var sb strings.Builder
+		for _, b := range result.ContentBlocks() {
+			if tb, ok := b.(TextBlock); ok {
+				sb.WriteString(tb.Text)
+			}
+		}
+		return sb.String(), nil
 	}
 }
 
