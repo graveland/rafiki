@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -99,6 +100,17 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 	return contextFiles, discovered, nil
 }
 
+// checkRipgrep verifies the ripgrep dependency. It does its own lookup
+// rather than consulting tools.RipgrepAvailable so the result is not
+// cached across a PATH change (which is what the test exercises).
+func checkRipgrep() error {
+	if _, err := exec.LookPath("rg"); err != nil {
+		return fmt.Errorf("runtime: ripgrep (rg) is required but was not found on PATH; " +
+			"install it with `apt-get install ripgrep` or `brew install ripgrep`")
+	}
+	return nil
+}
+
 // BuildRuntime assembles the tool registry, skills, MCP connections, and the
 // Engine. The returned shutdown func releases MCP connections and engine
 // resources; call it exactly once.
@@ -110,6 +122,10 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engine, func(), error) {
 	if !filepath.IsAbs(opts.Cwd) {
 		return nil, nil, fmt.Errorf("runtime: cwd must be absolute: %q", opts.Cwd)
+	}
+
+	if err := checkRipgrep(); err != nil {
+		return nil, nil, err
 	}
 
 	// Forward the caller's environment into the daemon process so subprocesses

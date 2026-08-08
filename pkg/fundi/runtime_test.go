@@ -192,6 +192,25 @@ func TestBuildRuntimeNoSkillsOmitsSkillTool(t *testing.T) {
 	}
 }
 
+// TestBuildRuntimeRequiresRipgrep pins the startup dependency check: a
+// missing rg must fail loudly once in checkRipgrep rather than once per tool
+// call. rgPath (pkg/fundi/tools) is a cached sync.OnceValue and cannot be
+// un-cached by t.Setenv, which is exactly why checkRipgrep does its own
+// exec.LookPath instead of calling tools.RipgrepAvailable — this test would
+// be vacuous (pass no matter what PATH says) against the cached path.
+func TestBuildRuntimeRequiresRipgrep(t *testing.T) {
+	if !tools.RipgrepAvailable() {
+		t.Skip("ripgrep not on PATH; this test asserts the happy path is reachable")
+	}
+	// PATH without rg makes the dependency check fire.
+	t.Setenv("PATH", t.TempDir())
+	if err := checkRipgrep(); err == nil {
+		t.Fatal("expected an error when ripgrep is absent")
+	} else if !strings.Contains(err.Error(), "ripgrep") {
+		t.Fatalf("error must name the missing dependency, got: %v", err)
+	}
+}
+
 // TestBuildRuntimeMissingMCPConfigIsAnError pins the contract cmd/rafikid relies
 // on: BuildRuntime errors on any MCPConfig path that does not exist. The
 // "silently skip a defaulted <cwd>/.mcp.json" behaviour stays in cmd/rafikid,
