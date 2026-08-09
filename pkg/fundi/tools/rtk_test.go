@@ -404,9 +404,15 @@ func TestRtkRewriteRTKOnNoRtk(t *testing.T) {
 	resetRTKCache(func() rtkCache { return rtkCache{} })
 	t.Cleanup(func() { resetRTKCache(nil) })
 
+	// Fail-open is correct *here* even in RTKOn mode: a compression layer
+	// must never be able to fail a command mid-turn. What RTKOn actually
+	// guarantees is enforced once at startup instead — see fundi.checkRTK
+	// and TestBuildRuntimeRequiresRTKWhenModeOn. Before that check existed
+	// this assertion was the whole of RTKOn's behaviour, which is what made
+	// `on` byte-identical to `auto`.
 	_, applied := rtkRewrite(RTKOn, "git status")
 	if applied {
-		t.Error("rtkRewrite should fail open even in RTKOn mode when rtk is missing")
+		t.Error("rtkRewrite must still fail open in RTKOn mode; the hard requirement lives at startup")
 	}
 }
 

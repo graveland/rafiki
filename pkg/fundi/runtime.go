@@ -122,6 +122,35 @@ func checkRipgrep() error {
 	return nil
 }
 
+// checkRTK enforces the one thing that distinguishes RTKOn from RTKAuto.
+//
+// Both modes use rtk when it is present and fall through to plain bash when
+// it is not; the whole point of `on` is that an operator who sized a
+// deployment's context budget around rtk compression gets told at startup
+// when the binary is missing, rather than silently burning 5-10x the tokens
+// on git/docker/kubectl output for the life of the process. Without this
+// check `on` was byte-identical to `auto` — a documented flag value that
+// did nothing.
+//
+// The per-call path in rtkRewrite deliberately keeps failing open even in
+// this mode: a compression layer must never be able to fail a command. The
+// guarantee belongs at startup, which is the only place it can be stated
+// once instead of N times per turn.
+//
+// Like checkRipgrep, this does its own lookup rather than consulting the
+// cached probe so the result is not fixed across a PATH change.
+func checkRTK(mode tools.RTKMode) error {
+	if mode != tools.RTKOn {
+		return nil
+	}
+	if _, err := exec.LookPath("rtk"); err != nil {
+		return fmt.Errorf("runtime: --bash-rtk=on (or RAFIKI_BASH_RTK=on) requires rtk, " +
+			"but it was not found on PATH; install it, or use `auto` to fall back to " +
+			"plain bash when rtk is absent")
+	}
+	return nil
+}
+
 // BuildRuntime assembles the tool registry, skills, MCP connections, and the
 // Engine. The returned shutdown func releases MCP connections and engine
 // resources; call it exactly once.
@@ -136,6 +165,9 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	if err := checkRipgrep(); err != nil {
+		return nil, nil, err
+	}
+	if err := checkRTK(tools.ParseRTKMode(opts.RTK)); err != nil {
 		return nil, nil, err
 	}
 

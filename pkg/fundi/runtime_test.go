@@ -211,6 +211,35 @@ func TestBuildRuntimeRequiresRipgrep(t *testing.T) {
 	}
 }
 
+// TestBuildRuntimeRequiresRTKWhenModeOn pins the one behaviour that makes
+// RTKOn different from RTKAuto.
+//
+// Both modes fall through to plain bash when rtk is absent, so before this
+// check `on` was byte-identical to `auto`: an operator who set it precisely
+// to make the dependency non-optional got a silently uncompressed session
+// with no error and no log line, burning many times the tokens on
+// git/docker/kubectl output. The per-call path still fails open by design;
+// the guarantee is stated once, here.
+func TestBuildRuntimeRequiresRTKWhenModeOn(t *testing.T) {
+	// PATH without rtk makes the dependency check fire.
+	t.Setenv("PATH", t.TempDir())
+
+	if err := checkRTK(tools.RTKOn); err == nil {
+		t.Fatal("--bash-rtk=on with no rtk on PATH must be a startup error")
+	} else if !strings.Contains(err.Error(), "rtk") {
+		t.Fatalf("error must name the missing dependency, got: %v", err)
+	}
+
+	// auto and off must remain unaffected: falling back to plain bash is
+	// their whole contract, and failing startup for them would break every
+	// deployment that never had rtk.
+	for _, mode := range []tools.RTKMode{tools.RTKAuto, tools.RTKOff} {
+		if err := checkRTK(mode); err != nil {
+			t.Errorf("checkRTK(%q) must not fail when rtk is absent, got: %v", mode, err)
+		}
+	}
+}
+
 // TestBuildRuntimeMissingMCPConfigIsAnError pins the contract cmd/rafikid relies
 // on: BuildRuntime errors on any MCPConfig path that does not exist. The
 // "silently skip a defaulted <cwd>/.mcp.json" behaviour stays in cmd/rafikid,
