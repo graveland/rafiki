@@ -15,7 +15,17 @@ func formatLSPLocations(locs []LSPLocation, label string) string {
 	fmt.Fprintf(&sb, "%s (%d):\n", label, len(locs))
 	for _, l := range locs {
 		path := strings.TrimPrefix(l.URI, "file://")
-		fmt.Fprintf(&sb, "  %s:%d:%d\n", path, l.Line+1, l.Col+1)
+		fmt.Fprintf(&sb, "  %s:%d:%d", path, l.Line+1, l.Col+1)
+		// Symbol results carry a name and kind; navigation results do not.
+		// Rendering location-only for symbols handed the model a coordinate
+		// for something it had no way to identify.
+		if l.Name != "" {
+			fmt.Fprintf(&sb, "  %s", l.Name)
+			if l.Kind != "" {
+				fmt.Fprintf(&sb, " (%s)", l.Kind)
+			}
+		}
+		sb.WriteByte('\n')
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }

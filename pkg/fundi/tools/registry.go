@@ -127,6 +127,24 @@ type LSPLocation struct {
 	URI  string
 	Line int // 0-based
 	Col  int // 0-based
+	// Name and Kind are set for symbol results. Without them lsp_symbols
+	// rendered every hit as a bare "  :3:6" — no name, no kind, and for
+	// document symbols no path either — which made the tool useless in its
+	// primary mode.
+	Name string
+	Kind string
+}
+
+// FileChangeNotifier is told when a tool has written to a file, so a
+// language server's view of the workspace can be kept in sync.
+//
+// Without this the navigation tools answer from whatever the server last
+// parsed: after the edit tool inserts lines, lsp_definition either errors
+// with "line number N out of range" or — when the line count is unchanged,
+// as in a rename or a constant change — returns a confidently wrong
+// location with no error at all.
+type FileChangeNotifier interface {
+	NotifyChange(ctx context.Context, path string) error
 }
 
 // LSPCallHierarchyItem is a node in the call graph.
@@ -209,6 +227,11 @@ type ToolOpts struct {
 	// LSP, when non-nil, provides access to language server diagnostics
 	// and document sync. nil means LSP tools decline to materialize.
 	LSP LSPClient
+
+	// FileChanged, when non-nil, is notified after edit/write modify a
+	// file so a language server can re-read it. nil disables the
+	// notification, which is correct when no LSP server is configured.
+	FileChanged FileChangeNotifier
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements
@@ -309,4 +332,19 @@ func (r *Registry) Execute(ctx context.Context, name string, input json.RawMessa
 		}
 	}()
 	return fn(ctx, input)
+}
+
+// notifyFileChanged tells a language server that path was rewritten.
+//
+// Best-effort by design: the write already succeeded, so a sync failure must
+// not turn a successful edit into a tool error. It is logged rather than
+// swallowed silently so a server that has stopped accepting notifications is
+// still diagnosable.
+func notifyFileChanged(ctx context.Context, n FileChangeNotifier, path string) {
+	if n == nil {
+		return
+	}
+	if err := n.NotifyChange(ctx, path); err != nil {
+		slog.Debug("tools: lsp change notification failed", "path", path, "err", err)
+	}
 }

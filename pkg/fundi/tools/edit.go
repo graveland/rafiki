@@ -56,13 +56,16 @@ func (EditBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 }
 
 func (EditBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	return &editTool{EditBlueprint: EditBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd}, nil
+	return &editTool{EditBlueprint: EditBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd, changed: opts.FileChanged}, nil
 }
 
 type editTool struct {
 	EditBlueprint
 	tr  *FileTracker
 	cwd string
+	// changed keeps a language server's view in sync after a write. See
+	// notifyFileChanged.
+	changed FileChangeNotifier
 }
 
 func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -120,6 +123,7 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 			return ToolResult{}, fmt.Errorf("edit: %w", err)
 		}
 		et.tr.RecordRead(absPath, fileMtime(absPath))
+		notifyFileChanged(ctx, et.changed, absPath)
 		return NewTextResult(fmt.Sprintf("replaced %d occurrence(s) in %s", count, absPath)), nil
 	}
 
@@ -147,6 +151,7 @@ func (et *editTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	}
 
 	et.tr.RecordRead(absPath, fileMtime(absPath))
+	notifyFileChanged(ctx, et.changed, absPath)
 	n := len(edits)
 	if n == 1 {
 		return NewTextResult(fmt.Sprintf("replaced 1 block in %s", absPath)), nil

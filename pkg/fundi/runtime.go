@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -196,8 +197,14 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		return nil, nil, err
 	}
 
+	// One FileTracker for every tool, including the LSP mutation path: the
+	// read-before-edit invariant and the per-path locks are only meaningful
+	// if all writers share the same instance.
+	fileTracker := tools.NewFileTracker()
+
 	lspShutdown := func() {}
 	var lspClient tools.LSPClient
+	var lspNotifier tools.FileChangeNotifier
 	if opts.LSPConfig != "" {
 		if _, err := os.Stat(opts.LSPConfig); err != nil {
 			return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
@@ -207,18 +214,30 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 			return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
 		}
 		lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
-		lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
-		lspClient = &lspClientAdapter{mgr: lspMgr}
+		// A config naming a server that is not installed (or an empty
+		// {"servers":{}}) would otherwise put eight tools in tools[] that can
+		// only fail with `executable file not found in $PATH`, burning a turn
+		// every time the model reaches for one.
+		if lspMgr.HasInstalledServer() {
+			lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
+			adapter := &lspClientAdapter{mgr: lspMgr, tracker: fileTracker}
+			lspClient = adapter
+			lspNotifier = lspMgr
+		} else {
+			slog.Warn("runtime: no configured language server found on PATH; lsp tools disabled",
+				"config", opts.LSPConfig)
+		}
 	}
 
 	toolOpts := tools.ToolOpts{
 		Cwd:          opts.Cwd,
-		FileTracker:  tools.NewFileTracker(),
+		FileTracker:  fileTracker,
 		OutputPolicy: outputPolicy,
 		Skills:       discovered,
 		RTK:          tools.ParseRTKMode(opts.RTK),
 		Web:          opts.ToolsWeb,
 		LSP:          lspClient,
+		FileChanged:  lspNotifier,
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 

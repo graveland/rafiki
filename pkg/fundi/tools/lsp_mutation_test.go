@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +14,7 @@ type fakeLSPMutClient struct {
 	renameFiles []string
 	renameErr   error
 	restartErr  error
+	restarted   bool
 }
 
 func (f *fakeLSPMutClient) Definition(context.Context, string, int, int) ([]LSPLocation, error) {
@@ -40,6 +42,7 @@ func (f *fakeLSPMutClient) Rename(_ context.Context, _ string, _, _ int, _ strin
 	return f.renameFiles, f.renameErr
 }
 func (f *fakeLSPMutClient) Restart(_ context.Context, _ string) error {
+	f.restarted = true
 	return f.restartErr
 }
 
@@ -70,7 +73,15 @@ func TestLSPRename_Execute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	t.Logf("result: %s", result.Text)
+	// Assert on the output. This previously only logged the result, so it
+	// passed no matter what rename did — including doing nothing at all,
+	// which is exactly what rename did against real gopls.
+	if !strings.Contains(result.Text, "main.go") || !strings.Contains(result.Text, "other.go") {
+		t.Errorf("rename must report every modified file, got:\n%s", result.Text)
+	}
+	if strings.Contains(result.Text, "no files were modified") {
+		t.Errorf("rename reported success while modifying nothing:\n%s", result.Text)
+	}
 }
 
 func TestLSPRename_Materialize_Declines(t *testing.T) {
@@ -98,5 +109,10 @@ func TestLSPRestart_Execute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	t.Logf("result: %s", result.Text)
+	if !fake.restarted {
+		t.Error("lsp_restart did not reach the client's Restart method")
+	}
+	if result.Text == "" {
+		t.Error("lsp_restart must report what it did")
+	}
 }

@@ -38,13 +38,16 @@ func (WriteBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
 }
 
 func (WriteBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	return &writeTool{WriteBlueprint: WriteBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd}, nil
+	return &writeTool{WriteBlueprint: WriteBlueprint{}, tr: opts.FileTracker, cwd: opts.Cwd, changed: opts.FileChanged}, nil
 }
 
 type writeTool struct {
 	WriteBlueprint
 	tr  *FileTracker
 	cwd string
+	// changed keeps a language server's view in sync after a write. See
+	// notifyFileChanged.
+	changed FileChangeNotifier
 }
 
 func (wt *writeTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -90,6 +93,7 @@ func (wt *writeTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 		return ToolResult{}, fmt.Errorf("write: %w", err)
 	}
 	wt.tr.RecordRead(absPath, info.ModTime())
+	notifyFileChanged(ctx, wt.changed, absPath)
 	return NewTextResult(fmt.Sprintf("wrote %d bytes to %s", len(in.Content), absPath)), nil
 }
 

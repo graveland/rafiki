@@ -37,6 +37,9 @@ func (LSPSymbolsBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 	return &lspSymbolsTool{LSPSymbolsBlueprint: LSPSymbolsBlueprint{}, lsp: opts.LSP, cwd: opts.Cwd}, nil
 }
 
+// maxWorkspaceSymbols caps workspace symbol results.
+const maxWorkspaceSymbols = 100
+
 type lspSymbolsTool struct {
 	LSPSymbolsBlueprint
 	lsp LSPClient
@@ -59,10 +62,15 @@ func (lt *lspSymbolsTool) Execute(ctx context.Context, input ToolInput) (ToolRes
 		if err != nil {
 			return ToolResult{}, fmt.Errorf("lsp_symbols: workspace: %w", err)
 		}
-		if len(locs) > 100 {
-			locs = locs[:100]
+		label := fmt.Sprintf("Workspace symbols matching %q", in.Query)
+		if len(locs) > maxWorkspaceSymbols {
+			// Announce the cut. lsp_references already does this two files
+			// over, and the design's rule is that a tool which truncates
+			// must say so — a silent cut reads as "that is all there is".
+			return NewTextResult(formatLSPLocations(locs[:maxWorkspaceSymbols], label) +
+				fmt.Sprintf("\n[+%d more; narrow the query]", len(locs)-maxWorkspaceSymbols)), nil
 		}
-		return NewTextResult(formatLSPLocations(locs, fmt.Sprintf("Workspace symbols matching %q", in.Query))), nil
+		return NewTextResult(formatLSPLocations(locs, label)), nil
 	}
 
 	if in.Path != "" {

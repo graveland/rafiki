@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -62,7 +63,6 @@ func TestLSPDefinition_Execute(t *testing.T) {
 	if result.Text == "" || result.Text == "Definition: none" {
 		t.Error("expected non-empty definition result")
 	}
-	t.Logf("result: %s", result.Text)
 }
 
 func TestLSPDefinition_Materialize_Declines(t *testing.T) {
@@ -92,7 +92,13 @@ func TestLSPReferences_Execute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	t.Logf("result: %s", result.Text)
+	// Assert on the rendered output. This test previously only logged it,
+	// so it could not fail except by panicking.
+	for _, want := range []string{"/tmp/a.go:6:1", "/tmp/b.go:13:1"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("references output missing %q:\n%s", want, result.Text)
+		}
+	}
 }
 
 func TestLSPCallHierarchy_Incoming(t *testing.T) {
@@ -115,7 +121,12 @@ func TestLSPCallHierarchy_Incoming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	t.Logf("result: %s", result.Text)
+	// The caller's name and location must both survive into the output.
+	for _, want := range []string{"main", "/tmp/main.go:20:2"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("incoming-calls output missing %q:\n%s", want, result.Text)
+		}
+	}
 }
 
 func TestLSPCallHierarchy_InvalidDirection(t *testing.T) {

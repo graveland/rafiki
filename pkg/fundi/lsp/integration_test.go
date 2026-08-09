@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,7 +24,12 @@ func TestIntegration_Gopls(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.21\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n"), 0o644); err != nil {
+	// A DELIBERATE compile error, as the plan required. The fixture used to
+	// be clean and the test only logged whatever came back, so it could not
+	// tell "gopls found no problems" apart from "gopls never saw the file"
+	// — it passed either way.
+	src := "package main\n\nfunc main() {\n\tunusedVar := 42\n\tprintln(\"hello\")\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -62,9 +68,21 @@ func TestIntegration_Gopls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Diagnostics: %v", err)
 	}
-	t.Logf("diagnostics count: %d", len(diags))
 	for _, d := range diags {
 		t.Logf("  L%d:%d: %s: %s", d.Range.Start.Line, d.Range.Start.Character, d.Severity, d.Message)
+	}
+	if len(diags) == 0 {
+		t.Fatal("gopls reported no diagnostics for a file with an unused variable; " +
+			"the document never reached the server")
+	}
+	var found bool
+	for _, d := range diags {
+		if strings.Contains(d.Message, "unusedVar") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a diagnostic naming unusedVar, got %d others", len(diags))
 	}
 
 	if err := client.DidClose(ctx, filepath.Join(dir, "main.go")); err != nil {

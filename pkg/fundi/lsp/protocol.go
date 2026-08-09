@@ -10,6 +10,9 @@ package lsp
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
+	"unicode/utf16"
 )
 
 // ---- Common LSP types ----
@@ -117,7 +120,24 @@ type WorkspaceFolder struct {
 type ClientCapabilities struct {
 	TextDocument *TextDocumentClientCapabilities `json:"textDocument,omitempty"`
 	Workspace    *WorkspaceClientCapabilities    `json:"workspace,omitempty"`
+	General      *GeneralClientCapabilities      `json:"general,omitempty"`
 }
+
+// GeneralClientCapabilities declares encoding-level capabilities.
+type GeneralClientCapabilities struct {
+	// PositionEncodings lists the encodings this client can handle, best
+	// first. Declaring utf-8 matters: LSP's default is utf-16, so a
+	// Position.Character is a count of UTF-16 code units, not bytes and not
+	// runes. Servers that support utf-8 will pick it and let us index by
+	// byte directly; the rest answer utf-16 and we convert.
+	PositionEncodings []string `json:"positionEncodings,omitempty"`
+}
+
+// Position encodings, per LSP 3.17.
+const (
+	PositionEncodingUTF8  = "utf-8"
+	PositionEncodingUTF16 = "utf-16"
+)
 
 // TextDocumentClientCapabilities declares textDocument capabilities.
 type TextDocumentClientCapabilities struct {
@@ -182,6 +202,10 @@ type InitializeResult struct {
 
 // ServerCapabilities declares what the server supports.
 type ServerCapabilities struct {
+	// PositionEncoding is the encoding the server chose. Per spec an absent
+	// or empty value means utf-16 — see EffectivePositionEncoding, and note
+	// that the zero value here is therefore NOT utf-8.
+	PositionEncoding       string                   `json:"positionEncoding,omitempty"`
 	TextDocumentSync       *TextDocumentSyncOptions `json:"textDocumentSync,omitempty"`
 	DefinitionProvider     bool                     `json:"definitionProvider,omitempty"`
 	ReferencesProvider     bool                     `json:"referencesProvider,omitempty"`
@@ -322,8 +346,65 @@ type RenameParams struct {
 }
 
 // WorkspaceEdit is the server's response to a rename request.
+//
+// The two fields are alternatives, and decoding only Changes is why rename
+// silently did nothing: modern gopls always answers with documentChanges
+// (its protocol.NewWorkspaceEdit builds only that field, and does not
+// downgrade based on client capability), so Changes was always nil, the
+// apply loop never ran, and the tool returned "no files were modified" as a
+// success string. Other servers still send changes, so both must be handled.
 type WorkspaceEdit struct {
-	Changes map[string][]TextEdit `json:"changes,omitempty"`
+	Changes         map[string][]TextEdit `json:"changes,omitempty"`
+	DocumentChanges []DocumentChange      `json:"documentChanges,omitempty"`
+}
+
+// DocumentChange is one entry of WorkspaceEdit.documentChanges. The array is
+// heterogeneous: an entry is either a TextDocumentEdit (textDocument+edits)
+// or a resource operation (create/rename/delete, tagged by Kind). Only the
+// TextDocumentEdit form is applied; the rest are refused loudly rather than
+// dropped, because silently skipping a file delete or rename would leave a
+// half-finished refactor that still compiles as something the model did not
+// ask for.
+type DocumentChange struct {
+	// Kind is set only for resource operations: "create", "rename", "delete".
+	Kind         string                           `json:"kind,omitempty"`
+	TextDocument *VersionedTextDocumentIdentifier `json:"textDocument,omitempty"`
+	Edits        []TextEdit                       `json:"edits,omitempty"`
+}
+
+// FileEdits normalizes the two WorkspaceEdit shapes into one path-keyed map,
+// preferring documentChanges when both are present (the spec says a client
+// that supports documentChanges must ignore changes). It returns an error
+// naming any resource operation it cannot apply so the caller can refuse the
+// whole edit instead of applying part of it.
+func (w WorkspaceEdit) FileEdits() (map[string][]TextEdit, error) {
+	out := make(map[string][]TextEdit)
+	if len(w.DocumentChanges) > 0 {
+		for _, dc := range w.DocumentChanges {
+			if dc.Kind != "" {
+				return nil, fmt.Errorf(
+					"lsp: workspace edit contains an unsupported %q file operation; "+
+						"refusing to apply a partial refactor", dc.Kind)
+			}
+			if dc.TextDocument == nil {
+				continue
+			}
+			path, err := URIToPath(dc.TextDocument.URI)
+			if err != nil {
+				return nil, err
+			}
+			out[path] = append(out[path], dc.Edits...)
+		}
+		return out, nil
+	}
+	for uri, edits := range w.Changes {
+		path, err := URIToPath(uri)
+		if err != nil {
+			return nil, err
+		}
+		out[path] = append(out[path], edits...)
+	}
+	return out, nil
 }
 
 // TextEdit is a single text replacement in a document.
@@ -339,7 +420,120 @@ type ShutdownResult struct{}
 
 // ---- URI helpers ----
 
-// pathToURI converts a filesystem path to a file:// URI.
-func pathToURI(path string) string {
-	return "file://" + path
+// PathToURI converts a filesystem path to a file:// URI.
+//
+// String concatenation is not good enough: a workspace under
+// "/Users/me/My Projects/app" produces an invalid URI with a raw space, and
+// the properly-escaped "file:///Users/me/My%20Projects/app/main.go" the
+// server sends back then has to survive the trip home. url.URL escapes the
+// path on the way out and URIToPath unescapes it on the way in, so the round
+// trip is lossless.
+func PathToURI(path string) string {
+	return (&url.URL{Scheme: "file", Path: path}).String()
+}
+
+// URIToPath converts a file:// URI back to a filesystem path, undoing any
+// percent-encoding. A non-file URI is an error rather than a silently
+// mangled path: strings.TrimPrefix used to leave "%20" sitting literally in
+// the path, so os.ReadFile failed with ENOENT — and in the middle of a
+// multi-file rename, after other files had already been written.
+func URIToPath(uri string) (string, error) {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("lsp: invalid document uri %q: %w", uri, err)
+	}
+	if u.Scheme != "file" {
+		return "", fmt.Errorf("lsp: expected a file:// uri, got %q", uri)
+	}
+	return u.Path, nil
+}
+
+// pathToURI is the unexported spelling used throughout this package.
+func pathToURI(path string) string { return PathToURI(path) }
+
+// EffectivePositionEncoding reports the encoding to use for this server.
+// An absent value means utf-16 per LSP 3.17, so this must never be read as
+// "empty implies bytes" — doing that is what corrupted files whose lines
+// contained non-ASCII before the edited column.
+func (c ServerCapabilities) EffectivePositionEncoding() string {
+	if c.PositionEncoding == PositionEncodingUTF8 {
+		return PositionEncodingUTF8
+	}
+	return PositionEncodingUTF16
+}
+
+// PositionToOffset converts an LSP Position into a byte offset into text.
+//
+// The naive version added Position.Character straight to the byte index of
+// the line start. That is only correct for an all-ASCII line. Under the
+// default utf-16 encoding a Character is a count of UTF-16 code units, so
+// for `x := "日本語" + foo` the column of `foo` counted 3 units for the
+// three CJK runes while each occupies 3 bytes — the offset landed 6 bytes
+// early, in the middle of a rune, and the resulting file was no longer
+// valid UTF-8.
+//
+// Offsets are clamped to the line's end rather than running into the next
+// line, so a server that reports a column past end-of-line truncates
+// harmlessly instead of corrupting the following line.
+func PositionToOffset(text string, pos Position, encoding string) int {
+	lineStart := 0
+	line := 0
+	for line < pos.Line {
+		idx := strings.IndexByte(text[lineStart:], '\n')
+		if idx < 0 {
+			return len(text)
+		}
+		lineStart += idx + 1
+		line++
+	}
+
+	lineEnd := lineStart + len(text[lineStart:])
+	if idx := strings.IndexByte(text[lineStart:], '\n'); idx >= 0 {
+		lineEnd = lineStart + idx
+	}
+	lineText := text[lineStart:lineEnd]
+
+	if encoding == PositionEncodingUTF8 {
+		if pos.Character >= len(lineText) {
+			return lineEnd
+		}
+		return lineStart + pos.Character
+	}
+
+	// utf-16: walk runes, counting code units (2 for anything outside the
+	// BMP, which is what utf16.RuneLen reports).
+	units := 0
+	for off, r := range lineText {
+		if units >= pos.Character {
+			return lineStart + off
+		}
+		n := utf16.RuneLen(r)
+		if n < 0 {
+			n = 1 // unpaired surrogate / invalid rune: count it as one
+		}
+		units += n
+	}
+	return lineEnd
+}
+
+// symbolKindNames maps the LSP SymbolKind enum (3.17, §Document Symbols) to
+// its spelling. The wire type is a bare int, so without this the tools layer
+// had nothing human-readable to show and dropped the kind entirely.
+var symbolKindNames = [...]string{
+	1: "file", 2: "module", 3: "namespace", 4: "package", 5: "class",
+	6: "method", 7: "property", 8: "field", 9: "constructor", 10: "enum",
+	11: "interface", 12: "function", 13: "variable", 14: "constant",
+	15: "string", 16: "number", 17: "boolean", 18: "array", 19: "object",
+	20: "key", 21: "null", 22: "enum-member", 23: "struct", 24: "event",
+	25: "operator", 26: "type-parameter",
+}
+
+// SymbolKindName returns the spelling of an LSP SymbolKind value. An
+// unrecognized kind renders as "kind(N)" rather than "" so a newer server's
+// value is still visible.
+func SymbolKindName(kind int) string {
+	if kind >= 0 && kind < len(symbolKindNames) && symbolKindNames[kind] != "" {
+		return symbolKindNames[kind]
+	}
+	return fmt.Sprintf("kind(%d)", kind)
 }
