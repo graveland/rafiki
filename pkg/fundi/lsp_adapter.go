@@ -90,3 +90,177 @@ func (a *lspClientAdapter) WaitForDiagnostics(ctx context.Context, path string, 
 	startVer := client.DiagnosticsVersion()
 	return client.WaitForInitialDiagnostics(ctx, startVer, time.Duration(timeoutSec)*time.Second)
 }
+
+func (a *lspClientAdapter) Definition(ctx context.Context, path string, line, col int) ([]tools.LSPLocation, error) {
+	client, err := a.mgr.For(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, nil
+	}
+	locs, err := client.Definition(ctx, path, line, col)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.LSPLocation, len(locs))
+	for i, l := range locs {
+		out[i] = tools.LSPLocation{URI: l.URI, Line: l.Range.Start.Line, Col: l.Range.Start.Character}
+	}
+	return out, nil
+}
+
+func (a *lspClientAdapter) References(ctx context.Context, path string, line, col int) ([]tools.LSPLocation, error) {
+	client, err := a.mgr.For(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, nil
+	}
+	locs, err := client.References(ctx, path, line, col)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.LSPLocation, len(locs))
+	for i, l := range locs {
+		out[i] = tools.LSPLocation{URI: l.URI, Line: l.Range.Start.Line, Col: l.Range.Start.Character}
+	}
+	return out, nil
+}
+
+func (a *lspClientAdapter) DocumentSymbols(ctx context.Context, path string) ([]tools.LSPLocation, error) {
+	client, err := a.mgr.For(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, nil
+	}
+	syms, err := client.DocumentSymbols(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return flattenSymbols(syms), nil
+}
+
+func (a *lspClientAdapter) WorkspaceSymbols(ctx context.Context, query string) ([]tools.LSPLocation, error) {
+	client, err := a.mgr.FirstClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, nil
+	}
+	syms, err := client.WorkspaceSymbols(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.LSPLocation, len(syms))
+	for i, s := range syms {
+		out[i] = tools.LSPLocation{URI: s.Location.URI, Line: s.Location.Range.Start.Line, Col: s.Location.Range.Start.Character}
+	}
+	return out, nil
+}
+
+func (a *lspClientAdapter) PrepareCallHierarchy(ctx context.Context, path string, line, col int) ([]tools.LSPCallHierarchyItem, error) {
+	client, err := a.mgr.For(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, nil
+	}
+	items, err := client.PrepareCallHierarchy(ctx, path, line, col)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.LSPCallHierarchyItem, len(items))
+	for i, it := range items {
+		out[i] = tools.LSPCallHierarchyItem{Name: it.Name, URI: it.URI, Line: it.Range.Start.Line, Col: it.Range.Start.Character}
+	}
+	return out, nil
+}
+
+func (a *lspClientAdapter) IncomingCalls(ctx context.Context, item tools.LSPCallHierarchyItem) ([]tools.LSPCallHierarchyItem, error) {
+	client, err := a.mgr.For(ctx, item.URI)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, nil
+	}
+	lspItem := lsp.CallHierarchyItem{
+		Name: item.Name,
+		URI:  item.URI,
+		Range: lsp.Range{
+			Start: lsp.Position{Line: item.Line, Character: item.Col},
+			End:   lsp.Position{Line: item.Line, Character: item.Col},
+		},
+		SelectionRange: lsp.Range{
+			Start: lsp.Position{Line: item.Line, Character: item.Col},
+			End:   lsp.Position{Line: item.Line, Character: item.Col},
+		},
+	}
+	calls, err := client.IncomingCalls(ctx, lspItem)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.LSPCallHierarchyItem, len(calls))
+	for i, c := range calls {
+		out[i] = tools.LSPCallHierarchyItem{Name: c.From.Name, URI: c.From.URI, Line: c.From.Range.Start.Line, Col: c.From.Range.Start.Character}
+	}
+	return out, nil
+}
+
+func (a *lspClientAdapter) OutgoingCalls(ctx context.Context, item tools.LSPCallHierarchyItem) ([]tools.LSPCallHierarchyItem, error) {
+	client, err := a.mgr.For(ctx, item.URI)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, nil
+	}
+	lspItem := lsp.CallHierarchyItem{
+		Name: item.Name,
+		URI:  item.URI,
+		Range: lsp.Range{
+			Start: lsp.Position{Line: item.Line, Character: item.Col},
+			End:   lsp.Position{Line: item.Line, Character: item.Col},
+		},
+		SelectionRange: lsp.Range{
+			Start: lsp.Position{Line: item.Line, Character: item.Col},
+			End:   lsp.Position{Line: item.Line, Character: item.Col},
+		},
+	}
+	calls, err := client.OutgoingCalls(ctx, lspItem)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.LSPCallHierarchyItem, len(calls))
+	for i, c := range calls {
+		out[i] = tools.LSPCallHierarchyItem{Name: c.To.Name, URI: c.To.URI, Line: c.To.Range.Start.Line, Col: c.To.Range.Start.Character}
+	}
+	return out, nil
+}
+
+// workspacePath returns a plausible path to use for workspace-level requests.
+func (a *lspClientAdapter) workspacePath() string {
+	// The manager has a cwd; return any path with a known extension.
+	// This is a best-effort heuristic for workspace/symbol.
+	// A better approach would be to iterate configured servers.
+	return a.mgr.Cwd() + "/_ws_.go"
+}
+
+func flattenSymbols(syms []lsp.DocumentSymbol) []tools.LSPLocation {
+	var out []tools.LSPLocation
+	for _, s := range syms {
+		out = append(out, tools.LSPLocation{
+			URI:  "", // filled by caller
+			Line: s.SelectionRange.Start.Line,
+			Col:  s.SelectionRange.Start.Character,
+		})
+		out = append(out, flattenSymbols(s.Children)...)
+	}
+	return out
+}

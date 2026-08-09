@@ -41,6 +41,25 @@ func NewManager(cfg Config, cwd string) *Manager {
 	}
 }
 
+// Cwd returns the working directory the manager is rooted at.
+func (m *Manager) Cwd() string { return m.cwd }
+
+// FirstClient returns the first configured client, or nil.
+// Useful for workspace-level requests that don't target a specific file.
+func (m *Manager) FirstClient(ctx context.Context) (*Client, error) {
+	// Find the first configured extension.
+	for _, cfg := range m.cfg.Servers {
+		if len(cfg.Extensions) > 0 {
+			ext := cfg.Extensions[0]
+			if !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+			return m.For(ctx, filepath.Join(m.cwd, "_ws"+ext))
+		}
+	}
+	return nil, nil
+}
+
 // For returns the Client responsible for the file at the given path.
 // It lazily starts the appropriate LSP server if one matches and hasn't
 // been started yet. Returns nil, nil if no configured server matches.

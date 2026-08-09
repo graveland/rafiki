@@ -122,6 +122,21 @@ type LSPDiagnostic struct {
 	Message  string
 }
 
+// LSPLocation is a file location returned by navigation operations.
+type LSPLocation struct {
+	URI   string
+	Line  int // 0-based
+	Col   int // 0-based
+}
+
+// LSPCallHierarchyItem is a node in the call graph.
+type LSPCallHierarchyItem struct {
+	Name string
+	URI  string
+	Line int
+	Col  int
+}
+
 // LSPClient is the interface the LSP tools use to talk to language servers.
 // It is satisfied by *lsp.Manager from the lsp package, keeping the tools
 // package free of direct LSP protocol types.
@@ -140,6 +155,30 @@ type LSPClient interface {
 	// WaitForDiagnostics blocks until new diagnostics arrive after the
 	// given start version, or the timeout expires.
 	WaitForDiagnostics(ctx context.Context, path string, timeoutSec int) error
+
+	// --- navigation ---
+
+	// Definition returns the definition location(s) for the symbol at
+	// the given 0-based line and column.
+	Definition(ctx context.Context, path string, line, col int) ([]LSPLocation, error)
+
+	// References returns all reference locations for the symbol.
+	References(ctx context.Context, path string, line, col int) ([]LSPLocation, error)
+
+	// DocumentSymbols returns the symbol outline for a file.
+	DocumentSymbols(ctx context.Context, path string) ([]LSPLocation, error)
+
+	// WorkspaceSymbols searches the workspace by name.
+	WorkspaceSymbols(ctx context.Context, query string) ([]LSPLocation, error)
+
+	// PrepareCallHierarchy resolves a call hierarchy item at the given position.
+	PrepareCallHierarchy(ctx context.Context, path string, line, col int) ([]LSPCallHierarchyItem, error)
+
+	// IncomingCalls returns callers of the given call hierarchy item.
+	IncomingCalls(ctx context.Context, item LSPCallHierarchyItem) ([]LSPCallHierarchyItem, error)
+
+	// OutgoingCalls returns callees of the given call hierarchy item.
+	OutgoingCalls(ctx context.Context, item LSPCallHierarchyItem) ([]LSPCallHierarchyItem, error)
 }
 
 // ToolOpts carries the per-agent runtime state a Materializer needs to

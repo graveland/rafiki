@@ -294,6 +294,117 @@ func (c *Client) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// Definition resolves the definition location for the symbol at the given
+// 0-based line and character.
+func (c *Client) Definition(ctx context.Context, path string, line, character int) ([]Location, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := DefinitionParams{
+		TextDocument: TextDocumentIdentifier{URI: pathToURI(path)},
+		Position:     Position{Line: line, Character: character},
+	}
+	var result []Location
+	if err := conn.Call(ctx, "textDocument/definition", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: definition: %w", err)
+	}
+	return result, nil
+}
+
+// References finds all references to the symbol at the given position.
+func (c *Client) References(ctx context.Context, path string, line, character int) ([]Location, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := ReferenceParams{
+		TextDocument: TextDocumentIdentifier{URI: pathToURI(path)},
+		Position:     Position{Line: line, Character: character},
+		Context:      ReferenceContext{IncludeDeclaration: true},
+	}
+	var result []Location
+	if err := conn.Call(ctx, "textDocument/references", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: references: %w", err)
+	}
+	return result, nil
+}
+
+// DocumentSymbols returns the structured symbol outline for a file.
+func (c *Client) DocumentSymbols(ctx context.Context, path string) ([]DocumentSymbol, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := DocumentSymbolParams{
+		TextDocument: TextDocumentIdentifier{URI: pathToURI(path)},
+	}
+	var result []DocumentSymbol
+	if err := conn.Call(ctx, "textDocument/documentSymbol", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: documentSymbol: %w", err)
+	}
+	return result, nil
+}
+
+// WorkspaceSymbols searches the workspace for symbols matching query.
+func (c *Client) WorkspaceSymbols(ctx context.Context, query string) ([]SymbolInformation, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := WorkspaceSymbolParams{Query: query}
+	var result []SymbolInformation
+	if err := conn.Call(ctx, "workspace/symbol", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: workspace/symbol: %w", err)
+	}
+	return result, nil
+}
+
+// PrepareCallHierarchy prepares the call hierarchy at the given position.
+func (c *Client) PrepareCallHierarchy(ctx context.Context, path string, line, character int) ([]CallHierarchyItem, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := CallHierarchyPrepareParams{
+		TextDocument: TextDocumentIdentifier{URI: pathToURI(path)},
+		Position:     Position{Line: line, Character: character},
+	}
+	var result []CallHierarchyItem
+	if err := conn.Call(ctx, "textDocument/prepareCallHierarchy", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: prepareCallHierarchy: %w", err)
+	}
+	return result, nil
+}
+
+// IncomingCalls returns callers of the given call hierarchy item.
+func (c *Client) IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyIncomingCall, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := CallHierarchyIncomingCallsParams{Item: item}
+	var result []CallHierarchyIncomingCall
+	if err := conn.Call(ctx, "callHierarchy/incomingCalls", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: incomingCalls: %w", err)
+	}
+	return result, nil
+}
+
+// OutgoingCalls returns callees of the given call hierarchy item.
+func (c *Client) OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyOutgoingCall, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := CallHierarchyOutgoingCallsParams{Item: item}
+	var result []CallHierarchyOutgoingCall
+	if err := conn.Call(ctx, "callHierarchy/outgoingCalls", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: outgoingCalls: %w", err)
+	}
+	return result, nil
+}
+
 // clientHandler handles incoming JSON-RPC requests/notifications from the LSP server.
 type clientHandler struct {
 	c *Client

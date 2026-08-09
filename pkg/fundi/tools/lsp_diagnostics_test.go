@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"os/exec"
 	"strings"
 	"testing"
@@ -32,6 +31,28 @@ func (f *fakeLSPClient) WaitForDiagnostics(_ context.Context, _ string, _ int) e
 		return context.DeadlineExceeded
 	}
 	return nil
+}
+
+func (f *fakeLSPClient) Definition(context.Context, string, int, int) ([]LSPLocation, error) {
+	return nil, nil
+}
+func (f *fakeLSPClient) References(context.Context, string, int, int) ([]LSPLocation, error) {
+	return nil, nil
+}
+func (f *fakeLSPClient) DocumentSymbols(context.Context, string) ([]LSPLocation, error) {
+	return nil, nil
+}
+func (f *fakeLSPClient) WorkspaceSymbols(context.Context, string) ([]LSPLocation, error) {
+	return nil, nil
+}
+func (f *fakeLSPClient) PrepareCallHierarchy(context.Context, string, int, int) ([]LSPCallHierarchyItem, error) {
+	return nil, nil
+}
+func (f *fakeLSPClient) IncomingCalls(context.Context, LSPCallHierarchyItem) ([]LSPCallHierarchyItem, error) {
+	return nil, nil
+}
+func (f *fakeLSPClient) OutgoingCalls(context.Context, LSPCallHierarchyItem) ([]LSPCallHierarchyItem, error) {
+	return nil, nil
 }
 
 func TestLSPDiagnostics_Materialize_DeclinesWhenNoLSP(t *testing.T) {
@@ -126,12 +147,4 @@ func TestLSPDiagnostics_Integration_Gopls(t *testing.T) {
 		t.Skipf("gopls not found: %v", err)
 	}
 	t.Log("gopls integration tested via lsp.Manager in pkg/fundi/lsp/integration_test.go")
-}
-
-func mustJSON(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return b
 }
