@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,7 +46,7 @@ func (WebfetchBlueprint) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "url", Type: "string", Description: "URL to fetch. Only http and https schemes are accepted."},
-			{Name: "format", Type: "string", Description: "Output format: text (default), markdown, or html"},
+			{Name: "format", Type: "string", Description: "Output format: markdown (default, links preserved), text, or html"},
 		},
 		Required: []string{"url"},
 	}
@@ -79,6 +80,9 @@ type webfetchTool struct {
 	// on loopback while still exercising the production dial path;
 	// production always gets isBlockedIP.
 	blocked func(net.IP) bool
+	// fallback is the spill-name counter used when the context carries no
+	// tool-call id — see the comment at its use in Execute.
+	fallback atomic.Int64
 }
 
 // guard indirects through the field so a test can swap the predicate after
@@ -216,13 +220,24 @@ func (t *webfetchTool) Execute(ctx context.Context, input ToolInput) (ToolResult
 		}
 	}
 
+	// A per-call spill name, as bash, ls, and mcp already do. A constant
+	// "webfetch" means two over-budget fetches in the same turn — agentloop
+	// runs a tool batch concurrently, limit 6 — both spill to
+	// <SpillDir>/webfetch, and result A's "[... full output at ...]" marker
+	// then points at whichever of the two write() calls landed last, with
+	// nothing signalling the swap.
+	spillName := agentloop.ToolCallID(ctx)
+	if spillName == "" {
+		spillName = fmt.Sprintf("webfetch_%d", t.fallback.Add(1))
+	}
+
 	// Budget below agentloop's blind outer cap, not at webfetch's own read
 	// limit. The old Budget{MaxBytes: 100KB} could never fire, because
 	// LimitReader had already capped the body at exactly that — so a 60 KB
 	// page skipped the spill entirely and was instead tail-clipped by
 	// truncateToolResult with no spill file, leaving the model no way to
 	// reach the rest.
-	content = t.p.ClipBudget(fenceUntrusted(in.URL, content), "webfetch",
+	content = t.p.ClipBudget(fenceUntrusted(in.URL, content), spillName,
 		Budget{MaxBytes: agentloop.MaxToolResultSize - webfetchTrailerReserve})
 	return NewTextResult(content), nil
 }
