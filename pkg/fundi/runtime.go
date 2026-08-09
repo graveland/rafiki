@@ -164,6 +164,21 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		return nil, nil, err
 	}
 
+	lspShutdown := func() {}
+	var lspClient tools.LSPClient
+	if opts.LSPConfig != "" {
+		if _, err := os.Stat(opts.LSPConfig); err != nil {
+			return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
+		}
+		lspCfg, err := loadLSPConfig(opts.LSPConfig)
+		if err != nil {
+			return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
+		}
+		lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
+		lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
+		lspClient = &lspClientAdapter{mgr: lspMgr}
+	}
+
 	toolOpts := tools.ToolOpts{
 		Cwd:          opts.Cwd,
 		FileTracker:  tools.NewFileTracker(),
@@ -171,6 +186,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Skills:       discovered,
 		RTK:          tools.ParseRTKMode(opts.RTK),
 		Web:          opts.ToolsWeb,
+		LSP:          lspClient,
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 
@@ -187,21 +203,6 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: connect mcp: %w", err)
 		}
-	}
-
-	lspShutdown := func() {}
-	if opts.LSPConfig != "" {
-		if _, err := os.Stat(opts.LSPConfig); err != nil {
-			return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
-		}
-		lspCfg, err := loadLSPConfig(opts.LSPConfig)
-		if err != nil {
-			return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
-		}
-		lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
-		lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
-		// Store the manager for later tool wiring in sub-phase B.
-		_ = lspMgr
 	}
 
 	cfg := Config{

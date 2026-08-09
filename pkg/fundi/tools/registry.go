@@ -112,6 +112,36 @@ func ParseRTKMode(s string) RTKMode {
 	}
 }
 
+// LSPDiagnostic is a diagnostic message from a language server, translated
+// from the LSP protocol into tool-agnostic fields.
+type LSPDiagnostic struct {
+	Path     string
+	Line     int    // 0-based
+	Column   int    // 0-based
+	Severity string // "error", "warning", "info", "hint"
+	Message  string
+}
+
+// LSPClient is the interface the LSP tools use to talk to language servers.
+// It is satisfied by *lsp.Manager from the lsp package, keeping the tools
+// package free of direct LSP protocol types.
+type LSPClient interface {
+	// Diagnostics returns cached diagnostics for a file, or nil when no
+	// language server handles it. The caller should first ensure the file
+	// is open (DidOpen) so the server has processed it.
+	Diagnostics(ctx context.Context, path string) ([]LSPDiagnostic, error)
+
+	// DidOpen notifies the language server that a file has been opened.
+	DidOpen(ctx context.Context, path, content string) error
+
+	// DidChange notifies the server that a file's content changed.
+	DidChange(ctx context.Context, path, content string) error
+
+	// WaitForDiagnostics blocks until new diagnostics arrive after the
+	// given start version, or the timeout expires.
+	WaitForDiagnostics(ctx context.Context, path string, timeoutSec int) error
+}
+
 // ToolOpts carries the per-agent runtime state a Materializer needs to
 // build a concrete Tool from a blueprint that carries only its static
 // metadata (name, description, input schema).
@@ -127,6 +157,10 @@ type ToolOpts struct {
 	// nil means the tool creates its own client with SSRF protection.
 	// Set by tests that provide an httptest server on loopback.
 	HTTPClient *http.Client
+
+	// LSP, when non-nil, provides access to language server diagnostics
+	// and document sync. nil means LSP tools decline to materialize.
+	LSP LSPClient
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements
