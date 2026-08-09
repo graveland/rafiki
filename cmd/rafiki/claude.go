@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,23 +32,28 @@ const (
 	claudeCatalogBudget = 2 * time.Second
 )
 
-// newClaudeCmd wraps claudeCmd for cobra. claudeCmd owns its own flag.FlagSet
-// (DisableFlagParsing: true means cobra hands it the raw args after "claude"
-// untouched) so the pi-controller-style `-model`/`-url` flags it already
-// documents keep working unchanged under the client's cobra front end.
+// newClaudeCmd builds the `rafiki claude` launcher. Flag parsing is plain
+// cobra/pflag: pflag already stops at a bare "--" and hands everything after
+// it back as positional args (see (*pflag.FlagSet).Parse), which is exactly
+// how the claude-side flags in the Example below reach execClaude unparsed.
 func newClaudeCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:     "claude [-- claude-args...]",
 		Aliases: []string{"cl"},
 		Short:   "Launch Claude Code pointed at the rafiki proxy",
 		Long: "Resolves the proxy URL and token, sets the environment Claude Code needs,\n" +
 			"and execs your own claude binary. Not a daemon child — this runs in your\n" +
-			"terminal and is not supervised, listed, or attachable.",
-		DisableFlagParsing: true, // claudeCmd owns its flag set and passes the rest through
-		RunE: func(_ *cobra.Command, args []string) error {
-			return claudeCmd(args)
-		},
+			"terminal and is not supervised, listed, or attachable.\n\n" +
+			"Everything after -- is passed to claude verbatim.\n\n" +
+			"Example:\n" +
+			"  rafiki claude --model glm-5.2 -- --permission-mode plan",
+		RunE: runClaude,
 	}
+	cmd.Flags().String("url", envOr("RAFIKI_URL", "http://localhost:8035"), "rafiki proxy base URL (or RAFIKI_URL)")
+	cmd.Flags().String("token", envOr("RAFIKI_TOKEN", "dev"), "static bearer token for the proxy (or RAFIKI_TOKEN)")
+	cmd.Flags().String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
+	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
+	return cmd
 }
 
 // claudeInvocation is the assembled environment and argument list for exec'ing
@@ -92,54 +96,39 @@ func claudeAutoCompactWindow(ctx context.Context, model string, cacheDir string)
 	return routing.AutoCompactWindow(ctxLen, maxComp)
 }
 
-// claudeCmd runs `rafiki claude [flags] [-- claude flags...]`.
-func claudeCmd(args []string) error {
-	fs := flag.NewFlagSet("claude", flag.ExitOnError)
-	url := fs.String("url", envOr("RAFIKI_URL", "http://localhost:8035"), "rafiki proxy base URL (or RAFIKI_URL)")
-	token := fs.String("token", envOr("RAFIKI_TOKEN", "dev"), "static bearer token for the proxy (or RAFIKI_TOKEN)")
-	model := fs.String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
-	session := fs.String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
-	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), `usage: rafiki claude [flags] [-- claude flags...]
+// runClaude runs `rafiki claude [flags] [-- claude flags...]`.
+func runClaude(cmd *cobra.Command, args []string) error {
+	url, _ := cmd.Flags().GetString("url")
+	token, _ := cmd.Flags().GetString("token")
+	model, _ := cmd.Flags().GetString("model")
+	session, _ := cmd.Flags().GetString("session")
 
-Launch Claude Code against a rafiki proxy, with capture, OpenRouter failover
-and model resolution. Everything after -- is passed to claude verbatim.
-
-  rafiki claude --model glm-5.2 -- --permission-mode plan
-
-`)
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	if *url == "" {
+	if url == "" {
 		return errors.New("--url (or RAFIKI_URL) is required")
 	}
 	// Preflight so a dead proxy is a clear message here rather than an opaque
 	// connection error from inside Claude Code after it has taken the TTY.
-	if err := claudePreflight(*url); err != nil {
+	if err := claudePreflight(url); err != nil {
 		return err
 	}
 
-	sessionID := *session
+	sessionID := session
 	if sessionID == "" {
 		sessionID = uuid.NewString()
 	}
 
 	autoCompact := 0
-	if *model != "" {
+	if model != "" {
 		cache, err := os.UserCacheDir()
 		if err == nil {
-			autoCompact = claudeAutoCompactWindow(context.Background(), *model, filepath.Join(cache, "rafiki"))
+			autoCompact = claudeAutoCompactWindow(context.Background(), model, filepath.Join(cache, "rafiki"))
 		}
 	}
 
 	env, modelArgs := proxyenv.Claude(os.Environ(), proxyenv.ClaudeOptions{
-		URL:               *url,
-		Token:             *token,
-		Model:             *model,
+		URL:               url,
+		Token:             token,
+		Model:             model,
 		AutoCompactWindow: autoCompact,
 		Headers: map[string]string{
 			// Correlates every turn of this session onto ONE captured
@@ -149,7 +138,7 @@ and model resolution. Everything after -- is passed to claude verbatim.
 			"X-Rafiki-Source":  "rafiki-claude",
 		},
 	})
-	return execClaude(claudeInvocation{Env: env, Args: append(modelArgs, fs.Args()...)})
+	return execClaude(claudeInvocation{Env: env, Args: append(modelArgs, args...)})
 }
 
 func envOr(key, fallback string) string {

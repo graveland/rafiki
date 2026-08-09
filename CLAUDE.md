@@ -35,6 +35,8 @@
 
 - **Quoting rules differ between `'` and `"` and the rtk rewrite guard must honour that.** Inside single quotes every shell metacharacter is inert; inside double quotes bash still expands `$`, `` ` ``, `$( )` and honours `\`. `hasShellChaining` refuses `$`/backtick/backslash inside `"…"` while leaving `;`/`|`/`&`/`<`/`>` inert there. Treating both quote kinds alike (the original bug) let `git commit -m "release $VERSION"` reach rtk's argv and commit the literal string.
 
+- **Deleting a git worktree leaves golangci-lint's cache keyed to the dead path, and the next `make check` in a DIFFERENT worktree reports phantom failures.** The errors cite files by their old absolute path and are accompanied by `failed to parse file: ... no such file or directory` warnings — the finding itself ("Error return value of `c.sf.Do` is not checked" in `pkg/routing/orcatalog.go`) looked entirely real while the file was clean. `golangci-lint cache clean` fixes it. Suspect this whenever `make check` fails on code you did not touch, especially right after a `git worktree remove`.
+
 - **No `Co-Authored-By` trailers in commit messages.**
 - **`make check` (vet + golangci-lint + unit tests, `-race`) is the only gate — there is no CI on this repo.** Run it before considering anything done.
 - **DB-backed tests silently skip without `RAFIKI_TEST_DSN`** — a green `go test ./...` does not mean the store/insights/agentcli code was exercised. Source `.env` first (`set -a; . ./.env; set +a`) and check the skip count, not just the exit code.
