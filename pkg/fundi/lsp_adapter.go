@@ -3,6 +3,7 @@ package fundi
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -294,16 +295,53 @@ func (a *lspClientAdapter) Rename(ctx context.Context, path string, line, col in
 	if err != nil {
 		return nil, err
 	}
-	return applyWorkspaceEdit(byFile, client.PositionEncoding(), a.tracker)
+	modified, err := applyWorkspaceEdit(byFile, client.PositionEncoding(), a.tracker)
+	if err != nil {
+		return modified, err
+	}
+	// edit and write both call notifyFileChanged (registry.go) after a
+	// successful write; rename wrote files and updated the FileTracker but
+	// never told the server, so a subsequent navigation query answered from
+	// the server's stale parse. A rename is exactly the case registry.go's
+	// FileChangeNotifier doc warns is silent: old name and new name are
+	// almost always the same length, so the line count is unchanged and the
+	// server returns a confidently wrong location with no error at all.
+	//
+	// Best-effort like notifyFileChanged: the files are already renamed on
+	// disk, so a sync failure here must not turn a successful rename into a
+	// tool error — it is logged, not swallowed silently, so a server that
+	// has stopped accepting notifications is still diagnosable.
+	for _, p := range modified {
+		if nerr := a.mgr.NotifyChange(ctx, p); nerr != nil {
+			slog.Debug("lsp: rename change notification failed", "path", p, "err", nerr)
+		}
+	}
+	return modified, nil
 }
 
-// applyWorkspaceEdit writes a multi-file edit atomically.
+// applyWorkspaceEdit writes a multi-file edit, narrowing the window in
+// which a write failure can leave a partial rename on disk.
 //
 // Every file is read, edited in memory and validated BEFORE anything is
-// written. The previous version wrote each file as it went while iterating a
-// Go map — whose order is random — so a failure on the 4th of 7 files left a
-// nondeterministic subset renamed and the rest not: a workspace that no
-// longer compiles and cannot be reproduced to debug.
+// written — that part was always true. But "write every file in a second
+// loop" is not the same guarantee as the comment here used to imply: a
+// failure on write 4 of 7 (disk full, a path that turned read-only, a
+// directory that vanished) still left files 1-3 renamed and 4-7 not, a
+// workspace that no longer compiles. Each staged file is now written to a
+// ".rename-tmp" sibling of its target first; only once every temp write has
+// succeeded do we os.Rename them into place one by one. A rename within the
+// same directory is atomic and — barring the filesystem itself failing —
+// cannot fail the way a fresh write can, so an ordinary failure (the kind
+// this function actually needs to guard against) is now caught in the temp
+// phase, before any real file has been touched, and every temp file it
+// created is removed.
+//
+// This is still not a cross-file transaction: an OS crash or kill -9
+// between the third and fifth os.Rename can still leave a partial result,
+// because there is no way to make N independent renames atomic as a group
+// without filesystem support this code doesn't have. What changed is that
+// the common failure mode — a write that fails for an ordinary reason
+// partway through — no longer corrupts the workspace.
 func applyWorkspaceEdit(byFile map[string][]lsp.TextEdit, encoding string, tracker *tools.FileTracker) ([]string, error) {
 	paths := make([]string, 0, len(byFile))
 	for p := range byFile {
@@ -324,7 +362,12 @@ func applyWorkspaceEdit(byFile map[string][]lsp.TextEdit, encoding string, track
 	}
 
 	staged := make(map[string][]byte, len(paths))
+	modes := make(map[string]os.FileMode, len(paths))
 	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("lsp: stat %s: %w", p, err)
+		}
 		content, err := os.ReadFile(p)
 		if err != nil {
 			return nil, fmt.Errorf("lsp: read %s: %w", p, err)
@@ -334,13 +377,41 @@ func applyWorkspaceEdit(byFile map[string][]lsp.TextEdit, encoding string, track
 			return nil, fmt.Errorf("lsp: apply edit to %s: %w", p, err)
 		}
 		staged[p] = next
+		modes[p] = info.Mode()
 	}
 
+	// Phase 1: write every staged file to a temp sibling. tmpFor tracks only
+	// the temp files actually created, so cleanup on an early failure never
+	// tries to remove one that was never written.
+	tmpFor := make(map[string]string, len(paths))
+	cleanupTmp := func() {
+		for _, tmp := range tmpFor {
+			_ = os.Remove(tmp)
+		}
+	}
+	for _, p := range paths {
+		tmp := p + ".rename-tmp"
+		if err := os.WriteFile(tmp, staged[p], modes[p]); err != nil {
+			cleanupTmp()
+			return nil, fmt.Errorf("lsp: write %s: %w", tmp, err)
+		}
+		tmpFor[p] = tmp
+	}
+
+	// Phase 2: rename every temp file into place. Each individual rename is
+	// atomic, but a failure partway still leaves the earlier ones applied —
+	// see the function comment on what guarantee this does and does not
+	// provide.
 	var modified []string
 	for _, p := range paths {
-		if err := os.WriteFile(p, staged[p], 0o644); err != nil {
-			return modified, fmt.Errorf("lsp: write %s: %w", p, err)
+		if err := os.Rename(tmpFor[p], p); err != nil {
+			// tmpFor[p] is left in the map on purpose: the rename failed, so
+			// that temp file is presumed to still exist and cleanupTmp must
+			// remove it too, not just the ones not yet attempted.
+			cleanupTmp()
+			return modified, fmt.Errorf("lsp: rename into %s: %w", p, err)
 		}
+		delete(tmpFor, p)
 		if tracker != nil {
 			if info, statErr := os.Stat(p); statErr == nil {
 				tracker.RecordRead(p, info.ModTime())
@@ -352,16 +423,11 @@ func applyWorkspaceEdit(byFile map[string][]lsp.TextEdit, encoding string, track
 }
 
 func (a *lspClientAdapter) Restart(ctx context.Context, path string) error {
-	client, err := a.mgr.For(ctx, path)
-	if err != nil {
-		return err
-	}
-	if client == nil {
-		return fmt.Errorf("lsp: no language server for %s", path)
-	}
-	_ = client.Shutdown(ctx)
-	// For will lazily restart on next call.
-	return nil
+	// Manager.Restart owns the restart-budget bookkeeping: a deliberate,
+	// tool-initiated restart must not consume the same crash budget a
+	// server that keeps dying on its own is measured against. See
+	// forgiveRestart in manager.go.
+	return a.mgr.Restart(ctx, path)
 }
 
 // applyTextEdits returns content with edits applied, leaving the input

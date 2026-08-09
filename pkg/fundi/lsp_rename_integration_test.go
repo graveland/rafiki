@@ -95,4 +95,32 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 	if !strings.Contains(string(gotMain), `"日本語"`) {
 		t.Errorf("the CJK literal was corrupted by the edit:\n%q", gotMain)
 	}
+
+	// Regression check for Finding 6: applyWorkspaceEdit wrote the rename to
+	// disk but never told the server, so its OPEN buffer for main.go still
+	// held the pre-rename content. "Add" -> "Sum" is exactly the
+	// line-count-and-column-preserving case that made this silent: querying
+	// DocumentSymbols at the same position gopls last indexed would still
+	// report the OLD name with no error at all if the didChange notify were
+	// missing. If this starts failing, check that Rename in lsp_adapter.go
+	// still calls a.mgr.NotifyChange for every modified path.
+	syms, err := adapter.DocumentSymbols(ctx, mainPath)
+	if err != nil {
+		t.Fatalf("DocumentSymbols: %v", err)
+	}
+	var sawOld, sawNew bool
+	for _, s := range syms {
+		switch s.Name {
+		case "Add":
+			sawOld = true
+		case "Sum":
+			sawNew = true
+		}
+	}
+	if sawOld {
+		t.Error("server still reports the pre-rename symbol \"Add\" -- it was never notified of the rename (no didChange sent)")
+	}
+	if !sawNew {
+		t.Error("server does not report the renamed symbol \"Sum\"; expected DocumentSymbols to reflect the rename")
+	}
 }

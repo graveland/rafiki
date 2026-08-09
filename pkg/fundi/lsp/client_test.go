@@ -2,8 +2,11 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/sourcegraph/jsonrpc2"
 )
 
 func TestClient_Initialize(t *testing.T) {
@@ -186,6 +189,131 @@ func TestClient_WaitForInitialDiagnostics_Timeout(t *testing.T) {
 			t.Error("expected timeout error, got nil")
 		}
 	})
+}
+
+// TestClientHandler_WorkspaceConfiguration is the regression test for
+// Finding 11: the client used to answer EVERY server-to-client request with
+// MethodNotFound, including workspace/configuration -- which gopls issues
+// unprompted during startup. Using the fake server harness to drive a real
+// server-to-client request (rather than calling HandleWorkspaceConfiguration
+// directly) proves the request actually reaches the handler through
+// clientHandler.Handle and gets a well-formed reply, not just that the
+// unmarshal-and-shape helper works in isolation.
+func TestClientHandler_WorkspaceConfiguration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fs := NewFakeServer()
+	client := &Client{name: "fake", diags: make(map[string][]Diagnostic)}
+	clientConn, serverConn, closer := NewFakeServerConn(ctx, fs, &clientHandler{c: client})
+	defer closer.Close()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	client.conn.Store(clientConn)
+
+	// The shape gopls actually sends: one item per setting it wants read.
+	params := struct {
+		Items []struct {
+			Section string `json:"section"`
+		} `json:"items"`
+	}{Items: []struct {
+		Section string `json:"section"`
+	}{{Section: "gopls"}, {Section: "go"}}}
+
+	var result []any
+	if err := serverConn.Call(ctx, "workspace/configuration", params, &result); err != nil {
+		t.Fatalf("workspace/configuration returned an error, want a result: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("got %d results, want 2 (one per requested item, in order)", len(result))
+	}
+	for i, r := range result {
+		if r != nil {
+			t.Errorf("item %d: got %v, want null (we have no configuration store)", i, r)
+		}
+	}
+}
+
+// TestClientHandler_RegisterCapability covers the other startup request
+// gopls issues unprompted: it used to get MethodNotFound like everything
+// else, and now gets a plain acknowledgement.
+func TestClientHandler_RegisterCapability(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fs := NewFakeServer()
+	client := &Client{name: "fake", diags: make(map[string][]Diagnostic)}
+	clientConn, serverConn, closer := NewFakeServerConn(ctx, fs, &clientHandler{c: client})
+	defer closer.Close()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	client.conn.Store(clientConn)
+
+	for _, method := range []string{"client/registerCapability", "client/unregisterCapability"} {
+		var result any
+		if err := serverConn.Call(ctx, method, struct{}{}, &result); err != nil {
+			t.Errorf("%s returned an error, want an acknowledgement: %v", method, err)
+		}
+	}
+}
+
+// TestClientHandler_ShowMessageRequestIsReachable is the regression test for
+// the dead-code half of Finding 11: window/showMessageRequest arrives as a
+// REQUEST, not a notification, so the old "case window/showMessageRequest"
+// in handleNotification could never run -- it was short-circuited by
+// Handle's blanket MethodNotFound for every non-notification request. This
+// proves the method is now routed to HandleShowMessageRequest and gets a
+// decline (null) reply instead of an error.
+func TestClientHandler_ShowMessageRequestIsReachable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fs := NewFakeServer()
+	client := &Client{name: "fake", diags: make(map[string][]Diagnostic)}
+	clientConn, serverConn, closer := NewFakeServerConn(ctx, fs, &clientHandler{c: client})
+	defer closer.Close()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	client.conn.Store(clientConn)
+
+	params := struct {
+		Type    int    `json:"type"`
+		Message string `json:"message"`
+	}{Type: 1, Message: "retry?"}
+
+	var result any
+	if err := serverConn.Call(ctx, "window/showMessageRequest", params, &result); err != nil {
+		t.Fatalf("window/showMessageRequest returned an error, want a decline reply: %v", err)
+	}
+	if result != nil {
+		t.Errorf("got %v, want nil (declining the action)", result)
+	}
+}
+
+// TestClientHandler_UnknownRequestIsMethodNotFound pins that a genuinely
+// unsupported server-to-client request still gets MethodNotFound: the fix
+// for Finding 11 must not turn Handle into an always-succeeds stub.
+func TestClientHandler_UnknownRequestIsMethodNotFound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fs := NewFakeServer()
+	client := &Client{name: "fake", diags: make(map[string][]Diagnostic)}
+	clientConn, serverConn, closer := NewFakeServerConn(ctx, fs, &clientHandler{c: client})
+	defer closer.Close()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	client.conn.Store(clientConn)
+
+	var result any
+	err := serverConn.Call(ctx, "workspace/definitelyNotARealMethod", struct{}{}, &result)
+	if err == nil {
+		t.Fatal("expected an error for a genuinely unknown method, got nil")
+	}
+	var rpcErr *jsonrpc2.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc2.CodeMethodNotFound {
+		t.Fatalf("got %v, want a jsonrpc2.Error with code CodeMethodNotFound", err)
+	}
 }
 
 // connPair creates a client and fake server, initializes the client, and

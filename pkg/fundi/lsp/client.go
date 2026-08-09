@@ -66,10 +66,21 @@ type Client struct {
 
 	// closed is set atomically when the client has been shut down.
 	closed atomic.Bool
+
+	// startedAt is when the server process was launched. Manager.For reads
+	// this through Uptime to tell a startup crash (evidence the server
+	// itself is broken, and countable against maxServerStarts) apart from
+	// an exit after a long healthy run (a run-of-the-mill flake, forgiven).
+	startedAt time.Time
 }
 
 // Dead reports whether the server process has exited, for any reason.
 func (c *Client) Dead() bool { return c.dead.Load() }
+
+// Uptime returns how long the server process has been running (or ran, if
+// it has since exited). See the startedAt field comment for why Manager
+// cares about this.
+func (c *Client) Uptime() time.Duration { return time.Since(c.startedAt) }
 
 // PositionEncoding returns the encoding negotiated at initialize, defaulting
 // to utf-16 (the LSP default) before initialize has run.
@@ -164,6 +175,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	c.cmd = cmd
 	c.pid = cmd.Process.Pid
 	c.rootURI = pathToURI(cfg.Cwd)
+	c.startedAt = time.Now()
 
 	handler := &clientHandler{c: c}
 	conn := jsonrpc2.NewConn(ctx, stream, handler)
@@ -569,20 +581,55 @@ type clientHandler struct {
 	c *Client
 }
 
+// Handle answers every server-to-client request and notification.
+//
+// This used to reply MethodNotFound to every request without exception,
+// which included "workspace/configuration" and "client/registerCapability"
+// -- both of which gopls sends unprompted during startup. Real servers
+// tolerate the error today, but nothing in the spec requires that
+// tolerance: a server that treats an error response to its own handshake
+// as fatal would simply never come up, and there would be nothing wrong on
+// our end to point at. Answering the standard startup requests properly
+// costs nothing and removes that fragility; MethodNotFound remains the
+// right answer for anything genuinely unsupported.
 func (h *clientHandler) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) {
 	if req.Notif {
 		h.handleNotification(ctx, req)
 		return
 	}
-	// We don't expect server-to-client requests in our minimal usage.
-	_ = conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{
-		Code:    jsonrpc2.CodeMethodNotFound,
-		Message: fmt.Sprintf("unexpected server request: %s", req.Method),
-	})
+
+	switch req.Method {
+	case "workspace/configuration":
+		result, err := HandleWorkspaceConfiguration(req.Params)
+		if err != nil {
+			_ = conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{
+				Code:    jsonrpc2.CodeInvalidParams,
+				Message: err.Error(),
+			})
+			return
+		}
+		_ = conn.Reply(ctx, req.ID, result)
+	case "client/registerCapability", "client/unregisterCapability":
+		// We don't act on dynamic capability registration, but a null
+		// result acknowledges the request instead of erroring it.
+		_ = conn.Reply(ctx, req.ID, nil)
+	case "window/showMessageRequest":
+		// This arrives as a REQUEST (req.Notif == false), not a
+		// notification -- it used to have a case in handleNotification
+		// below that could never run, leaving HandleShowMessageRequest
+		// unreachable dead code. Routing it here is what actually answers
+		// gopls (or any server) asking the user to pick an action: we
+		// decline by replying null rather than erroring the request.
+		HandleShowMessageRequest(ctx, conn, req)
+	default:
+		_ = conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{
+			Code:    jsonrpc2.CodeMethodNotFound,
+			Message: fmt.Sprintf("unexpected server request: %s", req.Method),
+		})
+	}
 }
 
-func (h *clientHandler) handleNotification(ctx context.Context, req *jsonrpc2.Request) {
-	conn := h.c.conn.Load()
+func (h *clientHandler) handleNotification(_ context.Context, req *jsonrpc2.Request) {
 	switch req.Method {
 	case "textDocument/publishDiagnostics":
 		if req.Params == nil {
@@ -594,11 +641,6 @@ func (h *clientHandler) handleNotification(ctx context.Context, req *jsonrpc2.Re
 	case "window/showMessage", "window/logMessage":
 		if req.Params != nil {
 			HandleShowMessage(req.Params)
-		}
-	case "window/showMessageRequest":
-		// We don't support interactive message requests.
-		if conn != nil {
-			HandleShowMessageRequest(ctx, conn, req)
 		}
 	}
 }

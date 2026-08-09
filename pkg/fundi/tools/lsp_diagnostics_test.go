@@ -59,6 +59,37 @@ func (f *fakeLSPClient) Rename(context.Context, string, int, int, string) ([]str
 }
 func (f *fakeLSPClient) Restart(context.Context, string) error { return nil }
 
+// TestLSPDiagnostics_SchemaRequiresPath is the regression test for the
+// documentation promising a mode that is a hard error: the description and
+// schema used to say "path" was optional ("omit or use \".\" to include all
+// open files"), but resolveToolPath rejects an empty path with "path is
+// required", and "." resolves to the cwd directory, which DidOpen fails to
+// open (os.ReadFile on a directory). A model following the documentation
+// burned a turn either way. This pins that the schema and description now
+// agree with the implementation: path is required, and no omit/"." mode is
+// advertised.
+func TestLSPDiagnostics_SchemaRequiresPath(t *testing.T) {
+	bp := LSPDiagnosticsBlueprint{}
+
+	schema := bp.InputSchema()
+	found := false
+	for _, r := range schema.Required {
+		if r == "path" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("schema.Required = %v, want it to include %q", schema.Required, "path")
+	}
+
+	desc := bp.Description()
+	for _, promise := range []string{"omit", "\".\"", "all open files", "all currently-open files"} {
+		if strings.Contains(desc, promise) {
+			t.Errorf("description still promises an omit/all-open-files mode (%q), which resolveToolPath and DidOpen both reject: %s", promise, desc)
+		}
+	}
+}
+
 func TestLSPDiagnostics_Materialize_DeclinesWhenNoLSP(t *testing.T) {
 	bp := LSPDiagnosticsBlueprint{}
 	tool, err := bp.Materialize(ToolOpts{LSP: nil, Cwd: "/tmp"})

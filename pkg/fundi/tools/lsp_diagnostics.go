@@ -6,9 +6,16 @@ import (
 	"strings"
 )
 
-const lspDiagnosticsDescription = `Get compiler and linter errors from the language server for a file. 
-Input: "path" (optional — omit or use "." to include all open files).
-Output: path:line:col: severity: message, one per diagnostic. 
+// lspDiagnosticsDescription intentionally does NOT offer an "omit path" or
+// all-open-files mode: resolveToolPath(in.Path, "", lt.cwd) below rejects an
+// empty path with "path is required", and "." resolves to the cwd
+// directory, which DidOpen then fails to open with an os.ReadFile-on-a-
+// directory error. The description used to promise both, so a model
+// following the documentation burned a turn either way finding out neither
+// worked.
+const lspDiagnosticsDescription = `Get compiler and linter errors from the language server for a file.
+Input: "path" (required) — the file to check.
+Output: path:line:col: severity: message, one per diagnostic.
 After editing a file, call this to check for errors without running a build.
 The language server must be configured (lsp.json) for your language.`
 
@@ -22,8 +29,9 @@ func (LSPDiagnosticsBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
-			{Name: "path", Type: "string", Description: "File path to check (absolute or relative to cwd). Omit to check all currently-open files."},
+			{Name: "path", Type: "string", Description: "File path to check (absolute or relative to cwd)."},
 		},
+		Required: []string{"path"},
 	}
 }
 

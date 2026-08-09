@@ -138,6 +138,108 @@ func TestApplyWorkspaceEditIsAtomic(t *testing.T) {
 	}
 }
 
+// TestApplyWorkspaceEditUnwritableTargetLeavesNothingModified is the
+// required regression test for the atomicity fix: staging computed every
+// edit successfully (all ranges valid), but the WRITE for one target fails
+// (its directory is read-only, so even creating the ".rename-tmp" sibling
+// fails). Every original file must be untouched, and no stray temp file may
+// survive -- both properties the old "write each file in a loop" version
+// could not offer, since it wrote directly to the real target and left
+// whatever succeeded before the failure in place.
+func TestApplyWorkspaceEditUnwritableTargetLeavesNothingModified(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions don't block writes")
+	}
+
+	dir := t.TempDir()
+	good := filepath.Join(dir, "a.go")
+	const goodSrc = "package a\n\nvar Foo = 1\n"
+	if err := os.WriteFile(good, []byte(goodSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	roDir := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(roDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(roDir, "b.go")
+	const badSrc = "package b\n\nvar Foo = 1\n"
+	if err := os.WriteFile(bad, []byte(badSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Deny writes to the directory so even creating "b.go.rename-tmp" fails
+	// -- the target file's own mode is irrelevant to creating a new sibling.
+	if err := os.Chmod(roDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	// Restore write permission so t.TempDir()'s cleanup can remove the dir.
+	t.Cleanup(func() {
+		if err := os.Chmod(roDir, 0o755); err != nil {
+			t.Errorf("restore %s mode: %v", roDir, err)
+		}
+	})
+
+	byFile := map[string][]lsp.TextEdit{
+		good: {edit(2, 4, 2, 7, "Bar")},
+		bad:  {edit(2, 4, 2, 7, "Bar")},
+	}
+	tracker := tools.NewFileTracker()
+	if _, err := applyWorkspaceEdit(byFile, lsp.PositionEncodingUTF16, tracker); err == nil {
+		t.Fatal("expected the unwritable target to fail the whole edit")
+	}
+
+	afterGood, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterGood) != goodSrc {
+		t.Fatalf("a failed workspace edit left %s modified:\n%q", good, afterGood)
+	}
+
+	afterBad, err := os.ReadFile(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterBad) != badSrc {
+		t.Fatalf("a failed workspace edit left %s modified:\n%q", bad, afterBad)
+	}
+
+	// No stray ".rename-tmp" files anywhere in dir.
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if strings.HasSuffix(path, ".rename-tmp") {
+			t.Errorf("stray temp file left behind: %s", path)
+		}
+		return nil
+	})
+}
+
+// TestApplyWorkspaceEditPreservesFileMode pins that the temp-file-then-
+// rename path (added for atomicity) keeps writing files with their
+// original mode rather than a hardcoded default.
+func TestApplyWorkspaceEditPreservesFileMode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "exec.go")
+	if err := os.WriteFile(p, []byte("package x\n\nvar Foo = 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	byFile := map[string][]lsp.TextEdit{p: {edit(2, 4, 2, 7, "Bar")}}
+	if _, err := applyWorkspaceEdit(byFile, lsp.PositionEncodingUTF16, tools.NewFileTracker()); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, want the original 0o755 preserved", info.Mode().Perm())
+	}
+}
+
 func TestApplyWorkspaceEditWritesEveryFile(t *testing.T) {
 	dir := t.TempDir()
 	var paths []string

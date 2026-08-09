@@ -36,11 +36,25 @@ type Manager struct {
 	// THREE gopls processes indexing the same module simultaneously and then
 	// threw two away — hundreds of MB and a lot of CPU for nothing.
 	starting map[string]*startInFlight
-	// restarts counts spawns per language so a server that crashes on
-	// startup cannot become an unbounded spawn loop.
+	// restarts counts UNHEALTHY spawns per language so a server that crashes
+	// on startup cannot become an unbounded spawn loop. It must not count
+	// every spawn: For used to increment it on every start regardless of
+	// cause, so the initial start plus four deliberate lsp_restart calls
+	// exhausted maxServerStarts and every LSP tool failed for the rest of
+	// the process with a message ("failed to stay running") that was a lie
+	// — the server had never failed on its own. It is forgiven in two ways,
+	// both applied under mu in For: an exit after healthyUptime resets it
+	// (see the eviction block), and an operator-initiated restart consumes
+	// its one free respawn via forgiveRestart instead of incrementing it.
 	restarts map[string]int
-	mu       sync.Mutex
-	closed   bool
+	// forgiveRestart marks a language whose NEXT spawn must not count
+	// against restarts, set by Restart (the lsp_restart tool) before it
+	// shuts the current client down. It is consumed (deleted) the moment
+	// that spawn is attempted in For, so it exempts exactly the one respawn
+	// the deliberate restart caused — nothing more.
+	forgiveRestart map[string]bool
+	mu             sync.Mutex
+	closed         bool
 
 	// procCtx governs SERVER PROCESS lifetime and is deliberately not any
 	// caller's context: exec.CommandContext kills the process when its ctx
@@ -57,20 +71,37 @@ type startInFlight struct {
 	err    error
 }
 
-// maxServerStarts bounds spawns per language for the manager's lifetime.
+// maxServerStarts bounds UNHEALTHY spawns per language for the manager's
+// lifetime — see the restarts field comment for what counts.
 const maxServerStarts = 5
+
+// healthyUptime is how long a server must stay up before its eventual exit
+// stops counting as a "failed to stay running" strike: it resets restarts
+// for that language to zero. A process that has been serving requests this
+// long has proven it starts and works, so a crash after that point is an
+// ordinary flake, not evidence the server itself is broken — and without
+// this a long-lived server that happens to crash once an hour would still
+// eventually exhaust maxServerStarts and lock LSP out for the rest of the
+// session. Set comfortably above initializeTimeout (30s): indexing a large
+// module can itself take close to that long, and this must never mistake a
+// slow-but-legitimate startup for a startup crash.
+//
+// A var, not a const, so tests can shrink it rather than sleep 2 real
+// minutes to prove the forgiveness path fires.
+var healthyUptime = 2 * time.Minute
 
 // NewManager creates a Manager from the given configuration and working directory.
 func NewManager(cfg Config, cwd string) *Manager {
 	procCtx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		cfg:        cfg,
-		cwd:        cwd,
-		clients:    make(map[string]*Client),
-		starting:   make(map[string]*startInFlight),
-		restarts:   make(map[string]int),
-		procCtx:    procCtx,
-		cancelProc: cancel,
+		cfg:            cfg,
+		cwd:            cwd,
+		clients:        make(map[string]*Client),
+		starting:       make(map[string]*startInFlight),
+		restarts:       make(map[string]int),
+		forgiveRestart: make(map[string]bool),
+		procCtx:        procCtx,
+		cancelProc:     cancel,
 	}
 }
 
@@ -120,6 +151,14 @@ func (m *Manager) For(ctx context.Context, path string) (*Client, error) {
 				m.mu.Unlock()
 				return client, nil
 			}
+			// A server that ran long enough to prove itself healthy should
+			// not have this exit — for whatever reason — count against
+			// future starts. See healthyUptime.
+			if uptime := client.Uptime(); uptime >= healthyUptime {
+				slog.Info("lsp: server had a healthy run before exiting, forgiving restart budget",
+					"name", name, "uptime", uptime)
+				m.restarts[name] = 0
+			}
 			slog.Info("lsp: server exited, will restart", "name", name)
 			delete(m.clients, name)
 		}
@@ -141,13 +180,18 @@ func (m *Manager) For(ctx context.Context, path string) (*Client, error) {
 			continue // it died immediately; re-evaluate under the lock
 		}
 
-		if m.restarts[name] >= maxServerStarts {
+		forgiven := m.forgiveRestart[name]
+		if !forgiven && m.restarts[name] >= maxServerStarts {
 			m.mu.Unlock()
 			return nil, fmt.Errorf(
 				"lsp: %s has failed to stay running after %d starts; not restarting it again",
 				name, maxServerStarts)
 		}
-		m.restarts[name]++
+		if forgiven {
+			delete(m.forgiveRestart, name)
+		} else {
+			m.restarts[name]++
+		}
 		inflight := &startInFlight{done: make(chan struct{})}
 		m.starting[name] = inflight
 		m.mu.Unlock()
@@ -174,6 +218,43 @@ func (m *Manager) For(ctx context.Context, path string) (*Client, error) {
 		}
 		return client, nil
 	}
+}
+
+// Restart forces the language server responsible for path to respawn, for
+// the lsp_restart tool. It must NOT consume the restarts budget in For:
+// that budget exists to stop an unbounded loop of a server that fails on
+// its own, and an operator asking for a restart says nothing about the
+// server's health. This is what Finding 5 was — every spawn, deliberate or
+// not, used to increment restarts, so the initial start plus four
+// lsp_restart calls exhausted maxServerStarts and every LSP tool failed
+// for the rest of the process.
+//
+// If no server is currently running for path, this is equivalent to a
+// plain lazy start via For: there is no existing process to discard, and a
+// fresh start is not a "restart" the budget needs to forgive anything for.
+func (m *Manager) Restart(ctx context.Context, path string) error {
+	name, _, ok := m.serverFor(path)
+	if !ok {
+		return fmt.Errorf("lsp: no language server for %s", path)
+	}
+
+	m.mu.Lock()
+	client := m.clients[name]
+	if client != nil {
+		// Consumed by For the moment it attempts the respawn this shutdown
+		// causes, so it exempts exactly this one restart.
+		m.forgiveRestart[name] = true
+	}
+	m.mu.Unlock()
+
+	if client == nil {
+		_, err := m.For(ctx, path)
+		return err
+	}
+
+	// For lazily respawns on its next call for this name; forgiveRestart
+	// above ensures that respawn is free.
+	return client.Shutdown(ctx)
 }
 
 // start spawns and initializes one server. The process is tied to procCtx,
