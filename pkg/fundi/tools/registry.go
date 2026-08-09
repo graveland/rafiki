@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
+	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
 // ToolInput is the raw JSON input a tool receives from the model. It is a
@@ -237,6 +238,27 @@ type ToolOpts struct {
 	// Pool, when non-nil, is the shared database pool backing per-conversation
 	// tool state persistence. nil means in-memory-only (tests, standalone).
 	Pool *pgxpool.Pool
+
+	// Tasks is the task ledger backing the task_* tools. It is NEVER nil once
+	// those tools exist: BuildRuntime supplies an in-memory store when no pool
+	// is configured, so a DB-less agent keeps working with state lost on
+	// restart. This deliberately does NOT follow LSP's nil-means-decline
+	// pattern, which would silently remove task tracking from every DB-less
+	// agent and from every test constructing a bare ToolOpts{}.
+	Tasks tasks.Store
+
+	// ChildID is this agent's own child id (RuntimeOptions.Ref).
+	//
+	// Unlike the conversation ID — which does not exist until NewEngine runs,
+	// after materialization, and so must travel by context — the childID is
+	// already known here. That is what lets a task tool resolve "my assigned
+	// task" from assignee = me with no spawn-time handshake.
+	ChildID string
+
+	// Executor, when non-nil, runs the filesystem and shell tools in a
+	// separate process rather than in-process. nil keeps every tool local,
+	// which is the default and preserves today's behaviour exactly.
+	Executor ExecutorClient
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the

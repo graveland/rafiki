@@ -34,6 +34,7 @@ const (
 	TypeCtrlForget             = "ctrl_forget"
 	TypeCtrlForgetAllExited    = "ctrl_forget_all_exited"
 	TypeCtrlSearch             = "ctrl_search"
+	TypeCtrlTaskList           = "ctrl_task_list"
 	TypeCtrlStatus             = "ctrl_status"
 	TypeCtrlSetLabels          = "ctrl_set_labels"
 	TypeCtrlResponse           = "ctrl_response"
@@ -171,6 +172,18 @@ type SpawnRequest struct {
 	// Identity
 	Name   string            `json:"name,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; rafiki/ prefix rejected
+
+	// ParentChildID names the child spawning this one, forming the tree edge
+	// recorded as the rafiki/parent label (rafiki/root is derived from it).
+	// Empty means top-level.
+	//
+	// From an ordinary client connection this is honoured as given — the
+	// caller is already authenticated to the daemon. When a spawn originates
+	// from an agent's own spawn tool, the controller overrides it with the
+	// calling child's real id, so an agent cannot claim a parent it does not
+	// have. The lineage labels themselves are never accepted from a caller:
+	// the rafiki/ prefix is rejected in Labels above.
+	ParentChildID string `json:"parentChildId,omitempty"`
 
 	// Working directory (required, absolute).
 	Cwd string `json:"cwd"`
