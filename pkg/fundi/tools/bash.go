@@ -1,12 +1,16 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -81,30 +85,45 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 
 	// Try rtk rewrite first. When applied, exec the rtk argv directly
 	// instead of wrapping in bash -c.
-	var cmd *exec.Cmd
-	if rtkArgv, rtkApplied := rtkRewrite(bt.rtkMode, in.Command); rtkApplied {
-		cmd = exec.CommandContext(cctx, rtkArgv[0], rtkArgv[1:]...)
+	rtkArgv, rtkApplied := rtkRewrite(bt.rtkMode, in.Command)
+	var argv0 string
+	var argvRest []string
+	if rtkApplied {
+		argv0, argvRest = rtkArgv[0], rtkArgv[1:]
 	} else {
-		cmd = exec.CommandContext(cctx, "bash", "-c", in.Command)
+		argv0, argvRest = "bash", []string{"-c", in.Command}
 	}
-	cmd.Dir = bt.cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
-	cmd.WaitDelay = bashWaitDelay
 
-	outBytes, runErr := cmd.CombinedOutput()
-	out := string(outBytes)
+	out, stderrText, runErr := bt.run(cctx, argv0, argvRest)
+
+	// rtk's rewrite-guard design note says a REFUSAL TO REWRITE costs
+	// nothing — it always falls back to plain bash. But once a command has
+	// actually been rewritten, a refusal by rtk itself is a different
+	// failure mode: it surfaces to the model as an opaque command failure
+	// for something plain bash would have run fine. Confirmed against the
+	// installed rtk (0.43.0):
+	//
+	//	find . -name '*.go' -not -path './vendor/*'
+	//
+	// has every metacharacter single-quoted, so hasShellChaining correctly
+	// leaves it alone, it rewrites to `rtk find …`, and rtk exits 1 with
+	// stderr "rtk: rtk find does not support compound predicates or
+	// actions (e.g. -not, -exec). Use `find` directly." — a command that
+	// plain bash executes without complaint.
+	//
+	// The fallback is deliberately narrow: only re-run when rtkRefused is
+	// confident rtk itself declined, never merely because the exit code was
+	// nonzero. Exit code alone cannot tell "rtk refused" from "the
+	// underlying tool failed" — git outside a repo, kubectl against a
+	// missing pod, and rtk's own refusals all exit nonzero, with no shared
+	// code across them (128, 1, 1 respectively were observed). Re-running
+	// on a genuine tool failure would execute something like a rejected
+	// `git push` a second time, so this errs hard toward NOT falling back.
+	if rtkApplied && isNonZeroExit(runErr) && rtkRefused(stderrText) {
+		slog.Warn("agent/tools: bash: rtk refused the rewritten command, falling back to plain bash",
+			"command", in.Command, "rtk_stderr", stderrText)
+		out, _, runErr = bt.run(cctx, "bash", []string{"-c", in.Command})
+	}
 
 	if runErr != nil {
 		switch {
@@ -139,6 +158,99 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		spillName = fmt.Sprintf("bash_%d", bt.fallback.Add(1))
 	}
 	return NewTextResult(bt.p.Clip(out, spillName)), nil
+}
+
+// syncWriter is a mutex-guarded io.Writer. exec.Cmd services Stdout and
+// Stderr from two SEPARATE goroutines unless the two fields are the exact
+// same writer (that's what exec.Cmd.CombinedOutput actually relies on:
+// pointing both fields at one *bytes.Buffer, which Cmd special-cases via an
+// identity check to share a single pipe). run needs stderr written to two
+// destinations — the merged buffer and a stderr-only copy for rtkRefused —
+// so Stdout and Stderr can no longer be identical writers, and a bare
+// *bytes.Buffer behind an io.MultiWriter would then be hit by both
+// goroutines concurrently: not a benign interleaving question but a real
+// data race, observed as stderr text simply missing from the result
+// (`echo out; echo err >&2; exit 3` produced "out\n\nexit status 3\n", no
+// "err" anywhere) rather than corrupted or reordered.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// run execs name(args...) under ctx with this tool's cwd, its process-group
+// kill-on-cancel, and its WaitDelay all wired up identically regardless of
+// whether the caller is running the rtk-rewritten argv or a plain
+// `bash -c`. It returns the merged stdout+stderr text (the model-facing
+// result) and stderr alone (so rtkRefused can inspect it without stdout
+// noise) — see syncWriter for why this isn't just CombinedOutput plus a tee.
+func (bt *bashTool) run(ctx context.Context, name string, args []string) (combined, stderrOnly string, err error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = bt.cwd
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = bashWaitDelay
+
+	combinedBuf := &syncWriter{}
+	var stderrBuf bytes.Buffer // written by stderr's copy goroutine only — no race
+	cmd.Stdout = combinedBuf
+	cmd.Stderr = io.MultiWriter(combinedBuf, &stderrBuf)
+	err = cmd.Run()
+	return combinedBuf.String(), stderrBuf.String(), err
+}
+
+// rtkRefused reports whether stderr looks like RTK ITSELF refusing to run
+// the rewritten command, as opposed to the underlying tool failing on its
+// own. Verified against the installed rtk (0.43.0):
+//
+//	rtk find . -name '*.go' -not -path './vendor/*'
+//
+// exits 1 with stderr "rtk: rtk find does not support compound predicates
+// or actions (e.g. -not, -exec). Use `find` directly." — rtk prefixes its
+// own diagnostics with "rtk: ". A real underlying-tool failure passes the
+// tool's own stderr through untouched, with no such prefix: `rtk git
+// status` outside a repo exits 128 with "fatal: not a git repository…";
+// `rtk docker <bogus-subcommand>` exits 1 with "docker: unknown command:
+// …"; `rtk aws s3 cp` with a bad flag exits 255 with "aws: [ERROR]: …".
+// Exit codes overlap across both cases (1, 128, 254, 255 were all
+// observed on refusals AND on genuine failures), so they cannot be used to
+// tell the two apart — only the prefix can.
+func rtkRefused(stderr string) bool {
+	return strings.HasPrefix(strings.TrimSpace(stderr), "rtk: ")
+}
+
+// isNonZeroExit reports whether err represents the command actually
+// running and exiting nonzero, as opposed to a timeout, a cancellation, or
+// a failure to start at all. Only a genuine nonzero exit is eligible for
+// the rtk-refusal fallback — the other cases mean there is no real result
+// to compare rtk's stderr against, and re-running under those conditions
+// (e.g. an already-expired timeout) would just fail again for an unrelated
+// reason.
+func isNonZeroExit(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
 }
 
 type bashInput struct {

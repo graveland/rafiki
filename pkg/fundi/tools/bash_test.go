@@ -530,3 +530,114 @@ func TestBashChainedCommandNotRewired(t *testing.T) {
 		t.Fatalf("expected 'also' in output, got %q", result.Text)
 	}
 }
+
+// installFakeRTK writes a fake rtk binary that answers --version normally
+// and otherwise runs the given script body, adds it to PATH, and resets the
+// version probe cache. Unlike fakeRTK (which echoes its args and always
+// succeeds), this lets a test control rtk's own exit code and stderr to
+// simulate refusal vs. underlying-tool-failure.
+func installFakeRTK(t *testing.T, otherwiseScript string) {
+	t.Helper()
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "rtk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/bash\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"rtk 0.45.0\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		otherwiseScript
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := os.Chmod(f.Name(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	resetRTKCache(func() rtkCache {
+		p, err := exec.LookPath("rtk")
+		if err != nil {
+			return rtkCache{}
+		}
+		return rtkCache{path: p, ok: true}
+	})
+	t.Cleanup(func() { resetRTKCache(nil) })
+}
+
+// TestBashRtkRefusalFallsBackToBash is the regression test for finding 9:
+// once a command has been rewritten into an rtk argv, a refusal by rtk
+// ITSELF (the "rtk: ..." prefixed diagnostics observed from the real
+// binary — e.g. `rtk find` rejecting `-not`/`-exec`) must transparently
+// re-run the ORIGINAL command under plain bash rather than surfacing rtk's
+// limitation to the model as an opaque failure.
+func TestBashRtkRefusalFallsBackToBash(t *testing.T) {
+	installFakeRTK(t, `echo "rtk: rtk find does not support compound predicates or actions (e.g. -not, -exec). Use find directly." >&2
+exit 1
+`)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "needle.go"), []byte("package x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{
+		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
+		Cwd:          dir,
+		RTK:          RTKAuto,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := tool.Execute(context.Background(),
+		ToolInput(json.RawMessage(`{"command":"find . -name '*.go'"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Text, "does not support") {
+		t.Fatalf("rtk's refusal message leaked through instead of falling back to bash: %q", result.Text)
+	}
+	if !strings.Contains(result.Text, "needle.go") {
+		t.Fatalf("expected the bash fallback to actually find needle.go, got %q", result.Text)
+	}
+}
+
+// TestBashUnderlyingToolFailureDoesNotFallBack is the flip side of finding
+// 9's fallback: when the underlying tool fails on its own (no "rtk: "
+// prefix on stderr), the command must NOT be re-run. Falling back on every
+// nonzero exit would silently re-execute something like a rejected
+// `git push` a second time.
+func TestBashUnderlyingToolFailureDoesNotFallBack(t *testing.T) {
+	installFakeRTK(t, `echo "TOOLFAIL: pathspec did not match any files" >&2
+exit 1
+`)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "needle.go"), []byte("package x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{
+		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
+		Cwd:          dir,
+		RTK:          RTKAuto,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := tool.Execute(context.Background(),
+		ToolInput(json.RawMessage(`{"command":"find . -name '*.go'"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "TOOLFAIL") {
+		t.Fatalf("expected the underlying tool's own failure to surface, got %q", result.Text)
+	}
+	if strings.Contains(result.Text, "needle.go") {
+		t.Fatalf("an underlying-tool failure incorrectly triggered a bash fallback (real find output leaked through): %q", result.Text)
+	}
+}

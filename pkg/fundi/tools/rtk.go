@@ -83,7 +83,10 @@ func atoi(s string) int {
 }
 
 // shellUnsafeChars are the characters that make a command unsafe to rewrite
-// into an rtk argv. Two distinct hazards, both fatal, both fail open:
+// into an rtk argv when they appear OUTSIDE any quoting (or inside single
+// quotes' cousin, double quotes, for the chaining/redirection subset —
+// see doubleQuoteUnsafeChars for the rest of that story). Two distinct
+// hazards, both fatal, both fail open:
 //
 //   - Chaining and redirection (; | & > < ` and newline) mean the string is
 //     more than one command. Rewriting the first token then changes what
@@ -100,37 +103,52 @@ func atoi(s string) int {
 // is the behaviour without rtk at all.
 const shellUnsafeChars = ";|&><`\n\r$~*?[{#!"
 
-// hasShellChaining reports whether command must not be rewritten. The name
-// is historical — the set now covers expansion as well as chaining.
+// doubleQuoteUnsafeChars are the characters that stay live inside a
+// DOUBLE-quoted string, unlike everything in shellUnsafeChars. Single
+// quotes make every character genuinely inert — bash does no further
+// interpretation of anything between them, which is why hasShellChaining
+// can skip a single-quoted span outright. Double quotes are not that:
+// bash still performs parameter expansion, command substitution, and
+// backslash escaping inside them. Treating "…" the same as '…' let
 //
-// Note the previous version's per-character ladder returned true in every
-// branch, so it was already equivalent to a plain membership test; the
-// branches only made it look like there was nuance to get wrong.
-func hasShellChaining(command string) bool {
-	for i := 0; i < len(command); i++ {
-		if strings.IndexByte(shellUnsafeChars, command[i]) >= 0 && !inQuote(command, i) {
-			return true
-		}
-	}
-	return false
-}
+//	git commit -m "release $VERSION"
+//	git commit -m "built at `date`"
+//
+// rewrite to an argv containing the literal, unexpanded text — no error,
+// no sign anything should have been substituted, just a commit with the
+// wrong message. `$` and the backtick are the two expansion triggers bash
+// honours inside double quotes; backslash is included too, even though it
+// is not a hazard by itself, because it can escape INTO one (`\$(cmd)`
+// etc.) and untangling "this backslash escapes something dangerous" from
+// "this one doesn't" is exactly the kind of nuance this file's design note
+// says to skip — refusing the whole command is free. The pure
+// chaining/redirection characters (; | & > < and newline) are NOT in this
+// set: bash does not treat them specially inside double quotes, so they
+// stay inert there. `!` (history expansion) is absent everywhere — it is
+// inactive in non-interactive bash, the only way this argv ever runs.
+const doubleQuoteUnsafeChars = "$`\\"
 
-// inQuote reports whether position i in s is inside a quoted string.
-// Handles single and double quotes with backslash escaping in double quotes.
-func inQuote(s string, i int) bool {
+// hasShellChaining reports whether command must not be rewritten. Despite
+// the name, the set it checks covers expansion as well as chaining — see
+// shellUnsafeChars. It tracks quote state itself in a single pass (rather
+// than calling a per-position "am I inside a quote" helper) because the
+// answer to "is this character safe" now depends on WHICH kind of quote:
+// single quotes make shellUnsafeChars fully inert, double quotes only
+// silence the chaining/redirection subset while leaving
+// doubleQuoteUnsafeChars live.
+func hasShellChaining(command string) bool {
 	inSingle := false
 	inDouble := false
-	for j := 0; j < i && j < len(s); j++ {
-		c := s[j]
+	for i := 0; i < len(command); i++ {
+		c := command[i]
 		switch {
 		case inSingle:
 			if c == '\'' {
 				inSingle = false
 			}
 		case inDouble:
-			if c == '\\' {
-				j++ // skip escaped char
-				continue
+			if strings.IndexByte(doubleQuoteUnsafeChars, c) >= 0 {
+				return true
 			}
 			if c == '"' {
 				inDouble = false
@@ -143,15 +161,19 @@ func inQuote(s string, i int) bool {
 				// opening a quote at the escaped ", so the following | was
 				// judged to be inside a quote and the guard let a pipeline
 				// through — the exact false negative it exists to prevent.
-				j++
+				i++
 			case '\'':
 				inSingle = true
 			case '"':
 				inDouble = true
+			default:
+				if strings.IndexByte(shellUnsafeChars, c) >= 0 {
+					return true
+				}
 			}
 		}
 	}
-	return inSingle || inDouble
+	return false
 }
 
 // rtkRewriteMapping maps the first whitespace-delimited token of a command
@@ -311,16 +333,33 @@ func rtkRewrite(mode RTKMode, command string) (argv []string, applied bool) {
 
 // shellSplit splits a command string into tokens, handling single and double
 // quotes and backslash escaping. This is a simplified shell tokenizer; it is
-// only used for the rewrite mapping, which needs the first few tokens correctly
-// identified. The original command string is appended as-is to the rtk argv,
-// so this tokenizer's imperfections do not affect the executed command — only
-// the detection of whether to rewrite.
+// only used for the rewrite mapping, which needs the first few tokens
+// correctly identified. That output is NOT cosmetic: rtkRewrite appends
+// tokens[1:] straight onto the rtk argv that gets exec'd, so a bug here
+// reaches the command that actually runs, not just the yes/no decision of
+// whether to rewrite.
+//
+// current is only flushed into a token when it is non-empty OR quoted was
+// set — a bare `len(current) > 0` check drops an explicitly quoted empty
+// argument entirely. `git commit -m ""` used to tokenize to ["git" "commit"
+// "-m"], three tokens instead of four; rewritten, that became `rtk git
+// commit -m`, which swallows whatever argument follows (or errors) instead
+// of committing an empty message.
 func shellSplit(s string) []string {
 	var tokens []string
 	var current []byte
+	quoted := false
 	inSingle := false
 	inDouble := false
 	escaped := false
+
+	flush := func() {
+		if len(current) > 0 || quoted {
+			tokens = append(tokens, string(current))
+		}
+		current = current[:0]
+		quoted = false
+	}
 
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -351,23 +390,20 @@ func shellSplit(s string) []string {
 		switch c {
 		case '\'':
 			inSingle = true
+			quoted = true
 			continue
 		case '"':
 			inDouble = true
+			quoted = true
 			continue
 		case ' ', '\t':
-			if len(current) > 0 {
-				tokens = append(tokens, string(current))
-				current = current[:0]
-			}
+			flush()
 			continue
 		}
 		current = append(current, c)
 	}
 
-	if len(current) > 0 {
-		tokens = append(tokens, string(current))
-	}
+	flush()
 
 	return tokens
 }

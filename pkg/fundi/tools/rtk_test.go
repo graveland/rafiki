@@ -131,19 +131,33 @@ func TestHasShellChaining(t *testing.T) {
 		{"echo hello", false},
 		{"", false},
 
-		// Operators inside quotes should NOT trigger chaining
+		// Chaining/redirection operators inside quotes should NOT trigger —
+		// bash does not treat ; | & > < specially inside EITHER quote
+		// style.
 		{`echo "hello | world"`, false},
 		{`echo 'hello && world'`, false},
 		{`git commit -m "fix && refactor"`, false},
 		{`echo "pipe: |"`, false},
 		{`echo 'semi;colon'`, false},
+		{`echo "a;b"`, false}, // double-quoted ";" must stay allowed
 
-		// Escaped characters in double quotes
-		{`echo "escaped \" quote"`, false},
+		// A backslash inside double quotes is refused outright, even when
+		// all it does is escape the closing quote: bash lets a backslash
+		// escape into "$" or a backtick too (`\$(cmd)`), and telling "this
+		// backslash is dangerous" from "this one isn't" is exactly the
+		// nuance this file's design note says to skip.
+		{`echo "escaped \" quote"`, true},
 
-		// $( inside quotes is safe
-		{`echo "$(not expandable)"`, false},
+		// $( is command substitution and bash DOES expand it inside double
+		// quotes — this used to be (wrongly) treated as safe. Single-quoted
+		// $( is genuinely inert.
+		{`echo "$(not expandable)"`, true},
 		{`echo '$(not expandable)'`, false},
+
+		// A bare "$" inside double quotes must now be refused — this is
+		// finding 2's core bug: "release $VERSION" used to rewrite to a
+		// literal, unexpanded argv entry.
+		{`echo "release $VERSION"`, true},
 
 		// Operators in single quotes are safe
 		{`awk '{print $1}'`, false},
@@ -472,6 +486,16 @@ func TestShellSplit(t *testing.T) {
 		{"  ls  -la  ", []string{"ls", "-la"}},
 		{`awk '{print $1}'`, []string{"awk", "{print $1}"}},
 		{`echo "escaped \"quote\""`, []string{"echo", `escaped "quote"`}},
+
+		// Finding 3: an explicitly quoted empty argument must survive as
+		// its own token. The old flush-only-if-nonempty logic dropped it,
+		// so `git commit -m ""` tokenized to only 3 tokens (the "-m" flag
+		// with nothing after it); rewritten, that became `rtk git commit
+		// -m`, which either swallows the next real argument or errors —
+		// instead of committing an empty message.
+		{`git commit -m ""`, []string{"git", "commit", "-m", ""}},
+		{`echo ''`, []string{"echo", ""}},
+		{`echo "" a ""`, []string{"echo", "", "a", ""}},
 	}
 
 	for _, tc := range cases {
@@ -638,5 +662,46 @@ func TestRtkRewriteStillHandlesQuotedMetacharacters(t *testing.T) {
 		if _, applied := rtkRewrite(RTKAuto, cmd); !applied {
 			t.Errorf("rtkRewrite(%q) was not applied; the guard is now too broad", cmd)
 		}
+	}
+}
+
+// TestRtkRewriteDoubleQuoteExpansion is the regression test for finding 2:
+// inQuote treated double quotes exactly like single quotes, so
+// hasShellChaining never flagged "$", backticks, or backslashes appearing
+// inside "…" — even though bash DOES expand them there. A model asking for
+//
+//	git commit -m "release $VERSION"
+//
+// got a commit rewritten into an rtk argv containing the literal,
+// unexpanded text "release $VERSION" — no error, no sign anything should
+// have been substituted. Single-quoted expansion characters are genuinely
+// inert and must keep working.
+func TestRtkRewriteDoubleQuoteExpansion(t *testing.T) {
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	refused := []string{
+		`git commit -m "release $VERSION"`,
+		"git commit -m \"built at `date`\"",
+	}
+	for _, cmd := range refused {
+		t.Run(cmd, func(t *testing.T) {
+			if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
+				t.Errorf("rtkRewrite(%q) = %v, true; double-quoted expansion must be refused, not rewritten with the literal text", cmd, argv)
+			}
+		})
+	}
+
+	// Single quotes are genuinely inert: the model gets a commit containing
+	// the literal text "$VERSION", which is exactly what it asked for by
+	// choosing single quotes.
+	cmd := `git commit -m 'release $VERSION'`
+	argv, applied := rtkRewrite(RTKAuto, cmd)
+	if !applied {
+		t.Fatalf("rtkRewrite(%q) should be applied; single-quoted $ is inert", cmd)
+	}
+	want := []string{"rtk", "git", "commit", "-m", "release $VERSION"}
+	if !stringSlicesEqual(argv, want) {
+		t.Errorf("rtkRewrite(%q) = %v, want %v", cmd, argv, want)
 	}
 }
