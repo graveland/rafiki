@@ -405,6 +405,24 @@ func (c *Client) OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]C
 	return result, nil
 }
 
+// Rename requests a workspace-wide rename of the symbol at the given position.
+func (c *Client) Rename(ctx context.Context, path string, line, character int, newName string) (*WorkspaceEdit, error) {
+	conn := c.conn.Load()
+	if conn == nil {
+		return nil, ErrServerGone
+	}
+	params := RenameParams{
+		TextDocument: TextDocumentIdentifier{URI: pathToURI(path)},
+		Position:     Position{Line: line, Character: character},
+		NewName:      newName,
+	}
+	var result WorkspaceEdit
+	if err := conn.Call(ctx, "textDocument/rename", params, &result); err != nil {
+		return nil, fmt.Errorf("lsp: rename: %w", err)
+	}
+	return &result, nil
+}
+
 // clientHandler handles incoming JSON-RPC requests/notifications from the LSP server.
 type clientHandler struct {
 	c *Client

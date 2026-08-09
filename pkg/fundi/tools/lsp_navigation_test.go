@@ -39,6 +39,10 @@ func (f *fakeLSPNavClient) IncomingCalls(_ context.Context, _ LSPCallHierarchyIt
 func (f *fakeLSPNavClient) OutgoingCalls(_ context.Context, _ LSPCallHierarchyItem) ([]LSPCallHierarchyItem, error) {
 	return f.outCalls, nil
 }
+func (f *fakeLSPNavClient) Rename(context.Context, string, int, int, string) ([]string, error) {
+	return nil, nil
+}
+func (f *fakeLSPNavClient) Restart(context.Context, string) error { return nil }
 
 func TestLSPDefinition_Execute(t *testing.T) {
 	fake := &fakeLSPNavClient{

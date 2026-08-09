@@ -54,6 +54,10 @@ func (f *fakeLSPClient) IncomingCalls(context.Context, LSPCallHierarchyItem) ([]
 func (f *fakeLSPClient) OutgoingCalls(context.Context, LSPCallHierarchyItem) ([]LSPCallHierarchyItem, error) {
 	return nil, nil
 }
+func (f *fakeLSPClient) Rename(context.Context, string, int, int, string) ([]string, error) {
+	return nil, nil
+}
+func (f *fakeLSPClient) Restart(context.Context, string) error { return nil }
 
 func TestLSPDiagnostics_Materialize_DeclinesWhenNoLSP(t *testing.T) {
 	bp := LSPDiagnosticsBlueprint{}

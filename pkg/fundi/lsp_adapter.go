@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
@@ -144,6 +145,19 @@ func (a *lspClientAdapter) DocumentSymbols(ctx context.Context, path string) ([]
 	return flattenSymbols(syms), nil
 }
 
+func flattenSymbols(syms []lsp.DocumentSymbol) []tools.LSPLocation {
+	var out []tools.LSPLocation
+	for _, s := range syms {
+		out = append(out, tools.LSPLocation{
+			URI:  "",
+			Line: s.SelectionRange.Start.Line,
+			Col:  s.SelectionRange.Start.Character,
+		})
+		out = append(out, flattenSymbols(s.Children)...)
+	}
+	return out
+}
+
 func (a *lspClientAdapter) WorkspaceSymbols(ctx context.Context, query string) ([]tools.LSPLocation, error) {
 	client, err := a.mgr.FirstClient(ctx)
 	if err != nil {
@@ -244,23 +258,81 @@ func (a *lspClientAdapter) OutgoingCalls(ctx context.Context, item tools.LSPCall
 	return out, nil
 }
 
-// workspacePath returns a plausible path to use for workspace-level requests.
-func (a *lspClientAdapter) workspacePath() string {
-	// The manager has a cwd; return any path with a known extension.
-	// This is a best-effort heuristic for workspace/symbol.
-	// A better approach would be to iterate configured servers.
-	return a.mgr.Cwd() + "/_ws_.go"
+func (a *lspClientAdapter) Rename(ctx context.Context, path string, line, col int, newName string) ([]string, error) {
+	client, err := a.mgr.For(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if client == nil {
+		return nil, fmt.Errorf("lsp: no language server for %s", path)
+	}
+	edit, err := client.Rename(ctx, path, line, col, newName)
+	if err != nil {
+		return nil, err
+	}
+	// Apply the workspace edit to disk.
+	var modified []string
+	for uri, textEdits := range edit.Changes {
+		filePath := uriToPath(uri)
+		if err := applyTextEdits(filePath, textEdits); err != nil {
+			return modified, fmt.Errorf("lsp: apply edit to %s: %w", filePath, err)
+		}
+		modified = append(modified, filePath)
+	}
+	return modified, nil
 }
 
-func flattenSymbols(syms []lsp.DocumentSymbol) []tools.LSPLocation {
-	var out []tools.LSPLocation
-	for _, s := range syms {
-		out = append(out, tools.LSPLocation{
-			URI:  "", // filled by caller
-			Line: s.SelectionRange.Start.Line,
-			Col:  s.SelectionRange.Start.Character,
-		})
-		out = append(out, flattenSymbols(s.Children)...)
+func (a *lspClientAdapter) Restart(ctx context.Context, path string) error {
+	client, err := a.mgr.For(ctx, path)
+	if err != nil {
+		return err
 	}
-	return out
+	if client == nil {
+		return fmt.Errorf("lsp: no language server for %s", path)
+	}
+	_ = client.Shutdown(ctx)
+	// For will lazily restart on next call.
+	return nil
 }
+
+func applyTextEdits(path string, edits []lsp.TextEdit) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	// Apply edits in reverse order so offsets remain valid.
+	for i := len(edits) - 1; i >= 0; i-- {
+		edit := edits[i]
+		start := positionToOffset(string(content), edit.Range.Start)
+		end := positionToOffset(string(content), edit.Range.End)
+		if start < 0 || end < 0 || start > end || end > len(content) {
+			return fmt.Errorf("invalid range %v for %q", edit.Range, path)
+		}
+		content = append(content[:start], append([]byte(edit.NewText), content[end:]...)...)
+	}
+	return os.WriteFile(path, content, 0o644)
+}
+
+func positionToOffset(text string, pos lsp.Position) int {
+	line := 0
+	for i, ch := range text {
+		if line == pos.Line {
+			// Count characters from line start; approximate for now.
+			offset := i + pos.Character
+			if offset > len(text) {
+				offset = len(text)
+			}
+			return offset
+		}
+		if ch == '\n' {
+			line++
+		}
+	}
+	return len(text)
+}
+
+func uriToPath(uri string) string {
+	return strings.TrimPrefix(uri, "file://")
+}
+
+// workspacePath returns a plausible path to use for workspace-level requests.

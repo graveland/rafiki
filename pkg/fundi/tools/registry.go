@@ -124,9 +124,9 @@ type LSPDiagnostic struct {
 
 // LSPLocation is a file location returned by navigation operations.
 type LSPLocation struct {
-	URI   string
-	Line  int // 0-based
-	Col   int // 0-based
+	URI  string
+	Line int // 0-based
+	Col  int // 0-based
 }
 
 // LSPCallHierarchyItem is a node in the call graph.
@@ -179,6 +179,15 @@ type LSPClient interface {
 
 	// OutgoingCalls returns callees of the given call hierarchy item.
 	OutgoingCalls(ctx context.Context, item LSPCallHierarchyItem) ([]LSPCallHierarchyItem, error)
+
+	// --- mutation ---
+
+	// Rename renames the symbol at the given position across the workspace.
+	// It returns the list of files that were modified.
+	Rename(ctx context.Context, path string, line, col int, newName string) ([]string, error)
+
+	// Restart restarts the language server for the given path.
+	Restart(ctx context.Context, path string) error
 }
 
 // ToolOpts carries the per-agent runtime state a Materializer needs to
