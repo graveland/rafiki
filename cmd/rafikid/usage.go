@@ -54,7 +54,7 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.IntVar(&f.maxOutputTokens, "max-output-tokens", 0, "per-turn output token cap sent to upstream (0 = default 16384)")
 	fs.BoolVar(&f.recordRequests, "record-requests", false, "Record raw LLM API requests and responses for debugging")
 	fs.StringVar(&f.bashRTK, "bash-rtk", "", "route bash commands through rtk for output compression: auto, on, or off (overrides $RAFIKI_BASH_RTK)")
-	fs.StringVar(&f.toolsWeb, "tools-web", "", "enable the webfetch/websearch tools: on or off (overrides $RAFIKI_TOOLS_WEB; default off)")
+	fs.BoolVar(&f.toolsWeb, "tools-web", false, "enable the webfetch/websearch tools (overrides $RAFIKI_TOOLS_WEB; default off; disable with --tools-web=false)")
 	// --fake-turns was read by runAgent (EngineConfig.FakeTurns) and listed
 	// in docs/agent-cli.md, but never registered here — so the field was
 	// permanently empty and passing the flag was a hard parse error rather

@@ -208,6 +208,6 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
 		Pool:                 pool,
 		RTK:                  bashRTKValue(f.bashRTK),
-		ToolsWeb:             toolsWebValue(f.toolsWeb),
+		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),
 	}, nil
 }

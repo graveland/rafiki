@@ -388,24 +388,30 @@ func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
 	cwdWithoutLSP := t.TempDir()
 
 	cases := []struct {
-		name      string
-		lspConfig string
-		cwd       string
-		toolsWeb  string
-		envWeb    string
+		name        string
+		lspConfig   string
+		cwd         string
+		toolsWeb    bool
+		toolsWebSet bool
+		envWeb      string
 	}{
-		{"defaulted lsp present, tools-web unset", "", cwdWithLSP, "", ""},
-		{"defaulted lsp absent, tools-web unset", "", cwdWithoutLSP, "", ""},
-		{"explicit lsp missing survives, tools-web flag on", "/nope/lsp.json", cwdWithoutLSP, "on", ""},
-		{"tools-web flag off beats env on", "", cwdWithoutLSP, "off", "1"},
-		{"tools-web from env only", "", cwdWithoutLSP, "", "1"},
+		{"defaulted lsp present, tools-web unset", "", cwdWithLSP, false, false, ""},
+		{"defaulted lsp absent, tools-web unset", "", cwdWithoutLSP, false, false, ""},
+		{"explicit lsp missing survives, tools-web flag on", "/nope/lsp.json", cwdWithoutLSP, true, true, ""},
+		{"tools-web flag off beats env on", "", cwdWithoutLSP, false, true, "1"},
+		{"tools-web from env only", "", cwdWithoutLSP, false, false, "1"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("RAFIKI_TOOLS_WEB", tc.envWeb)
 
-			f := agentFlags{model: "anthropic/claude-sonnet-4-5", lspConfig: tc.lspConfig, toolsWeb: tc.toolsWeb}
+			f := agentFlags{
+				model:       "anthropic/claude-sonnet-4-5",
+				lspConfig:   tc.lspConfig,
+				toolsWeb:    tc.toolsWeb,
+				toolsWebSet: tc.toolsWebSet,
+			}
 			ro, err := f.toRuntimeOptions(tc.cwd, nil)
 			if err != nil {
 				t.Fatalf("toRuntimeOptions: %v", err)
@@ -416,7 +422,7 @@ func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
 				t.Errorf("toRuntimeOptions LSPConfig = %q, want %q (effectiveLSPConfig directly)", ro.LSPConfig, wantLSP)
 			}
 
-			wantWeb := toolsWebValue(tc.toolsWeb)
+			wantWeb := toolsWebValue(tc.toolsWeb, tc.toolsWebSet)
 			if ro.ToolsWeb != wantWeb {
 				t.Errorf("toRuntimeOptions ToolsWeb = %v, want %v (toolsWebValue directly)", ro.ToolsWeb, wantWeb)
 			}

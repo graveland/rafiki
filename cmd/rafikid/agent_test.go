@@ -370,63 +370,83 @@ func TestParseAgentFlagsBashRTK(t *testing.T) {
 	}
 }
 
-// TestToolsWebValuePrecedence verifies the --tools-web flag precedence added
-// for finding 17: explicit flag beats $RAFIKI_TOOLS_WEB beats the "off"
-// default. Unlike --bash-rtk's three real states (auto/on/off), the whole
-// point of this flag is being able to force the toggle OFF even when the env
-// var says on — a plain flag.BoolVar cannot express "not passed" separately
-// from "passed false", so both directions are asserted here, not just
-// flag-wins-when-on.
+// TestToolsWebValuePrecedence verifies the --tools-web precedence: an
+// explicitly passed flag beats $RAFIKI_TOOLS_WEB beats the "off" default. The
+// point of the flag is being able to force the toggle OFF even when the env var
+// says on, so both directions are asserted, not just flag-wins-when-on.
 func TestToolsWebValuePrecedence(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		t.Setenv("RAFIKI_TOOLS_WEB", "")
-		if got := toolsWebValue(""); got != false {
-			t.Errorf("toolsWebValue(\"\") = %v, want false", got)
-		}
-	})
-
-	t.Run("env-only", func(t *testing.T) {
-		t.Setenv("RAFIKI_TOOLS_WEB", "1")
-		if got := toolsWebValue(""); got != true {
-			t.Errorf("toolsWebValue(\"\") = %v, want true (from $RAFIKI_TOOLS_WEB=1)", got)
-		}
-	})
-
-	t.Run("flag-on-beats-env-unset", func(t *testing.T) {
-		t.Setenv("RAFIKI_TOOLS_WEB", "")
-		if got := toolsWebValue("on"); got != true {
-			t.Errorf("toolsWebValue(\"on\") = %v, want true", got)
-		}
-	})
-
-	// The direction a bool flag cannot express: turning the toggle OFF via
-	// the flag while the env var says on.
-	t.Run("flag-off-beats-env-on", func(t *testing.T) {
-		t.Setenv("RAFIKI_TOOLS_WEB", "1")
-		if got := toolsWebValue("off"); got != false {
-			t.Errorf("toolsWebValue(\"off\") = %v, want false (explicit flag must beat $RAFIKI_TOOLS_WEB=1)", got)
-		}
-	})
+	for _, tc := range []struct {
+		name       string
+		env        string
+		flagVal    bool
+		flagPassed bool
+		want       bool
+	}{
+		{"default", "", false, false, false},
+		{"env-only", "1", false, false, true},
+		{"env set to something else", "0", false, false, false},
+		{"flag on beats env unset", "", true, true, true},
+		// The direction a bare bool cannot express without the passed signal.
+		{"flag off beats env on", "1", false, true, false},
+		{"flag on with env on", "1", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RAFIKI_TOOLS_WEB", tc.env)
+			if got := toolsWebValue(tc.flagVal, tc.flagPassed); got != tc.want {
+				t.Errorf("toolsWebValue(%v, %v) with $RAFIKI_TOOLS_WEB=%q = %v, want %v",
+					tc.flagVal, tc.flagPassed, tc.env, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestParseAgentFlagsToolsWeb verifies --tools-web is actually read by
 // parseAgentFlags, the same regression class TestParseAgentFlagsBashRTK
-// guards against (a flag registered but never read from the parsed struct).
+// guards against (a flag registered but never read from the parsed struct),
+// and that the passed/not-passed signal survives parsing.
 func TestParseAgentFlagsToolsWeb(t *testing.T) {
-	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--tools-web", "on"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.toolsWeb != "on" {
-		t.Errorf("toolsWeb = %q, want on", f.toolsWeb)
-	}
+	base := []string{"--model", "anthropic/sonnet-latest"}
 
-	f2, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantVal    bool
+		wantPassed bool
+	}{
+		{"bare flag", []string{"--tools-web"}, true, true},
+		{"explicit true", []string{"--tools-web=true"}, true, true},
+		{"explicit false", []string{"--tools-web=false"}, false, true},
+		{"absent", nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := parseAgentFlags(append(append([]string{}, base...), tc.args...))
+			if err != nil {
+				t.Fatalf("parseAgentFlags: %v", err)
+			}
+			if f.toolsWeb != tc.wantVal || f.toolsWebSet != tc.wantPassed {
+				t.Errorf("toolsWeb=%v set=%v, want %v/%v",
+					f.toolsWeb, f.toolsWebSet, tc.wantVal, tc.wantPassed)
+			}
+		})
+	}
+}
+
+// TestParseAgentFlagsToolsWebDoesNotEatNextFlag is why --tools-web is a bool
+// rather than a string in --bash-rtk's shape. stdlib's flag package resolves
+// `--strflag --model X` by taking "--model" as the value and leaving --model
+// unset, reporting no error at all — so `rafikid agent --tools-web --model M`
+// would have silently produced an empty model. A bool flag cannot consume the
+// following argument, so --model still lands.
+func TestParseAgentFlagsToolsWebDoesNotEatNextFlag(t *testing.T) {
+	f, err := parseAgentFlags([]string{"--tools-web", "--model", "anthropic/sonnet-latest"})
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
-	if f2.toolsWeb != "" {
-		t.Errorf("toolsWeb = %q, want empty (flag not passed)", f2.toolsWeb)
+	if f.model != "anthropic/sonnet-latest" {
+		t.Errorf("model = %q, want anthropic/sonnet-latest; --tools-web swallowed the next flag", f.model)
+	}
+	if !f.toolsWeb || !f.toolsWebSet {
+		t.Errorf("toolsWeb=%v set=%v, want true/true", f.toolsWeb, f.toolsWebSet)
 	}
 }
 

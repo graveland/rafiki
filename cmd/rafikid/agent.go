@@ -52,7 +52,10 @@ type agentFlags struct {
 	fakeTurns          string
 	recordRequests     bool
 	bashRTK            string
-	toolsWeb           string
+	toolsWeb           bool
+	// toolsWebSet records whether --tools-web appeared in argv at all, which
+	// a bool's value alone cannot express. See toolsWebValue.
+	toolsWebSet bool
 }
 
 // parseAgentFlags parses the rafikid agent flag set. It is a pure function of
@@ -66,6 +69,14 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 	if err := fs.Parse(args); err != nil {
 		return agentFlags{}, err
 	}
+
+	// Visit walks only the flags actually present in argv, which is the one
+	// way to tell --tools-web=false from an absent --tools-web.
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "tools-web" {
+			f.toolsWebSet = true
+		}
+	})
 
 	if f.model == "" || !strings.Contains(f.model, "/") {
 		return agentFlags{}, fmt.Errorf(`--model is required and must be provider-qualified, e.g. "anthropic/sonnet-latest" or "deepseek/deepseek-chat"`)
@@ -120,32 +131,27 @@ func effectiveLSPConfig(flagValue, cwd string) string {
 	return lspPath
 }
 
-// toolsWebValue resolves the --tools-web flag precedence: explicit flag beats
-// $RAFIKI_TOOLS_WEB beats the default of OFF - mirroring bashRTKValue above,
-// which is the pattern finding 17 asks this to follow.
+// toolsWebValue resolves the --tools-web precedence: an explicitly passed flag
+// beats $RAFIKI_TOOLS_WEB, which beats the default of OFF.
 //
-// The flag is a string, not a flag.BoolVar: a bool flag can't tell "not
-// passed" from "passed as false" (both leave the Go zero value, false), which
-// would make it impossible to turn the tools OFF with a flag when
-// $RAFIKI_TOOLS_WEB is set - the exact case this precedence rule exists to
-// handle. An empty string means "not passed", so it falls through to the env
-// var same as bashRTK's "" does.
+// It takes the value AND whether the flag was actually passed, because a bool's
+// value alone cannot carry that: --tools-web=false and an absent flag both
+// leave false, and collapsing them would make it impossible to turn the tools
+// off from the command line when $RAFIKI_TOOLS_WEB=1 — precisely the case this
+// precedence rule exists for. parseAgentFlags supplies the second argument from
+// flag.FlagSet.Visit, which walks only the flags that were set.
 //
-// Unrecognized non-empty spellings fail safe to off rather than erroring,
-// matching tools.ParseRTKMode's own leniency for --bash-rtk (pkg/fundi/tools):
-// this flag set has no separate validation pass, and a value nobody asked for
-// should not turn on a tool with real egress.
-func toolsWebValue(flagVal string) bool {
-	switch strings.ToLower(flagVal) {
-	case "on", "true":
-		return true
-	case "off", "false":
-		return false
-	case "":
-		return paths.Get(paths.ToolsWeb) == "1"
-	default:
-		return false
+// Deliberately NOT a string flag in the shape of --bash-rtk. That knob is
+// genuinely tri-valued (auto/on/off) so a string fits it; this one is boolean,
+// and stdlib's flag package resolves `--tools-web --model X` for a string flag
+// by taking "--model" as the value and leaving --model unset, with no error
+// reported. A bool flag rejects that spelling instead of silently eating the
+// next argument.
+func toolsWebValue(flagVal, flagPassed bool) bool {
+	if flagPassed {
+		return flagVal
 	}
+	return paths.Get(paths.ToolsWeb) == "1"
 }
 
 // standaloneFatal builds the EngineConfig.OnFatal hook for `rafikid agent`, plus
@@ -275,7 +281,7 @@ func runAgent(args []string) int {
 		Pool:                 pool,
 		OnFatal:              onFatal,
 		RTK:                  bashRTKValue(f.bashRTK),
-		ToolsWeb:             toolsWebValue(f.toolsWeb),
+		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),
 	}
 	if f.recordRequests {
 		// NewRawTraceStore(nil) is documented to return nil, so this is safe

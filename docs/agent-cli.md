@@ -234,7 +234,7 @@ corresponding `RAFIKI_*` env var default; an explicit flag always wins.
 | `--model` | *(required)* | provider-qualified model id |
 | `--thinking` | `off` | extended-thinking level: `off`, `low`, `medium`, `high`, `xhigh` |
 | `--bash-rtk` | `$RAFIKI_BASH_RTK` / `auto` | route bash through rtk: `auto`, `on`, `off` |
-| `--tools-web` | `$RAFIKI_TOOLS_WEB` / off | enable the webfetch/websearch tools: `on`, `off` |
+| `--tools-web` | `$RAFIKI_TOOLS_WEB` / off | enable the webfetch/websearch tools; boolean, so disable with `--tools-web=false` to override `$RAFIKI_TOOLS_WEB=1` |
 | `--record-requests` | `$RAFIKI_RECORD_REQUESTS` | capture raw LLM API requests/responses |
 | `--db` | `$RAFIKI_DB` | postgres DSN for conversation persistence |
 | `--ref` | `$RAFIKI_CHILD_ID` | conversation ref for reattachment |
