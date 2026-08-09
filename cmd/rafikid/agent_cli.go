@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +15,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
@@ -25,61 +26,14 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// migrateCmd applies the conversations schema migration chain (store.Migrate)
-// against --db (or $RAFIKI_DB). Copied verbatim from the doomed standalone
-// `rafiki serve`/`rafiki migrate` binary's main.go (deleted; not the current
-// cmd/rafiki client, which reused the freed name): the daemon itself never
-// needed this — it opens its own pool and never migrates outside --dev — but
-// operators still need a way to run the chain by hand.
-func migrateCmd(args []string) error {
-	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
-	db := fs.String("db", os.Getenv("RAFIKI_DB"), "postgres DSN (or RAFIKI_DB)")
-	_ = fs.Parse(args)
-	if *db == "" {
-		return errors.New("--db (or RAFIKI_DB) is required")
-	}
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, *db)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-	return store.Migrate(ctx, pool)
-}
-
-// agentCmd dispatches `rafikid agent <subcommand>`, a DSN-backed CLI over the
-// same conversation store the proxy captures into: stats/search/export for
-// read-only insights, analyze for the LLM-driven skill-gap detector, and
-// findings for triaging what analyze produced.
-func agentCmd(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: rafikid agent <stats|search|export|analyze|findings> [flags]")
-	}
-	sub, rest := args[0], args[1:]
-	switch sub {
-	case "stats":
-		return agentStatsCmd(rest)
-	case "search":
-		return agentSearchCmd(rest)
-	case "export":
-		return agentExportCmd(rest)
-	case "analyze":
-		return agentAnalyzeCmd(rest)
-	case "findings":
-		return agentFindingsCmd(rest)
-	default:
-		return fmt.Errorf("unknown agent command %q (want stats, search, export, analyze or findings)", sub)
-	}
-}
-
-// dbFlag registers the --db flag shared by every agent subcommand, defaulting
-// to RAFIKI_DB then RAFIKI_TEST_DSN.
-func dbFlag(fs *flag.FlagSet) *string {
+// dbDSNDefault returns the default DSN for agent subcommands, checking
+// RAFIKI_DB first then RAFIKI_TEST_DSN.
+func dbDSNDefault() string {
 	def := os.Getenv("RAFIKI_DB")
 	if def == "" {
 		def = os.Getenv("RAFIKI_TEST_DSN")
 	}
-	return fs.String("db", def, "postgres DSN (or RAFIKI_DB, then RAFIKI_TEST_DSN)")
+	return def
 }
 
 // connectPool opens a pool against db, erroring with the flag/env hint a
@@ -89,134 +43,6 @@ func connectPool(ctx context.Context, db string) (*pgxpool.Pool, error) {
 		return nil, errors.New("--db (or RAFIKI_DB, or RAFIKI_TEST_DSN) is required")
 	}
 	return pgxpool.New(ctx, db)
-}
-
-// jsonFlags registers the -j (indented) / -J (compact) output flags shared by
-// every agent subcommand.
-func jsonFlags(fs *flag.FlagSet) (indent, compact *bool) {
-	indent = fs.Bool("j", false, "JSON output, indented")
-	compact = fs.Bool("J", false, "JSON output, compact")
-	return
-}
-
-// bindFilterFlags registers the filter flags shared by stats/search onto fs,
-// returning the FilterVals they fill.
-func bindFilterFlags(fs *flag.FlagSet) *agentcli.FilterVals {
-	v := &agentcli.FilterVals{}
-	fs.StringVar(&v.Since, "since", "", "RFC3339 timestamp or duration like 24h")
-	fs.StringVar(&v.Until, "until", "", "RFC3339 timestamp or duration like 24h")
-	fs.StringVar(&v.Owner, "owner", "", "filter by owner")
-	fs.StringVar(&v.Persona, "persona", "", "filter by persona")
-	fs.StringVar(&v.Source, "source", "", "filter by source")
-	fs.StringVar(&v.Model, "model", "", "filter by model")
-	fs.StringVar(&v.Path, "path", "", "filter by path (proxy or direct)")
-	return v
-}
-
-// agentStatsCmd runs `rafikid agent stats [conv-id]`.
-func agentStatsCmd(args []string) error {
-	fs := flag.NewFlagSet("agent stats", flag.ExitOnError)
-	db := dbFlag(fs)
-	v := bindFilterFlags(fs)
-	indent, compact := jsonFlags(fs)
-	_ = fs.Parse(args)
-
-	ctx := context.Background()
-	pool, err := connectPool(ctx, *db)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-	// No Pricer here: Insights.cost (the only pricer consumer among the
-	// read-only commands — Search/Export/Findings never reference i.pricer
-	// at all) would need a live, catalog-backed one to price anything beyond
-	// 0. A short-lived CLI invocation has no warm in-memory catalog to reuse
-	// (unlike `serve`, which builds one once and Warm()s it at startup for
-	// the life of the process) and no on-disk snapshot to fall back to until
-	// some OTHER run has populated one — so the very first `agent stats`,
-	// or any run after the snapshot's TTL lapses, would block this
-	// local-DB-only, no-network command on a synchronous OpenRouter /models
-	// fetch just to print stats. That's a materially different reliability
-	// contract than "stats" promises today, so this is left nil deliberately
-	// rather than wired silently; --model-priced totals here would need a
-	// dedicated, deliberately-cached catalog construction (mirroring
-	// client/pkg/sc/openRouterCatalog's fileSnapshotStore pattern), not just
-	// this one-line default.
-	b := local.New(local.Options{Pool: pool})
-
-	if fs.NArg() > 0 {
-		st, err := b.ConversationStats(ctx, fs.Arg(0))
-		if err != nil {
-			return err
-		}
-		return agentcli.Render(os.Stdout, st, jsonMode(*indent, *compact), agentcli.RenderStats)
-	}
-
-	f, err := agentcli.BindStatsFilter(*v)
-	if err != nil {
-		return err
-	}
-	st, err := b.Stats(ctx, f)
-	if err != nil {
-		return err
-	}
-	return agentcli.Render(os.Stdout, st, jsonMode(*indent, *compact), agentcli.RenderStats)
-}
-
-// agentSearchCmd runs `rafikid agent search [flags]`.
-func agentSearchCmd(args []string) error {
-	fs := flag.NewFlagSet("agent search", flag.ExitOnError)
-	db := dbFlag(fs)
-	v := bindFilterFlags(fs)
-	fs.StringVar(&v.Status, "status", "", "filter by status")
-	fs.Int64Var(&v.MinTokens, "min-tokens", 0, "minimum total tokens")
-	fs.StringVar(&v.Text, "text", "", "full-text search over first messages")
-	fs.IntVar(&v.Limit, "limit", 0, "max results (0 = default)")
-	indent, compact := jsonFlags(fs)
-	_ = fs.Parse(args)
-
-	ctx := context.Background()
-	pool, err := connectPool(ctx, *db)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-	b := local.New(local.Options{Pool: pool})
-
-	f, err := agentcli.BindSearchFilter(*v)
-	if err != nil {
-		return err
-	}
-	rows, err := b.Search(ctx, f)
-	if err != nil {
-		return err
-	}
-	return agentcli.Render(os.Stdout, rows, jsonMode(*indent, *compact), agentcli.RenderSearch)
-}
-
-// agentExportCmd runs `rafikid agent export <conv-id>`.
-func agentExportCmd(args []string) error {
-	fs := flag.NewFlagSet("agent export", flag.ExitOnError)
-	db := dbFlag(fs)
-	indent, compact := jsonFlags(fs)
-	_ = fs.Parse(args)
-	if fs.NArg() != 1 {
-		return errors.New("usage: rafikid agent export <conv-id>")
-	}
-
-	ctx := context.Background()
-	pool, err := connectPool(ctx, *db)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-	b := local.New(local.Options{Pool: pool})
-
-	tr, err := b.Export(ctx, fs.Arg(0))
-	if err != nil {
-		return err
-	}
-	return agentcli.Render(os.Stdout, tr, jsonMode(*indent, *compact), agentcli.RenderTranscriptMD)
 }
 
 // jsonMode maps the -j/-J flag pair onto the render mode shared with
@@ -230,6 +56,353 @@ func jsonMode(indent, compact bool) agentcli.Mode {
 	default:
 		return agentcli.ModeTable
 	}
+}
+
+// jsonModeFromCmd reads --json/-j and --json-compact/-J from cmd.
+func jsonModeFromCmd(cmd *cobra.Command) agentcli.Mode {
+	indent, _ := cmd.Flags().GetBool("json")
+	compact, _ := cmd.Flags().GetBool("json-compact")
+	return jsonMode(indent, compact)
+}
+
+// dbFromCmd reads --db from cmd (persistent flag).
+func dbFromCmd(cmd *cobra.Command) string {
+	db, _ := cmd.Flags().GetString("db")
+	return db
+}
+
+// registerFilterFlags registers the filter flags shared by stats/search onto fs.
+func registerFilterFlags(fs *pflag.FlagSet) {
+	fs.String("since", "", "RFC3339 timestamp or duration like 24h")
+	fs.String("until", "", "RFC3339 timestamp or duration like 24h")
+	fs.String("owner", "", "filter by owner")
+	fs.String("persona", "", "filter by persona")
+	fs.String("source", "", "filter by source")
+	fs.String("model", "", "filter by model")
+	fs.String("path", "", "filter by path (proxy or direct)")
+}
+
+// filterValsFromCmd reads filter flag values from cmd into an agentcli.FilterVals.
+func filterValsFromCmd(cmd *cobra.Command) *agentcli.FilterVals {
+	v := &agentcli.FilterVals{}
+	v.Since, _ = cmd.Flags().GetString("since")
+	v.Until, _ = cmd.Flags().GetString("until")
+	v.Owner, _ = cmd.Flags().GetString("owner")
+	v.Persona, _ = cmd.Flags().GetString("persona")
+	v.Source, _ = cmd.Flags().GetString("source")
+	v.Model, _ = cmd.Flags().GetString("model")
+	v.Path, _ = cmd.Flags().GetString("path")
+	return v
+}
+
+// newAgentStatsCmd returns `rafikid agent stats [conv-id]`.
+func newAgentStatsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "stats [conv-id]",
+		Short: "Show aggregate conversation stats, or a single conversation's stats",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db := dbFromCmd(cmd)
+			jm := jsonModeFromCmd(cmd)
+
+			ctx := context.Background()
+			pool, err := connectPool(ctx, db)
+			if err != nil {
+				return err
+			}
+			defer pool.Close()
+			// No Pricer here: see the original comment in agent_cli.go.
+			b := local.New(local.Options{Pool: pool})
+
+			if len(args) > 0 {
+				st, err := b.ConversationStats(ctx, args[0])
+				if err != nil {
+					return err
+				}
+				return agentcli.Render(os.Stdout, st, jm, agentcli.RenderStats)
+			}
+
+			v := filterValsFromCmd(cmd)
+			f, err := agentcli.BindStatsFilter(*v)
+			if err != nil {
+				return err
+			}
+			st, err := b.Stats(ctx, f)
+			if err != nil {
+				return err
+			}
+			return agentcli.Render(os.Stdout, st, jm, agentcli.RenderStats)
+		},
+	}
+	registerFilterFlags(cmd.Flags())
+	return cmd
+}
+
+// newAgentSearchCmd returns `rafikid agent search`.
+func newAgentSearchCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "search",
+		Short: "Full-text search over conversations with filters",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db := dbFromCmd(cmd)
+			jm := jsonModeFromCmd(cmd)
+			v := filterValsFromCmd(cmd)
+			v.Status, _ = cmd.Flags().GetString("status")
+			v.MinTokens, _ = cmd.Flags().GetInt64("min-tokens")
+			v.Text, _ = cmd.Flags().GetString("text")
+			v.Limit, _ = cmd.Flags().GetInt("limit")
+
+			ctx := context.Background()
+			pool, err := connectPool(ctx, db)
+			if err != nil {
+				return err
+			}
+			defer pool.Close()
+			b := local.New(local.Options{Pool: pool})
+
+			f, err := agentcli.BindSearchFilter(*v)
+			if err != nil {
+				return err
+			}
+			rows, err := b.Search(ctx, f)
+			if err != nil {
+				return err
+			}
+			return agentcli.Render(os.Stdout, rows, jm, agentcli.RenderSearch)
+		},
+	}
+	registerFilterFlags(cmd.Flags())
+	cmd.Flags().String("status", "", "filter by status")
+	cmd.Flags().Int64("min-tokens", 0, "minimum total tokens")
+	cmd.Flags().String("text", "", "full-text search over first messages")
+	cmd.Flags().Int("limit", 0, "max results (0 = default)")
+	return cmd
+}
+
+// newAgentExportCmd returns `rafikid agent export <conv-id>`.
+func newAgentExportCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "export <conv-id>",
+		Short: "Export a single conversation transcript",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			db := dbFromCmd(cmd)
+			jm := jsonModeFromCmd(cmd)
+
+			ctx := context.Background()
+			pool, err := connectPool(ctx, db)
+			if err != nil {
+				return err
+			}
+			defer pool.Close()
+			b := local.New(local.Options{Pool: pool})
+
+			tr, err := b.Export(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			return agentcli.Render(os.Stdout, tr, jm, agentcli.RenderTranscriptMD)
+		},
+	}
+}
+
+// newAgentAnalyzeCmd returns `rafikid agent analyze <conv-id>... | --corpus DIR`.
+func newAgentAnalyzeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "analyze <conv-id>...",
+		Short: "LLM-driven skill-gap detector over stored conversations or a --corpus dir",
+		Long: `Runs the analyze pipeline (compact → detect → rank → draft) over stored
+conversation ids or exported transcripts in --corpus.
+
+Use --compact, --detect, or --rank to stop early; --draft (the default)
+runs the full pipeline.
+
+With --compare, sweep the detector over --corpus once per model and
+compare findings.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := parseAnalyzeArgsFromCmd(cmd, args)
+			if err != nil {
+				return err
+			}
+			return runAnalyze(a)
+		},
+	}
+	registerAnalyzeFlags(cmd.Flags())
+	return cmd
+}
+
+// parseAnalyzeArgsFromCmd reads and validates `agent analyze` flags from a cobra
+// command, returning the validated analyzeArgs. The positional conv-ids come
+// from args.
+func parseAnalyzeArgsFromCmd(cmd *cobra.Command, args []string) (analyzeArgs, error) {
+	corpus, _ := cmd.Flags().GetString("corpus")
+	compare, _ := cmd.Flags().GetString("compare")
+	compactStage, _ := cmd.Flags().GetBool("compact")
+	detectStage, _ := cmd.Flags().GetBool("detect")
+	rankStage, _ := cmd.Flags().GetBool("rank")
+	draftStage, _ := cmd.Flags().GetBool("draft")
+	profile, _ := cmd.Flags().GetString("profile")
+	model, _ := cmd.Flags().GetString("model")
+	analyzerDir, _ := cmd.Flags().GetString("analyzer-dir")
+	force, _ := cmd.Flags().GetBool("force")
+	limit, _ := cmd.Flags().GetInt("limit")
+	out, _ := cmd.Flags().GetString("out")
+	repo, _ := cmd.Flags().GetString("repo")
+	noStore, _ := cmd.Flags().GetBool("no-store")
+	proxyURL, _ := cmd.Flags().GetString("proxy-url")
+	proxyTok, _ := cmd.Flags().GetString("proxy-token")
+	indent, _ := cmd.Flags().GetBool("json")
+	compactJSON, _ := cmd.Flags().GetBool("json-compact")
+
+	stages := map[string]bool{"compact": compactStage, "detect": detectStage, "rank": rankStage, "draft": draftStage}
+	var stopAfter string
+	for name, set := range stages {
+		if !set {
+			continue
+		}
+		if stopAfter != "" {
+			return analyzeArgs{}, errors.New("agent analyze: --compact, --detect, --rank and --draft are mutually exclusive")
+		}
+		stopAfter = name
+	}
+	if stopAfter == "draft" {
+		stopAfter = ""
+	}
+
+	ids := args
+	if corpus != "" && len(ids) > 0 {
+		return analyzeArgs{}, errors.New("agent analyze: --corpus and conversation ids are mutually exclusive")
+	}
+	if corpus == "" && len(ids) == 0 {
+		return analyzeArgs{}, errors.New("agent analyze: requires conversation ids or --corpus <dir>")
+	}
+
+	var compareModels []string
+	if compare != "" {
+		if corpus == "" {
+			return analyzeArgs{}, errors.New("agent analyze: --compare requires --corpus (re-analyzing a stored population per model would thrash the skip key)")
+		}
+		for _, m := range strings.Split(compare, ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				compareModels = append(compareModels, m)
+			}
+		}
+	}
+
+	return analyzeArgs{
+		ConversationIDs: ids,
+		CorpusDir:       corpus,
+		StopAfter:       stopAfter,
+		Compare:         compareModels,
+		DB:              dbFromCmd(cmd),
+		Profile:         profile,
+		Model:           model,
+		AnalyzerDir:     analyzerDir,
+		Force:           force,
+		Limit:           limit,
+		Out:             out,
+		Repo:            repo,
+		NoStore:         noStore,
+		Indent:          indent,
+		Compact:         compactJSON,
+		ProxyURL:        proxyURL,
+		ProxyTok:        proxyTok,
+	}, nil
+}
+
+// newAgentFindingsCmd returns `rafikid agent findings [--axis ...] [--skill ...] [--status ...]`.
+func newAgentFindingsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "findings",
+		Short: "List and triage analysis findings",
+		Long: `List analysis findings with optional filters, or update finding status.
+
+Subcommands:
+  dismiss <id>    Mark a finding as dismissed.
+  action  <id>    Mark a finding as actioned.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("agent findings: unknown command %q (want dismiss or action)", args[0])
+			}
+			return runFindingsList(cmd)
+		},
+	}
+
+	cmd.Flags().String("axis", "", "filter by axis")
+	cmd.Flags().String("skill", "", "filter by skill name")
+	cmd.Flags().String("status", "", "filter by status (default: open)")
+
+	cmd.AddCommand(newAgentFindingsDismissCmd())
+	cmd.AddCommand(newAgentFindingsActionCmd())
+
+	return cmd
+}
+
+// runFindingsList runs the read-only findings list path.
+func runFindingsList(cmd *cobra.Command) error {
+	db := dbFromCmd(cmd)
+	jm := jsonModeFromCmd(cmd)
+	axis, _ := cmd.Flags().GetString("axis")
+	skill, _ := cmd.Flags().GetString("skill")
+	status, _ := cmd.Flags().GetString("status")
+
+	ctx := context.Background()
+	pool, err := connectPool(ctx, db)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	b := local.New(local.Options{Pool: pool})
+
+	rows, err := b.Findings(ctx, store.FindingFilter{Axis: axis, Skill: skill, Status: status})
+	if err != nil {
+		return err
+	}
+	return agentcli.Render(os.Stdout, rows, jm, agentcli.RenderFindings)
+}
+
+// newAgentFindingsDismissCmd returns `rafikid agent findings dismiss <id>`.
+func newAgentFindingsDismissCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "dismiss <id>",
+		Short: "Mark a finding as dismissed",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runFindingsSetStatus(cmd, args[0], "dismissed")
+		},
+	}
+}
+
+// newAgentFindingsActionCmd returns `rafikid agent findings action <id>`.
+func newAgentFindingsActionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "action <id>",
+		Short: "Mark a finding as actioned",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runFindingsSetStatus(cmd, args[0], "actioned")
+		},
+	}
+}
+
+// runFindingsSetStatus performs the dismiss/action mutation.
+func runFindingsSetStatus(cmd *cobra.Command, id, status string) error {
+	db := dbFromCmd(cmd)
+	jm := jsonModeFromCmd(cmd)
+
+	ctx := context.Background()
+	pool, err := connectPool(ctx, db)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	b := local.New(local.Options{Pool: pool})
+
+	row, err := b.SetFindingStatus(ctx, id, status)
+	if err != nil {
+		return err
+	}
+	return agentcli.Render(os.Stdout, row, jm,
+		func(w io.Writer, r store.FindingRow) error { return agentcli.RenderFindings(w, []store.FindingRow{r}) })
 }
 
 // analyzeArgs is the parsed, validated result of `rafikid agent analyze`'s
@@ -258,13 +431,33 @@ type analyzeArgs struct {
 	ProxyTok string
 }
 
+// registerAnalyzeFlags registers `rafikid agent analyze`'s flags on fs.
+func registerAnalyzeFlags(fs *pflag.FlagSet) {
+	fs.String("corpus", "", "run over exported *.json transcripts in this directory instead of a DSN population")
+	fs.String("compare", "", "comma-separated model ids to sweep over --corpus, comparing detector output per model (requires --corpus)")
+	fs.Bool("compact", false, "stop after the compact stage")
+	fs.Bool("detect", false, "stop after the detect stage")
+	fs.Bool("rank", false, "stop after the rank stage")
+	fs.Bool("draft", false, "run the full pipeline through draft (default)")
+	fs.String("profile", "", "named profile from --analyzer-dir")
+	fs.String("model", "", "override the detector/rank/draft model")
+	fs.String("analyzer-dir", os.Getenv("RAFIKI_ANALYZER_DIR"), "analyzer directory (profiles.yaml + detector.md/draft.md); default RAFIKI_ANALYZER_DIR")
+	fs.Bool("force", false, "re-analyze even if already analyzed under this exact configuration")
+	fs.Int("limit", 0, "cap how many conversations this run analyzes (0 = profile default)")
+	fs.String("out", "", "write per-conversation JSON+markdown artifacts to this directory")
+	fs.String("repo", "", "repo root to resolve current skill files from, for --draft edits")
+	fs.Bool("no-store", false, "don't persist analysis rows (still ranks/drafts in-memory)")
+	fs.String("proxy-url", os.Getenv("RAFIKI_URL"), "route LLM calls through this rafiki proxy URL instead of ANTHROPIC_API_KEY")
+	fs.String("proxy-token", os.Getenv("RAFIKI_TOKEN"), "bearer token for --proxy-url")
+}
+
 // parseAnalyzeArgs parses `rafikid agent analyze`'s flags and positional
 // conversation ids, validating the mutual exclusions the brief requires:
 // exactly one stage-stop flag among --compact/--detect/--rank/--draft, and
 // exactly one population selector among conversation ids and --corpus.
 func parseAnalyzeArgs(args []string) (analyzeArgs, error) {
-	fs := flag.NewFlagSet("agent analyze", flag.ContinueOnError)
-	db := dbFlag(fs)
+	fs := pflag.NewFlagSet("agent analyze", pflag.ContinueOnError)
+	db := fs.String("db", dbDSNDefault(), "postgres DSN (or RAFIKI_DB, then RAFIKI_TEST_DSN)")
 	corpus := fs.String("corpus", "", "run over exported *.json transcripts in this directory instead of a DSN population")
 	compare := fs.String("compare", "", "comma-separated model ids to sweep over --corpus, comparing detector output per model (requires --corpus)")
 	compactStage := fs.Bool("compact", false, "stop after the compact stage")
@@ -281,7 +474,8 @@ func parseAnalyzeArgs(args []string) (analyzeArgs, error) {
 	noStore := fs.Bool("no-store", false, "don't persist analysis rows (still ranks/drafts in-memory)")
 	proxyURL := fs.String("proxy-url", os.Getenv("RAFIKI_URL"), "route LLM calls through this rafiki proxy URL instead of ANTHROPIC_API_KEY")
 	proxyTok := fs.String("proxy-token", os.Getenv("RAFIKI_TOKEN"), "bearer token for --proxy-url")
-	indent, compactJSON := jsonFlags(fs)
+	indent := fs.BoolP("json", "j", false, "JSON output, indented")
+	compactJSON := fs.BoolP("json-compact", "J", false, "JSON output, compact")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return analyzeArgs{}, err
@@ -589,12 +783,20 @@ func loadSkillFiles(repo string) ([]analyze.SkillFile, error) {
 }
 
 // agentAnalyzeCmd runs `rafikid agent analyze <conv-id>... | --corpus DIR`.
+// Deprecated: the cobra path (newAgentAnalyzeCmd) is preferred. This wrapper
+// exists for test backward compatibility.
 func agentAnalyzeCmd(args []string) error {
 	a, err := parseAnalyzeArgs(args)
 	if err != nil {
 		return err
 	}
+	return runAnalyze(a)
+}
 
+// runAnalyze contains the body of agentAnalyzeCmd, extracted so both the
+// cobra path (newAgentAnalyzeCmd) and the raw-args path (agentAnalyzeCmd,
+// for backward compat) can exercise it.
+func runAnalyze(a analyzeArgs) error {
 	// In --compare mode the detector model comes from the sweep list, not
 	// a single resolved profile field, so resolveProfile must not demand one.
 	profile, err := resolveProfile(a.AnalyzerDir, a.Profile, a.Model, a.StopAfter != "compact" && len(a.Compare) == 0)
@@ -846,7 +1048,7 @@ func renderWrittenFiles(w io.Writer, files []string) error {
 // when the verb happened to be first; a flag ahead of it silently fell
 // through to the read-only list path instead of performing the mutation.
 func agentFindingsCmd(args []string) error {
-	fs := flag.NewFlagSet("agent findings", flag.ExitOnError)
+	fs := pflag.NewFlagSet("agent findings", pflag.ExitOnError)
 	fs.Usage = func() {
 		out := fs.Output()
 		// A --help usage message is best-effort output on its own dedicated
@@ -858,11 +1060,13 @@ func agentFindingsCmd(args []string) error {
 		_, _ = fmt.Fprintln(out, "       rafikid agent findings action <id> [--db ...] [-j|-J]")
 		fs.PrintDefaults()
 	}
-	db := dbFlag(fs)
+	db := fs.String("db", dbDSNDefault(), "postgres DSN (or RAFIKI_DB, then RAFIKI_TEST_DSN)")
 	axis := fs.String("axis", "", "filter by axis (list mode only)")
 	skill := fs.String("skill", "", "filter by skill name (list mode only)")
 	status := fs.String("status", "", "filter by status (default: open; list mode only)")
-	indent, compact := jsonFlags(fs)
+	indent := fs.BoolP("json", "j", false, "JSON output, indented")
+	compact := fs.BoolP("json-compact", "J", false, "JSON output, compact")
+	fs.SetNormalizeFunc(normalizeSingleDash)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

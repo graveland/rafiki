@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -202,27 +203,63 @@ Claude Code. Normally spawned by the rafiki daemon rather than invoked directly.
 }
 
 func newAgentCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                "agent",
-		Short:              "DSN-backed insights CLI",
-		DisableFlagParsing: true,
-		SilenceUsage:       true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return agentCmd(args)
-		},
+	cmd := &cobra.Command{
+		Use:   "agent",
+		Short: "DSN-backed insights CLI: stats, search, export, analyze, findings",
+		Long: `DSN-backed CLI over the same conversation store the proxy captures into.
+Subcommands: stats (aggregates), search (full-text + filters),
+export (single transcript), analyze (LLM-driven skill-gap detector),
+findings (triage analysis output).`,
+		SilenceUsage: true,
 	}
+
+	// Persistent flags shared by every agent subcommand.
+	def := os.Getenv("RAFIKI_DB")
+	if def == "" {
+		def = os.Getenv("RAFIKI_TEST_DSN")
+	}
+	cmd.PersistentFlags().String("db", def, "postgres DSN (or RAFIKI_DB, then RAFIKI_TEST_DSN)")
+	cmd.PersistentFlags().BoolP("json", "j", false, "JSON output, indented")
+	cmd.PersistentFlags().BoolP("json-compact", "J", false, "JSON output, compact")
+
+	cmd.AddCommand(newAgentStatsCmd())
+	cmd.AddCommand(newAgentSearchCmd())
+	cmd.AddCommand(newAgentExportCmd())
+	cmd.AddCommand(newAgentAnalyzeCmd())
+	cmd.AddCommand(newAgentFindingsCmd())
+
+	return cmd
 }
 
 func newMigrateCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                "migrate",
-		Short:              "Apply the conversations schema migration chain",
-		DisableFlagParsing: true,
-		SilenceUsage:       true,
+	var dbDSN string
+
+	cmd := &cobra.Command{
+		Use:           "migrate",
+		Short:         "Apply the conversations schema migration chain",
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return migrateCmd(args)
+			if dbDSN == "" {
+				return errors.New("--db (or RAFIKI_DB) is required")
+			}
+			ctx := context.Background()
+			pool, err := pgxpool.New(ctx, dbDSN)
+			if err != nil {
+				return err
+			}
+			defer pool.Close()
+			return store.Migrate(ctx, pool)
 		},
 	}
+
+	def := os.Getenv("RAFIKI_DB")
+	if def == "" {
+		def = os.Getenv("RAFIKI_TEST_DSN")
+	}
+	cmd.Flags().StringVar(&dbDSN, "db", def, "postgres DSN (or RAFIKI_DB, then RAFIKI_TEST_DSN)")
+
+	return cmd
 }
 
 // runDaemonOpts is the cobra-parsed daemon configuration.
