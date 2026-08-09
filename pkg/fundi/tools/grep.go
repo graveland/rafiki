@@ -14,9 +14,11 @@ const (
 	defaultGrepMaxMatches = 100
 
 	grepDescription = "Search file contents for a regular expression (RE2 syntax), walking " +
-		"path. .git directories are always excluded. Optionally restrict the " +
-		"search to files matching a glob. Output is one \"path:line:text\" line " +
-		"per match, capped at 100 matches by default."
+		"path, which may be a directory or a single file. Honours .gitignore, " +
+		"so ignored files are not searched; hidden files are included, but .git " +
+		"itself is not. Optionally restrict the search to files matching a glob. " +
+		"Output is one \"path:line:text\" line per match, capped at 100 matches " +
+		"by default."
 )
 
 func init() { DefaultBlueprint.Register(&GrepTool{}) }

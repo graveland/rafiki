@@ -16,10 +16,22 @@ const (
 	// trailer reports the overflow instead of flooding the model.
 	maxGlobResults = 200
 
+	// globSortPool is how many matches are collected before the mtime sort.
+	//
+	// Collecting only maxGlobResults+1 made "newest first" a lie: those are
+	// the first 201 paths in ripgrep's traversal order, so in a repo with
+	// 5000 .go files the actually-newest file was usually not among them and
+	// the tool confidently returned an arbitrary prefix sorted by mtime.
+	// Sorting a larger pool and then taking the top 200 restores the
+	// documented behaviour at bounded cost — the extra work is one stat per
+	// candidate, not a second walk.
+	globSortPool = 5000
+
 	globDescription = "Find files by glob pattern (doublestar syntax: * ? [...] and ** for " +
 		"recursive matching), rooted at path (defaults to the current working " +
 		"directory). Results are sorted by modification time, newest first, and " +
-		"capped at 200 matches."
+		"capped at 200 matches. Honours .gitignore; hidden files are included, " +
+		"but .git itself is not searched."
 )
 
 func init() { DefaultBlueprint.Register(&GlbTool{}) }
@@ -90,10 +102,8 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 		pattern = rel
 	}
 
-	// Request one more than the cap to detect overflow via DiscoverFiles'
-	// truncated return while still collecting exactly maxGlobResults + 1
-	// entries for the mtime sort.
-	paths, truncated, err := DiscoverFiles(ctx, FileQuery{Root: base, Glob: pattern, Limit: maxGlobResults + 1})
+	// Collect a large pool so the mtime sort is meaningful; see globSortPool.
+	paths, poolFull, err := DiscoverFiles(ctx, FileQuery{Root: base, Glob: pattern, Limit: globSortPool})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ToolResult{}, ctxErr
@@ -119,8 +129,15 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].mtime.After(entries[j].mtime) })
 
-	if truncated {
+	// Cut to the reported cap after sorting, so the 200 returned really are
+	// the newest of everything found. The length guard matters because
+	// entries can be shorter than paths when a match was deleted between
+	// the walk and its stat: slicing to a larger length would panic, and
+	// slicing within a larger cap would resurrect zero-valued entries.
+	truncated := poolFull
+	if len(entries) > maxGlobResults {
 		entries = entries[:maxGlobResults]
+		truncated = true
 	}
 
 	var out strings.Builder

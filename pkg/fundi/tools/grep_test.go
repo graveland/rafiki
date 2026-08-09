@@ -357,3 +357,65 @@ func TestGrepToolMaxMatchesHonouredWithGlob(t *testing.T) {
 		t.Fatalf("expected 1 shown match, got %d in %q", got, out)
 	}
 }
+
+// TestGrepSingleFileWithGlob: when path names one file, filepath.Rel yields
+// "." and no glob can match it, so every hit was discarded and grep answered
+// "no matches" for a file that plainly contained the pattern. Naming a file
+// is already narrower than any glob, so the filter must not apply.
+func TestGrepSingleFileWithGlob(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(p, []byte("package a\n\nfunc Foo() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gt := &GrepTool{}
+	res, err := gt.Execute(context.Background(),
+		ToolInput(fmt.Sprintf(`{"pattern":"func Foo","path":%q,"glob":"*.go"}`, p)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Text, "no matches") {
+		t.Fatalf("glob defeated a single-file search:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "func Foo") {
+		t.Fatalf("expected the match, got:\n%s", res.Text)
+	}
+}
+
+// TestGrepDashPattern: without -e and --, ripgrep parses a pattern starting
+// with a dash as a flag and the search dies with "unrecognized flag".
+func TestGrepDashPattern(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("run --force now\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gt := &GrepTool{}
+	res, err := gt.Execute(context.Background(),
+		ToolInput(fmt.Sprintf(`{"pattern":"--force","path":%q}`, dir)))
+	if err != nil {
+		t.Fatalf("a pattern starting with a dash must not error: %v", err)
+	}
+	if !strings.Contains(res.Text, "--force") {
+		t.Fatalf("expected the match, got:\n%s", res.Text)
+	}
+}
+
+// TestGrepFindsHiddenFiles: rg skips dotfiles by default, so .env.example
+// and .github/ were invisible and grep answered "no matches" for content
+// that exists.
+func TestGrepFindsHiddenFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env.example"), []byte("RAFIKI_TOKEN=xyz\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gt := &GrepTool{}
+	res, err := gt.Execute(context.Background(),
+		ToolInput(fmt.Sprintf(`{"pattern":"RAFIKI_TOKEN","path":%q}`, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Text, ".env.example") {
+		t.Fatalf("hidden files must be searched, got:\n%s", res.Text)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -291,6 +292,13 @@ func SearchContent(ctx context.Context, q ContentQuery) ([]Match, bool, error) {
 		return nil, false, err
 	}
 
+	// Stat once, outside the loop: whether Root is a file decides how the
+	// glob filter behaves for every match.
+	rootIsFile := false
+	if info, statErr := os.Stat(q.Root); statErr == nil && !info.IsDir() {
+		rootIsFile = true
+	}
+
 	var matches []Match
 	truncated := false
 	// A json.Decoder, not a bufio.Scanner: rg embeds the whole matched line
@@ -315,7 +323,12 @@ func SearchContent(ctx context.Context, q ContentQuery) ([]Match, bool, error) {
 			continue
 		}
 		path := ev.Data.Path.String()
-		if q.Glob != "" {
+		// rootIsFile: when Root is a single file rather than a directory,
+		// filepath.Rel returns "." and no glob can match it, so every hit
+		// was discarded and grep answered "no matches" for a file that
+		// plainly contained the pattern. Naming one file is already
+		// narrower than any glob, so the filter has nothing left to do.
+		if q.Glob != "" && !rootIsFile {
 			rel, relErr := filepath.Rel(q.Root, path)
 			if relErr != nil {
 				continue
