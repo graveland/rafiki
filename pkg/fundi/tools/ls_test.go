@@ -214,3 +214,75 @@ func TestLsEmptyDirectory(t *testing.T) {
 	// Should not error on empty directory.
 	_ = res.Text
 }
+
+// TestLsIgnoreSurvivesTruncation covers the lsMaxFiles branch, which had no
+// coverage at all: the existing truncation test builds 500 files against a
+// cap of 1000, so `truncated` is always false there.
+//
+// The bug this pins: the ignore filter used to reuse paths' backing array
+// (paths[:0]), and the cap below then re-extended into it, resurrecting
+// every entry the filter had just dropped. `ignore` silently did nothing on
+// exactly the large directories it exists for, and because the re-extension
+// stays within cap there was no panic to notice.
+func TestLsIgnoreSurvivesTruncation(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < lsMaxFiles+100; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("noise-%04d.log", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keep.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lt, err := (&LsBlueprint{}).Materialize(ToolOpts{Cwd: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := lt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q,"ignore":["*.log"]}`, dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Text, ".log") {
+		t.Fatalf("ignore was defeated by the file cap: .log entries present in output:\n%s", firstLines(res.Text, 10))
+	}
+	if !strings.Contains(res.Text, "keep.go") {
+		t.Fatalf("the one non-ignored file is missing from the listing:\n%s", firstLines(res.Text, 10))
+	}
+}
+
+// TestLsRelativePathUsesAgentCwd pins that a relative path resolves against
+// the agent's cwd, not the daemon's process cwd. fundi runs in-process in
+// the daemon, so those differ in production; filepath.Abs silently used the
+// wrong one, and where both trees held a same-named directory the model got
+// a listing of the wrong repo with no error.
+func TestLsRelativePathUsesAgentCwd(t *testing.T) {
+	agentCwd := t.TempDir()
+	sub := filepath.Join(agentCwd, "target")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "marker.go"), []byte("package t\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lt, err := (&LsBlueprint{}).Materialize(ToolOpts{Cwd: agentCwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := lt.Execute(context.Background(), ToolInput(`{"path":"target"}`))
+	if err != nil {
+		t.Fatalf("relative path resolved against the wrong cwd: %v", err)
+	}
+	if !strings.Contains(res.Text, "marker.go") {
+		t.Fatalf("expected the agent-cwd-relative listing, got:\n%s", res.Text)
+	}
+}
+
+func firstLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
+}

@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
-	"github.com/bmatcuk/doublestar/v4"
+	"go.graveland.dev/rafiki/pkg/agentloop"
 )
 
 const (
@@ -57,8 +58,9 @@ type lsInput struct {
 
 type lsTool struct {
 	LsBlueprint
-	cwd    string
-	output OutputPolicy
+	cwd      string
+	output   OutputPolicy
+	fallback atomic.Int64 // spill-name counter when there is no tool-call id
 }
 
 func (lt *lsTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -70,13 +72,23 @@ func (lt *lsTool) Execute(ctx context.Context, input ToolInput) (ToolResult, err
 		return ToolResult{}, err
 	}
 
-	root := in.Path
-	if root == "" {
-		root = lt.cwd
+	// resolveToolPath, not filepath.Abs: Abs joins a relative path against
+	// the *daemon's* process cwd, but fundi runs in-process in the daemon
+	// and the agent's cwd comes from the spawn request, so the two are
+	// routinely different directories. ls {"path":"pkg"} would otherwise
+	// list the daemon's tree — and where both trees contain a pkg/, it
+	// does so silently. Every other file tool already routes through this
+	// helper, which also gives ls ~-expansion for free.
+	root := lt.cwd
+	if in.Path != "" {
+		resolved, perr := resolveToolPath(in.Path, "", lt.cwd)
+		if perr != nil {
+			return ToolResult{}, fmt.Errorf("ls: %w", perr)
+		}
+		root = resolved
 	}
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return ToolResult{}, fmt.Errorf("ls: %w", err)
+	if root == "" {
+		return ToolResult{}, fmt.Errorf("ls: no path given and no working directory available")
 	}
 	rootInfo, err := os.Stat(root)
 	if err != nil {
@@ -86,8 +98,11 @@ func (lt *lsTool) Execute(ctx context.Context, input ToolInput) (ToolResult, err
 		return ToolResult{}, fmt.Errorf("ls: %q is not a directory", root)
 	}
 
+	// Ignore patterns go into the query, not a post-filter: Limit counts
+	// kept files, so filtering afterwards can only remove entries and never
+	// reach the ones the limit already excluded.
 	// Request one more than the cap to detect truncation.
-	paths, truncated, err := DiscoverFiles(ctx, FileQuery{Root: root, Limit: lsMaxFiles + 1})
+	paths, truncated, err := DiscoverFiles(ctx, FileQuery{Root: root, Exclude: in.Ignore, Limit: lsMaxFiles + 1})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ToolResult{}, ctxErr
@@ -95,47 +110,29 @@ func (lt *lsTool) Execute(ctx context.Context, input ToolInput) (ToolResult, err
 		return ToolResult{}, fmt.Errorf("ls: %w", err)
 	}
 
-	// Apply caller ignore patterns.
-	if len(in.Ignore) > 0 {
-		filtered := paths[:0]
-		for _, p := range paths {
-			rel, relErr := filepath.Rel(root, p)
-			if relErr != nil {
-				continue
-			}
-			excluded := false
-			for _, pattern := range in.Ignore {
-				ok, mErr := doublestar.Match(pattern, rel)
-				if mErr != nil {
-					continue
-				}
-				if !ok && !strings.ContainsRune(pattern, '/') {
-					ok, _ = doublestar.Match(pattern, filepath.Base(rel))
-				}
-				if ok {
-					excluded = true
-					break
-				}
-			}
-			if !excluded {
-				filtered = append(filtered, p)
-			}
-		}
-		paths = filtered
-	}
-
-	if truncated {
+	if truncated && len(paths) > lsMaxFiles {
 		paths = paths[:lsMaxFiles]
 	}
 
 	if len(paths) == 0 {
+		if len(in.Ignore) > 0 {
+			return NewTextResult(root + "\n(no entries matched; all were excluded by ignore or .gitignore)"), nil
+		}
 		return NewTextResult(root + "\n(empty directory)"), nil
 	}
 
 	// Build a tree node set for depth-filtered tree rendering.
 	tree := lsNodeFromPaths(paths, root, in.Depth)
 	out := renderTree(tree, root, truncated)
-	return NewTextResult(lt.output.Clip(out, "ls")), nil
+	// A per-call spill name, as bash and mcp already do. A constant "ls"
+	// means two concurrent over-budget listings in the same turn both write
+	// <SpillDir>/ls, and the model follows the path printed in result A's
+	// elision marker into result B's tree, with nothing signalling the swap.
+	spillName := agentloop.ToolCallID(ctx)
+	if spillName == "" {
+		spillName = fmt.Sprintf("ls_%d", lt.fallback.Add(1))
+	}
+	return NewTextResult(lt.output.Clip(out, spillName)), nil
 }
 
 // lsNodeFromPaths builds a tree of nodes from flat paths. Depth filtering is
