@@ -463,6 +463,38 @@ func TestSubscribeRequest_NilFilter(t *testing.T) {
 	}
 }
 
+func TestSpawnRequestParentChildID(t *testing.T) {
+	req := protocol.SpawnRequest{
+		Type:          protocol.TypeCtrlSpawn,
+		Cwd:           "/tmp",
+		ParentChildID: "c_parent",
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"parentChildId":"c_parent"`) {
+		t.Fatalf("ParentChildID missing or misspelled in JSON: %s", b)
+	}
+
+	// Omitted when empty — an absent parent must not appear as a null or "".
+	b2, err := json.Marshal(protocol.SpawnRequest{Type: protocol.TypeCtrlSpawn, Cwd: "/tmp"})
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	if strings.Contains(string(b2), "parentChildId") {
+		t.Fatalf("empty ParentChildID should be omitted, got: %s", b2)
+	}
+
+	var back protocol.SpawnRequest
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.ParentChildID != "c_parent" {
+		t.Fatalf("round-trip lost ParentChildID: got %q", back.ParentChildID)
+	}
+}
+
 // TestChildSummary_NullPID verifies that *int PID and ExitCode serialize as null when nil.
 func TestChildSummary_NullPID(t *testing.T) {
 	cs := protocol.ChildSummary{

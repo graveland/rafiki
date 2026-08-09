@@ -279,6 +279,10 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   // Identity
   "name":                "afk-impl",       // optional; if set, controller
                                             // sends set_session_name after spawn
+  "parentChildId":       null,             // optional; child id of spawning parent
+                                            // recorded as rafiki/parent and rafiki/root
+                                            // labels; rejected with child_not_found if
+                                            // no such child exists
 
   // Working directory (required, absolute)
   "cwd":                 "/Users/.../dev",
