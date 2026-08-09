@@ -1358,6 +1358,31 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		false, sessionPath, "")
 }
 
+// exitPersistDeadline bounds the wait for handleChildExit to finish after a
+// child process has been reaped. It is a backstop, not a timeout anyone
+// should hit: that goroutine only has to run MarkExited and cm.Remove.
+const exitPersistDeadline = 2 * time.Second
+
+// waitForChildRemoval blocks until handleChildExit has finished for childID,
+// or the deadline passes. It reports whether the child was removed.
+//
+// cm.Remove is the final step of handleChildExit, so a child's absence from
+// the manager is the observable signal that MarkExited has already run and
+// the store snapshot therefore reports "exited". Every caller that reports a
+// kill as complete, or that touches on-disk state afterwards, has to wait
+// for this. Two of them were each spinning on it with a private copy of the
+// loop and their own comment; Kill was missing it entirely.
+func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if _, alive := cm.Get(childID); !alive {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (control.KillResult, error) {
 	ch, ok := c.cm.Get(childID)
 	if !ok {
@@ -1386,6 +1411,16 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 	if err != nil {
 		return control.KillResult{}, fmt.Errorf("shutdown: %w", err)
 	}
+
+	// ch.Shutdown returns when the child PROCESS is reaped, but the status
+	// only becomes "exited" once handleChildExit calls MarkExited, and that
+	// runs asynchronously on monitorChild's goroutine. Returning here left a
+	// window in which a client that killed a child and immediately read its
+	// status saw "shutting_down": the kill had succeeded, but the state the
+	// caller can observe said otherwise, so the operation reported itself
+	// complete before it was. Forget and ShutdownAllChildren already wait on
+	// exactly this; Kill was the one caller that did not.
+	waitForChildRemoval(c.cm, childID, exitPersistDeadline)
 
 	var exitCode *int
 	if res.Signal == "" {
