@@ -229,7 +229,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_CONTROL_URL` | client-side: remote rafikid URL to dial (e.g. `tls://rafiki.graveland.dev:443`). Wins over `RAFIKI_SOCKET` |
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
-| `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/gravelbridge/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
+| `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
 
 **Web access (webfetch / websearch).** The fundi runtime includes two opt-in web
 tools: `webfetch` fetches a URL and returns its text, and `websearch` queries
@@ -276,6 +276,21 @@ architecture.
 ---
 
 # Development
+
+## Prerequisites
+
+**[ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) must be on `PATH`.** It
+is not optional and not a fallback: the fundi runtime's file-discovery tools are
+built directly on it, so `BuildRuntime` probes for it at startup and refuses to
+start without it. A daemon on a host with no `rg` fails every `fundi` child with
+`ripgrep (rg) is required but was not found on PATH` rather than degrading. The
+container image installs it (see `Dockerfile`); a local checkout needs
+`apt-get install ripgrep` or `brew install ripgrep`.
+
+[rtk](https://github.com/rtk-ai/rtk) is genuinely optional — `RAFIKI_BASH_RTK`
+defaults to `auto`, which uses it when present and runs plain bash when it is
+not. Only `RAFIKI_BASH_RTK=on` promotes a missing `rtk` to a startup error, which
+is the entire difference between `on` and `auto`.
 
 ```bash
 make check    # vet + golangci-lint + unit tests (-race) — the full local gate
