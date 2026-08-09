@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,14 +21,7 @@ import (
 )
 
 // stringSliceFlag implements flag.Value for a repeatable flag (--skills-dir).
-type stringSliceFlag []string
-
-func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
-
-func (s *stringSliceFlag) Set(v string) error {
-	*s = append(*s, v)
-	return nil
-}
+// DELETED in favour of pflag's built-in StringArrayVar. See usage.go.
 
 // agentFlags is the parsed --model .. --fake-turns flag contract Task 16's
 // buildAgentArgv targets verbatim. See parseAgentFlags.
@@ -40,7 +32,7 @@ type agentFlags struct {
 	systemPrompt       string
 	appendSystemPrompt string
 	noContextFiles     bool
-	skillsDir          stringSliceFlag
+	skillsDir          []string
 	skills             string
 	noSkills           bool
 	mcpConfig          string
@@ -70,13 +62,10 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 		return agentFlags{}, err
 	}
 
-	// Visit walks only the flags actually present in argv, which is the one
-	// way to tell --tools-web=false from an absent --tools-web.
-	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "tools-web" {
-			f.toolsWebSet = true
-		}
-	})
+	// pflag: use Changed to detect whether --tools-web appeared in argv.
+	if fl := fs.Lookup("tools-web"); fl != nil {
+		f.toolsWebSet = fl.Changed
+	}
 
 	if f.model == "" || !strings.Contains(f.model, "/") {
 		return agentFlags{}, fmt.Errorf(`--model is required and must be provider-qualified, e.g. "anthropic/sonnet-latest" or "deepseek/deepseek-chat"`)
@@ -187,33 +176,13 @@ func standaloneFatal(stdin io.Closer) (func(error), <-chan error) {
 	}, fired
 }
 
-// runAgent is cmd/rafikid's other entry point: `rafikid agent ...` runs a single
-// agent child speaking pi's rpc protocol on stdio, in place of Claude Code.
-// It owns everything fundi.BuildRuntime cannot: flag parsing, os.Getwd(), the
-// process-level signal.NotifyContext, and the CLI-only "--mcp-config not
-// found" vs "defaulted .mcp.json absent" distinction (see the mcpPath block
-// below). BuildRuntime owns the rest of the assembly (context files, skills,
-// the tool registry, MCP connections, the Engine) so the daemon can build the
-// same runtime per child without touching cwd or installing signal handlers.
+// runAgentWithFlags is the post-flag-parsing body, shared by both the
+// cobra path (newFundiCmd.RunE) and the in-process daemon path
+// (agentRuntimeOptions → parseAgentFlags → toRuntimeOptions).
 //
 // Exit codes: 0 or the reader's clean EOF/graceful-shutdown path, 1 for a
-// setup or run error, 2 for a flag-parse error.
-func runAgent(args []string) int {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
-
-	f, err := parseAgentFlags(args)
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			// The FlagSet's own output is discarded (see newAgentFlagSet), so
-			// -h has to print usage explicitly or it exits 0 silently.
-			printAgentUsage(os.Stdout)
-			return 0
-		}
-		slog.Error("agent: parse flags", "error", err)
-		return 2
-	}
+// setup or run error, 2 for a thinking-budget validation error.
+func runAgentWithFlags(f agentFlags) int {
 
 	thinkingBudget, err := fundi.ThinkingBudgetFor(f.thinking)
 	if err != nil {

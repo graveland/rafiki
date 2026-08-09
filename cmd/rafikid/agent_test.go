@@ -464,6 +464,10 @@ func TestEffectiveLSPConfigPrecedence(t *testing.T) {
 
 	t.Run("defaulted missing path is blanked", func(t *testing.T) {
 		cwd := t.TempDir() // no .lsp.json written
+		// Prevent GlobalLSPConfig from resolving to a real file on the dev
+		// machine, which would make effectiveLSPConfig keep the path (correctly:
+		// the global default exists). Force a path that doesn't exist.
+		t.Setenv("XDG_CONFIG_HOME", cwd)
 		if got := effectiveLSPConfig("", cwd); got != "" {
 			t.Errorf("effectiveLSPConfig(\"\", %q) = %q, want empty (defaulted path absent: skip LSP)", cwd, got)
 		}
@@ -509,7 +513,7 @@ func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
 	wantCalls := []string{"effectiveLSPConfig", "toolsWebValue"}
 
 	for file, fn := range map[string]string{
-		"agent.go":         "runAgent",
+		"agent.go":         "runAgentWithFlags",
 		"agent_runtime.go": "toRuntimeOptions",
 	} {
 		parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)

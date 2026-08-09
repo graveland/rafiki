@@ -50,6 +50,12 @@ func main() {
 	// already present and the file only fills gaps.
 	loadServiceEnv()
 
+	// Normalize single-dash long flags (-model → --model) for pflag compatibility.
+	// stdlib flag accepted both forms; pflag rejects the single-dash form as an
+	// unknown shorthand. ctrl_spawn's caller-supplied ExtraArgs reach rafikid
+	// fundi through buildAgentArgv, so this is a wire-visible contract.
+	normalizeArgsForPflag()
+
 	root := newRootCmd()
 
 	// Resolve the config paths once at startup for the help text.
@@ -146,21 +152,53 @@ func newRootCmd() *cobra.Command {
 }
 
 func newFundiCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                protocol.KindFundi,
-		Short:              "Run one agent child on stdio (pi rpc protocol)",
-		DisableFlagParsing: true,
-		SilenceUsage:       true,
+	var f agentFlags
+
+	cmd := &cobra.Command{
+		Use:   protocol.KindFundi,
+		Short: "Run one agent child on stdio (pi rpc protocol)",
+		Long: `Runs a single agent child speaking pi's rpc protocol on stdio, in place of
+Claude Code. Normally spawned by the rafiki daemon rather than invoked directly.`,
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			code := runAgent(args)
+			// pflag: detect whether --tools-web appeared in argv.
+			if fl := cmd.Flags().Lookup("tools-web"); fl != nil {
+				f.toolsWebSet = fl.Changed
+			}
+
+			if f.model == "" || !strings.Contains(f.model, "/") {
+				return fmt.Errorf(`--model is required and must be provider-qualified, e.g. "anthropic/sonnet-latest" or "deepseek/deepseek-chat"`)
+			}
+
+			code := runAgentWithFlags(f)
 			if code != 0 {
-				// runAgent already printed errors via slog; just exit with the
-				// right code. Don't let cobra print anything.
 				os.Exit(code)
 			}
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&f.model, "model", "", "provider-qualified model id, e.g. \"anthropic/sonnet-latest\" or \"deepseek/deepseek-chat\" (required)")
+	cmd.Flags().StringVar(&f.thinking, "thinking", "off", "extended-thinking level: off|low|medium|high|xhigh")
+	cmd.Flags().StringVar(&f.systemPrompt, "system-prompt", "", "override the base system prompt")
+	cmd.Flags().StringVar(&f.appendSystemPrompt, "append-system-prompt", "", "append to the system prompt")
+	cmd.Flags().BoolVar(&f.noContextFiles, "no-context-files", false, "skip loading CLAUDE.md/AGENTS.md context files")
+	cmd.Flags().StringArrayVar(&f.skillsDir, "skills-dir", nil, "additional skills directory (repeatable)")
+	cmd.Flags().StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")
+	cmd.Flags().BoolVar(&f.noSkills, "no-skills", false, "disable skill discovery and the skill tool entirely")
+	cmd.Flags().StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $RAFIKI_MCP_CONFIG or <ConfigDir>/mcp.json)")
+	cmd.Flags().StringVar(&f.lspConfig, "lsp-config", "", "path to lsp.json (default: <cwd>/.lsp.json if present, else $RAFIKI_LSP_CONFIG or <ConfigDir>/lsp.json)")
+	cmd.Flags().StringVar(&f.ref, "ref", paths.Get(paths.ChildID), "external ref correlating the conversation across restarts")
+	cmd.Flags().StringVar(&f.db, "db", paths.Get(paths.DB), "postgres url for conversation persistence (empty: in-memory)")
+	cmd.Flags().StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: <XDG_CACHE_HOME>/rafiki/spill/<ref>)")
+	cmd.Flags().StringVar(&f.name, "name", "", "session name reported through get_state")
+	cmd.Flags().IntVar(&f.maxOutputTokens, "max-output-tokens", 0, "per-turn output token cap sent to upstream (0 = default 16384)")
+	cmd.Flags().BoolVar(&f.recordRequests, "record-requests", false, "Record raw LLM API requests and responses for debugging")
+	cmd.Flags().StringVar(&f.bashRTK, "bash-rtk", "", "route bash commands through rtk for output compression: auto, on, or off (overrides $RAFIKI_BASH_RTK)")
+	cmd.Flags().BoolVar(&f.toolsWeb, "tools-web", false, "enable the webfetch/websearch tools (overrides $RAFIKI_TOOLS_WEB; default off; disable with --tools-web=false)")
+	cmd.Flags().StringVar(&f.fakeTurns, "fake-turns", "", "replay a recorded turn file instead of calling upstream (testing)")
+
+	return cmd
 }
 
 func newAgentCmd() *cobra.Command {
@@ -580,4 +618,41 @@ func loadServiceEnv() {
 	if len(applied) > 0 {
 		slog.Info("loaded environment file", "path", path, "vars", applied)
 	}
+}
+
+// normalizeArgsForPflag converts single-dash long flags (-model) to double-dash
+// form (--model) in os.Args before cobra parses them. stdlib flag accepts both
+// -db and --db; pflag rejects -db as "unknown shorthand flag: 'd'".
+// ctrl_spawn's caller-supplied ExtraArgs reach rafikid fundi through
+// buildAgentArgv, so single-dash forms are a wire-visible contract.
+//
+// Single-character args (-j) are left alone as shorthands.
+func normalizeArgsForPflag() {
+	normalized := make([]string, len(os.Args))
+	for i, a := range os.Args {
+		normalized[i] = normalizeArg(a)
+	}
+	os.Args = normalized
+}
+
+// normalizeArg converts a single-dash multi-character flag to its double-dash
+// form. Single-char (-j), double-dash (--x), and non-flag args pass through.
+func normalizeArg(a string) string {
+	if !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
+		return a
+	}
+	// -x=value or -x value forms; strip the leading dash.
+	rest := a[1:]
+	if eq := strings.IndexByte(rest, '='); eq >= 0 {
+		name := rest[:eq]
+		if len(name) > 1 {
+			return "--" + rest
+		}
+		return a // single-char shorthand with =value (-j=...)
+	}
+	// No = sign.
+	if len(rest) > 1 {
+		return "--" + rest
+	}
+	return a // single-char shorthand (-j)
 }

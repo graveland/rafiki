@@ -2,15 +2,16 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/pflag"
 )
 
 // `rafikid fundi -h` must print usage. It previously exited 0 having printed
-// NOTHING: parseAgentFlags sets the FlagSet output to io.Discard so runAgent can
+// NOTHING: parseAgentFlags sets the FlagSet output to io.Discard so the caller can
 // report parse errors itself, which also silently swallowed the -h usage text.
 func TestPrintAgentUsageListsFlags(t *testing.T) {
 	var buf bytes.Buffer
@@ -44,7 +45,7 @@ func TestParseAgentFlagsHelpReturnsErrHelp(t *testing.T) {
 
 func errorsIsHelp(err error) bool {
 	for err != nil {
-		if err == flag.ErrHelp {
+		if err == pflag.ErrHelp {
 			return true
 		}
 		u, ok := err.(interface{ Unwrap() error })
