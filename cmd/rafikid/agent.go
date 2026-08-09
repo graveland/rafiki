@@ -52,6 +52,7 @@ type agentFlags struct {
 	fakeTurns          string
 	recordRequests     bool
 	bashRTK            string
+	toolsWeb           string
 }
 
 // parseAgentFlags parses the rafikid agent flag set. It is a pure function of
@@ -97,6 +98,54 @@ func bashRTKValue(flagVal string) string {
 		return env
 	}
 	return "auto"
+}
+
+// effectiveLSPConfig resolves the lsp.json path a runtime should actually
+// load, encoding the one precedence rule that was previously copy-pasted
+// between runAgent (agent.go) and toRuntimeOptions (agent_runtime.go): an
+// explicit --lsp-config must reach BuildRuntime even when the path does not
+// exist, so a typo'd flag value is a hard startup error there rather than a
+// silent no-op; a path that only came from resolveLSPConfig's own default (no
+// --lsp-config given) must be blanked to "" when absent, so a cwd/machine with
+// no lsp.json simply runs without LSP tools instead of erroring on a file
+// nobody asked for. Both call sites now call this instead of hand-rolling the
+// os.Stat check, so they cannot drift the way finding 15 flagged.
+func effectiveLSPConfig(flagValue, cwd string) string {
+	lspPath := resolveLSPConfig(flagValue, cwd)
+	if flagValue == "" {
+		if _, err := os.Stat(lspPath); err != nil {
+			lspPath = "" // defaulted path absent: skip LSP, as before
+		}
+	}
+	return lspPath
+}
+
+// toolsWebValue resolves the --tools-web flag precedence: explicit flag beats
+// $RAFIKI_TOOLS_WEB beats the default of OFF - mirroring bashRTKValue above,
+// which is the pattern finding 17 asks this to follow.
+//
+// The flag is a string, not a flag.BoolVar: a bool flag can't tell "not
+// passed" from "passed as false" (both leave the Go zero value, false), which
+// would make it impossible to turn the tools OFF with a flag when
+// $RAFIKI_TOOLS_WEB is set - the exact case this precedence rule exists to
+// handle. An empty string means "not passed", so it falls through to the env
+// var same as bashRTK's "" does.
+//
+// Unrecognized non-empty spellings fail safe to off rather than erroring,
+// matching tools.ParseRTKMode's own leniency for --bash-rtk (pkg/fundi/tools):
+// this flag set has no separate validation pass, and a value nobody asked for
+// should not turn on a tool with real egress.
+func toolsWebValue(flagVal string) bool {
+	switch strings.ToLower(flagVal) {
+	case "on", "true":
+		return true
+	case "off", "false":
+		return false
+	case "":
+		return paths.Get(paths.ToolsWeb) == "1"
+	default:
+		return false
+	}
 }
 
 // standaloneFatal builds the EngineConfig.OnFatal hook for `rafikid agent`, plus
@@ -187,13 +236,7 @@ func runAgent(args []string) int {
 		mcpPath = "" // defaulted path absent: skip MCP, as before
 	}
 
-	lspPath := resolveLSPConfig(f.lspConfig, cwd)
-	explicitLSP := f.lspConfig != ""
-	if !explicitLSP {
-		if _, err := os.Stat(lspPath); err != nil {
-			lspPath = "" // defaulted path absent: skip LSP, as before
-		}
-	}
+	lspPath := effectiveLSPConfig(f.lspConfig, cwd)
 	// The standalone CLI owns its pool: BuildRuntime/BuildEngine never open
 	// or close one themselves (see Config.Pool's doc comment), so a daemon
 	// can share a single pool across N engines. A nil pool here (--db unset)
@@ -232,7 +275,7 @@ func runAgent(args []string) int {
 		Pool:                 pool,
 		OnFatal:              onFatal,
 		RTK:                  bashRTKValue(f.bashRTK),
-		ToolsWeb:             paths.Get(paths.ToolsWeb) == "1",
+		ToolsWeb:             toolsWebValue(f.toolsWeb),
 	}
 	if f.recordRequests {
 		// NewRawTraceStore(nil) is documented to return nil, so this is safe

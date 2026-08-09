@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -364,5 +366,60 @@ func TestAgentRefIsDaemonControlled(t *testing.T) {
 	}
 	if got.Ref != "c_authoritative" {
 		t.Errorf("Ref = %q, want the daemon's child id to win over ExtraArgs", got.Ref)
+	}
+}
+
+// TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution is the behavioral
+// half of finding 15's regression guard (the structural half is
+// TestLSPAndToolsWebHelpersSharedAcrossCallSites in agent_test.go): for a
+// matrix of --lsp-config/--tools-web/$RAFIKI_TOOLS_WEB combinations, it
+// proves toRuntimeOptions' LSPConfig and ToolsWeb fields equal what calling
+// effectiveLSPConfig/toolsWebValue directly (the exact calls runAgent also
+// makes, in agent.go) produces for the identical inputs. Before the
+// extraction, runAgent and toRuntimeOptions each hand-rolled this precedence
+// with no shared helper, so nothing forced the two to compute the same
+// answer on a given input; this test would have failed the moment either
+// copy drifted.
+func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
+	cwdWithLSP := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwdWithLSP, ".lsp.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cwdWithoutLSP := t.TempDir()
+
+	cases := []struct {
+		name      string
+		lspConfig string
+		cwd       string
+		toolsWeb  string
+		envWeb    string
+	}{
+		{"defaulted lsp present, tools-web unset", "", cwdWithLSP, "", ""},
+		{"defaulted lsp absent, tools-web unset", "", cwdWithoutLSP, "", ""},
+		{"explicit lsp missing survives, tools-web flag on", "/nope/lsp.json", cwdWithoutLSP, "on", ""},
+		{"tools-web flag off beats env on", "", cwdWithoutLSP, "off", "1"},
+		{"tools-web from env only", "", cwdWithoutLSP, "", "1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RAFIKI_TOOLS_WEB", tc.envWeb)
+
+			f := agentFlags{model: "anthropic/claude-sonnet-4-5", lspConfig: tc.lspConfig, toolsWeb: tc.toolsWeb}
+			ro, err := f.toRuntimeOptions(tc.cwd, nil)
+			if err != nil {
+				t.Fatalf("toRuntimeOptions: %v", err)
+			}
+
+			wantLSP := effectiveLSPConfig(tc.lspConfig, tc.cwd)
+			if ro.LSPConfig != wantLSP {
+				t.Errorf("toRuntimeOptions LSPConfig = %q, want %q (effectiveLSPConfig directly)", ro.LSPConfig, wantLSP)
+			}
+
+			wantWeb := toolsWebValue(tc.toolsWeb)
+			if ro.ToolsWeb != wantWeb {
+				t.Errorf("toRuntimeOptions ToolsWeb = %v, want %v (toolsWebValue directly)", ro.ToolsWeb, wantWeb)
+			}
+		})
 	}
 }

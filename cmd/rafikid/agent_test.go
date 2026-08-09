@@ -2,6 +2,9 @@ package main
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"os"
@@ -364,5 +367,162 @@ func TestParseAgentFlagsBashRTK(t *testing.T) {
 	}
 	if f2.bashRTK != "" {
 		t.Errorf("bashRTK = %q, want empty (flag not passed)", f2.bashRTK)
+	}
+}
+
+// TestToolsWebValuePrecedence verifies the --tools-web flag precedence added
+// for finding 17: explicit flag beats $RAFIKI_TOOLS_WEB beats the "off"
+// default. Unlike --bash-rtk's three real states (auto/on/off), the whole
+// point of this flag is being able to force the toggle OFF even when the env
+// var says on — a plain flag.BoolVar cannot express "not passed" separately
+// from "passed false", so both directions are asserted here, not just
+// flag-wins-when-on.
+func TestToolsWebValuePrecedence(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("RAFIKI_TOOLS_WEB", "")
+		if got := toolsWebValue(""); got != false {
+			t.Errorf("toolsWebValue(\"\") = %v, want false", got)
+		}
+	})
+
+	t.Run("env-only", func(t *testing.T) {
+		t.Setenv("RAFIKI_TOOLS_WEB", "1")
+		if got := toolsWebValue(""); got != true {
+			t.Errorf("toolsWebValue(\"\") = %v, want true (from $RAFIKI_TOOLS_WEB=1)", got)
+		}
+	})
+
+	t.Run("flag-on-beats-env-unset", func(t *testing.T) {
+		t.Setenv("RAFIKI_TOOLS_WEB", "")
+		if got := toolsWebValue("on"); got != true {
+			t.Errorf("toolsWebValue(\"on\") = %v, want true", got)
+		}
+	})
+
+	// The direction a bool flag cannot express: turning the toggle OFF via
+	// the flag while the env var says on.
+	t.Run("flag-off-beats-env-on", func(t *testing.T) {
+		t.Setenv("RAFIKI_TOOLS_WEB", "1")
+		if got := toolsWebValue("off"); got != false {
+			t.Errorf("toolsWebValue(\"off\") = %v, want false (explicit flag must beat $RAFIKI_TOOLS_WEB=1)", got)
+		}
+	})
+}
+
+// TestParseAgentFlagsToolsWeb verifies --tools-web is actually read by
+// parseAgentFlags, the same regression class TestParseAgentFlagsBashRTK
+// guards against (a flag registered but never read from the parsed struct).
+func TestParseAgentFlagsToolsWeb(t *testing.T) {
+	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--tools-web", "on"})
+	if err != nil {
+		t.Fatalf("parseAgentFlags: %v", err)
+	}
+	if f.toolsWeb != "on" {
+		t.Errorf("toolsWeb = %q, want on", f.toolsWeb)
+	}
+
+	f2, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
+	if err != nil {
+		t.Fatalf("parseAgentFlags: %v", err)
+	}
+	if f2.toolsWeb != "" {
+		t.Errorf("toolsWeb = %q, want empty (flag not passed)", f2.toolsWeb)
+	}
+}
+
+// TestEffectiveLSPConfigPrecedence covers finding 15's extracted helper: an
+// explicit --lsp-config must survive a missing file (so BuildRuntime raises
+// the hard error), while a defaulted path that doesn't exist must be blanked
+// (so a cwd with no lsp.json just runs without LSP tools, as before).
+func TestEffectiveLSPConfigPrecedence(t *testing.T) {
+	t.Run("explicit missing path is preserved", func(t *testing.T) {
+		got := effectiveLSPConfig("/does/not/exist/lsp.json", t.TempDir())
+		if got != "/does/not/exist/lsp.json" {
+			t.Errorf("effectiveLSPConfig = %q, want the explicit path preserved so BuildRuntime raises it", got)
+		}
+	})
+
+	t.Run("defaulted missing path is blanked", func(t *testing.T) {
+		cwd := t.TempDir() // no .lsp.json written
+		if got := effectiveLSPConfig("", cwd); got != "" {
+			t.Errorf("effectiveLSPConfig(\"\", %q) = %q, want empty (defaulted path absent: skip LSP)", cwd, got)
+		}
+	})
+
+	t.Run("defaulted present path is kept", func(t *testing.T) {
+		cwd := t.TempDir()
+		cwdCfg := filepath.Join(cwd, ".lsp.json")
+		if err := os.WriteFile(cwdCfg, []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := effectiveLSPConfig("", cwd); got != cwdCfg {
+			t.Errorf("effectiveLSPConfig(\"\", %q) = %q, want %q", cwd, got, cwdCfg)
+		}
+	})
+
+	t.Run("explicit existing path is kept", func(t *testing.T) {
+		cwd := t.TempDir()
+		explicit := filepath.Join(t.TempDir(), "custom-lsp.json")
+		if err := os.WriteFile(explicit, []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := effectiveLSPConfig(explicit, cwd); got != explicit {
+			t.Errorf("effectiveLSPConfig(%q, %q) = %q, want %q", explicit, cwd, got, explicit)
+		}
+	})
+}
+
+// TestLSPAndToolsWebHelpersSharedAcrossCallSites is the regression guard for
+// finding 15 itself: it proves runAgent (agent.go) and toRuntimeOptions
+// (agent_runtime.go) resolve LSPConfig/ToolsWeb through the same two helpers,
+// rather than through hand-copied implementations that merely happen to agree
+// today. A behavioural test cannot cover this on its own — toRuntimeOptions is
+// callable from a test but runAgent is not (it is a signal- and stdin-driven
+// CLI entrypoint returning an exit code), so the daemon half can be asserted
+// on outputs and the standalone half can only be asserted structurally.
+//
+// This walks the AST rather than grepping the source text: a textual check for
+// the call expression breaks on a local variable rename, on gofmt wrapping the
+// call across lines, or on an added argument, none of which reintroduce the
+// duplication this is meant to catch.
+func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
+	wantCalls := []string{"effectiveLSPConfig", "toolsWebValue"}
+
+	for file, fn := range map[string]string{
+		"agent.go":         "runAgent",
+		"agent_runtime.go": "toRuntimeOptions",
+	} {
+		parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+
+		var body *ast.FuncDecl
+		for _, decl := range parsed.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == fn {
+				body = fd
+				break
+			}
+		}
+		if body == nil {
+			t.Fatalf("%s: no func %s; this test needs updating alongside the rename", file, fn)
+		}
+
+		called := map[string]bool{}
+		ast.Inspect(body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if ident, ok := call.Fun.(*ast.Ident); ok {
+					called[ident.Name] = true
+				}
+			}
+			return true
+		})
+
+		for _, want := range wantCalls {
+			if !called[want] {
+				t.Errorf("%s: %s does not call %s; finding 15's duplicated resolution logic is back",
+					file, fn, want)
+			}
+		}
 	}
 }
