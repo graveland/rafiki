@@ -242,6 +242,7 @@ corresponding `RAFIKI_*` env var default; an explicit flag always wins.
 | `--skills-dir` | *(repeatable)* | additional skills directories |
 | `--skills` | — | comma-separated skill allowlist |
 | `--mcp-config` | `$RAFIKI_MCP_CONFIG` | path to .mcp.json |
+| `--lsp-config` | `$RAFIKI_LSP_CONFIG` | path to lsp.json (language server config). Absent file = LSP tools disabled |
 | `--spill-dir` | *(derived)* | directory for clipped tool output |
 | `--max-output-tokens` | `0` (default 16384) | per-turn output token cap |
 | `--system-prompt` | — | override the base system prompt |
