@@ -34,9 +34,12 @@ exit 0
 		t.Fatal(err)
 	}
 
-	oldPath := os.Getenv("PATH")
-	newPath := dir + ":" + oldPath
-	os.Setenv("PATH", newPath)
+	// t.Setenv, not os.Setenv: the manual save/restore leaked. PATH was
+	// swapped by several tests and restored to whatever it happened to be
+	// when *their* cleanup ran, so with -shuffle=on a later test could find
+	// an empty PATH and fail with `exec: "bash": executable file not found`.
+	// t.Setenv restores per-test, in order, automatically.
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
 	// Override the probe so it actually checks the new PATH
 	resetRTKCache(func() rtkCache {
@@ -48,11 +51,9 @@ exit 0
 		_, _ = exec.Command(p, "--version").Output()
 		return rtkCache{path: p, ok: true}
 	})
+	t.Cleanup(func() { resetRTKCache(nil) })
 
-	return func() {
-		os.Setenv("PATH", oldPath)
-		resetRTKCache(nil) // clear override so other tests aren't affected
-	}
+	return func() {}
 }
 
 // fakeRTKVersion creates a fake rtk that reports a specific version string.
@@ -72,7 +73,7 @@ func fakeRTKVersion(t *testing.T, versionOutput string) {
 	if err := os.Chmod(f.Name(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
 	// Parse the version from the output to determine ok status.
 	v := strings.TrimPrefix(versionOutput, "rtk ")
@@ -85,6 +86,7 @@ func fakeRTKVersion(t *testing.T, versionOutput string) {
 		p, _ := exec.LookPath("rtk")
 		return rtkCache{path: p, ok: versionOK}
 	})
+	t.Cleanup(func() { resetRTKCache(nil) })
 }
 
 func TestHasShellChaining(t *testing.T) {
@@ -205,8 +207,8 @@ func TestRtkRewriteMapping(t *testing.T) {
 		{"ls -la", []string{"rtk", "ls", "-la"}},
 		{"tree -L 2", []string{"rtk", "tree", "-L", "2"}},
 		{"cat file.txt", []string{"rtk", "read", "file.txt"}},
-		{"head README.md", []string{"rtk", "read", "README.md"}},
-		{"tail -20 app.log", []string{"rtk", "read", "-20", "app.log"}},
+		// head and tail are deliberately not here; see
+		// TestRtkRewriteLeavesHeadAndTailAlone.
 		{"find . -name '*.go'", []string{"rtk", "find", ".", "-name", "*.go"}},
 		{"grep pattern file", []string{"rtk", "grep", "pattern", "file"}},
 		{"rg pattern", []string{"rtk", "rg", "pattern"}},
@@ -386,8 +388,9 @@ func TestRtkRewriteVersionGuardUnparseable(t *testing.T) {
 
 func TestRtkRewriteMissingRtk(t *testing.T) {
 	dir := t.TempDir()
-	os.Setenv("PATH", dir)
+	t.Setenv("PATH", dir)
 	resetRTKCache(func() rtkCache { return rtkCache{} })
+	t.Cleanup(func() { resetRTKCache(nil) })
 
 	_, applied := rtkRewrite(RTKAuto, "git status")
 	if applied {
@@ -397,8 +400,9 @@ func TestRtkRewriteMissingRtk(t *testing.T) {
 
 func TestRtkRewriteRTKOnNoRtk(t *testing.T) {
 	dir := t.TempDir()
-	os.Setenv("PATH", dir)
+	t.Setenv("PATH", dir)
 	resetRTKCache(func() rtkCache { return rtkCache{} })
+	t.Cleanup(func() { resetRTKCache(nil) })
 
 	_, applied := rtkRewrite(RTKOn, "git status")
 	if applied {
@@ -514,5 +518,119 @@ func TestSemverGTE(t *testing.T) {
 					tc.v, tc.maj, tc.min, tc.pat, got, tc.ok)
 			}
 		})
+	}
+}
+
+// TestRtkRewriteLeavesHeadAndTailAlone: head/tail were mapped to "read",
+// producing `rtk read -20 app.log`. That reaches bash's builtin read, which
+// answers "read: -2: invalid option" and exits 2 — so `head -50 server.log`
+// returned a usage error instead of the file. Upstream's rtk-rewrite.sh
+// does not map them, and the real binary translates the count flag
+// (`rtk read README.md --max-lines 20`), which a bare prefix swap cannot
+// do. Falling through to plain bash is the correct behaviour.
+func TestRtkRewriteLeavesHeadAndTailAlone(t *testing.T) {
+	// Without a working rtk on PATH every rewrite fails open, which
+	// would make the negative assertions below pass for the wrong
+	// reason.
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	for _, cmd := range []string{
+		"head README.md",
+		"head -20 README.md",
+		"tail -20 app.log",
+		"tail -f app.log",
+	} {
+		if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
+			t.Errorf("rtkRewrite(%q) was rewritten to %v; it must fall through to bash", cmd, argv)
+		}
+	}
+}
+
+// TestRtkRewriteRefusesMultilineCommands is the regression test for the
+// worst rtk defect: newline was not in the guard set and shellSplit breaks
+// only on space and tab, so a newline was absorbed into a token.
+// "git add -A\ngit commit -m wip" became one git call with a pathspec of
+// "-A\ngit" — the add failed, the commit never ran, and the model saw no
+// sign a second command had existed.
+func TestRtkRewriteRefusesMultilineCommands(t *testing.T) {
+	// Without a working rtk on PATH every rewrite fails open, which
+	// would make the negative assertions below pass for the wrong
+	// reason.
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	for _, cmd := range []string{
+		"git add -A\ngit commit -m wip",
+		"git status\r\ngit log",
+		"docker ps\ndocker images",
+	} {
+		if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
+			t.Errorf("rtkRewrite(%q) was rewritten to %v; a multi-line command must never be rewritten", cmd, argv)
+		}
+	}
+}
+
+// TestRtkRewriteRefusesShellExpansion: the rewritten path execs argv with
+// no shell, so anything the shell would have expanded arrives literally.
+// `cat ~/.zshrc` reached rtk as a literal tilde and failed with ENOENT.
+func TestRtkRewriteRefusesShellExpansion(t *testing.T) {
+	// Without a working rtk on PATH every rewrite fails open, which
+	// would make the negative assertions below pass for the wrong
+	// reason.
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	for _, cmd := range []string{
+		"cat ~/.zshrc",
+		"ls $HOME",
+		"ls *.go",
+		"cat file?.txt",
+		"git status # check the tree",
+		"ls {a,b}",
+	} {
+		if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
+			t.Errorf("rtkRewrite(%q) was rewritten to %v; the no-shell path cannot expand it", cmd, argv)
+		}
+	}
+}
+
+// TestRtkRewriteEscapedQuoteDoesNotHidePipeline: inQuote ignored a
+// backslash outside quotes, so the escaped " in `grep a\"b file | wc -l`
+// was read as opening a quote and the following | looked quoted. The guard
+// then let a pipeline through and rtk ran one grep with a garbage pattern.
+func TestRtkRewriteEscapedQuoteDoesNotHidePipeline(t *testing.T) {
+	// Without a working rtk on PATH every rewrite fails open, which
+	// would make the negative assertions below pass for the wrong
+	// reason.
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	cmd := `grep a\"b file | wc -l`
+	if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
+		t.Fatalf("rtkRewrite(%q) was rewritten to %v; the pipeline must be detected", cmd, argv)
+	}
+}
+
+// TestRtkRewriteStillHandlesQuotedMetacharacters guards the other
+// direction: a metacharacter genuinely inside quotes is not a pipeline, and
+// widening the refusal set must not make every ordinary command fall
+// through — that would silently disable rtk rather than break it.
+func TestRtkRewriteStillHandlesQuotedMetacharacters(t *testing.T) {
+	// Without a working rtk on PATH every rewrite fails open, which
+	// would make the negative assertions below pass for the wrong
+	// reason.
+	cleanup := fakeRTK(t)
+	defer cleanup()
+
+	for _, cmd := range []string{
+		"git status",
+		"docker ps",
+		"find . -name '*.go'",
+		"kubectl get pods",
+	} {
+		if _, applied := rtkRewrite(RTKAuto, cmd); !applied {
+			t.Errorf("rtkRewrite(%q) was not applied; the guard is now too broad", cmd)
+		}
 	}
 }

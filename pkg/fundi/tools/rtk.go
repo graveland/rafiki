@@ -82,64 +82,36 @@ func atoi(s string) int {
 	return n
 }
 
-// shellChainingRE matches shell metacharacters that indicate chaining,
-// piping, or substitution. Any match means the command is a compound
-// command that rtk cannot safely rewrite.
+// shellUnsafeChars are the characters that make a command unsafe to rewrite
+// into an rtk argv. Two distinct hazards, both fatal, both fail open:
 //
-// The set: ; | & > < ` $(
-var shellChainingChars = ";|&><`"
+//   - Chaining and redirection (; | & > < ` and newline) mean the string is
+//     more than one command. Rewriting the first token then changes what
+//     runs: "git add -A\ngit commit -m wip" became a single git invocation
+//     with a pathspec of "-A\ngit", so the add failed and the commit
+//     silently never happened — while the model saw one command's output
+//     and no sign that a second command had ever existed.
+//   - Expansion ($ ~ * ? [ { # !) is the shell's job, and the rewritten
+//     path execs argv directly with no shell. "cat ~/.zshrc" reached rtk as
+//     a literal tilde and failed with ENOENT; "ls *.go" as an unexpanded
+//     glob; "git status # note" with the comment as trailing arguments.
+//
+// Refusing too much costs nothing: every refusal is just plain bash, which
+// is the behaviour without rtk at all.
+const shellUnsafeChars = ";|&><`\n\r$~*?[{#!"
 
-// hasShellChaining reports whether command contains shell chaining operators.
-// This is the guardrail that prevents rewriting compound shell commands.
+// hasShellChaining reports whether command must not be rewritten. The name
+// is historical — the set now covers expansion as well as chaining.
+//
+// Note the previous version's per-character ladder returned true in every
+// branch, so it was already equivalent to a plain membership test; the
+// branches only made it look like there was nuance to get wrong.
 func hasShellChaining(command string) bool {
-	// Fast path: scan for simple metacharacters
 	for i := 0; i < len(command); i++ {
-		c := command[i]
-		if strings.IndexByte(shellChainingChars, c) >= 0 {
-			// Check context to avoid false positives in quoted strings.
-			// Simple approach: only match outside of quotes.
-			if !inQuote(command, i) {
-				// For &, require " && " or " & " (not just bare & like in "2>&1").
-				// But we reject ANY unquoted & to be safe — redirects like 2>&1
-				// will be caught. Actually, we need to be more careful:
-				// "&&" is chaining, "&" background, "2>&1" is a redirect.
-				// For simplicity and safety, we reject any unquoted & or |.
-				if c == '&' {
-					// Check if it's part of && or standalone &
-					if i+1 < len(command) && command[i+1] == '&' {
-						return true // &&
-					}
-					// Check for " & " (background)
-					// But also check this isn't a redirect like 2>&1
-					// We reject all unquoted & for safety
-					return true
-				}
-				if c == '|' {
-					if i+1 < len(command) && command[i+1] == '|' {
-						return true // ||
-					}
-					return true // |
-				}
-				if c == ';' {
-					return true
-				}
-				if c == '>' || c == '<' {
-					return true
-				}
-				if c == '`' {
-					return true
-				}
-			}
-		}
-	}
-
-	// Check for $( substitution
-	for i := 0; i < len(command)-1; i++ {
-		if command[i] == '$' && command[i+1] == '(' && !inQuote(command, i) {
+		if strings.IndexByte(shellUnsafeChars, command[i]) >= 0 && !inQuote(command, i) {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -165,6 +137,13 @@ func inQuote(s string, i int) bool {
 			}
 		default:
 			switch c {
+			case '\\':
+				// A backslash escapes the next character outside quotes
+				// too. Without this, `grep a\"b file | wc -l` was read as
+				// opening a quote at the escaped ", so the following | was
+				// judged to be inside a quote and the guard let a pipeline
+				// through — the exact false negative it exists to prevent.
+				j++
 			case '\'':
 				inSingle = true
 			case '"':
@@ -182,17 +161,24 @@ func inQuote(s string, i int) bool {
 // Single-token prefixes only. Multi-token prefixes (like "npm exec tsc") are
 // not in this table — the follow-on token is checked at match time.
 var rtkRewriteMapping = map[string]string{
-	"git":              "git",
-	"yadm":             "git",
-	"gh":               "gh",
-	"glab":             "glab",
-	"cargo":            "cargo",
-	"pnpm":             "pnpm",
-	"npm":              "npm",
-	"npx":              "npx",
-	"cat":              "read",
-	"head":             "read",
-	"tail":             "read",
+	"git":   "git",
+	"yadm":  "git",
+	"gh":    "gh",
+	"glab":  "glab",
+	"cargo": "cargo",
+	"pnpm":  "pnpm",
+	"npm":   "npm",
+	"npx":   "npx",
+	"cat":   "read",
+	// head and tail are deliberately absent. They were mapped to "read"
+	// here, but upstream's rtk-rewrite.sh does not map them and the real
+	// binary refuses "tail -f" outright: `rtk rewrite "head -20 README.md"`
+	// emits `rtk read README.md --max-lines 20`, translating the count
+	// flag, which a bare prefix swap cannot do. The unswapped form ran as
+	// `rtk read -20 README.md` and hit bash's builtin read:
+	// "read: -2: invalid option", exit 2 — so `head -50 server.log` broke
+	// instead of being compressed. Falling through to plain bash is the
+	// correct behaviour until the flag translation is ported.
 	"grep":             "grep",
 	"rg":               "rg",
 	"ls":               "ls",
