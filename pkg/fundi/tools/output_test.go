@@ -191,10 +191,20 @@ func TestClipBudgetTruncatesLongLines(t *testing.T) {
 
 func TestClipBudgetCapsLines(t *testing.T) {
 	p := OutputPolicy{SpillDir: t.TempDir()}
-	in := strings.Repeat("line\n", 50)
+	in := strings.Repeat("content\n", 50)
 	got := p.ClipBudget(in, "t", Budget{MaxLines: 5})
-	if n := strings.Count(got, "line"); n != 5 {
-		t.Fatalf("got %d lines, want 5", n)
+
+	// Count content lines specifically. The previous version counted
+	// occurrences of "line" across the whole result, so any wording in a
+	// truncation marker was silently counted as a content line too.
+	if n := strings.Count(got, "content"); n != 5 {
+		t.Fatalf("got %d content lines, want 5:\n%q", n, got)
+	}
+	// The line cap must announce itself. A silent cut leaves the model
+	// reasoning confidently about output it only partly saw — the rule
+	// every other truncation path in this package follows.
+	if !strings.Contains(got, linesTruncSuffix) {
+		t.Fatalf("MaxLines truncation must be marked in the output, got:\n%q", got)
 	}
 }
 

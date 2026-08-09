@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"go.graveland.dev/rafiki/pkg/agentloop"
 )
 
 func TestReadTool(t *testing.T) {
@@ -283,9 +286,11 @@ func TestReadToolByteBudget(t *testing.T) {
 	}
 	out := res.Text
 
-	// The output must be roughly <= 50 KB.
-	if len(out) > 52*1024 {
-		t.Fatalf("output too large: %d bytes", len(out))
+	// The whole result, trailer included, must fit under the budget. The
+	// old assertion allowed a 2 KB overshoot of a 50 KB contract, and that
+	// slack is exactly what hid the trailer being clipped by agentloop.
+	if len(out) > maxReadBytes+readTrailerReserve {
+		t.Fatalf("output too large: %d bytes (budget %d + reserve %d)", len(out), maxReadBytes, readTrailerReserve)
 	}
 
 	// A continuation hint must be present.
@@ -431,5 +436,84 @@ func TestReadToolRoundTripContinueOffset(t *testing.T) {
 	// The last line should be L001000 (end of file).
 	if !strings.HasPrefix(seenLines[len(seenLines)-1], "L001000:") {
 		t.Fatalf("last line should be L001000, got %q", seenLines[len(seenLines)-1])
+	}
+}
+
+// TestReadBudgetLeavesRoomForTrailer pins the relationship between read's
+// own byte budget and agentloop's blind outer cap.
+//
+// These are constants in two different packages with nothing but this test
+// enforcing that they agree — the same duplication hazard CLAUDE.md flags
+// for APP_NAME. When they were equal, read filled its budget to just under
+// the cap and *then* appended the continuation trailer, pushing the result
+// over; truncateToolResult cuts from the tail, so it removed the trailer
+// and the last line with it. The model received a short file and no offset
+// to resume from: the exact defect per-tool budgets were introduced to fix,
+// invisible to every test that called Execute directly.
+func TestReadBudgetLeavesRoomForTrailer(t *testing.T) {
+	if maxReadBytes >= agentloop.MaxToolResultSize {
+		t.Fatalf("maxReadBytes (%d) must be strictly below agentloop.MaxToolResultSize (%d), "+
+			"or the continuation trailer is clipped off by the outer cap",
+			maxReadBytes, agentloop.MaxToolResultSize)
+	}
+
+	dir := t.TempDir()
+	var lines []string
+	for i := 1; i <= 2000; i++ {
+		lines = append(lines, fmt.Sprintf("line-%04d-%s", i, strings.Repeat("x", 100)))
+	}
+	p := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: NewFileTracker(), Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The property that matters: the complete result, trailer included, is
+	// under the outer cap, so truncateToolResult never fires on a read.
+	if len(res.Text) > agentloop.MaxToolResultSize {
+		t.Fatalf("read result is %d bytes, over agentloop's %d cap: the trailer will be clipped",
+			len(res.Text), agentloop.MaxToolResultSize)
+	}
+	if !strings.Contains(res.Text, "offset=") {
+		t.Fatal("byte-capped read must carry a continuation offset")
+	}
+}
+
+// TestReadTruncatesLongLineOnRuneBoundary guards against slicing a
+// multi-byte rune in half. Invalid UTF-8 is silently rewritten to U+FFFD
+// during JSON encoding, so the model would receive replacement characters
+// rather than an honestly truncated line.
+func TestReadTruncatesLongLineOnRuneBoundary(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cjk.txt")
+	// Each rune is 3 bytes, so a byte-slice at maxLineChars lands mid-rune.
+	if err := os.WriteFile(p, []byte(strings.Repeat("界", maxLineChars+500)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: NewFileTracker(), Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(res.Text) {
+		t.Fatal("read produced invalid UTF-8: a rune was split by line truncation")
+	}
+	if strings.ContainsRune(res.Text, utf8.RuneError) {
+		t.Fatal("read output contains U+FFFD: a rune was split by line truncation")
+	}
+	if !strings.Contains(res.Text, lineTruncSuffix) {
+		t.Fatal("an over-long line must be marked as truncated")
 	}
 }

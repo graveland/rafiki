@@ -39,7 +39,14 @@ const (
 	// (see drive).
 	defaultMaxIterations = 250
 	maxConcurrentTools   = 6
-	maxToolResultSize    = 50 * 1024
+
+	// MaxToolResultSize is the blind, content-agnostic cap applied to every
+	// tool result by truncateToolResult. It is exported because a tool that
+	// budgets its own output must reserve headroom below this number: this
+	// clip cuts from the tail, so a tool whose own budget equals this one
+	// gets its trailing "here is how to get the rest" hint silently removed
+	// — exactly the failure the per-tool budgets exist to prevent.
+	MaxToolResultSize = 50 * 1024
 
 	// DefaultResumeCap bounds Resume attempts per conversation.
 	DefaultResumeCap = 3
@@ -551,7 +558,7 @@ func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse
 			if err != nil && result == "" {
 				result = fmt.Sprintf("Error executing tool: %v", err)
 			}
-			result = truncateToolResult(result, maxToolResultSize)
+			result = truncateToolResult(result, MaxToolResultSize)
 
 			emitMu.Lock()
 			ev.toolResult(use.name, result, err)

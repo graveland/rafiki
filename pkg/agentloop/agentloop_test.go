@@ -493,12 +493,12 @@ func TestInterruptedToolResultShape(t *testing.T) {
 
 func TestTruncateToolResult(t *testing.T) {
 	small := "short"
-	if truncateToolResult(small, maxToolResultSize) != small {
+	if truncateToolResult(small, MaxToolResultSize) != small {
 		t.Error("small result must pass through")
 	}
 	big := strings.Repeat("line\n", 20*1024)
-	got := truncateToolResult(big, maxToolResultSize)
-	if len(got) > maxToolResultSize+64 {
+	got := truncateToolResult(big, MaxToolResultSize)
+	if len(got) > MaxToolResultSize+64 {
 		t.Errorf("truncated result too big: %d", len(got))
 	}
 	if !strings.Contains(got, "truncated,") {

@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"go.graveland.dev/rafiki/pkg/agentloop"
 )
 
 const (
@@ -14,8 +16,19 @@ const (
 	// maxLineChars caps a single line; longer lines are truncated with a
 	// "… (line truncated)" suffix. Matches opencode's proven value.
 	maxLineChars = 2000
-	// maxReadBytes is the total output byte budget for one read call.
-	maxReadBytes = 50 * 1024
+	// readTrailerReserve is headroom left below agentloop.MaxToolResultSize
+	// for read's continuation trailer. The trailer is appended *after* the
+	// byte budget is spent, so a budget equal to the outer cap pushes the
+	// result over it, and truncateToolResult — which cuts from the tail —
+	// removes the trailer and the last line or two with it. The model then
+	// gets a silently short file and no offset to resume from, which is the
+	// precise defect these budgets were added to fix. 1 KiB is ~14x the
+	// longest trailer this file can emit.
+	readTrailerReserve = 1024
+	// maxReadBytes is the total output byte budget for one read call. It
+	// must stay strictly below agentloop.MaxToolResultSize; see
+	// readTrailerReserve. TestReadBudgetLeavesRoomForTrailer pins this.
+	maxReadBytes = agentloop.MaxToolResultSize - readTrailerReserve
 	// binaryCheckBytes is how many bytes at the head of the file are
 	// scanned for a NUL byte to detect binary content.
 	binaryCheckBytes = 8192
@@ -139,10 +152,11 @@ func (rt *readTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 			break
 		}
 
-		line := scanner.Text()
-		if len(line) > maxLineChars {
-			line = line[:maxLineChars] + "… (line truncated)"
-		}
+		// truncateLine, not a byte slice: line[:maxLineChars] can cut a
+		// multi-byte rune in half, and the invalid UTF-8 that results is
+		// silently rewritten to U+FFFD when the result is JSON-encoded for
+		// the API — so a CJK or emoji line arrives as replacement characters.
+		line := truncateLine(scanner.Text(), maxLineChars)
 
 		formatted := fmt.Sprintf("%6d\t%s\n", lineNo, line)
 

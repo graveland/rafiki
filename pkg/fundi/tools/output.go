@@ -93,6 +93,28 @@ func (p OutputPolicy) Clip(s, name string) string {
 // lineTruncSuffix marks a line shortened by Budget.MaxLineChars.
 const lineTruncSuffix = "… (line truncated)"
 
+// linesTruncSuffix marks a result shortened by Budget.MaxLines. The line
+// cap used to cut silently, which contradicts the rule every tool here
+// follows: if output was dropped, the model has to be told, or it reasons
+// confidently about a file it only partly saw.
+const linesTruncSuffix = "\n[... line limit reached; earlier lines only ...]"
+
+// truncateLine shortens s to at most maxChars characters and appends
+// lineTruncSuffix. It cuts on a rune boundary: slicing a string mid-rune
+// yields invalid UTF-8, which json.Marshal silently rewrites to U+FFFD on
+// the way to the model, so a CJK or emoji line degrades into replacement
+// characters instead of being honestly truncated.
+func truncateLine(s string, maxChars int) string {
+	if maxChars <= 0 || len(s) <= maxChars {
+		return s // byte length bounds rune count, so this is a safe fast path
+	}
+	r := []rune(s)
+	if len(r) <= maxChars {
+		return s
+	}
+	return string(r[:maxChars]) + lineTruncSuffix
+}
+
 // Budget bounds one tool result in three dimensions. A zero field means
 // that dimension is unbounded (MaxBytes zero falls back to
 // defaultOutputBudget, matching Clip).
@@ -108,17 +130,20 @@ type Budget struct {
 func (p OutputPolicy) ClipBudget(s, name string, b Budget) string {
 	if b.MaxLineChars > 0 || b.MaxLines > 0 {
 		lines := strings.Split(s, "\n")
+		linesCut := false
 		if b.MaxLines > 0 && len(lines) > b.MaxLines {
 			lines = lines[:b.MaxLines]
+			linesCut = true
 		}
 		if b.MaxLineChars > 0 {
 			for i, line := range lines {
-				if len(line) > b.MaxLineChars {
-					lines[i] = line[:b.MaxLineChars] + lineTruncSuffix
-				}
+				lines[i] = truncateLine(line, b.MaxLineChars)
 			}
 		}
 		s = strings.Join(lines, "\n")
+		if linesCut {
+			s += linesTruncSuffix
+		}
 	}
 	if b.MaxBytes > 0 {
 		return OutputPolicy{Budget: b.MaxBytes, SpillDir: p.SpillDir}.Clip(s, name)
