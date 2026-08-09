@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWebsearchParsesFixtureResults(t *testing.T) {
@@ -234,3 +236,141 @@ func parseLiteSearchResultsFromReader(r io.Reader, maxResults int) ([]SearchResu
 
 // force test compilation
 var _ = parseLiteSearchResultsFromReader
+
+// TestParseFailureIsNotZeroResults is the regression test for the
+// silent-wrong-answer bug. DDG Lite is unofficial and its markup drifts;
+// when result-link is renamed, every query used to return "No results
+// found", the model concluded the topic had no web coverage, rephrased, and
+// concluded it again — with nothing in the logs.
+func TestParseFailureIsNotZeroResults(t *testing.T) {
+	// A realistic page with the search form and plenty of chrome, but no
+	// anchor carrying the class the parser looks for.
+	renamed := `<html><body><form action="/lite/"><input name="q"></form>` +
+		`<table>` + strings.Repeat(`<tr><td><a class="result__a" href="https://example.com">Example</a></td></tr>`, 20) +
+		`</table></body></html>`
+
+	_, err := parseLiteSearchResults(renamed, 10)
+	if err == nil {
+		t.Fatal("a renamed result class must be reported as a parse failure, not zero results")
+	}
+	if !strings.Contains(err.Error(), "NOT the same as finding no results") {
+		t.Fatalf("the error must tell the model not to treat this as an empty web, got: %v", err)
+	}
+}
+
+// TestGenuineZeroResultsIsNotAnError guards the other direction: a real
+// empty result set must stay a normal, non-error answer.
+func TestGenuineZeroResultsIsNotAnError(t *testing.T) {
+	empty := `<html><body><form action="/lite/"><input name="q"></form>
+		<div>No results found for your query.</div></body></html>`
+	results, err := parseLiteSearchResults(empty, 10)
+	if err != nil {
+		t.Fatalf("a genuinely empty result page must not error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected zero results, got %d", len(results))
+	}
+}
+
+// TestFixtureStillParses pins the captured fixture against the live parser,
+// so a refactor that breaks extraction fails here rather than in production.
+func TestFixtureStillParses(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "ddg_lite_response.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := parseLiteSearchResults(string(raw), 20)
+	if err != nil {
+		t.Fatalf("the captured fixture no longer parses: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("the captured fixture yielded no results")
+	}
+	for i, r := range results {
+		if r.Title == "" || r.Link == "" {
+			t.Errorf("result %d is missing a title or link: %+v", i, r)
+		}
+		if !strings.HasPrefix(r.Link, "http") {
+			t.Errorf("result %d link is not absolute: %q", i, r.Link)
+		}
+	}
+}
+
+// TestSearchBraveParsesResults drives the Brave path against a fixture
+// server, including the age-prefixed snippet and the count clamp.
+func TestSearchBraveParsesResults(t *testing.T) {
+	var gotAuth, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("X-Subscription-Token")
+		gotQuery = r.URL.Query().Get("q")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"web":{"results":[
+			{"title":"First","url":"https://a.example","description":"one","age":"2 days ago"},
+			{"title":"Second","url":"https://b.example","description":"two"}
+		]}}`)
+	}))
+	defer srv.Close()
+
+	old := braveEndpoint
+	braveEndpoint = srv.URL
+	defer func() { braveEndpoint = old }()
+	braveLast = time.Time{} // don't pay the pacing delay in tests
+
+	results, err := searchBrave(context.Background(), "test-key", "golang generics", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "test-key" {
+		t.Errorf("X-Subscription-Token = %q, want test-key", gotAuth)
+	}
+	if gotQuery != "golang generics" {
+		t.Errorf("q = %q", gotQuery)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if results[0].Title != "First" || results[0].Link != "https://a.example" {
+		t.Errorf("first result wrong: %+v", results[0])
+	}
+	if !strings.Contains(results[0].Snippet, "2 days ago") {
+		t.Errorf("age should be surfaced in the snippet: %q", results[0].Snippet)
+	}
+	if results[1].Position != 2 {
+		t.Errorf("position not assigned: %+v", results[1])
+	}
+}
+
+// TestSearchBraveReportsErrors: a keyed API must surface a real failure
+// rather than degrade into an empty result set, which is the whole reason
+// for offering it alongside the scraper.
+func TestSearchBraveReportsErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"rate limited", http.StatusTooManyRequests, `{}`, "rate limited"},
+		{"bad key", http.StatusUnauthorized, `{}`, "API key"},
+		{"in-band error", http.StatusOK, `{"type":"ErrorResponse","message":"quota exceeded"}`, "quota exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			old := braveEndpoint
+			braveEndpoint = srv.URL
+			defer func() { braveEndpoint = old }()
+			braveLast = time.Time{}
+
+			if _, err := searchBrave(context.Background(), "k", "q", 5); err == nil {
+				t.Fatal("expected an error")
+			} else if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}

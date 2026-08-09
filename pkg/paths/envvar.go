@@ -137,6 +137,13 @@ const (
 	// ToolsWeb, when "1", enables the fundi webfetch and websearch tools.
 	// Default off: fundi runs unattended and may have no egress.
 	ToolsWeb = "RAFIKI_TOOLS_WEB"
+
+	// BraveAPIKey selects the Brave Search API for websearch. Empty falls
+	// back to the keyless DuckDuckGo scraper, so the tool works with no
+	// setup — but a scrape can break on a layout change or be served a
+	// bot-detection page, which is indistinguishable from "no results" to
+	// a model. Set this when search reliability matters.
+	BraveAPIKey = "RAFIKI_BRAVE_API_KEY"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the
