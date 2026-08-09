@@ -37,6 +37,7 @@ type agentFlags struct {
 	noSkills           bool
 	mcpConfig          string
 	lspConfig          string
+	noLSP              bool
 	ref                string
 	db                 string
 	spillDir           string
@@ -251,6 +252,7 @@ func runAgentWithFlags(f agentFlags) int {
 		OnFatal:              onFatal,
 		RTK:                  bashRTKValue(f.bashRTK),
 		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),
+		NoLSP:                f.noLSP || paths.Get(paths.LSPDisable) == "1",
 	}
 	if f.recordRequests {
 		// NewRawTraceStore(nil) is documented to return nil, so this is safe

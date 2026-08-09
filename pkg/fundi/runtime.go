@@ -81,6 +81,12 @@ type RuntimeOptions struct {
 	// ToolsWeb enables the fundi webfetch and websearch tools when true.
 	// Default false: fundi runs unattended and may have no egress.
 	ToolsWeb bool
+
+	// NoLSP suppresses all LSP integration — no config files are read and
+	// no auto-detection runs. Set to opt out of the default auto-detect
+	// behaviour: without an lsp.json and with NoLSP false (the zero value),
+	// BuildRuntime scans PATH for well-known language servers.
+	NoLSP bool
 }
 
 // resolveContent loads the cwd-relative context files and discovers skills.
@@ -205,14 +211,30 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	lspShutdown := func() {}
 	var lspClient tools.LSPClient
 	var lspNotifier tools.FileChangeNotifier
+
+	var lspCfg lsp.Config
+	lspCfg.Servers = make(map[string]lsp.ServerConfig)
 	if opts.LSPConfig != "" {
 		if _, err := os.Stat(opts.LSPConfig); err != nil {
 			return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
 		}
-		lspCfg, err := loadLSPConfig(opts.LSPConfig)
+		var err error
+		lspCfg, err = loadLSPConfig(opts.LSPConfig)
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
 		}
+	} else if !opts.NoLSP {
+		lspCfg = lsp.AutoDetect()
+		if len(lspCfg.Servers) > 0 {
+			names := make([]string, 0, len(lspCfg.Servers))
+			for n := range lspCfg.Servers {
+				names = append(names, n)
+			}
+			slog.Info("runtime: auto-detected language servers on PATH", "servers", names)
+		}
+	}
+
+	if len(lspCfg.Servers) > 0 {
 		lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
 		// A config naming a server that is not installed (or an empty
 		// {"servers":{}}) would otherwise put eight tools in tools[] that can
@@ -238,6 +260,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Web:          opts.ToolsWeb,
 		LSP:          lspClient,
 		FileChanged:  lspNotifier,
+		Pool:         opts.Pool,
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 

@@ -464,9 +464,11 @@ func TestEffectiveLSPConfigPrecedence(t *testing.T) {
 
 	t.Run("defaulted missing path is blanked", func(t *testing.T) {
 		cwd := t.TempDir() // no .lsp.json written
-		// Prevent GlobalLSPConfig from resolving to a real file on the dev
-		// machine, which would make effectiveLSPConfig keep the path (correctly:
-		// the global default exists). Force a path that doesn't exist.
+		// Isolate from the dev machine's global lsp.json both via the env-var
+		// path ($RAFIKI_LSP_CONFIG, checked first) and via the ConfigDir
+		// fallback (XDG_CONFIG_HOME). Either alone could resolve to a real
+		// file when the test runner's env carries defaults through rtk.
+		t.Setenv("RAFIKI_LSP_CONFIG", filepath.Join(t.TempDir(), "nonexistent-lsp.json"))
 		t.Setenv("XDG_CONFIG_HOME", cwd)
 		if got := effectiveLSPConfig("", cwd); got != "" {
 			t.Errorf("effectiveLSPConfig(\"\", %q) = %q, want empty (defaulted path absent: skip LSP)", cwd, got)

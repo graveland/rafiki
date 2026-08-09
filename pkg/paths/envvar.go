@@ -101,6 +101,10 @@ const (
 	// LSPConfig is the path to a global lsp.json, merged under the per-cwd one.
 	LSPConfig = "RAFIKI_LSP_CONFIG"
 
+	// LSPDisable, when "1", suppresses LSP entirely — no config files are read
+	// and the PATH auto-detection step is skipped. Equivalent to --no-lsp.
+	LSPDisable = "RAFIKI_LSP_DISABLE"
+
 	// ControlListen is the address the daemon's TCP control plane binds
 	// (e.g. "tcp:8036"). Unset = UDS only.
 	ControlListen = "RAFIKI_CONTROL_LISTEN"

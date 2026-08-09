@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/inproc"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -209,5 +210,6 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 		Pool:                 pool,
 		RTK:                  bashRTKValue(f.bashRTK),
 		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),
+		NoLSP:                f.noLSP || paths.Get(paths.LSPDisable) == "1",
 	}, nil
 }
