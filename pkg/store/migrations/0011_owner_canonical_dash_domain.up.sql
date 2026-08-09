@@ -27,13 +27,35 @@
 -- "a trailing -<something>.<tld>": the dot is what distinguishes a typo'd
 -- address from an ordinary hyphenated machine name, which is exactly the
 -- distinction the test fixtures encode —
---   dev-example.com      -> dev@example.com      (dot: a typo'd address)
---   dev-mail.example.com -> dev@mail.example.com (subdomains still work)
---   foo-bar-example.com  -> foo-bar@example.com  (splits at the last dash)
---   kubecfg-svcaccount   -> unchanged            (no dot: a service account)
---   ci-runner            -> unchanged            (no dot: a machine identity)
+--   dev-example.com              -> dev@example.com      (dot: a typo'd address)
+--   dev-mail.example.com         -> dev@mail.example.com (subdomains still work)
+--   foo-bar-example.com          -> foo-bar@example.com  (splits at the last dash)
+--   kubecfg-svcaccount           -> unchanged             (no dot: a service account)
+--   ci-runner                    -> unchanged             (no dot: a machine identity)
+--   kubecfg-deploy.prod.internal -> unchanged             (dotted host, but still kubecfg-)
 -- [^-@]+ is what makes it split at the last dash and refuse a string that
 -- already contains an '@'.
+--
+-- That last row is the fix this migration makes over its first version: the
+-- generalized "-<label>.<tld>" rule fires on ANY dotted suffix, including a
+-- service identity that happens to carry a dotted hostname
+-- (kubecfg-deploy.prod.internal). Left alone, the rewrite turns it into
+-- kubecfg@deploy.prod.internal, which no longer matches the `LIKE
+-- 'kubecfg-%'` classification arm below and — now that it contains an '@' —
+-- falls into 'human', inflating the adoption metric with a robot. That is
+-- the exact bug the 'kubecfg-' rule exists to prevent, just approached from
+-- the rewrite side instead of the classification side.
+--
+-- The fix skips the rewrite entirely for any raw owner already starting
+-- with 'kubecfg-': canonical is left equal to the raw owner, so the
+-- classification arm (which still reads the canonical value, see below)
+-- keeps matching. This is preferred over classifying the 'kubecfg-' prefix
+-- on the raw owner instead of canonical: it keeps the CASE below untouched
+-- and — more importantly — keeps owner_canonical itself trustworthy for a
+-- service account. Rewriting it to kubecfg@deploy.prod.internal would still
+-- be wrong even if owner_kind correctly said 'service', because anything
+-- reading owner_canonical directly (not just owner_kind) would see what
+-- looks like a real email address for a robot.
 
 DROP VIEW IF EXISTS conversations.v_conversation CASCADE;
 
@@ -51,7 +73,11 @@ SELECT c.id,
        c.updated_at,
        k.canonical AS owner_canonical,
        -- Classified on the CANONICAL owner, not the raw one: a dash-typo
-       -- address carries no '@' until the rewrite above has been applied.
+       -- address carries no '@' until the rewrite below has been applied.
+       -- This still works for kubecfg- owners because the rewrite below
+       -- leaves them untouched (canonical == raw owner), so 'kubecfg-%'
+       -- keeps matching even for a dotted host like
+       -- kubecfg-deploy.prod.internal — see the migration header for why.
        CASE WHEN k.canonical IS NULL          THEN NULL
             WHEN k.canonical LIKE 'system:%'  THEN 'system'
             WHEN k.canonical LIKE 'kubecfg-%' THEN 'service'
@@ -62,12 +88,17 @@ FROM conversations.conversation c
 -- produces a row with a NULL canonical rather than dropping the
 -- conversation from the view entirely.
 LEFT JOIN LATERAL (
-    SELECT regexp_replace(
-               CASE WHEN c.owner LIKE '%-at-%'
-                    THEN regexp_replace(c.owner, '-at-', '@', 'g')
-                    ELSE c.owner END,
-               '-([^-@]+\.[A-Za-z]{2,})$', '@\1'
-           ) AS canonical
+    SELECT CASE
+               -- kubecfg- identities are never rewritten, even when they
+               -- carry a dotted hostname: see the migration header.
+               WHEN c.owner LIKE 'kubecfg-%' THEN c.owner
+               ELSE regexp_replace(
+                        CASE WHEN c.owner LIKE '%-at-%'
+                             THEN regexp_replace(c.owner, '-at-', '@', 'g')
+                             ELSE c.owner END,
+                        '-([^-@]+\.[A-Za-z]{2,})$', '@\1'
+                    )
+           END AS canonical
 ) k ON true;
 
 -- Recreate v_turn unchanged from 0008. This duplication is intentional —

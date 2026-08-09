@@ -67,10 +67,17 @@ func TestOwnerCanonicalRewritesDashDomain(t *testing.T) {
 	cases := []struct{ owner, want, wantKind string }{
 		{"dev-example.com", "dev@example.com", "human"},
 		{"dev@example.com", "dev@example.com", "human"},
+		{"dev-mail.example.com", "dev@mail.example.com", "human"},
+		{"foo-bar-example.com", "foo-bar@example.com", "human"},
 		{"kubecfg-svcaccount", "kubecfg-svcaccount", "service"},
 		{"system:diagnose", "system:diagnose", "system"},
 		// Neither system:-prefixed nor an email address → a machine identity.
 		{"ci-runner", "ci-runner", "service"},
+		// Regression: a service identity whose raw owner happens to carry a
+		// dotted hostname must NOT be rewritten into an email-shaped
+		// canonical, or it silently reclassifies as 'human' and inflates the
+		// distinct-active-owners adoption metric with a robot.
+		{"kubecfg-deploy.prod.internal", "kubecfg-deploy.prod.internal", "service"},
 	}
 	for _, c := range cases {
 		var id string
