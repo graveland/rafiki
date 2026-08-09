@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -235,4 +236,110 @@ func mustMarshal(t *testing.T, v any) ToolInput {
 		t.Fatalf("marshal: %v", err)
 	}
 	return ToolInput(b)
+}
+
+// TestIsBlockedIPRanges pins the address ranges. Each of these was either
+// reachable before the hardening or is a well-known filter bypass.
+func TestIsBlockedIPRanges(t *testing.T) {
+	blocked := []string{
+		"127.0.0.1",              // loopback
+		"::1",                    // loopback v6
+		"169.254.169.254",        // cloud instance metadata
+		"10.1.2.3",               // RFC1918
+		"192.168.1.1",            // RFC1918
+		"172.16.0.1",             // RFC1918
+		"0.0.0.0",                // unspecified: connect() remaps to loopback
+		"::",                     // unspecified v6
+		"0.1.2.3",                // 0.0.0.0/8
+		"100.64.1.1",             // CGNAT / tailnet
+		"100.127.255.254",        // CGNAT upper edge
+		"::ffff:127.0.0.1",       // IPv4-mapped loopback, a classic bypass
+		"::ffff:169.254.169.254", // IPv4-mapped metadata
+		"fd00::1",                // IPv6 unique local
+		"fe80::1",                // IPv6 link-local
+		"224.0.0.1",              // multicast
+	}
+	for _, s := range blocked {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("test bug: %q is not a valid IP", s)
+		}
+		if !isBlockedIP(ip) {
+			t.Errorf("isBlockedIP(%s) = false, want true", s)
+		}
+	}
+
+	allowed := []string{"1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:2800:220:1::1"}
+	for _, s := range allowed {
+		ip := net.ParseIP(s)
+		if isBlockedIP(ip) {
+			t.Errorf("isBlockedIP(%s) = true, want false (public address)", s)
+		}
+	}
+}
+
+// TestWebfetchBlocksRedirectToMetadata is the regression test for the
+// headline SSRF hole: the address check used to be a pre-flight DNS lookup
+// on the URL the model typed, so only the first hop was validated. A server
+// answering "302 Location: http://169.254.169.254/…" walked straight into
+// cloud instance metadata and put the returned credentials into the model's
+// context. The check now lives in the dialer's Control hook, which runs on
+// every connection including redirect hops.
+//
+// This test drives the real production client (no injected transport) with
+// only the loopback exemption needed to reach httptest.
+func TestWebfetchBlocksRedirectToMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/iam/security-credentials/", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	tool, err := (&WebfetchBlueprint{}).Materialize(ToolOpts{Web: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, ok := tool.(*webfetchTool)
+	if !ok {
+		t.Fatalf("expected *webfetchTool, got %T", tool)
+	}
+	// Allow loopback so the first hop reaches httptest; everything else
+	// keeps the production predicate, so the redirect target stays blocked.
+	wt.blocked = func(ip net.IP) bool { return !ip.IsLoopback() && isBlockedIP(ip) }
+
+	res, err := wt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"url":%q}`, srv.URL)))
+	if err != nil {
+		t.Fatalf("expected a tool result, got a hard error: %v", err)
+	}
+	if strings.Contains(res.Text, "SecretAccessKey") || strings.Contains(res.Text, "AccessKeyId") {
+		t.Fatalf("metadata content reached the model: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "blocked") {
+		t.Fatalf("expected the redirect to be refused as a blocked address, got: %q", res.Text)
+	}
+}
+
+// TestWebfetchGuardedClientAllowsNormalFetch proves the guard does not break
+// an ordinary fetch — without this, a guard that blocked everything would
+// pass the test above for the wrong reason.
+func TestWebfetchGuardedClientAllowsNormalFetch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html><body><p>hello from the server</p></body></html>")
+	}))
+	defer srv.Close()
+
+	tool, err := (&WebfetchBlueprint{}).Materialize(ToolOpts{Web: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := tool.(*webfetchTool)
+	wt.blocked = func(ip net.IP) bool { return !ip.IsLoopback() && isBlockedIP(ip) }
+
+	res, err := wt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"url":%q}`, srv.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Text, "hello from the server") {
+		t.Fatalf("guarded client broke a normal fetch, got: %q", res.Text)
+	}
 }
