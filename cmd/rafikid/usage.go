@@ -54,6 +54,16 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.IntVar(&f.maxOutputTokens, "max-output-tokens", 0, "per-turn output token cap sent to upstream (0 = default 16384)")
 	fs.BoolVar(&f.recordRequests, "record-requests", false, "Record raw LLM API requests and responses for debugging")
 	fs.StringVar(&f.bashRTK, "bash-rtk", "", "route bash commands through rtk for output compression: auto, on, or off (overrides $RAFIKI_BASH_RTK)")
+	// --fake-turns was read by runAgent (EngineConfig.FakeTurns) and listed
+	// in docs/agent-cli.md, but never registered here — so the field was
+	// permanently empty and passing the flag was a hard parse error rather
+	// than a silent no-op. That is what broke
+	// TestIntegration_AgentKind_AbortPreservesProcess, which spawns an agent
+	// child with --fake-turns. Same defect class as the --record-requests
+	// bug, and the reason this flag set is shared with printAgentUsage in
+	// the first place: so the documented flags cannot drift from the parsed
+	// ones. A flag that skips it defeats the whole arrangement.
+	fs.StringVar(&f.fakeTurns, "fake-turns", "", "replay a recorded turn file instead of calling upstream (testing)")
 
 	return fs
 }
