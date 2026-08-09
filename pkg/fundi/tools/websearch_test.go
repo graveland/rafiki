@@ -2,9 +2,11 @@ package tools
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -88,13 +90,6 @@ func TestWebsearchHardCapAt20(t *testing.T) {
 }
 
 func TestWebsearchHardCapEnforcedInInput(t *testing.T) {
-	opts := ToolOpts{Web: true}
-	blueprint := &WebsearchBlueprint{}
-	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-
 	// Use a mock server that returns a fixture with many results.
 	fixture := mustReadFixture(t, "ddg_lite_response.html")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +99,17 @@ func TestWebsearchHardCapEnforcedInInput(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+
+	// The production default client (built when opts.HTTPClient is nil)
+	// guards against loopback, which httptest binds to — so this must
+	// inject a permissive client, exactly as webfetch_test.go's HTTPClient
+	// seam does, to actually reach the fixture server.
+	opts := ToolOpts{Web: true, HTTPClient: srv.Client()}
+	blueprint := &WebsearchBlueprint{}
+	tool, err := blueprint.Materialize(opts)
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
 
 	// Override the endpoint for testing.
 	oldEndpoint := ddgLiteEndpoint
@@ -140,7 +146,9 @@ func TestWebsearchEmptyResults(t *testing.T) {
 	ddgLiteEndpoint = srv.URL + "/?q="
 	t.Cleanup(func() { ddgLiteEndpoint = oldEndpoint })
 
-	opts := ToolOpts{Web: true}
+	// Permissive client so the loopback fixture server is reachable — see
+	// the comment in TestWebsearchHardCapEnforcedInInput.
+	opts := ToolOpts{Web: true, HTTPClient: srv.Client()}
 	tool, err := (&WebsearchBlueprint{}).Materialize(opts)
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
@@ -316,7 +324,7 @@ func TestSearchBraveParsesResults(t *testing.T) {
 	defer func() { braveEndpoint = old }()
 	braveLast = time.Time{} // don't pay the pacing delay in tests
 
-	results, err := searchBrave(context.Background(), "test-key", "golang generics", 10)
+	results, err := searchBrave(context.Background(), srv.Client(), "test-key", "golang generics", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,11 +374,115 @@ func TestSearchBraveReportsErrors(t *testing.T) {
 			defer func() { braveEndpoint = old }()
 			braveLast = time.Time{}
 
-			if _, err := searchBrave(context.Background(), "k", "q", 5); err == nil {
+			if _, err := searchBrave(context.Background(), srv.Client(), "k", "q", 5); err == nil {
 				t.Fatal("expected an error")
 			} else if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error %q does not mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestSearchBraveDecodesGzipResponse is the regression test for the
+// headline blocker: searchBrave used to set "Accept-Encoding: gzip" by hand,
+// which opts the request OUT of http.Transport's transparent decompression
+// (it only kicks in when the header is left unset) while Brave still honours
+// the header and gzips the body. Every real search failed with "brave:
+// decoding response: invalid character '\x1f' looking for beginning of
+// value". The bug is invisible to a fixture server that serves plain JSON,
+// which is exactly what every other test here does — so this one actually
+// gzips the body and sets Content-Encoding, the way the real Brave API does.
+func TestSearchBraveDecodesGzipResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		fmt.Fprint(gz, `{"web":{"results":[{"title":"Gzipped","url":"https://a.example","description":"d"}]}}`)
+		if err := gz.Close(); err != nil {
+			panic(err)
+		}
+	}))
+	defer srv.Close()
+
+	old := braveEndpoint
+	braveEndpoint = srv.URL
+	defer func() { braveEndpoint = old }()
+	braveLast = time.Time{}
+
+	results, err := searchBrave(context.Background(), srv.Client(), "test-key", "q", 5)
+	if err != nil {
+		t.Fatalf("searchBrave: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Gzipped" {
+		t.Fatalf("expected the gzipped result to decode, got: %+v", results)
+	}
+}
+
+// TestSearchBraveStripsCredentialOnCrossHostRedirect is the regression test
+// for finding 4's key-leak path. Go strips Authorization/Cookie on a
+// cross-host redirect but forwards arbitrary custom headers — so without
+// newBraveClient's stripping, a hijacked or compromised search upstream that
+// answers with a redirect harvests X-Subscription-Token from the forwarded
+// request. Per the guidance in webfetch_test.go's redirect tests, this
+// injects a permissive client (httptest binds to loopback, which the
+// production guarded client blocks) so the redirect actually completes and
+// the stripping logic — not the address guard — is what's under test.
+func TestSearchBraveStripsCredentialOnCrossHostRedirect(t *testing.T) {
+	var gotAuth string
+	var targetHit bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+		gotAuth = r.Header.Get("X-Subscription-Token")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"web":{"results":[]}}`)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path+"?"+r.URL.RawQuery, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	old := braveEndpoint
+	braveEndpoint = redirector.URL
+	defer func() { braveEndpoint = old }()
+	braveLast = time.Time{}
+
+	client := newBraveClient(&http.Client{})
+	if _, err := searchBrave(context.Background(), client, "sekrit-api-key", "q", 5); err != nil {
+		t.Fatalf("searchBrave: %v", err)
+	}
+	if !targetHit {
+		t.Fatal("redirect target never received the request")
+	}
+	if gotAuth != "" {
+		t.Fatalf("X-Subscription-Token leaked to cross-host redirect target: %q", gotAuth)
+	}
+}
+
+// TestSearchBraveBlocksRedirectToBlockedAddress covers the other half of
+// finding 4: websearch previously had none of webfetch's SSRF hardening, so
+// a redirect from either search endpoint to a blocked address (cloud
+// metadata, a loopback control plane, ...) would have been fetched and
+// parsed into results shown to the model. This drives the real guarded
+// client, exempting only loopback so the first hop can reach httptest —
+// the redirect target is a non-loopback blocked address, so the exemption
+// does not also let the redirect through.
+func TestSearchBraveBlocksRedirectToBlockedAddress(t *testing.T) {
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/iam/security-credentials/", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	old := braveEndpoint
+	braveEndpoint = redirector.URL
+	defer func() { braveEndpoint = old }()
+	braveLast = time.Time{}
+
+	guarded := newGuardedClient(func(ip net.IP) bool { return !ip.IsLoopback() && isBlockedIP(ip) }, 30*time.Second)
+	client := newBraveClient(guarded)
+
+	if _, err := searchBrave(context.Background(), client, "test-key", "q", 5); err == nil {
+		t.Fatal("expected the redirect to a blocked address to fail")
 	}
 }

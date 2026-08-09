@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -58,10 +59,26 @@ func (WebsearchBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 	if !opts.Web {
 		return nil, nil
 	}
-	return &websearchTool{
+	t := &websearchTool{
 		WebsearchBlueprint: WebsearchBlueprint{},
 		braveKey:           paths.Get(paths.BraveAPIKey),
-	}, nil
+		blocked:            isBlockedIP,
+	}
+	client := opts.HTTPClient
+	if client == nil {
+		// Mirrors webfetchTool: the search endpoints are fixed constants and
+		// queries are url.QueryEscape'd, so this is not model-triggerable
+		// SSRF. It is defense-in-depth against a hijacked or DNS-hijacked
+		// upstream, or a malicious redirect from either search provider —
+		// previously this tool built a bare &http.Client{} with none of
+		// webfetch's dialer-level address guard or redirect cap.
+		client = newGuardedClient(t.guard, 30*time.Second)
+	}
+	// Wrapped regardless of where the client came from: a test-injected
+	// permissive client still needs the Brave-credential redirect guard
+	// exercised, not just the production guarded client.
+	t.httpClient = newBraveClient(client)
+	return t, nil
 }
 
 type websearchTool struct {
@@ -70,7 +87,16 @@ type websearchTool struct {
 	// scraper, which is the default so the tool works with no setup; a key
 	// switches to Brave's API, which has a stable contract instead of a
 	// layout that can change under us.
-	braveKey string
+	braveKey   string
+	httpClient *http.Client
+
+	// blocked decides which resolved IPs are refused at connect time when
+	// this tool builds its own guarded client (opts.HTTPClient is nil). A
+	// field, not a value captured at construction, so a test can swap the
+	// predicate after Materialize to exempt loopback for the first hop
+	// (reaching an httptest server) while keeping a redirect target blocked
+	// — see webfetchTool.blocked for the original of this pattern.
+	blocked func(net.IP) bool
 
 	// lastSearch throttles this tool instance. It used to be a package
 	// global, which serialized every fundi child in the daemon rather than
@@ -78,6 +104,10 @@ type websearchTool struct {
 	lastSearchMu sync.Mutex
 	lastSearch   time.Time
 }
+
+// guard indirects through the field so a test can swap the predicate after
+// Materialize has already built the client. Mirrors webfetchTool.guard.
+func (t *websearchTool) guard(ip net.IP) bool { return t.blocked(ip) }
 
 type websearchInput struct {
 	Query      string `json:"query"`
@@ -104,12 +134,12 @@ func (t *websearchTool) Execute(ctx context.Context, input ToolInput) (ToolResul
 	var results []SearchResult
 	var err error
 	if t.braveKey != "" {
-		results, err = searchBrave(ctx, t.braveKey, in.Query, maxResults)
+		results, err = searchBrave(ctx, t.httpClient, t.braveKey, in.Query, maxResults)
 	} else {
 		if derr := t.delay(ctx); derr != nil {
 			return NewErrorResult(derr), nil
 		}
-		results, err = searchDuckDuckGo(ctx, in.Query, maxResults)
+		results, err = searchDuckDuckGo(ctx, t.httpClient, in.Query, maxResults)
 	}
 	if err != nil {
 		return NewErrorResult(fmt.Errorf("websearch: %w", err)), nil
@@ -142,7 +172,7 @@ var errSearchRateLimited = fmt.Errorf(
 		"Do not retry or rephrase; wait a few minutes or fetch known URLs directly",
 )
 
-func searchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]SearchResult, error) {
+func searchDuckDuckGo(ctx context.Context, client *http.Client, query string, maxResults int) ([]SearchResult, error) {
 	if maxResults <= 0 {
 		maxResults = 10
 	}
@@ -155,7 +185,6 @@ func searchDuckDuckGo(ctx context.Context, query string, maxResults int) ([]Sear
 
 	setRandomizedHeaders(req)
 
-	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute search: %w", err)
@@ -399,6 +428,35 @@ var (
 	braveLast time.Time
 )
 
+// newBraveClient wraps client so a cross-host redirect can never carry the
+// Brave API key to the new host.
+//
+// Go's http.Client already strips Authorization and Cookie when a redirect
+// changes host, but that list is fixed and does not cover custom headers —
+// X-Subscription-Token is forwarded to the redirect target as-is. A hijacked
+// or compromised search upstream, or a malicious redirect from either
+// provider, would otherwise harvest the key. This wraps whatever
+// CheckRedirect the client already carries (e.g. newGuardedClient's hop cap
+// and scheme check) rather than replacing it, and runs once at Materialize
+// time — CheckRedirect is never mutated again afterward, so sharing the
+// resulting client across concurrent searches is safe.
+func newBraveClient(client *http.Client) *http.Client {
+	wrapped := *client
+	inner := client.CheckRedirect
+	wrapped.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if inner != nil {
+			if err := inner(req, via); err != nil {
+				return err
+			}
+		}
+		if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+			req.Header.Del("X-Subscription-Token")
+		}
+		return nil
+	}
+	return &wrapped
+}
+
 // braveResponse is the subset of Brave's payload we consume.
 type braveResponse struct {
 	Web struct {
@@ -422,7 +480,7 @@ type braveResponse struct {
 // serves a bot-detection page once it decides it does not like us. Brave has
 // a versioned contract and a real error channel, so a failure is reportable
 // instead of looking like "the web contains nothing about this".
-func searchBrave(ctx context.Context, apiKey, query string, maxResults int) ([]SearchResult, error) {
+func searchBrave(ctx context.Context, client *http.Client, apiKey, query string, maxResults int) ([]SearchResult, error) {
 	if maxResults <= 0 {
 		maxResults = 10
 	}
@@ -449,10 +507,18 @@ func searchBrave(ctx context.Context, apiKey, query string, maxResults int) ([]S
 		return nil, fmt.Errorf("brave: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Deliberately no Accept-Encoding here. http.Transport only performs
+	// transparent gzip decompression when the request's Accept-Encoding is
+	// left unset; setting it by hand (even to "gzip") opts back out of that
+	// and gets the raw compressed bytes instead. Brave honours the header,
+	// so this used to hand json.Unmarshal a gzip stream and fail every
+	// single search with "invalid character '\x1f' looking for beginning of
+	// value" — 100% broken whenever RAFIKI_BRAVE_API_KEY was set. Do not
+	// hand-roll a gzip.Reader here either; the transport already decodes
+	// correctly once it is allowed to.
 	req.Header.Set("X-Subscription-Token", apiKey)
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("brave: %w", err)
 	}
