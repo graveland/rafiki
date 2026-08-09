@@ -15,6 +15,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
@@ -120,6 +121,19 @@ type Engine struct {
 	wg   sync.WaitGroup // one count per queued-but-unfinished turn
 }
 
+// toolSetWithConvID wraps an agentloop.ToolSet to inject the conversation ID
+// into the context before every tool execution. Tools that need per-conversation
+// persistence (todo) read it via tools.ConversationIDFromContext.
+type toolSetWithConvID struct {
+	agentloop.ToolSet
+	convID string
+}
+
+func (t toolSetWithConvID) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
+	ctx = context.WithValue(ctx, tools.ConversationIDKey{}, t.convID)
+	return t.ToolSet.Execute(ctx, name, input)
+}
+
 // NewEngine creates the engine's conversation and starts its turn worker.
 func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	if cfg.Client == nil {
@@ -139,9 +153,15 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agent: create conversation: %w", err)
 	}
+
+	// Wrap the tool set so every tool execution receives the conversation ID
+	// in its context — tools that need per-conversation persistence (todo)
+	// read it from there.
+	tools := toolSetWithConvID{ToolSet: cfg.Tools, convID: conv.ID}
+
 	e := &Engine{
 		conv:    conv,
-		tools:   cfg.Tools,
+		tools:   tools,
 		fe:      fe,
 		em:      NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
 		baseCtx: baseCtx,

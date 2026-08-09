@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
 )
@@ -232,6 +233,25 @@ type ToolOpts struct {
 	// file so a language server can re-read it. nil disables the
 	// notification, which is correct when no LSP server is configured.
 	FileChanged FileChangeNotifier
+
+	// Pool, when non-nil, is the shared database pool backing per-conversation
+	// tool state persistence. nil means in-memory-only (tests, standalone).
+	Pool *pgxpool.Pool
+}
+
+// ConversationIDKey is the context key for the conversation ID injected by the
+// engine before each tool execution. Tools that need per-conversation persistence
+// read it from ctx via ConversationIDFromContext. It is exported so the engine
+// wrapper (pkg/fundi) can set it without importing this package.
+type ConversationIDKey struct{}
+
+// ConversationIDFromContext extracts the conversation ID set by the engine, or
+// returns "" when none was set (in-memory conversation, tests).
+func ConversationIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(ConversationIDKey{}).(string); ok {
+		return id
+	}
+	return ""
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements
