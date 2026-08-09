@@ -98,24 +98,32 @@ func (tt *todoTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		}
 	}
 
+	// Store, then render from the stored copy rather than from in.Todos.
+	// Rendering the input directly left tt.items write-only — nothing in
+	// the repo read it — so the per-agent isolation this tool exists to
+	// provide was asserted by a test that could not fail: replacing the
+	// field with a package-level global kept every isolation assertion
+	// green, because each call just echoed its own input back. Reading
+	// through the stored state is what makes the guarantee testable.
 	tt.mu.Lock()
 	tt.items = in.Todos
+	items := tt.items
 	tt.mu.Unlock()
 
 	var sb strings.Builder
 	counts := map[string]int{"pending": 0, "in_progress": 0, "completed": 0}
-	for _, item := range in.Todos {
+	for _, item := range items {
 		counts[item.Status]++
 	}
 
-	fmt.Fprintf(&sb, "%d todo(s):\n", len(in.Todos))
-	for i, item := range in.Todos {
+	fmt.Fprintf(&sb, "%d todo(s):\n", len(items))
+	for i, item := range items {
 		icon := iconForStatus(item.Status)
 		fmt.Fprintf(&sb, "  %s %s", icon, item.Content)
 		if item.ActiveForm != "" {
 			fmt.Fprintf(&sb, " (%s)", item.ActiveForm)
 		}
-		if i < len(in.Todos)-1 {
+		if i < len(items)-1 {
 			sb.WriteByte('\n')
 		}
 	}
