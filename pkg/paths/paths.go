@@ -164,6 +164,16 @@ func GlobalMCPConfig() string {
 	return filepath.Join(ConfigDir(), "mcp.json")
 }
 
+// GlobalLSPConfig is the machine-wide lsp.json: $RAFIKI_LSP_CONFIG, else
+// <ConfigDir>/lsp.json. The per-cwd .lsp.json remains the primary source and
+// takes precedence; this is the fallback for servers you want everywhere.
+func GlobalLSPConfig() string {
+	if v := Get(LSPConfig); v != "" {
+		return v
+	}
+	return filepath.Join(ConfigDir(), "lsp.json")
+}
+
 // ControlTokenFile is the shared-secret file for control-plane auth:
 // <ConfigDir>/control.token. Expected mode 0600; the daemon reads it at
 // startup (env wins), and the client re-reads it on every dial so token

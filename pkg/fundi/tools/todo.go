@@ -108,20 +108,20 @@ func (tt *todoTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		counts[item.Status]++
 	}
 
-	sb.WriteString(fmt.Sprintf("%d todo(s):\n", len(in.Todos)))
+	fmt.Fprintf(&sb, "%d todo(s):\n", len(in.Todos))
 	for i, item := range in.Todos {
 		icon := iconForStatus(item.Status)
-		sb.WriteString(fmt.Sprintf("  %s %s", icon, item.Content))
+		fmt.Fprintf(&sb, "  %s %s", icon, item.Content)
 		if item.ActiveForm != "" {
-			sb.WriteString(fmt.Sprintf(" (%s)", item.ActiveForm))
+			fmt.Fprintf(&sb, " (%s)", item.ActiveForm)
 		}
 		if i < len(in.Todos)-1 {
 			sb.WriteByte('\n')
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n[%d pending, %d in_progress, %d completed]",
-		counts["pending"], counts["in_progress"], counts["completed"]))
+	fmt.Fprintf(&sb, "\n[%d pending, %d in_progress, %d completed]",
+		counts["pending"], counts["in_progress"], counts["completed"])
 
 	return NewTextResult(sb.String()), nil
 }

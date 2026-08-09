@@ -98,6 +98,9 @@ const (
 	// MCPConfig is the path to a global .mcp.json, merged under the per-cwd one.
 	MCPConfig = "RAFIKI_MCP_CONFIG"
 
+	// LSPConfig is the path to a global lsp.json, merged under the per-cwd one.
+	LSPConfig = "RAFIKI_LSP_CONFIG"
+
 	// ControlListen is the address the daemon's TCP control plane binds
 	// (e.g. "tcp:8036"). Unset = UDS only.
 	ControlListen = "RAFIKI_CONTROL_LISTEN"

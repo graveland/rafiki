@@ -187,6 +187,12 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 		}
 	}
 
+	lspPath := resolveLSPConfig(f.lspConfig, cwd)
+	if f.lspConfig == "" {
+		if _, statErr := os.Stat(lspPath); statErr != nil {
+			lspPath = ""
+		}
+	}
 	return fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
@@ -202,6 +208,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 		NoSkills:             f.noSkills,
 		NoContextFiles:       f.noContextFiles,
 		MCPConfig:            mcpPath,
+		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),

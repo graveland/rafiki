@@ -44,6 +44,7 @@ type agentFlags struct {
 	skills             string
 	noSkills           bool
 	mcpConfig          string
+	lspConfig          string
 	ref                string
 	db                 string
 	spillDir           string
@@ -186,6 +187,13 @@ func runAgent(args []string) int {
 		mcpPath = "" // defaulted path absent: skip MCP, as before
 	}
 
+	lspPath := resolveLSPConfig(f.lspConfig, cwd)
+	explicitLSP := f.lspConfig != ""
+	if !explicitLSP {
+		if _, err := os.Stat(lspPath); err != nil {
+			lspPath = "" // defaulted path absent: skip LSP, as before
+		}
+	}
 	// The standalone CLI owns its pool: BuildRuntime/BuildEngine never open
 	// or close one themselves (see Config.Pool's doc comment), so a daemon
 	// can share a single pool across N engines. A nil pool here (--db unset)
@@ -217,6 +225,7 @@ func runAgent(args []string) int {
 		NoSkills:             f.noSkills,
 		NoContextFiles:       f.noContextFiles,
 		MCPConfig:            mcpPath,
+		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),

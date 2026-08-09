@@ -2,6 +2,7 @@ package fundi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/fundi/lsp"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -35,6 +37,7 @@ type RuntimeOptions struct {
 	NoSkills             bool
 	NoContextFiles       bool
 	MCPConfig            string // absolute path, or empty to skip MCP entirely
+	LSPConfig            string // absolute path, or empty to skip LSP entirely
 	FakeTurns            string
 	AnthropicAPIKey      string
 	OpenRouterAPIKey     string
@@ -186,6 +189,21 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		}
 	}
 
+	lspShutdown := func() {}
+	if opts.LSPConfig != "" {
+		if _, err := os.Stat(opts.LSPConfig); err != nil {
+			return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
+		}
+		lspCfg, err := loadLSPConfig(opts.LSPConfig)
+		if err != nil {
+			return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
+		}
+		lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
+		lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
+		// Store the manager for later tool wiring in sub-phase B.
+		_ = lspMgr
+	}
+
 	cfg := Config{
 		Model:                opts.Model,
 		ThinkingBudget:       opts.ThinkingBudget,
@@ -209,11 +227,29 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 
 	eng, engShutdown, err := cfg.BuildEngine(ctx, fe)
 	if err != nil {
+		lspShutdown()
 		mcpShutdown()
 		return nil, nil, fmt.Errorf("runtime: build engine: %w", err)
 	}
 	return eng, func() {
+		lspShutdown()
 		mcpShutdown()
 		engShutdown()
 	}, nil
+}
+
+// loadLSPConfig reads and decodes an LSP server configuration file.
+func loadLSPConfig(path string) (lsp.Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return lsp.Config{}, err
+	}
+	var cfg lsp.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return lsp.Config{}, fmt.Errorf("runtime: invalid lsp config: %w", err)
+	}
+	if cfg.Servers == nil {
+		cfg.Servers = make(map[string]lsp.ServerConfig)
+	}
+	return cfg, nil
 }

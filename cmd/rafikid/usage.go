@@ -46,6 +46,7 @@ func newAgentFlagSet(f *agentFlags) *flag.FlagSet {
 	fs.StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")
 	fs.BoolVar(&f.noSkills, "no-skills", false, "disable skill discovery and the skill tool entirely")
 	fs.StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $RAFIKI_MCP_CONFIG or <ConfigDir>/mcp.json)")
+	fs.StringVar(&f.lspConfig, "lsp-config", "", "path to lsp.json (default: <cwd>/.lsp.json if present, else $RAFIKI_LSP_CONFIG or <ConfigDir>/lsp.json)")
 	fs.StringVar(&f.ref, "ref", paths.Get(paths.ChildID), "external ref correlating the conversation across restarts")
 	fs.StringVar(&f.db, "db", paths.Get(paths.DB), "postgres url for conversation persistence (empty: in-memory)")
 	fs.StringVar(&f.spillDir, "spill-dir", "", "directory for clipped tool output (default: <XDG_CACHE_HOME>/rafiki/spill/<ref>)")
@@ -80,4 +81,18 @@ func resolveMCPConfig(flagValue, cwd string) string {
 		return cwdCfg
 	}
 	return paths.GlobalMCPConfig()
+}
+
+// resolveLSPConfig determines the effective lsp.json path, mirroring the
+// resolveMCPConfig precedence order: explicit --lsp-config wins; otherwise
+// <cwd>/.lsp.json if present; otherwise $RAFIKI_LSP_CONFIG or <ConfigDir>/lsp.json.
+func resolveLSPConfig(flagValue, cwd string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	cwdCfg := filepath.Join(cwd, ".lsp.json")
+	if _, err := os.Stat(cwdCfg); err == nil {
+		return cwdCfg
+	}
+	return paths.GlobalLSPConfig()
 }
