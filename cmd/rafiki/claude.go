@@ -57,8 +57,12 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().String("token", envOr("RAFIKI_TOKEN", "dev"), "static bearer token for the proxy (or RAFIKI_TOKEN)")
 	cmd.Flags().String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
 	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
-	cmd.Flags().Bool("passthrough-auth", os.Getenv("RAFIKI_CLAUDE_PASSTHROUGH") != "",
-		"bill your own Claude subscription upstream instead of the daemon's API key (or RAFIKI_CLAUDE_PASSTHROUGH)")
+	// "1" exactly, matching every other boolean env var in the repo
+	// (RAFIKI_RECORD_REQUESTS, RAFIKI_TOOLS_WEB, RAFIKI_LSP_DISABLE). Treating
+	// any non-empty value as true would make RAFIKI_CLAUDE_PASSTHROUGH=0 turn
+	// billing ON for someone trying to turn it off.
+	cmd.Flags().Bool("passthrough-auth", os.Getenv("RAFIKI_CLAUDE_PASSTHROUGH") == "1",
+		"bill your own Claude subscription upstream instead of the daemon's API key (or RAFIKI_CLAUDE_PASSTHROUGH=1)")
 	return cmd
 }
 
@@ -112,6 +116,18 @@ func runClaude(cmd *cobra.Command, args []string) error {
 
 	if url == "" {
 		return errors.New("--url (or RAFIKI_URL) is required")
+	}
+	// Both passthrough guards run before the TTY is handed over. The proxy
+	// enforces the same rules, but it can only do so on the session's first
+	// turn — by which point Claude Code owns the terminal and a clear error
+	// reads as a mysterious dead session.
+	if passthrough {
+		if token == "" {
+			return errors.New("--passthrough-auth needs --token (or RAFIKI_TOKEN): rafiki's own token moves to the X-Rafiki-Token header, leaving Authorization free for yours, and without it the proxy cannot authenticate the session")
+		}
+		if !proxyenv.AnthropicModel(model) {
+			return fmt.Errorf("--passthrough-auth bills your Claude subscription, which can only buy Anthropic models, but --model %q resolves to another provider; drop --passthrough-auth to bill the daemon's key instead", model)
+		}
 	}
 	// Preflight so a dead proxy is a clear message here rather than an opaque
 	// connection error from inside Claude Code after it has taken the TTY.
