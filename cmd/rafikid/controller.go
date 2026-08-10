@@ -594,6 +594,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		}
 	}
 
+	// Resolve lineage before spawning: a bad parentChildId must fail without
+	// leaving a started process behind.
+	parentLabel, rootLabel, err := computeLineageLabels(c.st, req.ParentChildID)
+	if err != nil {
+		return control.SpawnResult{}, err
+	}
+
 	// childID is minted before resolveSpawnPlan (rather than after, as
 	// before) because the "fundi" kind needs it to pin --spill-dir
 	// (see buildAgentArgv/agentSpillDir).
@@ -668,6 +675,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 	}
 	if req.ResumedFromSession != "" {
 		initLabels["rafiki/resumed-from-session"] = req.ResumedFromSession
+	}
+	if parentLabel != "" {
+		initLabels[childstore.LabelParent] = parentLabel
+		initLabels[childstore.LabelRoot] = rootLabel
 	}
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
@@ -2366,6 +2377,27 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 	rec := recordFromSnapshot(snap)
 	rec.LastStatus = lastStatus
 	return c.records.Write(rec)
+}
+
+// computeLineageLabels resolves the rafiki/parent and rafiki/root label
+// values for a child being spawned under parentID. Both are empty when
+// parentID is empty (a top-level child).
+//
+// root is taken from the parent's own root label when it has one, and is
+// otherwise the parent's id — the parent is then top-level. This never walks
+// the chain: the parent's labels are correct by induction, which is what
+// keeps spawn O(1) regardless of tree depth.
+func computeLineageLabels(st *childstore.Store, parentID string) (parent, root string, err error) {
+	if parentID == "" {
+		return "", "", nil
+	}
+	if _, ok := st.Get(parentID); !ok {
+		return "", "", &control.ControllerError{
+			Code:    protocol.ErrChildNotFound,
+			Message: "parentChildId: no such child: " + parentID,
+		}
+	}
+	return parentID, st.RootOf(parentID), nil
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
