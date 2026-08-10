@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -70,7 +71,7 @@ func tailDisplayWidth() int {
 }
 
 // renderList writes a list of ChildSummary either as JSON or as a table.
-func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, useColor bool) error {
+func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, useColor bool, flat bool) error {
 	if mode == outputJSON {
 		return writeJSON(w, map[string]any{"children": children})
 	}
@@ -95,17 +96,24 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	}
 	tw.AppendHeader(headerRow)
 
-	for _, ch := range children {
+	treeRows := sortChildrenAsTree(children)
+	if flat {
+		treeRows = flattenTree(children)
+	}
+
+	for _, tr := range treeRows {
+		ch := tr.Child
 		started := "-"
 		if ch.StartedAt > 0 {
-			// StartedAt arrives from the daemon as Unix milliseconds (see
-			// dispatch.go: snap.StartedAt.UnixMilli()).  time.UnixMilli ensures
-			// the printed date is in the present millennium.
 			started = time.UnixMilli(ch.StartedAt).Format("2006-01-02 15:04")
 		}
 		provider, model := splitProviderModel(ch.Model)
+		idCell := ch.ChildID
+		if tr.Depth > 0 {
+			idCell = strings.Repeat("  ", tr.Depth) + "└ " + ch.ChildID
+		}
 		tw.AppendRow(table.Row{
-			ch.ChildID,
+			idCell,
 			defaultDash(ch.Name),
 			formatStatus(ch.Status, ch.ExitCode, ch.ExitSignal, useColor),
 			defaultDash(provider),
@@ -203,3 +211,104 @@ func green(s string) string   { return "\x1b[32m" + s + "\x1b[0m" }
 func yellow(s string) string  { return "\x1b[33m" + s + "\x1b[0m" }
 func cyan(s string) string    { return "\x1b[36m" + s + "\x1b[0m" }
 func magenta(s string) string { return "\x1b[35m" + s + "\x1b[0m" }
+
+// ─── tree ordering ───────────────────────────────────────────────────────────
+
+// treeRow is a child plus its indentation depth in the rendered tree.
+type treeRow struct {
+	Child protocol.ChildSummary
+	Depth int
+}
+
+// sortChildrenAsTree orders children so each parent is immediately followed
+// by its descendants, depth-first, and reports each one's depth.
+//
+// Every input child appears in the output exactly once. A child whose parent
+// is absent from the input — filtered out by --status, or already forgotten —
+// is treated as a root so it stays visible; silently dropping it would make
+// a filtered list lie about what is running.
+func sortChildrenAsTree(children []protocol.ChildSummary) []treeRow {
+	byID := make(map[string]protocol.ChildSummary, len(children))
+	for _, ch := range children {
+		byID[ch.ChildID] = ch
+	}
+
+	parentOf := func(ch protocol.ChildSummary) string {
+		p := ch.Labels["rafiki/parent"]
+		if p == "" {
+			p = ch.Labels["fundi/parent"]
+		}
+		if _, present := byID[p]; !present {
+			return ""
+		}
+		return p
+	}
+
+	kids := make(map[string][]protocol.ChildSummary, len(children))
+	var roots []protocol.ChildSummary
+	for _, ch := range children {
+		if p := parentOf(ch); p != "" {
+			kids[p] = append(kids[p], ch)
+		} else {
+			roots = append(roots, ch)
+		}
+	}
+
+	// Sort roots and sibling groups so output is deterministic across calls.
+	slices.SortStableFunc(roots, func(a, b protocol.ChildSummary) int {
+		if a.ChildID < b.ChildID {
+			return -1
+		}
+		if a.ChildID > b.ChildID {
+			return 1
+		}
+		return 0
+	})
+	for _, p := range kids {
+		slices.SortStableFunc(p, func(a, b protocol.ChildSummary) int {
+			if a.ChildID < b.ChildID {
+				return -1
+			}
+			if a.ChildID > b.ChildID {
+				return 1
+			}
+			return 0
+		})
+	}
+
+	var out []treeRow
+	emitted := make(map[string]bool, len(children))
+	var walk func(ch protocol.ChildSummary, depth int)
+	walk = func(ch protocol.ChildSummary, depth int) {
+		if emitted[ch.ChildID] {
+			return
+		}
+		emitted[ch.ChildID] = true
+		out = append(out, treeRow{Child: ch, Depth: depth})
+		for _, kid := range kids[ch.ChildID] {
+			walk(kid, depth+1)
+		}
+	}
+	for _, r := range roots {
+		walk(r, 0)
+	}
+	// Anything still unemitted was part of a cycle. Render it flat rather
+	// than dropping it.
+	for _, ch := range children {
+		if !emitted[ch.ChildID] {
+			emitted[ch.ChildID] = true
+			out = append(out, treeRow{Child: ch, Depth: 0})
+		}
+	}
+	return out
+}
+
+// flattenTree returns every child as a treeRow at depth 0 — the flat
+// (--flat) mode.
+func flattenTree(children []protocol.ChildSummary) []treeRow {
+	out := make([]treeRow, len(children))
+	for i, ch := range children {
+		out[i] = treeRow{Child: ch, Depth: 0}
+	}
+	return out
+}

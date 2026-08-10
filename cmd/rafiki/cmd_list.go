@@ -22,6 +22,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().String("cwd-contains", "", "Filter by substring in working directory")
 	cmd.Flags().StringArray("label", nil, "AND-match label k=v (repeatable)")
 	cmd.Flags().StringArray("has-label", nil, "Filter children that have this label key (repeatable)")
+	cmd.Flags().Bool("flat", false, "Render a flat list instead of a tree")
 
 	_ = cmd.RegisterFlagCompletionFunc("status", cobra.FixedCompletions(
 		[]string{"spawning", "idle", "streaming", "tool_running", "compacting", "blocked_ui", "shutting_down", "exited"},
@@ -62,5 +63,6 @@ func runList(cmd *cobra.Command, _ []string) error {
 	}
 
 	mode, useColor := outputOpts(cmd)
-	return renderList(os.Stdout, children, mode, useColor)
+	flat, _ := cmd.Flags().GetBool("flat")
+	return renderList(os.Stdout, children, mode, useColor, flat)
 }
