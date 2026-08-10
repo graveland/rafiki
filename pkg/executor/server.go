@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"runtime"
 	"time"
 
@@ -38,6 +39,7 @@ type Server struct {
 	opts   Options
 	labels map[string]string
 	reg    *tools.Registry
+	jobs   *jobRegistry
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
@@ -53,7 +55,8 @@ func NewServer(opts Options) *Server {
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
-		reg: reg,
+		reg:  reg,
+		jobs: newJobRegistry(),
 	}
 }
 
@@ -87,7 +90,8 @@ func (s *Server) Health(
 		diskFree = int64(stat.Bavail) * int64(stat.Bsize)
 	}
 	return connect.NewResponse(&executorpb.HealthResponse{
-		DiskFreeBytes: diskFree,
+		DiskFreeBytes:  diskFree,
+		RunningHandles: s.jobs.running(),
 	}), nil
 }
 
@@ -98,9 +102,12 @@ func (s *Server) Execute(
 ) error {
 	msg := req.Msg
 
-	// Verify expect_mtime before dispatching: if the file changed on disk
-	// since the parent last read it, refuse the write/edit. This is the
-	// TOCTOU guard — parent-side checking alone is insufficient.
+	// Background bash — start a job, return a handle immediately.
+	if msg.Background && msg.Tool == "bash" {
+		return s.startBackground(ctx, msg, stream)
+	}
+
+	// Verify expect_mtime before dispatching.
 	for path, expectedNS := range msg.ExpectMtime {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -149,6 +156,106 @@ func (s *Server) Execute(
 	return stream.Send(&executorpb.ExecuteResponse{
 		Event: &executorpb.ExecuteResponse_Result{Result: result},
 	})
+}
+
+// startBackground launches a bash command as a background job and streams the
+// handle back immediately.
+func (s *Server) startBackground(
+	ctx context.Context,
+	msg *executorpb.ExecuteRequest,
+	stream *connect.ServerStream[executorpb.ExecuteResponse],
+) error {
+	var in struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(msg.InputJson, &in); err != nil || in.Command == "" {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code:    executorpb.Failure_CODE_TOOL_FAILED,
+					Message: "background bash requires a command",
+				},
+			},
+		})
+	}
+
+	handle := msg.CallId
+	if handle == "" {
+		handle = randomID()
+	}
+
+	cmd := exec.CommandContext(context.Background(), "bash", "-c", in.Command)
+	cmd.Dir = s.opts.Root
+	s.jobs.start(cmd, handle)
+
+	return stream.Send(&executorpb.ExecuteResponse{
+		Event: &executorpb.ExecuteResponse_Handle{Handle: handle},
+	})
+}
+
+func (s *Server) Attach(
+	ctx context.Context,
+	req *connect.Request[executorpb.AttachRequest],
+	stream *connect.ServerStream[executorpb.AttachResponse],
+) error {
+	handle := req.Msg.Handle
+
+	// Send accumulated output so far.
+	out, exited := s.jobs.output(handle)
+	if len(out) > 0 {
+		if err := stream.Send(&executorpb.AttachResponse{
+			Event: &executorpb.AttachResponse_Output{
+				Output: &executorpb.OutputChunk{Data: out},
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	if exited {
+		code, _ := s.jobs.wait(handle)
+		return stream.Send(&executorpb.AttachResponse{
+			Event: &executorpb.AttachResponse_ExitCode{ExitCode: int32(code)},
+		})
+	}
+
+	// Poll for more output and eventual exit.
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastLen := len(out)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			out, exited = s.jobs.output(handle)
+			if len(out) > lastLen {
+				chunk := out[lastLen:]
+				lastLen = len(out)
+				if err := stream.Send(&executorpb.AttachResponse{
+					Event: &executorpb.AttachResponse_Output{
+						Output: &executorpb.OutputChunk{Data: chunk},
+					},
+				}); err != nil {
+					return err
+				}
+			}
+			if exited {
+				code, _ := s.jobs.wait(handle)
+				return stream.Send(&executorpb.AttachResponse{
+					Event: &executorpb.AttachResponse_ExitCode{ExitCode: int32(code)},
+				})
+			}
+		}
+	}
+}
+
+func (s *Server) Cancel(
+	_ context.Context,
+	req *connect.Request[executorpb.CancelRequest],
+) (*connect.Response[executorpb.CancelResponse], error) {
+	s.jobs.kill(req.Msg.CallId)
+	return connect.NewResponse(&executorpb.CancelResponse{}), nil
 }
 
 // collectObservedMtimes stats files touched by a tool call and returns their

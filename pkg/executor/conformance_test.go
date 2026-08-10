@@ -147,6 +147,123 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 			t.Fatalf("the refused edit still wrote: %q", got)
 		}
 	})
+
+	t.Run("background execute returns a handle immediately", func(t *testing.T) {
+		start := time.Now()
+		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "bg-1", Tool: "bash", Background: true,
+			InputJson: []byte(`{"command":"sleep 2; echo done"}`),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var handle string
+		for stream.Receive() {
+			if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Handle); ok {
+				handle = ev.Handle
+				break
+			}
+		}
+		_ = stream.Err()
+		if handle == "" {
+			t.Fatal("background execute must yield a handle")
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("returned after %v; a background start must not block on the command", elapsed)
+		}
+
+		// Attach and wait for completion.
+		attachStream, err := client.Attach(ctx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var exitCode int32 = -1
+		for attachStream.Receive() {
+			if ev, ok := attachStream.Msg().Event.(*executorpb.AttachResponse_ExitCode); ok {
+				exitCode = ev.ExitCode
+			}
+		}
+		_ = attachStream.Err()
+		if exitCode != 0 {
+			t.Errorf("exit code = %d, want 0", exitCode)
+		}
+	})
+
+	t.Run("a dropped Attach does not kill the job", func(t *testing.T) {
+		// Start a background job.
+		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "bg-2", Tool: "bash", Background: true,
+			InputJson: []byte(`{"command":"sleep 2; echo survived"}`),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var handle string
+		for stream.Receive() {
+			if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Handle); ok {
+				handle = ev.Handle
+				break
+			}
+		}
+		_ = stream.Err()
+		if handle == "" {
+			t.Fatal("no handle")
+		}
+
+		// Attach, cancel it, then attache again — the job must survive.
+		ctx1, cancel1 := context.WithCancel(ctx)
+		attachStream1, err := client.Attach(ctx1, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Read one event then cancel.
+		attachStream1.Receive()
+		cancel1()
+
+		// Wait past the job's natural completion.
+		time.Sleep(3 * time.Second)
+
+		// Attach again and confirm completion.
+		attachStream2, err := client.Attach(ctx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var exited bool
+		for attachStream2.Receive() {
+			if _, ok := attachStream2.Msg().Event.(*executorpb.AttachResponse_ExitCode); ok {
+				exited = true
+			}
+		}
+		_ = attachStream2.Err()
+		if !exited {
+			t.Fatal("job did not complete — a dropped Attach must not kill the job")
+		}
+	})
+
+	t.Run("Health lists running handles", func(t *testing.T) {
+		stream, _ := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "bg-3", Tool: "bash", Background: true,
+			InputJson: []byte(`{"command":"sleep 10"}`),
+		}))
+		for stream.Receive() {
+		}
+		_ = stream.Err()
+
+		resp, err := client.Health(ctx, connect.NewRequest(&executorpb.HealthRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, h := range resp.Msg.RunningHandles {
+			if h == "bg-3" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("Health must list the running background job")
+		}
+	})
 }
 
 // textOf extracts the concatenated text from a Result's content blocks.
