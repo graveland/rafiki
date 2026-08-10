@@ -171,6 +171,22 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 	if n := tag.RowsAffected(); n != 1 {
 		return fmt.Errorf("complete-turn: expected 1 row, updated %d (stale/skewed key)", n)
 	}
+	// Backfill conversation.model from the response model: InsertTurnIntent
+	// writes the request body's model first-seen, but for client-driven sessions
+	// the first outbound request body may carry a client-side default (e.g.
+	// "claude-haiku-4-5-20251001") that differs from the actual served model
+	// the user intended (e.g. "claude-opus-5", set later via /model or
+	// --model). Using the response model is authoritative. Best-effort: a
+	// failed backfill must not fail the turn.
+	if r.Model != "" {
+		_, _ = s.pool.Exec(ctx, `UPDATE conversations.conversation
+			SET model = $3, updated_at = now()
+			WHERE id = (
+				SELECT conversation_id FROM conversations.conversation_turn
+				WHERE id = $1::uuid AND created_at = $2
+			) AND model IS NULL`,
+			r.TurnID, r.CreatedAt, r.Model)
+	}
 	return nil
 }
 

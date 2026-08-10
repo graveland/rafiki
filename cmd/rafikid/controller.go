@@ -116,12 +116,20 @@ func (c *Controller) SetProxy(url, token string) {
 }
 
 // SetCatalog records the daemon's shared model catalog, consulted by
-// ContextWindow. Called once at startup, before the socket accepts anything
-// — mirrors SetProxy. A nil cat is legal (main.go passes one through
-// regardless of whether the proxy face itself started) and just means every
-// ContextWindow call returns ok=false.
+// ContextWindow and by the insights backend (pricing). Called once at startup,
+// before the socket accepts anything — mirrors SetProxy. A nil cat is legal
+// (main.go passes one through regardless of whether the proxy face itself
+// started) and just means every ContextWindow call returns ok=false and every
+// cost reads as unpriced.
 func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	c.catalog = cat
+	if cat != nil {
+		// Re-create the insights backend with a pricer wrapped from the catalog.
+		// The initial backend in NewController is pricer-less because the catalog
+		// is not yet available; by the time SetCatalog returns the socket is not
+		// yet listening, so no concurrent read can observe the intermediate state.
+		c.insights = local.New(local.Options{Pool: c.pool, Pricer: cat.Pricing})
+	}
 }
 
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *routing.RawTraceStore, baseCtx context.Context) *Controller {

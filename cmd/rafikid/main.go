@@ -426,6 +426,10 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.loadOrphans(records)
 	ctrl.startSweeper(ctx)
 
+	if pool != nil {
+		go syncPricingLoop(baseCtx, pool, catalog)
+	}
+
 	slog.Info("loaded orphans", "count", len(records))
 
 	handler := control.NewDispatch(ctrl)
@@ -672,7 +676,34 @@ func normalizeArgsForPflag() {
 	os.Args = normalized
 }
 
-// normalizeArg converts a single-dash multi-character flag to its double-dash
+// syncPricingLoop runs SyncModelPricing once at startup and then on the given
+// interval, keeping the model_pricing table populated so conversation search and
+// v_turn views can compute costs in SQL.
+func syncPricingLoop(ctx context.Context, pool *pgxpool.Pool, src store.PriceSource) {
+	interval := 6 * time.Hour
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	syncOnce := func() {
+		n, err := store.SyncModelPricing(ctx, pool, src)
+		if err != nil {
+			slog.Warn("sync model pricing failed", "error", err)
+			return
+		}
+		slog.Info("model pricing synced", "rows", n)
+	}
+
+	syncOnce()
+	for {
+		select {
+		case <-ticker.C:
+			syncOnce()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // form. Single-char (-j), double-dash (--x), and non-flag args pass through.
 func normalizeArg(a string) string {
 	if !strings.HasPrefix(a, "-") || strings.HasPrefix(a, "--") {
