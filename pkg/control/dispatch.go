@@ -12,6 +12,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
 // ─── ControllerError ──────────────────────────────────────────────────────────
@@ -86,6 +87,9 @@ type Controller interface {
 	ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error)
 	ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error)
 	ConversationExport(ctx context.Context, id string) (*insights.Transcript, error)
+
+	// Task ledger.
+	TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error)
 
 	// Lifecycle mutations.
 	Spawn(ctx context.Context, req protocol.SpawnRequest) (SpawnResult, error)
@@ -197,6 +201,8 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.conversationSearch(frame, hdr.ID)
 	case protocol.TypeCtrlConversationExport:
 		return d.conversationExport(frame, hdr.ID)
+	case protocol.TypeCtrlTaskList:
+		return d.taskList(frame, hdr.ID)
 	case protocol.TypeCtrlSend:
 		return d.ctrlSend(frame, hdr.ID)
 	case protocol.TypeCtrlSetLabels:
@@ -764,4 +770,30 @@ func (d *dispatcher) globalUnsubscribe(conn Connection, frame []byte, id string)
 		return mapErr(protocol.TypeCtrlGlobalUnsubscribe, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlGlobalUnsubscribe, id, nil)
+}
+
+const taskListMaxRows = 2000
+
+func (d *dispatcher) taskList(frame []byte, id string) []byte {
+	var req protocol.TaskListRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlTaskList, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+
+	// Clamp before responding. A tree over a large subtree is exactly the
+	// unbounded-response shape that breaks the frame reader: an oversized frame
+	// does not error cleanly, it returns ErrFrameTooLarge, tears down the
+	// connection, and surfaces as "connection closed".
+	if req.Limit <= 0 || req.Limit > taskListMaxRows {
+		req.Limit = taskListMaxRows
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
+	defer cancel()
+
+	rows, err := d.c.TaskList(ctx, req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlTaskList, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlTaskList, id, rows)
 }

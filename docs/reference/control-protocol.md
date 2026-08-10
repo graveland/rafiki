@@ -823,6 +823,36 @@ exists; `payload_too_large` (§8) when the transcript exceeds the maximum respon
 it via `rafikid agent export` instead; `no_agent_db` (§8) when the daemon has no database
 configured.
 
+### 6.20 `ctrl_task_list`
+
+Query the task ledger. Returns tasks as a bare array of `tasks.Task` objects (not wrapped in
+`{"rows": [...]}`).
+
+```jsonc
+{
+  "type":    "ctrl_task_list",
+  "id":      "37",
+  "childId": "c_abc",        // optional: filter by assignee
+  "status":  "orphaned",     // optional: filter by status
+  "all":     true            // optional: include dropped tasks
+}
+```
+
+Response:
+
+```jsonc
+{
+  "type": "ctrl_response", "command": "ctrl_task_list", "id": "37",
+  "success": true,
+  "data": [ /* tasks.Task objects */ ]
+}
+```
+
+The response is capped at 2000 rows. Errors: `no_agent_db` when the daemon has no database
+configured.
+
+CLI: `rafiki tasks [--child <id>] [--status <s>] [--all]`.
+
 ## 7. Controller → client events
 
 ### 7.1 `ctrl_event`

@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
 // discardConn is a no-op Connection used in dispatch tests where event
@@ -118,6 +119,10 @@ func (f *fakeController) ConversationExport(ctx context.Context, id string) (*in
 		return f.conversationExportFn(ctx, id)
 	}
 	return &insights.Transcript{}, nil
+}
+
+func (f *fakeController) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
+	return nil, nil
 }
 
 func (f *fakeController) Spawn(ctx context.Context, req protocol.SpawnRequest) (control.SpawnResult, error) {

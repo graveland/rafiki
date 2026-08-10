@@ -411,6 +411,17 @@ type ConversationExportRequest struct {
 	ConversationID string `json:"conversationId"`
 }
 
+// TaskListRequest queries the task ledger (§ ctrl_task_list).
+type TaskListRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	ChildID string `json:"childId,omitempty"` // tasks assigned to this child
+	Status  string `json:"status,omitempty"`
+	Repo    string `json:"repo,omitempty"` // repo_root scope
+	Limit   int    `json:"limit,omitempty"`
+	All     bool   `json:"all,omitempty"` // include dropped
+}
+
 // ─── Response envelope and per-command response data types ───────────────────
 
 // Response is the generic ctrl_response envelope. The Data field is left as

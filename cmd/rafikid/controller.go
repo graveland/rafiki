@@ -3052,3 +3052,20 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 		Labels:             snap.Labels,
 	}
 }
+
+// TaskList queries the task ledger for the ctrl_task_list verb.
+func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
+	if c.tasks == nil {
+		return nil, &control.ControllerError{
+			Code:    protocol.ErrNoAgentDB,
+			Message: "task ledger unavailable: no database configured",
+		}
+	}
+
+	f := tasks.ListFilter{
+		Assignee:       req.ChildID,
+		Status:         tasks.Status(req.Status),
+		IncludeDropped: req.All,
+	}
+	return c.tasks.List(ctx, f)
+}
