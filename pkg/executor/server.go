@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"runtime"
 
@@ -14,6 +15,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 )
 
 // Options configures an executor server.
@@ -32,16 +34,23 @@ type Server struct {
 	id     string
 	opts   Options
 	labels map[string]string
+	reg    *tools.Registry
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
 func NewServer(opts Options) *Server {
+	tr := tools.NewFileTracker()
+	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
+		Cwd:         opts.Root,
+		FileTracker: tr,
+	})
 	return &Server{
 		id:   randomID(),
 		opts: opts,
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
+		reg: reg,
 	}
 }
 
@@ -77,6 +86,34 @@ func (s *Server) Health(
 	return connect.NewResponse(&executorpb.HealthResponse{
 		DiskFreeBytes: diskFree,
 	}), nil
+}
+
+func (s *Server) Execute(
+	ctx context.Context,
+	req *connect.Request[executorpb.ExecuteRequest],
+	stream *connect.ServerStream[executorpb.ExecuteResponse],
+) error {
+	name := req.Msg.Tool
+	result, err := s.reg.Execute(ctx, name, json.RawMessage(req.Msg.InputJson))
+	if err != nil {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code:    executorpb.Failure_CODE_TOOL_FAILED,
+					Message: err.Error(),
+				},
+			},
+		})
+	}
+	return stream.Send(&executorpb.ExecuteResponse{
+		Event: &executorpb.ExecuteResponse_Result{
+			Result: &executorpb.Result{
+				Content: []*executorpb.ContentBlock{
+					{Block: &executorpb.ContentBlock_Text{Text: result}},
+				},
+			},
+		},
+	})
 }
 
 func randomID() string {

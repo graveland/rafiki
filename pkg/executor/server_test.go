@@ -75,6 +75,13 @@ func TestHealthReportsNoRunningHandles(t *testing.T) {
 	}
 }
 
+func TestConformance(t *testing.T) {
+	root := t.TempDir()
+	srv := executor.NewServer(executor.Options{Root: root, Concurrency: 6, Version: "test"})
+	client := testClient(t, srv)
+	RunConformance(t, client, root)
+}
+
 // testClient starts a server on a temp unix socket and returns a Connect
 // client dialing it. The caller is responsible for cleanup via t.Cleanup.
 func testClient(t *testing.T, handler executorpbconnect.ExecutorServiceHandler) executorpbconnect.ExecutorServiceClient {
