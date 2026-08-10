@@ -208,3 +208,59 @@ func TestFormatHeaders_DropsForgedHeaders(t *testing.T) {
 		t.Errorf("got %q, want only the good header", got)
 	}
 }
+
+// Passthrough is defined by the ABSENCE of ANTHROPIC_AUTH_TOKEN: that variable
+// is what makes Claude Code use API-key auth instead of falling through to its
+// OAuth subscription. Verified against claude-cli 2.1.226.
+func TestClaude_PassthroughOmitsAuthToken(t *testing.T) {
+	in := []string{"ANTHROPIC_API_KEY=sk-real", "HOME=/h"}
+	env, _ := Claude(in, ClaudeOptions{
+		URL:             "http://localhost:8035",
+		Token:           "dev",
+		PassthroughAuth: true,
+		Headers:         map[string]string{"X-Rafiki-Session": "s1"},
+	})
+	got, dupes := envMap(t, env)
+	if len(dupes) > 0 {
+		t.Errorf("duplicate variables: %v", dupes)
+	}
+	if v, ok := got["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want it absent entirely", v)
+	}
+	if _, ok := got["ANTHROPIC_API_KEY"]; ok {
+		t.Error("ANTHROPIC_API_KEY survived; it must be stripped or it outranks OAuth")
+	}
+	if got["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q", got["ANTHROPIC_BASE_URL"])
+	}
+	if !strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token: dev") {
+		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want an X-Rafiki-Token line", got["ANTHROPIC_CUSTOM_HEADERS"])
+	}
+	if !strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Session: s1") {
+		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want the caller's headers kept", got["ANTHROPIC_CUSTOM_HEADERS"])
+	}
+}
+
+// The caller's Headers map must not be mutated: callers reuse it, and a
+// surprise credential appearing in it is the kind of aliasing bug that only
+// shows up in the second session.
+func TestClaude_PassthroughDoesNotMutateCallerHeaders(t *testing.T) {
+	headers := map[string]string{"X-Rafiki-Session": "s1"}
+	_, _ = Claude(nil, ClaudeOptions{URL: "http://x", Token: "dev", PassthroughAuth: true, Headers: headers})
+	if _, ok := headers["X-Rafiki-Token"]; ok {
+		t.Error("Claude mutated the caller's Headers map")
+	}
+}
+
+// Without the option, nothing changes: the token stays in ANTHROPIC_AUTH_TOKEN
+// and no X-Rafiki-Token header is emitted.
+func TestClaude_NoPassthroughKeepsAuthToken(t *testing.T) {
+	env, _ := Claude(nil, ClaudeOptions{URL: "http://x", Token: "dev"})
+	got, _ := envMap(t, env)
+	if got["ANTHROPIC_AUTH_TOKEN"] != "dev" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q", got["ANTHROPIC_AUTH_TOKEN"], "dev")
+	}
+	if strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token") {
+		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want no X-Rafiki-Token", got["ANTHROPIC_CUSTOM_HEADERS"])
+	}
+}
