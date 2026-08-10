@@ -98,14 +98,23 @@ type Change struct {
 	Status Status
 }
 
-// ListFilter selects rows. A zero filter matches everything except dropped
-// rows, which stay hidden unless IncludeDropped is set.
+// ListFilter selects rows. A zero filter matches every task in every
+// conversation except dropped rows, which stay hidden unless IncludeDropped
+// is set.
+//
+// ConversationID == "" deliberately means "every conversation": that is the
+// ctrl_task_list case, where a human asks "what is every agent doing" and
+// there is no single conversation to scope to.
 type ListFilter struct {
 	ConversationID string
 	Assignee       string
 	Status         Status
 	Metadata       map[string]string
 	IncludeDropped bool
+	// Limit caps the returned rows, applied last — after handles are
+	// assigned and after filtering — so a truncated list never renumbers.
+	// Zero means no limit.
+	Limit int
 }
 
 // Store is the ledger. Every mutation names its target: there is no

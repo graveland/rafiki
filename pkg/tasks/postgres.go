@@ -3,7 +3,6 @@ package tasks
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -207,26 +206,7 @@ func (ps *postgresStore) List(ctx context.Context, f ListFilter) ([]Task, error)
 	if err != nil {
 		return nil, err
 	}
-
-	filtered := slices.DeleteFunc(all, func(t Task) bool {
-		if f.Assignee != "" && t.Assignee != f.Assignee {
-			return true
-		}
-		if f.Status != "" && t.Status != f.Status {
-			return true
-		}
-		if !f.IncludeDropped && t.Status == StatusDropped {
-			return true
-		}
-		for k, v := range f.Metadata {
-			if t.Metadata[k] != v {
-				return true
-			}
-		}
-		return false
-	})
-
-	return AssignHandles(filtered), nil
+	return FilterTasks(AssignHandles(all), f), nil
 }
 
 func (ps *postgresStore) Assign(ctx context.Context, convID, handle, assignee string) (Task, error) {

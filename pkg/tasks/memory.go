@@ -3,7 +3,6 @@ package tasks
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -209,26 +208,22 @@ func (ms *memoryStore) List(ctx context.Context, f ListFilter) ([]Task, error) {
 		return nil, err
 	}
 
-	filtered := ms.listLocked(f.ConversationID)
-	filtered = slices.DeleteFunc(filtered, func(t Task) bool {
-		if f.Assignee != "" && t.Assignee != f.Assignee {
-			return true
-		}
-		if f.Status != "" && t.Status != f.Status {
-			return true
-		}
-		if !f.IncludeDropped && t.Status == StatusDropped {
-			return true
-		}
-		for k, v := range f.Metadata {
-			if t.Metadata[k] != v {
-				return true
-			}
-		}
-		return false
-	})
+	// Handles are assigned over the full set BEFORE filtering: a filter that
+	// hides a parent must not renumber its children.
+	return FilterTasks(AssignHandles(ms.allLocked(f.ConversationID)), f), nil
+}
 
-	return AssignHandles(filtered), nil
+// allLocked returns every task for convID, or every task in the store when
+// convID is empty. Caller must hold mu.
+func (ms *memoryStore) allLocked(convID string) []Task {
+	var out []Task
+	for _, t := range ms.rows {
+		if convID != "" && t.ConversationID != convID {
+			continue
+		}
+		out = append(out, *t)
+	}
+	return out
 }
 
 func (ms *memoryStore) Assign(ctx context.Context, convID, handle, assignee string) (Task, error) {
