@@ -42,3 +42,38 @@ func TestFakeExecutorCanFail(t *testing.T) {
 		t.Errorf("code = %v, want CODE_EXECUTOR_LOST", fe.Failure.Code)
 	}
 }
+
+func TestFakeImplementsTheJobSurface(t *testing.T) {
+	f := executorclient.NewFake()
+	ctx := context.Background()
+
+	handle, err := f.StartJob(ctx, "echo hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle == "" {
+		t.Fatal("StartJob returned an empty handle")
+	}
+
+	f.SetJobOutput(handle, "hi\n", true, 0)
+
+	snap, err := f.JobOutput(ctx, handle, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Found || !snap.Exited || snap.Data != "hi\n" {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+
+	if err := f.KillJob(ctx, handle); err != nil {
+		t.Fatal(err)
+	}
+
+	missing, err := f.JobOutput(ctx, "nope", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.Found {
+		t.Fatal("Found=true for an unknown handle")
+	}
+}

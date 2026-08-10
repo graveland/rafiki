@@ -77,3 +77,70 @@ func (c *Client) Execute(ctx context.Context, tool string, input json.RawMessage
 	}
 	return resultText, nil
 }
+
+// StartJob launches command as a background job on the executor and returns
+// its handle. It returns as soon as the executor confirms the process is
+// running.
+func (c *Client) StartJob(ctx context.Context, command string) (string, error) {
+	input, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		return "", fmt.Errorf("executor start job: %w", err)
+	}
+	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+		Tool:       "bash",
+		InputJson:  input,
+		Background: true,
+	}))
+	if err != nil {
+		return "", fmt.Errorf("executor start job: %w", err)
+	}
+	defer stream.Close()
+
+	var handle string
+	var failure *executorpb.Failure
+	for stream.Receive() {
+		switch ev := stream.Msg().Event.(type) {
+		case *executorpb.ExecuteResponse_Handle:
+			handle = ev.Handle
+		case *executorpb.ExecuteResponse_Failed:
+			failure = ev.Failed
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", fmt.Errorf("executor start job: %w", err)
+	}
+	if failure != nil {
+		return "", &FailureError{Failure: failure}
+	}
+	if handle == "" {
+		return "", fmt.Errorf("executor start job: no handle returned")
+	}
+	return handle, nil
+}
+
+// JobOutput polls a background job. It never blocks.
+func (c *Client) JobOutput(ctx context.Context, handle string, since int64) (tools.JobSnapshot, error) {
+	resp, err := c.inner.JobOutput(ctx, connect.NewRequest(&executorpb.JobOutputRequest{
+		Handle: handle, Since: since,
+	}))
+	if err != nil {
+		return tools.JobSnapshot{}, fmt.Errorf("executor job output: %w", err)
+	}
+	return tools.JobSnapshot{
+		Data:     string(resp.Msg.Data),
+		Total:    resp.Msg.Total,
+		Exited:   resp.Msg.Exited,
+		ExitCode: int(resp.Msg.ExitCode),
+		Found:    resp.Msg.Found,
+	}, nil
+}
+
+// KillJob terminates a background job and everything it spawned.
+func (c *Client) KillJob(ctx context.Context, handle string) error {
+	if _, err := c.inner.Cancel(ctx, connect.NewRequest(&executorpb.CancelRequest{
+		CallId: handle,
+	})); err != nil {
+		return fmt.Errorf("executor kill job: %w", err)
+	}
+	return nil
+}
