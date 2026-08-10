@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -100,6 +101,50 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		}
 		if !strings.Contains(out, "visible.txt") {
 			t.Error("non-ignored file missing")
+		}
+	})
+
+	t.Run("edit refuses when the file changed under us", func(t *testing.T) {
+		p := filepath.Join(root, "race.txt")
+		if err := os.WriteFile(p, []byte("original"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, fail := call(t, "read", `{"file_path":"`+p+`"}`)
+		if fail != nil {
+			t.Fatalf("read failed: %v", fail)
+		}
+		stale := res.ObservedMtime[p]
+		if stale == 0 {
+			t.Fatal("read must report observed_mtime; without it the parent has nothing to send back")
+		}
+
+		// Someone else writes.
+		time.Sleep(10 * time.Millisecond) // filesystem mtime granularity
+		if err := os.WriteFile(p, []byte("changed by someone else"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "c", Tool: "edit", TimeoutMs: 30000,
+			InputJson:   []byte(`{"file_path":"` + p + `","old_string":"original","new_string":"mine"}`),
+			ExpectMtime: map[string]int64{p: stale},
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var failure *executorpb.Failure
+		for stream.Receive() {
+			if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Failed); ok {
+				failure = ev.Failed
+			}
+		}
+		_ = stream.Err()
+		if failure == nil {
+			t.Fatal("edit against a stale mtime must fail — this is the TOCTOU guard")
+		}
+		got, _ := os.ReadFile(p)
+		if string(got) != "changed by someone else" {
+			t.Fatalf("the refused edit still wrote: %q", got)
 		}
 	})
 }

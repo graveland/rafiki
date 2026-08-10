@@ -7,8 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/sys/unix"
@@ -93,8 +96,39 @@ func (s *Server) Execute(
 	req *connect.Request[executorpb.ExecuteRequest],
 	stream *connect.ServerStream[executorpb.ExecuteResponse],
 ) error {
-	name := req.Msg.Tool
-	result, err := s.reg.Execute(ctx, name, json.RawMessage(req.Msg.InputJson))
+	msg := req.Msg
+
+	// Verify expect_mtime before dispatching: if the file changed on disk
+	// since the parent last read it, refuse the write/edit. This is the
+	// TOCTOU guard — parent-side checking alone is insufficient.
+	for path, expectedNS := range msg.ExpectMtime {
+		info, err := os.Stat(path)
+		if err != nil {
+			return stream.Send(&executorpb.ExecuteResponse{
+				Event: &executorpb.ExecuteResponse_Failed{
+					Failed: &executorpb.Failure{
+						Code:    executorpb.Failure_CODE_TOOL_FAILED,
+						Message: "file changed under us: " + err.Error(),
+					},
+				},
+			})
+		}
+		expected := time.Unix(0, expectedNS)
+		if !info.ModTime().Equal(expected) {
+			return stream.Send(&executorpb.ExecuteResponse{
+				Event: &executorpb.ExecuteResponse_Failed{
+					Failed: &executorpb.Failure{
+						Code:    executorpb.Failure_CODE_DENIED,
+						Message: fmt.Sprintf("%s was modified on disk since it was last read (expected mtime %s, found %s)",
+							path, expected, info.ModTime()),
+					},
+				},
+			})
+		}
+	}
+
+	name := msg.Tool
+	resultStr, err := s.reg.Execute(ctx, name, json.RawMessage(msg.InputJson))
 	if err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{
@@ -105,15 +139,52 @@ func (s *Server) Execute(
 			},
 		})
 	}
-	return stream.Send(&executorpb.ExecuteResponse{
-		Event: &executorpb.ExecuteResponse_Result{
-			Result: &executorpb.Result{
-				Content: []*executorpb.ContentBlock{
-					{Block: &executorpb.ContentBlock_Text{Text: result}},
-				},
-			},
+
+	result := &executorpb.Result{
+		Content: []*executorpb.ContentBlock{
+			{Block: &executorpb.ContentBlock_Text{Text: resultStr}},
 		},
+		ObservedMtime: s.collectObservedMtimes(msg.Tool, msg.InputJson),
+	}
+	return stream.Send(&executorpb.ExecuteResponse{
+		Event: &executorpb.ExecuteResponse_Result{Result: result},
 	})
+}
+
+// collectObservedMtimes stats files touched by a tool call and returns their
+// current mtimes. The parent uses these to populate its FileTracker so it can
+// pass expect_mtime on the next write.
+func (s *Server) collectObservedMtimes(tool string, input json.RawMessage) map[string]int64 {
+	paths := filePathsFromInput(tool, input)
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(paths))
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		out[p] = info.ModTime().UnixNano()
+	}
+	return out
+}
+
+// filePathsFromInput extracts file paths from a tool's JSON input for mtime
+// reporting. Best-effort: it only parses fields that carry a single file path
+// (read, write, edit); directory tools (glob, grep, ls) are omitted because
+// their observed set is unbounded.
+func filePathsFromInput(tool string, input json.RawMessage) []string {
+	switch tool {
+	case "read", "write", "edit":
+		var in struct {
+			FilePath string `json:"file_path"`
+		}
+		if json.Unmarshal(input, &in) == nil && in.FilePath != "" {
+			return []string{in.FilePath}
+		}
+	}
+	return nil
 }
 
 func randomID() string {
