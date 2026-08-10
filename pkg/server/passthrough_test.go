@@ -3,8 +3,12 @@
 package server
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -98,5 +102,110 @@ func TestStaticTokenAuth_XRafikiTokenWithoutAuthorization(t *testing.T) {
 	}
 	if gotCred != "" {
 		t.Errorf("passthrough credential = %q, want empty", gotCred)
+	}
+}
+
+// The whole point of the feature: the client's own credential reaches
+// Anthropic and the daemon's key is not attached. Sending both Authorization
+// and x-api-key is a 400 upstream, so the daemon key must be absent, not just
+// unused.
+func TestMessagesProxy_PassthroughForwardsClientCredential(t *testing.T) {
+	var gotAuth, gotAPIKey, gotBeta string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotBeta = r.Header.Get("anthropic-beta")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","stop_reason":"end_turn","usage":{"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "daemon-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
+	req.Header.Set("X-Rafiki-Token", "rafiki-token")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-client")
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if gotAuth != "Bearer sk-ant-oat01-client" {
+		t.Errorf("upstream Authorization = %q, want the client's credential", gotAuth)
+	}
+	if gotAPIKey != "" {
+		t.Errorf("daemon key leaked as x-api-key = %q, want absent", gotAPIKey)
+	}
+	// Dropping oauth-2025-04-20 makes Anthropic reject an OAuth bearer.
+	if gotBeta != "oauth-2025-04-20,claude-code-20250219" {
+		t.Errorf("anthropic-beta = %q, want it forwarded intact", gotBeta)
+	}
+}
+
+// The inverse of the above, pinning the pre-existing invariant: an ordinary
+// request still bills the daemon key and never leaks the caller's bearer.
+func TestMessagesProxy_OrdinaryRequestStillUsesDaemonKey(t *testing.T) {
+	var gotAuth, gotAPIKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"type":"message","stop_reason":"end_turn","usage":{"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "daemon-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer rafiki-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if gotAPIKey != "daemon-key" {
+		t.Errorf("upstream x-api-key = %q, want the daemon key", gotAPIKey)
+	}
+	if gotAuth != "" {
+		t.Errorf("client Authorization leaked upstream: %q", gotAuth)
+	}
+}
+
+// An OAuth subscription credential cannot buy an OpenRouter model. Failing
+// over would silently bill the daemon's key instead, which is exactly what the
+// user asked not to happen — so this is a clean 400, not a fallback.
+func TestMessagesProxy_PassthroughRejectsSlashModel(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "daemon-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.SetFallback("or-key", upstream.URL, nil)
+	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"openai/gpt-4o","messages":[]}`))
+	req.Header.Set("X-Rafiki-Token", "rafiki-token")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-client")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if called {
+		t.Error("upstream was called; the request must be refused before any forward")
 	}
 }
