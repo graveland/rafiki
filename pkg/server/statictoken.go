@@ -36,6 +36,13 @@ func WithPassthroughCredential(ctx context.Context, cred string) context.Context
 // PassthroughCredential returns the credential stored by
 // WithPassthroughCredential, or "" for an ordinary request whose Authorization
 // header is rafiki's own token.
+//
+// Only StaticTokenAuth.Middleware populates this, which couples the feature to
+// standalone mode: an embedded host mounts the faces under its own middleware
+// stack (see Handler.Mount), where nothing sets the credential and every
+// request silently bills the daemon's key instead. A host that wants
+// passthrough must call WithPassthroughCredential itself, having decided by
+// its own means that the caller's Authorization is not the host's.
 func PassthroughCredential(ctx context.Context) string {
 	cred, _ := ctx.Value(ctxKeyPassthrough{}).(string)
 	return cred
@@ -86,7 +93,23 @@ func (a *StaticTokenAuth) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		ctx := WithIdentity(r.Context(), &Identity{Username: name})
-		if cred := r.Header.Get("Authorization"); passthrough && cred != "" {
+		if passthrough {
+			// X-Rafiki-Token means "Authorization is mine, bill it upstream",
+			// so both of these fail CLOSED. Proceeding would charge the
+			// daemon's key — the exact outcome the caller opted out of — with
+			// no error and no log to notice it by.
+			cred := r.Header.Get("Authorization")
+			if cred == "" {
+				http.Error(w, "X-Rafiki-Token means passthrough auth, but no Authorization credential was supplied to forward upstream", http.StatusUnauthorized)
+				return
+			}
+			// Never relay rafiki's own static token to the upstream provider:
+			// a client that puts the same token in both headers would ship our
+			// secret to a third party and get an opaque 401 back for it.
+			if _, isOurs := a.lookup(strings.TrimPrefix(cred, "Bearer ")); isOurs {
+				http.Error(w, "Authorization carries rafiki's own token, not an upstream credential; passthrough auth needs your provider credential there", http.StatusUnauthorized)
+				return
+			}
 			ctx = WithPassthroughCredential(ctx, cred)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))

@@ -83,13 +83,15 @@ func TestStaticTokenAuth_XRafikiTokenUnknownRejected(t *testing.T) {
 	}
 }
 
-// X-Rafiki-Token without any Authorization is legal — it just means there is
-// nothing to pass through, and the daemon key is used as usual.
-func TestStaticTokenAuth_XRafikiTokenWithoutAuthorization(t *testing.T) {
+// X-Rafiki-Token declares "Authorization is mine"; arriving without one means
+// the caller cannot self-bill after all. Serving it would charge the daemon's
+// key silently — the precise outcome passthrough exists to avoid — so it fails
+// closed. Reachable whenever Claude Code has no OAuth credential to send: the
+// user is logged out, or CLAUDE_CODE_USE_BEDROCK/VERTEX is set.
+func TestStaticTokenAuth_XRafikiTokenWithoutAuthorizationIsRejected(t *testing.T) {
 	auth := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"})
-	var gotCred string
-	h := auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		gotCred = PassthroughCredential(r.Context())
+	h := auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("handler reached; the request must be refused, not billed to the daemon")
 	}))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -97,11 +99,28 @@ func TestStaticTokenAuth_XRafikiTokenWithoutAuthorization(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
 	}
-	if gotCred != "" {
-		t.Errorf("passthrough credential = %q, want empty", gotCred)
+}
+
+// A client that puts rafiki's own token in BOTH headers must not have that
+// token relayed to Anthropic: it is our secret, it buys nothing there, and the
+// turn would die on an opaque upstream 401.
+func TestStaticTokenAuth_RefusesToForwardOwnToken(t *testing.T) {
+	auth := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"})
+	h := auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("handler reached; rafiki's own token must never be forwarded upstream")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("X-Rafiki-Token", "rafiki-token")
+	req.Header.Set("Authorization", "Bearer rafiki-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
 	}
 }
 
@@ -197,6 +216,38 @@ func TestMessagesProxy_PassthroughRejectsSlashModel(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"openai/gpt-4o","messages":[]}`))
+	req.Header.Set("X-Rafiki-Token", "rafiki-token")
+	req.Header.Set("Authorization", "Bearer sk-ant-oat01-client")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if called {
+		t.Error("upstream was called; the request must be refused before any forward")
+	}
+}
+
+// The OpenAI face is wrapped by the same auth middleware, so it can receive a
+// passthrough credential it has no way to honour — it authenticates to each
+// upstream with that upstream's own key. Silently serving the request would
+// bill the daemon while the caller believed otherwise.
+func TestChatCompletionsProxy_RejectsPassthrough(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewChatCompletionsProxy(nil, nil,
+		[]OpenAIUpstream{{Name: "u", BaseURL: upstream.URL, APIKey: "daemon-key"}},
+		nil, "u", logger)
+	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[]}`))
 	req.Header.Set("X-Rafiki-Token", "rafiki-token")
 	req.Header.Set("Authorization", "Bearer sk-ant-oat01-client")
 	rec := httptest.NewRecorder()

@@ -73,6 +73,15 @@ func (p *ChatCompletionsProxy) SetMetrics(m *Metrics) { p.metrics = m }
 
 func (p *ChatCompletionsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	// The auth middleware honours X-Rafiki-Token on every face it wraps, but
+	// passthrough is an Anthropic-face feature: this one authenticates to each
+	// upstream with that upstream's own key. Serving the request anyway would
+	// bill the daemon while the caller believed it was self-billing, so refuse
+	// rather than silently ignore the intent.
+	if PassthroughCredential(r.Context()) != "" {
+		http.Error(w, "passthrough auth is not supported on the OpenAI-compatible face; it applies to /v1/messages only", http.StatusBadRequest)
+		return
+	}
 	reqBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)

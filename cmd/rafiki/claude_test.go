@@ -129,3 +129,67 @@ func TestClaudeCmd_PassthroughFlagFromEnv(t *testing.T) {
 		t.Error("--passthrough-auth default = false with RAFIKI_CLAUDE_PASSTHROUGH=1, want true")
 	}
 }
+
+// "0" and "false" mean off. Treating any non-empty value as true would make a
+// user who exports RAFIKI_CLAUDE_PASSTHROUGH=0 to disable the feature silently
+// start billing their personal subscription instead.
+func TestClaudeCmd_PassthroughFlagFalseyEnv(t *testing.T) {
+	for _, v := range []string{"0", "false", "no"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", v)
+			got, err := newClaudeCmd().Flags().GetBool("passthrough-auth")
+			if err != nil {
+				t.Fatalf("--passthrough-auth not registered: %v", err)
+			}
+			if got {
+				t.Errorf("RAFIKI_CLAUDE_PASSTHROUGH=%q enabled passthrough, want off", v)
+			}
+		})
+	}
+}
+
+// A subscription credential cannot buy an OpenRouter model. The proxy rejects
+// it too, but only on the first turn — by which point claude owns the TTY and
+// the failure reads as a hung session.
+func TestRunClaude_PassthroughRejectsNonAnthropicModel(t *testing.T) {
+	cmd := newClaudeCmd()
+	for flag, val := range map[string]string{"url": "http://localhost:8035", "token": "dev", "model": "openai/gpt-4o"} {
+		if err := cmd.Flags().Set(flag, val); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cmd.Flags().Set("passthrough-auth", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runClaude(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for --passthrough-auth with an OpenRouter model, got nil")
+	}
+	if !strings.Contains(err.Error(), "--passthrough-auth") {
+		t.Errorf("error = %v, want it to name the conflicting flag", err)
+	}
+}
+
+// Without a rafiki token there is no X-Rafiki-Token header, so the proxy sees
+// only the OAuth bearer, tries it as rafiki's own token and 401s. Catch it here
+// where the message can say what is actually wrong.
+func TestRunClaude_PassthroughRequiresToken(t *testing.T) {
+	cmd := newClaudeCmd()
+	for flag, val := range map[string]string{"url": "http://localhost:8035", "token": "", "model": "claude-opus-5"} {
+		if err := cmd.Flags().Set(flag, val); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cmd.Flags().Set("passthrough-auth", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runClaude(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for --passthrough-auth without a token, got nil")
+	}
+	if !strings.Contains(err.Error(), "--token") {
+		t.Errorf("error = %v, want it to mention --token", err)
+	}
+}

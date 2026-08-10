@@ -72,15 +72,23 @@ var Defaults = []string{
 // !Yd()`; a falsy value short-circuits via WKr()==="standard".)
 const toolSearchEnv = "ENABLE_TOOL_SEARCH"
 
-// anthropicModel reports whether model is served by Anthropic, and so can use
+// AnthropicModel reports whether model is served by Anthropic, and so can use
 // the deferred tools Claude Code would otherwise send to a model that cannot
-// call them.
+// call them. `rafiki claude` also uses it to refuse --passthrough-auth against
+// a model a Claude subscription cannot buy, before the session starts.
 //
 // This is a shape test rather than a catalog lookup on purpose: proxyenv is a
 // leaf package, the answer is needed before any network is available, and
 // being wrong in the "not Anthropic" direction only costs a fatter tools[]
 // while being wrong the other way costs the whole session.
-func anthropicModel(model string) bool {
+//
+// Note it is deliberately no substitute for the proxy's own check. A bare
+// alias resolves through routing.ResolveModel's table (glm-5.2 → an OpenRouter
+// id), and "~anthropic/..." keeps its tilde and routes to OpenRouter — this
+// predicate calls the first not-Anthropic and the second Anthropic. It is a
+// launch-time courtesy that errs toward letting work through; the proxy's 400
+// remains the authority.
+func AnthropicModel(model string) bool {
 	if model == "" {
 		return true // no override: Claude Code picks one of its own Anthropic ids
 	}
@@ -161,7 +169,7 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 		}
 	}
 
-	if !present[toolSearchEnv] && !anthropicModel(o.Model) {
+	if !present[toolSearchEnv] && !AnthropicModel(o.Model) {
 		env = append(env, toolSearchEnv+"=false")
 	}
 
