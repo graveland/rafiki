@@ -183,7 +183,7 @@ func (t *taskUpdateTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 	changes := make([]tasks.Change, len(params.Changes))
 	for i, ch := range params.Changes {
 		st := tasks.Status(ch.Status)
-		if !st.Valid() {
+		if !st.UserSettable() {
 			return ToolResult{}, fmt.Errorf("task_update: invalid status %q; valid: pending, in_progress, blocked, completed, failed", ch.Status)
 		}
 		changes[i] = tasks.Change{Handle: ch.Handle, Status: st}

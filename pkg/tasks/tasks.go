@@ -57,6 +57,22 @@ func (s Status) Valid() bool {
 	return false
 }
 
+// UserSettable reports whether an agent may set s directly via task_update.
+//
+// StatusDropped is excluded because a drop requires a reason (the DB enforces
+// it with tasks_drop_reason_required) and that is task_drop's job.
+// StatusOrphaned is excluded because it is daemon-stamped: it means "the
+// agent holding this died", which is a fact the thing it describes cannot
+// assert about itself.
+func (s Status) UserSettable() bool {
+	switch s {
+	case StatusPending, StatusInProgress, StatusBlocked,
+		StatusCompleted, StatusFailed:
+		return true
+	}
+	return false
+}
+
 // Task is one row of the ledger.
 type Task struct {
 	ID             string

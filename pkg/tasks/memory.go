@@ -148,15 +148,23 @@ func (ms *memoryStore) Update(ctx context.Context, convID string, changes []Chan
 		return nil, err
 	}
 
-	for _, ch := range changes {
-		if !ch.Status.Valid() {
+	// Validate and resolve EVERYTHING before mutating ANYTHING. The Postgres
+	// store gets this from its transaction; without the same discipline here
+	// a bad handle late in a batch leaves the earlier ones applied, and the
+	// two stores disagree about what a failed Update did.
+	targets := make([]*Task, len(changes))
+	for i, ch := range changes {
+		if !ch.Status.UserSettable() {
 			return nil, fmt.Errorf("%w: %q", ErrInvalidStatus, ch.Status)
 		}
 		t, err := ms.resolve(convID, ch.Handle)
 		if err != nil {
 			return nil, err
 		}
-		t.Status = ch.Status
+		targets[i] = t
+	}
+	for i, ch := range changes {
+		targets[i].Status = ch.Status
 	}
 
 	return AssignHandles(ms.listLocked(convID)), nil

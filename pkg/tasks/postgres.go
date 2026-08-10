@@ -111,7 +111,7 @@ func (ps *postgresStore) Update(ctx context.Context, convID string, changes []Ch
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, ch := range changes {
-		if !ch.Status.Valid() {
+		if !ch.Status.UserSettable() {
 			return nil, fmt.Errorf("%w: %q", ErrInvalidStatus, ch.Status)
 		}
 		t, err := ps.resolveInTx(ctx, tx, convID, ch.Handle)

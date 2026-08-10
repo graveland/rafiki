@@ -230,6 +230,44 @@ func RunConformance(t *testing.T, mk func(*testing.T) (tasks.Store, string)) {
 			t.Fatalf("err = %v; want ErrNotFound", err)
 		}
 	})
+
+	t.Run("a batch with one bad handle changes nothing", func(t *testing.T) {
+		s, conv := mk(t)
+		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{
+			{Content: "one", ActiveForm: "one-ing"},
+			{Content: "two", ActiveForm: "two-ing"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.Update(ctx, conv, []tasks.Change{
+			{Handle: "1", Status: tasks.StatusCompleted},
+			{Handle: "99", Status: tasks.StatusCompleted},
+		})
+		if err == nil {
+			t.Fatal("update with an unknown handle must fail")
+		}
+		rows, err := s.List(ctx, tasks.ListFilter{ConversationID: conv})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r.Status != tasks.StatusPending {
+				t.Fatalf("task %s is %s; a failed batch must apply nothing", r.Handle, r.Status)
+			}
+		}
+	})
+
+	t.Run("update refuses statuses the tool does not offer", func(t *testing.T) {
+		s, conv := mk(t)
+		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "one", ActiveForm: "one-ing"}}); err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []tasks.Status{tasks.StatusDropped, tasks.StatusOrphaned} {
+			if _, err := s.Update(ctx, conv, []tasks.Change{{Handle: "1", Status: bad}}); err == nil {
+				t.Fatalf("Update accepted %q; dropped is task_drop's job and orphaned is the daemon's", bad)
+			}
+		}
+	})
 }
 
 func TestMemoryStoreConformance(t *testing.T) {
