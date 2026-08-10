@@ -22,7 +22,7 @@ import (
 func TestDescribeReportsCapabilities(t *testing.T) {
 	root := t.TempDir()
 	srv := executor.NewServer(executor.Options{Root: root, Concurrency: 6, Version: "test"})
-	client := testClient(t, srv)
+	client := newTestClient(t, srv)
 	ctx := context.Background()
 
 	resp, err := client.Describe(ctx, connect.NewRequest(&executorpb.DescribeRequest{}))
@@ -60,7 +60,7 @@ func TestDescribeReportsCapabilities(t *testing.T) {
 
 func TestHealthReportsNoRunningHandles(t *testing.T) {
 	srv := executor.NewServer(executor.Options{Root: t.TempDir(), Concurrency: 6, Version: "test"})
-	client := testClient(t, srv)
+	client := newTestClient(t, srv)
 	ctx := context.Background()
 
 	resp, err := client.Health(ctx, connect.NewRequest(&executorpb.HealthRequest{}))
@@ -78,13 +78,66 @@ func TestHealthReportsNoRunningHandles(t *testing.T) {
 func TestConformance(t *testing.T) {
 	root := t.TempDir()
 	srv := executor.NewServer(executor.Options{Root: root, Concurrency: 6, Version: "test"})
-	client := testClient(t, srv)
+	client := newTestClient(t, srv)
 	RunConformance(t, client, root)
 }
 
-// testClient starts a server on a temp unix socket and returns a Connect
+// The executor must not carry the parent's credentialed tools. A registry
+// built from the full blueprint also has a nil task store, so an Execute
+// naming task_add nil-derefs and panics the handler.
+func TestExecutorDoesNotServeParentSideTools(t *testing.T) {
+	srv := executor.NewServer(executor.Options{Root: t.TempDir(), Concurrency: 6, Version: "test"})
+	client := newTestClient(t, srv)
+	ctx := context.Background()
+
+	for _, tool := range []string{"task_add", "task_list", "web_search", "web_fetch", "skill"} {
+		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "x", Tool: tool, InputJson: []byte(`{}`), TimeoutMs: 5000,
+		}))
+		if err != nil {
+			t.Fatalf("%s: transport error, want a typed Failure: %v", tool, err)
+		}
+		var failed bool
+		for stream.Receive() {
+			if _, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Failed); ok {
+				failed = true
+			}
+		}
+		if err := stream.Err(); err != nil {
+			t.Fatalf("%s: stream error, want a typed Failure: %v", tool, err)
+		}
+		if !failed {
+			t.Fatalf("%s: executor served a parent-side tool", tool)
+		}
+	}
+}
+
+func TestExecuteHonoursTimeoutMs(t *testing.T) {
+	srv := executor.NewServer(executor.Options{Root: t.TempDir(), Concurrency: 6, Version: "test"})
+	client := newTestClient(t, srv)
+	ctx := context.Background()
+
+	stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+		CallId: "slow", Tool: "bash", InputJson: []byte(`{"command":"sleep 10"}`), TimeoutMs: 500,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code executorpb.Failure_Code
+	for stream.Receive() {
+		if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Failed); ok {
+			code = ev.Failed.Code
+		}
+	}
+	_ = stream.Err()
+	if code != executorpb.Failure_CODE_TIMEOUT {
+		t.Fatalf("failure code = %v, want CODE_TIMEOUT", code)
+	}
+}
+
+// newTestClient starts a server on a temp unix socket and returns a Connect
 // client dialing it. The caller is responsible for cleanup via t.Cleanup.
-func testClient(t *testing.T, handler executorpbconnect.ExecutorServiceHandler) executorpbconnect.ExecutorServiceClient {
+func newTestClient(t *testing.T, srv *executor.Server) executorpbconnect.ExecutorServiceClient {
 	t.Helper()
 
 	sockPath := filepath.Join("/tmp", "rafiki-exec-"+t.Name()+".sock")
@@ -92,10 +145,10 @@ func testClient(t *testing.T, handler executorpbconnect.ExecutorServiceHandler) 
 	t.Cleanup(func() { os.Remove(sockPath) })
 
 	mux := http.NewServeMux()
-	mux.Handle(executorpbconnect.NewExecutorServiceHandler(handler))
+	mux.Handle(executorpbconnect.NewExecutorServiceHandler(srv))
 	protos := new(http.Protocols)
 	protos.SetUnencryptedHTTP2(true)
-	srv := &http.Server{Handler: mux, Protocols: protos}
+	httpSrv := &http.Server{Handler: mux, Protocols: protos}
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -104,9 +157,9 @@ func testClient(t *testing.T, handler executorpbconnect.ExecutorServiceHandler) 
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { httpSrv.Close() })
 	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			t.Errorf("serve: %v", err)
 		}
 	}()

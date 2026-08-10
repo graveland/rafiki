@@ -96,6 +96,43 @@ func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 	return r
 }
 
+// MaterializeOnly builds a Registry containing only the named blueprints.
+//
+// It exists for the executor, which must serve a strict subset: a registry
+// built from the full blueprint carries web_fetch, web_search and skill (all
+// of which belong above the credential boundary) and the task_* tools (whose
+// store is nil in an executor's ToolOpts, so calling one panics).
+//
+// A blueprint that declines by returning (nil, nil) is omitted, exactly as
+// in MaterializeAll. A name with no matching blueprint is ignored.
+func (br *BlueprintRegistry) MaterializeOnly(opts ToolOpts, names []string) *Registry {
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	r := NewRegistry()
+	for _, bp := range br.All() {
+		if !want[bp.Name()] {
+			continue
+		}
+		var t Tool
+		if m, ok := bp.(Materializer); ok {
+			var err error
+			t, err = m.Materialize(opts)
+			if err != nil {
+				panic(fmt.Sprintf("tools: MaterializeOnly: %q: %v", bp.Name(), err))
+			}
+			if t == nil {
+				continue // declined
+			}
+		} else {
+			t = bp
+		}
+		r.Register(t)
+	}
+	return r
+}
+
 // routedSet returns the set of tool names forwarded to an executor.
 func routedSet() map[string]bool {
 	s := make(map[string]bool, 9)

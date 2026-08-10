@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,15 +41,21 @@ type Server struct {
 	labels map[string]string
 	reg    *tools.Registry
 	jobs   *jobRegistry
+	sem    chan struct{} // bounds concurrent Execute calls
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
 func NewServer(opts Options) *Server {
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 6
+	}
 	tr := tools.NewFileTracker()
-	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
+	// MaterializeOnly, not MaterializeAll: the full blueprint would give the
+	// executor the parent's credentialed tools and a nil task store.
+	reg := tools.DefaultBlueprint.MaterializeOnly(tools.ToolOpts{
 		Cwd:         opts.Root,
 		FileTracker: tr,
-	})
+	}, tools.ExecutorLocalTools())
 	return &Server{
 		id:   randomID(),
 		opts: opts,
@@ -57,6 +64,7 @@ func NewServer(opts Options) *Server {
 		},
 		reg:  reg,
 		jobs: newJobRegistry(),
+		sem:  make(chan struct{}, opts.Concurrency),
 	}
 }
 
@@ -65,16 +73,13 @@ func (s *Server) Describe(
 	_ *connect.Request[executorpb.DescribeRequest],
 ) (*connect.Response[executorpb.DescribeResponse], error) {
 	return connect.NewResponse(&executorpb.DescribeResponse{
-		ExecutorId:    s.id,
-		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
-		Roots:         []string{s.opts.Root},
-		Concurrency:   int32(s.opts.Concurrency),
-		Isolation:     "none",
-		WorkspaceMode: "pinned",
-		Tools: []string{
-			"read", "write", "edit", "glob", "grep", "bash",
-			"bash_start", "bash_output", "bash_kill",
-		},
+		ExecutorId:         s.id,
+		Platform:           runtime.GOOS + "/" + runtime.GOARCH,
+		Roots:              []string{s.opts.Root},
+		Concurrency:        int32(s.opts.Concurrency),
+		Isolation:          "none",
+		WorkspaceMode:      "pinned",
+		Tools:              tools.RoutedToExecutor(),
 		Version:            s.opts.Version,
 		SelfReportedLabels: s.labels,
 	}), nil
@@ -107,6 +112,24 @@ func (s *Server) Execute(
 		return s.startBackground(ctx, msg, stream)
 	}
 
+	// Bound concurrent tool calls. Describe advertises Options.Concurrency
+	// and the README documents it; without this it is decoration.
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Honour the client's deadline. Without it CODE_TIMEOUT — one of four
+	// documented failure codes, with its own retry semantics — can never be
+	// produced, and a read or grep on a pathological tree runs forever.
+	if msg.TimeoutMs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(msg.TimeoutMs)*time.Millisecond)
+		defer cancel()
+	}
+
 	// Verify expect_mtime before dispatching.
 	for path, expectedNS := range msg.ExpectMtime {
 		info, err := os.Stat(path)
@@ -136,6 +159,24 @@ func (s *Server) Execute(
 
 	name := msg.Tool
 	resultStr, err := s.reg.Execute(ctx, name, json.RawMessage(msg.InputJson))
+
+	// Check the deadline before the tool's own error, and even when the
+	// tool reports success: bash specifically treats a killed-by-context
+	// command as a completed call and folds a "[bash: command timed out
+	// ...]" note into its (nil-error) result text rather than returning an
+	// error, so err == nil is not proof the deadline held. Once our own
+	// timeout has elapsed the call is CODE_TIMEOUT regardless of what the
+	// tool itself reports.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code:    executorpb.Failure_CODE_TIMEOUT,
+					Message: fmt.Sprintf("tool %q exceeded timeout_ms=%d", name, msg.TimeoutMs),
+				},
+			},
+		})
+	}
 	if err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{
