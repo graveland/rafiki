@@ -124,3 +124,33 @@ func buildInjectionFrame(body string, urgent bool) json.RawMessage {
 }
 
 func now() time.Time { return time.Now() }
+
+func TestEventBufConfigDefaultsOnGarbage(t *testing.T) {
+	t.Setenv("RAFIKI_EVENTBUF_DEBOUNCE_MS", "not-a-number")
+	cfg := loadEventBufConfig()
+	if cfg.Debounce != 5*time.Second {
+		t.Fatalf("Debounce = %v; want the 5s default. A zero debounce silently "+
+			"turns the buffer into a pass-through.", cfg.Debounce)
+	}
+}
+
+func TestEventBufConfigValidValues(t *testing.T) {
+	t.Setenv("RAFIKI_EVENTBUF_DEBOUNCE_MS", "10000")
+	t.Setenv("RAFIKI_EVENTBUF_MAX_WAIT_MS", "120000")
+	t.Setenv("RAFIKI_EVENTBUF_MAX_FRAGMENTS", "50")
+	t.Setenv("RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT", "16000")
+
+	cfg := loadEventBufConfig()
+	if cfg.Debounce != 10*time.Second {
+		t.Fatalf("Debounce = %v; want 10s", cfg.Debounce)
+	}
+	if cfg.MaxWait != 120*time.Second {
+		t.Fatalf("MaxWait = %v; want 120s", cfg.MaxWait)
+	}
+	if cfg.MaxFragments != 50 {
+		t.Fatalf("MaxFragments = %d; want 50", cfg.MaxFragments)
+	}
+	if cfg.MaxBytesPerFrag != 16000 {
+		t.Fatalf("MaxBytesPerFrag = %d; want 16000", cfg.MaxBytesPerFrag)
+	}
+}

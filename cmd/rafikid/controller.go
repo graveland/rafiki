@@ -157,6 +157,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		insights:    local.New(local.Options{Pool: pool}),
 		baseCtx:     baseCtx,
 		tasks:       taskStore(pool),
+		evbuf:       newEventBuffer(),
 	}
 }
 

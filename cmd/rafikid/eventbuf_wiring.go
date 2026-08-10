@@ -3,9 +3,13 @@ package main
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -55,4 +59,47 @@ func (c *Controller) wireEventBuffer() {
 	}
 	c.evbuf.SetFlush(c.injectBatch)
 	c.evbuf.SetBusy(func(childID string) bool { return childIsBusy(c.st, childID) })
+}
+
+// loadEventBufConfig reads event buffer tunables from the environment.
+// A zero or unparseable value falls back to the documented default.
+func loadEventBufConfig() eventbuf.Config {
+	return eventbuf.Config{
+		Debounce:        envDuration("RAFIKI_EVENTBUF_DEBOUNCE_MS", 5000),
+		MaxWait:         envDuration("RAFIKI_EVENTBUF_MAX_WAIT_MS", 60000),
+		MaxFragments:    envInt("RAFIKI_EVENTBUF_MAX_FRAGMENTS", 30),
+		MaxBytesPerFrag: envInt("RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT", 8192),
+	}
+}
+
+// newEventBuffer constructs the daemon's shared event buffer from environment
+// config. Returns nil when the buffer is not configured (a future phase that
+// never binds the buffer effectively disables it).
+func newEventBuffer() *eventbuf.Buffer {
+	cfg := loadEventBufConfig()
+	return eventbuf.New(cfg, eventbuf.RealClock())
+}
+
+func envInt(name string, def int) int {
+	s := os.Getenv(name)
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+func envDuration(name string, defMs int) time.Duration {
+	s := os.Getenv(name)
+	if s == "" {
+		return time.Duration(defMs) * time.Millisecond
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return time.Duration(defMs) * time.Millisecond
+	}
+	return time.Duration(n) * time.Millisecond
 }
