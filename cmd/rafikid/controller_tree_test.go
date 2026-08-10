@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -170,5 +171,75 @@ func TestSpawnRejectsUnknownParent(t *testing.T) {
 	// No new child should have appeared in the store.
 	if after := len(st.List()); after != before {
 		t.Fatalf("store grew from %d to %d children — rejection must happen before spawn", before, after)
+	}
+}
+
+func TestResumePreservesLineageLabels(t *testing.T) {
+	ctrl := newTestController(t)
+
+	// 1. Spawn a top-level child A.
+	parentID := spawnTestChild(t, ctrl, nil)
+
+	// Verify A has no lineage labels.
+	snapA, ok := ctrl.st.Get(parentID)
+	if !ok {
+		t.Fatalf("child A not found")
+	}
+	if _, exists := snapA.Labels[childstore.LabelParent]; exists {
+		t.Error("top-level child A should not have rafiki/parent label")
+	}
+
+	// 2. Spawn child B with ParentChildID = A.
+	req := protocol.SpawnRequest{
+		Cwd:           t.TempDir(),
+		PiBinary:      fakePiBin(t),
+		NoSession:     true,
+		ParentChildID: parentID,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := ctrl.Spawn(ctx, req)
+	if err != nil {
+		t.Fatalf("spawn child B: %v", err)
+	}
+	childBID := res.ChildID
+
+	// Verify B got the lineage labels.
+	snapB, ok := ctrl.st.Get(childBID)
+	if !ok {
+		t.Fatalf("child B not found")
+	}
+	if got := snapB.Labels[childstore.LabelParent]; got != parentID {
+		t.Fatalf("B.LabelParent = %q, want %q", got, parentID)
+	}
+	if got := snapB.Labels[childstore.LabelRoot]; got != parentID {
+		t.Fatalf("B.LabelRoot = %q, want %q", got, parentID)
+	}
+
+	// 3. Kill B and wait for removal.
+	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer killCancel()
+	if _, err := ctrl.Kill(killCtx, childBID, 2000, 500); err != nil {
+		t.Fatalf("kill B: %v", err)
+	}
+	waitForExited(t, ctrl.st, childBID, 5*time.Second)
+
+	// 4. Resume B.
+	resCtx, resCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer resCancel()
+	if _, err := ctrl.Resume(resCtx, childBID, ""); err != nil {
+		t.Fatalf("resume B: %v", err)
+	}
+
+	// 5. Assert B's labels STILL contain lineage.
+	snapResumed, ok := ctrl.st.Get(childBID)
+	if !ok {
+		t.Fatalf("child B not found after resume")
+	}
+	if got := snapResumed.Labels[childstore.LabelParent]; got != parentID {
+		t.Fatalf("after resume B.LabelParent = %q, want %q — resume dropped the parent label", got, parentID)
+	}
+	if got := snapResumed.Labels[childstore.LabelRoot]; got != parentID {
+		t.Fatalf("after resume B.LabelRoot = %q, want %q — resume dropped the root label", got, parentID)
 	}
 }
