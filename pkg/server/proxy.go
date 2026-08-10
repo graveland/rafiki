@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -71,6 +72,16 @@ func (p *MessagesProxy) SetRawTrace(s *routing.RawTraceStore, recordAll bool) {
 
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
+
+// cachePct returns the percentage of input tokens served from cache, rounded to
+// one decimal place.
+func cachePct(u routing.CapturedUsage) float64 {
+	total := u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens
+	if total == 0 {
+		return 0
+	}
+	return math.Round(float64(u.CacheReadTokens)/float64(total)*1000) / 10
+}
 
 func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *slog.Logger) *MessagesProxy {
 	// ResponseHeaderTimeout bounds connect + time-to-first-byte so a hung
@@ -715,6 +726,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
+		"cache_pct", cachePct(usage),
 		"stop_reason", stop, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
 	// Detached: a mid-stream client disconnect cancels r.Context(), but capture
