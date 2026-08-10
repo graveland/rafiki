@@ -2,7 +2,9 @@ package childstore
 
 // Lineage label keys. These are daemon-written: the controller computes them
 // at spawn and re-stamps them at resume. They are never accepted from a
-// caller — SpawnRequest.Labels rejects the whole rafiki/ prefix.
+// caller — cmd/rafikid/labels.go rejects BOTH the rafiki/ and the legacy
+// fundi/ prefix, which matters because labelLookup below still honours the
+// legacy spelling on read.
 const (
 	LabelParent = "rafiki/parent"
 	LabelRoot   = "rafiki/root"

@@ -10,6 +10,25 @@ import (
 // Alphanumeric plus: underscore, dot, forward-slash, hyphen.
 var labelKeyRE = regexp.MustCompile(`^[a-zA-Z0-9_./-]+$`)
 
+// reservedLabelPrefixes are the namespaces only the daemon may write.
+//
+// "fundi/" is here and not merely tolerated on read: childstore.labelLookup
+// accepts fundi/parent and fundi/root as authoritative fallbacks for records
+// written before the rename, so a client that could SET them could forge a
+// lineage and make IsDescendant — the authority predicate behind every
+// steering verb — return a false positive across agents. Nothing writes the
+// legacy spelling any more; nothing may.
+var reservedLabelPrefixes = []string{"rafiki/", "fundi/"}
+
+func reservedLabelPrefix(k string) string {
+	for _, p := range reservedLabelPrefixes {
+		if strings.HasPrefix(k, p) {
+			return p
+		}
+	}
+	return ""
+}
+
 // validateLabelKey returns an error if k is empty or contains disallowed characters.
 func validateLabelKey(k string) error {
 	if k == "" {
@@ -33,8 +52,8 @@ func validateUserLabelKeys(m map[string]string) error {
 		if err := validateLabelKey(k); err != nil {
 			return err
 		}
-		if strings.HasPrefix(k, "rafiki/") {
-			return fmt.Errorf("labels with 'rafiki/' prefix are reserved (got: %s)", k)
+		if p := reservedLabelPrefix(k); p != "" {
+			return fmt.Errorf("labels with '%s' prefix are reserved (got: %s)", p, k)
 		}
 	}
 	return nil
@@ -47,8 +66,8 @@ func validateUserRemoveKeys(keys []string) error {
 		if err := validateLabelKey(k); err != nil {
 			return err
 		}
-		if strings.HasPrefix(k, "rafiki/") {
-			return fmt.Errorf("labels with 'rafiki/' prefix are reserved (got: %s)", k)
+		if p := reservedLabelPrefix(k); p != "" {
+			return fmt.Errorf("labels with '%s' prefix are reserved (got: %s)", p, k)
 		}
 	}
 	return nil

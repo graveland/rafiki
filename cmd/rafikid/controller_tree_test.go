@@ -243,3 +243,24 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 		t.Fatalf("after resume B.LabelRoot = %q, want %q — resume dropped the root label", got, parentID)
 	}
 }
+
+// tree.go reads fundi/parent as an authoritative fallback for pre-rename
+// records. If a client can WRITE it, lineage is forgeable and IsDescendant —
+// the authority predicate for every steering verb — returns a false positive
+// across agents.
+func TestReservedLabelPrefixesRejectBothSpellings(t *testing.T) {
+	for _, key := range []string{
+		"rafiki/parent", "rafiki/root", "fundi/parent", "fundi/root", "fundi/anything",
+	} {
+		if err := validateUserLabelKeys(map[string]string{key: "c_victim"}); err == nil {
+			t.Errorf("validateUserLabelKeys accepted %q; lineage must not be settable by a caller", key)
+		}
+		if err := validateUserRemoveKeys([]string{key}); err == nil {
+			t.Errorf("validateUserRemoveKeys accepted %q", key)
+		}
+	}
+	// An ordinary label must still work.
+	if err := validateUserLabelKeys(map[string]string{"team": "infra"}); err != nil {
+		t.Errorf("ordinary label rejected: %v", err)
+	}
+}
