@@ -35,9 +35,9 @@ func TestPostgresStoreConformance(t *testing.T) {
 			t.Fatalf("create conversation: %v", err)
 		}
 		t.Cleanup(func() {
-			pool.Exec(context.Background(),
+			_, _ = pool.Exec(context.Background(),
 				`DELETE FROM conversations.tasks WHERE conversation_id = $1`, convID)
-			pool.Exec(context.Background(),
+			_, _ = pool.Exec(context.Background(),
 				`DELETE FROM conversations.conversation WHERE id = $1`, convID)
 		})
 		return tasks.NewPostgresStore(pool), convID

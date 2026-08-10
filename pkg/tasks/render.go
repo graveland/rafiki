@@ -18,7 +18,8 @@ func AssignHandles(all []Task) []Task {
 	}
 	handle := func(t Task) string {
 		var parts []string
-		cur, ok := t, true
+		cur := t
+		var ok bool
 		for range 64 { // depth guard; a cycle must not hang a render
 			parts = append([]string{strconv.Itoa(cur.Ordinal)}, parts...)
 			if cur.ParentID == "" {

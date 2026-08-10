@@ -24,7 +24,7 @@ func (ps *postgresStore) Add(ctx context.Context, convID, parentHandle string, i
 	if err != nil {
 		return nil, fmt.Errorf("tasks add: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Resolve parent ID if a handle was given.
 	var parentID *string
@@ -37,14 +37,16 @@ func (ps *postgresStore) Add(ctx context.Context, convID, parentHandle string, i
 	}
 
 	// Lock the (convID, parentID) partition for ordinal allocation.
-	_, err = tx.Exec(ctx,
+	// ErrNoRows is fine — no rows to lock means we start at ordinal 1.
+	if _, lockErr := tx.Exec(ctx,
 		`SELECT 1 FROM conversations.tasks
 		  WHERE conversation_id = $1
 		    AND parent_id IS NOT DISTINCT FROM $2
 		  FOR UPDATE`,
 		convID, parentID,
-	)
-	// ErrNoRows is fine — no rows to lock means we start at ordinal 1.
+	); lockErr != nil {
+		return nil, fmt.Errorf("tasks add: lock: %w", lockErr)
+	}
 
 	// Compute the next ordinal. MUST use MAX, never COUNT.
 	var nextOrdinal int
@@ -107,7 +109,7 @@ func (ps *postgresStore) Update(ctx context.Context, convID string, changes []Ch
 	if err != nil {
 		return nil, fmt.Errorf("tasks update: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, ch := range changes {
 		if !ch.Status.Valid() {
@@ -148,7 +150,7 @@ func (ps *postgresStore) Drop(ctx context.Context, convID, handle, reason string
 	if err != nil {
 		return nil, fmt.Errorf("tasks drop: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	t, err := ps.resolveInTx(ctx, tx, convID, handle)
 	if err != nil {
@@ -232,7 +234,7 @@ func (ps *postgresStore) Assign(ctx context.Context, convID, handle, assignee st
 	if err != nil {
 		return Task{}, fmt.Errorf("tasks assign: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	t, err := ps.resolveInTx(ctx, tx, convID, handle)
 	if err != nil {
