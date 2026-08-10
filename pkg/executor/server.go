@@ -295,6 +295,23 @@ func (s *Server) Cancel(
 	return connect.NewResponse(&executorpb.CancelResponse{}), nil
 }
 
+// JobOutput is the one-shot poll behind bash_output. It never blocks: it
+// answers from the ring as it stands and returns immediately, whether or not
+// the job has exited.
+func (s *Server) JobOutput(
+	_ context.Context,
+	req *connect.Request[executorpb.JobOutputRequest],
+) (*connect.Response[executorpb.JobOutputResponse], error) {
+	data, total, exited, code, found := s.jobs.output(req.Msg.Handle, req.Msg.Since)
+	return connect.NewResponse(&executorpb.JobOutputResponse{
+		Data:     data,
+		Total:    total,
+		Exited:   exited,
+		ExitCode: int32(code),
+		Found:    found,
+	}), nil
+}
+
 // collectObservedMtimes stats files touched by a tool call and returns their
 // current mtimes. The parent uses these to populate its FileTracker so it can
 // pass expect_mtime on the next write.

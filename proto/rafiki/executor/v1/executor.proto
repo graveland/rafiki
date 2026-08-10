@@ -10,6 +10,7 @@ service ExecutorService {
   rpc Execute(ExecuteRequest) returns (stream ExecuteResponse);
   rpc Attach(AttachRequest) returns (stream AttachResponse);
   rpc Cancel(CancelRequest) returns (CancelResponse);
+  rpc JobOutput(JobOutputRequest) returns (JobOutputResponse);
 }
 
 message DescribeRequest {}
@@ -89,3 +90,23 @@ message AttachResponse {
 
 message CancelRequest { string call_id = 1; }
 message CancelResponse {}
+
+// JobOutput is the one-shot poll behind bash_output. Attach is a stream and
+// draining it to answer "what has this printed so far" means either blocking
+// until exit or racing a deadline.
+message JobOutputRequest {
+  string handle = 1;
+  // Byte offset into the job's lifetime output. 0 means "from whatever is
+  // still retained". Pass back the previous response's `total` to poll.
+  int64  since = 2;
+}
+message JobOutputResponse {
+  bytes data = 1;
+  // Bytes the job has ever written, including any dropped from the ring.
+  int64 total = 2;
+  bool  exited = 3;
+  int32 exit_code = 4;
+  // false when the handle is unknown — either never started, or reaped
+  // after the retention window.
+  bool  found = 5;
+}

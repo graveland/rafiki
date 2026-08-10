@@ -82,6 +82,22 @@ Cancel(callId) → {}
 Unary. Terminates the background job named by `callId`. Does not wait for
 the process to reap.
 
+### `JobOutput`
+
+One-shot poll of a background job. Never blocks.
+
+| Field | Direction | Meaning |
+|---|---|---|
+| `handle` | → | the handle returned by a background `Execute` |
+| `since` | → | byte offset into lifetime output; pass back the previous `total` |
+| `data` | ← | bytes from `since` (or the ring's oldest byte) to `total` |
+| `total` | ← | bytes the job has ever written, including any dropped |
+| `exited` | ← | whether the process has been reaped |
+| `exit_code` | ← | meaningful only when `exited` |
+| `found` | ← | false when the handle is unknown or was reaped after 10 minutes |
+
+`Attach` remains the streaming path. Use `JobOutput` when you want a snapshot.
+
 ## Failure codes
 
 Failures are typed, never collapsed into a bare string. The parent makes a

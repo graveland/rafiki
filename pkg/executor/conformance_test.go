@@ -311,6 +311,62 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		}
 	})
 
+	t.Run("JobOutput polls a running job without blocking", func(t *testing.T) {
+		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "bg-poll", Tool: "bash", Background: true,
+			InputJson: []byte(`{"command":"echo hello; sleep 3"}`),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var handle string
+		for stream.Receive() {
+			if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Handle); ok {
+				handle = ev.Handle
+				break
+			}
+		}
+		_ = stream.Err()
+
+		time.Sleep(500 * time.Millisecond)
+		start := time.Now()
+		resp, err := client.JobOutput(ctx, connect.NewRequest(&executorpb.JobOutputRequest{Handle: handle}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("JobOutput blocked for %v; it must not wait for the job", elapsed)
+		}
+		if !resp.Msg.Found {
+			t.Fatal("Found=false for a live handle")
+		}
+		if resp.Msg.Exited {
+			t.Fatal("Exited=true while the job is still sleeping")
+		}
+		if !strings.Contains(string(resp.Msg.Data), "hello") {
+			t.Fatalf("data = %q, want it to contain %q", resp.Msg.Data, "hello")
+		}
+
+		// A second poll from the returned offset must return nothing new.
+		resp2, err := client.JobOutput(ctx, connect.NewRequest(&executorpb.JobOutputRequest{
+			Handle: handle, Since: resp.Msg.Total,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp2.Msg.Data) != 0 {
+			t.Fatalf("polling from the previous total returned %q; want nothing", resp2.Msg.Data)
+		}
+
+		unknown, err := client.JobOutput(ctx, connect.NewRequest(&executorpb.JobOutputRequest{Handle: "nope"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if unknown.Msg.Found {
+			t.Fatal("Found=true for an unknown handle")
+		}
+	})
+
 	t.Run("Cancel kills the whole process group", func(t *testing.T) {
 		marker := filepath.Join(root, "grandchild-alive")
 		// The outer bash exits immediately; the backgrounded subshell keeps

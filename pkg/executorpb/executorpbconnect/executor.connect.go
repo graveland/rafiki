@@ -44,6 +44,9 @@ const (
 	ExecutorServiceAttachProcedure = "/rafiki.executor.v1.ExecutorService/Attach"
 	// ExecutorServiceCancelProcedure is the fully-qualified name of the ExecutorService's Cancel RPC.
 	ExecutorServiceCancelProcedure = "/rafiki.executor.v1.ExecutorService/Cancel"
+	// ExecutorServiceJobOutputProcedure is the fully-qualified name of the ExecutorService's JobOutput
+	// RPC.
+	ExecutorServiceJobOutputProcedure = "/rafiki.executor.v1.ExecutorService/JobOutput"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -53,6 +56,7 @@ type ExecutorServiceClient interface {
 	Execute(context.Context, *connect.Request[executorpb.ExecuteRequest]) (*connect.ServerStreamForClient[executorpb.ExecuteResponse], error)
 	Attach(context.Context, *connect.Request[executorpb.AttachRequest]) (*connect.ServerStreamForClient[executorpb.AttachResponse], error)
 	Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error)
+	JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error)
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -96,16 +100,23 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("Cancel")),
 			connect.WithClientOptions(opts...),
 		),
+		jobOutput: connect.NewClient[executorpb.JobOutputRequest, executorpb.JobOutputResponse](
+			httpClient,
+			baseURL+ExecutorServiceJobOutputProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("JobOutput")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // executorServiceClient implements ExecutorServiceClient.
 type executorServiceClient struct {
-	describe *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
-	health   *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
-	execute  *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
-	attach   *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
-	cancel   *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
+	describe  *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
+	health    *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
+	execute   *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
+	attach    *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
+	cancel    *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
+	jobOutput *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -133,6 +144,11 @@ func (c *executorServiceClient) Cancel(ctx context.Context, req *connect.Request
 	return c.cancel.CallUnary(ctx, req)
 }
 
+// JobOutput calls rafiki.executor.v1.ExecutorService.JobOutput.
+func (c *executorServiceClient) JobOutput(ctx context.Context, req *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error) {
+	return c.jobOutput.CallUnary(ctx, req)
+}
+
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
 type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
@@ -140,6 +156,7 @@ type ExecutorServiceHandler interface {
 	Execute(context.Context, *connect.Request[executorpb.ExecuteRequest], *connect.ServerStream[executorpb.ExecuteResponse]) error
 	Attach(context.Context, *connect.Request[executorpb.AttachRequest], *connect.ServerStream[executorpb.AttachResponse]) error
 	Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error)
+	JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error)
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -179,6 +196,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("Cancel")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceJobOutputHandler := connect.NewUnaryHandler(
+		ExecutorServiceJobOutputProcedure,
+		svc.JobOutput,
+		connect.WithSchema(executorServiceMethods.ByName("JobOutput")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -191,6 +214,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceAttachHandler.ServeHTTP(w, r)
 		case ExecutorServiceCancelProcedure:
 			executorServiceCancelHandler.ServeHTTP(w, r)
+		case ExecutorServiceJobOutputProcedure:
+			executorServiceJobOutputHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -218,4 +243,8 @@ func (UnimplementedExecutorServiceHandler) Attach(context.Context, *connect.Requ
 
 func (UnimplementedExecutorServiceHandler) Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Cancel is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.JobOutput is not implemented"))
 }
