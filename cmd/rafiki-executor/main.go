@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
@@ -50,16 +54,30 @@ func main() {
 		wd = abs
 	}
 
-	// Remove a stale socket file from a previous run.
-	os.Remove(*socketPath)
-
-	ln, err := net.Listen("unix", *socketPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: listen on %s: %v\n", *socketPath, err)
+	// A stale socket file must be removed, but a LIVE one must not: removing
+	// it silently steals every future connection from a running executor
+	// while leaving it serving the ones it already has.
+	if conn, err := net.DialTimeout("unix", *socketPath, 500*time.Millisecond); err == nil {
+		conn.Close()
+		fmt.Fprintf(os.Stderr, "error: %s is already served by a live executor\n", *socketPath)
 		os.Exit(1)
 	}
-	if err := os.Chmod(*socketPath, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "error: chmod %s: %v\n", *socketPath, err)
+	if err := os.Remove(*socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "error: cannot remove stale socket %s: %v\n", *socketPath, err)
+		os.Exit(1)
+	}
+
+	// Umask around Listen rather than chmod after it: between a
+	// world-accessible bind and the chmod there is a window in which any
+	// local user can connect to a surface that runs arbitrary bash.
+	// net.Listen binds unix sockets against a base mode of 0777 (not 0666
+	// like regular files), so the umask must also clear the owner's execute
+	// bit to land on 0600: 0177, not 0077.
+	oldMask := unix.Umask(0o177)
+	ln, err := net.Listen("unix", *socketPath)
+	unix.Umask(oldMask)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: listen on %s: %v\n", *socketPath, err)
 		os.Exit(1)
 	}
 

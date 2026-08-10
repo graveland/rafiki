@@ -203,7 +203,12 @@ go build -o bin/rafiki-executor ./cmd/rafiki-executor
 - `--concurrency` — maximum concurrent tool calls (default 6)
 
 **Socket permissions are the only access control in this phase.** The socket
-is created with mode `0600`, so another user on the same host cannot reach it.
+is created under a `0177` umask, so it is `0600` from the moment it exists —
+no window in which another local user can connect. The executor refuses to
+start when the path is already served by a live executor, rather than
+silently stealing its future connections. Anyone who *can* open the socket
+gets arbitrary `bash` and filesystem access inside `--root`; there is no
+authentication beyond the filesystem.
 
 See `docs/reference/executor-protocol.md` for the full wire protocol.
 
