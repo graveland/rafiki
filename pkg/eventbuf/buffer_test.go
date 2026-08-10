@@ -434,3 +434,26 @@ func TestAssembleBatchAppliesByteCapAfterFragmentCap(t *testing.T) {
 		t.Fatalf("marker = %q; want %q", marker, wantMarker)
 	}
 }
+
+func TestForgetDiscardsEverythingForADeadChild(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	rec := &flushRecorder{}
+	b := New(Config{Debounce: 5 * time.Second}, clk)
+	b.SetFlush(rec.record)
+	b.SetBusy(func(string) bool { return true })
+
+	b.Push("c_dead", "subagents", "", "worker finished")
+	clk.Advance(10 * time.Second) // timer fires, defers on busy
+
+	b.Forget("c_dead")
+
+	b.SetBusy(func(string) bool { return false })
+	b.DrainIdle("c_dead")
+	if rec.n() != 0 {
+		t.Fatalf("delivered %d batches to a forgotten child; want 0", rec.n())
+	}
+	clk.Advance(time.Hour)
+	if rec.n() != 0 {
+		t.Fatalf("a forgotten child's timer still fired")
+	}
+}

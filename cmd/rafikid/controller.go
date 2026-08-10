@@ -2375,6 +2375,12 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		}
 	}
 
+	// Drop any buffered events aimed at this child. It will never transition
+	// to idle again, so DrainIdle can never clear them.
+	if c.evbuf != nil {
+		c.evbuf.Forget(childID)
+	}
+
 	// Sweep this child's unfinished work to orphaned BEFORE cm.Remove.
 	// cm.Remove is the observable "kill complete" signal (waitForChildRemoval
 	// blocks on it), so sweeping after it would let a caller see a finished

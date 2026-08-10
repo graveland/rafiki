@@ -208,6 +208,24 @@ func (b *Buffer) DrainIdle(childID string) {
 	}
 }
 
+// Forget discards every buffered batch for childID and stops its timers.
+//
+// The daemon calls this on child exit. Without it a child that dies mid-turn
+// leaves its deferred batches in the buffer forever: DrainIdle is the only
+// thing that clears deferred state and it only fires on an idle transition,
+// which a dead child never makes.
+func (b *Buffer) Forget(childID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for bk, pk := range b.state {
+		if bk.childID != childID {
+			continue
+		}
+		pk.reset()
+		delete(b.state, bk)
+	}
+}
+
 // --- internal ---
 
 func validSource(childID, source, op string) bool {
