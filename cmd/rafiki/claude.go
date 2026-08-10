@@ -44,6 +44,10 @@ func newClaudeCmd() *cobra.Command {
 		Long: "Resolves the proxy URL and token, sets the environment Claude Code needs,\n" +
 			"and execs your own claude binary. Not a daemon child — this runs in your\n" +
 			"terminal and is not supervised, listed, or attachable.\n\n" +
+			"With --passthrough-auth, your own Claude subscription is billed instead\n" +
+			"of the daemon's API key: rafiki forwards your credential upstream and\n" +
+			"still captures the conversation. Anthropic models only — an OpenRouter\n" +
+			"slash id is rejected, because a subscription credential cannot buy one.\n\n" +
 			"Everything after -- is passed to claude verbatim.\n\n" +
 			"Example:\n" +
 			"  rafiki claude --model glm-5.2 -- --permission-mode plan",
@@ -53,6 +57,8 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().String("token", envOr("RAFIKI_TOKEN", "dev"), "static bearer token for the proxy (or RAFIKI_TOKEN)")
 	cmd.Flags().String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
 	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
+	cmd.Flags().Bool("passthrough-auth", os.Getenv("RAFIKI_CLAUDE_PASSTHROUGH") != "",
+		"bill your own Claude subscription upstream instead of the daemon's API key (or RAFIKI_CLAUDE_PASSTHROUGH)")
 	return cmd
 }
 
@@ -102,6 +108,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	model, _ := cmd.Flags().GetString("model")
 	session, _ := cmd.Flags().GetString("session")
+	passthrough, _ := cmd.Flags().GetBool("passthrough-auth")
 
 	if url == "" {
 		return errors.New("--url (or RAFIKI_URL) is required")
@@ -130,6 +137,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 		Token:             token,
 		Model:             model,
 		AutoCompactWindow: autoCompact,
+		PassthroughAuth:   passthrough,
 		Headers: map[string]string{
 			// Correlates every turn of this session onto ONE captured
 			// conversation; without it the proxy falls back to one
