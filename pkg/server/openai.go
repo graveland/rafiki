@@ -198,6 +198,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 		"conversation", cr.convID, "upstream", upstream, "model", model, "protocol", "openai",
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens,
+		"cache_pct", cachePct(usage),
 		"finish_reason", finish, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "openai", elapsed, usage)
 	if !cr.on {
