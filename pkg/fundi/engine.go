@@ -123,7 +123,7 @@ type Engine struct {
 
 // toolSetWithConvID wraps an agentloop.ToolSet to inject the conversation ID
 // into the context before every tool execution. Tools that need per-conversation
-// persistence (todo) read it via tools.ConversationIDFromContext.
+// persistence (the task_* tools) read it via tools.ConversationIDFromContext.
 type toolSetWithConvID struct {
 	agentloop.ToolSet
 	convID string
@@ -155,7 +155,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	}
 
 	// Wrap the tool set so every tool execution receives the conversation ID
-	// in its context — tools that need per-conversation persistence (todo)
+	// in its context — tools that need per-conversation persistence (the task_* tools)
 	// read it from there.
 	tools := toolSetWithConvID{ToolSet: cfg.Tools, convID: conv.ID}
 
