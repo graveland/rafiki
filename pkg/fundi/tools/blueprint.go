@@ -112,9 +112,9 @@ type executorProxy struct {
 	client ExecutorClient
 }
 
-func (p *executorProxy) Name() string              { return p.tool.Name() }
-func (p *executorProxy) Description() string       { return p.tool.Description() }
-func (p *executorProxy) InputSchema() Schema       { return p.tool.InputSchema() }
+func (p *executorProxy) Name() string        { return p.tool.Name() }
+func (p *executorProxy) Description() string { return p.tool.Description() }
+func (p *executorProxy) InputSchema() Schema { return p.tool.InputSchema() }
 func (p *executorProxy) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	result, err := p.client.Execute(ctx, p.tool.Name(), json.RawMessage(input))
 	if err != nil {

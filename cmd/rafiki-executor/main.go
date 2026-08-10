@@ -15,9 +15,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 )
@@ -74,8 +71,14 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle(executorpbconnect.NewExecutorServiceHandler(srv))
+	// Protocols instead of h2c.NewHandler: h2c is deprecated, and an
+	// http.Server that advertises UnencryptedHTTP2 serves prior-knowledge
+	// HTTP/2 directly. Connect needs HTTP/2 for its streaming RPCs.
+	protos := new(http.Protocols)
+	protos.SetUnencryptedHTTP2(true)
 	httpSrv := &http.Server{
-		Handler: h2c.NewHandler(mux, &http2.Server{}),
+		Handler:   mux,
+		Protocols: protos,
 	}
 
 	slog.Info("executor listening", "socket", *socketPath, "root", wd, "version", version)
@@ -86,7 +89,9 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		slog.Info("executor shutting down")
-		httpSrv.Shutdown(context.Background())
+		if err := httpSrv.Shutdown(context.Background()); err != nil {
+			slog.Warn("executor shutdown", "error", err)
+		}
 	}()
 
 	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {

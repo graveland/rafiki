@@ -65,17 +65,17 @@ func (s *Server) Describe(
 	_ *connect.Request[executorpb.DescribeRequest],
 ) (*connect.Response[executorpb.DescribeResponse], error) {
 	return connect.NewResponse(&executorpb.DescribeResponse{
-		ExecutorId:   s.id,
-		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
-		Roots:        []string{s.opts.Root},
-		Concurrency:  int32(s.opts.Concurrency),
-		Isolation:    "none",
+		ExecutorId:    s.id,
+		Platform:      runtime.GOOS + "/" + runtime.GOARCH,
+		Roots:         []string{s.opts.Root},
+		Concurrency:   int32(s.opts.Concurrency),
+		Isolation:     "none",
 		WorkspaceMode: "pinned",
 		Tools: []string{
 			"read", "write", "edit", "glob", "grep", "bash",
 			"bash_start", "bash_output", "bash_kill",
 		},
-		Version:           s.opts.Version,
+		Version:            s.opts.Version,
 		SelfReportedLabels: s.labels,
 	}), nil
 }
@@ -125,7 +125,7 @@ func (s *Server) Execute(
 			return stream.Send(&executorpb.ExecuteResponse{
 				Event: &executorpb.ExecuteResponse_Failed{
 					Failed: &executorpb.Failure{
-						Code:    executorpb.Failure_CODE_DENIED,
+						Code: executorpb.Failure_CODE_DENIED,
 						Message: fmt.Sprintf("%s was modified on disk since it was last read (expected mtime %s, found %s)",
 							path, expected, info.ModTime()),
 					},
@@ -254,7 +254,9 @@ func (s *Server) Cancel(
 	_ context.Context,
 	req *connect.Request[executorpb.CancelRequest],
 ) (*connect.Response[executorpb.CancelResponse], error) {
-	s.jobs.kill(req.Msg.CallId)
+	if err := s.jobs.kill(req.Msg.CallId); err != nil {
+		slog.Warn("executor: cancel failed", "handle", req.Msg.CallId, "error", err)
+	}
 	return connect.NewResponse(&executorpb.CancelResponse{}), nil
 }
 

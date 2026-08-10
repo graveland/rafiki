@@ -22,10 +22,10 @@ type Call struct {
 // Fake is an in-memory tools.ExecutorClient for parent-side tests. It records
 // every call and returns pre-configured results.
 type Fake struct {
-	mu     sync.Mutex
-	calls  []Call
-	results   map[string]string
-	failures  map[string]*executorpb.Failure
+	mu       sync.Mutex
+	calls    []Call
+	results  map[string]string
+	failures map[string]*executorpb.Failure
 }
 
 // NewFake returns a Fake with no pre-configured responses.

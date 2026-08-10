@@ -3,6 +3,7 @@ package executor_test
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -12,7 +13,6 @@ import (
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb"
@@ -93,7 +93,9 @@ func testClient(t *testing.T, handler executorpbconnect.ExecutorServiceHandler) 
 
 	mux := http.NewServeMux()
 	mux.Handle(executorpbconnect.NewExecutorServiceHandler(handler))
-	srv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
+	protos := new(http.Protocols)
+	protos.SetUnencryptedHTTP2(true)
+	srv := &http.Server{Handler: mux, Protocols: protos}
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -103,7 +105,11 @@ func testClient(t *testing.T, handler executorpbconnect.ExecutorServiceHandler) 
 		t.Fatalf("chmod: %v", err)
 	}
 	t.Cleanup(func() { srv.Close() })
-	go srv.Serve(ln)
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("serve: %v", err)
+		}
+	}()
 
 	client := executorpbconnect.NewExecutorServiceClient(
 		&http.Client{

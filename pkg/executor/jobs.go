@@ -2,7 +2,6 @@ package executor
 
 import (
 	"bytes"
-	"context"
 	"os/exec"
 	"sync"
 	"time"
@@ -13,11 +12,11 @@ type job struct {
 	cmd    *exec.Cmd
 	handle string
 
-	mu      sync.Mutex
-	buf     bytes.Buffer
-	exited  bool
+	mu       sync.Mutex
+	buf      bytes.Buffer
+	exited   bool
 	exitCode int
-	done    chan struct{}
+	done     chan struct{}
 }
 
 // maxJobOutput is the byte budget for a single job's output buffer. When
@@ -135,14 +134,6 @@ func (r *jobRegistry) running() []string {
 	return handles
 }
 
-// purge removes an exited job entry. Safe to call when the handle does not
-// exist — it is a no-op.
-func (r *jobRegistry) purge(handle string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.jobs, handle)
-}
-
 // syncWriter is a mutex-guarded bytes.Buffer. See bash.go for the race this
 // avoids.
 type syncWriter struct {
@@ -202,17 +193,4 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
-}
-
-// waitFor blocks until the job's done channel is closed or ctx is cancelled.
-// Returns (exitCode, true) on completion, (0, false) on cancel/timeout.
-func (j *job) waitFor(ctx context.Context) (int, bool) {
-	select {
-	case <-j.done:
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		return j.exitCode, true
-	case <-ctx.Done():
-		return 0, false
-	}
 }
