@@ -34,6 +34,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -95,6 +96,10 @@ type Controller struct {
 	// fresh — see the doc comment on childClaimSet for why a shared claim set
 	// covers both.
 	spawnClaims childClaimSet
+
+	// tasks is the task ledger, nil when there is no database pool (daemon
+	// with no database has no ledger to sweep). Populated in NewController.
+	tasks tasks.Store
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -145,7 +150,16 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		rawTrace:    rawTrace,
 		insights:    local.New(local.Options{Pool: pool}),
 		baseCtx:     baseCtx,
+		tasks:       taskStore(pool),
 	}
+}
+
+// taskStore returns a task ledger or nil when there is no database.
+func taskStore(pool *pgxpool.Pool) tasks.Store {
+	if pool == nil {
+		return nil
+	}
+	return tasks.NewPostgresStore(pool)
 }
 
 // startSweeper launches a background goroutine that periodically forgets
@@ -2347,6 +2361,25 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		if snap, ok := c.st.Get(childID); ok {
 			c.cm.DeliverToMatching(childID, snap.Labels, b)
 		}
+	}
+
+	// Sweep this child's unfinished work to orphaned BEFORE cm.Remove.
+	// cm.Remove is the observable "kill complete" signal (waitForChildRemoval
+	// blocks on it), so sweeping after it would let a caller see a finished
+	// kill while the tasks still read in_progress.
+	//
+	// Best-effort under a short deadline: a database outage must not wedge
+	// child teardown. The cost of failure is that rows stay in_progress
+	// behind a dead child, which is recoverable.
+	if c.tasks != nil {
+		sweepCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if n, err := c.tasks.OrphanAssigned(sweepCtx, childID); err != nil {
+			slog.Warn("orphan task sweep failed; tasks remain in_progress",
+				"childId", childID, "error", err)
+		} else if n > 0 {
+			slog.Info("orphaned tasks for exited child", "childId", childID, "count", n)
+		}
+		cancel()
 	}
 
 	c.cm.Remove(childID)
