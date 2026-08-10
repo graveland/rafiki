@@ -65,10 +65,13 @@ Server-streaming. Dispatches a single tool call. The normal path is:
 Attach(handle) → stream { Output(chunk) | exitCode }
 ```
 
-Server-streaming. Attaches to a background job identified by handle. The
-server streams accumulated output, then incremental deltas, and finally the
-exit code when the process exits. A dropped connection does **not** kill the
-job — that is the entire point of handles.
+`Attach` streams a job's output from the beginning of what is still retained,
+then incremental deltas every 200ms, then a final `exit_code`. Output is held
+in a 100 KB tail ring: a job that writes more than that loses its OLDEST
+bytes, and the first chunk an attacher receives is prefixed with
+`... [earlier output dropped: buffer limit reached] ...` when that has
+happened. An unknown handle is `CodeNotFound`. Dropping the connection does
+not kill the job — reattaching resumes from what the ring still holds.
 
 ### Cancel
 
@@ -105,8 +108,11 @@ Kill:  Cancel(callId) → {}
 ```
 
 - A handle is the `callId` from `ExecuteRequest`. The parent picks it.
-- A job's output ring buffer is capped at 100 KB; head and tail are kept,
-  the middle elided.
+- A job's output ring buffer is capped at 100 KB; once exceeded, the OLDEST
+  bytes are dropped so the live tail is always available. Byte offsets are
+  tracked against a monotonic total so a re-`Attach` after data has been
+  dropped can tell the caller it missed output, rather than silently
+  replaying or skipping bytes.
 - A job survives a dropped `Attach` connection — the parent may re-attach
   at any time.
 - `Health().runningHandles` lists every handle whose process has not yet

@@ -1,28 +1,71 @@
 package executor
 
 import (
-	"bytes"
+	"errors"
 	"os/exec"
 	"sync"
-	"time"
+	"syscall"
 )
 
-// job holds a single background process and its output ring buffer.
+// maxJobOutput is the byte budget for a single job's live output ring. Once
+// exceeded, the OLDEST bytes are dropped: a live tail wants the newest
+// output, and eliding the middle (which is what bash.go does for a completed
+// result) would invalidate the byte offsets Attach uses for deltas.
+const maxJobOutput = 100_000
+
+// ring is a mutex-guarded bounded buffer that remembers how many bytes have
+// ever passed through it. Stdout and Stderr both point at the same ring —
+// exec.Cmd only shares one pipe when the two writers are the identical
+// value, and pointing them at two writers over one buffer is a data race
+// (see pkg/fundi/tools/bash.go).
+type ring struct {
+	mu    sync.Mutex
+	buf   []byte
+	total int64 // bytes ever written, including those dropped from buf
+}
+
+func (r *ring) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.total += int64(len(p))
+	r.buf = append(r.buf, p...)
+	if len(r.buf) > maxJobOutput {
+		r.buf = append([]byte(nil), r.buf[len(r.buf)-maxJobOutput:]...)
+	}
+	return len(p), nil
+}
+
+// since returns the bytes from offset `from` onward, plus the running total.
+// When `from` is older than the ring's oldest retained byte, the returned
+// slice starts at that oldest byte and `dropped` is true — the caller has
+// missed data and must say so rather than silently splicing.
+func (r *ring) since(from int64) (data []byte, total int64, dropped bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	oldest := r.total - int64(len(r.buf))
+	if from < oldest {
+		from = oldest
+		dropped = true
+	}
+	if from > r.total {
+		from = r.total
+	}
+	out := make([]byte, r.total-from)
+	copy(out, r.buf[from-oldest:])
+	return out, r.total, dropped
+}
+
+// job holds a single background process and its output ring.
 type job struct {
 	cmd    *exec.Cmd
 	handle string
+	out    *ring
 
 	mu       sync.Mutex
-	buf      bytes.Buffer
 	exited   bool
 	exitCode int
 	done     chan struct{}
 }
-
-// maxJobOutput is the byte budget for a single job's output buffer. When
-// exceeded, head and tail are kept and the middle is elided — the same
-// pattern bash.go uses for its clips.
-const maxJobOutput = 100_000
 
 // jobRegistry tracks running background jobs.
 type jobRegistry struct {
@@ -34,59 +77,65 @@ func newJobRegistry() *jobRegistry {
 	return &jobRegistry{jobs: make(map[string]*job)}
 }
 
-// start launches cmd as a background job, captures its combined output, and
-// returns a handle. The job runs until completion or Kill.
-func (r *jobRegistry) start(cmd *exec.Cmd, handle string) {
-	j := &job{
-		cmd:    cmd,
-		handle: handle,
-		done:   make(chan struct{}),
+// start launches cmd as a background job and captures its combined output.
+// It returns once the process is RUNNING, so cmd.Process is non-nil for
+// every caller that sees a nil error — kill must never race a start.
+func (r *jobRegistry) start(cmd *exec.Cmd, handle string) error {
+	rg := &ring{}
+	cmd.Stdout = rg
+	cmd.Stderr = rg
+	// Own process group, so kill can signal the whole tree: a background
+	// `bash -c "npm run dev"` spawns children that outlive a bare
+	// Process.Kill on the bash itself.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		return err
 	}
 
-	// Use a syncWriter so Stdout and Stderr can share a single buffer without
-	// racing. This avoids the trap documented in bash.go: teeing two pipes
-	// into one buffer without a mutex is a data race.
-	sw := &syncWriter{}
-	cmd.Stdout = sw
-	cmd.Stderr = sw
-
+	j := &job{cmd: cmd, handle: handle, out: rg, done: make(chan struct{})}
 	r.mu.Lock()
 	r.jobs[handle] = j
 	r.mu.Unlock()
 
 	go func() {
-		err := cmd.Run()
-		sw.mu.Lock()
+		err := cmd.Wait()
 		j.mu.Lock()
 		j.exited = true
 		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
 				j.exitCode = ee.ExitCode()
 			} else {
 				j.exitCode = -1
 			}
 		}
-		j.buf = clipBuffer(sw.buf)
 		j.mu.Unlock()
-		sw.mu.Unlock()
 		close(j.done)
 	}()
+	return nil
 }
 
-// output returns the current combined output of job handle. The second return
-// value is true when the job has exited.
-func (r *jobRegistry) output(handle string) ([]byte, bool) {
+// output returns the job's bytes from offset `since` onward.
+//
+// It reads the LIVE ring, not a snapshot taken at exit: an Attach to a
+// running job must see output as it arrives, which is the entire reason
+// handles exist.
+func (r *jobRegistry) output(handle string, since int64) (data []byte, total int64, exited bool, exitCode int, found bool) {
 	r.mu.Lock()
 	j, ok := r.jobs[handle]
 	r.mu.Unlock()
 	if !ok {
-		return nil, true
+		return nil, 0, false, 0, false
+	}
+	data, total, dropped := j.out.since(since)
+	if dropped {
+		data = append([]byte("\n... [earlier output dropped: buffer limit reached] ...\n"), data...)
 	}
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	out := make([]byte, j.buf.Len())
-	copy(out, j.buf.Bytes())
-	return out, j.exited
+	exited, exitCode = j.exited, j.exitCode
+	j.mu.Unlock()
+	return data, total, exited, exitCode, true
 }
 
 // kill terminates job handle. It returns nil when the job was found and
@@ -99,23 +148,6 @@ func (r *jobRegistry) kill(handle string) error {
 		return nil // already gone
 	}
 	return j.cmd.Process.Kill()
-}
-
-// wait blocks until job handle exits, then returns its exit code.
-func (r *jobRegistry) wait(handle string) (int, bool) {
-	r.mu.Lock()
-	j, ok := r.jobs[handle]
-	r.mu.Unlock()
-	if !ok {
-		return -1, false
-	}
-	select {
-	case <-j.done:
-	case <-time.After(10 * time.Minute):
-	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.exitCode, true
 }
 
 // running returns the handles of all non-exited jobs.
@@ -132,65 +164,4 @@ func (r *jobRegistry) running() []string {
 		}
 	}
 	return handles
-}
-
-// syncWriter is a mutex-guarded bytes.Buffer. See bash.go for the race this
-// avoids.
-type syncWriter struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (w *syncWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.Write(p)
-}
-
-func (w *syncWriter) Bytes() []byte {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make([]byte, w.buf.Len())
-	copy(out, w.buf.Bytes())
-	return out
-}
-
-// clipBuffer keeps head and tail, elides the middle, exactly as bash.go does
-// for oversized tool results.
-func clipBuffer(buf bytes.Buffer) bytes.Buffer {
-	if buf.Len() <= maxJobOutput {
-		return buf
-	}
-	raw := buf.Bytes()
-	headBytes := maxJobOutput * 20 / 100
-	tailBytes := maxJobOutput - headBytes
-
-	var out bytes.Buffer
-	out.Write(raw[:headBytes])
-	elided := len(raw) - headBytes - tailBytes
-	out.WriteString("\n\n... [" + itoa(elided) + " bytes elided] ...\n\n")
-	out.Write(raw[len(raw)-tailBytes:])
-	return out
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

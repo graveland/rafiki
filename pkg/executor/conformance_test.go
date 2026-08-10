@@ -240,6 +240,51 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		}
 	})
 
+	t.Run("Attach streams output while the job is still running", func(t *testing.T) {
+		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "bg-live", Tool: "bash", Background: true,
+			InputJson: []byte(`{"command":"echo first; sleep 3; echo second"}`),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var handle string
+		for stream.Receive() {
+			if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Handle); ok {
+				handle = ev.Handle
+				break
+			}
+		}
+		_ = stream.Err()
+		if handle == "" {
+			t.Fatal("no handle")
+		}
+
+		attachCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		attach, err := client.Attach(attachCtx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []byte
+		for attach.Receive() {
+			if ev, ok := attach.Msg().Event.(*executorpb.AttachResponse_Output); ok {
+				got = append(got, ev.Output.Data...)
+			}
+		}
+		_ = attach.Err()
+
+		// The 2s deadline expires while the job is still sleeping, so this
+		// asserts output arrived BEFORE exit — which is the entire point of
+		// a background handle.
+		if !strings.Contains(string(got), "first") {
+			t.Fatalf("Attach delivered %q before the job exited; want it to contain %q", got, "first")
+		}
+		if strings.Contains(string(got), "second") {
+			t.Fatalf("the job cannot have finished yet; got %q", got)
+		}
+	})
+
 	t.Run("Health lists running handles", func(t *testing.T) {
 		stream, _ := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 			CallId: "bg-3", Tool: "bash", Background: true,

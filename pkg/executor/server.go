@@ -186,7 +186,16 @@ func (s *Server) startBackground(
 
 	cmd := exec.CommandContext(context.Background(), "bash", "-c", in.Command)
 	cmd.Dir = s.opts.Root
-	s.jobs.start(cmd, handle)
+	if err := s.jobs.start(cmd, handle); err != nil {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code:    executorpb.Failure_CODE_TOOL_FAILED,
+					Message: "background bash failed to start: " + err.Error(),
+				},
+			},
+		})
+	}
 
 	return stream.Send(&executorpb.ExecuteResponse{
 		Event: &executorpb.ExecuteResponse_Handle{Handle: handle},
@@ -200,52 +209,37 @@ func (s *Server) Attach(
 ) error {
 	handle := req.Msg.Handle
 
-	// Send accumulated output so far.
-	out, exited := s.jobs.output(handle)
-	if len(out) > 0 {
-		if err := stream.Send(&executorpb.AttachResponse{
-			Event: &executorpb.AttachResponse_Output{
-				Output: &executorpb.OutputChunk{Data: out},
-			},
-		}); err != nil {
-			return err
-		}
-	}
-	if exited {
-		code, _ := s.jobs.wait(handle)
-		return stream.Send(&executorpb.AttachResponse{
-			Event: &executorpb.AttachResponse_ExitCode{ExitCode: int32(code)},
-		})
-	}
+	// cursor is a byte offset into the job's lifetime output, not a length:
+	// the ring drops old bytes, so comparing lengths would replay or skip.
+	var cursor int64
 
-	// Poll for more output and eventual exit.
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
-	lastLen := len(out)
 	for {
+		data, total, exited, code, found := s.jobs.output(handle, cursor)
+		if !found {
+			return connect.NewError(connect.CodeNotFound, fmt.Errorf("no such handle: %s", handle))
+		}
+		if len(data) > 0 {
+			if err := stream.Send(&executorpb.AttachResponse{
+				Event: &executorpb.AttachResponse_Output{
+					Output: &executorpb.OutputChunk{Data: data},
+				},
+			}); err != nil {
+				return err
+			}
+			cursor = total
+		}
+		if exited {
+			return stream.Send(&executorpb.AttachResponse{
+				Event: &executorpb.AttachResponse_ExitCode{ExitCode: int32(code)},
+			})
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			out, exited = s.jobs.output(handle)
-			if len(out) > lastLen {
-				chunk := out[lastLen:]
-				lastLen = len(out)
-				if err := stream.Send(&executorpb.AttachResponse{
-					Event: &executorpb.AttachResponse_Output{
-						Output: &executorpb.OutputChunk{Data: chunk},
-					},
-				}); err != nil {
-					return err
-				}
-			}
-			if exited {
-				code, _ := s.jobs.wait(handle)
-				return stream.Send(&executorpb.AttachResponse{
-					Event: &executorpb.AttachResponse_ExitCode{ExitCode: int32(code)},
-				})
-			}
 		}
 	}
 }
