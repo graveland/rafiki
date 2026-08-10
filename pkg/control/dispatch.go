@@ -780,10 +780,10 @@ func (d *dispatcher) taskList(frame []byte, id string) []byte {
 		return errResponse(protocol.TypeCtrlTaskList, id, protocol.ErrInvalidArgs, "malformed request")
 	}
 
-	// Clamp before responding. A tree over a large subtree is exactly the
-	// unbounded-response shape that breaks the frame reader: an oversized frame
-	// does not error cleanly, it returns ErrFrameTooLarge, tears down the
-	// connection, and surfaces as "connection closed".
+	// Clamp before querying. The store applies Limit, so this is what keeps
+	// the response inside protocol.MaxFrameBytes: an oversized frame does not
+	// error cleanly, it returns ErrFrameTooLarge, tears down the connection,
+	// and surfaces to the client as a bare "connection closed".
 	if req.Limit <= 0 || req.Limit > taskListMaxRows {
 		req.Limit = taskListMaxRows
 	}

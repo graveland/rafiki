@@ -834,6 +834,7 @@ Query the task ledger. Returns tasks as a bare array of `tasks.Task` objects (no
   "id":      "37",
   "childId": "c_abc",        // optional: filter by assignee
   "status":  "orphaned",     // optional: filter by status
+  "limit":   500,            // optional: max rows; clamped to 2000
   "all":     true            // optional: include dropped tasks
 }
 ```
@@ -848,10 +849,13 @@ Response:
 }
 ```
 
-The response is capped at 2000 rows. Errors: `no_agent_db` when the daemon has no database
-configured.
+The query spans every conversation — this verb answers "what is every agent
+doing", so there is no conversation scope. `limit` is clamped to 2000 rows
+server-side and applied after ordering, which is what keeps the response
+inside the 16 MiB frame ceiling. Errors: `no_agent_db` when the daemon has no
+database configured.
 
-CLI: `rafiki tasks [--child <id>] [--status <s>] [--all]`.
+CLI: `rafiki tasks [--child <id>] [--status <s>] [--limit <n>] [--all]`.
 
 ## 7. Controller → client events
 

@@ -417,7 +417,6 @@ type TaskListRequest struct {
 	ID      string `json:"id,omitempty"`
 	ChildID string `json:"childId,omitempty"` // tasks assigned to this child
 	Status  string `json:"status,omitempty"`
-	Repo    string `json:"repo,omitempty"` // repo_root scope
 	Limit   int    `json:"limit,omitempty"`
 	All     bool   `json:"all,omitempty"` // include dropped
 }

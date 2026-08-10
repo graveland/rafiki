@@ -253,18 +253,32 @@ func (ps *postgresStore) OrphanAssigned(ctx context.Context, assignee string) (i
 	return int(tag.RowsAffected()), nil
 }
 
-// loadAll reads every task row for convID.
+// loadAll reads every task row for convID, or every task row in the ledger
+// when convID is empty (the ctrl_task_list case).
+//
+// The empty case is a separate statement rather than a guarded predicate:
+// conversation_id is UUID NOT NULL, and any expression that casts "" to uuid
+// fails at parse time regardless of whether the guard would short-circuit.
 func (ps *postgresStore) loadAll(ctx context.Context, convID string) ([]Task, error) {
-	rows, err := ps.pool.Query(ctx,
-		`SELECT id, conversation_id, parent_id, ordinal, content,
-		        active_form, status, drop_reason, assignee, metadata
-		   FROM conversations.tasks
-		  WHERE conversation_id = $1
-		  ORDER BY ordinal`,
-		convID,
-	)
+	const cols = `id, conversation_id, parent_id, ordinal, content,
+	              active_form, status, drop_reason, assignee, metadata`
+
+	var rows pgx.Rows
+	var err error
+	if convID == "" {
+		rows, err = ps.pool.Query(ctx,
+			`SELECT `+cols+`
+			   FROM conversations.tasks
+			  ORDER BY conversation_id, ordinal`)
+	} else {
+		rows, err = ps.pool.Query(ctx,
+			`SELECT `+cols+`
+			   FROM conversations.tasks
+			  WHERE conversation_id = $1
+			  ORDER BY ordinal`, convID)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("tasks loadAll: %w", err)
+		return nil, fmt.Errorf("tasks loadAll: query: %w", err)
 	}
 	defer rows.Close()
 

@@ -3066,6 +3066,11 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 }
 
 // TaskList queries the task ledger for the ctrl_task_list verb.
+//
+// No conversation scope: this verb answers "what is every agent doing",
+// which is a cross-conversation question. The dispatcher clamps Limit before
+// calling, and the store applies it after sorting, which is what keeps the
+// response inside protocol.MaxFrameBytes.
 func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
 	if c.tasks == nil {
 		return nil, &control.ControllerError{
@@ -3078,6 +3083,7 @@ func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest)
 		Assignee:       req.ChildID,
 		Status:         tasks.Status(req.Status),
 		IncludeDropped: req.All,
+		Limit:          req.Limit,
 	}
 	return c.tasks.List(ctx, f)
 }
