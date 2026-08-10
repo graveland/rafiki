@@ -210,6 +210,22 @@ silently stealing its future connections. Anyone who *can* open the socket
 gets arbitrary `bash` and filesystem access inside `--root`; there is no
 authentication beyond the filesystem.
 
+**Background jobs.** With an executor configured, agents gain three tools
+that plain `bash` cannot offer, because plain `bash` is synchronous with a
+600s ceiling:
+
+| Tool | Purpose |
+|---|---|
+| `bash_start` | start a command in the background, return a handle immediately |
+| `bash_output` | read everything the job has printed; reports running/exited and the exit code |
+| `bash_kill` | stop the job and its whole process group |
+
+They are parent-side tools implemented as RPCs, and they **do not exist**
+when no executor is configured — a tool that can only answer "not configured"
+costs a turn to learn nothing. Output is held in a 100 KB tail ring on the
+executor and a finished job stays readable for 10 minutes before it is
+reaped.
+
 See `docs/reference/executor-protocol.md` for the full wire protocol.
 
 ## Paths
