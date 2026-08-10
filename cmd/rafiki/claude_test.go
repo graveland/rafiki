@@ -103,3 +103,29 @@ func TestRunClaude_EmptyURLIsError(t *testing.T) {
 		t.Errorf("error = %v, want it to mention --url", err)
 	}
 }
+
+func TestClaudeCmd_PassthroughFlagDefaultsOff(t *testing.T) {
+	t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", "")
+
+	cmd := newClaudeCmd()
+	got, err := cmd.Flags().GetBool("passthrough-auth")
+	if err != nil {
+		t.Fatalf("--passthrough-auth not registered: %v", err)
+	}
+	if got {
+		t.Error("--passthrough-auth default = true, want false: billing must never change by accident")
+	}
+}
+
+func TestClaudeCmd_PassthroughFlagFromEnv(t *testing.T) {
+	t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", "1")
+
+	cmd := newClaudeCmd()
+	got, err := cmd.Flags().GetBool("passthrough-auth")
+	if err != nil {
+		t.Fatalf("--passthrough-auth not registered: %v", err)
+	}
+	if !got {
+		t.Error("--passthrough-auth default = false with RAFIKI_CLAUDE_PASSTHROUGH=1, want true")
+	}
+}
