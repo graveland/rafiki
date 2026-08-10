@@ -2769,6 +2769,18 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 		// Passing a nil environ yields only the additions, which is what is
 		// wanted: the child inherits os.Environ and this is appended to it,
 		// where the last assignment wins.
+		//
+		// PassthroughAuth is deliberately NOT set here and must not be: this
+		// path passes nil for the environ and receives only ADDITIONS, which
+		// buildEnv appends to the daemon's own os.Environ(). Passthrough is
+		// defined by the absence of ANTHROPIC_AUTH_TOKEN and
+		// ANTHROPIC_API_KEY, and appending cannot un-set anything — the
+		// daemon's own ANTHROPIC_API_KEY would reach the child and it would
+		// quietly use API-key auth. Supporting children means converting this
+		// path to a full-environment contract first. Note the same asymmetry
+		// already makes proxyenv.Credentials inert here: children do inherit
+		// the daemon's ANTHROPIC_API_KEY today, and only Claude Code's own
+		// precedence (ANTHROPIC_AUTH_TOKEN outranks it) keeps that harmless.
 		additions, _ := proxyenv.Claude(nil, proxyenv.ClaudeOptions{
 			URL: url, Token: token, Model: req.Model, Headers: headers,
 		})
