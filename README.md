@@ -176,8 +176,36 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 | `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself; `pi` and `claude` children remain subprocesses. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
 | `rafiki` | the CLI client — the one you type |
 | `rafiki-attach` | the TUI, spawned by `rafiki create` / `rafiki attach` |
+| `rafiki-executor` | the executor. Serves filesystem and shell tools over Connect RPC on a local unix socket. Optional — when absent, tools run in-process as before |
 
 Note that a `pic` on your `$PATH` is *pi-controller's* client, not rafiki's.
+
+## Executor
+
+`rafiki-executor` moves the filesystem and shell tools (`read`, `write`, `edit`,
+`glob`, `grep`, `bash`) behind a Connect RPC surface on a local unix socket. The
+daemon becomes the RPC client: when an executor socket is configured, tool calls
+are dispatched to it; when absent, every tool runs in-process as before.
+
+**Background execution** is the immediate win: `bash` is synchronous with a
+600s ceiling in-process, so dev servers, log tails, and any test suite slower
+than ten minutes are unavailable. The executor's `Attach` stream survives a
+dropped connection — a laptop sleeping mid-build does not lose the build.
+
+```bash
+go build -o bin/rafiki-executor ./cmd/rafiki-executor
+./bin/rafiki-executor --socket /tmp/exec.sock --root "$PWD"
+```
+
+**Flags:**
+- `--socket` — path to the unix socket (required)
+- `--root` — working directory root (defaults to current directory)
+- `--concurrency` — maximum concurrent tool calls (default 6)
+
+**Socket permissions are the only access control in this phase.** The socket
+is created with mode `0600`, so another user on the same host cannot reach it.
+
+See `docs/reference/executor-protocol.md` for the full wire protocol.
 
 ## Paths
 
