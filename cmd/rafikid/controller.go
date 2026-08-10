@@ -27,6 +27,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
@@ -100,6 +101,11 @@ type Controller struct {
 	// tasks is the task ledger, nil when there is no database pool (daemon
 	// with no database has no ledger to sweep). Populated in NewController.
 	tasks tasks.Store
+
+	// evbuf coalesces externally-injected agent events (subagent settles,
+	// budget warnings, executor loss) into debounced frames so N events
+	// cost one model turn instead of N. Nil means the buffer is disabled.
+	evbuf *eventbuf.Buffer
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -2180,7 +2186,12 @@ func (c *Controller) drainChildStatus(childID string, ch *child.Child) {
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {
-	c.st.SetStatus(childID, newStatus)
+	storePrev, ok := c.st.SetStatus(childID, newStatus)
+	// Release any event batches deferred while this child was mid-turn.
+	// This is rafiki's turn-end drain; it is why no busy-poller is needed.
+	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle && c.evbuf != nil {
+		c.evbuf.DrainIdle(childID)
+	}
 	now := time.Now()
 	evt := protocol.CtrlChildStatus{
 		Type:     protocol.TypeCtrlChildStatus,

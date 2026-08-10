@@ -419,6 +419,7 @@ func runDaemon(opts runDaemonOpts) error {
 	st := childstore.New()
 	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx)
+	ctrl.wireEventBuffer() // a no-op until evbuf is populated (Task 4)
 	ctrl.SetCatalog(catalog)
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
