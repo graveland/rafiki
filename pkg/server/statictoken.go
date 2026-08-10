@@ -23,6 +23,24 @@ func IdentityFromContext(ctx context.Context) *Identity {
 	return id
 }
 
+type ctxKeyPassthrough struct{}
+
+// WithPassthroughCredential stores the caller's own upstream credential. It is
+// set only when a request authenticated via X-Rafiki-Token, which is the
+// caller declaring that its Authorization header is its own rather than
+// rafiki's.
+func WithPassthroughCredential(ctx context.Context, cred string) context.Context {
+	return context.WithValue(ctx, ctxKeyPassthrough{}, cred)
+}
+
+// PassthroughCredential returns the credential stored by
+// WithPassthroughCredential, or "" for an ordinary request whose Authorization
+// header is rafiki's own token.
+func PassthroughCredential(ctx context.Context) string {
+	cred, _ := ctx.Value(ctxKeyPassthrough{}).(string)
+	return cred
+}
+
 // ContextAuthenticator resolves capture identity from rafiki's own request
 // context — the standalone counterpart of sc's middleware adapter.
 type ContextAuthenticator struct{}
@@ -33,9 +51,12 @@ func (ContextAuthenticator) Identify(r *http.Request) *Identity {
 
 // StaticTokenAuth authenticates requests against config-defined bearer
 // tokens (token value → client name; the name becomes the captured
-// owner/origin identity). Tokens are accepted via `Authorization: Bearer` or
-// `x-api-key` — Anthropic-protocol clients like sentinel and Claude Code
-// send the latter. Unknown or missing tokens are rejected with 401.
+// owner/origin identity). Tokens are accepted via `X-Rafiki-Token`,
+// `Authorization: Bearer` or `x-api-key` — Anthropic-protocol clients like
+// sentinel and Claude Code send the middle or last of those. `X-Rafiki-Token`
+// additionally means the request's Authorization header belongs to the
+// caller and is forwarded upstream (see PassthroughCredential). Unknown or
+// missing tokens are rejected with 401.
 type StaticTokenAuth struct {
 	byToken map[string]string // token value -> client name
 }
@@ -54,9 +75,9 @@ func NewStaticTokenAuth(tokens map[string]string) *StaticTokenAuth {
 // identity for the proxy faces' ContextAuthenticator.
 func (a *StaticTokenAuth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := bearerOrAPIKey(r)
+		token, passthrough := credential(r)
 		if token == "" {
-			http.Error(w, "missing credentials (Authorization: Bearer or x-api-key)", http.StatusUnauthorized)
+			http.Error(w, "missing credentials (Authorization: Bearer, x-api-key or X-Rafiki-Token)", http.StatusUnauthorized)
 			return
 		}
 		name, ok := a.lookup(token)
@@ -64,7 +85,11 @@ func (a *StaticTokenAuth) Middleware(next http.Handler) http.Handler {
 			http.Error(w, "unknown token", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), &Identity{Username: name})))
+		ctx := WithIdentity(r.Context(), &Identity{Username: name})
+		if cred := r.Header.Get("Authorization"); passthrough && cred != "" {
+			ctx = WithPassthroughCredential(ctx, cred)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -79,6 +104,17 @@ func (a *StaticTokenAuth) lookup(token string) (string, bool) {
 		}
 	}
 	return name, found
+}
+
+// credential returns rafiki's own token and whether it arrived in
+// X-Rafiki-Token. That header is checked first and is the passthrough signal:
+// a caller which puts rafiki's token there is stating that Authorization
+// carries its own upstream credential instead, so the two never collide.
+func credential(r *http.Request) (token string, passthrough bool) {
+	if h := r.Header.Get("X-Rafiki-Token"); h != "" {
+		return h, true
+	}
+	return bearerOrAPIKey(r), false
 }
 
 func bearerOrAPIKey(r *http.Request) string {
