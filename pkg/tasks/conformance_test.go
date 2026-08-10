@@ -14,12 +14,15 @@ import (
 
 // RunConformance exercises the Store contract. Both the memory and the
 // Postgres implementation must pass it unchanged.
-func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
+//
+// mk returns a Store and the conversation id to use for all operations.
+// The memory store returns a literal; the Postgres store creates a real
+// conversation row and returns its UUID.
+func RunConformance(t *testing.T, mk func(*testing.T) (tasks.Store, string)) {
 	ctx := context.Background()
-	const conv = "conv-1"
 
 	t.Run("add assigns sequential handles", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		got, err := s.Add(ctx, conv, "", []tasks.NewTask{
 			{Content: "one", ActiveForm: "doing one"},
 			{Content: "two", ActiveForm: "doing two"},
@@ -33,7 +36,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("add under a parent nests", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "top"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -48,7 +51,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 
 	// THE ordinal test. A dropped sibling must not free its handle.
 	t.Run("dropped handles are never reused", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "a"}, {Content: "b"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -67,7 +70,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("update changes only what it names", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "a"}, {Content: "b"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -88,7 +91,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("drop requires a reason", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "a"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +101,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("drop refuses an assigned task and names the assignee", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "a"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +118,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("dropping a parent cascades to unassigned children", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "top"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +137,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("dropping a parent with an assigned descendant refuses and changes nothing", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "top"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -156,7 +159,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("orphan sweep marks a dead agent's work", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "a"}, {Content: "b"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -186,7 +189,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("metadata filter selects", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{
 			{Content: "a", Metadata: map[string]string{"project": "sentinel"}},
 			{Content: "b"},
@@ -206,7 +209,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("list hides dropped by default", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{{Content: "a"}}); err != nil {
 			t.Fatal(err)
 		}
@@ -222,7 +225,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 	})
 
 	t.Run("unknown handle is ErrNotFound", func(t *testing.T) {
-		s := mk(t)
+		s, conv := mk(t)
 		if _, err := s.Update(ctx, conv, []tasks.Change{{Handle: "9.9", Status: tasks.StatusCompleted}}); !errors.Is(err, tasks.ErrNotFound) {
 			t.Fatalf("err = %v; want ErrNotFound", err)
 		}
@@ -230,5 +233,7 @@ func RunConformance(t *testing.T, mk func(*testing.T) tasks.Store) {
 }
 
 func TestMemoryStoreConformance(t *testing.T) {
-	RunConformance(t, func(*testing.T) tasks.Store { return tasks.NewMemoryStore() })
+	RunConformance(t, func(*testing.T) (tasks.Store, string) {
+		return tasks.NewMemoryStore(), "conv-1"
+	})
 }
