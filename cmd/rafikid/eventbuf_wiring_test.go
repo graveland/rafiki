@@ -37,7 +37,7 @@ func TestInjectBatchSendsPromptFrame(t *testing.T) {
 	// Verify the frame shape produced by injectBatch: one frame with
 	// type "prompt" whose message contains all fragments.
 	body := buildInjectionBody("subagents", []string{"a done", "b done"})
-	frame := buildInjectionFrame(body, false)
+	frame := buildInjectionFrame(body, eventbuf.DeliverPrompt)
 
 	var m map[string]string
 	if err := json.Unmarshal(frame, &m); err != nil {
@@ -56,7 +56,7 @@ func TestInjectBatchSendsPromptFrame(t *testing.T) {
 
 func TestInjectBatchUrgentUsesSteer(t *testing.T) {
 	body := buildInjectionBody("executor", []string{"LOST"})
-	frame := buildInjectionFrame(body, true)
+	frame := buildInjectionFrame(body, eventbuf.DeliverSteer)
 
 	var m map[string]string
 	if err := json.Unmarshal(frame, &m); err != nil {
@@ -73,16 +73,16 @@ func TestInjectBatchWiredThroughBuffer(t *testing.T) {
 	clk := eventbuf.NewFakeClock(now())
 
 	var (
-		gotChildID string
-		gotSource  string
-		gotFrags   []string
-		gotUrgent  bool
+		gotChildID  string
+		gotSource   string
+		gotFrags    []string
+		gotDelivery eventbuf.Delivery
 	)
-	recordFlush := func(childID, source string, frags []string, urgent bool) {
+	recordFlush := func(childID, source string, frags []string, d eventbuf.Delivery) {
 		gotChildID = childID
 		gotSource = source
 		gotFrags = frags
-		gotUrgent = urgent
+		gotDelivery = d
 	}
 
 	buf := eventbuf.New(eventbuf.Config{}, clk)
@@ -102,8 +102,8 @@ func TestInjectBatchWiredThroughBuffer(t *testing.T) {
 	if len(gotFrags) != 2 {
 		t.Fatalf("fragments = %d; want 2", len(gotFrags))
 	}
-	if gotUrgent {
-		t.Fatal("urgent = true; want false for non-urgent push")
+	if gotDelivery != eventbuf.DeliverPrompt {
+		t.Fatalf("delivery = %v; want DeliverPrompt for non-urgent push", gotDelivery)
 	}
 }
 
@@ -114,9 +114,9 @@ func buildInjectionBody(source string, fragments []string) string {
 		strings.Join(fragments, "\n") + "\n</rafiki-event>"
 }
 
-func buildInjectionFrame(body string, urgent bool) json.RawMessage {
+func buildInjectionFrame(body string, d eventbuf.Delivery) json.RawMessage {
 	kind := "prompt"
-	if urgent {
+	if d == eventbuf.DeliverSteer {
 		kind = "steer"
 	}
 	b, _ := json.Marshal(map[string]string{"type": kind, "message": body})

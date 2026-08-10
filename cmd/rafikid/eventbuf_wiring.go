@@ -32,15 +32,15 @@ func childIsBusy(st *childstore.Store, childID string) bool {
 
 // injectBatch delivers a coalesced batch to a child as a single frame.
 //
-// urgent selects the steer path, which injects into a turn already running.
-// Reserve it for events that invalidate that turn — budget exhausted,
-// executor lost. Subagent transitions are news that keeps, and use prompt.
-func (c *Controller) injectBatch(childID, source string, fragments []string, urgent bool) {
+// The Delivery decides the frame kind, and nothing else does: prompt queues
+// for the child's next turn, steer injects into the turn already running.
+// The buffer owns that decision because it owns the busy gate.
+func (c *Controller) injectBatch(childID, source string, fragments []string, d eventbuf.Delivery) {
 	body := "<rafiki-event source=\"" + source + "\">\n" +
 		strings.Join(fragments, "\n") + "\n</rafiki-event>"
 
 	kind := "prompt"
-	if urgent {
+	if d == eventbuf.DeliverSteer {
 		kind = "steer"
 	}
 	frame, err := json.Marshal(map[string]string{"type": kind, "message": body})

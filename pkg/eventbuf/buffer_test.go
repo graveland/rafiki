@@ -26,18 +26,18 @@ func newTestBuffer(t *testing.T) (*Buffer, *FakeClock, *flushRecorder) {
 }
 
 type flushRecorder struct {
-	mu     sync.Mutex
-	calls  [][]string
-	urgent []bool
+	mu         sync.Mutex
+	calls      [][]string
+	deliveries []Delivery
 }
 
-func (r *flushRecorder) record(_, _ string, frags []string, urgent bool) {
+func (r *flushRecorder) record(_, _ string, frags []string, d Delivery) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cp := make([]string, len(frags))
 	copy(cp, frags)
 	r.calls = append(r.calls, cp)
-	r.urgent = append(r.urgent, urgent)
+	r.deliveries = append(r.deliveries, d)
 }
 
 func (r *flushRecorder) n() int {
@@ -202,5 +202,99 @@ func TestSourceWithDoubleColonIsRejected(t *testing.T) {
 	clk.Advance(10 * time.Second)
 	if rec.n() != 0 {
 		t.Fatal("a source containing :: must be rejected, not routed")
+	}
+}
+
+// PushNow skips the DEBOUNCE. It does not skip the BUSY GATE — those are two
+// independent bypasses and conflating them injects a steer into every urgent
+// event, whether or not the turn it lands in is invalidated by it.
+func TestPushNowDefersWhileBusy(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	rec := &flushRecorder{}
+	var busy atomic.Bool
+	busy.Store(true)
+	b := New(Config{}, clk)
+	b.SetFlush(rec.record)
+	b.SetBusy(func(string) bool { return busy.Load() })
+
+	b.PushNow("c_w", "budget", "BUDGET EXHAUSTED")
+	if rec.n() != 0 {
+		t.Fatalf("PushNow delivered %d batches while the child was mid-turn; want 0", rec.n())
+	}
+
+	busy.Store(false)
+	b.DrainIdle("c_w")
+	if rec.n() != 1 {
+		t.Fatalf("flushes after idle = %d; want 1", rec.n())
+	}
+	if rec.deliveries[0] != DeliverPrompt {
+		t.Fatalf("delivery = %v; PushNow must use prompt, not steer", rec.deliveries[0])
+	}
+	if len(rec.calls[0]) != 1 || rec.calls[0][0] != "BUDGET EXHAUSTED" {
+		t.Fatalf("batch = %v", rec.calls[0])
+	}
+}
+
+// PushSteer skips the IDLE GATE: an executor-loss event must reach a worker
+// that would otherwise spend another 40s believing it still has one.
+func TestPushSteerBypassesTheBusyGate(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	rec := &flushRecorder{}
+	b := New(Config{}, clk)
+	b.SetFlush(rec.record)
+	b.SetBusy(func(string) bool { return true })
+
+	b.PushSteer("c_w", "executor", "EXECUTOR LOST")
+	if rec.n() != 1 {
+		t.Fatalf("PushSteer delivered %d batches; want 1 even though the child is busy", rec.n())
+	}
+	if rec.deliveries[0] != DeliverSteer {
+		t.Fatalf("delivery = %v; want DeliverSteer", rec.deliveries[0])
+	}
+}
+
+// A batch still inside its debounce window must NOT ride out on someone
+// else's idle transition — that turns every turn-end into an extra turn,
+// which is the cost this package exists to remove.
+func TestDrainIdleReleasesOnlyDeferredBatches(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	rec := &flushRecorder{}
+	b := New(Config{Debounce: 5 * time.Second}, clk)
+	b.SetFlush(rec.record)
+	b.SetBusy(func(string) bool { return false })
+
+	b.Push("c_w", "subagents", "", "worker 1 finished")
+	b.DrainIdle("c_w")
+	if rec.n() != 0 {
+		t.Fatalf("DrainIdle flushed a batch still inside its debounce window")
+	}
+
+	clk.Advance(5 * time.Second)
+	if rec.n() != 1 {
+		t.Fatalf("the batch never flushed on its own timer; flushes = %d", rec.n())
+	}
+}
+
+// flush must never run under b.mu: it is Controller.injectBatch → c.Send, a
+// blocking write, and a producer that pushes from inside that path would
+// deadlock on a re-entrant acquire.
+func TestFlushRunsWithoutHoldingTheLock(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	b := New(Config{Debounce: time.Second}, clk)
+	b.SetBusy(func(string) bool { return false })
+	done := make(chan struct{}, 1)
+	b.SetFlush(func(childID, source string, frags []string, d Delivery) {
+		// Re-entering the buffer from inside flush must not deadlock.
+		b.Push("c_other", "reentrant", "", "pushed from inside flush")
+		done <- struct{}{}
+	})
+
+	b.Push("c_w", "subagents", "", "worker 1 finished")
+	clk.Advance(time.Second)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush deadlocked — it is being called while b.mu is held")
 	}
 }
