@@ -298,3 +298,139 @@ func TestFlushRunsWithoutHoldingTheLock(t *testing.T) {
 		t.Fatal("flush deadlocked — it is being called while b.mu is held")
 	}
 }
+
+// Regression for a TOCTOU in emit's redeposit branch: checking b.busy and
+// marking the batch deferred must happen under ONE lock hold. If they were
+// two separate critical sections (check, then re-lock to redeposit), a
+// concurrent DrainIdle could run in the gap, see nothing deferred yet, and
+// complete having drained nothing — stranding the batch until the child's
+// NEXT busy->idle cycle instead of the one already racing it.
+//
+// This test forces exactly that interleaving: busy() blocks while emit
+// holds b.mu (proving the check now happens lock-in-hand), and a
+// concurrently-launched DrainIdle can therefore only ever observe the
+// state either strictly before emit's critical section runs (nothing to
+// do yet) or strictly after it completes (the batch freshly deferred) —
+// never the torn state in between. Either way the batch must not be lost:
+// the assertion below only holds because the second case is what actually
+// happens once the busy check unblocks.
+func TestEmitBusyCheckAndRedepositAreAtomicWithDrainIdle(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	rec := &flushRecorder{}
+	b := New(Config{}, clk)
+	b.SetFlush(rec.record)
+
+	busyCheckStarted := make(chan struct{})
+	releaseBusyCheck := make(chan struct{})
+	var busyCalls atomic.Int32
+	b.SetBusy(func(string) bool {
+		if busyCalls.Add(1) == 1 {
+			close(busyCheckStarted)
+			<-releaseBusyCheck
+		}
+		return true
+	})
+
+	pushDone := make(chan struct{})
+	go func() {
+		b.PushNow("c_w", "budget", "BUDGET EXHAUSTED")
+		close(pushDone)
+	}()
+
+	<-busyCheckStarted // emit is now inside its busy check, holding b.mu if fixed
+
+	drainDone := make(chan struct{})
+	go func() {
+		// If the busy check were not covered by the same lock as the
+		// redeposit, this call could run in the gap and see nothing to
+		// drain. With the fix it can only block until emit finishes, then
+		// observe the freshly-redeposited, freshly-deferred batch.
+		b.DrainIdle("c_w")
+		close(drainDone)
+	}()
+
+	// Give the DrainIdle goroutine a chance to reach and block on b.mu
+	// before letting the busy check (and the redeposit that follows it)
+	// proceed. Not required for correctness — Lock() blocks regardless of
+	// scheduling order — but it exercises the intended contention path.
+	time.Sleep(20 * time.Millisecond)
+	close(releaseBusyCheck)
+
+	waitFor := func(name string, ch chan struct{}) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s did not complete — possible deadlock", name)
+		}
+	}
+	waitFor("PushNow", pushDone)
+	waitFor("DrainIdle", drainDone)
+
+	if rec.n() != 1 {
+		t.Fatalf("flushes = %d; want 1 — the batch must not be stranded by the race", rec.n())
+	}
+	if rec.deliveries[0] != DeliverPrompt {
+		t.Fatalf("delivery = %v; want DeliverPrompt", rec.deliveries[0])
+	}
+}
+
+// The byte cap must still apply AFTER the fragment cap has already trimmed
+// the batch: an early return from the fragment-cap branch used to skip the
+// byte budget entirely, which bites hardest exactly when the batch is
+// largest. MaxFragments alone (30 at the default) never exercises this —
+// the two caps must be pinned together to distinguish the fix from the bug.
+func TestAssembleBatchAppliesByteCapAfterFragmentCap(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	rec := &flushRecorder{}
+	b := New(Config{
+		Debounce:         time.Second,
+		MaxWait:          time.Minute,
+		MaxFragments:     10,
+		MaxBytesPerFrag:  1000, // large enough that per-fragment truncation never triggers
+		MaxBytesPerFlush: 25,
+	}, clk)
+	b.SetFlush(rec.record)
+	b.SetBusy(func(string) bool { return false })
+
+	const fragment = "1234567890" // exactly 10 bytes
+	for range 15 {
+		b.Push("c", "src", "", fragment)
+	}
+	clk.Advance(2 * time.Second)
+
+	if rec.n() != 1 {
+		t.Fatalf("flushes = %d; want 1", rec.n())
+	}
+	got := rec.calls[0]
+
+	// Fragment cap (10) keeps 9 real fragments out of 15 pushed (10-1, one
+	// slot reserved for the marker) — 6 omitted there. The byte cap (25
+	// bytes) then trims those 9 (90 bytes) down to 2 (20 bytes; a 3rd would
+	// push to 30 > 25) — 7 more omitted. Under the original bug, the byte
+	// cap never ran here at all: this batch would carry all 9 fragments
+	// (90 bytes) instead of 2 (20 bytes).
+	const wantKept = 2
+	const wantOmitted = 6 + 7
+
+	if len(got) != wantKept+1 { // +1 for the trailing omission marker
+		t.Fatalf("fragments = %d (%v); want %d real + 1 marker", len(got), got, wantKept)
+	}
+
+	var totalBytes int
+	for _, f := range got[:wantKept] {
+		if f != fragment {
+			t.Fatalf("fragment %q corrupted", f)
+		}
+		totalBytes += len(f)
+	}
+	if totalBytes > 25 {
+		t.Fatalf("real fragment bytes = %d; must stay within MaxBytesPerFlush (25)", totalBytes)
+	}
+
+	marker := got[wantKept]
+	wantMarker := fmt.Sprintf("[%d fragment(s) omitted]", wantOmitted)
+	if marker != wantMarker {
+		t.Fatalf("marker = %q; want %q", marker, wantMarker)
+	}
+}

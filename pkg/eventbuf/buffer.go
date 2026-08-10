@@ -287,11 +287,21 @@ func (b *Buffer) emit(p *pending) {
 	}
 	// A forced delivery skips the busy gate (DrainIdle already established
 	// the child is idle; PushSteer deliberately interrupts).
-	if !p.forced && b.busy != nil && b.busy(p.bk.childID) {
+	//
+	// The check and the redeposit happen under ONE lock hold — checking
+	// b.busy outside the lock and re-acquiring only to redeposit leaves a
+	// window where a concurrent DrainIdle can run between the two, find
+	// nothing deferred yet, and miss this batch; it would then be marked
+	// deferred after the idle transition already passed and sit stranded
+	// with no armed timer until the child's next busy→idle cycle.
+	if !p.forced && b.busy != nil {
 		b.mu.Lock()
-		b.redepositLocked(p)
+		if b.busy(p.bk.childID) {
+			b.redepositLocked(p)
+			b.mu.Unlock()
+			return
+		}
 		b.mu.Unlock()
-		return
 	}
 	b.flush(p.bk.childID, p.bk.source, p.fragments, p.delivery)
 }
