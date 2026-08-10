@@ -3,6 +3,7 @@ module go.graveland.dev/rafiki
 go 1.26.4
 
 require (
+	connectrpc.com/connect v1.20.0
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.37.0
 	github.com/dustin/go-humanize v1.0.1
@@ -11,6 +12,7 @@ require (
 	github.com/jedib0t/go-pretty/v6 v6.7.10
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sourcegraph/jsonrpc2 v0.2.2
+	github.com/spf13/pflag v1.0.9
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
@@ -27,7 +29,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 )
@@ -70,5 +71,5 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/grpc v1.82.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.11
 )

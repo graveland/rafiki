@@ -339,6 +339,17 @@ test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 test-nodb: ## Run only the DSN-free tests (explicitly skips DB-backed ones).
 	RAFIKI_TEST_DSN= go test -race ./...
 
+.PHONY: proto
+proto: ## Generate protobuf Go code from proto/ definitions.
+	protoc \
+		--proto_path=proto/rafiki/executor/v1 \
+		--go_out=pkg/executorpb \
+		--go_opt=paths=source_relative \
+		--connect-go_out=pkg/executorpb \
+		--connect-go_opt=paths=source_relative \
+		proto/rafiki/executor/v1/executor.proto
+	gofmt -w pkg/executorpb
+
 .PHONY: fmt
 fmt: ## gofmt all Go sources.
 	$(GO) fmt ./...

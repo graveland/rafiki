@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package rafiki.executor.v1;
+
+option go_package = "go.graveland.dev/rafiki/pkg/executorpb;executorpb";
+
+service ExecutorService {
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Execute(ExecuteRequest) returns (stream ExecuteResponse);
+  rpc Attach(AttachRequest) returns (stream AttachResponse);
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+}
+
+message DescribeRequest {}
+message DescribeResponse {
+  string executor_id = 1;
+  string platform = 2;
+  repeated string roots = 3;
+  int32  concurrency = 4;
+  string isolation = 5;
+  string workspace_mode = 6;
+  repeated string tools = 7;
+  string version = 8;
+  map<string, string> self_reported_labels = 9;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  double load = 1;
+  repeated string running_handles = 2;
+  int64  disk_free_bytes = 3;
+  bool   draining = 4;
+}
+
+message ContentBlock {
+  oneof block {
+    string text = 1;
+    ImageBlock image = 2;
+  }
+}
+message ImageBlock {
+  string media_type = 1;
+  bytes  data = 2;
+}
+
+message ExecuteRequest {
+  string call_id = 1;
+  string tool = 2;
+  bytes  input_json = 3;
+  int64  timeout_ms = 4;
+  map<string, int64> expect_mtime = 5;
+  bool   background = 6;
+}
+
+message ExecuteResponse {
+  oneof event {
+    OutputChunk output = 1;
+    Result      result = 2;
+    Failure     failed = 3;
+    string      handle = 4;
+  }
+}
+message OutputChunk { bytes data = 1; }
+message Result {
+  repeated ContentBlock content = 1;
+  bool is_error = 2;
+  map<string, int64> observed_mtime = 3;
+}
+message Failure {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CODE_DENIED = 1;
+    CODE_EXECUTOR_LOST = 2;
+    CODE_TOOL_FAILED = 3;
+    CODE_TIMEOUT = 4;
+  }
+  Code   code = 1;
+  string message = 2;
+}
+
+message AttachRequest { string handle = 1; }
+message AttachResponse {
+  oneof event {
+    OutputChunk output = 1;
+    int32       exit_code = 2;
+  }
+}
+
+message CancelRequest { string call_id = 1; }
+message CancelResponse {}
