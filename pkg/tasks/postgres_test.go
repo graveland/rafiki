@@ -2,7 +2,9 @@ package tasks_test
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -99,5 +101,54 @@ func TestPostgresListWithoutConversationScope(t *testing.T) {
 	}
 	if len(limited) != 1 {
 		t.Fatalf("Limit 1 returned %d rows", len(limited))
+	}
+}
+
+// Two agents calling task_add at the same instant in one conversation must
+// not both get handle "1". The row lock in Add cannot protect an empty
+// partition, so this is enforced by an advisory lock plus a unique
+// constraint that treats NULL parent_id as equal.
+func TestPostgresConcurrentFirstAddDoesNotDuplicateOrdinal(t *testing.T) {
+	pool := testPool(t)
+	st := tasks.NewPostgresStore(pool)
+	ctx := context.Background()
+	conv := newTestConversation(t, pool)
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = st.Add(ctx, conv, "", []tasks.NewTask{
+				{Content: fmt.Sprintf("task %d", i), ActiveForm: "doing"},
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("add %d failed: %v", i, err)
+		}
+	}
+
+	rows, err := st.List(ctx, tasks.ListFilter{ConversationID: conv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != n {
+		t.Fatalf("got %d tasks, want %d", len(rows), n)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if seen[r.Handle] {
+			t.Fatalf("handle %q assigned twice — two tasks share one handle", r.Handle)
+		}
+		seen[r.Handle] = true
 	}
 }

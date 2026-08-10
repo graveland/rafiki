@@ -35,14 +35,20 @@ func (ps *postgresStore) Add(ctx context.Context, convID, parentHandle string, i
 		parentID = &p.ID
 	}
 
-	// Lock the (convID, parentID) partition for ordinal allocation.
-	// ErrNoRows is fine — no rows to lock means we start at ordinal 1.
+	// Serialize ordinal allocation for this (conversation, parent) partition.
+	//
+	// A row lock cannot do this job: SELECT … FOR UPDATE over an EMPTY
+	// partition locks nothing, so two concurrent first-adds both read
+	// MAX(ordinal)=0 and both insert ordinal 1. A transaction-scoped advisory
+	// lock keyed on the partition has no such hole and is released on commit
+	// or rollback without any explicit unlock.
+	partitionKey := convID + "|"
+	if parentID != nil {
+		partitionKey += *parentID
+	}
 	if _, lockErr := tx.Exec(ctx,
-		`SELECT 1 FROM conversations.tasks
-		  WHERE conversation_id = $1
-		    AND parent_id IS NOT DISTINCT FROM $2
-		  FOR UPDATE`,
-		convID, parentID,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		partitionKey,
 	); lockErr != nil {
 		return nil, fmt.Errorf("tasks add: lock: %w", lockErr)
 	}
