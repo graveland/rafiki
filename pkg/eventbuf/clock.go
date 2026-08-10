@@ -26,8 +26,8 @@ type Timer interface {
 // realClock implements Clock with the wall clock.
 type realClock struct{}
 
-func (realClock) Now() time.Time                                 { return time.Now() }
-func (realClock) AfterFunc(d time.Duration, f func()) Timer      { return time.AfterFunc(d, f) }
+func (realClock) Now() time.Time                            { return time.Now() }
+func (realClock) AfterFunc(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) }
 
 // RealClock returns a Clock that uses the wall clock.
 func RealClock() Clock { return realClock{} }
