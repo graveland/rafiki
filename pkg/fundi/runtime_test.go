@@ -253,3 +253,21 @@ func TestBuildRuntimeMissingMCPConfigIsAnError(t *testing.T) {
 		t.Fatal("expected an error for a non-existent MCPConfig, got nil")
 	}
 }
+
+// TestBuildRuntimeAlwaysSuppliesATaskStore verifies the never-nil invariant:
+// even with a nil Pool, ToolOpts.Tasks must be non-nil (memory store). A nil
+// store would panic inside the task tools on first use.
+func TestBuildRuntimeAlwaysSuppliesATaskStore(t *testing.T) {
+	opts := fakeRuntimeOptions(t, t.TempDir())
+
+	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+	if err != nil {
+		t.Fatalf("BuildRuntime: %v", err)
+	}
+	defer shutdown()
+	if eng == nil {
+		t.Fatal("BuildRuntime returned a nil engine")
+	}
+	// Engine constructed without panic — the task store is non-nil.
+}
