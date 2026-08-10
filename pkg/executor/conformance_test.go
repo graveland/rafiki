@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -307,6 +308,48 @@ func RunConformance(t *testing.T, client executorpbconnect.ExecutorServiceClient
 		}
 		if !found {
 			t.Error("Health must list the running background job")
+		}
+	})
+
+	t.Run("Cancel kills the whole process group", func(t *testing.T) {
+		marker := filepath.Join(root, "grandchild-alive")
+		// The outer bash exits immediately; the backgrounded subshell keeps
+		// touching a file. A kill that signals only the direct child leaves
+		// it running.
+		cmd := `bash -c 'while true; do touch ` + marker + `; sleep 0.2; done' & sleep 30`
+		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+			CallId: "bg-group", Tool: "bash", Background: true,
+			InputJson: []byte(`{"command":` + strconv.Quote(cmd) + `}`),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var handle string
+		for stream.Receive() {
+			if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Handle); ok {
+				handle = ev.Handle
+				break
+			}
+		}
+		_ = stream.Err()
+		if handle == "" {
+			t.Fatal("no handle")
+		}
+		time.Sleep(600 * time.Millisecond)
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("the grandchild never ran: %v", err)
+		}
+
+		if _, err := client.Cancel(ctx, connect.NewRequest(&executorpb.CancelRequest{CallId: handle})); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if err := os.Remove(marker); err != nil {
+			t.Fatalf("remove marker: %v", err)
+		}
+		time.Sleep(800 * time.Millisecond)
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("the grandchild survived Cancel — kill signalled only the direct child")
 		}
 	})
 }

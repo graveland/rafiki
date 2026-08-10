@@ -5,7 +5,13 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
+
+// jobRetention is how long a finished job stays readable before its ring is
+// released. bash_output on a job that just finished must still work; holding
+// every job forever is a leak.
+const jobRetention = 10 * time.Minute
 
 // maxJobOutput is the byte budget for a single job's live output ring. Once
 // exceeded, the OLDEST bytes are dropped: a live tail wants the newest
@@ -112,6 +118,10 @@ func (r *jobRegistry) start(cmd *exec.Cmd, handle string) error {
 		}
 		j.mu.Unlock()
 		close(j.done)
+		// Release the ring after the retention window. bash_output on a job
+		// that just finished must still work, but nothing may hold every
+		// job's output for the executor's lifetime.
+		time.AfterFunc(jobRetention, func() { r.purge(handle) })
 	}()
 	return nil
 }
@@ -138,8 +148,11 @@ func (r *jobRegistry) output(handle string, since int64) (data []byte, total int
 	return data, total, exited, exitCode, true
 }
 
-// kill terminates job handle. It returns nil when the job was found and
-// signalled; the caller must still wait for the process to reap.
+// kill terminates job handle and everything it spawned.
+//
+// It signals the process GROUP, not the process: a background
+// `bash -c "npm run dev"` spawns children that a bare Process.Kill leaves
+// running. start() sets Setpgid so the group id equals the pid.
 func (r *jobRegistry) kill(handle string) error {
 	r.mu.Lock()
 	j, ok := r.jobs[handle]
@@ -147,7 +160,26 @@ func (r *jobRegistry) kill(handle string) error {
 	if !ok {
 		return nil // already gone
 	}
-	return j.cmd.Process.Kill()
+	if j.cmd.Process == nil {
+		return nil // start() failed; nothing to signal
+	}
+	pgid := j.cmd.Process.Pid
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		// The group may already be gone; fall back to the direct process so
+		// a racing exit is not reported as a failure.
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return j.cmd.Process.Kill()
+	}
+	return nil
+}
+
+// purge removes a job entry. Safe when the handle does not exist.
+func (r *jobRegistry) purge(handle string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.jobs, handle)
 }
 
 // running returns the handles of all non-exited jobs.
