@@ -366,3 +366,34 @@ func TestBuildSpawnRequest_ReservedLabelKey(t *testing.T) {
 		t.Fatal("expected error for rafiki/ prefix")
 	}
 }
+
+func TestBuildSpawnRequest_ParentFlag(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("parent", "c_abc123"); err != nil {
+		t.Fatal(err)
+	}
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ParentChildID != "c_abc123" {
+		t.Fatalf("ParentChildID = %q; want c_abc123", req.ParentChildID)
+	}
+}
+
+func TestBuildSpawnRequest_ParentFlagOmitted(t *testing.T) {
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ParentChildID != "" {
+		t.Errorf("ParentChildID = %q, want empty", req.ParentChildID)
+	}
+}

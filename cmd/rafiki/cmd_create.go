@@ -87,6 +87,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see RAFIKI_DEFAULT_LABELS")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 	cmd.Flags().Bool("record-requests", false, "Record raw LLM API requests and responses for debugging")
+	cmd.Flags().String("parent", "", "Child id of the spawning parent (records rafiki/parent and rafiki/root)")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -188,6 +189,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 
 	recordRequests, _ := cmd.Flags().GetBool("record-requests")
 
+	parent, _ := cmd.Flags().GetString("parent")
+
 	return protocol.SpawnRequest{
 		Type:               protocol.TypeCtrlSpawn,
 		Name:               name,
@@ -207,6 +210,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		SkillsDirs:         skillsDirs,
 		MCPConfig:          mcpConfig,
 		Labels:             labels,
+		ParentChildID:      parent,
 		Env:                env,
 		RecordRequests:     recordRequests,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
