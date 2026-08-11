@@ -107,6 +107,12 @@ type Controller struct {
 	// cost one model turn instead of N. Nil means the buffer is disabled.
 	evbuf *eventbuf.Buffer
 
+	// coster resolves what an agent subtree has spent. An interface rather
+	// than *insights.Insights so the admission logic is testable without a
+	// database — the number's correctness is insights' problem, what the
+	// controller does with it is this package's.
+	coster subtreeCoster
+
 	// nudgedOnce bounds prompting.md's enforcement ladder to one nudge per
 	// child. Guarded by nudgedMu.
 	nudgedMu   sync.Mutex
@@ -147,7 +153,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 			gw = time.Duration(n * float64(time.Hour))
 		}
 	}
-	return &Controller{
+	c := &Controller{
 		st:          st,
 		cm:          newChildManager(),
 		records:     persist.NewRecordWriter(stateDir),
@@ -164,6 +170,13 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		tasks:       taskStore(pool),
 		evbuf:       newEventBuffer(),
 	}
+	// Wire the coster only when there is a database: without one every
+	// budgeted spawn fails closed (which is what checkBudget does when
+	// coster is nil), while unbudgeted ones are unaffected.
+	if pool != nil {
+		c.coster = insights.New(pool)
+	}
+	return c
 }
 
 // taskStore returns a task ledger or nil when there is no database.

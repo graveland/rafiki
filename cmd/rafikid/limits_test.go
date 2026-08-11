@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -199,5 +202,70 @@ func TestZeroMaxChildrenBlocksEverySpawn(t *testing.T) {
 	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxChildren = 0 })
 	if err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}); err == nil {
 		t.Fatal("max-children 0 must refuse")
+	}
+}
+
+// fakeCoster stands in for insights so the admission logic is testable
+// without a database.
+type fakeCoster struct {
+	spend float64
+	err   error
+}
+
+func (f fakeCoster) SubtreeCost(context.Context, insights.SubtreeSelector) (float64, error) {
+	return f.spend, f.err
+}
+
+func TestBudgetExhaustedRefusesSpawn(t *testing.T) {
+	c := limitsFixture(t, 3)
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 5.00 })
+	c.coster = fakeCoster{spend: 5.01}
+
+	err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"})
+	if err == nil {
+		t.Fatal("a subtree over budget must not spawn more agents")
+	}
+	for _, want := range []string{"5.01", "5.00", "budget"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal must show spend, budget and the limit name; missing %q in %v", want, err)
+		}
+	}
+}
+
+func TestChildCannotBeGrantedMoreThanTheParentHasLeft(t *testing.T) {
+	c := limitsFixture(t, 3)
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 10.00 })
+	c.coster = fakeCoster{spend: 9.00}
+
+	cost := 5.00
+	err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0", MaxCost: &cost})
+	if err == nil {
+		t.Fatal("a $5 grant from a parent with $1 remaining must be refused")
+	}
+}
+
+func TestUnbudgetedParentIsUnlimited(t *testing.T) {
+	c := limitsFixture(t, 3)
+	c.coster = fakeCoster{spend: 1000.00}
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}); err != nil {
+		t.Fatalf("an unbudgeted parent must not be limited: %v", err)
+	}
+}
+
+func TestCostLookupFailureRefusesABudgetedSpawn(t *testing.T) {
+	c := limitsFixture(t, 3)
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 5.00 })
+	c.coster = fakeCoster{err: errors.New("db down")}
+
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}); err == nil {
+		t.Fatal("an unreadable budget must fail closed for a BUDGETED parent")
+	}
+}
+
+func TestCostLookupFailureDoesNotBlockAnUnbudgetedSpawn(t *testing.T) {
+	c := limitsFixture(t, 3)
+	c.coster = fakeCoster{err: errors.New("db down")}
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}); err != nil {
+		t.Fatalf("an unbudgeted parent must not be blocked by a cost query: %v", err)
 	}
 }

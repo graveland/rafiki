@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -157,8 +161,95 @@ func (c *Controller) checkConcurrency(req protocol.SpawnRequest) error {
 	return nil
 }
 
-// checkBudget is implemented in Task 4.
-func (c *Controller) checkBudget(protocol.SpawnRequest) error { return nil }
+// subtreeCoster is the one thing the budget checks need from insights.
+type subtreeCoster interface {
+	SubtreeCost(ctx context.Context, sel insights.SubtreeSelector) (float64, error)
+}
+
+// checkBudget enforces the cost ceiling at admission.
+//
+// Cost is the one limit that DECREMENTS: dollars a grandchild spends are gone
+// from the subtree, so the budget is consulted against actual spend rather
+// than against a static grant. Spend is summed across the subtree via phase
+// 01's lineage labels — which is why that phase stamps rafiki/root even though
+// rafiki/parent alone would describe the tree.
+//
+// Fails CLOSED for a budgeted parent: if the spend cannot be read, the answer
+// to "are we under budget" is unknown, and treating unknown as yes is how a
+// database hiccup becomes an unbounded bill. An UNBUDGETED parent has nothing
+// to compare against, so the same failure is irrelevant to it and must not
+// block it — the daemon must keep working without a database.
+func (c *Controller) checkBudget(req protocol.SpawnRequest) error {
+	if req.ParentChildID == "" {
+		return nil
+	}
+	parent, ok := c.st.Get(req.ParentChildID)
+	if !ok {
+		return limitError("parentChildId: no such child: %s", req.ParentChildID)
+	}
+	if parent.MaxCost <= 0 {
+		return nil // unset means unlimited
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), budgetQueryTimeout)
+	defer cancel()
+	spent, err := c.subtreeSpend(ctx, req.ParentChildID)
+	if err != nil {
+		return limitError(
+			"spawn refused: agent %s has a $%.2f budget and its spend could not be read (%v). A budget that cannot be checked is not enforced, so this fails closed",
+			req.ParentChildID, parent.MaxCost, err)
+	}
+
+	remaining := parent.MaxCost - spent
+	if remaining <= 0 {
+		return limitError(
+			"spawn refused: budget exhausted — this agent tree has spent $%.2f of its $%.2f budget. Raise it with a higher --max-cost, or finish with what is already running",
+			spent, parent.MaxCost)
+	}
+	if req.MaxCost != nil && *req.MaxCost > remaining {
+		return limitError(
+			"spawn refused: you asked to grant $%.2f but only $%.2f of the $%.2f budget remains (already spent: $%.2f). Grant at most the remainder",
+			*req.MaxCost, remaining, parent.MaxCost, spent)
+	}
+	return nil
+}
+
+// budgetQueryTimeout bounds the spend rollup. A slow query must not wedge a
+// spawn indefinitely; it becomes a fail-closed refusal instead, which is
+// recoverable by retrying.
+const budgetQueryTimeout = 5 * time.Second
+
+// subtreeSelector collects every conversation belonging to rootChildID's
+// subtree, INCLUDING rootChildID's own.
+//
+// Two routes, because a subtree routinely mixes execution models: a fundi
+// child's conversation id is on its snapshot (SessionID), while a claude or
+// pi child's row correlates by external_ref, which the daemon sets to the
+// childID (controller.go's X-Rafiki-Session header). Following only one
+// under-reports, and under-reporting a budget is the expensive direction.
+func (c *Controller) subtreeSelector(rootChildID string) insights.SubtreeSelector {
+	var sel insights.SubtreeSelector
+	add := func(snap childstore.Snapshot) {
+		if snap.SessionID != "" {
+			sel.ConversationIDs = append(sel.ConversationIDs, snap.SessionID)
+		}
+		sel.ExternalRefs = append(sel.ExternalRefs, snap.ChildID)
+	}
+	if snap, ok := c.st.Get(rootChildID); ok {
+		add(snap)
+	}
+	for _, snap := range c.st.Descendants(rootChildID) {
+		add(snap)
+	}
+	return sel
+}
+
+func (c *Controller) subtreeSpend(ctx context.Context, rootChildID string) (float64, error) {
+	if c.coster == nil {
+		return 0, errors.New("no cost source configured")
+	}
+	return c.coster.SubtreeCost(ctx, c.subtreeSelector(rootChildID))
+}
 
 // childDepthFor is where a child of parentID would land. Kept separate from
 // checkDepth so the stored grant and the admission check cannot disagree
