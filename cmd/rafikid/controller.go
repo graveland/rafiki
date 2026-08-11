@@ -113,6 +113,9 @@ type Controller struct {
 	// controller does with it is this package's.
 	coster subtreeCoster
 
+	// breaches bounds the budget sweep to one steer per breach.
+	breaches budgetBreaches
+
 	// nudgedOnce bounds prompting.md's enforcement ladder to one nudge per
 	// child. Guarded by nudgedMu.
 	nudgedMu   sync.Mutex
@@ -202,6 +205,12 @@ func (c *Controller) startSweeper(ctx context.Context) {
 				return
 			case <-ticker.C:
 				c.sweepExpired()
+				// Budget breaches are checked on the same tick as expiry: both are
+				// periodic reconciliations of stored state, and a second ticker would be
+				// a second thing to reason about at shutdown.
+				sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
+				c.sweepBudgets(sweepCtx)
+				cancel()
 			}
 		}
 	}()
