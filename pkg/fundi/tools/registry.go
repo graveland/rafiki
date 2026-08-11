@@ -259,6 +259,18 @@ type ToolOpts struct {
 	// separate process rather than in-process. nil keeps every tool local,
 	// which is the default and preserves today's behaviour exactly.
 	Executor ExecutorClient
+
+	// Agents, when non-nil, lets this agent spawn and steer its own
+	// descendants. nil means the six agent_* tools decline to materialize —
+	// the SkillBlueprint rule, not the Tasks rule: an agent with no spawner
+	// has no subtree, and a spawn tool that can only answer "not configured"
+	// costs a turn to learn nothing.
+	//
+	// The implementation is bound to ONE child at construction and takes no
+	// caller identity in any method. That is deliberate: a self id passed as
+	// an argument is a tool argument, and a tool argument is produced by an
+	// LLM that can be prompt-injected into naming somebody else.
+	Agents AgentSpawner
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the
