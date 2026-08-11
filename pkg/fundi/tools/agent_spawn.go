@@ -42,6 +42,12 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 				Description: "Handle of a task in YOUR list (e.g. \"2.1\") to assign to this agent."},
 			{Name: "kind", Type: "string",
 				Description: "Agent runtime: \"fundi\" (default) or \"claude\"."},
+			{Name: "max_depth", Type: "integer",
+				Description: "How many further levels of agents this one may spawn. 0 = it cannot spawn. Default 1."},
+			{Name: "max_cost", Type: "number",
+				Description: "USD budget for this agent and everything it spawns. Omit to inherit no limit — but if you are coordinating, set one."},
+			{Name: "max_children", Type: "integer",
+				Description: "How many agents may be alive beneath it at once. Default 4."},
 		},
 		Required: []string{"prompt"},
 	}
@@ -66,12 +72,15 @@ type agentSpawnTool struct {
 
 func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var params struct {
-		Prompt string `json:"prompt"`
-		Name   string `json:"name,omitempty"`
-		Model  string `json:"model,omitempty"`
-		Cwd    string `json:"cwd,omitempty"`
-		Task   string `json:"task,omitempty"`
-		Kind   string `json:"kind,omitempty"`
+		Prompt      string   `json:"prompt"`
+		Name        string   `json:"name,omitempty"`
+		Model       string   `json:"model,omitempty"`
+		Cwd         string   `json:"cwd,omitempty"`
+		Task        string   `json:"task,omitempty"`
+		Kind        string   `json:"kind,omitempty"`
+		MaxDepth    *int     `json:"max_depth,omitempty"`
+		MaxCost     *float64 `json:"max_cost,omitempty"`
+		MaxChildren *int     `json:"max_children,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: invalid input: %w", err)
@@ -90,12 +99,15 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 	// SpawnSpec carries no parent. The implementation supplies the caller's
 	// own id, which it closed over at construction.
 	info, err := t.agents.Spawn(ctx, SpawnSpec{
-		Name:   params.Name,
-		Model:  params.Model,
-		Cwd:    cwd,
-		Prompt: params.Prompt,
-		Task:   params.Task,
-		Kind:   params.Kind,
+		Name:        params.Name,
+		Model:       params.Model,
+		Cwd:         cwd,
+		Prompt:      params.Prompt,
+		Task:        params.Task,
+		Kind:        params.Kind,
+		MaxDepth:    params.MaxDepth,
+		MaxCost:     params.MaxCost,
+		MaxChildren: params.MaxChildren,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)

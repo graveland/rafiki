@@ -88,6 +88,9 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 	cmd.Flags().Bool("record-requests", false, "Record raw LLM API requests and responses for debugging")
 	cmd.Flags().String("parent", "", "Child id of the spawning parent (records rafiki/parent and rafiki/root)")
+	cmd.Flags().Int("max-depth", -1, "how many further levels of agents this child may spawn (0 = none; default 1). Bounded absolutely by the daemon's RAFIKI_MAX_DEPTH")
+	cmd.Flags().Float64("max-cost", -1, "USD budget for this child's whole subtree (unset = unlimited)")
+	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 4)")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -191,7 +194,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 
 	parent, _ := cmd.Flags().GetString("parent")
 
-	return protocol.SpawnRequest{
+	req := protocol.SpawnRequest{
 		Type:               protocol.TypeCtrlSpawn,
 		Name:               name,
 		Cwd:                cwd,
@@ -219,7 +222,22 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		// and the caller's PATH (often richer than launchd's) all override the
 		// daemon's minimal defaults.
 		EnvOverride: false,
-	}, nil
+	}
+
+	if cmd.Flags().Changed("max-depth") {
+		v, _ := cmd.Flags().GetInt("max-depth")
+		req.MaxDepth = &v
+	}
+	if cmd.Flags().Changed("max-cost") {
+		v, _ := cmd.Flags().GetFloat64("max-cost")
+		req.MaxCost = &v
+	}
+	if cmd.Flags().Changed("max-children") {
+		v, _ := cmd.Flags().GetInt("max-children")
+		req.MaxChildren = &v
+	}
+
+	return req, nil
 }
 
 // collectCallerEnv snapshots the calling process's environment for inclusion

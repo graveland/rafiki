@@ -49,6 +49,13 @@ type SpawnSpec struct {
 	// Kind selects the child runtime ("fundi", "claude", "pi"). Empty means
 	// fundi.
 	Kind string
+
+	// MaxDepth / MaxCost / MaxChildren are GRANTS, not claims. The controller
+	// treats them as a request and enforces its own stored limits regardless
+	// — a nil here means "use the default", not "no limit".
+	MaxDepth    *int
+	MaxCost     *float64
+	MaxChildren *int
 }
 
 // AgentSpawner is the daemon-side capability behind the agent_* tools.

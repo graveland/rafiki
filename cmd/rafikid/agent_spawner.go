@@ -202,6 +202,9 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		// against the CALLER's ledger rather than the new child's, which
 		// does not have one yet.
 		SpawnerConversationID: self.SessionID,
+		MaxDepth:              spec.MaxDepth,
+		MaxCost:               spec.MaxCost,
+		MaxChildren:           spec.MaxChildren,
 	}
 	res, err := s.c.Spawn(ctx, req)
 	if err != nil {

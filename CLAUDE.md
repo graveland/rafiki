@@ -52,3 +52,12 @@
 - **`pkg/protocol` must never import `pkg/executorpb`.** The protocol package promises zero dependencies in its own header and the executor protocol is a separate wire format with its own types and transport. Generated code, the client, and the server all live outside `pkg/protocol`.
 - **Two tool lists, and they are not the same list.** `tools.ExecutorLocalTools()` is what an executor process RUNS — `read`, `write`, `edit`, `glob`, `grep`, `bash` — and `executor.NewServer` builds its registry with `MaterializeOnly` over exactly that set. `tools.RoutedToExecutor()` is what the PARENT dispatches remotely: those six plus `bash_start`, `bash_output`, `bash_kill`, which are parent-side tools implemented as RPCs and never reach the executor's registry. Everything else — `skill`, `task_*`, `web_*`, `lsp_*`, MCP — stays parent-side, which is what keeps credentials above the boundary. Building the executor's registry with `MaterializeAll` instead is a live panic: `ToolOpts.Tasks` is nil there, and the `task_*` tools do not nil-check.
 - **`tools.AgentSpawner` is bound to ONE child at construction and takes no caller identity in any method.** That is the enforcement of §1.2's rule, and it is easy to undo by "simplifying" the adapter into a single shared value with a `selfID string` first parameter. Do not: fundi children run in-process, so a self id passed as a parameter is one refactor away from being a tool argument, and a tool argument is produced by an LLM that can be prompt-injected into naming a sibling. `newControllerSpawner` is called per-child from `agentRuntimeOptions`, where the daemon-stamped `childID` is already in hand.
+- **`SpawnRequest.MaxDepth/MaxCost/MaxChildren` are pointers because zero is
+  meaningful for all three, and they collapse to plain values in
+  `childstore.Session` — where `MaxCost == 0` means UNLIMITED, not "spend
+  nothing".** Every comparison against a stored budget must be guarded by
+  `if snap.MaxCost > 0` first. Getting it backwards makes every unbudgeted
+  agent refuse its first spawn, which reads as a broken daemon rather than as
+  a limit. The pointer-to-value collapse happens in `grantedCost` /
+  `grantedDepth` / `grantedChildren` (`cmd/rafikid/limits.go`) and nowhere
+  else — do not re-derive it at a call site.

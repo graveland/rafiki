@@ -258,6 +258,38 @@ than a transcript replay.
 non-terminal tasks is told once, naming the handles. A second settle with the
 same residue escalates to its coordinator instead of nudging again.
 
+### Limits
+
+Three independent ceilings, all enforced by the daemon against stored state —
+never against a value in the request that asks for them.
+
+| Limit | Set with | Default | Bounded by |
+|---|---|---|---|
+| **depth** | `--max-depth`, `agent_spawn(max_depth=…)` | `1` | `RAFIKI_MAX_DEPTH` (default `3`) |
+| **cost** | `--max-cost`, `agent_spawn(max_cost=…)` | unlimited | the parent's remaining budget |
+| **concurrency** | `--max-children`, `agent_spawn(max_children=…)` | `4` | — |
+
+**Depth is granted locally and bounded absolutely.** A parent grants what its
+child needs without reference to its own allowance: a coordinator making one
+hop grants each worker `1`, and those workers grant reviewers `0`. Nobody
+computes the tree's total depth — `RAFIKI_MAX_DEPTH` caps the child's absolute
+position, computed from stored lineage, and refuses regardless of what any
+parent granted.
+
+**Cost decrements across the subtree.** Spend is summed over every conversation
+in the tree, reached by conversation id (in-process agents) and by
+`external_ref` (proxied ones). A child may be granted at most its parent's
+remainder. Unset means unlimited — right for a top-level interactive agent,
+wrong for a coordinator, which should always set one.
+
+A budget hit **mid-flight is not a kill**: the subtree's unfinished tasks go
+`blocked` (not `orphaned` — the agents are alive), every live agent is steered
+once, and raising the budget resumes the work.
+
+Budget checks **fail closed**: if a budgeted agent's spend cannot be read, the
+spawn is refused. An agent with no budget is unaffected, so a daemon without a
+database keeps working.
+
 ## Paths
 
 rafiki follows the XDG base directories, so it coexists with a standalone

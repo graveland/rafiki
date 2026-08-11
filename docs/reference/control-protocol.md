@@ -337,6 +337,18 @@ the client sees the response, the child is fully ready for `ctrl_send`.
 
   // Escape hatch
   "extraArgs":           []                // appended last; wins by last-flag-wins
+
+  // Resource grants (pointer fields — "unset" ≠ "zero")
+  "maxDepth":            1,                // levels this child may further delegate
+                                            // 0 = cannot spawn. Default 1. Bounded by
+                                            // RAFIKI_MAX_DEPTH (default 3), an absolute
+                                            // ceiling on position in the tree.
+  "maxCost":             null,             // USD budget for this child's subtree.
+                                            // Nil = unlimited. A child gets at most its
+                                            // parent's remaining budget. Refused with
+                                            // invalid_args when over or unreadable.
+  "maxChildren":         4,                // live descendant cap; default 4. Zero blocks
+                                            // every spawn beneath this child.
 }
 ```
 
