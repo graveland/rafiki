@@ -2211,6 +2211,9 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	// Release any event batches deferred while this child was mid-turn.
 	// This is rafiki's turn-end drain; it is why no busy-poller is needed.
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle && c.evbuf != nil {
+		if isWorkingStatus(storePrev) {
+			c.notifySubagentSettled(childID, "settled (idle)")
+		}
 		c.evbuf.DrainIdle(childID)
 	}
 	now := time.Now()
@@ -2394,6 +2397,11 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 			c.cm.DeliverToMatching(childID, snap.Labels, b)
 		}
 	}
+
+	// Tell the parent its worker is gone. This runs before Forget (which
+	// clears batches aimed AT this child, not at its parent) and before
+	// cm.Remove, which is the observable "teardown complete" signal.
+	c.notifySubagentSettled(childID, "exited")
 
 	// Drop any buffered events aimed at this child. It will never transition
 	// to idle again, so DrainIdle can never clear them.
