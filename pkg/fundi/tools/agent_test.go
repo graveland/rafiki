@@ -203,3 +203,72 @@ func TestAgentSpawnSurfacesRefusal(t *testing.T) {
 		t.Fatalf("a controller refusal must reach the model verbatim; got %v", err)
 	}
 }
+
+func TestAgentViewReturnsTranscript(t *testing.T) {
+	sp := &fakeSpawner{view: "user: do the thing\nassistant: done\n"}
+	reg, ctx := newAgentTools(t, sp)
+	out, err := reg.Execute(ctx, "agent_view", json.RawMessage(`{"agent":"c_a"}`))
+	if err != nil {
+		t.Fatalf("agent_view: %v", err)
+	}
+	if !strings.Contains(out, "do the thing") {
+		t.Fatalf("got:\n%s", out)
+	}
+}
+
+func TestAgentSendDeliversMessage(t *testing.T) {
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	if _, err := reg.Execute(ctx, "agent_send", json.RawMessage(
+		`{"agent":"c_a","message":"also update the docs"}`)); err != nil {
+		t.Fatalf("agent_send: %v", err)
+	}
+	if len(sp.sent) != 1 || sp.sent[0].ChildID != "c_a" || sp.sent[0].Message != "also update the docs" {
+		t.Fatalf("got %+v", sp.sent)
+	}
+}
+
+func TestAgentKillStopsNamedAgent(t *testing.T) {
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	if _, err := reg.Execute(ctx, "agent_kill", json.RawMessage(`{"agent":"c_a"}`)); err != nil {
+		t.Fatalf("agent_kill: %v", err)
+	}
+	if len(sp.killed) != 1 || sp.killed[0] != "c_a" {
+		t.Fatalf("got %v", sp.killed)
+	}
+}
+
+// A refusal from the daemon must reach the model as an error it can act on,
+// naming the offending id — not be flattened into a generic failure.
+func TestSteeringRefusalsReachTheModel(t *testing.T) {
+	sp := &fakeSpawner{
+		viewErr: errors.New("agent c_stranger is not a descendant of yours"),
+		sendErr: errors.New("agent c_stranger is not a descendant of yours"),
+		killErr: errors.New("agent c_stranger is not a descendant of yours"),
+	}
+	reg, ctx := newAgentTools(t, sp)
+	for name, args := range map[string]string{
+		"agent_view": `{"agent":"c_stranger"}`,
+		"agent_send": `{"agent":"c_stranger","message":"x"}`,
+		"agent_kill": `{"agent":"c_stranger"}`,
+	} {
+		_, err := reg.Execute(ctx, name, json.RawMessage(args))
+		if err == nil || !strings.Contains(err.Error(), "c_stranger") {
+			t.Errorf("%s: want a refusal naming c_stranger, got %v", name, err)
+		}
+	}
+}
+
+func TestSteeringVerbsRequireAnAgentID(t *testing.T) {
+	reg, ctx := newAgentTools(t, &fakeSpawner{})
+	for name, args := range map[string]string{
+		"agent_view": `{}`,
+		"agent_send": `{"message":"x"}`,
+		"agent_kill": `{}`,
+	} {
+		if _, err := reg.Execute(ctx, name, json.RawMessage(args)); err == nil {
+			t.Errorf("%s with no agent id must fail", name)
+		}
+	}
+}
