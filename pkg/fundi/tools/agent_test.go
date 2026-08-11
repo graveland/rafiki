@@ -148,3 +148,58 @@ func TestAgentModelsRendersCatalog(t *testing.T) {
 		t.Fatalf("got:\n%s", out)
 	}
 }
+
+func TestAgentSpawnPassesSpecThrough(t *testing.T) {
+	sp := &fakeSpawner{nextID: "c_worker"}
+	reg, ctx := newAgentTools(t, sp)
+	out, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
+		`{"name":"impl","model":"anthropic/claude-sonnet-4","prompt":"do the thing","cwd":"/w","task":"2.1"}`))
+	if err != nil {
+		t.Fatalf("agent_spawn: %v", err)
+	}
+	if len(sp.spawned) != 1 {
+		t.Fatalf("want 1 spawn, got %d", len(sp.spawned))
+	}
+	got := sp.spawned[0]
+	if got.Name != "impl" || got.Model != "anthropic/claude-sonnet-4" ||
+		got.Prompt != "do the thing" || got.Cwd != "/w" || got.Task != "2.1" {
+		t.Fatalf("spec not passed through: %+v", got)
+	}
+	if !strings.Contains(out, "c_worker") {
+		t.Fatalf("result must return the handle; got:\n%s", out)
+	}
+}
+
+// The tool must not accept a parent: a coordinator that can name its own
+// parent can spawn into a sibling's subtree. The schema has no such property,
+// and an unknown JSON key must not smuggle one in.
+func TestAgentSpawnIgnoresForgedParent(t *testing.T) {
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
+		`{"prompt":"x","parent":"c_stranger","parentChildId":"c_stranger"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// SpawnSpec has no parent field at all, so this is a compile-time
+	// guarantee reinforced by an observable one: nothing the tool produces
+	// can name a parent.
+	if len(sp.spawned) != 1 {
+		t.Fatalf("want 1 spawn, got %d", len(sp.spawned))
+	}
+}
+
+func TestAgentSpawnRequiresPrompt(t *testing.T) {
+	reg, ctx := newAgentTools(t, &fakeSpawner{})
+	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"name":"x"}`)); err == nil {
+		t.Fatal("a spawn with nothing to do must be refused")
+	}
+}
+
+func TestAgentSpawnSurfacesRefusal(t *testing.T) {
+	sp := &fakeSpawner{spawnErr: errors.New("depth limit: absolute depth 3 exceeds RAFIKI_MAX_DEPTH")}
+	reg, ctx := newAgentTools(t, sp)
+	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"prompt":"x"}`))
+	if err == nil || !strings.Contains(err.Error(), "depth limit") {
+		t.Fatalf("a controller refusal must reach the model verbatim; got %v", err)
+	}
+}

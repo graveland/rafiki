@@ -12,6 +12,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
@@ -166,9 +167,57 @@ func (s *controllerSpawner) Kill(ctx context.Context, childID string) error {
 	return nil
 }
 
-// Spawn is implemented in Task 3.
+// Spawn creates a descendant. ParentChildID is the caller's own id, taken
+// from the binding — never from spec — so an agent cannot spawn into another
+// subtree.
+//
+// The task assignment rides along INSIDE SpawnRequest rather than being a
+// follow-up Assign call. Two reasons: a separate call leaves a window where a
+// row is assigned to a child that has not started, and a spawn refused by a
+// limit (phase 05) would need a compensating write to undo it. Controller.Spawn
+// assigns only after the child is registered, so a refusal writes nothing.
 func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.AgentInfo, error) {
-	return tools.AgentInfo{}, errors.New("agent_spawn: not implemented")
+	kind := spec.Kind
+	if kind == "" {
+		kind = protocol.KindFundi
+	}
+	self, ok := s.c.st.Get(s.selfID)
+	if !ok {
+		return tools.AgentInfo{}, fmt.Errorf("spawning agent %s is not registered", s.selfID)
+	}
+	cwd := spec.Cwd
+	if cwd == "" {
+		cwd = self.Cwd
+	}
+
+	req := protocol.SpawnRequest{
+		Type:          protocol.TypeCtrlSpawn,
+		Kind:          kind,
+		Name:          spec.Name,
+		Model:         spec.Model,
+		Cwd:           cwd,
+		ParentChildID: s.selfID,
+		Task:          spec.Task,
+		// SpawnerConversationID lets Controller.Spawn resolve the handle
+		// against the CALLER's ledger rather than the new child's, which
+		// does not have one yet.
+		SpawnerConversationID: self.SessionID,
+	}
+	res, err := s.c.Spawn(ctx, req)
+	if err != nil {
+		return tools.AgentInfo{}, err
+	}
+	if spec.Prompt != "" {
+		frame, mErr := json.Marshal(map[string]string{"type": "prompt", "message": spec.Prompt})
+		if mErr != nil {
+			return tools.AgentInfo{}, mErr
+		}
+		if sErr := s.c.Send(res.ChildID, frame); sErr != nil {
+			return tools.AgentInfo{}, fmt.Errorf("agent %s started but its prompt could not be delivered: %w", res.ChildID, sErr)
+		}
+	}
+	snap, _ := s.c.st.Get(res.ChildID)
+	return s.infoFor(snap), nil
 }
 
 // labelTaskHandle records the ledger handle a child was spawned to work on.

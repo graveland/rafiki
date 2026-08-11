@@ -751,6 +751,26 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		slog.Warn("write state record (spawning)", "childId", childID, "error", err)
 	}
 
+	// Assign the ledger row now that the child is admitted and registered.
+	// Ordering is load-bearing: phase 05 refuses spawns for depth, cost and
+	// concurrency, and every one of those refusals returns BEFORE this point,
+	// so a refused spawn can never leave a row pointing at a child that never
+	// started — no rollback, no compensating write.
+	if req.Task != "" && c.tasks != nil && req.SpawnerConversationID != "" {
+		assignCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		if _, err := c.tasks.Assign(assignCtx, req.SpawnerConversationID, req.Task, childID); err != nil {
+			// Best-effort, and deliberately not fatal: the child is already
+			// running, and killing a healthy agent because a bookkeeping row
+			// would not update trades a recoverable inconsistency for an
+			// unrecoverable one. The warning is the record.
+			slog.Warn("spawn: could not assign task to new child",
+				"childId", childID, "task", req.Task, "error", err)
+		} else {
+			_, _ = c.st.SetLabels(childID, map[string]string{labelTaskHandle: req.Task}, nil)
+		}
+		cancel()
+	}
+
 	// Emit ctrl_child_spawned immediately after the process is running and the
 	// state record is persisted (spec §6.3.3, §7.2). Delivered to global,
 	// per-child, and label-filtered subscribers.

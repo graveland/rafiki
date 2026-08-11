@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
 // spawnerFixture builds a Controller with a hand-populated childstore, which
@@ -87,5 +89,42 @@ func TestSpawnerRefusalNamesTheTarget(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "descendant") {
 		t.Errorf("refusal must say why; got %v", err)
+	}
+}
+
+// The phase's ledger invariant, tested where it lives. A spawn that the
+// controller refuses must write nothing to the ledger — no assignment, no
+// row to roll back. This is asserted with a controller that refuses every
+// spawn, so it holds for whatever refuses it: bad cwd today, a depth or cost
+// ceiling once phase 05 lands.
+func TestRefusedSpawnAssignsNothing(t *testing.T) {
+	c := spawnerFixture(t)
+	store := tasks.NewMemoryStore()
+	c.tasks = store
+	ctx := context.Background()
+
+	// Give the caller a conversation and a task to delegate.
+	_ = c.st.Update("c_mine", func(s *childstore.Session) { s.SessionID = "conv-mine" })
+	if _, err := store.Add(ctx, "conv-mine", "", []tasks.NewTask{{Content: "delegate me"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	sp := newControllerSpawner(c, "c_mine")
+	// A cwd that does not exist is refused by Controller.Spawn's first check,
+	// before anything is registered.
+	_, err := sp.Spawn(ctx, tools.SpawnSpec{Prompt: "x", Cwd: "/definitely/not/a/directory", Task: "1"})
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+
+	rows, err := store.List(ctx, tasks.ListFilter{ConversationID: "conv-mine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rows))
+	}
+	if rows[0].Assignee != "" {
+		t.Fatalf("a refused spawn left task 1 assigned to %q", rows[0].Assignee)
 	}
 }

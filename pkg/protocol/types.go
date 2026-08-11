@@ -195,6 +195,12 @@ type SpawnRequest struct {
 	// leaves a window where a row points at a child that does not exist.
 	Task string `json:"task,omitempty"`
 
+	// SpawnerConversationID names the conversation whose ledger Task resolves
+	// against. Set by the daemon from the spawning child's own record, never
+	// by a client: a handle is relative to a conversation, and resolving it
+	// against the wrong one silently assigns somebody else's row.
+	SpawnerConversationID string `json:"spawnerConversationId,omitempty"`
+
 	// Working directory (required, absolute).
 	Cwd string `json:"cwd"`
 
