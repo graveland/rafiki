@@ -228,6 +228,36 @@ reaped.
 
 See `docs/reference/executor-protocol.md` for the full wire protocol.
 
+## Subagents
+
+A fundi agent can spawn and steer its own descendants through six tools:
+
+| Tool | Purpose |
+|---|---|
+| `agent_spawn` | start a subagent; returns a handle immediately, does not block |
+| `agent_list` | your subtree — id, name, model, status, assigned task |
+| `agent_view` | the tail of a descendant's transcript |
+| `agent_send` | steer a descendant mid-flight, or give it more work |
+| `agent_kill` | stop a descendant and everything below it |
+| `agent_models` | the models you may spawn on |
+
+**Every verb that names another agent is checked against stored lineage.** An
+agent may only see, steer or kill its own descendants; a sibling's child, its
+own parent, and another conversation's agent are all refused with an error
+naming the id. The check reads the parent chain in `childstore`, never a tool
+argument — tool arguments are produced by a model that can be prompt-injected.
+
+**Completion is a signal, not a return value.** `agent_spawn` returns as soon
+as the child is registered. When a descendant settles, one coalesced digest is
+injected into its parent's next turn: five workers finishing together cost one
+turn, not five. The digest names who finished; *what they did* is read from the
+task ledger with `task_list(assignee=…)`, which is one indexed query rather
+than a transcript replay.
+
+**Unresolved work is caught, not prompted for.** An agent that settles holding
+non-terminal tasks is told once, naming the handles. A second settle with the
+same residue escalates to its coordinator instead of nudging again.
+
 ## Paths
 
 rafiki follows the XDG base directories, so it coexists with a standalone

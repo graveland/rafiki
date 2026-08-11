@@ -283,6 +283,14 @@ the client sees the response, the child is fully ready for `ctrl_send`.
                                             // recorded as rafiki/parent and rafiki/root
                                             // labels; rejected with child_not_found if
                                             // no such child exists
+  "task":                null,             // optional; handle ("2.1") in spawner's
+                                            // task ledger to assign to new child
+                                            // Honoured only with parentChildId and
+                                            // spawnerConversationId. Assigned after
+                                            // admission; a refused spawn assigns nothing.
+  "spawnerConversationId": null,           // optional; the conversation task resolves
+                                            // against. DAEMON-SET ONLY. A client setting
+                                            // it is naming somebody else's ledger.
 
   // Working directory (required, absolute)
   "cwd":                 "/Users/.../dev",
