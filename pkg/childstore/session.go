@@ -87,6 +87,13 @@ type Session struct {
 	// capturing after the daemon restarts or the session is respawned.
 	RecordRequests bool
 
+	// Resource grants, daemon-stamped at spawn and never re-read from the
+	// child. These are the FACTS the controller enforces against; a value
+	// arriving in a request is a request.
+	MaxDepth    int
+	MaxCost     float64
+	MaxChildren int
+
 	// Counters
 	ExtensionErrors int
 	AutoRetries     int
@@ -167,6 +174,13 @@ type Snapshot struct {
 
 	RecordRequests bool
 
+	// Resource grants, daemon-stamped at spawn and never re-read from the
+	// child. These are the FACTS the controller enforces against; a value
+	// arriving in a request is a request.
+	MaxDepth    int
+	MaxCost     float64
+	MaxChildren int
+
 	ExtensionErrors int
 	AutoRetries     int
 	LastRetryError  string
@@ -228,6 +242,8 @@ func (s *Session) Snapshot() Snapshot {
 		ExtraArgs: copyStrings(s.ExtraArgs),
 
 		RecordRequests: s.RecordRequests,
+
+		MaxDepth: s.MaxDepth, MaxCost: s.MaxCost, MaxChildren: s.MaxChildren,
 
 		ExtensionErrors:  s.ExtensionErrors,
 		AutoRetries:      s.AutoRetries,

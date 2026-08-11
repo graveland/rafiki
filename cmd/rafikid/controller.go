@@ -627,6 +627,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		return control.SpawnResult{}, err
 	}
 
+	// Resource admission. Deliberately before the childID is minted and long
+	// before anything is registered: a refusal must leave no process, no
+	// store entry, no record and — with phase 04's ordering — no task
+	// assignment to roll back.
+	if err := c.checkSpawnLimits(req); err != nil {
+		return control.SpawnResult{}, err
+	}
+
 	// childID is minted before resolveSpawnPlan (rather than after, as
 	// before) because the "fundi" kind needs it to pin --spill-dir
 	// (see buildAgentArgv/agentSpillDir).
@@ -749,6 +757,9 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		PiBinary:           bin,
 		ExtraArgs:          req.ExtraArgs,
 		RecordRequests:     req.RecordRequests,
+		MaxDepth:           grantedDepth(req, childDepthFor(c.st, req.ParentChildID), resolveAbsoluteDepthCeiling()),
+		MaxCost:            grantedCost(req),
+		MaxChildren:        grantedChildren(req),
 	}
 	c.st.Insert(sess)
 
@@ -1023,6 +1034,9 @@ func (c *Controller) activateLiveChild(
 		PiBinary:           piBin,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
+		MaxDepth:           snap.MaxDepth,
+		MaxCost:            snap.MaxCost,
+		MaxChildren:        snap.MaxChildren,
 	}
 	c.st.Insert(sess)
 	c.cm.Add(childID, ch)
@@ -1097,6 +1111,9 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
+		MaxDepth:           &snap.MaxDepth,
+		MaxCost:            &snap.MaxCost,
+		MaxChildren:        &snap.MaxChildren,
 	}
 	if snap.Kind == protocol.KindClaude {
 		req.ResumeSession = snap.SessionID
@@ -3053,6 +3070,9 @@ func sessionFromRecord(rec persist.Record) *childstore.Session {
 		PiBinary:           rec.PiBinary,
 		ExtraArgs:          rec.ExtraArgs,
 		RecordRequests:     rec.RecordRequests,
+		MaxDepth:           rec.MaxDepth,
+		MaxCost:            rec.MaxCost,
+		MaxChildren:        rec.MaxChildren,
 		StartedAt:          time.UnixMilli(rec.SpawnedAt),
 		LastActivity:       time.UnixMilli(rec.LastSeenAlive),
 		ExitedAt:           time.UnixMilli(rec.ExitedAt),
@@ -3098,6 +3118,9 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
+		MaxDepth:           snap.MaxDepth,
+		MaxCost:            snap.MaxCost,
+		MaxChildren:        snap.MaxChildren,
 		SpawnedAt:          snap.StartedAt.UnixMilli(),
 		LastSeenAlive:      snap.LastActivity.UnixMilli(),
 		LastStatus:         string(snap.Status),

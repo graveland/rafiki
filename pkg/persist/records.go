@@ -60,6 +60,14 @@ type Record struct {
 	// deserialises to false — the same as never having set it.
 	RecordRequests bool `json:"recordRequests,omitempty"`
 
+	// Resource grants (phase 05). Additive: records written before their
+	// introduction lack these keys and deserialise to zero. A zero MaxDepth
+	// on an old record means "cannot spawn", which is the safe direction —
+	// resuming an old child does not silently grant it a subtree.
+	MaxDepth    int     `json:"maxDepth,omitempty"`
+	MaxCost     float64 `json:"maxCost,omitempty"`
+	MaxChildren int     `json:"maxChildren,omitempty"`
+
 	SpawnedAt     int64  `json:"spawnedAt"`
 	LastSeenAlive int64  `json:"lastSeenAlive"`
 	PID           int    `json:"pid"`

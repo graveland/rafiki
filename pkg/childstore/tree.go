@@ -1,5 +1,7 @@
 package childstore
 
+import "go.graveland.dev/rafiki/pkg/protocol"
+
 // Lineage label keys. These are daemon-written: the controller computes them
 // at spawn and re-stamps them at resume. They are never accepted from a
 // caller — cmd/rafikid/labels.go rejects BOTH the rafiki/ and the legacy
@@ -82,6 +84,51 @@ func (s *Store) IsDescendant(ancestorID, candidateID string) bool {
 		cur = parent
 	}
 	return false
+}
+
+// AbsoluteDepth returns how many parent links separate childID from its
+// top-level ancestor. A top-level child is 0. An unknown child is -1, which
+// callers must treat as "refuse", never as "top level".
+//
+// This is the number RAFIKI_MAX_DEPTH bounds. It is computed from the stored
+// parent chain rather than from any grant arithmetic, because a chain of
+// grants is a chain of numbers a prompt-injected coordinator could be talked
+// into getting wrong, while the chain of labels is what actually happened.
+func (s *Store) AbsoluteDepth(childID string) int {
+	if childID == "" {
+		return -1
+	}
+	if _, ok := s.Get(childID); !ok {
+		return -1
+	}
+	depth := 0
+	cur := childID
+	for range maxChainDepth {
+		parent, ok := s.ParentOf(cur)
+		if !ok {
+			return depth
+		}
+		depth++
+		cur = parent
+	}
+	return depth
+}
+
+// LiveDescendantCount counts descendants of ancestorID that have not exited.
+//
+// "Live", not "ever spawned": a long-running coordinator that has cycled
+// through twenty workers must still be able to spawn a twenty-first, or the
+// cap is a leak rather than a limit. Exited children are still in the store
+// (ctrl_get_recent serves their rings after exit) so they must be filtered
+// here rather than assumed absent.
+func (s *Store) LiveDescendantCount(ancestorID string) int {
+	n := 0
+	for _, snap := range s.Descendants(ancestorID) {
+		if snap.Status != protocol.StatusExited {
+			n++
+		}
+	}
+	return n
 }
 
 // Descendants returns snapshots for every child beneath ancestorID at any

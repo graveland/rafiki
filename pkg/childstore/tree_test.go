@@ -140,3 +140,37 @@ func TestCycleTerminates(t *testing.T) {
 		t.Fatal("IsDescendant did not terminate on a cyclic parent chain")
 	}
 }
+
+func TestAbsoluteDepth(t *testing.T) {
+	s := tree(t)
+	cases := map[string]int{
+		"a": 0, "b": 1, "c": 2, "d": 1, "z": 0,
+	}
+	for id, want := range cases {
+		if got := s.AbsoluteDepth(id); got != want {
+			t.Errorf("AbsoluteDepth(%s) = %d, want %d", id, got, want)
+		}
+	}
+	if got := s.AbsoluteDepth("nope"); got != -1 {
+		t.Errorf("AbsoluteDepth(unknown) = %d, want -1", got)
+	}
+	if got := s.AbsoluteDepth(""); got != -1 {
+		t.Errorf("AbsoluteDepth(empty) = %d, want -1", got)
+	}
+}
+
+func TestLiveDescendantCount(t *testing.T) {
+	s := childstore.New()
+	insert(t, s, "root", "", "")
+	// 3 live children + 1 exited
+	for _, id := range []string{"c1", "c2", "c3"} {
+		insert(t, s, id, "root", "root")
+	}
+	s.Insert(&childstore.Session{
+		ChildID: "c_dead", Status: protocol.StatusExited, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: "root", childstore.LabelRoot: "root"},
+	})
+	if got := s.LiveDescendantCount("root"); got != 3 {
+		t.Fatalf("LiveDescendantCount(root) = %d, want 3", got)
+	}
+}

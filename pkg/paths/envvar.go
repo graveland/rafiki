@@ -148,6 +148,10 @@ const (
 	// bot-detection page, which is indistinguishable from "no results" to
 	// a model. Set this when search reliability matters.
 	BraveAPIKey = "RAFIKI_BRAVE_API_KEY"
+
+	// MaxDepth caps a child's ABSOLUTE position in the spawn tree, regardless
+	// of what any parent granted. Default 3; "0" disables spawning entirely.
+	MaxDepth = "RAFIKI_MAX_DEPTH"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the

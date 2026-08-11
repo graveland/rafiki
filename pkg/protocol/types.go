@@ -262,6 +262,36 @@ type SpawnRequest struct {
 	// to the debug raw_http_request hypertable (agent-kind only; requires
 	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).
 	RecordRequests bool `json:"recordRequests,omitempty"`
+
+	// ─── Resource grants (phase 05) ───
+	//
+	// All three are POINTERS so "unset" is distinguishable from "zero". The
+	// distinction is load-bearing in opposite directions for each: an unset
+	// MaxDepth means the default 1, a zero means "this child may not spawn";
+	// an unset MaxCost means unlimited, a zero means "spend nothing".
+	// Collapsing either to a plain int silently converts one into the other.
+
+	// MaxDepth is how many further levels of descendants the NEW child may
+	// create. 0 means it cannot spawn. Default 1 when unset.
+	//
+	// It does NOT decrement: a parent grants what its child needs without
+	// reference to its own allowance. The safety bound is RAFIKI_MAX_DEPTH,
+	// an absolute ceiling on the child's position in the tree that the daemon
+	// computes from stored lineage labels.
+	MaxDepth *int `json:"maxDepth,omitempty"`
+
+	// MaxCost is the new child's subtree budget in USD. Unset means
+	// unlimited — the right default for a top-level interactive agent and the
+	// wrong one for a coordinator, which should always set it. A child may be
+	// granted at most its parent's REMAINING budget; unlike depth, this one
+	// decrements across the subtree.
+	MaxCost *float64 `json:"maxCost,omitempty"`
+
+	// MaxChildren caps simultaneously LIVE descendants across the new child's
+	// subtree. Default 4. It is separate from cost because a runaway
+	// recursion of cheap spawns exhausts the machine long before it exhausts
+	// a dollar budget.
+	MaxChildren *int `json:"maxChildren,omitempty"`
 }
 
 // ResumeRequest re-spawns a child against its persisted state record (§6.4).
