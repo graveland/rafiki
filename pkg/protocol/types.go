@@ -263,6 +263,17 @@ type SpawnRequest struct {
 	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).
 	RecordRequests bool `json:"recordRequests,omitempty"`
 
+	// ExecutorSocket is a unix socket path served by a rafiki-executor. When
+	// set, the child's filesystem and shell tools run in that process instead
+	// of in the daemon.
+	//
+	// Static configuration, and deliberately the FIRST of the two selection
+	// paths: phase 07's registry replaces this with a label selector over
+	// enrolled executors, but a named socket stays the escape hatch for a
+	// local executor with no enrollment. If both are set the selector wins,
+	// because it is the one the daemon can audit.
+	ExecutorSocket string `json:"executorSocket,omitempty"`
+
 	// ─── Resource grants (phase 05) ───
 	//
 	// All three are POINTERS so "unset" is distinguishable from "zero". The

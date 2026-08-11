@@ -152,6 +152,11 @@ const (
 	// MaxDepth caps a child's ABSOLUTE position in the spawn tree, regardless
 	// of what any parent granted. Default 3; "0" disables spawning entirely.
 	MaxDepth = "RAFIKI_MAX_DEPTH"
+
+	// ExecutorSocket is the default unix socket of a rafiki-executor to run
+	// agent children's filesystem and shell tools in. Used by `rafiki create
+	// --executor-socket` when the flag is not given.
+	ExecutorSocket = "RAFIKI_EXECUTOR_SOCKET"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the

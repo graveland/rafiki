@@ -60,6 +60,11 @@ type Record struct {
 	// deserialises to false — the same as never having set it.
 	RecordRequests bool `json:"recordRequests,omitempty"`
 
+	// ExecutorSocket, when non-empty, is the unix socket of the executor
+	// this child runs on. Additive: records before its introduction
+	// lack the key and deserialise to empty.
+	ExecutorSocket string `json:"executorSocket,omitempty"`
+
 	// Resource grants (phase 05). Additive: records written before their
 	// introduction lack these keys and deserialise to zero. A zero MaxDepth
 	// on an old record means "cannot spawn", which is the safe direction —

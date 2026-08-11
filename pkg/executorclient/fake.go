@@ -28,6 +28,7 @@ type Fake struct {
 	failures  map[string]*executorpb.Failure
 	jobs      map[string]*fakeJob
 	nextJobID int
+	pingErr   error // non-nil simulates an unreachable executor
 }
 
 // NewFake returns a Fake with no pre-configured responses.
@@ -37,6 +38,13 @@ func NewFake() *Fake {
 		failures: make(map[string]*executorpb.Failure),
 		jobs:     make(map[string]*fakeJob),
 	}
+}
+
+// SetPingError configures Ping to return err.
+func (f *Fake) SetPingError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pingErr = err
 }
 
 // SetResult configures the fake to return text for tool name on every future
@@ -159,6 +167,13 @@ func (f *Fake) KillJob(_ context.Context, handle string) error {
 		j.exitCode = -1
 	}
 	return nil
+}
+
+// Ping returns the configured pingErr. nil means the executor is reachable.
+func (f *Fake) Ping(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pingErr
 }
 
 // Killed reports whether KillJob was called for handle.

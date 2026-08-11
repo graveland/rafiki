@@ -91,6 +91,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("max-depth", -1, "how many further levels of agents this child may spawn (0 = none; default 1). Bounded absolutely by the daemon's RAFIKI_MAX_DEPTH")
 	cmd.Flags().Float64("max-cost", -1, "USD budget for this child's whole subtree (unset = unlimited)")
 	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 4)")
+	cmd.Flags().String("executor-socket", paths.Get(paths.ExecutorSocket),
+		"unix socket of a rafiki-executor to run this agent's filesystem and shell tools in")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -235,6 +237,9 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	if cmd.Flags().Changed("max-children") {
 		v, _ := cmd.Flags().GetInt("max-children")
 		req.MaxChildren = &v
+	}
+	if cmd.Flags().Changed("executor-socket") {
+		req.ExecutorSocket, _ = cmd.Flags().GetString("executor-socket")
 	}
 
 	return req, nil

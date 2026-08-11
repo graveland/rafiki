@@ -43,4 +43,8 @@ type ExecutorClient interface {
 	JobOutput(ctx context.Context, handle string, since int64) (JobSnapshot, error)
 	// KillJob terminates a background job and everything it spawned.
 	KillJob(ctx context.Context, handle string) error
+
+	// Ping verifies the executor is reachable and responsive. It must fail
+	// when the executor is unreachable — no lazy connection.
+	Ping(ctx context.Context) error
 }

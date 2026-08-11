@@ -144,3 +144,12 @@ func (c *Client) KillJob(ctx context.Context, handle string) error {
 	}
 	return nil
 }
+
+// Ping verifies the executor is reachable by calling Describe.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.inner.Describe(ctx, connect.NewRequest(&executorpb.DescribeRequest{}))
+	if err != nil {
+		return fmt.Errorf("executor ping: %w", err)
+	}
+	return nil
+}

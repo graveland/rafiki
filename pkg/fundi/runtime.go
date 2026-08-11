@@ -81,6 +81,11 @@ type RuntimeOptions struct {
 	// subtree to steer.
 	Agents tools.AgentSpawner
 
+	// Executor, when non-nil, runs the filesystem and shell tools in a
+	// separate process rather than in-process. nil keeps every tool local,
+	// which is the default and preserves today's behaviour exactly.
+	Executor tools.ExecutorClient
+
 	// RTK selects the bash tool's rtk mode: "auto", "on", or "off".
 	// Empty means auto. See tools.ParseRTKMode.
 	RTK string
@@ -276,6 +281,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Tasks:        taskStore,
 		ChildID:      opts.Ref,
 		Agents:       opts.Agents,
+		Executor:     opts.Executor,
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 

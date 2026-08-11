@@ -155,6 +155,11 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// because the binding is what makes a self id unspoofable — a shared
 	// spawner would have to take one as an argument.
 	ro.Agents = newControllerSpawner(c, childID)
+	exec, err := c.resolveExecutor(req)
+	if err != nil {
+		return fundi.RuntimeOptions{}, err
+	}
+	ro.Executor = exec
 	return ro, nil
 }
 
