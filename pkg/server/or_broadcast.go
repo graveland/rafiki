@@ -124,7 +124,9 @@ func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 			}
 		}
 		if count > 0 {
-			logger.Debug("or_broadcast: stored spans", "count", count)
+			logger.Info("or_broadcast: stored spans", "count", count)
+		} else {
+			logger.Warn("or_broadcast: valid body but zero spans", "body_len", len(body))
 		}
 	}
 }
