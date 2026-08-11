@@ -141,3 +141,63 @@ func TestMaxDepthCeilingDefaultsToThree(t *testing.T) {
 		t.Fatalf("an explicit 0 must disable spawning entirely, got %d", got)
 	}
 }
+
+func insertChild(c *Controller, id, parent, root string, status protocol.Status) {
+	c.st.Insert(&childstore.Session{
+		ChildID: id, Status: status, StartedAt: time.Now(), MaxDepth: 2, MaxChildren: 4,
+		Labels: map[string]string{
+			childstore.LabelParent: parent, childstore.LabelRoot: root,
+		},
+	})
+}
+
+func TestConcurrencyCapRefusesTheFifthChild(t *testing.T) {
+	c := limitsFixture(t, 3) // c_d0, MaxChildren 4
+	for _, id := range []string{"c_w1", "c_w2", "c_w3", "c_w4"} {
+		insertChild(c, id, "c_d0", "c_d0", protocol.StatusIdle)
+	}
+	err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"})
+	if err == nil {
+		t.Fatal("the fifth live child must be refused")
+	}
+	if !strings.Contains(err.Error(), "4") {
+		t.Errorf("refusal must name the cap so it is actionable: %v", err)
+	}
+}
+
+// The cap counts LIVE descendants. An exited child frees a slot — otherwise a
+// long-running coordinator that has cycled through twenty workers can never
+// spawn again, which is a leak dressed as a limit.
+func TestExitedChildFreesASlot(t *testing.T) {
+	c := limitsFixture(t, 3)
+	for _, id := range []string{"c_w1", "c_w2", "c_w3"} {
+		insertChild(c, id, "c_d0", "c_d0", protocol.StatusIdle)
+	}
+	insertChild(c, "c_dead", "c_d0", "c_d0", protocol.StatusExited)
+
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}); err != nil {
+		t.Fatalf("3 live + 1 exited is under a cap of 4: %v", err)
+	}
+}
+
+// "Across the subtree", not "direct children". A coordinator with two workers
+// that each hold two reviewers is at four, not two.
+func TestConcurrencyCountsTheWholeSubtree(t *testing.T) {
+	c := limitsFixture(t, 3)
+	insertChild(c, "c_w1", "c_d0", "c_d0", protocol.StatusIdle)
+	insertChild(c, "c_w2", "c_d0", "c_d0", protocol.StatusIdle)
+	insertChild(c, "c_r1", "c_w1", "c_d0", protocol.StatusIdle)
+	insertChild(c, "c_r2", "c_w2", "c_d0", protocol.StatusIdle)
+
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}); err == nil {
+		t.Fatal("4 live descendants at any depth must exhaust a cap of 4")
+	}
+}
+
+func TestZeroMaxChildrenBlocksEverySpawn(t *testing.T) {
+	c := limitsFixture(t, 3)
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxChildren = 0 })
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}); err == nil {
+		t.Fatal("max-children 0 must refuse")
+	}
+}

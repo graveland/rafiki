@@ -128,9 +128,37 @@ func grantedDepth(req protocol.SpawnRequest, childDepth, ceiling int) int {
 	return want
 }
 
-// checkConcurrency and checkBudget are implemented in Tasks 2 and 4.
-func (c *Controller) checkConcurrency(protocol.SpawnRequest) error { return nil }
-func (c *Controller) checkBudget(protocol.SpawnRequest) error      { return nil }
+// checkConcurrency caps simultaneously LIVE descendants across the spawner's
+// subtree.
+//
+// Separate from cost on purpose: a runaway recursion of cheap spawns exhausts
+// process tables, file descriptors and memory long before it exhausts a dollar
+// budget, and the two failures want different numbers.
+func (c *Controller) checkConcurrency(req protocol.SpawnRequest) error {
+	if req.ParentChildID == "" {
+		return nil // a top-level spawn has no subtree to bound
+	}
+	parent, ok := c.st.Get(req.ParentChildID)
+	if !ok {
+		return limitError("parentChildId: no such child: %s", req.ParentChildID)
+	}
+	limit := parent.MaxChildren
+	if limit <= 0 {
+		return limitError(
+			"agent %s has a live-agent cap of %d and may not spawn",
+			req.ParentChildID, limit)
+	}
+	live := c.st.LiveDescendantCount(req.ParentChildID)
+	if live >= limit {
+		return limitError(
+			"spawn refused: %d live agent(s) already running beneath %s, at its cap of %d. Wait for one to finish, or stop one with agent_kill",
+			live, req.ParentChildID, limit)
+	}
+	return nil
+}
+
+// checkBudget is implemented in Task 4.
+func (c *Controller) checkBudget(protocol.SpawnRequest) error { return nil }
 
 // childDepthFor is where a child of parentID would land. Kept separate from
 // checkDepth so the stored grant and the admission check cannot disagree
