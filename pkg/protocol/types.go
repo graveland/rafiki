@@ -185,6 +185,16 @@ type SpawnRequest struct {
 	// the rafiki/ prefix is rejected in Labels above.
 	ParentChildID string `json:"parentChildId,omitempty"`
 
+	// Task is a handle ("2.1") in the SPAWNER's task ledger to assign to the
+	// new child. Honoured only when ParentChildID is set, because a handle is
+	// meaningless without a conversation to resolve it against.
+	//
+	// The assignment is written only after the controller has admitted the
+	// spawn. There is deliberately no task_delegate verb: it would clone this
+	// whole struct's surface to add one field, and a separate assign call
+	// leaves a window where a row points at a child that does not exist.
+	Task string `json:"task,omitempty"`
+
 	// Working directory (required, absolute).
 	Cwd string `json:"cwd"`
 

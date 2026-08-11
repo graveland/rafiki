@@ -75,6 +75,12 @@ type RuntimeOptions struct {
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
 	RawTrace *routing.RawTraceStore
 
+	// Agents, when non-nil, gives this child the agent_* tools. Supplied by
+	// the daemon as a per-child adapter over the Controller; nil for the
+	// standalone `rafikid fundi` process, which has no controller and so no
+	// subtree to steer.
+	Agents tools.AgentSpawner
+
 	// RTK selects the bash tool's rtk mode: "auto", "on", or "off".
 	// Empty means auto. See tools.ParseRTKMode.
 	RTK string
@@ -269,6 +275,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Pool:         opts.Pool,
 		Tasks:        taskStore,
 		ChildID:      opts.Ref,
+		Agents:       opts.Agents,
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 

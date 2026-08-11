@@ -151,6 +151,10 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if !req.RecordRequests {
 		ro.RawTrace = nil
 	}
+	// Bound to THIS child. Constructed here rather than stored on Controller
+	// because the binding is what makes a self id unspoofable — a shared
+	// spawner would have to take one as an argument.
+	ro.Agents = newControllerSpawner(c, childID)
 	return ro, nil
 }
 
