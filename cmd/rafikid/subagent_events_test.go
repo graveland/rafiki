@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
 type capturedFlush struct {
@@ -146,5 +148,105 @@ func TestExitNotifiesTheParent(t *testing.T) {
 	batches := cap.batches()
 	if len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited") {
 		t.Fatalf("got %+v", batches)
+	}
+}
+
+// The rule is checkable, so it is checked — not written into a prompt paid on
+// every request forever.
+func TestSettleWithResidueNudgesTheAgentItself(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	store := tasks.NewMemoryStore()
+	c.tasks = store
+	ctx := context.Background()
+
+	_ = c.st.Update("c_w1", func(s *childstore.Session) { s.SessionID = "conv-w1" })
+	if _, err := store.Add(ctx, "conv-w1", "", []tasks.NewTask{
+		{Content: "done thing"}, {Content: "half-done thing"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, "conv-w1", []tasks.Change{{Handle: "1", Status: tasks.StatusCompleted}}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	var nudge string
+	for _, b := range cap.batches() {
+		if b.childID == "c_w1" {
+			nudge = strings.Join(b.fragments, "\n")
+		}
+	}
+	if nudge == "" {
+		t.Fatal("the settling agent must be nudged about its own residue")
+	}
+	if !strings.Contains(nudge, "2") {
+		t.Errorf("the nudge must name the unresolved handle; got %q", nudge)
+	}
+	if strings.Contains(nudge, "1 ") && strings.Contains(nudge, "done thing") {
+		t.Errorf("a resolved task must not be listed; got %q", nudge)
+	}
+}
+
+// Bound the loop. A model that ignored the first nudge is not more likely to
+// honour the fifth, and each one costs a full turn.
+func TestSecondSettleWithResidueEscalatesInsteadOfNudging(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	store := tasks.NewMemoryStore()
+	c.tasks = store
+	ctx := context.Background()
+
+	_ = c.st.Update("c_w1", func(s *childstore.Session) { s.SessionID = "conv-w1" })
+	if _, err := store.Add(ctx, "conv-w1", "", []tasks.NewTask{{Content: "never finished"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+	c.st.SetStatus("c_w1", protocol.StatusStreaming)
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	var toWorker, toCoord int
+	var coordText string
+	for _, b := range cap.batches() {
+		switch b.childID {
+		case "c_w1":
+			toWorker++
+		case "c_coord":
+			toCoord++
+			coordText += strings.Join(b.fragments, "\n")
+		}
+	}
+	if toWorker != 1 {
+		t.Errorf("want exactly one nudge to the worker, got %d", toWorker)
+	}
+	if toCoord == 0 || !strings.Contains(coordText, "unresolved") {
+		t.Errorf("the second settle must escalate to the coordinator; got %q", coordText)
+	}
+}
+
+func TestCleanSettleIsNotNudged(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	store := tasks.NewMemoryStore()
+	c.tasks = store
+	ctx := context.Background()
+
+	_ = c.st.Update("c_w1", func(s *childstore.Session) { s.SessionID = "conv-w1" })
+	if _, err := store.Add(ctx, "conv-w1", "", []tasks.NewTask{{Content: "done"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, "conv-w1", []tasks.Change{{Handle: "1", Status: tasks.StatusCompleted}}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	for _, b := range cap.batches() {
+		if b.childID == "c_w1" {
+			t.Fatalf("a clean settle must not cost a turn: %+v", b)
+		}
 	}
 }

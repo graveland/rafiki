@@ -106,6 +106,11 @@ type Controller struct {
 	// budget warnings, executor loss) into debounced frames so N events
 	// cost one model turn instead of N. Nil means the buffer is disabled.
 	evbuf *eventbuf.Buffer
+
+	// nudgedOnce bounds prompting.md's enforcement ladder to one nudge per
+	// child. Guarded by nudgedMu.
+	nudgedMu   sync.Mutex
+	nudgedOnce map[string]bool
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -2408,6 +2413,10 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	if c.evbuf != nil {
 		c.evbuf.Forget(childID)
 	}
+
+	c.nudgedMu.Lock()
+	delete(c.nudgedOnce, childID)
+	c.nudgedMu.Unlock()
 
 	// Sweep this child's unfinished work to orphaned BEFORE cm.Remove.
 	// cm.Remove is the observable "kill complete" signal (waitForChildRemoval
