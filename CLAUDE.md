@@ -48,44 +48,26 @@
 - **`pkg/protocol` is a deliberately pure-data, zero-dependency package** (imports nothing but `encoding/json` — see its own file header). New wire **request** types belong there. New wire **response** types generally should NOT duplicate an existing domain type's fields (e.g. `insights.Stats` is ~9 nested structs/~40 fields) — instead, pass the domain type straight to `okResponse` (which takes `any`) from `pkg/control`, which already depends on domain packages elsewhere (`childstore.Snapshot` in the `Controller` interface itself). Mirroring types nobody enforces stay in sync is pure drift risk for zero benefit.
 - **`ctrl_*` response payload shapes are not uniform — read `pkg/control/dispatch.go` before writing a client-side decode, never infer from a sibling verb.** `ctrl_conversation_stats` and `ctrl_conversation_export` send the domain value bare; `ctrl_conversation_search` wraps its rows in `{"rows": [...]}`. Assuming the search shape from its neighbours produced a runtime `cannot unmarshal object into Go value of type []insights.ConversationSummary` that a unit test happily missed, because the test's fixture encoded the same wrong assumption. Build response fixtures from the shape `dispatch.go` marshals, and confirm against a live daemon.
 - **Every `ctrl_*` response is capped at `protocol.MaxFrameBytes` (16 MiB) per frame** (`pkg/protocol/frame.go`) — a writer that emits a larger frame doesn't error cleanly, it silently breaks the reader (`FrameReader` returns `ErrFrameTooLarge`, the connection gets torn down, and the client sees an unhelpful "connection closed" rather than a real error). Any new handler returning variable/unbounded-size data (history, transcripts, search results) must clamp limits and/or size-check the payload before responding — see `recentResponseBudget` in `cmd/rafikid/controller.go` (`ctrl_get_recent`) and `protocol.ErrPayloadTooLarge` (`ctrl_conversation_export`) for the two established patterns.
-- **The event buffer's two bypasses are orthogonal, and `eventbuf.Delivery` is what keeps them apart.** *When* a batch goes out and *how* it arrives are separate axes. `Push` is debounced + `DeliverPrompt` + busy-gated (the default for everything). `PushNow` skips the debounce but still defers while the child is mid-turn, and still arrives as a prompt. `PushSteer` skips both the debounce and the busy gate and arrives as `{"type":"steer"}`, injected into the turn already running — reserve it for events that *invalidate* that turn, because a worker that has lost its executor must not spend another 40s believing it still has one. A steer deferred for any reason stays a steer (`perKey.pendingDelivery`). `Buffer.emit` must always run with `b.mu` released: flush is `Controller.injectBatch` → `Controller.Send`, a blocking write, and a producer pushing an event from inside that path would deadlock on a re-entrant acquire.
 - **Design/plan docs live in `docs/plans/YYYY-MM-DD-<topic>-design.md` and `...-plan.md`** (not the generic `docs/superpowers/` default) — follow this repo's existing convention when brainstorming or planning new work.
-- **Generated protobuf code is checked in** (`pkg/executorpb/`). A contributor without `protoc` or `buf` must still be able to build. The `make proto` target regenerates it when the `.proto` file changes; never hand-edit the generated `.pb.go` or `.connect.go` files.
-- **`pkg/protocol` must never import `pkg/executorpb`.** The protocol package promises zero dependencies in its own header and the executor protocol is a separate wire format with its own types and transport. Generated code, the client, and the server all live outside `pkg/protocol`.
-- **Two tool lists, and they are not the same list.** `tools.ExecutorLocalTools()` is what an executor process RUNS — `read`, `write`, `edit`, `glob`, `grep`, `bash` — and `executor.NewServer` builds its registry with `MaterializeOnly` over exactly that set. `tools.RoutedToExecutor()` is what the PARENT dispatches remotely: those six plus `bash_start`, `bash_output`, `bash_kill`, which are parent-side tools implemented as RPCs and never reach the executor's registry. Everything else — `skill`, `task_*`, `web_*`, `lsp_*`, MCP — stays parent-side, which is what keeps credentials above the boundary. Building the executor's registry with `MaterializeAll` instead is a live panic: `ToolOpts.Tasks` is nil there, and the `task_*` tools do not nil-check.
-- **`tools.AgentSpawner` is bound to ONE child at construction and takes no caller identity in any method.** That is the enforcement of §1.2's rule, and it is easy to undo by "simplifying" the adapter into a single shared value with a `selfID string` first parameter. Do not: fundi children run in-process, so a self id passed as a parameter is one refactor away from being a tool argument, and a tool argument is produced by an LLM that can be prompt-injected into naming a sibling. `newControllerSpawner` is called per-child from `agentRuntimeOptions`, where the daemon-stamped `childID` is already in hand.
-- **`SpawnRequest.MaxDepth/MaxCost/MaxChildren` are pointers because zero is
-  meaningful for all three, and they collapse to plain values in
-  `childstore.Session` — where `MaxCost == 0` means UNLIMITED, not "spend
-  nothing".** Every comparison against a stored budget must be guarded by
-  `if snap.MaxCost > 0` first. Getting it backwards makes every unbudgeted
-  agent refuse its first spawn, which reads as a broken daemon rather than as
-  a limit. The pointer-to-value collapse happens in `grantedCost` /
-  `grantedDepth` / `grantedChildren` (`cmd/rafikid/limits.go`) and nowhere
-  else — do not re-derive it at a call site.
 
-- **The executor DIALS rafikid and then SERVES HTTP/2 on what it dialled;
-  rafikid accepts and is the HTTP client.** Four things fail silently if you
-  get them wrong (`pkg/execpool/transport.go` documents each at its site):
-  `DialTLSContext` is the hook even with no TLS — there is no `DialContext` on
-  `http2.Transport`; a second dial request is the reconnect signal, not an
-  error to retry; **both** sides must set `NextProtos: []string{"h2"}` or ALPN
-  resolves to `""` and `ServeConn` still works; and the hello frame must be
-  read byte-at-a-time, because a buffered reader that consumes past its newline
-  leaves `http2.Transport` starting mid-frame. Note this last rule is the
-  OPPOSITE of the control listener's (`pkg/control/server.go`), where the
-  handshake reader must be reused or a pipelined first request is lost.
+- **`Pool.Park` locks; `Pool.parkLocked` does not, and `sync.RWMutex` is not
+  reentrant.** A goroutine that blocks while holding `Pool.mu` does not just
+  lose its own executor — it wedges `Live()`, `ClientFor()` and every
+  subsequent accept, so one unwell executor takes the whole executor plane
+  down. This shipped once (`healthLoop` calling `Park` inside its own lock) and
+  was invisible because `pkg/execpool` had no pool test. Any new caller inside
+  a locked region uses `parkLocked`; any caller outside one uses `Park`.
 
-- **`conversations.executors` is authoritative on every connection; the
-  credential proves only binding to a row.** Nothing that gates access may be
-  cached from enrollment time, and nothing self-reported by the executor may
-  reach the `labels` column — `self_reported` is a separate column for exactly
-  that reason. This is what makes relabelling and revocation row updates
-  needing no reissue, no restart, and no access to the machine.
+- **A child's executor set is its PARENT'S set intersected with its own
+  selector — never `Live()` filtered by the child's selector.** The first
+  version of `selectExecutor` did the latter, which lets any child reach any
+  executor its selector happens to match, including one its parent was confined
+  away from. `effectiveExecutorSet` (`cmd/rafikid/executor_select.go`) walks the
+  lineage root-first so an ancestor's constraint can never be widened by a
+  descendant's, and a malformed selector — on either side — EXCLUDES rather
+  than admits.
 
-- **Executor narrowing is runtime intersection, never a subset proof.** Compute
-  the parent's effective executor set, evaluate the child's selector
-  independently, intersect. Attempting to prove a child's selector implies its
-  parent's is decidable for equality matches and a logic puzzle the moment
-  `notin` appears — and it fails OPEN, which is the wrong direction for a
-  confidentiality boundary.
+- **`Executor.Admits` is the executor-side half of selection and is easy to
+  store and never evaluate** (it shipped that way). An agent-side selector
+  alone is permissive by default: it says what the agent wants, not what the
+  executor will take. Both halves are evaluated in `effectiveExecutorSet`.

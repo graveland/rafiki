@@ -1355,7 +1355,107 @@ with no argument picks the obvious target.
   pi's native `session_start { reason: "new" }` extension lifecycle
   semantics.
 
-## 15. Reference: pi RPC pass-through
+## 15. Executor management (ctrl_executor_*)
+
+Commands for managing remote executor enrollment, labels, and state.
+Unregistered commands receive an error response with code `invalid_args`.
+
+### 15.1 `ctrl_executor_enroll`
+
+Mint a one-time enrollment token. The token is returned once and not persisted
+server-side in plaintext — only its hash is stored.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_executor_enroll",
+  "labels": {"rafiki/env": "work"},        // trust labels bound to the executor row
+  "roots": ["/workspace"],                  // accessible root paths
+  "isolation": "none",                      // none | container | vm
+  "workspaceMode": "pinned",                // ephemeral | pinned
+  "admits": "",                             // executor-side admission selector
+  "ttlSeconds": 3600                        // token lifetime, required
+}
+```
+
+**Response** (success)
+```jsonc
+{
+  "type": "ctrl_response",
+  "command": "ctrl_executor_enroll",
+  "success": true,
+  "data": {"token": "<one-time bearer token>"}
+}
+```
+
+### 15.2 `ctrl_executor_list`
+
+List enrolled executors, optionally filtered by a label selector.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_executor_list",
+  "selector": "env=work",                   // optional label selector filter
+  "limit": 50                               // clamped to 100
+}
+```
+
+**Response** (success)
+```jsonc
+{
+  "type": "ctrl_response",
+  "command": "ctrl_executor_list",
+  "success": true,
+  "data": {
+    "executors": [
+      {
+        "id": "abc123...",
+        "displayName": "my-laptop",
+        "labels": {"env": "work"},
+        "enabled": true,
+        "workspaceMode": "pinned",
+        "admits": "",
+        "enrolledAt": "2026-01-01T00:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### 15.3 `ctrl_executor_label`
+
+Set or remove labels on an executor's database row. Changes take effect on the
+executor's next connection without requiring a restart.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_executor_label",
+  "executorId": "abc123...",
+  "set": {"env": "home"},                   // keys to set
+  "remove": ["legacy"]                      // keys to remove
+}
+```
+
+**Response** (success) — the full executor object post-mutation.
+
+### 15.4 `ctrl_executor_disable` / `ctrl_executor_enable`
+
+Disable or re-enable an executor. A disabled executor's credential fails
+authentication on its next connection.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_executor_disable",
+  "executorId": "abc123..."
+}
+```
+
+**Response** (success) — `data` is omitted (null).
+
+## 16. Reference: pi RPC pass-through
 
 For completeness, the controller is transparent for routing and content of
 pi's `--mode rpc` protocol, with the two intercepted commands documented in
