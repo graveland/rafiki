@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
 // ─── ControllerError ──────────────────────────────────────────────────────────
@@ -88,9 +88,6 @@ type Controller interface {
 	ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error)
 	ConversationExport(ctx context.Context, id string) (*insights.Transcript, error)
 
-	// Task ledger.
-	TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error)
-
 	// Lifecycle mutations.
 	Spawn(ctx context.Context, req protocol.SpawnRequest) (SpawnResult, error)
 	Resume(ctx context.Context, childID string, apiKey string) (SpawnResult, error)
@@ -140,6 +137,19 @@ type Controller interface {
 	// controller removes any subscriptions (global and per-child) held by
 	// this connection so they do not leak.
 	OnConnectionClose(conn Connection)
+
+	// ─── Executor management ────────────────────────────────────────────────
+
+	// ExecutorEnroll mints a one-time enrollment token for a new executor.
+	ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
+	// ExecutorList returns enrolled executors, optionally filtered.
+	ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error)
+	// ExecutorLabel sets or removes labels on an executor row.
+	ExecutorLabel(req protocol.ExecutorLabelRequest) (executors.Executor, error)
+	// ExecutorDisable disables an executor.
+	ExecutorDisable(req protocol.ExecutorDisableRequest) error
+	// ExecutorEnable re-enables a disabled executor.
+	ExecutorEnable(req protocol.ExecutorEnableRequest) error
 }
 
 // ─── Dispatch factory ─────────────────────────────────────────────────────────
@@ -201,8 +211,6 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.conversationSearch(frame, hdr.ID)
 	case protocol.TypeCtrlConversationExport:
 		return d.conversationExport(frame, hdr.ID)
-	case protocol.TypeCtrlTaskList:
-		return d.taskList(frame, hdr.ID)
 	case protocol.TypeCtrlSend:
 		return d.ctrlSend(frame, hdr.ID)
 	case protocol.TypeCtrlSetLabels:
@@ -219,6 +227,16 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.globalSubscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlGlobalUnsubscribe:
 		return d.globalUnsubscribe(conn, frame, hdr.ID)
+	case protocol.TypeCtrlExecutorEnroll:
+		return d.executorEnroll(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorList:
+		return d.executorList(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorLabel:
+		return d.executorLabel(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorDisable:
+		return d.executorDisable(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorEnable:
+		return d.executorEnable(frame, hdr.ID)
 	default:
 		return errResponse(hdr.Type, hdr.ID, protocol.ErrInvalidArgs, "unknown command type: "+hdr.Type)
 	}
@@ -772,28 +790,105 @@ func (d *dispatcher) globalUnsubscribe(conn Connection, frame []byte, id string)
 	return okResponse(protocol.TypeCtrlGlobalUnsubscribe, id, nil)
 }
 
-const taskListMaxRows = 2000
+// ─── Executor handlers ─────────────────────────────────────────────────────────
 
-func (d *dispatcher) taskList(frame []byte, id string) []byte {
-	var req protocol.TaskListRequest
+// maxExecutorListLimit bounds ctrl_executor_list's effective limit so a large
+// or absent client-supplied limit can't produce a response that risks
+// protocol.MaxFrameBytes.
+const maxExecutorListLimit = 100
+
+func (d *dispatcher) executorEnroll(frame []byte, id string) []byte {
+	var req protocol.ExecutorEnrollRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
-		return errResponse(protocol.TypeCtrlTaskList, id, protocol.ErrInvalidArgs, "malformed request")
+		return errResponse(protocol.TypeCtrlExecutorEnroll, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-
-	// Clamp before querying. The store applies Limit, so this is what keeps
-	// the response inside protocol.MaxFrameBytes: an oversized frame does not
-	// error cleanly, it returns ErrFrameTooLarge, tears down the connection,
-	// and surfaces to the client as a bare "connection closed".
-	if req.Limit <= 0 || req.Limit > taskListMaxRows {
-		req.Limit = taskListMaxRows
+	if req.TTLSeconds <= 0 {
+		return errResponse(protocol.TypeCtrlExecutorEnroll, id, protocol.ErrInvalidArgs, "ttlSeconds must be positive")
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
-	defer cancel()
-
-	rows, err := d.c.TaskList(ctx, req)
+	result, err := d.c.ExecutorEnroll(req)
 	if err != nil {
-		return mapErr(protocol.TypeCtrlTaskList, id, err, protocol.ErrInternal)
+		return mapErr(protocol.TypeCtrlExecutorEnroll, id, err, protocol.ErrInternal)
 	}
-	return okResponse(protocol.TypeCtrlTaskList, id, rows)
+	return okResponse(protocol.TypeCtrlExecutorEnroll, id, result)
+}
+
+func (d *dispatcher) executorList(frame []byte, id string) []byte {
+	var req protocol.ExecutorListRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorList, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.Limit > maxExecutorListLimit {
+		req.Limit = maxExecutorListLimit
+	}
+	if req.Limit <= 0 {
+		req.Limit = 50
+	}
+	execs, err := d.c.ExecutorList(req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlExecutorList, id, err, protocol.ErrInternal)
+	}
+	if execs == nil {
+		execs = []executors.Executor{}
+	}
+	// Clamp against MaxFrameBytes.
+	type listPayload struct {
+		Executors []executors.Executor `json:"executors"`
+	}
+	payload := listPayload{Executors: execs}
+	if b, err := json.Marshal(payload); err == nil && len(b) > protocol.MaxFrameBytes-4096 {
+		for len(execs) > 0 {
+			execs = execs[:len(execs)-1]
+			payload.Executors = execs
+			if b, err2 := json.Marshal(payload); err2 == nil && len(b) <= protocol.MaxFrameBytes-4096 {
+				break
+			}
+		}
+	}
+	return okResponse(protocol.TypeCtrlExecutorList, id, payload)
+}
+
+func (d *dispatcher) executorLabel(frame []byte, id string) []byte {
+	var req protocol.ExecutorLabelRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorLabel, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ExecutorID == "" {
+		return errResponse(protocol.TypeCtrlExecutorLabel, id, protocol.ErrInvalidArgs, "executorId required")
+	}
+	if len(req.Set) == 0 && len(req.Remove) == 0 {
+		return errResponse(protocol.TypeCtrlExecutorLabel, id, protocol.ErrInvalidArgs, "at least one of set or remove is required")
+	}
+	result, err := d.c.ExecutorLabel(req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlExecutorLabel, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorLabel, id, result)
+}
+
+func (d *dispatcher) executorDisable(frame []byte, id string) []byte {
+	var req protocol.ExecutorDisableRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorDisable, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ExecutorID == "" {
+		return errResponse(protocol.TypeCtrlExecutorDisable, id, protocol.ErrInvalidArgs, "executorId required")
+	}
+	if err := d.c.ExecutorDisable(req); err != nil {
+		return mapErr(protocol.TypeCtrlExecutorDisable, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorDisable, id, nil)
+}
+
+func (d *dispatcher) executorEnable(frame []byte, id string) []byte {
+	var req protocol.ExecutorEnableRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorEnable, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ExecutorID == "" {
+		return errResponse(protocol.TypeCtrlExecutorEnable, id, protocol.ErrInvalidArgs, "executorId required")
+	}
+	if err := d.c.ExecutorEnable(req); err != nil {
+		return mapErr(protocol.TypeCtrlExecutorEnable, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorEnable, id, nil)
 }
