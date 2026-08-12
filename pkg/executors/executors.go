@@ -1,53 +1,25 @@
-// Package executors manages the executor registry: the database rows where
-// identity and trust labels live, atomic enrollment against one-time tokens,
-// and label selectors that decide where a child runs.
+// Package executors provides the executor domain types, label selector
+// parsing and matching, and the narrow operation that enforces the
+// confidentiality boundary between a parent agent and its children.
 package executors
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
-// Executor is a row from the executors table, authoritative for everything
-// that gates access. A credential proves only binding to a row, never what
-// the row says.
+// Executor is a live machine that runs children's filesystem and shell tools.
+// The database row is authoritative for identity and trust labels, not the
+// credential the executor presents — which is what makes relabelling and
+// revocation row updates that need no reissue and no machine access.
 type Executor struct {
-	ID            string
-	DisplayName   string
-	Labels        map[string]string
-	SelfReported  map[string]string
-	Annotations   map[string]string
-	Roots         []string
-	Isolation     string
-	WorkspaceMode string
-	Admits        string
-	Enabled       bool
-	EnrolledAt    time.Time
-	LastSeenAt    time.Time
-}
-
-// NewToken carries everything the minter supplies to create an enrollment token.
-type NewToken struct {
-	Labels        map[string]string
-	Roots         []string
-	Isolation     string
-	WorkspaceMode string
-	Admits        string
-	MintedBy      string
-	ExpiresAt     time.Time
-}
-
-// Store is the executor registry's persistence layer. The implementation
-// is in postgres.go; a conformance test against the interface lives in
-// conformance_test.go.
-type Store interface {
-	MintToken(ctx context.Context, t NewToken) (plaintext string, err error)
-	Enroll(ctx context.Context, token string, self map[string]string) (Executor, string, error)
-	Authenticate(ctx context.Context, credential string) (Executor, error)
-	Get(ctx context.Context, id string) (Executor, error)
-	List(ctx context.Context) ([]Executor, error)
-	SetLabels(ctx context.Context, id string, set map[string]string, remove []string) (Executor, error)
-	SetEnabled(ctx context.Context, id string, enabled bool) error
-	Annotate(ctx context.Context, id string, set map[string]string, remove []string) error
-	TouchSeen(ctx context.Context, id string) error
+	ID            string            `json:"id"`
+	DisplayName   string            `json:"displayName"`
+	Labels        map[string]string `json:"labels"`
+	SelfReported  map[string]string `json:"selfReported,omitempty"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
+	Roots         []string          `json:"roots"`
+	Isolation     string            `json:"isolation"`
+	WorkspaceMode string            `json:"workspaceMode"`
+	Admits        string            `json:"admits"` // executor-side admission selector
+	Enabled       bool              `json:"enabled"`
+	EnrolledAt    time.Time         `json:"enrolledAt"`
+	LastSeenAt    time.Time         `json:"lastSeenAt,omitempty"`
 }
