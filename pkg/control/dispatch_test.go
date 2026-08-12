@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -39,6 +40,11 @@ type fakeController struct {
 	globalUnsubscribeFn     func(control.Connection) error
 	subscribeLabeledFn      func(control.Connection, map[string]string, []string, protocol.SubscribeFilter) error
 	onConnectionCloseFn     func(control.Connection)
+	executorEnrollFn        func(protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
+	executorListFn          func(protocol.ExecutorListRequest) ([]executors.Executor, error)
+	executorLabelFn         func(protocol.ExecutorLabelRequest) (executors.Executor, error)
+	executorDisableFn       func(protocol.ExecutorDisableRequest) error
+	executorEnableFn        func(protocol.ExecutorEnableRequest) error
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
 	contextWindowFn         func(string) (int, int, bool)
@@ -201,6 +207,41 @@ func (f *fakeController) OnConnectionClose(conn control.Connection) {
 	if f.onConnectionCloseFn != nil {
 		f.onConnectionCloseFn(conn)
 	}
+}
+
+func (f *fakeController) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
+	if f.executorEnrollFn != nil {
+		return f.executorEnrollFn(req)
+	}
+	return protocol.ExecutorEnrollResponseData{}, nil
+}
+
+func (f *fakeController) ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error) {
+	if f.executorListFn != nil {
+		return f.executorListFn(req)
+	}
+	return nil, nil
+}
+
+func (f *fakeController) ExecutorLabel(req protocol.ExecutorLabelRequest) (executors.Executor, error) {
+	if f.executorLabelFn != nil {
+		return f.executorLabelFn(req)
+	}
+	return executors.Executor{}, nil
+}
+
+func (f *fakeController) ExecutorDisable(req protocol.ExecutorDisableRequest) error {
+	if f.executorDisableFn != nil {
+		return f.executorDisableFn(req)
+	}
+	return nil
+}
+
+func (f *fakeController) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
+	if f.executorEnableFn != nil {
+		return f.executorEnableFn(req)
+	}
+	return nil
 }
 
 func (f *fakeController) SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error) {
