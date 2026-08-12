@@ -96,6 +96,57 @@ quantization and data-retention policy, so pinned lines get an OpenRouter
 (`glm-5.2` → Fireworks). A caller-supplied `provider` field always wins
 over the pin.
 
+### The provider cache guard
+
+OpenRouter picks which provider serves an unpinned model, and that choice can
+change without warning. On 2026-08-12 it moved `deepseek/deepseek-v4-pro` from
+Novita to CoreWeave; Novita had been serving 98–99% of input tokens from prompt
+cache, CoreWeave served 5.9%. Nothing errored — requests succeeded, quality was
+unaffected, and the cost per input token went up 15.6×. Sticky routing then kept
+every subsequent turn of the conversation on the bad provider.
+
+`routing.ProviderGuard` watches completed OpenRouter turns for exactly that. A
+turn counts as evidence against its provider only when it *should* have hit
+cache: same conversation, same `prefix_hash` as the previous turn, same provider
+as the previous turn, and a prompt over 4096 tokens. Five consecutive such
+misses eject the provider — its slug goes into the outbound request's
+`provider.ignore` for that model line, which is also what breaks OpenRouter's
+sticky routing and lets the next request land somewhere else.
+
+- **Threshold: 5.** Measured, not guessed. Across ~1200 turns of healthy Novita
+  traffic the worst consecutive miss streak was 1; the broken CoreWeave produced
+  streaks of 15–28. Both sequences are checked into
+  `pkg/routing/testdata/` and replayed as tests.
+- **TTL: 24 hours**, then the provider is eligible again — long enough that a
+  bad provider cannot re-burn the budget the same day, short enough that a
+  repaired endpoint returns unattended.
+- **Cap: 3 providers per model line**, oldest evicted first, so the guard can
+  never blacklist a model into unroutability.
+- The guard's ignore list is merged in **even when the caller supplied its own
+  `provider` object** — unlike the pin, which the caller overrides. A budget
+  guard any caller can switch off is not a guard.
+- It needs capture enabled: it judges misses using `prefix_hash` and the
+  conversation id, so with capture off nothing qualifies as evidence and the
+  guard is inert by design.
+
+Set `RAFIKI_PROVIDER_GUARD=off` to disable it entirely.
+
+Ejections are logged append-only, so the table is breakage history rather than
+just state, and unexpired rows reseed the in-memory list at startup:
+
+```sql
+SELECT created_at, provider, model_line, reason, expires_at, evidence
+  FROM openrouter.provider_ejection
+ ORDER BY created_at DESC LIMIT 20;
+```
+
+Note that OpenRouter's endpoints API cannot answer this question for you: its
+`supports_implicit_caching` flag is `false` for Novita, which cached 99% of the
+time, and `true` only for the first-party DeepSeek endpoint. Every third-party
+endpoint also publishes an `input_cache_read` price whether or not it delivers
+one. Observed behaviour is the only signal, which is why the guard is
+observational rather than a catalog lookup.
+
 No concrete model ids are hardcoded: aliases name families/lines and the
 catalog is the source of truth, so an unresolvable alias errors instead of
 falling back to a stale id. Slash ids and model aliases require
