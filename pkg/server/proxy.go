@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +59,8 @@ type MessagesProxy struct {
 
 	rawTrace    *routing.RawTraceStore // nil when no pool configured
 	rawTraceAll bool                   // record all sessions (RAFIKI_RECORD_REQUESTS=1); else per-session via X-Rafiki-Record-Requests header
+
+	guard *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -70,6 +73,12 @@ func (p *MessagesProxy) SetRawTrace(s *routing.RawTraceStore, recordAll bool) {
 	p.rawTraceAll = recordAll
 }
 
+// SetProviderGuard attaches the provider cache guard, which ejects an
+// OpenRouter provider from routing after it stops serving prompt-cache hits.
+// Pass nil to disable (RAFIKI_PROVIDER_GUARD=off); a nil guard is inert at
+// every call site.
+func (p *MessagesProxy) SetProviderGuard(g *routing.ProviderGuard) { p.guard = g }
+
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
 
@@ -81,6 +90,43 @@ func cachePct(u routing.CapturedUsage) float64 {
 		return 0
 	}
 	return math.Round(float64(u.CacheReadTokens)/float64(total)*1000) / 10
+}
+
+// mergeIgnore unions ignore into whatever provider object is already on the
+// payload — a routing.ProviderPrefs from a pin, a caller-supplied map, or
+// nothing at all — and returns the value to store back. Existing entries are
+// preserved and duplicates dropped.
+func mergeIgnore(existing any, ignore []string) any {
+	out := map[string]any{}
+	switch v := existing.(type) {
+	case routing.ProviderPrefs:
+		if len(v.Only) > 0 {
+			out["only"] = v.Only
+		}
+		ignore = append(ignore, v.Ignore...)
+	case map[string]any:
+		for k, val := range v {
+			out[k] = val
+		}
+		if prior, ok := v["ignore"].([]any); ok {
+			for _, s := range prior {
+				if str, ok := s.(string); ok {
+					ignore = append(ignore, str)
+				}
+			}
+		}
+	}
+	seen := map[string]bool{}
+	merged := make([]string, 0, len(ignore))
+	for _, s := range ignore {
+		if !seen[s] {
+			seen[s] = true
+			merged = append(merged, s)
+		}
+	}
+	sort.Strings(merged)
+	out["ignore"] = merged
+	return out
 }
 
 func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *slog.Logger) *MessagesProxy {
@@ -209,12 +255,19 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *htt
 		p.logger.Warn("proxy: openrouter request has no string model; forwarding untranslated")
 	}
 	// Pinned model lines get their provider preferences injected; a
-	// caller-supplied provider object always wins over the pin.
+	// caller-supplied provider object still wins for the pin.
+	//
+	// The guard's ignore list is different: it is merged in even when the
+	// caller supplied its own provider object. A budget guard that any caller
+	// can switch off by sending a provider block is not a guard.
 	if m, ok := payload["model"].(string); ok {
 		if _, has := payload["provider"]; !has {
 			if prefs, pinned := routing.ProviderPrefsFor(m); pinned {
 				payload["provider"] = prefs
 			}
+		}
+		if ignore := p.guard.IgnoredFor(time.Now(), m); len(ignore) > 0 {
+			payload["provider"] = mergeIgnore(payload["provider"], ignore)
 		}
 	}
 	rewritten, err := json.Marshal(payload)
@@ -729,6 +782,12 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"cache_pct", cachePct(usage),
 		"stop_reason", stop, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
+	if upstream == "openrouter" {
+		p.guard.Observe(time.Now(), routing.Observation{
+			Provider: usage.Provider, Model: model, Conversation: cr.convID,
+			PrefixHash: cr.prefixHash, InputTokens: usage.InputTokens, CacheReadTokens: usage.CacheReadTokens,
+		})
+	}
 	// Detached: a mid-stream client disconnect cancels r.Context(), but capture
 	// writes (including the raw trace below) happen after streaming ends and
 	// must still complete so the turn isn't stranded 'pending' and the trace
