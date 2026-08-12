@@ -87,3 +87,9 @@ func TestMessagesProxyNilAuthenticatorIsAnonymous(t *testing.T) {
 		t.Errorf("owner=%q author=%q, want empty/empty (anonymous)", fs.lastOwner, fs.lastAuthor)
 	}
 }
+
+// ConversationTokens satisfies proxyStore. The fake records nothing, so the
+// rollup is empty and cost_total reflects only the turn being logged.
+func (s *recordingStore) ConversationTokens(context.Context, string) ([]routing.ModelTokens, error) {
+	return nil, nil
+}

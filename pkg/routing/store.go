@@ -544,3 +544,46 @@ func isPgTransient(err error) bool {
 		return false
 	}
 }
+
+// ModelTokens is one model's token totals within a conversation.
+type ModelTokens struct {
+	Model               string
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+}
+
+// ConversationTokens returns per-model token totals across a conversation's
+// completed turns, for pricing a running cost.
+//
+// Grouped by model rather than summed flat because a conversation can change
+// model mid-flight — a failover to OpenRouter, a caller switching lines — and
+// the models price differently. Summing every turn's tokens together and
+// pricing them once would silently bill the whole conversation at whichever
+// model happened to be asked about.
+//
+// Errored and in-flight turns are excluded: a failed turn's usage is partial or
+// zero, and charging for it would make the total drift from the invoice.
+func (s *CaptureStore) ConversationTokens(ctx context.Context, convID string) ([]ModelTokens, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT COALESCE(model,''),
+		        COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0)
+		   FROM conversations.conversation_turn
+		  WHERE conversation_id = $1::uuid AND status = 'complete'
+		  GROUP BY model`, convID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ModelTokens
+	for rows.Next() {
+		var m ModelTokens
+		if err := rows.Scan(&m.Model, &m.InputTokens, &m.OutputTokens, &m.CacheReadTokens, &m.CacheCreationTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}

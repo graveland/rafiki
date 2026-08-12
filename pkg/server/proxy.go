@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -28,6 +29,7 @@ type proxyStore interface {
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
 	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error)
 	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error
+	ConversationTokens(ctx context.Context, convID string) ([]routing.ModelTokens, error)
 }
 
 type MessagesProxy struct {
@@ -81,6 +83,55 @@ func (p *MessagesProxy) SetProviderGuard(g *routing.ProviderGuard) { p.guard = g
 
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
+
+// costFields prices a finished turn for the log line, returning slog key/value
+// pairs to append: cost_turn (this turn) and cost_total (the conversation so
+// far, including this turn). Returns nil when the model has no resolvable list
+// price — an unpriced model must log nothing rather than a confident 0.00,
+// which would read as "this turn was free".
+//
+// cost_total is a rollup over the capture store rather than an in-process
+// counter, so it stays correct across a daemon restart mid-conversation and
+// needs no per-conversation state to evict. The extra indexed aggregate rides
+// on the same conv+created_at index the capture path already maintains, runs
+// after the client's bytes are already delivered, and is best-effort: a rollup
+// failure downgrades the line to cost_turn only rather than losing the log.
+//
+// The current turn is added on top of the rollup because this runs BEFORE
+// CompleteTurn writes it — reordering those to avoid the addition would put a
+// DB write between the stream ending and the operator seeing the line.
+func (p *MessagesProxy) costFields(r *http.Request, convID, model string, usage routing.CapturedUsage) []any {
+	price, ok := p.catalog.Pricing(model)
+	if !ok {
+		return nil
+	}
+	turn := price.CostOf(usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheCreationTokens).Total
+	fields := []any{"cost_turn", fmt.Sprintf("%.6f", turn)}
+	if p.store == nil || convID == "" {
+		return fields
+	}
+	// Detached from the request: a client that hung up mid-stream cancelled
+	// r.Context(), and the rollup would fail for a reason that has nothing to
+	// do with the database.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+	defer cancel()
+	prior, err := p.store.ConversationTokens(ctx, convID)
+	if err != nil {
+		p.logger.Warn("proxy: conversation cost rollup failed", "conversation", convID, "error", err)
+		return fields
+	}
+	total := turn
+	for _, m := range prior {
+		// Each model prices separately: a conversation that switched models
+		// mid-flight cannot be summed and priced once.
+		mp, ok := p.catalog.Pricing(m.Model)
+		if !ok {
+			continue
+		}
+		total += mp.CostOf(m.InputTokens, m.OutputTokens, m.CacheReadTokens, m.CacheCreationTokens).Total
+	}
+	return append(fields, "cost_total", fmt.Sprintf("%.2f", total))
+}
 
 // cachePct returns the percentage of input tokens served from cache, rounded to
 // one decimal place.
@@ -775,12 +826,14 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.failTurn(r, cr, "capture parse failed: "+perr.Error())
 		return
 	}
-	p.logger.Info("llm turn",
+	turnFields := []any{
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
 		"cache_pct", cachePct(usage),
-		"stop_reason", stop, "latency", latency(elapsed))
+		"stop_reason", stop, "latency", latency(elapsed),
+	}
+	p.logger.Info("llm turn", append(turnFields, p.costFields(r, cr.convID, model, usage)...)...)
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
 	if upstream == "openrouter" {
 		p.guard.Observe(time.Now(), routing.Observation{
