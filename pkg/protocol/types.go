@@ -34,6 +34,7 @@ const (
 	TypeCtrlForget             = "ctrl_forget"
 	TypeCtrlForgetAllExited    = "ctrl_forget_all_exited"
 	TypeCtrlSearch             = "ctrl_search"
+	TypeCtrlTaskList           = "ctrl_task_list"
 	TypeCtrlStatus             = "ctrl_status"
 	TypeCtrlSetLabels          = "ctrl_set_labels"
 	TypeCtrlResponse           = "ctrl_response"
@@ -172,6 +173,34 @@ type SpawnRequest struct {
 	Name   string            `json:"name,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"` // user-supplied labels; rafiki/ prefix rejected
 
+	// ParentChildID names the child spawning this one, forming the tree edge
+	// recorded as the rafiki/parent label (rafiki/root is derived from it).
+	// Empty means top-level.
+	//
+	// From an ordinary client connection this is honoured as given — the
+	// caller is already authenticated to the daemon. When a spawn originates
+	// from an agent's own spawn tool, the controller overrides it with the
+	// calling child's real id, so an agent cannot claim a parent it does not
+	// have. The lineage labels themselves are never accepted from a caller:
+	// the rafiki/ prefix is rejected in Labels above.
+	ParentChildID string `json:"parentChildId,omitempty"`
+
+	// Task is a handle ("2.1") in the SPAWNER's task ledger to assign to the
+	// new child. Honoured only when ParentChildID is set, because a handle is
+	// meaningless without a conversation to resolve it against.
+	//
+	// The assignment is written only after the controller has admitted the
+	// spawn. There is deliberately no task_delegate verb: it would clone this
+	// whole struct's surface to add one field, and a separate assign call
+	// leaves a window where a row points at a child that does not exist.
+	Task string `json:"task,omitempty"`
+
+	// SpawnerConversationID names the conversation whose ledger Task resolves
+	// against. Set by the daemon from the spawning child's own record, never
+	// by a client: a handle is relative to a conversation, and resolving it
+	// against the wrong one silently assigns somebody else's row.
+	SpawnerConversationID string `json:"spawnerConversationId,omitempty"`
+
 	// Working directory (required, absolute).
 	Cwd string `json:"cwd"`
 
@@ -234,20 +263,55 @@ type SpawnRequest struct {
 	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).
 	RecordRequests bool `json:"recordRequests,omitempty"`
 
-	// ExecutorSelector is a label selector that narrows the parent's executor
-	// set for this child. Used with the executor pool: the child runs its
-	// filesystem and shell tools on an executor that matches both its
-	// parent's set (intersected) and this selector.
+	// ExecutorSocket is a unix socket path served by a rafiki-executor. When
+	// set, the child's filesystem and shell tools run in that process instead
+	// of in the daemon.
+	//
+	// Static configuration, and deliberately the FIRST of the two selection
+	// paths: phase 07's registry replaces this with a label selector over
+	// enrolled executors, but a named socket stays the escape hatch for a
+	// local executor with no enrollment. If both are set the selector wins,
+	// because it is the one the daemon can audit.
+	ExecutorSocket string `json:"executorSocket,omitempty"`
+
+	// ExecutorSelector is a label selector for picking an executor from the
+	// live pool. When set, it wins over ExecutorSocket — the pool is the
+	// path the daemon can audit.
 	ExecutorSelector string `json:"executorSelector,omitempty"`
 
-	// WorkspaceMode controls how the executor provisions this child's
-	// workspace: "ephemeral" for one-shot, "pinned" for durable.
+	// WorkspaceMode selects how the child's workspace is provisioned:
+	// "ephemeral" (reschedulable) or "pinned" (existing tree).
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
 
-	// ParentChildID is the ChildID of the parent agent. Set when spawning a
-	// sub-agent so the daemon can compute the effective executor set by
-	// narrowing from the parent rather than from the full pool.
-	ParentChildID string `json:"parentChildId,omitempty"`
+	// ─── Resource grants (phase 05) ───
+	//
+	// All three are POINTERS so "unset" is distinguishable from "zero". The
+	// distinction is load-bearing in opposite directions for each: an unset
+	// MaxDepth means the default 1, a zero means "this child may not spawn";
+	// an unset MaxCost means unlimited, a zero means "spend nothing".
+	// Collapsing either to a plain int silently converts one into the other.
+
+	// MaxDepth is how many further levels of descendants the NEW child may
+	// create. 0 means it cannot spawn. Default 1 when unset.
+	//
+	// It does NOT decrement: a parent grants what its child needs without
+	// reference to its own allowance. The safety bound is RAFIKI_MAX_DEPTH,
+	// an absolute ceiling on the child's position in the tree that the daemon
+	// computes from stored lineage labels.
+	MaxDepth *int `json:"maxDepth,omitempty"`
+
+	// MaxCost is the new child's subtree budget in USD. Unset means
+	// unlimited — the right default for a top-level interactive agent and the
+	// wrong one for a coordinator, which should always set it. A child may be
+	// granted at most its parent's REMAINING budget; unlike depth, this one
+	// decrements across the subtree.
+	MaxCost *float64 `json:"maxCost,omitempty"`
+
+	// MaxChildren caps simultaneously LIVE descendants across the new child's
+	// subtree. Default 4. It is separate from cost because a runaway
+	// recursion of cheap spawns exhausts the machine long before it exhausts
+	// a dollar budget.
+	MaxChildren *int `json:"maxChildren,omitempty"`
 }
 
 // ResumeRequest re-spawns a child against its persisted state record (§6.4).
@@ -411,6 +475,16 @@ type ConversationExportRequest struct {
 	Type           string `json:"type"`
 	ID             string `json:"id,omitempty"`
 	ConversationID string `json:"conversationId"`
+}
+
+// TaskListRequest queries the task ledger (§ ctrl_task_list).
+type TaskListRequest struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	ChildID string `json:"childId,omitempty"` // tasks assigned to this child
+	Status  string `json:"status,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+	All     bool   `json:"all,omitempty"` // include dropped
 }
 
 // ─── Response envelope and per-command response data types ───────────────────
@@ -720,68 +794,101 @@ type PresetInfo struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
+// ExecutorHelloRequest is the executor's first frame on a reverse-dialled
+// connection. Exactly one of Token or Credential is set: Token on first
+// enrollment, Credential on every connection after.
+type ExecutorHelloRequest struct {
+	Type       string `json:"type"`
+	Token      string `json:"token,omitempty"`
+	Credential string `json:"credential,omitempty"`
+	// SelfReported carries capability facts (os, arch, version). It is NEVER
+	// merged into the trust labels — lying about arch only earns work the
+	// executor cannot run, but a label that gates access cannot be asserted
+	// by the thing it gates.
+	SelfReported map[string]string `json:"selfReported,omitempty"`
+}
+
+// ExecutorHelloResponse answers it. Credential is non-empty only on the
+// enrollment exchange and is the executor's durable identity thereafter.
+type ExecutorHelloResponse struct {
+	Type       string `json:"type"`
+	ExecutorID string `json:"executorId,omitempty"`
+	Credential string `json:"credential,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 // ─── ctrl_executor_* constants ─────────────────────────────────────────────────
 
-const (
-	TypeCtrlExecutorEnroll  = "ctrl_executor_enroll"
-	TypeCtrlExecutorList    = "ctrl_executor_list"
-	TypeCtrlExecutorLabel   = "ctrl_executor_label"
-	TypeCtrlExecutorDisable = "ctrl_executor_disable"
-	TypeCtrlExecutorEnable  = "ctrl_executor_enable"
-)
+	const (
+		TypeCtrlExecutorEnroll  = "ctrl_executor_enroll"
+		TypeCtrlExecutorList    = "ctrl_executor_list"
+		TypeCtrlExecutorLabel   = "ctrl_executor_label"
+		TypeCtrlExecutorDisable = "ctrl_executor_disable"
+		TypeCtrlExecutorEnable  = "ctrl_executor_enable"
+	)
 
-// ─── ctrl_executor_enroll ──────────────────────────────────────────────────────
+	// ─── ctrl_executor_enroll ──────────────────────────────────────────────────────
 
-// ExecutorEnrollRequest mints a one-time enrollment token.
-type ExecutorEnrollRequest struct {
-	Type          string            `json:"type"` // "ctrl_executor_enroll"
-	ID            string            `json:"id,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	Roots         []string          `json:"roots,omitempty"`
-	Isolation     string            `json:"isolation,omitempty"`
-	WorkspaceMode string            `json:"workspaceMode,omitempty"`
-	Admits        string            `json:"admits,omitempty"`
-	TTLSeconds    int64             `json:"ttlSeconds"`
-}
+	// ExecutorEnrollRequest mints a one-time enrollment token.
+	type ExecutorEnrollRequest struct {
+		Type          string            `json:"type"` // "ctrl_executor_enroll"
+		ID            string            `json:"id,omitempty"`
+		Labels        map[string]string `json:"labels,omitempty"`
+		Roots         []string          `json:"roots,omitempty"`
+		Isolation     string            `json:"isolation,omitempty"`
+		WorkspaceMode string            `json:"workspaceMode,omitempty"`
+		Admits        string            `json:"admits,omitempty"`
+		TTLSeconds    int64             `json:"ttlSeconds"`
+	}
 
-// ExecutorEnrollResponseData is the data payload for ctrl_executor_enroll.
-type ExecutorEnrollResponseData struct {
-	Token string `json:"token"`
-}
+	// ExecutorEnrollResponseData is the data payload for ctrl_executor_enroll.
+	type ExecutorEnrollResponseData struct {
+		Token string `json:"token"`
+	}
 
-// ─── ctrl_executor_list ────────────────────────────────────────────────────────
+	// ─── ctrl_executor_list ────────────────────────────────────────────────────────
 
-// ExecutorListRequest lists enrolled executors, optionally filtered.
-type ExecutorListRequest struct {
-	Type     string `json:"type"` // "ctrl_executor_list"
-	ID       string `json:"id,omitempty"`
-	Selector string `json:"selector,omitempty"`
-	Limit    int    `json:"limit,omitempty"`
-}
+	// ExecutorListRequest lists enrolled executors, optionally filtered.
+	type ExecutorListRequest struct {
+		Type     string `json:"type"` // "ctrl_executor_list"
+		ID       string `json:"id,omitempty"`
+		Selector string `json:"selector,omitempty"`
+		Limit    int    `json:"limit,omitempty"`
+	}
 
-// ─── ctrl_executor_label ───────────────────────────────────────────────────────
+	// ExecutorListEntry is one row from the executor list.
+	type ExecutorListEntry struct {
+		ID          string            `json:"id"`
+		DisplayName string            `json:"displayName"`
+		Labels      map[string]string `json:"labels"`
+		Enabled     bool              `json:"enabled"`
+		Connected   bool              `json:"connected"`
+		LastSeenAt  string            `json:"lastSeenAt,omitempty"`
+	}
 
-// ExecutorLabelRequest sets or removes labels on an executor's database row.
-type ExecutorLabelRequest struct {
-	Type       string            `json:"type"` // "ctrl_executor_label"
-	ID         string            `json:"id,omitempty"`
-	ExecutorID string            `json:"executorId"`
-	Set        map[string]string `json:"set,omitempty"`
-	Remove     []string          `json:"remove,omitempty"`
-}
+	// ─── ctrl_executor_label ───────────────────────────────────────────────────────
 
-// ─── ctrl_executor_disable / ctrl_executor_enable ──────────────────────────────
+	// ExecutorLabelRequest sets or removes labels on an executor's database row.
+	type ExecutorLabelRequest struct {
+		Type       string            `json:"type"` // "ctrl_executor_label"
+		ID         string            `json:"id,omitempty"`
+		ExecutorID string            `json:"executorId"`
+		Set        map[string]string `json:"set,omitempty"`
+		Remove     []string          `json:"remove,omitempty"`
+	}
 
-// ExecutorDisableRequest disables an executor. Its credential stops working.
-type ExecutorDisableRequest struct {
-	Type       string `json:"type"` // "ctrl_executor_disable"
-	ID         string `json:"id,omitempty"`
-	ExecutorID string `json:"executorId"`
-}
+	// ─── ctrl_executor_disable / ctrl_executor_enable ──────────────────────────────
 
-// ExecutorEnableRequest re-enables a disabled executor.
-type ExecutorEnableRequest struct {
-	Type       string `json:"type"` // "ctrl_executor_enable"
-	ID         string `json:"id,omitempty"`
-	ExecutorID string `json:"executorId"`
-}
+	// ExecutorDisableRequest disables an executor. Its credential stops working.
+	type ExecutorDisableRequest struct {
+		Type       string `json:"type"` // "ctrl_executor_disable"
+		ID         string `json:"id,omitempty"`
+		ExecutorID string `json:"executorId"`
+	}
+
+	// ExecutorEnableRequest re-enables a disabled executor.
+	type ExecutorEnableRequest struct {
+		Type       string `json:"type"` // "ctrl_executor_enable"
+		ID         string `json:"id,omitempty"`
+		ExecutorID string `json:"executorId"`
+	}

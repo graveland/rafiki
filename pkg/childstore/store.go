@@ -129,16 +129,6 @@ func (s *Store) FindByStatus(status protocol.Status) []Snapshot {
 	})
 }
 
-// ParentOf returns the parent ChildID stored in the child's labels, and ok
-// when a parent label exists.
-func (s *Store) ParentOf(id string) (string, bool) {
-	snap, ok := s.Get(id)
-	if !ok {
-		return "", false
-	}
-	parent, exists := snap.Labels[LabelParent]
-	return parent, exists
-}
 
 // Update applies fn to the session under its lock. The caller is responsible
 // for keeping index entries in sync if fn mutates indexed fields (Name, Cwd,
