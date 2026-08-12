@@ -113,7 +113,7 @@ func TestExpiredParkNotifiesRatherThanOnlyLogging(t *testing.T) {
 func TestReconnectBeforeTheTimeoutClearsThePark(t *testing.T) {
 	p := New(nil)
 	p.Park("napping", time.Minute)
-	p.Reattach("napping")
+	p.reattach("napping")
 	if p.Parked("napping") {
 		t.Fatal("a reconnect must clear the park")
 	}

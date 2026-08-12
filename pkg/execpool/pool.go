@@ -23,11 +23,14 @@ import (
 // identity. Nothing authoritative is cached here beyond the last Describe and
 // Health, both of which are self-reported and therefore non-authoritative by
 // construction.
+const parkTimeout = 5 * time.Minute
+
 type Pool struct {
 	mu     sync.RWMutex
 	store  executors.Store
 	live   map[string]*liveConn
 	parked map[string]*parkedEntry
+	onLost func(executorID string) // fired when a park expires; see SetOnLost
 }
 
 type liveConn struct {
@@ -175,11 +178,19 @@ type LiveExecutor struct {
 func (p *Pool) ClientFor(executorID string) (tools.ExecutorClient, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	lc, ok := p.live[executorID]
-	if !ok {
-		return nil, fmt.Errorf("executor %s is not connected", executorID)
+	if lc, ok := p.live[executorID]; ok {
+		return lc.client, nil
 	}
-	return lc.client, nil
+	// Parked and lost are different answers, and the caller acts differently on
+	// each: a parked executor may still come back inside its timeout, so the
+	// child should wait for it; a lost one never will, so the child has to be
+	// rehomed or failed. Collapsing both into one "not connected" string makes
+	// that undecidable at the call site, which is what the typed sentinels in
+	// departure.go exist to prevent.
+	if _, parked := p.parked[executorID]; parked {
+		return nil, fmt.Errorf("executor %s: %w", executorID, ErrParked)
+	}
+	return nil, fmt.Errorf("executor %s: %w", executorID, ErrExecutorLost)
 }
 
 func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
@@ -190,17 +201,32 @@ func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 		case <-ticker.C:
 			if err := p.healthCheck(ctx, id, lc); err != nil {
 				slog.Warn("execpool: health check failed; parking executor", "executorId", id, "error", err)
-				p.mu.Lock()
-				delete(p.live, id)
-				p.Park(id, 5*time.Minute)
-				p.mu.Unlock()
-				close(lc.done)
+				p.onHealthFailure(id, lc)
 				return
 			}
 		case <-lc.done:
 			return
 		}
 	}
+}
+
+// onHealthFailure drops a failed executor from the live set and parks it,
+// giving it parkTimeout to reconnect before its children are declared lost.
+//
+// The live-set delete and the Park are deliberately NOT one critical section.
+// Park takes p.mu itself and sync.RWMutex is not reentrant, so holding the lock
+// across the call deadlocks this goroutine WHILE IT HOLDS the pool lock — every
+// later Live(), ClientFor() and accept blocks behind it, and one unwell
+// executor takes the whole executor plane down. Splitting the lock also loses
+// nothing: Park re-checks p.live and no-ops if the executor reconnected in the
+// gap, which is the correct outcome rather than a race.
+func (p *Pool) onHealthFailure(id string, lc *liveConn) {
+	p.mu.Lock()
+	delete(p.live, id)
+	p.mu.Unlock()
+
+	p.Park(id, parkTimeout)
+	close(lc.done)
 }
 
 func (p *Pool) healthCheck(ctx context.Context, id string, lc *liveConn) error {

@@ -75,15 +75,47 @@ func (p *Pool) parkSweep(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.mu.Lock()
-			now := time.Now()
-			for id, entry := range p.parked {
-				if now.After(entry.deadline) {
-					delete(p.parked, id)
-					slog.Warn("execpool: parked executor lost (timeout)", "executorId", id)
-				}
-			}
-			p.mu.Unlock()
+			p.sweepParkedOnce(time.Now())
+		}
+	}
+}
+
+// SetOnLost registers a callback fired when a parked executor's timeout expires
+// and it is declared permanently lost. Without it an expired park only reaches
+// the log, so nothing upstream ever learns the executor is gone for good.
+//
+// Invoked OUTSIDE the pool lock, so a callback may safely call back into the
+// pool -- the same discipline routing.Breaker.SetOnTransition documents, and
+// for the same reason: p.mu is not reentrant.
+func (p *Pool) SetOnLost(fn func(executorID string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onLost = fn
+}
+
+// sweepParkedOnce converts every park entry whose deadline has passed into
+// executor-lost. Split out of parkSweep's ticker loop so the conversion is
+// testable without waiting on a 30s tick.
+//
+// The callbacks fire after the lock is dropped: onLost is caller-supplied and
+// may re-enter the pool, and holding p.mu across it is the same deadlock class
+// as onHealthFailure's.
+func (p *Pool) sweepParkedOnce(now time.Time) {
+	p.mu.Lock()
+	var lost []string
+	for id, entry := range p.parked {
+		if now.After(entry.deadline) {
+			delete(p.parked, id)
+			lost = append(lost, id)
+		}
+	}
+	fn := p.onLost
+	p.mu.Unlock()
+
+	for _, id := range lost {
+		slog.Warn("execpool: parked executor lost (timeout)", "executorId", id)
+		if fn != nil {
+			fn(id)
 		}
 	}
 }
