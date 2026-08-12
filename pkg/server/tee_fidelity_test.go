@@ -607,3 +607,9 @@ func TestMessagesTeeForwardsPingsDuringUpstreamSilence(t *testing.T) {
 		}
 	}
 }
+
+// ConversationTokens satisfies proxyStore; the tee fidelity tests assert on
+// streamed bytes, not cost, so an empty rollup is the honest answer here.
+func (s *recordingChatStore) ConversationTokens(context.Context, string) ([]routing.ModelTokens, error) {
+	return nil, nil
+}
