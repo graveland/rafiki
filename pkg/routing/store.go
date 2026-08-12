@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/store"
@@ -457,4 +460,81 @@ func nullifyBytes(b []byte) any {
 		return nil
 	}
 	return b
+}
+
+// ---- retry helpers --------------------------------------------------------
+
+// dbRetryDelays defines the backoff sequence for DB retries (3 retries after
+// the initial attempt). A package var (not a local literal) so tests can
+// shrink it instead of sleeping through a real 1s/3s/5s sequence.
+var dbRetryDelays = []time.Duration{1 * time.Second, 3 * time.Second, 5 * time.Second}
+
+// retryDB wraps a database operation with retries on transient errors.
+// Each attempt gets its own sub-context (20s timeout, bounded by ctx's own
+// deadline when tighter). retryDB does NOT log the final outcome — callers
+// log that at their level; it only WARNs on each retry it takes.
+func retryDB(ctx context.Context, op string, fn func(context.Context) error) error {
+	for attempt := 0; ; attempt++ {
+		subCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err := fn(subCtx)
+		cancel()
+		if err == nil || !isRetryableDB(err, ctx) {
+			return err
+		}
+		if attempt >= len(dbRetryDelays) {
+			return err
+		}
+		slog.Warn("capture: retrying db op", "op", op, "attempt", attempt+1, "error", err)
+		select {
+		case <-time.After(dbRetryDelays[attempt]):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// isRetryableDB reports whether a database error is transient and worth
+// retrying. ctx must be checked first: if ctx.Err() != nil the parent is
+// shutting down and no retry should be attempted regardless of the error
+// shape — mirrors agentloop.isRetryable, and (unlike relying on retryDB's
+// own select against ctx.Done()) makes cancellation deterministic rather
+// than racing time.After when both fire on an already-canceled context.
+func isRetryableDB(err error, ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if err == nil {
+		return false
+	}
+	// context.DeadlineExceeded from our sub-context is transient (the op
+	// timed out, but the DB itself is reachable and may succeed next time).
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Network errors.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	// pgx connection/pool exhaustion errors.
+	if isPgTransient(err) {
+		return true
+	}
+	return false
+}
+
+// isPgTransient detects pgx-level transient errors: deadlocks (40P01) and
+// serialization failures (40001). Connection failures already surface as
+// net.OpError (caught above), so only explicit SQLSTATEs are classified here.
+func isPgTransient(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.SQLState() {
+	case "40P01", "40001": // deadlock_detected, serialization_failure
+		return true
+	default:
+		return false
+	}
 }
