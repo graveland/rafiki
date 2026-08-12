@@ -274,6 +274,15 @@ type SpawnRequest struct {
 	// because it is the one the daemon can audit.
 	ExecutorSocket string `json:"executorSocket,omitempty"`
 
+	// ExecutorSelector is a label selector for picking an executor from the
+	// live pool. When set, it wins over ExecutorSocket — the pool is the
+	// path the daemon can audit.
+	ExecutorSelector string `json:"executorSelector,omitempty"`
+
+	// WorkspaceMode selects how the child's workspace is provisioned:
+	// "ephemeral" (reschedulable) or "pinned" (existing tree).
+	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
 	// ─── Resource grants (phase 05) ───
 	//
 	// All three are POINTERS so "unset" is distinguishable from "zero". The
@@ -783,4 +792,27 @@ type PresetInfo struct {
 	Name   string            `json:"name"`
 	Model  string            `json:"model,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// ExecutorHelloRequest is the executor's first frame on a reverse-dialled
+// connection. Exactly one of Token or Credential is set: Token on first
+// enrollment, Credential on every connection after.
+type ExecutorHelloRequest struct {
+	Type       string `json:"type"`
+	Token      string `json:"token,omitempty"`
+	Credential string `json:"credential,omitempty"`
+	// SelfReported carries capability facts (os, arch, version). It is NEVER
+	// merged into the trust labels — lying about arch only earns work the
+	// executor cannot run, but a label that gates access cannot be asserted
+	// by the thing it gates.
+	SelfReported map[string]string `json:"selfReported,omitempty"`
+}
+
+// ExecutorHelloResponse answers it. Credential is non-empty only on the
+// enrollment exchange and is the executor's durable identity thereafter.
+type ExecutorHelloResponse struct {
+	Type       string `json:"type"`
+	ExecutorID string `json:"executorId,omitempty"`
+	Credential string `json:"credential,omitempty"`
+	Error      string `json:"error,omitempty"`
 }

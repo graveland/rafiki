@@ -157,6 +157,10 @@ const (
 	// agent children's filesystem and shell tools in. Used by `rafiki create
 	// --executor-socket` when the flag is not given.
 	ExecutorSocket = "RAFIKI_EXECUTOR_SOCKET"
+
+	// ExecutorListen is the address rafikid binds for executor reverse-dial
+	// connections (e.g. "tcp:8037"). Unset = executor pool disabled.
+	ExecutorListen = "RAFIKI_EXECUTOR_LISTEN"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the

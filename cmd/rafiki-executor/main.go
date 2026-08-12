@@ -1,6 +1,6 @@
 // rafiki-executor serves the filesystem and shell tools over a Connect RPC
-// surface on a local unix socket. The daemon dispatches tool calls to it; the
-// executor has no direct database or credential access.
+// surface, either on a local unix socket (--socket) or by reverse-dialing
+// rafikid (--connect) and serving on the dialled TLS connection.
 package main
 
 import (
@@ -14,11 +14,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 )
@@ -29,13 +31,22 @@ func main() {
 	socketPath := flag.String("socket", "", "path to the unix socket (required)")
 	root := flag.String("root", "", "working directory root (defaults to current directory)")
 	concurrency := flag.Int("concurrency", 6, "maximum concurrent tool calls")
+	connectAddr := flag.String("connect", "", "rafikid executor endpoint to dial (host:port). Mutually exclusive with --socket")
+	enrollToken := flag.String("enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"), "one-time enrollment token, required on first connect")
+	credentialFile := flag.String("credential-file", "", "path the durable credential is stored at after enrollment")
+	pinnedFingerprint := flag.String("pin-cert", "", "SHA-256 fingerprint of rafikid's leaf certificate")
 	flag.Parse()
 
-	if *socketPath == "" {
-		fmt.Fprintln(os.Stderr, "error: --socket is required")
+	if *socketPath != "" && *connectAddr != "" {
+		fmt.Fprintln(os.Stderr, "error: --socket and --connect are mutually exclusive")
+		os.Exit(2)
+	}
+	if *socketPath == "" && *connectAddr == "" {
+		fmt.Fprintln(os.Stderr, "error: one of --socket or --connect is required")
 		flag.Usage()
 		os.Exit(2)
 	}
+
 	wd := *root
 	if wd == "" {
 		var err error
@@ -54,9 +65,45 @@ func main() {
 		wd = abs
 	}
 
-	// A stale socket file must be removed, but a LIVE one must not: removing
-	// it silently steals every future connection from a running executor
-	// while leaving it serving the ones it already has.
+	srv := executor.NewServer(executor.Options{
+		Root:        wd,
+		Concurrency: *concurrency,
+		Version:     version,
+	})
+
+	mux := http.NewServeMux()
+	mux.Handle(executorpbconnect.NewExecutorServiceHandler(srv))
+	protos := new(http.Protocols)
+	protos.SetUnencryptedHTTP2(true)
+	httpSrv := mux
+
+	if *connectAddr != "" {
+		// Reverse-dial mode: dial rafikid, serve on the dialled connection.
+		credFile := *credentialFile
+		if credFile == "" {
+			credFile = filepath.Join(wd, ".rafiki-executor-credential")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := execpool.Connect(ctx, execpool.ConnectOptions{
+			Addr:           *connectAddr,
+			PinCert:        *pinnedFingerprint,
+			EnrollToken:    *enrollToken,
+			CredentialFile: credFile,
+			SelfReported: map[string]string{
+				"os":      runtime.GOOS,
+				"arch":    runtime.GOARCH,
+				"version": version,
+			},
+			Handler: httpSrv,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "error: connect: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Local socket mode.
 	if conn, err := net.DialTimeout("unix", *socketPath, 500*time.Millisecond); err == nil {
 		conn.Close()
 		fmt.Fprintf(os.Stderr, "error: %s is already served by a live executor\n", *socketPath)
@@ -67,12 +114,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Umask around Listen rather than chmod after it: between a
-	// world-accessible bind and the chmod there is a window in which any
-	// local user can connect to a surface that runs arbitrary bash.
-	// net.Listen binds unix sockets against a base mode of 0777 (not 0666
-	// like regular files), so the umask must also clear the owner's execute
-	// bit to land on 0600: 0177, not 0077.
 	oldMask := unix.Umask(0o177)
 	ln, err := net.Listen("unix", *socketPath)
 	unix.Umask(oldMask)
@@ -81,38 +122,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := executor.NewServer(executor.Options{
-		Root:        wd,
-		Concurrency: *concurrency,
-		Version:     version,
-	})
-
-	mux := http.NewServeMux()
-	mux.Handle(executorpbconnect.NewExecutorServiceHandler(srv))
-	// Protocols instead of h2c.NewHandler: h2c is deprecated, and an
-	// http.Server that advertises UnencryptedHTTP2 serves prior-knowledge
-	// HTTP/2 directly. Connect needs HTTP/2 for its streaming RPCs.
-	protos := new(http.Protocols)
-	protos.SetUnencryptedHTTP2(true)
-	httpSrv := &http.Server{
-		Handler:   mux,
-		Protocols: protos,
-	}
-
+	h2Server := &http.Server{Handler: httpSrv, Protocols: protos}
 	slog.Info("executor listening", "socket", *socketPath, "root", wd, "version", version)
 
-	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	go func() {
 		<-ctx.Done()
 		slog.Info("executor shutting down")
-		if err := httpSrv.Shutdown(context.Background()); err != nil {
+		if err := h2Server.Shutdown(context.Background()); err != nil {
 			slog.Warn("executor shutdown", "error", err)
 		}
 	}()
 
-	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+	if err := h2Server.Serve(ln); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "error: serve: %v\n", err)
 		os.Exit(1)
 	}

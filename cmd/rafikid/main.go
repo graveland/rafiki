@@ -26,6 +26,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -423,6 +425,42 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.SetCatalog(catalog)
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
+	}
+	// Executor pool listener: accepts reverse-dialled executor connections.
+	if el := paths.Get(paths.ExecutorListen); el != "" {
+		certFile := paths.Get(paths.ControlTLSCert)
+		keyFile := paths.Get(paths.ControlTLSKey)
+		if certFile == "" || keyFile == "" {
+			slog.Error("RAFIKI_CONTROL_TLS_CERT and RAFIKI_CONTROL_TLS_KEY must be set when RAFIKI_EXECUTOR_LISTEN is set")
+			os.Exit(1)
+		}
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			slog.Error("failed to load TLS cert/key for executor listener", "cert", certFile, "key", keyFile, "error", err)
+			os.Exit(1)
+		}
+		execTLS := &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   execpool.ALPNProtocols,
+		}
+		execAddr := el
+		if !strings.Contains(el, ":") {
+			execAddr = "tcp:" + el
+		}
+		execLn, err := tls.Listen("tcp", strings.TrimPrefix(execAddr, "tcp:"), execTLS)
+		if err != nil {
+			slog.Error("executor listener failed", "addr", el, "error", err)
+			os.Exit(1)
+		}
+		execStore := executors.NewPostgresStore(pool)
+		ctrl.execPool = execpool.New(execStore)
+		go func() {
+			slog.Info("executor pool listening", "addr", el)
+			if err := ctrl.execPool.Serve(execLn); err != nil {
+				slog.Error("executor pool serve", "error", err)
+			}
+		}()
 	}
 	ctrl.loadOrphans(records)
 	ctrl.startSweeper(ctx)

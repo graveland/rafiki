@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
@@ -120,6 +121,10 @@ type Controller struct {
 	// child. Guarded by nudgedMu.
 	nudgedMu   sync.Mutex
 	nudgedOnce map[string]bool
+
+	// execPool is the live executor connection registry. Nil when the
+	// executor listener is not configured.
+	execPool *execpool.Pool
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
