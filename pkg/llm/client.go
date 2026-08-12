@@ -42,6 +42,7 @@ type Client struct {
 	modelGate     *ModelGate
 
 	rawTrace *routing.RawTraceStore // nil when disabled
+	guard    *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
 }
 
 type ClientOption func(*Client)
@@ -143,6 +144,11 @@ func (c *Client) Catalog() *routing.ModelCatalog { return c.catalog }
 // (store.UnfinishedConversations). Nil without WithStore.
 func (c *Client) Pool() *pgxpool.Pool { return c.pool }
 
+// SetProviderGuard attaches the provider cache guard, which ejects an
+// OpenRouter provider from routing after it stops serving prompt-cache hits.
+// Pass nil to disable; a nil guard is inert at every call site.
+func (c *Client) SetProviderGuard(g *routing.ProviderGuard) { c.guard = g }
+
 // SendMeta carries per-send capture attribution and routing selection, used
 // by hosts that build their own params (sc's core-dump analyzer) and
 // internally by Conversation.Send.
@@ -205,7 +211,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	}
 	if primary == UpstreamOpenRouter {
 		// Injected before capture so the recorded request matches the wire.
-		applyProviderPrefs(&params)
+		applyProviderPrefs(&params, c.guard)
 	}
 	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(
 		attribute.String("rafiki.model", string(params.Model)),
@@ -241,7 +247,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		return nil, err
 	}
 
-	turnID, turnCreatedAt, capturing := c.beginTurn(ctx, meta, params)
+	ref := c.beginTurn(ctx, meta, params)
 
 	start := time.Now()
 	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params)
@@ -250,9 +256,9 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 
 	if err != nil {
 		span.RecordError(err)
-		c.failTurn(ctx, capturing, turnID, turnCreatedAt, err)
+		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
 		// Raw trace: non-streaming error path.
-		c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, latency, err)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err)
 		return nil, err
 	}
 
@@ -262,12 +268,19 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		attribute.Int64("rafiki.tokens.cache_read", resp.Usage.CacheReadInputTokens),
 		attribute.Int64("rafiki.tokens.cache_creation", resp.Usage.CacheCreationInputTokens),
 	)
+	if servedBy == UpstreamOpenRouter {
+		c.guard.Observe(time.Now(), routing.Observation{
+			Provider: providerOf(resp), Model: string(params.Model), Conversation: ref.convID,
+			PrefixHash: ref.prefixHash, InputTokens: resp.Usage.InputTokens,
+			CacheReadTokens: resp.Usage.CacheReadInputTokens,
+		})
+	}
 
-	if capturing {
-		c.completeTurn(ctx, turnID, turnCreatedAt, resp, servedBy, latency)
+	if ref.capturing {
+		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, servedBy, latency)
 	}
 	// Raw trace: non-streaming success path.
-	c.recordRawTrace(ctx, meta, turnID, params, resp, 200, servedBy, latency, nil)
+	c.recordRawTrace(ctx, meta, ref.turnID, params, resp, 200, servedBy, latency, nil)
 	return resp, nil
 }
 
@@ -420,7 +433,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		return nil, false, false, nil
 	}
 
-	turnID, turnCreatedAt, capturing := c.beginTurn(ctx, meta, params)
+	ref := c.beginTurn(ctx, meta, params)
 	start := time.Now()
 
 	stream, serr := streamer.NewStreaming(ctx, params)
@@ -441,7 +454,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	}
 	if serr != nil {
 		span.RecordError(serr)
-		c.failTurn(ctx, capturing, turnID, turnCreatedAt, serr)
+		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
 		if breaker != nil {
 			// Nothing delivered yet and a real fallback exists: hand off
 			// WITHOUT recording here. SendParams's callModel is about to make
@@ -456,7 +469,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// sendWithTrim's own retry loop (not SendParams) re-attempts via
 		// streaming again, instead of wastefully re-issuing to the same
 		// primary sender.
-		c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
 		return nil, true, false, serr
 	}
 
@@ -476,9 +489,9 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		if aerr := acc.Accumulate(ev); aerr != nil {
 			wrapped := fmt.Errorf("llm: accumulate stream event: %w", aerr)
 			span.RecordError(wrapped)
-			c.failTurn(ctx, capturing, turnID, turnCreatedAt, wrapped)
+			c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
 			recordPrimaryResult(breaker, now, wrapped)
-			c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped)
+			c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped)
 			return nil, true, delivered, wrapped
 		}
 		FixAccumulatedEmptyToolInput(&acc, ev)
@@ -486,7 +499,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	}
 	if serr := stream.Err(); serr != nil {
 		span.RecordError(serr)
-		c.failTurn(ctx, capturing, turnID, turnCreatedAt, serr)
+		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, serr)
 		if !delivered && breaker != nil {
 			// Hand off WITHOUT recording, for the same reason as the
 			// NewStreaming-error branch above: callModel's own imminent
@@ -499,7 +512,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// regardless of breaker state) or breaker is nil (bypass, no handoff
 		// exists to defer to): this IS the final result, so record it.
 		recordPrimaryResult(breaker, now, serr)
-		c.recordRawTrace(ctx, meta, turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
 		return nil, true, delivered, serr
 	}
 
@@ -513,10 +526,20 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		attribute.Int64("rafiki.tokens.cache_read", acc.Usage.CacheReadInputTokens),
 		attribute.Int64("rafiki.tokens.cache_creation", acc.Usage.CacheCreationInputTokens),
 	)
-	if capturing {
-		c.completeTurn(ctx, turnID, turnCreatedAt, &acc, primary, latency)
+	if primary == UpstreamOpenRouter {
+		// acc is the fully accumulated message at this point (the loop above
+		// has already run to completion) — this is a completed turn's final
+		// usage, not a partial mid-stream snapshot.
+		c.guard.Observe(time.Now(), routing.Observation{
+			Provider: providerOf(&acc), Model: string(params.Model), Conversation: ref.convID,
+			PrefixHash: ref.prefixHash, InputTokens: acc.Usage.InputTokens,
+			CacheReadTokens: acc.Usage.CacheReadInputTokens,
+		})
 	}
-	c.recordRawTrace(ctx, meta, turnID, params, &acc, 200, primary, latency, nil)
+	if ref.capturing {
+		c.completeTurn(ctx, ref.turnID, ref.createdAt, &acc, primary, latency)
+	}
+	c.recordRawTrace(ctx, meta, ref.turnID, params, &acc, 200, primary, latency, nil)
 	return &acc, true, delivered, nil
 }
 
@@ -688,7 +711,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 		fbParams := params
 		if fb == UpstreamOpenRouter {
 			fbParams.Model = anthropic.Model(c.catalog.OpenRouterModel(string(params.Model)))
-			applyProviderPrefs(&fbParams)
+			applyProviderPrefs(&fbParams, c.guard)
 		}
 		resp, err := fbSender.New(ctx, fbParams)
 		if err == nil {
@@ -701,21 +724,58 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 }
 
 // applyProviderPrefs injects OpenRouter provider-routing preferences for
-// pinned model lines (routing.ProviderPrefsFor) as the request body's
-// "provider" field. No-op for unpinned models; call only on params bound for
-// OpenRouter — the field is not part of the Anthropic API.
-func applyProviderPrefs(params *anthropic.MessageNewParams) {
-	if prefs, ok := routing.ProviderPrefsFor(string(params.Model)); ok {
-		params.SetExtraFields(map[string]any{"provider": prefs})
+// pinned model lines (routing.ProviderPrefsFor) plus any providers the guard
+// has ejected, as the request body's "provider" field. Call only on params
+// bound for OpenRouter — the field is not part of the Anthropic API.
+func applyProviderPrefs(params *anthropic.MessageNewParams, g *routing.ProviderGuard) {
+	prefs, pinned := routing.ProviderPrefsFor(string(params.Model))
+	ignore := g.IgnoredFor(time.Now(), string(params.Model))
+	if !pinned && len(ignore) == 0 {
+		return
 	}
+	prefs.Ignore = append(prefs.Ignore, ignore...)
+	params.SetExtraFields(map[string]any{"provider": prefs})
+}
+
+// providerOf extracts OpenRouter's non-standard top-level "provider" field
+// from a decoded Message. The Anthropic SDK has no such field, but it retains
+// unknown members in JSON.ExtraFields, so the value survives the decode.
+// Returns "" for native Anthropic responses, which carry no provider.
+func providerOf(msg *anthropic.Message) string {
+	if msg == nil {
+		return ""
+	}
+	f, ok := msg.JSON.ExtraFields["provider"]
+	if !ok {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal([]byte(f.Raw()), &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// turnRef is what a write-ahead turn leaves behind for the paths that resolve
+// it: the ids to complete it with, plus the conversation and prefix hash the
+// provider guard needs to judge a cache miss.
+type turnRef struct {
+	turnID     string
+	createdAt  time.Time
+	convID     string
+	prefixHash string
+	capturing  bool
 }
 
 // beginTurn resolves the conversation and write-aheads the request row.
 // Mirrors the routing core's resolution rules: explicit ConversationID wins,
-// else ExternalRef correlates, else a fresh conversation.
-func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (string, time.Time, bool) {
+// else ExternalRef correlates, else a fresh conversation. Where capture is
+// off the zero value is returned with capturing false — convID and
+// prefixHash stay empty, which correctly disqualifies every ProviderGuard
+// observation derived from it (see ProviderGuard.Observe's doc comment).
+func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) turnRef {
 	if c.capture == nil {
-		return "", time.Time{}, false
+		return turnRef{}
 	}
 	drivenBy := meta.DrivenBy
 	if drivenBy == "" {
@@ -737,12 +797,12 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	}
 	if err != nil {
 		c.logger.Warn("capture: ensure-conversation failed (capturing disabled for this turn)", "error", err)
-		return "", time.Time{}, false
+		return turnRef{}
 	}
 	reqJSON, mErr := json.Marshal(params)
 	if mErr != nil {
 		c.logger.Warn("capture: marshal request failed", "error", mErr)
-		return "", time.Time{}, false
+		return turnRef{}
 	}
 	source := meta.Source
 	if source == "" {
@@ -756,7 +816,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	})
 	if iErr != nil {
 		c.logger.Warn("capture: insert-intent failed (capturing disabled for this turn)", "error", iErr)
-		return "", time.Time{}, false
+		return turnRef{}
 	}
 	// Record prefix_content (on-change) + cache_breakpoints for parity with the
 	// proxy path — the message rows are written separately by Conversation, so
@@ -765,7 +825,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	if err := c.capture.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqJSON, prefixHash); err != nil {
 		c.logger.Warn("capture: store turn prefix failed", "error", err)
 	}
-	return turnID, createdAt, true
+	return turnRef{turnID: turnID, createdAt: createdAt, convID: convID, prefixHash: prefixHash, capturing: true}
 }
 
 // completeTurn records the response; on a completion/marshal failure the turn
