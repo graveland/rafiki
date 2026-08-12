@@ -271,6 +271,11 @@ type ToolOpts struct {
 	// an argument is a tool argument, and a tool argument is produced by an
 	// LLM that can be prompt-injected into naming somebody else.
 	Agents AgentSpawner
+
+	// ExecutorAnnotator, when non-nil, enables the executor_annotate tool
+	// for agents running on a remote executor. nil means the tool declines
+	// to materialize (agent is running in-process, nothing to annotate).
+	ExecutorAnnotator ExecutorAnnotator
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the
