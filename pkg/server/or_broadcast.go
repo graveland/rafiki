@@ -78,10 +78,12 @@ func parseNanos(s string) (t time.Time, ok bool) {
 // errors (the payload is fire-and-forget from OR's perspective).
 func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 	insertSQL := `INSERT INTO openrouter.broadcast
-		(session_id, generation_id, trace_id, span_id, model,
-		 input_tokens, output_tokens, cache_read_tokens, cost_usd,
-		 latency_ms, provider, finish_reason, created_at, raw_payload)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+			(session_id, generation_id, trace_id, span_id, model,
+			 input_tokens, output_tokens, cache_read_tokens, cost_usd,
+			 latency_ms, provider, finish_reason, created_at, raw_payload,
+			 total_tokens, reasoning_tokens, input_cost_usd, output_cost_usd)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+		        $15, $16, $17, $18)`
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20)) // 16 MiB
@@ -136,17 +138,26 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 
 	sessionID := attrs["session.id"]
 	generationID := firstNonEmpty(
+		attrs["gen_ai.response.id"],
 		attrs["gen_ai.generation.id"],
 		attrs["generation.id"],
 	)
 	model := attrs["gen_ai.request.model"]
-	provider := attrs["gen_ai.response.provider"]
+	provider := firstNonEmpty(
+		attrs["gen_ai.response.provider"],
+		attrs["gen_ai.provider.name"],
+		attrs["trace.metadata.openrouter.provider_name"],
+	)
 
 	inputTokens := parseIntOr(attrs["gen_ai.usage.input_tokens"], 0)
 	outputTokens := parseIntOr(attrs["gen_ai.usage.output_tokens"], 0)
-	cacheReadTokens := parseIntOr(attrs["gen_ai.usage.cache_read_input_tokens"], 0)
+	cacheReadTokens := parseIntOr(attrs["gen_ai.usage.input_tokens.cached"], 0)
 
-	costUSD := parseFloatOr(attrs["gen_ai.usage.cost"], 0)
+	costUSD := parseFloatOr(attrs["gen_ai.usage.total_cost"], 0)
+	totalTokens := parseIntOr(attrs["gen_ai.usage.total_tokens"], 0)
+	reasoningTokens := parseIntOr(attrs["gen_ai.usage.output_tokens.reasoning"], 0)
+	inputCostUSD := parseFloatOr(attrs["gen_ai.usage.input_cost"], 0)
+	outputCostUSD := parseFloatOr(attrs["gen_ai.usage.output_cost"], 0)
 
 	createdAt, ok := parseNanos(sp.StartUnix)
 	if !ok {
@@ -198,6 +209,10 @@ func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan
 		nullStr(finishReason),
 		createdAt,
 		rawSpan,
+		nullInt(totalTokens),
+		nullInt(reasoningTokens),
+		nullFloat(inputCostUSD),
+		nullFloat(outputCostUSD),
 	)
 	return err
 }

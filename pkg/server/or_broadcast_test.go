@@ -79,22 +79,26 @@ func setupBroadcastTable(t *testing.T, pool *pgxpool.Pool) {
 	if _, err := pool.Exec(context.Background(), `
 		CREATE SCHEMA IF NOT EXISTS openrouter;
 		CREATE TABLE IF NOT EXISTS openrouter.broadcast (
-			id              BIGINT GENERATED ALWAYS AS IDENTITY,
-			session_id      TEXT,
-			generation_id   TEXT,
-			trace_id        TEXT,
-			span_id         TEXT,
-			model           TEXT,
-			input_tokens    BIGINT,
-			output_tokens   BIGINT,
-			cache_read_tokens  BIGINT,
-			cost_usd        DOUBLE PRECISION,
-			latency_ms      INT,
-			provider        TEXT,
-			finish_reason   TEXT,
-			created_at      TIMESTAMPTZ NOT NULL,
-			received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-			raw_payload     JSONB NOT NULL,
+			id               BIGINT GENERATED ALWAYS AS IDENTITY,
+			session_id       TEXT,
+			generation_id    TEXT,
+			trace_id         TEXT,
+			span_id          TEXT,
+			model            TEXT,
+			input_tokens     BIGINT,
+			output_tokens    BIGINT,
+			cache_read_tokens   BIGINT,
+			cost_usd         DOUBLE PRECISION,
+			latency_ms       INT,
+			provider         TEXT,
+			finish_reason    TEXT,
+			created_at       TIMESTAMPTZ NOT NULL,
+			received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+			raw_payload      JSONB NOT NULL,
+			total_tokens     BIGINT,
+			reasoning_tokens BIGINT,
+			input_cost_usd   DOUBLE PRECISION,
+			output_cost_usd  DOUBLE PRECISION,
 			PRIMARY KEY (id, created_at)
 		)
 	`); err != nil {
@@ -148,7 +152,7 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 										IntValue    json.Number `json:"intValue,omitempty"`
 										DoubleValue float64     `json:"doubleValue"`
 									}{StringValue: "conv-uuid-123"}},
-									{Key: "gen_ai.generation.id", Value: struct {
+									{Key: "gen_ai.response.id", Value: struct {
 										StringValue string      `json:"stringValue"`
 										IntValue    json.Number `json:"intValue,omitempty"`
 										DoubleValue float64     `json:"doubleValue"`
@@ -173,11 +177,36 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 										IntValue    json.Number `json:"intValue,omitempty"`
 										DoubleValue float64     `json:"doubleValue"`
 									}{IntValue: "50"}},
-									{Key: "gen_ai.usage.cost", Value: struct {
+									{Key: "gen_ai.usage.total_cost", Value: struct {
 										StringValue string      `json:"stringValue"`
 										IntValue    json.Number `json:"intValue,omitempty"`
 										DoubleValue float64     `json:"doubleValue"`
 									}{DoubleValue: 0.00042}},
+									{Key: "gen_ai.usage.input_cost", Value: struct {
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
+									}{DoubleValue: 0.00036}},
+									{Key: "gen_ai.usage.output_cost", Value: struct {
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
+									}{DoubleValue: 0.00006}},
+									{Key: "gen_ai.usage.total_tokens", Value: struct {
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
+									}{IntValue: "200"}},
+									{Key: "gen_ai.usage.output_tokens.reasoning", Value: struct {
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
+									}{IntValue: "30"}},
+									{Key: "gen_ai.usage.input_tokens.cached", Value: struct {
+										StringValue string      `json:"stringValue"`
+										IntValue    json.Number `json:"intValue,omitempty"`
+										DoubleValue float64     `json:"doubleValue"`
+									}{IntValue: "100"}},
 									{Key: "gen_ai.response.finish_reason", Value: struct {
 										StringValue string      `json:"stringValue"`
 										IntValue    json.Number `json:"intValue,omitempty"`
@@ -209,25 +238,32 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 
 	// Verify the row was inserted correctly.
 	var (
-		sessionID    string
-		generationID string
-		traceID      string
-		spanID       string
-		model        string
-		provider     string
-		inputTokens  int64
-		outputTokens int64
-		costUSD      float64
-		latency      int
-		finishReason string
+		sessionID       string
+		generationID    string
+		traceID         string
+		spanID          string
+		model           string
+		provider        string
+		inputTokens     int64
+		outputTokens    int64
+		cacheReadTokens int64
+		costUSD         float64
+		latency         int
+		finishReason    string
+		totalTokens     int64
+		reasoningTokens int64
+		inputCostUSD    float64
+		outputCostUSD   float64
 	)
 	err = pool.QueryRow(context.Background(),
 		`SELECT session_id, generation_id, trace_id, span_id, model, provider,
-		        input_tokens, output_tokens, cost_usd, latency_ms, finish_reason
+		        input_tokens, output_tokens, cache_read_tokens, cost_usd, latency_ms, finish_reason,
+		        total_tokens, reasoning_tokens, input_cost_usd, output_cost_usd
 		 FROM openrouter.broadcast
 		 WHERE span_id = 'def456span'`).Scan(
 		&sessionID, &generationID, &traceID, &spanID, &model, &provider,
-		&inputTokens, &outputTokens, &costUSD, &latency, &finishReason)
+		&inputTokens, &outputTokens, &cacheReadTokens, &costUSD, &latency, &finishReason,
+		&totalTokens, &reasoningTokens, &inputCostUSD, &outputCostUSD)
 	if err != nil {
 		t.Fatalf("query inserted row: %v", err)
 	}
@@ -256,8 +292,23 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 	if outputTokens != 50 {
 		t.Errorf("output_tokens = %d, want 50", outputTokens)
 	}
+	if cacheReadTokens != 100 {
+		t.Errorf("cache_read_tokens = %d, want 100", cacheReadTokens)
+	}
 	if costUSD != 0.00042 {
 		t.Errorf("cost_usd = %f, want 0.00042", costUSD)
+	}
+	if totalTokens != 200 {
+		t.Errorf("total_tokens = %d, want 200", totalTokens)
+	}
+	if reasoningTokens != 30 {
+		t.Errorf("reasoning_tokens = %d, want 30", reasoningTokens)
+	}
+	if inputCostUSD != 0.00036 {
+		t.Errorf("input_cost_usd = %f, want 0.00036", inputCostUSD)
+	}
+	if outputCostUSD != 0.00006 {
+		t.Errorf("output_cost_usd = %f, want 0.00006", outputCostUSD)
 	}
 	// 1.5 seconds in nanoseconds = 1500ms
 	if latency != 1500 {
