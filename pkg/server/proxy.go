@@ -733,7 +733,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	// writes (including the raw trace below) happen after streaming ends and
 	// must still complete so the turn isn't stranded 'pending' and the trace
 	// isn't silently dropped by the same cancellation.
-	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 	defer cancel()
 	// Raw trace: record the debug request/response pair.
 	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
@@ -797,7 +797,7 @@ func (p *MessagesProxy) failTurn(r *http.Request, cr captureRef, reason string) 
 	if !cr.on {
 		return
 	}
-	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 15*time.Second)
 	defer cancel()
 	p.failTurnCtx(capCtx, cr, reason)
 }
@@ -898,8 +898,12 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
 	// Detached: r.Context() may already be canceled (client hung up) by the time
-	// these capture writes — including the raw trace below — run.
-	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	// these capture writes — including the raw trace below — run. Same budget as
+	// the success-path capCtx above: this does the same raw-trace-insert +
+	// fail-turn + decompose sequence, and each of those now retries transient DB
+	// errors internally (retryDB), so the outer budget must be wide enough to
+	// cover more than one attempt.
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 	defer cancel()
 	// Raw trace: record the failed request/response pair.
 	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
