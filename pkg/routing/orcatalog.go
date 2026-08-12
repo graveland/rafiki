@@ -68,6 +68,12 @@ var modelAliases = map[string]string{
 type ProviderPrefs struct {
 	// Only restricts serving to these OpenRouter provider slugs.
 	Only []string `json:"only,omitempty"`
+	// Ignore excludes these OpenRouter provider slugs. OpenRouter merges this
+	// with the account-wide ignore list from the dashboard's privacy settings.
+	// Populated at request time by ProviderGuard from observed behaviour, never
+	// by the static pins below — a provider is ignored because it misbehaved,
+	// not because of a policy judgement about its quantization or retention.
+	Ignore []string `json:"ignore,omitempty"`
 }
 
 // providerPins maps an OpenRouter model-line prefix (same line semantics as

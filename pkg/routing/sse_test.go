@@ -177,3 +177,51 @@ func TestParseCapturedResponsePingsDoNotBreakReassembly(t *testing.T) {
 		t.Errorf("canonical not valid JSON: %s", canonical)
 	}
 }
+
+// TestParseCapturedResponseProviderJSON proves the non-standard OpenRouter
+// "provider" field survives the non-streaming parse path.
+func TestParseCapturedResponseProviderJSON(t *testing.T) {
+	body := []byte(`{"type":"message","model":"deepseek/deepseek-v4-pro","stop_reason":"end_turn",` +
+		`"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":0},"provider":"CoreWeave"}`)
+	_, u, _, err := ParseCapturedResponse("application/json", body)
+	if err != nil {
+		t.Fatalf("ParseCapturedResponse: %v", err)
+	}
+	if u.Provider != "CoreWeave" {
+		t.Errorf("Provider = %q, want %q", u.Provider, "CoreWeave")
+	}
+}
+
+// TestParseCapturedResponseProviderSSE proves the same for the streaming path,
+// where "provider" rides on message_start only — the final message_delta
+// carries the usage but never the provider.
+func TestParseCapturedResponseProviderSSE(t *testing.T) {
+	body := []byte("event: message_start\n" +
+		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"deepseek/deepseek-v4-pro","usage":{"input_tokens":0,"output_tokens":0},"provider":"Novita"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":4}}` + "\n\n")
+	_, u, _, err := ParseCapturedResponse("text/event-stream", body)
+	if err != nil {
+		t.Fatalf("ParseCapturedResponse: %v", err)
+	}
+	if u.Provider != "Novita" {
+		t.Errorf("Provider = %q, want %q", u.Provider, "Novita")
+	}
+	if u.CacheReadTokens != 4 {
+		t.Errorf("CacheReadTokens = %d, want 4", u.CacheReadTokens)
+	}
+}
+
+// TestParseCapturedResponseNoProvider proves a native Anthropic response, which
+// carries no such field, leaves Provider empty rather than inventing one.
+func TestParseCapturedResponseNoProvider(t *testing.T) {
+	body := []byte(`{"type":"message","model":"claude-opus-4-8","stop_reason":"end_turn",` +
+		`"usage":{"input_tokens":5,"output_tokens":1}}`)
+	_, u, _, err := ParseCapturedResponse("application/json", body)
+	if err != nil {
+		t.Fatalf("ParseCapturedResponse: %v", err)
+	}
+	if u.Provider != "" {
+		t.Errorf("Provider = %q, want empty", u.Provider)
+	}
+}
