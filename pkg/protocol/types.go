@@ -233,6 +233,21 @@ type SpawnRequest struct {
 	// to the debug raw_http_request hypertable (agent-kind only; requires
 	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).
 	RecordRequests bool `json:"recordRequests,omitempty"`
+
+	// ExecutorSelector is a label selector that narrows the parent's executor
+	// set for this child. Used with the executor pool: the child runs its
+	// filesystem and shell tools on an executor that matches both its
+	// parent's set (intersected) and this selector.
+	ExecutorSelector string `json:"executorSelector,omitempty"`
+
+	// WorkspaceMode controls how the executor provisions this child's
+	// workspace: "ephemeral" for one-shot, "pinned" for durable.
+	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
+	// ParentChildID is the ChildID of the parent agent. Set when spawning a
+	// sub-agent so the daemon can compute the effective executor set by
+	// narrowing from the parent rather than from the full pool.
+	ParentChildID string `json:"parentChildId,omitempty"`
 }
 
 // ResumeRequest re-spawns a child against its persisted state record (§6.4).

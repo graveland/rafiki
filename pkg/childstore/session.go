@@ -87,6 +87,14 @@ type Session struct {
 	// capturing after the daemon restarts or the session is respawned.
 	RecordRequests bool
 
+	// ExecutorSelector is a label selector narrowing the parent's executor set
+	// for this child. Persisted so a resumed child retains the same confinement.
+	ExecutorSelector string
+
+	// WorkspaceMode controls the executor's workspace provisioning.
+	// Persisted for the same reason as ExecutorSelector.
+	WorkspaceMode string
+
 	// Counters
 	ExtensionErrors int
 	AutoRetries     int
@@ -167,6 +175,11 @@ type Snapshot struct {
 
 	RecordRequests bool
 
+	// ExecutorSelector narrows the parent's executor set.
+	ExecutorSelector string
+	// WorkspaceMode controls executor workspace provisioning.
+	WorkspaceMode string
+
 	ExtensionErrors int
 	AutoRetries     int
 	LastRetryError  string
@@ -229,6 +242,8 @@ func (s *Session) Snapshot() Snapshot {
 
 		RecordRequests: s.RecordRequests,
 
+		ExecutorSelector: s.ExecutorSelector,
+		WorkspaceMode:    s.WorkspaceMode,
 		ExtensionErrors:  s.ExtensionErrors,
 		AutoRetries:      s.AutoRetries,
 		LastRetryError:   s.LastRetryError,

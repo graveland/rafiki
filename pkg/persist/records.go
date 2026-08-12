@@ -60,6 +60,11 @@ type Record struct {
 	// deserialises to false — the same as never having set it.
 	RecordRequests bool `json:"recordRequests,omitempty"`
 
+	// ExecutorSelector narrows the parent's executor set.
+	ExecutorSelector string `json:"executorSelector,omitempty"`
+	// WorkspaceMode controls executor workspace provisioning.
+	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
 	SpawnedAt     int64  `json:"spawnedAt"`
 	LastSeenAlive int64  `json:"lastSeenAlive"`
 	PID           int    `json:"pid"`

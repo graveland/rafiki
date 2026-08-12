@@ -95,6 +95,10 @@ type Controller struct {
 	// fresh — see the doc comment on childClaimSet for why a shared claim set
 	// covers both.
 	spawnClaims childClaimSet
+
+	// execPool, when non-nil, is the live executor pool that selects which
+	// remote machine a child's tools run on. nil means everything stays local.
+	execPool executorPool
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -720,6 +724,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		PiBinary:           bin,
 		ExtraArgs:          req.ExtraArgs,
 		RecordRequests:     req.RecordRequests,
+		ExecutorSelector:   req.ExecutorSelector,
+		WorkspaceMode:      req.WorkspaceMode,
 	}
 	c.st.Insert(sess)
 
@@ -974,6 +980,8 @@ func (c *Controller) activateLiveChild(
 		PiBinary:           piBin,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 	}
 	c.st.Insert(sess)
 	c.cm.Add(childID, ch)
@@ -1048,6 +1056,8 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 	}
 	if snap.Kind == protocol.KindClaude {
 		req.ResumeSession = snap.SessionID
@@ -2953,6 +2963,8 @@ func sessionFromRecord(rec persist.Record) *childstore.Session {
 		PiBinary:           rec.PiBinary,
 		ExtraArgs:          rec.ExtraArgs,
 		RecordRequests:     rec.RecordRequests,
+		ExecutorSelector:   rec.ExecutorSelector,
+		WorkspaceMode:      rec.WorkspaceMode,
 		StartedAt:          time.UnixMilli(rec.SpawnedAt),
 		LastActivity:       time.UnixMilli(rec.LastSeenAlive),
 		ExitedAt:           time.UnixMilli(rec.ExitedAt),
@@ -2998,6 +3010,8 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 		SpawnedAt:          snap.StartedAt.UnixMilli(),
 		LastSeenAlive:      snap.LastActivity.UnixMilli(),
 		LastStatus:         string(snap.Status),
