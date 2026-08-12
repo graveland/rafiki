@@ -1,70 +1,129 @@
 package execpool
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
 
+// Departure sentinel errors. The caller checks for these with errors.Is
+// after a tool call fails — they are typed so a model can reason about them
+// and a coordinator can decide whether to reschedule.
+var (
+	// ErrDraining means the executor is shutting down gracefully. In-flight
+	// work may still complete; new work is refused. Children on ephemeral
+	// workspaces may be rescheduled elsewhere.
+	ErrDraining = errors.New("execpool: executor is draining; choose another executor or wait for a replacement")
+
+	// ErrExecutorLost means the executor is gone permanently — a destroyed
+	// VM, a revoked row, or a park timeout that expired. Children cannot
+	// be rescheduled without a workspace rebuild.
+	ErrExecutorLost = errors.New("execpool: executor lost; it will not return")
+
+	// ErrParked means the executor's connection dropped and the pool is
+	// holding its children in a parked state in case it reconnects.
+	ErrParked = errors.New("execpool: executor connection lost; children are parked pending reconnect")
+)
+
 // Park places executorID into a parked state after a connection drop. If the
 // executor reconnects with the same credential within timeout, parked children
-// reattach; after timeout the entry becomes executor-lost.
+// reattach. After timeout, parked entries are converted to executor-lost.
 func (p *Pool) Park(executorID string, timeout time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.parkLocked(executorID, timeout)
-}
 
-// parkLocked is Park's body for callers that already hold p.mu.
-//
-// The split exists because sync.RWMutex is not reentrant and the pool's mutex
-// guards the accept path: a goroutine that blocks while holding it does not
-// just lose its own executor, it wedges Live(), ClientFor() and every
-// subsequent accept. Any new caller inside a locked region must use THIS, and
-// any new caller outside one must use Park — never reach for the other.
-func (p *Pool) parkLocked(executorID string, timeout time.Duration) {
 	if _, ok := p.live[executorID]; ok {
-		return // already back; it reconnected before we got here
+		// Already back — must have reconnected before we parked.
+		return
 	}
-	p.parked[executorID] = &parkedEntry{
+
+	entry := &parkedEntry{
 		executorID: executorID,
 		deadline:   time.Now().Add(timeout),
 	}
+
+	// Remove previous park entry if re-parking.
+	p.parked[executorID] = entry
 	slog.Info("execpool: executor parked", "executorId", executorID, "timeout", timeout)
 }
 
-// parkSweep runs periodically to convert expired parks into lost notifications.
-//
-//nolint:unused // wired by full daemon integration
-func (p *Pool) parkSweep() {
+// Reattach is called when an executor reconnects after being parked. It
+// removes the park entry so children resume normal operation.
+func (p *Pool) reattach(executorID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.parked, executorID)
+	slog.Info("execpool: executor reattached after park", "executorId", executorID)
+}
+
+// Parked returns true if executorID is currently parked.
+func (p *Pool) Parked(executorID string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	_, ok := p.parked[executorID]
+	return ok
+}
+
+// parkSweep runs periodically, converting expired park entries to
+// executor-lost. Called from the Pool's background goroutine.
+func (p *Pool) parkSweep(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		p.sweepParkedOnce(time.Now())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.sweepParkedOnce(time.Now())
+		}
 	}
 }
 
-// sweepParkedOnce converts every park whose deadline has passed into
-// executor-lost, and notifies. Split out of parkSweep so a test can drive one
-// tick without waiting 30 seconds or reaching into the ticker.
+// SetOnLost registers a callback fired when a parked executor's timeout expires
+// and it is declared permanently lost. Without it an expired park only reaches
+// the log, so nothing upstream ever learns the executor is gone for good.
+//
+// Invoked OUTSIDE the pool lock, so a callback may safely call back into the
+// pool -- the same discipline routing.Breaker.SetOnTransition documents, and
+// for the same reason: p.mu is not reentrant.
+func (p *Pool) SetOnLost(fn func(executorID string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onLost = fn
+}
+
+// sweepParkedOnce converts every park entry whose deadline has passed into
+// executor-lost. Split out of parkSweep's ticker loop so the conversion is
+// testable without waiting on a 30s tick.
+//
+// The callbacks fire after the lock is dropped: onLost is caller-supplied and
+// may re-enter the pool, and holding p.mu across it is the same deadlock class
+// as onHealthFailure's.
 func (p *Pool) sweepParkedOnce(now time.Time) {
 	p.mu.Lock()
-	var expired []string
+	var lost []string
 	for id, entry := range p.parked {
 		if now.After(entry.deadline) {
 			delete(p.parked, id)
-			expired = append(expired, id)
+			lost = append(lost, id)
 		}
 	}
-	onLost := p.onLost
+	fn := p.onLost
 	p.mu.Unlock()
 
-	// Notify OUTSIDE the lock. The callback ends at Controller.Send — a
-	// blocking write to a child — and a producer that touches the pool from
-	// inside it would deadlock on a re-entrant acquire.
-	for _, id := range expired {
+	for _, id := range lost {
 		slog.Warn("execpool: parked executor lost (timeout)", "executorId", id)
-		if onLost != nil {
-			onLost(id)
+		if fn != nil {
+			fn(id)
 		}
 	}
 }
+
+type parkedEntry struct {
+	executorID string
+	deadline   time.Time
+}
+
+// ClientFor now also checks parked state and returns typed errors.
+// Override the previous ClientFor by wrapping it.
