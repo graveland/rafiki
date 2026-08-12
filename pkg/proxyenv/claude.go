@@ -12,6 +12,7 @@ package proxyenv
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -71,15 +72,23 @@ var Defaults = []string{
 // !Yd()`; a falsy value short-circuits via WKr()==="standard".)
 const toolSearchEnv = "ENABLE_TOOL_SEARCH"
 
-// anthropicModel reports whether model is served by Anthropic, and so can use
+// AnthropicModel reports whether model is served by Anthropic, and so can use
 // the deferred tools Claude Code would otherwise send to a model that cannot
-// call them.
+// call them. `rafiki claude` also uses it to refuse --passthrough-auth against
+// a model a Claude subscription cannot buy, before the session starts.
 //
 // This is a shape test rather than a catalog lookup on purpose: proxyenv is a
 // leaf package, the answer is needed before any network is available, and
 // being wrong in the "not Anthropic" direction only costs a fatter tools[]
 // while being wrong the other way costs the whole session.
-func anthropicModel(model string) bool {
+//
+// Note it is deliberately no substitute for the proxy's own check. A bare
+// alias resolves through routing.ResolveModel's table (glm-5.2 → an OpenRouter
+// id), and "~anthropic/..." keeps its tilde and routes to OpenRouter — this
+// predicate calls the first not-Anthropic and the second Anthropic. It is a
+// launch-time courtesy that errs toward letting work through; the proxy's 400
+// remains the authority.
+func AnthropicModel(model string) bool {
 	if model == "" {
 		return true // no override: Claude Code picks one of its own Anthropic ids
 	}
@@ -103,6 +112,12 @@ type ClaudeOptions struct {
 	// to send anything to a custom base URL at all, so an empty one is
 	// replaced with a placeholder rather than omitted.
 	Token string
+	// PassthroughAuth leaves the client's own upstream credential in charge.
+	// ANTHROPIC_AUTH_TOKEN is not set at all — its presence is exactly what
+	// makes Claude Code choose API-key auth over its OAuth subscription — and
+	// rafiki's own token moves to the X-Rafiki-Token header, where the proxy
+	// reads it without colliding with the caller's Authorization.
+	PassthroughAuth bool
 	// Model may be empty, leaving Claude Code's own default in place.
 	Model string
 	// AutoCompactWindow of 0 leaves Claude Code's default threshold alone.
@@ -134,17 +149,19 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 		env = append(env, e)
 	}
 
-	token := o.Token
-	if token == "" {
-		// Claude Code will not send to a custom base URL without one; a proxy
-		// that authenticates by other means (tailnet identity, anonymous dev)
-		// still needs the field populated.
-		token = "rafiki"
+	env = append(env, "ANTHROPIC_BASE_URL="+o.URL)
+	if !o.PassthroughAuth {
+		token := o.Token
+		if token == "" {
+			// Claude Code will not send to a custom base URL without one; a proxy
+			// that authenticates by other means (tailnet identity, anonymous dev)
+			// still needs the field populated. Under PassthroughAuth the opposite
+			// is true: the variable must be absent so Claude Code's own OAuth
+			// credential takes over, and the placeholder would defeat the feature.
+			token = "rafiki"
+		}
+		env = append(env, "ANTHROPIC_AUTH_TOKEN="+token)
 	}
-	env = append(env,
-		"ANTHROPIC_BASE_URL="+o.URL,
-		"ANTHROPIC_AUTH_TOKEN="+token,
-	)
 	for _, d := range Defaults {
 		k, _, _ := strings.Cut(d, "=")
 		if !present[k] {
@@ -152,11 +169,18 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 		}
 	}
 
-	if !present[toolSearchEnv] && !anthropicModel(o.Model) {
+	if !present[toolSearchEnv] && !AnthropicModel(o.Model) {
 		env = append(env, toolSearchEnv+"=false")
 	}
 
-	if h := FormatHeaders(o.Headers); h != "" {
+	headers := o.Headers
+	if o.PassthroughAuth && o.Token != "" {
+		// Copy rather than mutate: the caller owns this map and may reuse it.
+		headers = make(map[string]string, len(o.Headers)+1)
+		maps.Copy(headers, o.Headers)
+		headers["X-Rafiki-Token"] = o.Token
+	}
+	if h := FormatHeaders(headers); h != "" {
 		env = append(env, "ANTHROPIC_CUSTOM_HEADERS="+h)
 	}
 

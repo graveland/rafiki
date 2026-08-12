@@ -146,12 +146,20 @@ func (c *Controller) SetProxy(url, token string) {
 }
 
 // SetCatalog records the daemon's shared model catalog, consulted by
-// ContextWindow. Called once at startup, before the socket accepts anything
-// — mirrors SetProxy. A nil cat is legal (main.go passes one through
-// regardless of whether the proxy face itself started) and just means every
-// ContextWindow call returns ok=false.
+// ContextWindow and by the insights backend (pricing). Called once at startup,
+// before the socket accepts anything — mirrors SetProxy. A nil cat is legal
+// (main.go passes one through regardless of whether the proxy face itself
+// started) and just means every ContextWindow call returns ok=false and every
+// cost reads as unpriced.
 func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	c.catalog = cat
+	if cat != nil {
+		// Re-create the insights backend with a pricer wrapped from the catalog.
+		// The initial backend in NewController is pricer-less because the catalog
+		// is not yet available; by the time SetCatalog returns the socket is not
+		// yet listening, so no concurrent read can observe the intermediate state.
+		c.insights = local.New(local.Options{Pool: c.pool, Pricer: cat.Pricing})
+	}
 }
 
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *routing.RawTraceStore, baseCtx context.Context) *Controller {
@@ -2936,6 +2944,18 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 		// Passing a nil environ yields only the additions, which is what is
 		// wanted: the child inherits os.Environ and this is appended to it,
 		// where the last assignment wins.
+		//
+		// PassthroughAuth is deliberately NOT set here and must not be: this
+		// path passes nil for the environ and receives only ADDITIONS, which
+		// buildEnv appends to the daemon's own os.Environ(). Passthrough is
+		// defined by the absence of ANTHROPIC_AUTH_TOKEN and
+		// ANTHROPIC_API_KEY, and appending cannot un-set anything — the
+		// daemon's own ANTHROPIC_API_KEY would reach the child and it would
+		// quietly use API-key auth. Supporting children means converting this
+		// path to a full-environment contract first. Note the same asymmetry
+		// already makes proxyenv.Credentials inert here: children do inherit
+		// the daemon's ANTHROPIC_API_KEY today, and only Claude Code's own
+		// precedence (ANTHROPIC_AUTH_TOKEN outranks it) keeps that harmless.
 		additions, _ := proxyenv.Claude(nil, proxyenv.ClaudeOptions{
 			URL: url, Token: token, Model: req.Model, Headers: headers,
 		})

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -71,6 +72,16 @@ func (p *MessagesProxy) SetRawTrace(s *routing.RawTraceStore, recordAll bool) {
 
 // latency renders a turn duration for logs, rounded to 100ms.
 func latency(d time.Duration) string { return d.Round(100 * time.Millisecond).String() }
+
+// cachePct returns the percentage of input tokens served from cache, rounded to
+// one decimal place.
+func cachePct(u routing.CapturedUsage) float64 {
+	total := u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens
+	if total == 0 {
+		return 0
+	}
+	return math.Round(float64(u.CacheReadTokens)/float64(total)*1000) / 10
+}
 
 func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *slog.Logger) *MessagesProxy {
 	// ResponseHeaderTimeout bounds connect + time-to-first-byte so a hung
@@ -150,9 +161,19 @@ func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer 
 		}
 	}
 	up.Header.Set("Content-Type", "application/json")
-	if bearer {
+	// A passthrough request carries the caller's own upstream credential.
+	// Forward it verbatim and attach nothing of ours: Anthropic rejects a
+	// request bearing both Authorization and x-api-key. The bearer case is
+	// checked first because OpenRouter authenticates with rafiki's key and
+	// must never see a caller credential — selectUpstream already refuses
+	// that route, and this is the second lock on the same door.
+	cred := PassthroughCredential(r.Context())
+	switch {
+	case bearer:
 		up.Header.Set("Authorization", "Bearer "+key)
-	} else {
+	case cred != "":
+		up.Header.Set("Authorization", cred)
+	default:
 		up.Header.Set("x-api-key", key)
 	}
 	if v := r.Header.Get("anthropic-version"); v != "" {
@@ -442,7 +463,17 @@ func (p *MessagesProxy) primaryOutOfCredit(resp *http.Response, status int) bool
 // response (a config error, not an upstream call) and resolved any begun
 // turn; the caller must just return.
 func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, reqBody []byte, model string, cr captureRef) (resp *http.Response, upstream string, err error, handled bool) {
+	passthrough := PassthroughCredential(r.Context()) != ""
 	if strings.Contains(model, "/") {
+		if passthrough {
+			// The caller's Anthropic credential cannot pay OpenRouter, and
+			// falling back to rafiki's key would bill the party the caller
+			// explicitly opted out of billing.
+			msg := "passthrough auth cannot serve non-Anthropic model " + model
+			p.failTurn(r, cr, msg)
+			http.Error(w, msg, http.StatusBadRequest)
+			return nil, "", nil, true
+		}
 		// Slash id = an OpenRouter-native model; route directly to OpenRouter,
 		// skipping the Anthropic primary + breaker. No failover: the caller asked
 		// for this specific model. doOpenRouter forwards slash ids untranslated.
@@ -453,6 +484,13 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		}
 		resp, err = p.doOpenRouter(r.Context(), reqBody, r, cr.convID)
 		return resp, "openrouter", err, false
+	}
+	if passthrough {
+		// No breaker and no failover: every fallback path this function owns
+		// leads to OpenRouter on rafiki's key. An upstream error surfaces to
+		// the caller verbatim instead.
+		resp, err = p.doUpstream(r.Context(), p.upstreamURL, "" /*key unused; the credential comes from the context*/, false, reqBody, r)
+		return resp, "anthropic", err, false
 	}
 	now := time.Now()
 	if p.breaker == nil || p.breaker.UsePrimary(now) {
@@ -688,6 +726,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
+		"cache_pct", cachePct(usage),
 		"stop_reason", stop, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
 	// Detached: a mid-stream client disconnect cancels r.Context(), but capture

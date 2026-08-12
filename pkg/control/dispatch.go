@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -140,6 +141,19 @@ type Controller interface {
 	// controller removes any subscriptions (global and per-child) held by
 	// this connection so they do not leak.
 	OnConnectionClose(conn Connection)
+
+	// ─── Executor management ────────────────────────────────────────────────
+
+	// ExecutorEnroll mints a one-time enrollment token for a new executor.
+	ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
+	// ExecutorList returns enrolled executors, optionally filtered.
+	ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error)
+	// ExecutorLabel sets or removes labels on an executor row.
+	ExecutorLabel(req protocol.ExecutorLabelRequest) (executors.Executor, error)
+	// ExecutorDisable disables an executor.
+	ExecutorDisable(req protocol.ExecutorDisableRequest) error
+	// ExecutorEnable re-enables a disabled executor.
+	ExecutorEnable(req protocol.ExecutorEnableRequest) error
 }
 
 // ─── Dispatch factory ─────────────────────────────────────────────────────────
@@ -219,6 +233,16 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.globalSubscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlGlobalUnsubscribe:
 		return d.globalUnsubscribe(conn, frame, hdr.ID)
+	case protocol.TypeCtrlExecutorEnroll:
+		return d.executorEnroll(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorList:
+		return d.executorList(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorLabel:
+		return d.executorLabel(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorDisable:
+		return d.executorDisable(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorEnable:
+		return d.executorEnable(frame, hdr.ID)
 	default:
 		return errResponse(hdr.Type, hdr.ID, protocol.ErrInvalidArgs, "unknown command type: "+hdr.Type)
 	}

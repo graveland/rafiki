@@ -65,6 +65,7 @@ func newRootCmd() *cobra.Command {
 		newInstallExtensionCmd(),
 		newCompletionCmd(),
 		newClaudeCmd(),
+		newExecutorCmd(),
 	)
 
 	return root

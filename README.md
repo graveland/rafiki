@@ -488,6 +488,35 @@ its turns on the outer session's captured conversation.
 Any other Anthropic-protocol client works the same way via
 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 
+### Billing your own subscription
+
+`rafiki claude --passthrough-auth` (or `RAFIKI_CLAUDE_PASSTHROUGH=1`) captures
+the conversation as usual but bills **your** Claude subscription rather than the
+daemon's `ANTHROPIC_API_KEY`. It works by *not* setting `ANTHROPIC_AUTH_TOKEN`:
+that variable is the only thing that makes Claude Code prefer API-key auth over
+its OAuth subscription, so omitting it lets the subscription credential through.
+rafiki's own token moves to an `X-Rafiki-Token` header, leaving `Authorization`
+free to carry yours, which the proxy forwards upstream untouched.
+
+Consequences worth knowing:
+
+- **Anthropic models only.** The launcher refuses a non-Anthropic `--model` up
+  front, and the proxy rejects one with a 400 if it gets that far — a
+  subscription credential cannot buy an OpenRouter model, and failing over
+  would bill the key you just opted out of. OpenRouter failover is off for
+  these requests for the same reason: an upstream error reaches you verbatim.
+- **It fails closed, never quietly.** Every way this can go wrong ends in an
+  error rather than a surprise bill: no rafiki token, no credential to forward
+  (you are logged out of Claude Code, or `CLAUDE_CODE_USE_BEDROCK`/`VERTEX` is
+  set), an `Authorization` that turns out to be rafiki's own token, or the
+  request landing on the OpenAI-compatible face, which cannot honour
+  passthrough. None of these fall back to the daemon's key.
+- **`rafiki claude` only.** Daemon-spawned `--kind claude` children cannot use
+  it; they receive environment *additions* appended to the daemon's own
+  environment, which cannot un-set the daemon's `ANTHROPIC_API_KEY`.
+- **`RAFIKI_CLAUDE_PASSTHROUGH` must be exactly `1`.** Any other value, `0` and
+  `false` included, leaves it off.
+
 One client-side caveat when pointing Claude Code at any proxy by hand: it
 attaches its byte watchdog — the mechanism that lets SSE keep-alive pings feed
 the 300s stream idle watchdog — only when the base URL host is exactly
