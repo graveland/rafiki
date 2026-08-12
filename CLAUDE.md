@@ -61,3 +61,29 @@
   a limit. The pointer-to-value collapse happens in `grantedCost` /
   `grantedDepth` / `grantedChildren` (`cmd/rafikid/limits.go`) and nowhere
   else — do not re-derive it at a call site.
+
+- **The executor DIALS rafikid and then SERVES HTTP/2 on what it dialled;
+  rafikid accepts and is the HTTP client.** Four things fail silently if you
+  get them wrong (`pkg/execpool/transport.go` documents each at its site):
+  `DialTLSContext` is the hook even with no TLS — there is no `DialContext` on
+  `http2.Transport`; a second dial request is the reconnect signal, not an
+  error to retry; **both** sides must set `NextProtos: []string{"h2"}` or ALPN
+  resolves to `""` and `ServeConn` still works; and the hello frame must be
+  read byte-at-a-time, because a buffered reader that consumes past its newline
+  leaves `http2.Transport` starting mid-frame. Note this last rule is the
+  OPPOSITE of the control listener's (`pkg/control/server.go`), where the
+  handshake reader must be reused or a pipelined first request is lost.
+
+- **`conversations.executors` is authoritative on every connection; the
+  credential proves only binding to a row.** Nothing that gates access may be
+  cached from enrollment time, and nothing self-reported by the executor may
+  reach the `labels` column — `self_reported` is a separate column for exactly
+  that reason. This is what makes relabelling and revocation row updates
+  needing no reissue, no restart, and no access to the machine.
+
+- **Executor narrowing is runtime intersection, never a subset proof.** Compute
+  the parent's effective executor set, evaluate the child's selector
+  independently, intersect. Attempting to prove a child's selector implies its
+  parent's is decidable for equality matches and a logic puzzle the moment
+  `notin` appears — and it fails OPEN, which is the wrong direction for a
+  confidentiality boundary.

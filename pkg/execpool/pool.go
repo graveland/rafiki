@@ -24,9 +24,10 @@ import (
 // Health, both of which are self-reported and therefore non-authoritative by
 // construction.
 type Pool struct {
-	mu    sync.RWMutex
-	store executors.Store
-	live  map[string]*liveConn
+	mu     sync.RWMutex
+	store  executors.Store
+	live   map[string]*liveConn
+	parked map[string]*parkedEntry
 }
 
 type liveConn struct {
@@ -39,14 +40,19 @@ type liveConn struct {
 // New creates a Pool backed by the executor store.
 func New(store executors.Store) *Pool {
 	return &Pool{
-		store: store,
-		live:  make(map[string]*liveConn),
+		store:  store,
+		live:   make(map[string]*liveConn),
+		parked: make(map[string]*parkedEntry),
 	}
 }
 
 // Serve accepts executor connections on ln, authenticating each against the
 // store and promoting them to pool entries. It blocks until ln is closed.
 func (p *Pool) Serve(ln net.Listener) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.parkSweep(ctx)
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -115,6 +121,9 @@ func (p *Pool) handleConn(conn net.Conn) {
 
 	_ = p.store.TouchSeen(ctx, e.ID)
 
+	// If this executor was parked, reattach it.
+	p.reattach(e.ID)
+
 	lc := &liveConn{
 		executor: e,
 		describe: desc.Msg,
@@ -180,9 +189,10 @@ func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 		select {
 		case <-ticker.C:
 			if err := p.healthCheck(ctx, id, lc); err != nil {
-				slog.Warn("execpool: health check failed; marking unreachable", "executorId", id, "error", err)
+				slog.Warn("execpool: health check failed; parking executor", "executorId", id, "error", err)
 				p.mu.Lock()
 				delete(p.live, id)
+				p.Park(id, 5*time.Minute)
 				p.mu.Unlock()
 				close(lc.done)
 				return
