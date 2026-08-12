@@ -13,6 +13,12 @@ import (
 // ErrNotFound is returned when the requested ChildID does not exist.
 var ErrNotFound = errors.New("session not found")
 
+// LabelParent is the label key holding the parent child's ID.
+const LabelParent = "rafiki/parent"
+
+// LabelRoot is the label key holding the root (top-level parent) child's ID.
+const LabelRoot = "rafiki/root"
+
 // Store is a concurrent, indexed collection of Sessions.
 //
 // Primary storage is a flat map keyed by ChildID. Secondary indexes (byName,
@@ -121,6 +127,17 @@ func (s *Store) FindByStatus(status protocol.Status) []Snapshot {
 	return lookupBucket(s.byStatus, s.sessions, status, func(snap Snapshot) bool {
 		return snap.Status == status
 	})
+}
+
+// ParentOf returns the parent ChildID stored in the child's labels, and ok
+// when a parent label exists.
+func (s *Store) ParentOf(id string) (string, bool) {
+	snap, ok := s.Get(id)
+	if !ok {
+		return "", false
+	}
+	parent, exists := snap.Labels[LabelParent]
+	return parent, exists
 }
 
 // Update applies fn to the session under its lock. The caller is responsible

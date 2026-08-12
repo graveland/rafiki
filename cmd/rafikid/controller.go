@@ -27,8 +27,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
-	"go.graveland.dev/rafiki/pkg/eventbuf"
-	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
@@ -36,7 +34,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routing"
-	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -99,32 +96,9 @@ type Controller struct {
 	// covers both.
 	spawnClaims childClaimSet
 
-	// tasks is the task ledger, nil when there is no database pool (daemon
-	// with no database has no ledger to sweep). Populated in NewController.
-	tasks tasks.Store
-
-	// evbuf coalesces externally-injected agent events (subagent settles,
-	// budget warnings, executor loss) into debounced frames so N events
-	// cost one model turn instead of N. Nil means the buffer is disabled.
-	evbuf *eventbuf.Buffer
-
-	// coster resolves what an agent subtree has spent. An interface rather
-	// than *insights.Insights so the admission logic is testable without a
-	// database — the number's correctness is insights' problem, what the
-	// controller does with it is this package's.
-	coster subtreeCoster
-
-	// breaches bounds the budget sweep to one steer per breach.
-	breaches budgetBreaches
-
-	// nudgedOnce bounds prompting.md's enforcement ladder to one nudge per
-	// child. Guarded by nudgedMu.
-	nudgedMu   sync.Mutex
-	nudgedOnce map[string]bool
-
-	// execPool is the live executor connection registry. Nil when the
-	// executor listener is not configured.
-	execPool *execpool.Pool
+	// execPool, when non-nil, is the live executor pool that selects which
+	// remote machine a child's tools run on. nil means everything stays local.
+	execPool executorPool
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -169,7 +143,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 			gw = time.Duration(n * float64(time.Hour))
 		}
 	}
-	c := &Controller{
+	return &Controller{
 		st:          st,
 		cm:          newChildManager(),
 		records:     persist.NewRecordWriter(stateDir),
@@ -183,24 +157,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		rawTrace:    rawTrace,
 		insights:    local.New(local.Options{Pool: pool}),
 		baseCtx:     baseCtx,
-		tasks:       taskStore(pool),
-		evbuf:       newEventBuffer(),
 	}
-	// Wire the coster only when there is a database: without one every
-	// budgeted spawn fails closed (which is what checkBudget does when
-	// coster is nil), while unbudgeted ones are unaffected.
-	if pool != nil {
-		c.coster = insights.New(pool)
-	}
-	return c
-}
-
-// taskStore returns a task ledger or nil when there is no database.
-func taskStore(pool *pgxpool.Pool) tasks.Store {
-	if pool == nil {
-		return nil
-	}
-	return tasks.NewPostgresStore(pool)
 }
 
 // startSweeper launches a background goroutine that periodically forgets
@@ -218,12 +175,6 @@ func (c *Controller) startSweeper(ctx context.Context) {
 				return
 			case <-ticker.C:
 				c.sweepExpired()
-				// Budget breaches are checked on the same tick as expiry: both are
-				// periodic reconciliations of stored state, and a second ticker would be
-				// a second thing to reason about at shutdown.
-				sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
-				c.sweepBudgets(sweepCtx)
-				cancel()
 			}
 		}
 	}()
@@ -655,21 +606,6 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		}
 	}
 
-	// Resolve lineage before spawning: a bad parentChildId must fail without
-	// leaving a started process behind.
-	parentLabel, rootLabel, err := computeLineageLabels(c.st, req.ParentChildID)
-	if err != nil {
-		return control.SpawnResult{}, err
-	}
-
-	// Resource admission. Deliberately before the childID is minted and long
-	// before anything is registered: a refusal must leave no process, no
-	// store entry, no record and — with phase 04's ordering — no task
-	// assignment to roll back.
-	if err := c.checkSpawnLimits(req); err != nil {
-		return control.SpawnResult{}, err
-	}
-
 	// childID is minted before resolveSpawnPlan (rather than after, as
 	// before) because the "fundi" kind needs it to pin --spill-dir
 	// (see buildAgentArgv/agentSpillDir).
@@ -745,10 +681,6 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 	if req.ResumedFromSession != "" {
 		initLabels["rafiki/resumed-from-session"] = req.ResumedFromSession
 	}
-	if parentLabel != "" {
-		initLabels[childstore.LabelParent] = parentLabel
-		initLabels[childstore.LabelRoot] = rootLabel
-	}
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
 	// process is confirmed running. A crash between exec and Idle() would
@@ -792,35 +724,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		PiBinary:           bin,
 		ExtraArgs:          req.ExtraArgs,
 		RecordRequests:     req.RecordRequests,
-		ExecutorSocket:     req.ExecutorSocket,
-		MaxDepth:           grantedDepth(req, childDepthFor(c.st, req.ParentChildID), resolveAbsoluteDepthCeiling()),
-		MaxCost:            grantedCost(req),
-		MaxChildren:        grantedChildren(req),
+		ExecutorSelector:   req.ExecutorSelector,
+		WorkspaceMode:      req.WorkspaceMode,
 	}
 	c.st.Insert(sess)
 
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record (spawning)", "childId", childID, "error", err)
-	}
-
-	// Assign the ledger row now that the child is admitted and registered.
-	// Ordering is load-bearing: phase 05 refuses spawns for depth, cost and
-	// concurrency, and every one of those refusals returns BEFORE this point,
-	// so a refused spawn can never leave a row pointing at a child that never
-	// started — no rollback, no compensating write.
-	if req.Task != "" && c.tasks != nil && req.SpawnerConversationID != "" {
-		assignCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		if _, err := c.tasks.Assign(assignCtx, req.SpawnerConversationID, req.Task, childID); err != nil {
-			// Best-effort, and deliberately not fatal: the child is already
-			// running, and killing a healthy agent because a bookkeeping row
-			// would not update trades a recoverable inconsistency for an
-			// unrecoverable one. The warning is the record.
-			slog.Warn("spawn: could not assign task to new child",
-				"childId", childID, "task", req.Task, "error", err)
-		} else {
-			_, _ = c.st.SetLabels(childID, map[string]string{labelTaskHandle: req.Task}, nil)
-		}
-		cancel()
 	}
 
 	// Emit ctrl_child_spawned immediately after the process is running and the
@@ -1070,10 +980,8 @@ func (c *Controller) activateLiveChild(
 		PiBinary:           piBin,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
-		ExecutorSocket:     snap.ExecutorSocket,
-		MaxDepth:           snap.MaxDepth,
-		MaxCost:            snap.MaxCost,
-		MaxChildren:        snap.MaxChildren,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 	}
 	c.st.Insert(sess)
 	c.cm.Add(childID, ch)
@@ -1148,10 +1056,8 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
-		ExecutorSocket:     snap.ExecutorSocket,
-		MaxDepth:           &snap.MaxDepth,
-		MaxCost:            &snap.MaxCost,
-		MaxChildren:        &snap.MaxChildren,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 	}
 	if snap.Kind == protocol.KindClaude {
 		req.ResumeSession = snap.SessionID
@@ -2267,15 +2173,7 @@ func (c *Controller) drainChildStatus(childID string, ch *child.Child) {
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {
-	storePrev, ok := c.st.SetStatus(childID, newStatus)
-	// Release any event batches deferred while this child was mid-turn.
-	// This is rafiki's turn-end drain; it is why no busy-poller is needed.
-	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle && c.evbuf != nil {
-		if isWorkingStatus(storePrev) {
-			c.notifySubagentSettled(childID, "settled (idle)")
-		}
-		c.evbuf.DrainIdle(childID)
-	}
+	c.st.SetStatus(childID, newStatus)
 	now := time.Now()
 	evt := protocol.CtrlChildStatus{
 		Type:     protocol.TypeCtrlChildStatus,
@@ -2458,40 +2356,6 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		}
 	}
 
-	// Tell the parent its worker is gone. This runs before Forget (which
-	// clears batches aimed AT this child, not at its parent) and before
-	// cm.Remove, which is the observable "teardown complete" signal.
-	c.notifySubagentSettled(childID, "exited")
-
-	// Drop any buffered events aimed at this child. It will never transition
-	// to idle again, so DrainIdle can never clear them.
-	if c.evbuf != nil {
-		c.evbuf.Forget(childID)
-	}
-
-	c.nudgedMu.Lock()
-	delete(c.nudgedOnce, childID)
-	c.nudgedMu.Unlock()
-
-	// Sweep this child's unfinished work to orphaned BEFORE cm.Remove.
-	// cm.Remove is the observable "kill complete" signal (waitForChildRemoval
-	// blocks on it), so sweeping after it would let a caller see a finished
-	// kill while the tasks still read in_progress.
-	//
-	// Best-effort under a short deadline: a database outage must not wedge
-	// child teardown. The cost of failure is that rows stay in_progress
-	// behind a dead child, which is recoverable.
-	if c.tasks != nil {
-		sweepCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if n, err := c.tasks.OrphanAssigned(sweepCtx, childID); err != nil {
-			slog.Warn("orphan task sweep failed; tasks remain in_progress",
-				"childId", childID, "error", err)
-		} else if n > 0 {
-			slog.Info("orphaned tasks for exited child", "childId", childID, "count", n)
-		}
-		cancel()
-	}
-
 	c.cm.Remove(childID)
 }
 
@@ -2520,27 +2384,6 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 	rec := recordFromSnapshot(snap)
 	rec.LastStatus = lastStatus
 	return c.records.Write(rec)
-}
-
-// computeLineageLabels resolves the rafiki/parent and rafiki/root label
-// values for a child being spawned under parentID. Both are empty when
-// parentID is empty (a top-level child).
-//
-// root is taken from the parent's own root label when it has one, and is
-// otherwise the parent's id — the parent is then top-level. This never walks
-// the chain: the parent's labels are correct by induction, which is what
-// keeps spawn O(1) regardless of tree depth.
-func computeLineageLabels(st *childstore.Store, parentID string) (parent, root string, err error) {
-	if parentID == "" {
-		return "", "", nil
-	}
-	if _, ok := st.Get(parentID); !ok {
-		return "", "", &control.ControllerError{
-			Code:    protocol.ErrChildNotFound,
-			Message: "parentChildId: no such child: " + parentID,
-		}
-	}
-	return parentID, st.RootOf(parentID), nil
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -3120,10 +2963,8 @@ func sessionFromRecord(rec persist.Record) *childstore.Session {
 		PiBinary:           rec.PiBinary,
 		ExtraArgs:          rec.ExtraArgs,
 		RecordRequests:     rec.RecordRequests,
-		ExecutorSocket:     rec.ExecutorSocket,
-		MaxDepth:           rec.MaxDepth,
-		MaxCost:            rec.MaxCost,
-		MaxChildren:        rec.MaxChildren,
+		ExecutorSelector:   rec.ExecutorSelector,
+		WorkspaceMode:      rec.WorkspaceMode,
 		StartedAt:          time.UnixMilli(rec.SpawnedAt),
 		LastActivity:       time.UnixMilli(rec.LastSeenAlive),
 		ExitedAt:           time.UnixMilli(rec.ExitedAt),
@@ -3169,10 +3010,8 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
-		ExecutorSocket:     snap.ExecutorSocket,
-		MaxDepth:           snap.MaxDepth,
-		MaxCost:            snap.MaxCost,
-		MaxChildren:        snap.MaxChildren,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 		SpawnedAt:          snap.StartedAt.UnixMilli(),
 		LastSeenAlive:      snap.LastActivity.UnixMilli(),
 		LastStatus:         string(snap.Status),
@@ -3181,27 +3020,4 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 		ExitSignal:         snap.ExitSignal,
 		Labels:             snap.Labels,
 	}
-}
-
-// TaskList queries the task ledger for the ctrl_task_list verb.
-//
-// No conversation scope: this verb answers "what is every agent doing",
-// which is a cross-conversation question. The dispatcher clamps Limit before
-// calling, and the store applies it after sorting, which is what keeps the
-// response inside protocol.MaxFrameBytes.
-func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
-	if c.tasks == nil {
-		return nil, &control.ControllerError{
-			Code:    protocol.ErrNoAgentDB,
-			Message: "task ledger unavailable: no database configured",
-		}
-	}
-
-	f := tasks.ListFilter{
-		Assignee:       req.ChildID,
-		Status:         tasks.Status(req.Status),
-		IncludeDropped: req.All,
-		Limit:          req.Limit,
-	}
-	return c.tasks.List(ctx, f)
 }

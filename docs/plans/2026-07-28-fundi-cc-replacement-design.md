@@ -169,6 +169,14 @@ allowed to wedge the daily driver.
 
 ### 1.2 Subagents
 
+> **SUPERSEDED 2026-08-09** by `2026-08-09-agent-platform/` phases 01 (tree
+> labels), 04 (subagent tools) and 05 (limits). The shape, the enforcement rule
+> and the limit model below are carried forward intact. Two corrections: the
+> labels are `rafiki/parent` / `rafiki/root`, not `fundi/*` (the code reserves
+> `rafiki/`), and `spawn` gains a `task` parameter binding it to the ledger.
+> The `todo` tool listed as deferred below has since shipped and is now retired
+> by phase 02.
+
 Multi-level spawning with per-agent model selection is the **design goal**, not a hazard:
 a coordinator decomposes, workers execute on cheap models, reviewers check on expensive
 ones. Any design that caps the tree at one level designs out the product.

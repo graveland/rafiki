@@ -87,17 +87,13 @@ type Session struct {
 	// capturing after the daemon restarts or the session is respawned.
 	RecordRequests bool
 
-	// ExecutorSocket, when non-empty, is the unix socket of the rafiki-executor
-	// this child's filesystem and shell tools run in. Persisted so a resumed
-	// child rejoins the same executor.
-	ExecutorSocket string
+	// ExecutorSelector is a label selector narrowing the parent's executor set
+	// for this child. Persisted so a resumed child retains the same confinement.
+	ExecutorSelector string
 
-	// Resource grants, daemon-stamped at spawn and never re-read from the
-	// child. These are the FACTS the controller enforces against; a value
-	// arriving in a request is a request.
-	MaxDepth    int
-	MaxCost     float64
-	MaxChildren int
+	// WorkspaceMode controls the executor's workspace provisioning.
+	// Persisted for the same reason as ExecutorSelector.
+	WorkspaceMode string
 
 	// Counters
 	ExtensionErrors int
@@ -179,16 +175,10 @@ type Snapshot struct {
 
 	RecordRequests bool
 
-	// ExecutorSocket, when non-empty, is the unix socket of the rafiki-executor
-	// this child's filesystem and shell tools run in.
-	ExecutorSocket string
-
-	// Resource grants, daemon-stamped at spawn and never re-read from the
-	// child. These are the FACTS the controller enforces against; a value
-	// arriving in a request is a request.
-	MaxDepth    int
-	MaxCost     float64
-	MaxChildren int
+	// ExecutorSelector narrows the parent's executor set.
+	ExecutorSelector string
+	// WorkspaceMode controls executor workspace provisioning.
+	WorkspaceMode string
 
 	ExtensionErrors int
 	AutoRetries     int
@@ -252,10 +242,8 @@ func (s *Session) Snapshot() Snapshot {
 
 		RecordRequests: s.RecordRequests,
 
-		ExecutorSocket: s.ExecutorSocket,
-
-		MaxDepth: s.MaxDepth, MaxCost: s.MaxCost, MaxChildren: s.MaxChildren,
-
+		ExecutorSelector: s.ExecutorSelector,
+		WorkspaceMode:    s.WorkspaceMode,
 		ExtensionErrors:  s.ExtensionErrors,
 		AutoRetries:      s.AutoRetries,
 		LastRetryError:   s.LastRetryError,
