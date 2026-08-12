@@ -5,9 +5,12 @@ package agentloop
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
@@ -85,6 +88,53 @@ func isSyscallErr(err error) bool {
 		err = errors.Unwrap(err)
 		if err == nil {
 			return false
+		}
+	}
+}
+
+// retryDelays defines the exponential backoff sequence for LLM retries.
+// 7 attempts total (initial + 6 retries), ~127s worst case.
+var retryDelays = []time.Duration{
+	1 * time.Second, 2 * time.Second, 4 * time.Second,
+	8 * time.Second, 16 * time.Second, 32 * time.Second, 64 * time.Second,
+}
+
+// backoffFor returns the backoff delay for retry attempt N (0-indexed)
+// with ±25% uniform jitter.
+func backoffFor(attempt int) time.Duration {
+	if attempt >= len(retryDelays) {
+		return retryDelays[len(retryDelays)-1]
+	}
+	d := retryDelays[attempt]
+	jitter := time.Duration(float64(d) * 0.25 * (rand.Float64()*2 - 1))
+	return d + jitter
+}
+
+// continueWithRetry wraps conv.Continue with transient-error retries.
+// On each retry it logs a warning and sleeps the backoff delay.
+// On recovery it logs an info line. On exhaustion it returns the last error.
+func continueWithRetry(ctx context.Context, conv *llm.Conversation, opts ...llm.SendOption) (*anthropic.Message, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := conv.Continue(ctx, opts...)
+		if err == nil || !isRetryable(err, ctx) {
+			if attempt > 0 && err == nil {
+				slog.Info("agentloop: turn recovered",
+					"attempts", attempt+1,
+					"total_backoff", time.Duration(attempt)*time.Second) // approximate
+			}
+			return resp, err
+		}
+		if attempt >= len(retryDelays) {
+			return resp, err
+		}
+		d := backoffFor(attempt)
+		slog.Warn("agentloop: retrying turn",
+			"attempt", attempt+1, "max", len(retryDelays)+1,
+			"backoff", d.Round(100*time.Millisecond), "error", err)
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
 }

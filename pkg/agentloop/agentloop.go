@@ -384,7 +384,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			// is a SendOption, and later options win for same-field config).
 			turnOpts = append(append([]llm.SendOption{}, baseOpts...), llm.WithMaxTokens(bumped))
 		}
-		resp, err := conv.Continue(ctx, turnOpts...)
+		resp, err := continueWithRetry(ctx, conv, turnOpts...)
 		ev.turn(iteration, resp, time.Since(start), err)
 		if err != nil {
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: iteration %d: %w", iteration, err)
