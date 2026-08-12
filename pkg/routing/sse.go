@@ -22,6 +22,13 @@ type CapturedUsage struct {
 	// ground truth when the request carried an alias (~vendor/x-latest). Empty
 	// when the response omits it.
 	Model string
+
+	// Provider is the endpoint that actually served the request, reported by
+	// OpenRouter's Anthropic face as a non-standard top-level "provider" field
+	// (e.g. "Novita"). Empty for native Anthropic responses, which have no such
+	// field. This is the only per-response signal of WHICH provider OpenRouter
+	// routed to, and ProviderGuard needs it to attribute a cache miss.
+	Provider string
 }
 
 type wireUsage struct {
@@ -57,6 +64,7 @@ func parseJSONMessage(body []byte) (string, CapturedUsage, error) {
 	var m struct {
 		StopReason string    `json:"stop_reason"`
 		Model      string    `json:"model"`
+		Provider   string    `json:"provider"`
 		Usage      wireUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &m); err != nil {
@@ -64,6 +72,7 @@ func parseJSONMessage(body []byte) (string, CapturedUsage, error) {
 	}
 	u := toCapturedUsage(m.Usage)
 	u.Model = m.Model
+	u.Provider = m.Provider
 	return m.StopReason, u, nil
 }
 
@@ -87,8 +96,9 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 		var ev struct {
 			Type    string `json:"type"`
 			Message struct {
-				Model string    `json:"model"`
-				Usage wireUsage `json:"usage"`
+				Model    string    `json:"model"`
+				Provider string    `json:"provider"`
+				Usage    wireUsage `json:"usage"`
 			} `json:"message"`
 			Delta struct {
 				StopReason string `json:"stop_reason"`
@@ -103,6 +113,10 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 			cu := toCapturedUsage(ev.Message.Usage)
 			u.InputTokens, u.CacheReadTokens, u.CacheCreationTokens = cu.InputTokens, cu.CacheReadTokens, cu.CacheCreationTokens
 			u.Model = ev.Message.Model
+			// OpenRouter reports the serving provider only here, on
+			// message_start — the final message_delta carries usage but no
+			// provider, so a parser that only reads the delta learns nothing.
+			u.Provider = ev.Message.Provider
 		case "message_delta":
 			if ev.Delta.StopReason != "" {
 				stop = ev.Delta.StopReason
