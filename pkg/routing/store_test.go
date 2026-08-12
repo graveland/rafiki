@@ -5,12 +5,15 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/store"
@@ -750,4 +753,110 @@ func TestAppendResponseMessage(t *testing.T) {
 	if respOrd != next {
 		t.Fatalf("response_ordinal = %d, want %d", respOrd, next)
 	}
+}
+
+func TestIsRetryableDB(t *testing.T) {
+	liveCtx := context.Background()
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name  string
+		err   error
+		ctx   context.Context
+		retry bool
+	}{
+		{"nil", nil, liveCtx, false},
+		{"cancelled context", context.DeadlineExceeded, cancelledCtx, false},
+		{"deadline exceeded", context.DeadlineExceeded, liveCtx, true},
+		{"net.OpError", &net.OpError{Op: "read", Err: errors.New("connection refused")}, liveCtx, true},
+		{"plain error", errors.New("something failed"), liveCtx, false},
+		{"pgconn deadlock", &pgconn.PgError{Code: "40P01"}, liveCtx, true},
+		{"pgconn serialization", &pgconn.PgError{Code: "40001"}, liveCtx, true},
+		{"pgconn not-null violation", &pgconn.PgError{Code: "23502"}, liveCtx, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRetryableDB(tt.err, tt.ctx)
+			if got != tt.retry {
+				t.Errorf("isRetryableDB(%v) = %v, want %v", tt.err, got, tt.retry)
+			}
+		})
+	}
+}
+
+func TestRetryDB_NonTransientNoRetry(t *testing.T) {
+	calls := 0
+	err := retryDB(context.Background(), "test", func(ctx context.Context) error {
+		calls++
+		return errors.New("permanent")
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call, got %d", calls)
+	}
+}
+
+func TestRetryDB_TransientRecovers(t *testing.T) {
+	withShortDBRetryDelays(t)
+	calls := 0
+	err := retryDB(context.Background(), "test", func(ctx context.Context) error {
+		calls++
+		if calls == 1 {
+			return &net.OpError{Op: "read", Err: errors.New("connection reset")}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected recovery, got: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 calls, got %d", calls)
+	}
+}
+
+func TestRetryDB_ExhaustedRetries(t *testing.T) {
+	withShortDBRetryDelays(t)
+	calls := 0
+	err := retryDB(context.Background(), "test", func(ctx context.Context) error {
+		calls++
+		return context.DeadlineExceeded
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausted retries")
+	}
+	if calls != 4 { // initial + 3 retries
+		t.Fatalf("expected 4 calls, got %d", calls)
+	}
+}
+
+func TestRetryDB_ParentContextCanceled(t *testing.T) {
+	withShortDBRetryDelays(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	err := retryDB(ctx, "test", func(ctx context.Context) error {
+		calls++
+		return context.DeadlineExceeded
+	})
+	if err == nil {
+		t.Fatal("expected error from cancelled parent")
+	}
+	// With a cancelled parent, the select at the end of the retry loop
+	// immediately returns ctx.Err(). Should not retry.
+	if calls > 1 {
+		t.Fatalf("expected at most 1 call with cancelled parent, got %d", calls)
+	}
+}
+
+// withShortDBRetryDelays shrinks dbRetryDelays to microseconds for the
+// duration of the test so a test exercising the full retry sequence doesn't
+// sleep through the real 1s/3s/5s backoff.
+func withShortDBRetryDelays(t *testing.T) {
+	t.Helper()
+	orig := dbRetryDelays
+	dbRetryDelays = []time.Duration{time.Microsecond, time.Microsecond, time.Microsecond}
+	t.Cleanup(func() { dbRetryDelays = orig })
 }
