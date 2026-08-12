@@ -797,6 +797,65 @@ func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
 	}
 }
 
+// TestDoOpenRouterMergesIgnoreList proves an ejected provider reaches the wire
+// as provider.ignore, AND that it survives a caller-supplied provider object.
+// The union is deliberate: a budget guard any caller can switch off by sending
+// its own provider block is not a guard. Contrast with
+// TestMessagesProxyPinsProviderForPinnedModel, where a caller-supplied
+// provider legitimately overrides a pin — the guard's ignore list is not a
+// pin and must not be overridable the same way.
+func TestDoOpenRouterMergesIgnoreList(t *testing.T) {
+	g := routing.NewProviderGuard(routing.DefaultEjectTTL, slog.New(slog.DiscardHandler))
+	now := time.Now()
+	for range 6 {
+		g.Observe(now, routing.Observation{
+			Provider: "CoreWeave", Model: "deepseek/deepseek-v4-pro", Conversation: "c1",
+			PrefixHash: "h1", InputTokens: 50000, CacheReadTokens: 0,
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"no caller provider block", `{"model":"deepseek/deepseek-v4-pro","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
+		{"caller supplied provider block", `{"model":"deepseek/deepseek-v4-pro","provider":{"only":["novita"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&got)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"type":"message","model":"deepseek/deepseek-v4-pro","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"provider":"Novita"}`)
+			}))
+			defer orSrv.Close()
+
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			p := NewMessagesProxy(nil, nil, "real-key", "http://unused-primary", "" /*defaultModel*/, nil /*catalog*/, logger)
+			p.store = &fakeProxyStore{}
+			p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
+			p.SetProviderGuard(g)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer client-token")
+			p.ServeHTTP(rec, req)
+
+			prov, _ := got["provider"].(map[string]any)
+			ignore, _ := prov["ignore"].([]any)
+			if len(ignore) != 1 || ignore[0] != "coreweave" {
+				t.Errorf("provider.ignore = %v, want [coreweave]; full provider block = %v", ignore, prov)
+			}
+			if strings.Contains(tc.name, "caller supplied") {
+				only, _ := prov["only"].([]any)
+				if len(only) != 1 || only[0] != "novita" {
+					t.Errorf("caller-supplied provider fields must survive the merge, got %v", prov)
+				}
+			}
+		})
+	}
+}
+
 // A slash model on a proxy with no OpenRouter key returns 502 AND must resolve
 // the turn it began, or the row is stranded 'pending' forever (a false orphan).
 func TestMessagesProxySlashWithoutOpenRouterFailsTurn(t *testing.T) {
