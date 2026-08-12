@@ -3,7 +3,10 @@
 package routing
 
 import (
+	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -169,4 +172,89 @@ func TestGuardNilSafe(t *testing.T) {
 	if got := g.IgnoredFor(time.Now(), "deepseek/deepseek-v4-pro"); got != nil {
 		t.Errorf("IgnoredFor = %v, want nil", got)
 	}
+}
+
+// replayTurn mirrors one row of the testdata fixtures.
+type replayTurn struct {
+	Conversation    string `json:"conversation"`
+	Ordinal         int    `json:"ordinal"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	PrefixHash      string `json:"prefix_hash"`
+	InputTokens     int64  `json:"input_tokens"`
+	CacheReadTokens int64  `json:"cache_read_tokens"`
+}
+
+func loadReplay(t *testing.T, name string) []replayTurn {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var turns []replayTurn
+	if err := json.Unmarshal(b, &turns); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if len(turns) == 0 {
+		t.Fatal("fixture is empty")
+	}
+	return turns
+}
+
+// replay feeds a fixture through a guard one turn per second and returns the
+// index of the turn that triggered an ejection, or -1.
+func replay(t *testing.T, name string) (int, []replayTurn, *ProviderGuard) {
+	t.Helper()
+	turns := loadReplay(t, name)
+	g := testGuard()
+	base := time.Now()
+	ejectedAt := -1
+	for i, tn := range turns {
+		now := base.Add(time.Duration(i) * time.Second)
+		g.Observe(now, Observation{
+			Provider: tn.Provider, Model: tn.Model, Conversation: tn.Conversation,
+			PrefixHash: tn.PrefixHash, InputTokens: tn.InputTokens, CacheReadTokens: tn.CacheReadTokens,
+		})
+		if ejectedAt < 0 && len(g.IgnoredFor(now, tn.Model)) > 0 {
+			ejectedAt = i
+		}
+	}
+	return ejectedAt, turns, g
+}
+
+// TestReplayHealthyNovitaNeverEjects is the false-positive guard. This is 13
+// hours of real traffic that was working correctly (98-99% of input tokens
+// served from cache). Twelve of its turns did miss the cache, but never twice
+// in a row. If a change to the qualification rules starts ejecting here, that
+// change would have blacklisted a healthy provider in production.
+func TestReplayHealthyNovitaNeverEjects(t *testing.T) {
+	ejectedAt, turns, _ := replay(t, "novita_healthy.json")
+	if ejectedAt >= 0 {
+		t.Fatalf("ejected at turn %d (conversation %s, ordinal %d) replaying healthy traffic; want no ejection",
+			ejectedAt, turns[ejectedAt].Conversation, turns[ejectedAt].Ordinal)
+	}
+}
+
+// TestReplayBrokenCoreWeaveEjects is the true-positive test. This is the real
+// 2026-08-12 incident: 214 turns, 201 of them cache misses, 15.6x the cost per
+// input token. The guard must catch it within a handful of turns rather than
+// after 207 of them.
+func TestReplayBrokenCoreWeaveEjects(t *testing.T) {
+	ejectedAt, turns, g := replay(t, "coreweave_broken.json")
+	if ejectedAt < 0 {
+		t.Fatal("replaying the CoreWeave incident produced no ejection")
+	}
+	if ejectedAt > 10 {
+		t.Errorf("ejected at turn %d, want within the first 10 — detection cost is the uncached turns before it fires", ejectedAt)
+	}
+	if got := g.IgnoredFor(time.Now(), "deepseek/deepseek-v4-pro"); len(got) != 1 || got[0] != "coreweave" {
+		t.Errorf("IgnoredFor = %v, want [coreweave]", got)
+	}
+	// Quantify what the guard saved, so a regression that delays detection is
+	// visible as a number rather than a boolean.
+	var wasted int64
+	for _, tn := range turns[:ejectedAt+1] {
+		wasted += tn.InputTokens
+	}
+	t.Logf("ejected at turn %d/%d after %d uncached input tokens", ejectedAt, len(turns), wasted)
 }
