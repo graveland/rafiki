@@ -24,6 +24,45 @@ import (
 	"go.graveland.dev/rafiki/pkg/server"
 )
 
+// providerGuardEnabled reports whether the provider cache guard runs. Anything
+// but an explicit off-switch leaves it on: a guard that disables itself on a
+// typo'd value is worse than no guard, because you would believe you had one.
+func providerGuardEnabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "off", "false", "0", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+// buildProviderGuard constructs the guard and seeds it from the durable
+// ejection log. Returns nil when disabled — a nil *ProviderGuard is inert at
+// every call site, so callers need no branch.
+//
+// With no pool the guard still runs, memory-only: it protects the budget for
+// this process's lifetime and simply forgets across restarts, which is strictly
+// better than not guarding at all.
+func buildProviderGuard(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) *routing.ProviderGuard {
+	if !providerGuardEnabled(paths.Get(paths.ProviderGuard)) {
+		logger.Warn("provider cache guard disabled; a provider that stops serving cache hits will not be ejected",
+			"env", paths.ProviderGuard)
+		return nil
+	}
+	guard := routing.NewProviderGuard(routing.DefaultEjectTTL, logger)
+	if pool == nil {
+		return guard
+	}
+	guard.SetSink(routing.NewEjectionStore(pool))
+	// Bounded: a slow database delays startup by at most this, and Rehydrate
+	// logs and swallows its own failure — ejection state is a cost
+	// optimisation, never a reason to refuse to boot.
+	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	guard.Rehydrate(rctx, time.Now())
+	return guard
+}
+
 // proxyFace is the daemon's own rafiki HTTP face: the same /v1/messages and
 // /v1/chat/completions handlers `rafiki serve` mounts, served in-process.
 //
@@ -146,6 +185,14 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	}
 	go client.Catalog().Warm()
 
+	// The provider cache guard is shared by both request paths — the proxy face
+	// below and the llm client above — because OpenRouter routes them both and
+	// either can be the one that notices a provider has stopped caching. A nil
+	// guard is inert at every call site, so the disabled case needs no branching
+	// past this point.
+	guard := buildProviderGuard(ctx, pool, logger)
+	client.SetProviderGuard(guard)
+
 	auth := server.ContextAuthenticator{}
 	messages := server.NewMessagesProxy(captureStore, auth, anthropicKey,
 		"https://api.anthropic.com", defaultModel, client.Catalog(), logger)
@@ -155,6 +202,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	if opts.RawTrace != nil {
 		messages.SetRawTrace(opts.RawTrace, opts.RawTraceAll)
 	}
+	messages.SetProviderGuard(guard)
 
 	var metrics *server.Metrics
 	if opts.Registry != nil {
@@ -164,6 +212,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		)
 		metrics = server.NewMetrics(opts.Registry)
 		metrics.WatchBreaker(string(llm.UpstreamAnthropic), client.Breaker(llm.UpstreamAnthropic))
+		metrics.WatchProviderGuard(guard)
 		messages.SetMetrics(metrics)
 	}
 
