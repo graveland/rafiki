@@ -817,55 +817,78 @@ type ExecutorHelloResponse struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// ─── ctrl_executor_* types ────────────────────────────────────────────────
+// ─── ctrl_executor_* constants ─────────────────────────────────────────────────
 
-const (
-	TypeCtrlExecutorEnroll  = "ctrl_executor_enroll"
-	TypeCtrlExecutorList    = "ctrl_executor_list"
-	TypeCtrlExecutorLabel   = "ctrl_executor_label"
-	TypeCtrlExecutorDisable = "ctrl_executor_disable"
-	TypeCtrlExecutorEnable  = "ctrl_executor_enable"
-)
+	const (
+		TypeCtrlExecutorEnroll  = "ctrl_executor_enroll"
+		TypeCtrlExecutorList    = "ctrl_executor_list"
+		TypeCtrlExecutorLabel   = "ctrl_executor_label"
+		TypeCtrlExecutorDisable = "ctrl_executor_disable"
+		TypeCtrlExecutorEnable  = "ctrl_executor_enable"
+	)
 
-// CtrlExecutorEnrollRequest mints an enrollment token.
-type CtrlExecutorEnrollRequest struct {
-	Labels map[string]string `json:"labels,omitempty"`
-	TTL    string            `json:"ttl,omitempty"`
-}
+	// ─── ctrl_executor_enroll ──────────────────────────────────────────────────────
 
-// CtrlExecutorEnrollResponse returns the plaintext token.
-type CtrlExecutorEnrollResponse struct {
-	Token string `json:"token"`
-}
+	// ExecutorEnrollRequest mints a one-time enrollment token.
+	type ExecutorEnrollRequest struct {
+		Type          string            `json:"type"` // "ctrl_executor_enroll"
+		ID            string            `json:"id,omitempty"`
+		Labels        map[string]string `json:"labels,omitempty"`
+		Roots         []string          `json:"roots,omitempty"`
+		Isolation     string            `json:"isolation,omitempty"`
+		WorkspaceMode string            `json:"workspaceMode,omitempty"`
+		Admits        string            `json:"admits,omitempty"`
+		TTLSeconds    int64             `json:"ttlSeconds"`
+	}
 
-// CtrlExecutorListResponse carries the current executor list.
-type CtrlExecutorListResponse struct {
-	Executors []ExecutorListEntry `json:"executors"`
-}
+	// ExecutorEnrollResponseData is the data payload for ctrl_executor_enroll.
+	type ExecutorEnrollResponseData struct {
+		Token string `json:"token"`
+	}
 
-// ExecutorListEntry is one row from the executor list.
-type ExecutorListEntry struct {
-	ID          string            `json:"id"`
-	DisplayName string            `json:"displayName"`
-	Labels      map[string]string `json:"labels"`
-	Enabled     bool              `json:"enabled"`
-	Connected   bool              `json:"connected"`
-	LastSeenAt  string            `json:"lastSeenAt,omitempty"`
-}
+	// ─── ctrl_executor_list ────────────────────────────────────────────────────────
 
-// CtrlExecutorLabelRequest sets or removes labels.
-type CtrlExecutorLabelRequest struct {
-	ExecutorID string            `json:"executorId"`
-	Set        map[string]string `json:"set,omitempty"`
-	Remove     []string          `json:"remove,omitempty"`
-}
+	// ExecutorListRequest lists enrolled executors, optionally filtered.
+	type ExecutorListRequest struct {
+		Type     string `json:"type"` // "ctrl_executor_list"
+		ID       string `json:"id,omitempty"`
+		Selector string `json:"selector,omitempty"`
+		Limit    int    `json:"limit,omitempty"`
+	}
 
-// CtrlExecutorDisableRequest revokes an executor.
-type CtrlExecutorDisableRequest struct {
-	ExecutorID string `json:"executorId"`
-}
+	// ExecutorListEntry is one row from the executor list.
+	type ExecutorListEntry struct {
+		ID          string            `json:"id"`
+		DisplayName string            `json:"displayName"`
+		Labels      map[string]string `json:"labels"`
+		Enabled     bool              `json:"enabled"`
+		Connected   bool              `json:"connected"`
+		LastSeenAt  string            `json:"lastSeenAt,omitempty"`
+	}
 
-// CtrlExecutorEnableRequest re-enables a revoked executor.
-type CtrlExecutorEnableRequest struct {
-	ExecutorID string `json:"executorId"`
-}
+	// ─── ctrl_executor_label ───────────────────────────────────────────────────────
+
+	// ExecutorLabelRequest sets or removes labels on an executor's database row.
+	type ExecutorLabelRequest struct {
+		Type       string            `json:"type"` // "ctrl_executor_label"
+		ID         string            `json:"id,omitempty"`
+		ExecutorID string            `json:"executorId"`
+		Set        map[string]string `json:"set,omitempty"`
+		Remove     []string          `json:"remove,omitempty"`
+	}
+
+	// ─── ctrl_executor_disable / ctrl_executor_enable ──────────────────────────────
+
+	// ExecutorDisableRequest disables an executor. Its credential stops working.
+	type ExecutorDisableRequest struct {
+		Type       string `json:"type"` // "ctrl_executor_disable"
+		ID         string `json:"id,omitempty"`
+		ExecutorID string `json:"executorId"`
+	}
+
+	// ExecutorEnableRequest re-enables a disabled executor.
+	type ExecutorEnableRequest struct {
+		Type       string `json:"type"` // "ctrl_executor_enable"
+		ID         string `json:"id,omitempty"`
+		ExecutorID string `json:"executorId"`
+	}

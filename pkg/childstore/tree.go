@@ -2,18 +2,10 @@ package childstore
 
 import "go.graveland.dev/rafiki/pkg/protocol"
 
-// Lineage label keys. These are daemon-written: the controller computes them
-// at spawn and re-stamps them at resume. They are never accepted from a
-// caller — cmd/rafikid/labels.go rejects BOTH the rafiki/ and the legacy
-// fundi/ prefix, which matters because labelLookup below still honours the
-// legacy spelling on read.
+// Pre-rename spellings. Records persisted before the fundi -> rafiki
+// identity consolidation still carry these, so readers tolerate them.
+// Nothing writes them.
 const (
-	LabelParent = "rafiki/parent"
-	LabelRoot   = "rafiki/root"
-
-	// Pre-rename spellings. Records persisted before the fundi -> rafiki
-	// identity consolidation still carry these, so readers tolerate them.
-	// Nothing writes them.
 	legacyLabelParent = "fundi/parent"
 	legacyLabelRoot   = "fundi/root"
 )
@@ -35,8 +27,7 @@ func labelLookup(labels map[string]string, key, legacy string) (string, bool) {
 	return "", false
 }
 
-// ParentOf returns the direct parent's child id. The second return is false
-// when childID is unknown or is a top-level child with no parent.
+// ParentOf returns the direct parent's child id, with legacy spelling fallback.
 func (s *Store) ParentOf(childID string) (string, bool) {
 	snap, ok := s.Get(childID)
 	if !ok {

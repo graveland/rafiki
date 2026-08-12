@@ -798,6 +798,7 @@ func (d *dispatcher) globalUnsubscribe(conn Connection, frame []byte, id string)
 
 const taskListMaxRows = 2000
 
+const maxExecutorListLimit = 500
 func (d *dispatcher) taskList(frame []byte, id string) []byte {
 	var req protocol.TaskListRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
@@ -820,4 +821,101 @@ func (d *dispatcher) taskList(frame []byte, id string) []byte {
 		return mapErr(protocol.TypeCtrlTaskList, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlTaskList, id, rows)
+}
+
+// ─── Executor handlers ──────────────────────────────────────────────────────
+
+func (d *dispatcher) executorEnroll(frame []byte, id string) []byte {
+	var req protocol.ExecutorEnrollRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorEnroll, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.TTLSeconds <= 0 {
+		return errResponse(protocol.TypeCtrlExecutorEnroll, id, protocol.ErrInvalidArgs, "ttlSeconds must be positive")
+	}
+	result, err := d.c.ExecutorEnroll(req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlExecutorEnroll, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorEnroll, id, result)
+}
+
+func (d *dispatcher) executorList(frame []byte, id string) []byte {
+	var req protocol.ExecutorListRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorList, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.Limit > maxExecutorListLimit {
+		req.Limit = maxExecutorListLimit
+	}
+	if req.Limit <= 0 {
+		req.Limit = 50
+	}
+	execs, err := d.c.ExecutorList(req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlExecutorList, id, err, protocol.ErrInternal)
+	}
+	if execs == nil {
+		execs = []executors.Executor{}
+	}
+	type listPayload struct {
+		Executors []executors.Executor `json:"executors"`
+	}
+	payload := listPayload{Executors: execs}
+	if b, err := json.Marshal(payload); err == nil && len(b) > protocol.MaxFrameBytes-4096 {
+		for len(execs) > 0 {
+			execs = execs[:len(execs)-1]
+			payload.Executors = execs
+			if b, err2 := json.Marshal(payload); err2 == nil && len(b) <= protocol.MaxFrameBytes-4096 {
+				break
+			}
+		}
+	}
+	return okResponse(protocol.TypeCtrlExecutorList, id, payload)
+}
+
+func (d *dispatcher) executorLabel(frame []byte, id string) []byte {
+	var req protocol.ExecutorLabelRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorLabel, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ExecutorID == "" {
+		return errResponse(protocol.TypeCtrlExecutorLabel, id, protocol.ErrInvalidArgs, "executorId required")
+	}
+	if len(req.Set) == 0 && len(req.Remove) == 0 {
+		return errResponse(protocol.TypeCtrlExecutorLabel, id, protocol.ErrInvalidArgs, "at least one of set or remove is required")
+	}
+	result, err := d.c.ExecutorLabel(req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlExecutorLabel, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorLabel, id, result)
+}
+
+func (d *dispatcher) executorDisable(frame []byte, id string) []byte {
+	var req protocol.ExecutorDisableRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorDisable, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ExecutorID == "" {
+		return errResponse(protocol.TypeCtrlExecutorDisable, id, protocol.ErrInvalidArgs, "executorId required")
+	}
+	if err := d.c.ExecutorDisable(req); err != nil {
+		return mapErr(protocol.TypeCtrlExecutorDisable, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorDisable, id, nil)
+}
+
+func (d *dispatcher) executorEnable(frame []byte, id string) []byte {
+	var req protocol.ExecutorEnableRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorEnable, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ExecutorID == "" {
+		return errResponse(protocol.TypeCtrlExecutorEnable, id, protocol.ErrInvalidArgs, "executorId required")
+	}
+	if err := d.c.ExecutorEnable(req); err != nil {
+		return mapErr(protocol.TypeCtrlExecutorEnable, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorEnable, id, nil)
 }

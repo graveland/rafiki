@@ -29,6 +29,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
@@ -3204,4 +3205,46 @@ func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest)
 		Limit:          req.Limit,
 	}
 	return c.tasks.List(ctx, f)
+}
+
+// ─── Executor stubs ─────────────────────────────────────────────────────────
+
+// ExecutorEnroll mints a one-time enrollment token.
+func (c *Controller) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
+	return protocol.ExecutorEnrollResponseData{}, &control.ControllerError{
+		Code:    protocol.ErrInternal,
+		Message: "executor enrollment not yet implemented (requires DB-backed executor store)",
+	}
+}
+
+// ExecutorList returns enrolled executors.
+func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error) {
+	return nil, &control.ControllerError{
+		Code:    protocol.ErrInternal,
+		Message: "executor listing not yet implemented (requires DB-backed executor store)",
+	}
+}
+
+// ExecutorLabel sets or removes labels on an executor row.
+func (c *Controller) ExecutorLabel(req protocol.ExecutorLabelRequest) (executors.Executor, error) {
+	return executors.Executor{}, &control.ControllerError{
+		Code:    protocol.ErrInternal,
+		Message: "executor labels not yet implemented (requires DB-backed executor store)",
+	}
+}
+
+// ExecutorDisable disables an executor.
+func (c *Controller) ExecutorDisable(req protocol.ExecutorDisableRequest) error {
+	return &control.ControllerError{
+		Code:    protocol.ErrInternal,
+		Message: "executor disable not yet implemented (requires DB-backed executor store)",
+	}
+}
+
+// ExecutorEnable re-enables a disabled executor.
+func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
+	return &control.ControllerError{
+		Code:    protocol.ErrInternal,
+		Message: "executor enable not yet implemented (requires DB-backed executor store)",
+	}
 }
