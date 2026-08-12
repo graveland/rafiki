@@ -174,36 +174,6 @@ func TestGlobToolRespectsCanceledContext(t *testing.T) {
 	}
 }
 
-func TestGlobToolDefaultsToWorkingDirectory(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "cwd-match.go")
-	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	origWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.Chdir(origWD); err != nil {
-			t.Fatal(err)
-		}
-	}()
-
-	tool := &GlbTool{}
-	res, err := tool.Execute(context.Background(), ToolInput(`{"pattern":"*.go"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := res.Text
-	if !strings.Contains(out, "cwd-match.go") {
-		t.Fatalf("expected default path to be the working directory, got %q", out)
-	}
-}
-
 // TestGlobToolExcludesGitignoredFiles verifies that .gitignore is honoured
 // via DiscoverFiles' ripgrep backend (--no-require-git).
 func TestGlobToolExcludesGitignoredFiles(t *testing.T) {

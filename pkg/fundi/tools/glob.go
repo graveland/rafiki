@@ -28,10 +28,9 @@ const (
 	globSortPool = 5000
 
 	globDescription = "Find files by glob pattern (doublestar syntax: * ? [...] and ** for " +
-		"recursive matching), rooted at path (defaults to the current working " +
-		"directory). Results are sorted by modification time, newest first, and " +
-		"capped at 200 matches. Honours .gitignore; hidden files are included, " +
-		"but .git itself is not searched."
+		"recursive matching), rooted at path. Results are sorted by modification " +
+		"time, newest first, and capped at 200 matches. Honours .gitignore; " +
+		"hidden files are included, but .git itself is not searched."
 )
 
 func init() { DefaultBlueprint.Register(&GlbTool{}) }
@@ -46,9 +45,9 @@ func (GlbTool) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "pattern", Type: "string", Description: "Glob pattern (doublestar syntax, supports **) to match file paths against. Relative to path — use \"**/*.go\", not an absolute path."},
-			{Name: "path", Type: "string", Description: "Base directory to search from. Defaults to the current working directory."},
+			{Name: "path", Type: "string", Description: "Base directory to search from. Required; must not be the filesystem root (\"/\")."},
 		},
-		Required: []string{"pattern"},
+		Required: []string{"pattern", "path"},
 	}
 }
 
@@ -61,21 +60,19 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 	if in.Pattern == "" {
 		return ToolResult{}, fmt.Errorf("glob: pattern is required")
 	}
+	if in.Path == "" {
+		return ToolResult{}, fmt.Errorf("glob: path is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return ToolResult{}, err
 	}
 
-	base := in.Path
-	if base == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return ToolResult{}, fmt.Errorf("glob: %w", err)
-		}
-		base = wd
-	}
-	base, err := filepath.Abs(base)
+	base, err := filepath.Abs(in.Path)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("glob: %w", err)
+	}
+	if base == string(filepath.Separator) {
+		return ToolResult{}, fmt.Errorf("glob: refusing to scan the filesystem root (%s); pass a narrower path", base)
 	}
 	baseInfo, err := os.Stat(base)
 	if err != nil {
