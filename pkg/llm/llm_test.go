@@ -806,3 +806,33 @@ func TestThinkingBudgetSetsParam(t *testing.T) {
 		t.Fatalf("thinking budget not set: %+v", last.Thinking)
 	}
 }
+
+// TestProviderSurvivesSDKDecode proves the non-standard "provider" field
+// reaches Go through the SDK's ExtraFields. This is the one genuine unknown in
+// the design: the Anthropic SDK has no Provider field, so if it dropped unknown
+// members the agent path could never attribute a cache miss to a provider.
+func TestProviderSurvivesSDKDecode(t *testing.T) {
+	var msg anthropic.Message
+	body := []byte(`{"id":"m1","type":"message","role":"assistant","model":"deepseek/deepseek-v4-pro",` +
+		`"content":[],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1},"provider":"CoreWeave"}`)
+	if err := json.Unmarshal(body, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := providerOf(&msg); got != "CoreWeave" {
+		t.Errorf("providerOf = %q, want %q", got, "CoreWeave")
+	}
+}
+
+// TestProviderOfMissing proves a native Anthropic response yields no provider
+// rather than a bogus one.
+func TestProviderOfMissing(t *testing.T) {
+	var msg anthropic.Message
+	body := []byte(`{"id":"m1","type":"message","role":"assistant","model":"claude-opus-4-8",` +
+		`"content":[],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}`)
+	if err := json.Unmarshal(body, &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := providerOf(&msg); got != "" {
+		t.Errorf("providerOf = %q, want empty", got)
+	}
+}
