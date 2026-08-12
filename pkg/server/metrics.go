@@ -3,6 +3,7 @@
 package server
 
 import (
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -13,11 +14,13 @@ import (
 // upstream/status/protocol, latency, token counters (cache_read ratio is
 // derivable), and per-upstream breaker state + transitions.
 type Metrics struct {
-	turns        *prometheus.CounterVec
-	latency      *prometheus.HistogramVec
-	tokens       *prometheus.CounterVec
-	breakerState *prometheus.GaugeVec
-	breakerTrans *prometheus.CounterVec
+	turns            *prometheus.CounterVec
+	latency          *prometheus.HistogramVec
+	tokens           *prometheus.CounterVec
+	breakerState     *prometheus.GaugeVec
+	breakerTrans     *prometheus.CounterVec
+	ejections        *prometheus.CounterVec
+	providersEjected *prometheus.GaugeVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -43,8 +46,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "rafiki_breaker_transitions_total",
 			Help: "Breaker state transitions (trip / close).",
 		}, []string{"upstream", "to"}),
+		ejections: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "rafiki_provider_ejections_total",
+			Help: "Providers ejected from OpenRouter routing, by reason.",
+		}, []string{"provider", "model_line", "reason"}),
+		providersEjected: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "rafiki_providers_ejected",
+			Help: "Providers currently ejected for a model line.",
+		}, []string{"model_line"}),
 	}
-	reg.MustRegister(m.turns, m.latency, m.tokens, m.breakerState, m.breakerTrans)
+	reg.MustRegister(m.turns, m.latency, m.tokens, m.breakerState, m.breakerTrans, m.ejections, m.providersEjected)
 	return m
 }
 
@@ -76,5 +87,23 @@ func (m *Metrics) WatchBreaker(upstream string, b *routing.Breaker) {
 		}
 		m.breakerState.WithLabelValues(upstream).Set(v)
 		m.breakerTrans.WithLabelValues(upstream, to).Inc()
+	})
+}
+
+// WatchProviderGuard wires the ejection counter and the currently-ejected
+// gauge. Safe with a nil guard.
+func (m *Metrics) WatchProviderGuard(g *routing.ProviderGuard) {
+	if m == nil || g == nil {
+		return
+	}
+	g.SetOnEject(func(provider, modelLine string, reason routing.EjectReason) {
+		m.ejections.WithLabelValues(strings.ToLower(provider), modelLine, string(reason)).Inc()
+		counts := map[string]int{}
+		for _, e := range g.Ejected(time.Now()) {
+			counts[e.ModelLine]++
+		}
+		for line, n := range counts {
+			m.providersEjected.WithLabelValues(line).Set(float64(n))
+		}
 	})
 }

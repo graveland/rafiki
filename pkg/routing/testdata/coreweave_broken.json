@@ -1,0 +1,1928 @@
+[
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 3,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 24934,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 5,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 31606,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 7,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 31686,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 9,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 31823,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 12,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 31916,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 14,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 32476,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 16,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 32801,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 18,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 32989,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 20,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 33310,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 22,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 33720,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 24,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 33818,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 26,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 34300,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 28,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 34560,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 30,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 34839,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 32,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 35619,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 34,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 35765,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 36,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 36121,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 38,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 36897,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 40,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 37245,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 42,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 37836,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 44,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 2899,
+  "cache_read_tokens": 35584
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 46,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 38974,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 48,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 39172,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 50,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 39284,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 52,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 39837,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 54,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 40155,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 56,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 40403,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 58,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 41192,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 60,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 41810,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 62,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 42025,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 64,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 42400,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 66,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 42721,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 68,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 2656,
+  "cache_read_tokens": 40448
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 70,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 43556,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 72,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 43895,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 74,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 44266,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 76,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 44493,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 78,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 44589,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 80,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 45247,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 82,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 46019,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 84,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 6243,
+  "cache_read_tokens": 40192
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 86,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 46683,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 88,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 46902,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 90,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 47435,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 92,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 49354,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 94,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 49744,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 96,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 51670,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 98,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 52114,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 100,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 52331,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 102,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 52775,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 104,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 53025,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 106,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 53137,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 108,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 53333,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 110,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 53899,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 112,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 55514,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 114,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 55704,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 116,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 358,
+  "cache_read_tokens": 55808
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 118,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 57373,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 120,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 57751,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 122,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 58239,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 124,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 58590,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 126,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 58840,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 128,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 59176,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 130,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 59437,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 132,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 59562,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 134,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 60328,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 136,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 60553,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 138,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 60689,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 140,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 60815,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 142,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 61068,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 144,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 2965,
+  "cache_read_tokens": 58368
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 146,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 61940,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 148,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 62161,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 150,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 62298,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 152,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 63093,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 154,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 63830,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 156,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 64459,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 158,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 64572,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 160,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 64814,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 163,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 65111,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 165,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 65243,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 167,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 3123,
+  "cache_read_tokens": 62208
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 169,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 65451,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 171,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 65539,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 173,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 1833,
+  "cache_read_tokens": 64768
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 175,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 68149,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 177,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 68392,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 179,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 68831,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 181,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 72367,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 183,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 72823,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 185,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 73224,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 187,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 73399,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 189,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 74160,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 191,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 74448,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 193,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 75145,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 195,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 75585,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 197,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 75748,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 199,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 76217,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 201,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 76906,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 203,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 78572,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 205,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 3072,
+  "cache_read_tokens": 75776
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 207,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 78983,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 209,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 79883,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 211,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 80296,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 213,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 80403,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 215,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 80544,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 217,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 86685,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 219,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 86797,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 221,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 86901,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 223,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 87261,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 225,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 87488,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 227,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 87799,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 229,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 87943,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 231,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 88463,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 233,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 88712,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 235,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 89849,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 237,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 89953,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 239,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 90122,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 241,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 90346,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 243,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 90471,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 245,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 90591,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 247,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 91068,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 249,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 91340,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 251,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 92040,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 253,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 92247,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 256,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 92387,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 258,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 92617,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 260,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 92908,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 262,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 93142,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 264,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 758,
+  "cache_read_tokens": 92928
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 266,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 1485,
+  "cache_read_tokens": 92672
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 268,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 94365,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 270,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 94606,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 272,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 94867,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 274,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 95044,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 276,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 95193,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 278,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 95376,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 280,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 95473,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 282,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 95651,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 284,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 96845,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 286,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 97345,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 288,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 97620,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 290,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 97794,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 292,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 97916,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 294,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 98265,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 296,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 98870,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 298,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 99605,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 300,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 99988,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 302,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 100232,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 304,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 100461,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 306,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 100862,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 308,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 236,
+  "cache_read_tokens": 100864
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 310,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 101425,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 312,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 102909,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 314,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 103216,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 316,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 103315,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 318,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 103437,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 320,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 103583,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 322,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 103750,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 324,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 103945,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 326,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 104095,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 328,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 104199,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 330,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 104434,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 332,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 105362,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 334,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 105627,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 336,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 105816,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 338,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 106249,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 340,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 106550,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 342,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 106798,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 344,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 106977,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 346,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 107203,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 348,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 107349,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 350,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 107521,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 352,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 108204,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 354,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 108396,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 356,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 108589,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 358,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 109025,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 360,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 109194,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 362,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 301,
+  "cache_read_tokens": 109056
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 364,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 109609,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 366,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 109889,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 368,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 110093,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 370,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 110370,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 372,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 110544,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 374,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 110665,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 376,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 110954,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 378,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 470,
+  "cache_read_tokens": 110592
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 380,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 112328,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 382,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 112718,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 384,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 113667,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 386,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 113950,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 388,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 114162,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 390,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 114405,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 392,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 114509,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 394,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 114751,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 396,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 114893,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 398,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 115274,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 400,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 115627,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 402,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 116162,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 404,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 116573,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 406,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 116749,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 408,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 116996,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 410,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 117207,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 413,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 117425,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 415,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 117549,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff682-2e96-7037-aebf-49e9656da5bc",
+  "ordinal": 417,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h1",
+  "input_tokens": 130839,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 1,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 11822,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 3,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 14105,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 6,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 14450,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 8,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 14822,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 11,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 15637,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 13,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 15809,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 15,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 16393,
+  "cache_read_tokens": 0
+ },
+ {
+  "conversation": "019ff6ba-39b9-704a-90c9-2f3d12ab1ffe",
+  "ordinal": 17,
+  "provider": "CoreWeave",
+  "model": "deepseek/deepseek-v4-pro",
+  "prefix_hash": "h2",
+  "input_tokens": 18053,
+  "cache_read_tokens": 0
+ }
+]

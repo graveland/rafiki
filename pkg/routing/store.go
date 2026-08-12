@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/store"
@@ -155,53 +158,57 @@ type TurnResult struct {
 }
 
 func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE conversations.conversation_turn
-		    SET status='complete', response=$3, stop_reason=$4, upstream=$5,
-		        input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10,
-		        model=COALESCE(NULLIF($11,''), model)
-		  WHERE id=$1::uuid AND created_at=$2`,
-		r.TurnID, r.CreatedAt, nullifyBytes(jsonbSafe(r.Response)), nullify(r.StopReason), nullify(r.Upstream),
-		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS, r.Model)
-	if err != nil {
-		return err
-	}
-	// The (id, created_at) pair must match exactly one chunk-resident row; zero
-	// rows means a skewed/stale key silently no-op'd the capture write.
-	if n := tag.RowsAffected(); n != 1 {
-		return fmt.Errorf("complete-turn: expected 1 row, updated %d (stale/skewed key)", n)
-	}
-	// Backfill conversation.model from the response model: InsertTurnIntent
-	// writes the request body's model first-seen, but for client-driven sessions
-	// the first outbound request body may carry a client-side default (e.g.
-	// "claude-haiku-4-5-20251001") that differs from the actual served model
-	// the user intended (e.g. "claude-opus-5", set later via /model or
-	// --model). Using the response model is authoritative. Best-effort: a
-	// failed backfill must not fail the turn.
-	if r.Model != "" {
-		_, _ = s.pool.Exec(ctx, `UPDATE conversations.conversation
-			SET model = $3, updated_at = now()
-			WHERE id = (
-				SELECT conversation_id FROM conversations.conversation_turn
-				WHERE id = $1::uuid AND created_at = $2
-			) AND model IS NULL`,
-			r.TurnID, r.CreatedAt, r.Model)
-	}
-	return nil
+	return retryDB(ctx, "completeTurn", func(ctx context.Context) error {
+		tag, err := s.pool.Exec(ctx,
+			`UPDATE conversations.conversation_turn
+			    SET status='complete', response=$3, stop_reason=$4, upstream=$5,
+			        input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10,
+			        model=COALESCE(NULLIF($11,''), model)
+			  WHERE id=$1::uuid AND created_at=$2`,
+			r.TurnID, r.CreatedAt, nullifyBytes(jsonbSafe(r.Response)), nullify(r.StopReason), nullify(r.Upstream),
+			r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS, r.Model)
+		if err != nil {
+			return err
+		}
+		// The (id, created_at) pair must match exactly one chunk-resident row; zero
+		// rows means a skewed/stale key silently no-op'd the capture write.
+		if n := tag.RowsAffected(); n != 1 {
+			return fmt.Errorf("complete-turn: expected 1 row, updated %d (stale/skewed key)", n)
+		}
+		// Backfill conversation.model from the response model: InsertTurnIntent
+		// writes the request body's model first-seen, but for client-driven sessions
+		// the first outbound request body may carry a client-side default (e.g.
+		// "claude-haiku-4-5-20251001") that differs from the actual served model
+		// the user intended (e.g. "claude-opus-5", set later via /model or
+		// --model). Using the response model is authoritative. Best-effort: a
+		// failed backfill must not fail the turn.
+		if r.Model != "" {
+			_, _ = s.pool.Exec(ctx, `UPDATE conversations.conversation
+				SET model = $3, updated_at = now()
+				WHERE id = (
+					SELECT conversation_id FROM conversations.conversation_turn
+					WHERE id = $1::uuid AND created_at = $2
+				) AND model IS NULL`,
+				r.TurnID, r.CreatedAt, r.Model)
+		}
+		return nil
+	})
 }
 
 func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE conversations.conversation_turn SET status='error', error=$3
-		  WHERE id=$1::uuid AND created_at=$2`,
-		turnID, createdAt, errMsg)
-	if err != nil {
-		return err
-	}
-	if n := tag.RowsAffected(); n != 1 {
-		return fmt.Errorf("fail-turn: expected 1 row, updated %d (stale/skewed key)", n)
-	}
-	return nil
+	return retryDB(ctx, "failTurn", func(ctx context.Context) error {
+		tag, err := s.pool.Exec(ctx,
+			`UPDATE conversations.conversation_turn SET status='error', error=$3
+			  WHERE id=$1::uuid AND created_at=$2`,
+			turnID, createdAt, errMsg)
+		if err != nil {
+			return err
+		}
+		if n := tag.RowsAffected(); n != 1 {
+			return fmt.Errorf("fail-turn: expected 1 row, updated %d (stale/skewed key)", n)
+		}
+		return nil
+	})
 }
 
 // DecomposeRequest parses reqBody's messages[] into conversation_message rows
@@ -219,26 +226,26 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 	if err := json.Unmarshal(reqBody, &req); err != nil {
 		return 0, fmt.Errorf("decompose: unmarshal request: %w", err)
 	}
-	// 1. Upsert each message verbatim, ordinal = index. Lenient: DO NOTHING (no divergence check).
-	for i, m := range req.Messages {
-		content := m.Content
-		if len(content) == 0 {
-			content = json.RawMessage(`null`)
+	err := retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
+		// 1. Upsert each message verbatim, ordinal = index. Lenient: DO NOTHING (no divergence check).
+		for i, m := range req.Messages {
+			content := m.Content
+			if len(content) == 0 {
+				content = json.RawMessage(`null`)
+			}
+			if _, err := s.pool.Exec(ctx,
+				`INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
+				 VALUES ($1,$2,$3,$4) ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
+				convID, i, m.Role, jsonbSafe(content)); err != nil {
+				return fmt.Errorf("decompose: insert message %d: %w", i, err)
+			}
 		}
-		if _, err := s.pool.Exec(ctx,
-			`INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
-			 VALUES ($1,$2,$3,$4) ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
-			convID, i, m.Role, jsonbSafe(content)); err != nil {
-			return 0, fmt.Errorf("decompose: insert message %d: %w", i, err)
-		}
-	}
-	// 2. Record the turn's prefix metadata (prefix_content on-change +
-	//    cache_breakpoints). Factored out so the in-process path can reuse it
-	//    without the message inserts above.
-	if err := s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash); err != nil {
-		return len(req.Messages), err
-	}
-	return len(req.Messages), nil
+		// 2. Record the turn's prefix metadata (prefix_content on-change +
+		//    cache_breakpoints). Factored out so the in-process path can reuse it
+		//    without the message inserts above.
+		return s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash)
+	})
+	return len(req.Messages), err
 }
 
 // StoreTurnPrefix records a turn's cache_breakpoints (always) and its
@@ -426,20 +433,22 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 	if len(content) == 0 {
 		content = json.RawMessage(`null`)
 	}
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO conversations.conversation_message
-		   (conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
-		 VALUES ($1,$2,'assistant',$3,$4,$5,$6)
-		 ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
-		convID, ordinal, jsonbSafe(content), in, out, nullify(stopReason)); err != nil {
-		return fmt.Errorf("append response: insert: %w", err)
-	}
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE conversations.conversation_turn SET response_ordinal=$3 WHERE id=$1::uuid AND created_at=$2`,
-		turnID, createdAt, ordinal); err != nil {
-		return fmt.Errorf("append response: set response_ordinal: %w", err)
-	}
-	return nil
+	return retryDB(ctx, "appendResponse", func(ctx context.Context) error {
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO conversations.conversation_message
+			   (conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
+			 VALUES ($1,$2,'assistant',$3,$4,$5,$6)
+			 ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
+			convID, ordinal, jsonbSafe(content), in, out, nullify(stopReason)); err != nil {
+			return fmt.Errorf("append response: insert: %w", err)
+		}
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE conversations.conversation_turn SET response_ordinal=$3 WHERE id=$1::uuid AND created_at=$2`,
+			turnID, createdAt, ordinal); err != nil {
+			return fmt.Errorf("append response: set response_ordinal: %w", err)
+		}
+		return nil
+	})
 }
 
 // nullify maps "" to nil so empty strings persist as SQL NULL.
@@ -457,4 +466,124 @@ func nullifyBytes(b []byte) any {
 		return nil
 	}
 	return b
+}
+
+// ---- retry helpers --------------------------------------------------------
+
+// dbRetryDelays defines the backoff sequence for DB retries (3 retries after
+// the initial attempt). A package var (not a local literal) so tests can
+// shrink it instead of sleeping through a real 1s/3s/5s sequence.
+var dbRetryDelays = []time.Duration{1 * time.Second, 3 * time.Second, 5 * time.Second}
+
+// retryDB wraps a database operation with retries on transient errors.
+// Each attempt gets its own sub-context (20s timeout, bounded by ctx's own
+// deadline when tighter). retryDB does NOT log the final outcome — callers
+// log that at their level; it only WARNs on each retry it takes.
+func retryDB(ctx context.Context, op string, fn func(context.Context) error) error {
+	for attempt := 0; ; attempt++ {
+		subCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err := fn(subCtx)
+		cancel()
+		if err == nil || !isRetryableDB(err, ctx) {
+			return err
+		}
+		if attempt >= len(dbRetryDelays) {
+			return err
+		}
+		slog.Warn("capture: retrying db op", "op", op, "attempt", attempt+1, "error", err)
+		select {
+		case <-time.After(dbRetryDelays[attempt]):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// isRetryableDB reports whether a database error is transient and worth
+// retrying. ctx must be checked first: if ctx.Err() != nil the parent is
+// shutting down and no retry should be attempted regardless of the error
+// shape — mirrors agentloop.isRetryable, and (unlike relying on retryDB's
+// own select against ctx.Done()) makes cancellation deterministic rather
+// than racing time.After when both fire on an already-canceled context.
+func isRetryableDB(err error, ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if err == nil {
+		return false
+	}
+	// context.DeadlineExceeded from our sub-context is transient (the op
+	// timed out, but the DB itself is reachable and may succeed next time).
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Network errors.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	// pgx connection/pool exhaustion errors.
+	if isPgTransient(err) {
+		return true
+	}
+	return false
+}
+
+// isPgTransient detects pgx-level transient errors: deadlocks (40P01) and
+// serialization failures (40001). Connection failures already surface as
+// net.OpError (caught above), so only explicit SQLSTATEs are classified here.
+func isPgTransient(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.SQLState() {
+	case "40P01", "40001": // deadlock_detected, serialization_failure
+		return true
+	default:
+		return false
+	}
+}
+
+// ModelTokens is one model's token totals within a conversation.
+type ModelTokens struct {
+	Model               string
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+}
+
+// ConversationTokens returns per-model token totals across a conversation's
+// completed turns, for pricing a running cost.
+//
+// Grouped by model rather than summed flat because a conversation can change
+// model mid-flight — a failover to OpenRouter, a caller switching lines — and
+// the models price differently. Summing every turn's tokens together and
+// pricing them once would silently bill the whole conversation at whichever
+// model happened to be asked about.
+//
+// Errored and in-flight turns are excluded: a failed turn's usage is partial or
+// zero, and charging for it would make the total drift from the invoice.
+func (s *CaptureStore) ConversationTokens(ctx context.Context, convID string) ([]ModelTokens, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT COALESCE(model,''),
+		        COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_creation_tokens),0)
+		   FROM conversations.conversation_turn
+		  WHERE conversation_id = $1::uuid AND status = 'complete'
+		  GROUP BY model`, convID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ModelTokens
+	for rows.Next() {
+		var m ModelTokens
+		if err := rows.Scan(&m.Model, &m.InputTokens, &m.OutputTokens, &m.CacheReadTokens, &m.CacheCreationTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }

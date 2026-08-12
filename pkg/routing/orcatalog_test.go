@@ -3,6 +3,7 @@
 package routing
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -631,5 +632,32 @@ func TestNilCatalogSatisfiesPriceSourceWithoutPanic(t *testing.T) {
 	}
 	if _, ok := src.Lookup("claude-opus-5"); ok {
 		t.Error("Lookup on a nil catalog ok = true, want false")
+	}
+}
+
+// TestProviderPrefsMarshal proves the wire shape OpenRouter expects: only the
+// populated fields appear. An ignore-only prefs object must not emit an empty
+// "only", which OpenRouter would read as "restrict routing to no providers".
+func TestProviderPrefsMarshal(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		prefs ProviderPrefs
+		want  string
+	}{
+		{"ignore only", ProviderPrefs{Ignore: []string{"coreweave"}}, `{"ignore":["coreweave"]}`},
+		{"only only", ProviderPrefs{Only: []string{"fireworks"}}, `{"only":["fireworks"]}`},
+		{"both", ProviderPrefs{Only: []string{"fireworks"}, Ignore: []string{"coreweave"}},
+			`{"only":["fireworks"],"ignore":["coreweave"]}`},
+		{"empty", ProviderPrefs{}, `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.prefs)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if string(b) != tc.want {
+				t.Errorf("Marshal = %s, want %s", b, tc.want)
+			}
+		})
 	}
 }

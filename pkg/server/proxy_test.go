@@ -25,6 +25,8 @@ import (
 )
 
 type fakeProxyStore struct {
+	convTokens []routing.ModelTokens
+
 	intents              int
 	completes            int
 	fails                int
@@ -797,6 +799,65 @@ func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
 	}
 }
 
+// TestDoOpenRouterMergesIgnoreList proves an ejected provider reaches the wire
+// as provider.ignore, AND that it survives a caller-supplied provider object.
+// The union is deliberate: a budget guard any caller can switch off by sending
+// its own provider block is not a guard. Contrast with
+// TestMessagesProxyPinsProviderForPinnedModel, where a caller-supplied
+// provider legitimately overrides a pin — the guard's ignore list is not a
+// pin and must not be overridable the same way.
+func TestDoOpenRouterMergesIgnoreList(t *testing.T) {
+	g := routing.NewProviderGuard(routing.DefaultEjectTTL, slog.New(slog.DiscardHandler))
+	now := time.Now()
+	for range 6 {
+		g.Observe(now, routing.Observation{
+			Provider: "CoreWeave", Model: "deepseek/deepseek-v4-pro", Conversation: "c1",
+			PrefixHash: "h1", InputTokens: 50000, CacheReadTokens: 0,
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"no caller provider block", `{"model":"deepseek/deepseek-v4-pro","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
+		{"caller supplied provider block", `{"model":"deepseek/deepseek-v4-pro","provider":{"only":["novita"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&got)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"type":"message","model":"deepseek/deepseek-v4-pro","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},"provider":"Novita"}`)
+			}))
+			defer orSrv.Close()
+
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			p := NewMessagesProxy(nil, nil, "real-key", "http://unused-primary", "" /*defaultModel*/, nil /*catalog*/, logger)
+			p.store = &fakeProxyStore{}
+			p.SetFallback("or-key", orSrv.URL, routing.NewBreaker(15*time.Minute))
+			p.SetProviderGuard(g)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer client-token")
+			p.ServeHTTP(rec, req)
+
+			prov, _ := got["provider"].(map[string]any)
+			ignore, _ := prov["ignore"].([]any)
+			if len(ignore) != 1 || ignore[0] != "coreweave" {
+				t.Errorf("provider.ignore = %v, want [coreweave]; full provider block = %v", ignore, prov)
+			}
+			if strings.Contains(tc.name, "caller supplied") {
+				only, _ := prov["only"].([]any)
+				if len(only) != 1 || only[0] != "novita" {
+					t.Errorf("caller-supplied provider fields must survive the merge, got %v", prov)
+				}
+			}
+		})
+	}
+}
+
 // A slash model on a proxy with no OpenRouter key returns 502 AND must resolve
 // the turn it began, or the row is stranded 'pending' forever (a false orphan).
 func TestMessagesProxySlashWithoutOpenRouterFailsTurn(t *testing.T) {
@@ -1103,5 +1164,55 @@ func TestMessagesProxyEffortRetry(t *testing.T) {
 	want := []string{"high", "medium", "medium"} // req1 high (rejected), req1-retry medium, req2 medium
 	if !reflect.DeepEqual(efforts, want) {
 		t.Errorf("upstream efforts = %v, want %v", efforts, want)
+	}
+}
+
+// ConversationTokens satisfies proxyStore. Returns a fixed two-model rollup so
+// the cost-logging path is exercised with a conversation that changed models
+// mid-flight — the case a flat SUM would price wrong.
+func (s *fakeProxyStore) ConversationTokens(context.Context, string) ([]routing.ModelTokens, error) {
+	return s.convTokens, nil
+}
+
+// TestCostFieldsPricesTurnAndConversation proves the log line carries both
+// numbers, that the running total includes the turn being logged (which is not
+// yet in the store when this runs), and that a conversation spanning two models
+// prices each at its own rate rather than billing everything at one.
+func TestCostFieldsPricesTurnAndConversation(t *testing.T) {
+	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "anthropic/claude-sonnet-5", Created: 1, Pricing: &routing.ModelPricing{
+			PromptUSD: 0.000003, CompletionUSD: 0.000015, CacheReadUSD: 0.0000003, CacheWriteUSD: 0.00000375,
+		}},
+		{ID: "deepseek/deepseek-v4-pro", Created: 2, Pricing: &routing.ModelPricing{
+			PromptUSD: 0.000001, CompletionUSD: 0.000002,
+		}},
+	})
+	fs := &fakeProxyStore{convTokens: []routing.ModelTokens{
+		{Model: "claude-sonnet-5", InputTokens: 1_000_000},           // $3.00
+		{Model: "deepseek/deepseek-v4-pro", OutputTokens: 1_000_000}, // $2.00
+	}}
+	p := &MessagesProxy{store: fs, catalog: cat, logger: slog.New(slog.DiscardHandler)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	// This turn: 1M output on sonnet = $15.00. Total = 15 + 3 + 2 = $20.00.
+	got := p.costFields(req, "conv-1", "claude-sonnet-5", routing.CapturedUsage{OutputTokens: 1_000_000})
+	want := []any{"cost_turn", "15.000000", "cost_total", "20.00"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("costFields = %v, want %v", got, want)
+	}
+}
+
+// TestCostFieldsUnpricedModelIsSilent proves an unpriced model logs no cost at
+// all. A confident "cost_turn=0.000000" would read as "this turn was free",
+// which is a worse answer than saying nothing.
+func TestCostFieldsUnpricedModelIsSilent(t *testing.T) {
+	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "anthropic/claude-sonnet-5", Created: 1}})
+	p := &MessagesProxy{store: &fakeProxyStore{}, catalog: cat, logger: slog.New(slog.DiscardHandler)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+	if got := p.costFields(req, "conv-1", "some/unknown-model", routing.CapturedUsage{OutputTokens: 5}); got != nil {
+		t.Errorf("costFields for an unpriced model = %v, want nil", got)
 	}
 }

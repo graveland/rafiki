@@ -86,3 +86,27 @@ func TestResolveDefaultModel_FallsThroughToEnv(t *testing.T) {
 		t.Errorf("resolveDefaultModel = %q, want env-model (empty config should fall through to env)", got)
 	}
 }
+
+// TestProviderGuardEnabled proves RAFIKI_PROVIDER_GUARD only disables the guard
+// on an explicit off-switch. Unset, and any value that isn't a recognised
+// negation, must leave it running — a budget guard that silently turns itself
+// off on a typo is worse than none, because you would believe you had one.
+func TestProviderGuardEnabled(t *testing.T) {
+	for in, want := range map[string]bool{
+		"":        true,
+		"on":      true,
+		"1":       true,
+		"true":    true,
+		"garbage": true,
+		"off":     false,
+		"OFF":     false,
+		" off ":   false,
+		"false":   false,
+		"0":       false,
+		"no":      false,
+	} {
+		if got := providerGuardEnabled(in); got != want {
+			t.Errorf("providerGuardEnabled(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

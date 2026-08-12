@@ -105,6 +105,12 @@ const (
 	// and the PATH auto-detection step is skipped. Equivalent to --no-lsp.
 	LSPDisable = "RAFIKI_LSP_DISABLE"
 
+	// ProviderGuard, when "off"/"false"/"0"/"no", disables the provider cache
+	// guard: OpenRouter providers that stop serving prompt-cache hits are no
+	// longer ejected from routing. Any other value (including unset) leaves it
+	// on — see routing.ProviderGuard.
+	ProviderGuard = "RAFIKI_PROVIDER_GUARD"
+
 	// ControlListen is the address the daemon's TCP control plane binds
 	// (e.g. "tcp:8036"). Unset = UDS only.
 	ControlListen = "RAFIKI_CONTROL_LISTEN"

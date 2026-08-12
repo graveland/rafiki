@@ -5,12 +5,15 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/store"
@@ -749,5 +752,188 @@ func TestAppendResponseMessage(t *testing.T) {
 	}
 	if respOrd != next {
 		t.Fatalf("response_ordinal = %d, want %d", respOrd, next)
+	}
+}
+
+func TestIsRetryableDB(t *testing.T) {
+	liveCtx := context.Background()
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name  string
+		err   error
+		ctx   context.Context
+		retry bool
+	}{
+		{"nil", nil, liveCtx, false},
+		{"cancelled context", context.DeadlineExceeded, cancelledCtx, false},
+		{"deadline exceeded", context.DeadlineExceeded, liveCtx, true},
+		{"net.OpError", &net.OpError{Op: "read", Err: errors.New("connection refused")}, liveCtx, true},
+		{"plain error", errors.New("something failed"), liveCtx, false},
+		{"pgconn deadlock", &pgconn.PgError{Code: "40P01"}, liveCtx, true},
+		{"pgconn serialization", &pgconn.PgError{Code: "40001"}, liveCtx, true},
+		{"pgconn not-null violation", &pgconn.PgError{Code: "23502"}, liveCtx, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRetryableDB(tt.err, tt.ctx)
+			if got != tt.retry {
+				t.Errorf("isRetryableDB(%v) = %v, want %v", tt.err, got, tt.retry)
+			}
+		})
+	}
+}
+
+func TestRetryDB_NonTransientNoRetry(t *testing.T) {
+	calls := 0
+	err := retryDB(context.Background(), "test", func(ctx context.Context) error {
+		calls++
+		return errors.New("permanent")
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call, got %d", calls)
+	}
+}
+
+func TestRetryDB_TransientRecovers(t *testing.T) {
+	withShortDBRetryDelays(t)
+	calls := 0
+	err := retryDB(context.Background(), "test", func(ctx context.Context) error {
+		calls++
+		if calls == 1 {
+			return &net.OpError{Op: "read", Err: errors.New("connection reset")}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected recovery, got: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 calls, got %d", calls)
+	}
+}
+
+func TestRetryDB_ExhaustedRetries(t *testing.T) {
+	withShortDBRetryDelays(t)
+	calls := 0
+	err := retryDB(context.Background(), "test", func(ctx context.Context) error {
+		calls++
+		return context.DeadlineExceeded
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausted retries")
+	}
+	if calls != 4 { // initial + 3 retries
+		t.Fatalf("expected 4 calls, got %d", calls)
+	}
+}
+
+func TestRetryDB_ParentContextCanceled(t *testing.T) {
+	withShortDBRetryDelays(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	err := retryDB(ctx, "test", func(ctx context.Context) error {
+		calls++
+		return context.DeadlineExceeded
+	})
+	if err == nil {
+		t.Fatal("expected error from cancelled parent")
+	}
+	// With a cancelled parent, the select at the end of the retry loop
+	// immediately returns ctx.Err(). Should not retry.
+	if calls > 1 {
+		t.Fatalf("expected at most 1 call with cancelled parent, got %d", calls)
+	}
+}
+
+// withShortDBRetryDelays shrinks dbRetryDelays to microseconds for the
+// duration of the test so a test exercising the full retry sequence doesn't
+// sleep through the real 1s/3s/5s backoff.
+func withShortDBRetryDelays(t *testing.T) {
+	t.Helper()
+	orig := dbRetryDelays
+	dbRetryDelays = []time.Duration{time.Microsecond, time.Microsecond, time.Microsecond}
+	t.Cleanup(func() { dbRetryDelays = orig })
+}
+
+// TestConversationTokensGroupsByModel proves the rollup keeps models apart. A
+// conversation that failed over mid-flight has turns priced at two different
+// rates, and a flat SUM would bill all of them at whichever model the caller
+// happened to price with.
+func TestConversationTokensGroupsByModel(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
+			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
+		}
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	cs := NewCaptureStore(pool)
+
+	convID, err := cs.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "test", DrivenBy: "server"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	// Two turns on one model, one on another, plus an errored turn that must
+	// NOT be counted.
+	for _, tc := range []struct {
+		model           string
+		in, out, cr, cw int64
+		fail            bool
+	}{
+		{model: "claude-sonnet-5", in: 100, out: 10, cr: 1000, cw: 5},
+		{model: "claude-sonnet-5", in: 200, out: 20, cr: 2000, cw: 5},
+		{model: "deepseek/deepseek-v4-pro", in: 300, out: 30, cr: 3000, cw: 0},
+		{model: "claude-sonnet-5", in: 999, out: 999, cr: 999, cw: 999, fail: true},
+	} {
+		turnID, createdAt, err := cs.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: tc.model})
+		if err != nil {
+			t.Fatalf("InsertTurnIntent: %v", err)
+		}
+		if tc.fail {
+			if err := cs.FailTurn(ctx, turnID, createdAt, "deliberate"); err != nil {
+				t.Fatalf("FailTurn: %v", err)
+			}
+			continue
+		}
+		if err := cs.CompleteTurn(ctx, TurnResult{
+			TurnID: turnID, CreatedAt: createdAt, Model: tc.model, Upstream: "test",
+			InputTokens: tc.in, OutputTokens: tc.out, CacheReadTokens: tc.cr, CacheCreationTokens: tc.cw,
+		}); err != nil {
+			t.Fatalf("CompleteTurn: %v", err)
+		}
+	}
+
+	got, err := cs.ConversationTokens(ctx, convID)
+	if err != nil {
+		t.Fatalf("ConversationTokens: %v", err)
+	}
+	byModel := map[string]ModelTokens{}
+	for _, m := range got {
+		byModel[m.Model] = m
+	}
+	if len(byModel) != 2 {
+		t.Fatalf("got %d model groups (%v), want 2 — the errored turn must be excluded", len(byModel), byModel)
+	}
+	if s := byModel["claude-sonnet-5"]; s.InputTokens != 300 || s.OutputTokens != 30 || s.CacheReadTokens != 3000 || s.CacheCreationTokens != 10 {
+		t.Errorf("claude-sonnet-5 = %+v, want in=300 out=30 cr=3000 cw=10", s)
+	}
+	if s := byModel["deepseek/deepseek-v4-pro"]; s.InputTokens != 300 || s.CacheReadTokens != 3000 {
+		t.Errorf("deepseek = %+v, want in=300 cr=3000", s)
 	}
 }
