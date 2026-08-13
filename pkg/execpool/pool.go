@@ -461,3 +461,32 @@ func (c *executorClient) Ping(ctx context.Context) error {
 	}
 	return nil
 }
+
+// Provision provisions a workspace on executorID and returns the response.
+func (p *Pool) Provision(ctx context.Context, executorID string, req *executorpb.ProvisionRequest) (*executorpb.ProvisionResponse, error) {
+	p.mu.RLock()
+	lc, ok := p.live[executorID]
+	p.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("execpool: executor %s not live", executorID[:12])
+	}
+	resp, err := lc.client.inner.Provision(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+// Release releases a workspace on executorID.
+func (p *Pool) Release(ctx context.Context, executorID, workspaceID string) error {
+	p.mu.RLock()
+	lc, ok := p.live[executorID]
+	p.mu.RUnlock()
+	if !ok {
+		return nil // executor is gone; workspace is effectively released
+	}
+	_, err := lc.client.inner.Release(ctx, connect.NewRequest(&executorpb.ReleaseRequest{
+		WorkspaceId: workspaceID,
+	}))
+	return err
+}

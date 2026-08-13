@@ -126,6 +126,18 @@ type Controller struct {
 	// execPool is the live executor connection registry. Nil when the
 	// executor listener is not configured.
 	execPool *execpool.Pool
+
+	// wsLabels holds workspace IDs and executor IDs provisioned for children
+	// whose spawn is in flight. Keyed by childID; set by agentRunner before
+	// Spawn builds the store record, consumed by Spawn for label insertion
+	// and by handleChildExit for release.
+	wsLabels   map[string]workspaceLabels
+	wsLabelsMu sync.Mutex
+}
+
+type workspaceLabels struct {
+	workspaceID string
+	executorID  string
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -749,6 +761,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 	if parentLabel != "" {
 		initLabels[childstore.LabelParent] = parentLabel
 		initLabels[childstore.LabelRoot] = rootLabel
+	}
+	// Merge workspace labels provisioned by agentRunner.
+	if c.wsLabels != nil {
+		if wl, ok := c.wsLabels[childID]; ok {
+			initLabels["rafiki/workspace"] = wl.workspaceID
+			initLabels["rafiki/executor"] = wl.executorID
+			delete(c.wsLabels, childID)
+		}
 	}
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
@@ -2491,6 +2511,19 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 			slog.Info("orphaned tasks for exited child", "childId", childID, "count", n)
 		}
 		cancel()
+	}
+
+	// Release workspace. Best-effort under a short deadline: a docker hiccup
+	// must not wedge child teardown, exactly like the orphan sweep above.
+	if snap, ok := c.st.Get(childID); ok {
+		if wID := snap.Labels["rafiki/workspace"]; wID != "" {
+			eID := snap.Labels["rafiki/executor"]
+			go func() {
+				rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer rcancel()
+				c.releaseWorkspace(rctx, eID, wID)
+			}()
+		}
 	}
 
 	c.cm.Remove(childID)
