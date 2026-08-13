@@ -33,6 +33,8 @@ type ConversationRef struct {
 	Model            string
 	Name             string
 	ExternalRef      string
+	Cwd              string
+	RepoRoot         string
 }
 
 // EnsureConversation creates the conversation row if it doesn't already exist
@@ -45,9 +47,10 @@ type ConversationRef struct {
 func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationRef) (string, error) {
 	if ref.ID != "" {
 		_, err := s.pool.Exec(ctx,
-			`INSERT INTO conversations.conversation (id, owner, persona, model, origin_entrypoint, driven_by, name, external_ref)
-			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING`,
+			`INSERT INTO conversations.conversation (id, owner, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
+			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
 			ref.ID, nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
+			nullify(ref.Cwd), nullify(ref.RepoRoot),
 		)
 		if err != nil {
 			return "", err
@@ -56,9 +59,10 @@ func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationR
 	}
 	var id string
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id::text`,
+		`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text`,
 		nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
+		nullify(ref.Cwd), nullify(ref.RepoRoot),
 	).Scan(&id)
 	return id, err
 }
@@ -76,10 +80,11 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 		// loser gets no row and falls through to SELECT the existing one.
 		var id string
 		err := s.pool.QueryRow(ctx,
-			`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
+			`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
 			 RETURNING id::text`,
 			nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), ref.ExternalRef,
+			nullify(ref.Cwd), nullify(ref.RepoRoot),
 		).Scan(&id)
 		if err == nil {
 			return id, nil
@@ -96,6 +101,7 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 	return s.EnsureConversation(ctx, ConversationRef{
 		OriginEntrypoint: ref.OriginEntrypoint, DrivenBy: ref.DrivenBy,
 		Owner: ref.Owner, Persona: ref.Persona, Model: ref.Model, Name: ref.Name, ExternalRef: ref.ExternalRef,
+		Cwd: ref.Cwd, RepoRoot: ref.RepoRoot,
 	})
 }
 
