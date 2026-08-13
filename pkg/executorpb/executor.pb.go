@@ -459,13 +459,17 @@ func (x *ImageBlock) GetData() []byte {
 }
 
 type ExecuteRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CallId        string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
-	Tool          string                 `protobuf:"bytes,2,opt,name=tool,proto3" json:"tool,omitempty"`
-	InputJson     []byte                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
-	TimeoutMs     int64                  `protobuf:"varint,4,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
-	ExpectMtime   map[string]int64       `protobuf:"bytes,5,rep,name=expect_mtime,json=expectMtime,proto3" json:"expect_mtime,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	Background    bool                   `protobuf:"varint,6,opt,name=background,proto3" json:"background,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	CallId      string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
+	Tool        string                 `protobuf:"bytes,2,opt,name=tool,proto3" json:"tool,omitempty"`
+	InputJson   []byte                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
+	TimeoutMs   int64                  `protobuf:"varint,4,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
+	ExpectMtime map[string]int64       `protobuf:"bytes,5,rep,name=expect_mtime,json=expectMtime,proto3" json:"expect_mtime,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	Background  bool                   `protobuf:"varint,6,opt,name=background,proto3" json:"background,omitempty"`
+	// workspace_id selects the workspace this call runs in. Empty means the
+	// executor's own root — the pre-phase-08 behaviour, kept so an executor and
+	// a daemon of different vintages still interoperate.
+	WorkspaceId   string `protobuf:"bytes,7,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -540,6 +544,13 @@ func (x *ExecuteRequest) GetBackground() bool {
 		return x.Background
 	}
 	return false
+}
+
+func (x *ExecuteRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
 }
 
 type ExecuteResponse struct {
@@ -1018,6 +1029,334 @@ func (*CancelResponse) Descriptor() ([]byte, []int) {
 	return file_executor_proto_rawDescGZIP(), []int{14}
 }
 
+// Mount is one bind mount. The DAEMON derives these from the child's worktree
+// assignment; the model never writes a path, and the executor never invents
+// one. Anything the executor added here would be a grant nobody authorised.
+type Mount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	HostPath      string                 `protobuf:"bytes,1,opt,name=host_path,json=hostPath,proto3" json:"host_path,omitempty"`
+	ContainerPath string                 `protobuf:"bytes,2,opt,name=container_path,json=containerPath,proto3" json:"container_path,omitempty"`
+	ReadOnly      bool                   `protobuf:"varint,3,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Mount) Reset() {
+	*x = Mount{}
+	mi := &file_executor_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Mount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Mount) ProtoMessage() {}
+
+func (x *Mount) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Mount.ProtoReflect.Descriptor instead.
+func (*Mount) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *Mount) GetHostPath() string {
+	if x != nil {
+		return x.HostPath
+	}
+	return ""
+}
+
+func (x *Mount) GetContainerPath() string {
+	if x != nil {
+		return x.ContainerPath
+	}
+	return ""
+}
+
+func (x *Mount) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
+}
+
+type ProvisionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// child_id is the daemon's id for the child this workspace serves. It is
+	// used for naming and for idempotency, never for authority.
+	ChildId string `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	// ephemeral: the executor constructs the workspace and it is
+	// reconstructible, so the child may be rescheduled elsewhere on loss.
+	// pinned: the executor exposes an existing tree; losing it means park or
+	// fail. This single field is what the park-vs-fail decision consults.
+	WorkspaceMode string   `protobuf:"bytes,2,opt,name=workspace_mode,json=workspaceMode,proto3" json:"workspace_mode,omitempty"`
+	Mounts        []*Mount `protobuf:"bytes,3,rep,name=mounts,proto3" json:"mounts,omitempty"`
+	// workdir is the container path the child's tools start in. It must be one
+	// of the mounts' container_path values; an executor MUST reject anything
+	// else rather than silently starting somewhere the child cannot write.
+	Workdir string `protobuf:"bytes,4,opt,name=workdir,proto3" json:"workdir,omitempty"`
+	// network is "none" or "bridge". Default none: an unattended worker that
+	// does not need egress should not have it, and a build that needs a package
+	// registry is a deliberate choice rather than an accident.
+	Network string `protobuf:"bytes,5,opt,name=network,proto3" json:"network,omitempty"`
+	// Resource caps. Zero means the executor's own default.
+	MemoryBytes   int64             `protobuf:"varint,6,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	Cpus          float64           `protobuf:"fixed64,7,opt,name=cpus,proto3" json:"cpus,omitempty"`
+	Env           map[string]string `protobuf:"bytes,8,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProvisionRequest) Reset() {
+	*x = ProvisionRequest{}
+	mi := &file_executor_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProvisionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProvisionRequest) ProtoMessage() {}
+
+func (x *ProvisionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProvisionRequest.ProtoReflect.Descriptor instead.
+func (*ProvisionRequest) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ProvisionRequest) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+func (x *ProvisionRequest) GetWorkspaceMode() string {
+	if x != nil {
+		return x.WorkspaceMode
+	}
+	return ""
+}
+
+func (x *ProvisionRequest) GetMounts() []*Mount {
+	if x != nil {
+		return x.Mounts
+	}
+	return nil
+}
+
+func (x *ProvisionRequest) GetWorkdir() string {
+	if x != nil {
+		return x.Workdir
+	}
+	return ""
+}
+
+func (x *ProvisionRequest) GetNetwork() string {
+	if x != nil {
+		return x.Network
+	}
+	return ""
+}
+
+func (x *ProvisionRequest) GetMemoryBytes() int64 {
+	if x != nil {
+		return x.MemoryBytes
+	}
+	return 0
+}
+
+func (x *ProvisionRequest) GetCpus() float64 {
+	if x != nil {
+		return x.Cpus
+	}
+	return 0
+}
+
+func (x *ProvisionRequest) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+type ProvisionResponse struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// roots the workspace actually exposes, as the CHILD will see them. The
+	// daemon puts these in the child's system prompt (phase 09): a sandboxed
+	// worker that does not know it is sandboxed misreads its first denial as a
+	// broken repository.
+	Roots         []string `protobuf:"bytes,2,rep,name=roots,proto3" json:"roots,omitempty"`
+	Workdir       string   `protobuf:"bytes,3,opt,name=workdir,proto3" json:"workdir,omitempty"`
+	Isolation     string   `protobuf:"bytes,4,opt,name=isolation,proto3" json:"isolation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProvisionResponse) Reset() {
+	*x = ProvisionResponse{}
+	mi := &file_executor_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProvisionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProvisionResponse) ProtoMessage() {}
+
+func (x *ProvisionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProvisionResponse.ProtoReflect.Descriptor instead.
+func (*ProvisionResponse) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ProvisionResponse) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *ProvisionResponse) GetRoots() []string {
+	if x != nil {
+		return x.Roots
+	}
+	return nil
+}
+
+func (x *ProvisionResponse) GetWorkdir() string {
+	if x != nil {
+		return x.Workdir
+	}
+	return ""
+}
+
+func (x *ProvisionResponse) GetIsolation() string {
+	if x != nil {
+		return x.Isolation
+	}
+	return ""
+}
+
+type ReleaseRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReleaseRequest) Reset() {
+	*x = ReleaseRequest{}
+	mi := &file_executor_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReleaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReleaseRequest) ProtoMessage() {}
+
+func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReleaseRequest.ProtoReflect.Descriptor instead.
+func (*ReleaseRequest) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ReleaseRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+type ReleaseResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReleaseResponse) Reset() {
+	*x = ReleaseResponse{}
+	mi := &file_executor_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReleaseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReleaseResponse) ProtoMessage() {}
+
+func (x *ReleaseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReleaseResponse.ProtoReflect.Descriptor instead.
+func (*ReleaseResponse) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{19}
+}
+
 // JobOutput is the one-shot poll behind bash_output. Attach is a stream and
 // draining it to answer "what has this printed so far" means either blocking
 // until exit or racing a deadline.
@@ -1033,7 +1372,7 @@ type JobOutputRequest struct {
 
 func (x *JobOutputRequest) Reset() {
 	*x = JobOutputRequest{}
-	mi := &file_executor_proto_msgTypes[15]
+	mi := &file_executor_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1045,7 +1384,7 @@ func (x *JobOutputRequest) String() string {
 func (*JobOutputRequest) ProtoMessage() {}
 
 func (x *JobOutputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_executor_proto_msgTypes[15]
+	mi := &file_executor_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1058,7 +1397,7 @@ func (x *JobOutputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobOutputRequest.ProtoReflect.Descriptor instead.
 func (*JobOutputRequest) Descriptor() ([]byte, []int) {
-	return file_executor_proto_rawDescGZIP(), []int{15}
+	return file_executor_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *JobOutputRequest) GetHandle() string {
@@ -1091,7 +1430,7 @@ type JobOutputResponse struct {
 
 func (x *JobOutputResponse) Reset() {
 	*x = JobOutputResponse{}
-	mi := &file_executor_proto_msgTypes[16]
+	mi := &file_executor_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1103,7 +1442,7 @@ func (x *JobOutputResponse) String() string {
 func (*JobOutputResponse) ProtoMessage() {}
 
 func (x *JobOutputResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_executor_proto_msgTypes[16]
+	mi := &file_executor_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1116,7 +1455,7 @@ func (x *JobOutputResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobOutputResponse.ProtoReflect.Descriptor instead.
 func (*JobOutputResponse) Descriptor() ([]byte, []int) {
-	return file_executor_proto_rawDescGZIP(), []int{16}
+	return file_executor_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *JobOutputResponse) GetData() []byte {
@@ -1188,7 +1527,7 @@ const file_executor_proto_rawDesc = "" +
 	"ImageBlock\x12\x1d\n" +
 	"\n" +
 	"media_type\x18\x01 \x01(\tR\tmediaType\x12\x12\n" +
-	"\x04data\x18\x02 \x01(\fR\x04data\"\xb3\x02\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"\xd6\x02\n" +
 	"\x0eExecuteRequest\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12\x1d\n" +
@@ -1199,7 +1538,8 @@ const file_executor_proto_rawDesc = "" +
 	"\fexpect_mtime\x18\x05 \x03(\v23.rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntryR\vexpectMtime\x12\x1e\n" +
 	"\n" +
 	"background\x18\x06 \x01(\bR\n" +
-	"background\x1a>\n" +
+	"background\x12!\n" +
+	"\fworkspace_id\x18\a \x01(\tR\vworkspaceId\x1a>\n" +
 	"\x10ExpectMtimeEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xdc\x01\n" +
@@ -1235,7 +1575,31 @@ const file_executor_proto_rawDesc = "" +
 	"\x05event\"(\n" +
 	"\rCancelRequest\x12\x17\n" +
 	"\acall_id\x18\x01 \x01(\tR\x06callId\"\x10\n" +
-	"\x0eCancelResponse\"@\n" +
+	"\x0eCancelResponse\"h\n" +
+	"\x05Mount\x12\x1b\n" +
+	"\thost_path\x18\x01 \x01(\tR\bhostPath\x12%\n" +
+	"\x0econtainer_path\x18\x02 \x01(\tR\rcontainerPath\x12\x1b\n" +
+	"\tread_only\x18\x03 \x01(\bR\breadOnly\"\xeb\x02\n" +
+	"\x10ProvisionRequest\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12%\n" +
+	"\x0eworkspace_mode\x18\x02 \x01(\tR\rworkspaceMode\x121\n" +
+	"\x06mounts\x18\x03 \x03(\v2\x19.rafiki.executor.v1.MountR\x06mounts\x12\x18\n" +
+	"\aworkdir\x18\x04 \x01(\tR\aworkdir\x12\x18\n" +
+	"\anetwork\x18\x05 \x01(\tR\anetwork\x12!\n" +
+	"\fmemory_bytes\x18\x06 \x01(\x03R\vmemoryBytes\x12\x12\n" +
+	"\x04cpus\x18\a \x01(\x01R\x04cpus\x12?\n" +
+	"\x03env\x18\b \x03(\v2-.rafiki.executor.v1.ProvisionRequest.EnvEntryR\x03env\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x84\x01\n" +
+	"\x11ProvisionResponse\x12!\n" +
+	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x14\n" +
+	"\x05roots\x18\x02 \x03(\tR\x05roots\x12\x18\n" +
+	"\aworkdir\x18\x03 \x01(\tR\aworkdir\x12\x1c\n" +
+	"\tisolation\x18\x04 \x01(\tR\tisolation\"3\n" +
+	"\x0eReleaseRequest\x12!\n" +
+	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\"\x11\n" +
+	"\x0fReleaseResponse\"@\n" +
 	"\x10JobOutputRequest\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\tR\x06handle\x12\x14\n" +
 	"\x05since\x18\x02 \x01(\x03R\x05since\"\x88\x01\n" +
@@ -1244,14 +1608,16 @@ const file_executor_proto_rawDesc = "" +
 	"\x05total\x18\x02 \x01(\x03R\x05total\x12\x16\n" +
 	"\x06exited\x18\x03 \x01(\bR\x06exited\x12\x1b\n" +
 	"\texit_code\x18\x04 \x01(\x05R\bexitCode\x12\x14\n" +
-	"\x05found\x18\x05 \x01(\bR\x05found2\x8d\x04\n" +
+	"\x05found\x18\x05 \x01(\bR\x05found2\xbb\x05\n" +
 	"\x0fExecutorService\x12U\n" +
 	"\bDescribe\x12#.rafiki.executor.v1.DescribeRequest\x1a$.rafiki.executor.v1.DescribeResponse\x12O\n" +
 	"\x06Health\x12!.rafiki.executor.v1.HealthRequest\x1a\".rafiki.executor.v1.HealthResponse\x12T\n" +
 	"\aExecute\x12\".rafiki.executor.v1.ExecuteRequest\x1a#.rafiki.executor.v1.ExecuteResponse0\x01\x12Q\n" +
 	"\x06Attach\x12!.rafiki.executor.v1.AttachRequest\x1a\".rafiki.executor.v1.AttachResponse0\x01\x12O\n" +
 	"\x06Cancel\x12!.rafiki.executor.v1.CancelRequest\x1a\".rafiki.executor.v1.CancelResponse\x12X\n" +
-	"\tJobOutput\x12$.rafiki.executor.v1.JobOutputRequest\x1a%.rafiki.executor.v1.JobOutputResponseB3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
+	"\tJobOutput\x12$.rafiki.executor.v1.JobOutputRequest\x1a%.rafiki.executor.v1.JobOutputResponse\x12X\n" +
+	"\tProvision\x12$.rafiki.executor.v1.ProvisionRequest\x1a%.rafiki.executor.v1.ProvisionResponse\x12R\n" +
+	"\aRelease\x12\".rafiki.executor.v1.ReleaseRequest\x1a#.rafiki.executor.v1.ReleaseResponseB3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
 
 var (
 	file_executor_proto_rawDescOnce sync.Once
@@ -1266,7 +1632,7 @@ func file_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_executor_proto_goTypes = []any{
 	(Failure_Code)(0),         // 0: rafiki.executor.v1.Failure.Code
 	(*DescribeRequest)(nil),   // 1: rafiki.executor.v1.DescribeRequest
@@ -1284,40 +1650,52 @@ var file_executor_proto_goTypes = []any{
 	(*AttachResponse)(nil),    // 13: rafiki.executor.v1.AttachResponse
 	(*CancelRequest)(nil),     // 14: rafiki.executor.v1.CancelRequest
 	(*CancelResponse)(nil),    // 15: rafiki.executor.v1.CancelResponse
-	(*JobOutputRequest)(nil),  // 16: rafiki.executor.v1.JobOutputRequest
-	(*JobOutputResponse)(nil), // 17: rafiki.executor.v1.JobOutputResponse
-	nil,                       // 18: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
-	nil,                       // 19: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
-	nil,                       // 20: rafiki.executor.v1.Result.ObservedMtimeEntry
+	(*Mount)(nil),             // 16: rafiki.executor.v1.Mount
+	(*ProvisionRequest)(nil),  // 17: rafiki.executor.v1.ProvisionRequest
+	(*ProvisionResponse)(nil), // 18: rafiki.executor.v1.ProvisionResponse
+	(*ReleaseRequest)(nil),    // 19: rafiki.executor.v1.ReleaseRequest
+	(*ReleaseResponse)(nil),   // 20: rafiki.executor.v1.ReleaseResponse
+	(*JobOutputRequest)(nil),  // 21: rafiki.executor.v1.JobOutputRequest
+	(*JobOutputResponse)(nil), // 22: rafiki.executor.v1.JobOutputResponse
+	nil,                       // 23: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	nil,                       // 24: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	nil,                       // 25: rafiki.executor.v1.Result.ObservedMtimeEntry
+	nil,                       // 26: rafiki.executor.v1.ProvisionRequest.EnvEntry
 }
 var file_executor_proto_depIdxs = []int32{
-	18, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	23, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
 	6,  // 1: rafiki.executor.v1.ContentBlock.image:type_name -> rafiki.executor.v1.ImageBlock
-	19, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	24, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
 	9,  // 3: rafiki.executor.v1.ExecuteResponse.output:type_name -> rafiki.executor.v1.OutputChunk
 	10, // 4: rafiki.executor.v1.ExecuteResponse.result:type_name -> rafiki.executor.v1.Result
 	11, // 5: rafiki.executor.v1.ExecuteResponse.failed:type_name -> rafiki.executor.v1.Failure
 	5,  // 6: rafiki.executor.v1.Result.content:type_name -> rafiki.executor.v1.ContentBlock
-	20, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
+	25, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
 	0,  // 8: rafiki.executor.v1.Failure.code:type_name -> rafiki.executor.v1.Failure.Code
 	9,  // 9: rafiki.executor.v1.AttachResponse.output:type_name -> rafiki.executor.v1.OutputChunk
-	1,  // 10: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
-	3,  // 11: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
-	7,  // 12: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
-	12, // 13: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
-	14, // 14: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
-	16, // 15: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
-	2,  // 16: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
-	4,  // 17: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
-	8,  // 18: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
-	13, // 19: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
-	15, // 20: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
-	17, // 21: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
-	16, // [16:22] is the sub-list for method output_type
-	10, // [10:16] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	16, // 10: rafiki.executor.v1.ProvisionRequest.mounts:type_name -> rafiki.executor.v1.Mount
+	26, // 11: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
+	1,  // 12: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
+	3,  // 13: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
+	7,  // 14: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
+	12, // 15: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
+	14, // 16: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
+	21, // 17: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
+	17, // 18: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
+	19, // 19: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
+	2,  // 20: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
+	4,  // 21: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
+	8,  // 22: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
+	13, // 23: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
+	15, // 24: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
+	22, // 25: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
+	18, // 26: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
+	20, // 27: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
+	20, // [20:28] is the sub-list for method output_type
+	12, // [12:20] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_executor_proto_init() }
@@ -1345,7 +1723,7 @@ func file_executor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_executor_proto_rawDesc), len(file_executor_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   20,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

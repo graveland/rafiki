@@ -47,6 +47,11 @@ const (
 	// ExecutorServiceJobOutputProcedure is the fully-qualified name of the ExecutorService's JobOutput
 	// RPC.
 	ExecutorServiceJobOutputProcedure = "/rafiki.executor.v1.ExecutorService/JobOutput"
+	// ExecutorServiceProvisionProcedure is the fully-qualified name of the ExecutorService's Provision
+	// RPC.
+	ExecutorServiceProvisionProcedure = "/rafiki.executor.v1.ExecutorService/Provision"
+	// ExecutorServiceReleaseProcedure is the fully-qualified name of the ExecutorService's Release RPC.
+	ExecutorServiceReleaseProcedure = "/rafiki.executor.v1.ExecutorService/Release"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -57,6 +62,13 @@ type ExecutorServiceClient interface {
 	Attach(context.Context, *connect.Request[executorpb.AttachRequest]) (*connect.ServerStreamForClient[executorpb.AttachResponse], error)
 	Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error)
 	JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error)
+	// Provision prepares a workspace for one child and returns a handle every
+	// later Execute carries. A native executor answers with its pinned root and
+	// does nothing else; a container executor starts a container.
+	Provision(context.Context, *connect.Request[executorpb.ProvisionRequest]) (*connect.Response[executorpb.ProvisionResponse], error)
+	// Release tears a workspace down. Idempotent: a daemon restart that lost
+	// track of a workspace must be able to release it again without error.
+	Release(context.Context, *connect.Request[executorpb.ReleaseRequest]) (*connect.Response[executorpb.ReleaseResponse], error)
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -106,6 +118,18 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("JobOutput")),
 			connect.WithClientOptions(opts...),
 		),
+		provision: connect.NewClient[executorpb.ProvisionRequest, executorpb.ProvisionResponse](
+			httpClient,
+			baseURL+ExecutorServiceProvisionProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("Provision")),
+			connect.WithClientOptions(opts...),
+		),
+		release: connect.NewClient[executorpb.ReleaseRequest, executorpb.ReleaseResponse](
+			httpClient,
+			baseURL+ExecutorServiceReleaseProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("Release")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -117,6 +141,8 @@ type executorServiceClient struct {
 	attach    *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
 	cancel    *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
 	jobOutput *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
+	provision *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
+	release   *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -149,6 +175,16 @@ func (c *executorServiceClient) JobOutput(ctx context.Context, req *connect.Requ
 	return c.jobOutput.CallUnary(ctx, req)
 }
 
+// Provision calls rafiki.executor.v1.ExecutorService.Provision.
+func (c *executorServiceClient) Provision(ctx context.Context, req *connect.Request[executorpb.ProvisionRequest]) (*connect.Response[executorpb.ProvisionResponse], error) {
+	return c.provision.CallUnary(ctx, req)
+}
+
+// Release calls rafiki.executor.v1.ExecutorService.Release.
+func (c *executorServiceClient) Release(ctx context.Context, req *connect.Request[executorpb.ReleaseRequest]) (*connect.Response[executorpb.ReleaseResponse], error) {
+	return c.release.CallUnary(ctx, req)
+}
+
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
 type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
@@ -157,6 +193,13 @@ type ExecutorServiceHandler interface {
 	Attach(context.Context, *connect.Request[executorpb.AttachRequest], *connect.ServerStream[executorpb.AttachResponse]) error
 	Cancel(context.Context, *connect.Request[executorpb.CancelRequest]) (*connect.Response[executorpb.CancelResponse], error)
 	JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error)
+	// Provision prepares a workspace for one child and returns a handle every
+	// later Execute carries. A native executor answers with its pinned root and
+	// does nothing else; a container executor starts a container.
+	Provision(context.Context, *connect.Request[executorpb.ProvisionRequest]) (*connect.Response[executorpb.ProvisionResponse], error)
+	// Release tears a workspace down. Idempotent: a daemon restart that lost
+	// track of a workspace must be able to release it again without error.
+	Release(context.Context, *connect.Request[executorpb.ReleaseRequest]) (*connect.Response[executorpb.ReleaseResponse], error)
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -202,6 +245,18 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("JobOutput")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceProvisionHandler := connect.NewUnaryHandler(
+		ExecutorServiceProvisionProcedure,
+		svc.Provision,
+		connect.WithSchema(executorServiceMethods.ByName("Provision")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceReleaseHandler := connect.NewUnaryHandler(
+		ExecutorServiceReleaseProcedure,
+		svc.Release,
+		connect.WithSchema(executorServiceMethods.ByName("Release")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -216,6 +271,10 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceCancelHandler.ServeHTTP(w, r)
 		case ExecutorServiceJobOutputProcedure:
 			executorServiceJobOutputHandler.ServeHTTP(w, r)
+		case ExecutorServiceProvisionProcedure:
+			executorServiceProvisionHandler.ServeHTTP(w, r)
+		case ExecutorServiceReleaseProcedure:
+			executorServiceReleaseHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -247,4 +306,12 @@ func (UnimplementedExecutorServiceHandler) Cancel(context.Context, *connect.Requ
 
 func (UnimplementedExecutorServiceHandler) JobOutput(context.Context, *connect.Request[executorpb.JobOutputRequest]) (*connect.Response[executorpb.JobOutputResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.JobOutput is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) Provision(context.Context, *connect.Request[executorpb.ProvisionRequest]) (*connect.Response[executorpb.ProvisionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Provision is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) Release(context.Context, *connect.Request[executorpb.ReleaseRequest]) (*connect.Response[executorpb.ReleaseResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Release is not implemented"))
 }
