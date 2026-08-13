@@ -3,12 +3,12 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"slices"
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -17,7 +17,42 @@ import (
 // dialling executor — the reason this whole path shipped untested.
 type executorPool interface {
 	Live() []execpool.LiveExecutor
-	ClientFor(executorID string) (execpool.ExecutorClient, error)
+	ClientFor(executorID string) (tools.ExecutorClient, error)
+}
+
+// selectExecutor picks an executor from the live pool based on the request's
+// label selector. The refusal path is as important as the success path: a
+// spawn whose grant no live executor satisfies fails IMMEDIATELY, naming what
+// was required, what was live, and which predicate excluded each candidate.
+//
+// Selection is two-sided: the child's selector narrows the PARENT's effective
+// executor set — never Live() directly. A child can never reach an executor
+// its parent could not.
+func (c *Controller) selectExecutor(req protocol.SpawnRequest) (tools.ExecutorClient, error) {
+	sel, err := executors.ParseSelector(req.ExecutorSelector)
+	if err != nil {
+		return nil, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
+	}
+
+	// The child does not exist yet, so evaluate the PARENT's set and narrow
+	// with the request's selector — which is exactly what
+	// effectiveExecutorSet will compute for the child once it is stored.
+	parentSet, err := c.effectiveExecutorSet(req.ParentChildID)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := executors.Narrow(parentSet, sel)
+	if len(candidates) == 0 {
+		return nil, c.explainNoMatch(req, sel, parentSet)
+	}
+
+	chosen := candidates[0]
+	cl, err := c.execPool.ClientFor(chosen.ID)
+	if err != nil {
+		return nil, fmt.Errorf("executor %s selected but not reachable: %w", chosen.ID[:12], err)
+	}
+	return cl, nil
 }
 
 // effectiveExecutorSet is every live executor childID may use.
@@ -40,10 +75,6 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 	if c.execPool == nil {
 		return nil, errors.New("no executor listener is configured (set RAFIKI_EXECUTOR_LISTEN)")
 	}
-	chain, err := c.lineageChain(childID)
-	if err != nil {
-		return nil, err
-	}
 
 	// Start from every live executor that ADMITS the child. The executor-side
 	// selector is evaluated once, against the child's own labels, because an
@@ -55,13 +86,14 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 	}
 	var set []executors.Executor
 	for _, le := range c.execPool.Live() {
-		if !le.Enabled {
+		if !le.Executor.Enabled {
 			continue
 		}
-		admits, err := executors.ParseSelector(le.Admits)
+		admits, err := executors.ParseSelector(le.Executor.Admits)
 		if err != nil {
-			slog.Warn("execpool: executor has an unparseable admission selector; excluding it",
-				"executorId", le.ID, "admits", le.Admits, "error", err)
+			// A malformed admission selector must EXCLUDE, never admit. An
+			// operator typo that silently opens a machine to every child is
+			// the failure this ordering exists to prevent.
 			continue
 		}
 		if !admits.Matches(childLabels) {
@@ -73,6 +105,10 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 	// Then narrow by every selector from the root down to and including this
 	// child. Root-first order is not cosmetic: it means an ancestor's
 	// constraint can never be widened by a descendant's.
+	chain, err := c.lineageChain(childID)
+	if err != nil {
+		return nil, err
+	}
 	for _, ancestorSelector := range chain {
 		if ancestorSelector == "" {
 			continue
@@ -89,6 +125,9 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 // lineageChain returns the stored executor selectors from the root down to
 // childID inclusive.
 func (c *Controller) lineageChain(childID string) ([]string, error) {
+	if childID == "" {
+		return nil, nil // top-level: no selector inherited
+	}
 	var reversed []string
 	cur := childID
 	for range maxLineageWalk {
@@ -112,91 +151,66 @@ func (c *Controller) lineageChain(childID string) ([]string, error) {
 // wedge the spawn path.
 const maxLineageWalk = 64
 
-// selectExecutor resolves which executor a child runs on.
+// explainNoMatch builds a refusal message naming the excluding predicate per
+// candidate, so the reason is legible to the caller.
 //
-// When no pool is configured, returns nil, nil — the default of running
-// everything in-process. When a pool is configured, evaluates the child's
-// selector against the parent's effective set (intersection).
-func (c *Controller) selectExecutor(req protocol.SpawnRequest) (execpool.ExecutorClient, error) {
-	if c.execPool == nil || req.ExecutorSelector == "" {
-		return nil, nil
+// Three exclusion reasons are distinguished:
+//   - The child's own selector excludes the executor (the parent's set would
+//     have allowed it).
+//   - The parent's set excludes the executor (the child never got to evaluate
+//     it).
+//   - The executor's admission selector refused the child.
+func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor) error {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "spawn refused: no executor satisfies %q.\n", req.ExecutorSelector)
+	fmt.Fprintf(&sb, "  %d live executor(s), %d in your parent's set:\n",
+		len(c.execPool.Live()), len(parentSet))
+
+	// Report each live executor with the reason it was excluded.
+	for _, le := range c.execPool.Live() {
+		e := le.Executor
+		reason := ""
+		if !e.Enabled {
+			reason = "disabled"
+		} else if admitsSel, err := executors.ParseSelector(e.Admits); err != nil {
+			reason = fmt.Sprintf("unparseable admission selector %q", e.Admits)
+		} else {
+			childLabels := map[string]string{}
+			if snap, ok := c.st.Get(req.ParentChildID); ok {
+				childLabels = snap.Labels
+			}
+			if !admitsSel.Matches(childLabels) {
+				reason = fmt.Sprintf("excluded by ITS admission selector %q: this child is %v", e.Admits, childLabels)
+			} else {
+				inParentSet := false
+				for _, p := range parentSet {
+					if p.ID == e.ID {
+						inParentSet = true
+						break
+					}
+				}
+				if !inParentSet {
+					reason = "excluded by your PARENT's set"
+				} else {
+					explain := childSel.Explain(e.Labels)
+					if explain != "" {
+						reason = fmt.Sprintf("excluded by your selector:   %s", explain)
+					} else {
+						reason = "excluded by your selector"
+					}
+				}
+			}
+		}
+		fmt.Fprintf(&sb, "    %-12s  %s\n", shortID(e.ID), reason)
 	}
-	sel, err := executors.ParseSelector(req.ExecutorSelector)
-	if err != nil {
-		return nil, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
-	}
-	// The child does not exist yet, so evaluate the PARENT's set and narrow
-	// with the request's selector — which is exactly what
-	// effectiveExecutorSet will compute for the child once it is stored.
-	parentSet, err := c.effectiveExecutorSet(req.ParentChildID)
-	if err != nil {
-		return nil, err
-	}
-	candidates := executors.Narrow(parentSet, sel)
-	if len(candidates) == 0 {
-		return nil, c.explainNoMatch(req, sel, parentSet)
-	}
-	chosen := candidates[0]
-	cl, err := c.execPool.ClientFor(chosen.ID)
-	if err != nil {
-		return nil, fmt.Errorf("executor %s selected but not reachable: %w", chosen.ID, err)
-	}
-	return cl, nil
+	return fmt.Errorf("%s", sb.String())
 }
 
-// explainNoMatch builds a diagnostic refusal naming every exclusion reason
-// per live executor, so a model or operator can distinguish a typo from a
-// missing label from an executor that refused the child.
-func (c *Controller) explainNoMatch(req protocol.SpawnRequest, sel executors.Selector, parentSet []executors.Executor) error {
-	var b strings.Builder
-	reqText := req.ExecutorSelector
-	if reqText == "" {
-		reqText = "(none)"
+// shortID truncates an executor id for display without panicking on short ids
+// (test fixtures use human-readable names, not ULIDs).
+func shortID(id string) string {
+	if len(id) <= 12 {
+		return id
 	}
-	fmt.Fprintf(&b, "spawn refused: no executor satisfies `%s`.\n", reqText)
-	fmt.Fprintf(&b, "  %d live executor(s),", len(parentSet))
-	if req.ParentChildID != "" {
-		fmt.Fprintf(&b, " %d in your parent's set:", len(parentSet))
-	} else {
-		fmt.Fprintf(&b, " %d passing admission:", len(parentSet))
-	}
-	fmt.Fprintln(&b)
-
-	for _, ex := range parentSet {
-		reason := sel.Explain(ex.Labels)
-		if reason != "" {
-			fmt.Fprintf(&b, "    %-12s excluded by your selector:   %s\n", ex.ID, reason)
-		} else {
-			// It matched the child's selector but was already filtered out —
-			// hence, the parent's set is the constraint.
-			fmt.Fprintf(&b, "    %-12s excluded by your PARENT's set\n", ex.ID)
-		}
-	}
-
-	// Also report live executors that were excluded by ADMISSION (not in parentSet).
-	// This is best-effort and helps diagnose executor-side refusals.
-	if c.execPool != nil {
-		seen := make(map[string]bool)
-		for _, ex := range parentSet {
-			seen[ex.ID] = true
-		}
-		hasAdmissionRefusals := false
-		for _, le := range c.execPool.Live() {
-			if seen[le.ID] || !le.Enabled {
-				continue
-			}
-			admits, err := executors.ParseSelector(le.Admits)
-			if err != nil {
-				continue
-			}
-			if !admits.Matches(nil) { // simplified check
-				hasAdmissionRefusals = true
-				fmt.Fprintf(&b, "    %-12s excluded by ITS admission selector `%s`\n",
-					le.ID, le.Admits)
-			}
-		}
-		_ = hasAdmissionRefusals
-	}
-
-	return errors.New(b.String())
+	return id[:12]
 }

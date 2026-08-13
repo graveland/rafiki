@@ -87,13 +87,27 @@ type Session struct {
 	// capturing after the daemon restarts or the session is respawned.
 	RecordRequests bool
 
-	// ExecutorSelector is a label selector narrowing the parent's executor set
-	// for this child. Persisted so a resumed child retains the same confinement.
+	// ExecutorSocket, when non-empty, is the unix socket of the rafiki-executor
+	// this child's filesystem and shell tools run in. Persisted so a resumed
+	// child rejoins the same executor.
+	ExecutorSocket string
+
+	// ExecutorSelector is the label selector this child was spawned with
+	// (or the empty string for "no selector"). Persisted so the narrowing
+	// property survives resume: a resumed child's effective set is still its
+	// parent's set intersected with what IT asked for.
 	ExecutorSelector string
 
-	// WorkspaceMode controls the executor's workspace provisioning.
-	// Persisted for the same reason as ExecutorSelector.
+	// WorkspaceMode is "ephemeral" or "pinned" as requested at spawn.
+	// Empty means the default (pinned). Persisted for the same reason.
 	WorkspaceMode string
+
+	// Resource grants, daemon-stamped at spawn and never re-read from the
+	// child. These are the FACTS the controller enforces against; a value
+	// arriving in a request is a request.
+	MaxDepth    int
+	MaxCost     float64
+	MaxChildren int
 
 	// Counters
 	ExtensionErrors int
@@ -175,10 +189,22 @@ type Snapshot struct {
 
 	RecordRequests bool
 
-	// ExecutorSelector narrows the parent's executor set.
+	// ExecutorSocket, when non-empty, is the unix socket of the rafiki-executor
+	// this child's filesystem and shell tools run in.
+	ExecutorSocket string
+
+	// ExecutorSelector is the label selector this child was spawned with.
 	ExecutorSelector string
-	// WorkspaceMode controls executor workspace provisioning.
+
+	// WorkspaceMode is "ephemeral" or "pinned".
 	WorkspaceMode string
+
+	// Resource grants, daemon-stamped at spawn and never re-read from the
+	// child. These are the FACTS the controller enforces against; a value
+	// arriving in a request is a request.
+	MaxDepth    int
+	MaxCost     float64
+	MaxChildren int
 
 	ExtensionErrors int
 	AutoRetries     int
@@ -242,8 +268,13 @@ func (s *Session) Snapshot() Snapshot {
 
 		RecordRequests: s.RecordRequests,
 
+		ExecutorSocket: s.ExecutorSocket,
+
 		ExecutorSelector: s.ExecutorSelector,
 		WorkspaceMode:    s.WorkspaceMode,
+
+		MaxDepth: s.MaxDepth, MaxCost: s.MaxCost, MaxChildren: s.MaxChildren,
+
 		ExtensionErrors:  s.ExtensionErrors,
 		AutoRetries:      s.AutoRetries,
 		LastRetryError:   s.LastRetryError,

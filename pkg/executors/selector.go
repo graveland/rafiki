@@ -5,49 +5,184 @@ import (
 	"strings"
 )
 
-// Selector is a parsed label selector over executor labels.
-// Zero value (empty) matches every executor.
+// Selector is a parsed label selector for matching executors or narrowing
+// a parent's effective set.
 type Selector struct {
-	terms []term
+	terms []selectorTerm
 }
 
-type term struct {
+type selectorOp int
+
+const (
+	opEq        selectorOp = iota // key = value
+	opNeq                         // key != value
+	opIn                          // key in (v1,v2)
+	opNotIn                       // key notin (v1,v2)
+	opExists                      // key (presence)
+	opNotExists                   // !key (absence)
+)
+
+type selectorTerm struct {
 	key    string
-	op     string // "=", "!=", "in", "notin", "exists", "notexists"
+	op     selectorOp
 	values []string
 }
 
-// ParseSelector parses a label selector string.
+// ParseSelector parses a label selector string. An empty string matches
+// everything. A malformed selector is an error, never a permissive default.
 //
 // Supported forms, joined by comma (AND):
-//   - "key"         — key existence
-//   - "!key"        — key absence
-//   - "key=value"   — exact match
-//   - "key!=value"  — not-equal match
-//   - "key in (a,b)"   — set membership
-//   - "key notin (a,b)" — set exclusion
 //
-// An empty selector matches everything.
-// A malformed selector is an error — never a permissive default.
+//	os=linux          equality
+//	os!=linux         inequality
+//	os                key presence
+//	!os               key absence
+//	os in (linux,darwin)  set membership
+//	os notin (linux)      set non-membership
 func ParseSelector(s string) (Selector, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return Selector{}, nil
 	}
-	parts := splitSelectorTerms(s)
-	var terms []term
-	for _, part := range parts {
+
+	var terms []selectorTerm
+	for _, part := range splitSelector(s) {
 		t, err := parseTerm(part)
 		if err != nil {
-			return Selector{}, fmt.Errorf("invalid selector %q: %w", s, err)
+			return Selector{}, fmt.Errorf("parse selector %q: %w", s, err)
 		}
 		terms = append(terms, t)
 	}
 	return Selector{terms: terms}, nil
 }
 
-// splitSelectorTerms splits on commas that are not inside parentheses.
-func splitSelectorTerms(s string) []string {
+// Matches returns true when labels satisfies every term.
+func (s Selector) Matches(labels map[string]string) bool {
+	for _, t := range s.terms {
+		if !t.matches(labels) {
+			return false
+		}
+	}
+	return true
+}
+
+// Narrow returns the executors in parentSet that ALSO match child's
+// selector. It evaluates the sets, never tries to prove implication —
+// intersection is exact and correct by construction.
+func Narrow(parentSet []Executor, child Selector) []Executor {
+	if len(parentSet) == 0 {
+		return nil
+	}
+	var out []Executor
+	for _, e := range parentSet {
+		if child.Matches(e.Labels) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// Explain returns "" when labels satisfies every term, otherwise the first
+// failing term in human words against the actual labels.
+func (s Selector) Explain(labels map[string]string) string {
+	for _, t := range s.terms {
+		if explain := t.explain(labels); explain != "" {
+			return explain
+		}
+	}
+	return ""
+}
+
+func (t selectorTerm) matches(labels map[string]string) bool {
+	v, exists := labels[t.key]
+	switch t.op {
+	case opEq:
+		return exists && v == t.values[0]
+	case opNeq:
+		return !exists || v != t.values[0]
+	case opExists:
+		return exists
+	case opNotExists:
+		return !exists
+	case opIn:
+		if !exists {
+			return false
+		}
+		for _, want := range t.values {
+			if v == want {
+				return true
+			}
+		}
+		return false
+	case opNotIn:
+		if !exists {
+			return true // absent is not in any set
+		}
+		for _, excl := range t.values {
+			if v == excl {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// explain returns "" when the term matches, otherwise a human-readable
+// description of why it failed against the actual labels.
+func (t selectorTerm) explain(labels map[string]string) string {
+	v, exists := labels[t.key]
+	switch t.op {
+	case opEq:
+		if !exists {
+			return fmt.Sprintf("no %s label, wanted %s=%s", t.key, t.key, t.values[0])
+		}
+		if v != t.values[0] {
+			return fmt.Sprintf("%s=%s, wanted %s=%s", t.key, v, t.key, t.values[0])
+		}
+		return ""
+	case opNeq:
+		if exists && v == t.values[0] {
+			return fmt.Sprintf("%s=%s, wanted %s!=%s", t.key, v, t.key, t.values[0])
+		}
+		return ""
+	case opExists:
+		if !exists {
+			return fmt.Sprintf("no %s label, wanted it present", t.key)
+		}
+		return ""
+	case opNotExists:
+		if exists {
+			return fmt.Sprintf("has %s=%s, wanted no %s label", t.key, v, t.key)
+		}
+		return ""
+	case opIn:
+		if !exists {
+			return fmt.Sprintf("no %s label, wanted %s in (%s)", t.key, t.key, strings.Join(t.values, ","))
+		}
+		for _, want := range t.values {
+			if v == want {
+				return ""
+			}
+		}
+		return fmt.Sprintf("%s=%s, wanted %s in (%s)", t.key, v, t.key, strings.Join(t.values, ","))
+	case opNotIn:
+		if !exists {
+			return ""
+		}
+		for _, excl := range t.values {
+			if v == excl {
+				return fmt.Sprintf("%s=%s, wanted %s notin (%s)", t.key, v, t.key, strings.Join(t.values, ","))
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// splitSelector splits on comma, respecting parentheses.
+func splitSelector(s string) []string {
 	var parts []string
 	depth := 0
 	start := 0
@@ -56,9 +191,7 @@ func splitSelectorTerms(s string) []string {
 		case '(':
 			depth++
 		case ')':
-			if depth > 0 {
-				depth--
-			}
+			depth--
 		case ',':
 			if depth == 0 {
 				parts = append(parts, strings.TrimSpace(s[start:i]))
@@ -70,237 +203,91 @@ func splitSelectorTerms(s string) []string {
 	return parts
 }
 
-func parseTerm(s string) (term, error) {
-	// "key in (values)" or "key notin (values)"
-	if strings.Contains(s, " in (") {
-		key, values, err := parseIn(s, "in")
-		if err != nil {
-			return term{}, err
-		}
-		if !validKey(key) {
-			return term{}, fmt.Errorf("invalid key %q", key)
-		}
-		return term{key: key, op: "in", values: values}, nil
+func parseTerm(s string) (selectorTerm, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return selectorTerm{}, fmt.Errorf("empty term")
 	}
-	if strings.Contains(s, " notin (") {
-		key, values, err := parseIn(s, "notin")
-		if err != nil {
-			return term{}, err
+
+	// !key — absence
+	if strings.HasPrefix(s, "!") && !strings.Contains(s, "=") {
+		key := strings.TrimSpace(s[1:])
+		if key == "" {
+			return selectorTerm{}, fmt.Errorf("empty key in %q", s)
 		}
-		if !validKey(key) {
-			return term{}, fmt.Errorf("invalid key %q", key)
+		return selectorTerm{key: key, op: opNotExists}, nil
+	}
+
+	// key in (v1,v2) / key notin (v1,v2)
+	if idx := strings.Index(s, " in ("); idx >= 0 {
+		key := strings.TrimSpace(s[:idx])
+		rest := s[idx+len(" in ("):]
+		if !strings.HasSuffix(rest, ")") {
+			return selectorTerm{}, fmt.Errorf("unclosed parenthesis in %q", s)
 		}
-		return term{key: key, op: "notin", values: values}, nil
-	}
-	// "!key"
-	if strings.HasPrefix(s, "!") {
-		key := s[1:]
-		if key == "" || strings.ContainsAny(key, "=!(), ") {
-			return term{}, fmt.Errorf("invalid key absence %q", s)
+		vals := splitValues(strings.TrimSuffix(rest, ")"))
+		if len(vals) == 0 {
+			return selectorTerm{}, fmt.Errorf("empty value list in %q", s)
 		}
-		return term{key: key, op: "notexists"}, nil
+		return selectorTerm{key: key, op: opIn, values: vals}, nil
 	}
-	// "key!=value"
-	if i := strings.Index(s, "!="); i >= 0 {
-		key, value := s[:i], s[i+2:]
-		if key == "" || value == "" || !validKey(key) {
-			return term{}, fmt.Errorf("invalid not-equal %q", s)
+	if idx := strings.Index(s, " notin ("); idx >= 0 {
+		key := strings.TrimSpace(s[:idx])
+		rest := s[idx+len(" notin ("):]
+		if !strings.HasSuffix(rest, ")") {
+			return selectorTerm{}, fmt.Errorf("unclosed parenthesis in %q", s)
 		}
-		return term{key: key, op: "!=", values: []string{value}}, nil
-	}
-	// "key=value"
-	if i := strings.Index(s, "="); i >= 0 {
-		key, value := s[:i], s[i+1:]
-		if key == "" || value == "" || !validKey(key) {
-			return term{}, fmt.Errorf("invalid equality %q", s)
+		vals := splitValues(strings.TrimSuffix(rest, ")"))
+		if len(vals) == 0 {
+			return selectorTerm{}, fmt.Errorf("empty value list in %q", s)
 		}
-		return term{key: key, op: "=", values: []string{value}}, nil
+		return selectorTerm{key: key, op: opNotIn, values: vals}, nil
 	}
-	// plain "key"
-	if !validKey(s) {
-		return term{}, fmt.Errorf("invalid key %q", s)
+
+	// key!=value
+	if idx := strings.Index(s, "!="); idx >= 0 {
+		key := strings.TrimSpace(s[:idx])
+		val := strings.TrimSpace(s[idx+2:])
+		if key == "" || val == "" {
+			return selectorTerm{}, fmt.Errorf("empty key or value in %q", s)
+		}
+		// Reject doubled operators like "os!!=x" — "!=" is the only valid form.
+		if strings.Contains(key, "!") {
+			return selectorTerm{}, fmt.Errorf("unexpected operator in %q", s)
+		}
+		return selectorTerm{key: key, op: opNeq, values: []string{val}}, nil
 	}
-	return term{key: s, op: "exists"}, nil
+
+	// key=value
+	if idx := strings.Index(s, "="); idx >= 0 {
+		key := strings.TrimSpace(s[:idx])
+		val := strings.TrimSpace(s[idx+1:])
+		if key == "" || val == "" {
+			return selectorTerm{}, fmt.Errorf("empty key or value in %q", s)
+		}
+		return selectorTerm{key: key, op: opEq, values: []string{val}}, nil
+	}
+
+	// key — presence
+	// A key must be a single identifier — reject anything that looks like a
+	// broken compound (e.g. "os in linux" without parentheses).
+	if s != "" {
+		if strings.Contains(s, " ") {
+			return selectorTerm{}, fmt.Errorf("unexpected space in %q — is this a broken compound?", s)
+		}
+		return selectorTerm{key: s, op: opExists}, nil
+	}
+
+	return selectorTerm{}, fmt.Errorf("cannot parse %q", s)
 }
 
-// validKey reports whether k is a valid label key: non-empty, no whitespace,
-// no punctuation except hyphen and slash.
-func validKey(k string) bool {
-	if k == "" {
-		return false
-	}
-	for _, r := range k {
-		if r == ' ' || r == '!' || r == '=' || r == '(' || r == ')' || r == ',' {
-			return false
+func splitValues(s string) []string {
+	var vals []string
+	for _, v := range strings.Split(s, ",") {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			vals = append(vals, v)
 		}
 	}
-	return true
-}
-
-func parseIn(s, op string) (string, []string, error) {
-	idx := strings.Index(s, " "+op+" (")
-	if idx < 0 {
-		return "", nil, fmt.Errorf("expected 'key %s (values)'", op)
-	}
-	key := s[:idx]
-	if key == "" {
-		return "", nil, fmt.Errorf("empty key in %q", s)
-	}
-	rest := s[idx+len(" "+op+" ("):]
-	if !strings.HasSuffix(rest, ")") {
-		return "", nil, fmt.Errorf("unterminated %s list in %q", op, s)
-	}
-	list := rest[:len(rest)-1]
-	if list == "" {
-		return "", nil, fmt.Errorf("empty %s list", op)
-	}
-	values := strings.Split(list, ",")
-	for i, v := range values {
-		values[i] = strings.TrimSpace(v)
-		if values[i] == "" {
-			return "", nil, fmt.Errorf("empty value in %s list", op)
-		}
-	}
-	return key, values, nil
-}
-
-// Matches reports whether labels satisfy every term in the selector.
-func (s Selector) Matches(labels map[string]string) bool {
-	for _, t := range s.terms {
-		val, exists := labels[t.key]
-		switch t.op {
-		case "exists":
-			if !exists {
-				return false
-			}
-		case "notexists":
-			if exists {
-				return false
-			}
-		case "=":
-			if !exists || val != t.values[0] {
-				return false
-			}
-		case "!=":
-			if !exists || val != t.values[0] {
-				continue
-			}
-			return false
-		case "in":
-			if !exists {
-				return false
-			}
-			found := false
-			for _, v := range t.values {
-				if val == v {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return false
-			}
-		case "notin":
-			if !exists {
-				continue
-			}
-			for _, v := range t.values {
-				if val == v {
-					return false
-				}
-			}
-		}
-	}
-	return true
-}
-
-// Narrow returns the executors in parentSet that also satisfy child.
-// Used for intersecting a parent's effective executor set with a child's
-// selector — never replaced by a subset proof over selector text.
-func Narrow(parentSet []Executor, child Selector) []Executor {
-	var out []Executor
-	for _, e := range parentSet {
-		if child.Matches(e.Labels) {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-// Explain returns a human-readable explanation of the first failing term,
-// or "" when the selector matches.
-func (s Selector) Explain(labels map[string]string) string {
-	for _, t := range s.terms {
-		val, exists := labels[t.key]
-		switch t.op {
-		case "exists":
-			if !exists {
-				return fmt.Sprintf("no %s label", t.key)
-			}
-		case "notexists":
-			if exists {
-				return fmt.Sprintf("has %s label", t.key)
-			}
-		case "=":
-			if !exists {
-				return fmt.Sprintf("no %s label, wanted %s=%s", t.key, t.key, t.values[0])
-			}
-			if val != t.values[0] {
-				return fmt.Sprintf("%s=%s, wanted %s=%s", t.key, val, t.key, t.values[0])
-			}
-		case "!=":
-			if exists && val == t.values[0] {
-				return fmt.Sprintf("%s=%s, wanted %s!=%s", t.key, val, t.key, t.values[0])
-			}
-		case "in":
-			if !exists {
-				return fmt.Sprintf("no %s label, wanted %s in (%s)", t.key, t.key, strings.Join(t.values, ","))
-			}
-			found := false
-			for _, v := range t.values {
-				if val == v {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Sprintf("%s=%s, wanted %s in (%s)", t.key, val, t.key, strings.Join(t.values, ","))
-			}
-		case "notin":
-			if !exists {
-				continue
-			}
-			for _, v := range t.values {
-				if val == v {
-					return fmt.Sprintf("%s=%s, wanted %s notin (%s)", t.key, val, t.key, strings.Join(t.values, ","))
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// String returns the selector's text representation.
-func (s Selector) String() string {
-	if len(s.terms) == 0 {
-		return ""
-	}
-	parts := make([]string, len(s.terms))
-	for i, t := range s.terms {
-		switch t.op {
-		case "exists":
-			parts[i] = t.key
-		case "notexists":
-			parts[i] = "!" + t.key
-		case "=":
-			parts[i] = t.key + "=" + t.values[0]
-		case "!=":
-			parts[i] = t.key + "!=" + t.values[0]
-		case "in":
-			parts[i] = t.key + " in (" + strings.Join(t.values, ",") + ")"
-		case "notin":
-			parts[i] = t.key + " notin (" + strings.Join(t.values, ",") + ")"
-		}
-	}
-	return strings.Join(parts, ",")
+	return vals
 }

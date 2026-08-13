@@ -454,11 +454,12 @@ func runDaemon(opts runDaemonOpts) error {
 			os.Exit(1)
 		}
 		execStore := executors.NewPostgresStore(pool)
-		ctrl.execPool = execpool.New(execStore)
-		ctrl.execPool.SetOnLost(ctrl.HandleExecutorLost)
+		execPool := execpool.New(execStore)
+		execPool.SetOnLost(ctrl.HandleExecutorLost)
+		ctrl.execPool = execPool
 		go func() {
 			slog.Info("executor pool listening", "addr", el)
-			if err := ctrl.execPool.Serve(execLn); err != nil {
+			if err := execPool.Serve(execLn); err != nil {
 				slog.Error("executor pool serve", "error", err)
 			}
 		}()
