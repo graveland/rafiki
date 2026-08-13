@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -159,6 +160,27 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if err != nil {
 		return fundi.RuntimeOptions{}, err
 	}
+
+	// Provision workspace when using a label-selected executor.
+	if req.ExecutorSelector != "" && c.execPool != nil {
+		execID, _, selErr := c.selectExecutorID(req)
+		if selErr == nil {
+			wsID, wsRoots, wsExec, wsErr := c.provisionWorkspace(context.Background(), req, execID)
+			if wsErr != nil {
+				return fundi.RuntimeOptions{}, fmt.Errorf("workspace: %w", wsErr)
+			}
+			exec = wsExec
+			c.wsLabelsMu.Lock()
+			if c.wsLabels == nil {
+				c.wsLabels = make(map[string]workspaceLabels)
+			}
+			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID}
+			c.wsLabelsMu.Unlock()
+			// Phase 09 reads roots for prompt visibility.
+			_ = wsRoots
+		}
+	}
+
 	ro.Executor = exec
 	return ro, nil
 }
