@@ -349,6 +349,20 @@ the client sees the response, the child is fully ready for `ctrl_send`.
                                             // invalid_args when over or unreadable.
   "maxChildren":         4,                // live descendant cap; default 4. Zero blocks
                                             // every spawn beneath this child.
+
+  // Executor grant (the entire model-facing grant — a selector, not a path)
+  "executorSelector":    null,             // label selector over executor labels,
+                                            // e.g. "env=work,os=linux". Intersected with
+                                            // the parent's effective executor set, so it
+                                            // can only ever narrow. A spawn matching
+                                            // nothing is refused naming the excluding
+                                            // predicate per candidate; it does not queue.
+  "workspaceMode":       null,             // "ephemeral" or "pinned". Empty = pinned.
+                                            // Decides whether the child can be rescheduled
+                                            // when its executor goes away. The resolved
+                                            // assignment (executor, isolation, roots,
+                                            // read-only roots) is written into the
+                                            // child's system prompt at spawn.
 }
 ```
 

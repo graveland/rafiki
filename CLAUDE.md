@@ -117,3 +117,25 @@
   returns a child-scoped one.** A workspaced child handed the shared client
   runs its tools in whatever workspace the previous caller used — a cross-child
   leak no test catches, because both children see plausible files either way.
+
+- **The model-facing executor grant is exactly two fields — a label selector and
+  a workspace mode — and must stay that way.** `agent_spawn` has a test
+  asserting no path-shaped parameter exists (`TestAgentSpawnHasNoPathShapedParameter`).
+  Mounts are derived by the daemon from the child's worktree
+  (`pkg/workspace.Derive`); the moment a caller can contribute a path, grants
+  stop being safe to author without human review, which is the property the
+  whole selector model exists to buy.
+
+- **The workspace block belongs in the system prompt's ENVIRONMENT section,
+  never in `defaultBasePrompt`.** It varies between children, and
+  `BuildSystemPrompt`'s ordering comment explains why anything that varies must
+  follow the cacheable sections — rafiki's prompt-cache breakpoint sits over the
+  tools+system prefix. A native, unsandboxed agent gets no block at all.
+
+- **Two protocols must stay conceptually coherent with nothing enforcing it:**
+  `pkg/protocol`'s framed JSON for daemon↔client and Connect/protobuf for
+  daemon↔executor. This repo already has a documented history of cross-boundary
+  constants drifting (`APP_NAME` across Go and TypeScript; the `RAFIKI_*` names
+  kept in sync by a comment). Expect the same class of bug between these two and
+  do not rely on a compiler to catch it — when you change a workspace or
+  isolation value on one side, grep the other.
