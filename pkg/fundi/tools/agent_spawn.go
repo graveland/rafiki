@@ -48,6 +48,17 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 				Description: "USD budget for this agent and everything it spawns. Omit to inherit no limit — but if you are coordinating, set one."},
 			{Name: "max_children", Type: "integer",
 				Description: "How many agents may be alive beneath it at once. Default 4."},
+			{Name: "executor", Type: "string",
+				Description: "Where to run this agent, as a label selector over machines " +
+					"(e.g. \"env=work,os=linux\"). Omit to use the same machines you can. " +
+					"You can only ever narrow: a selector naming a machine you cannot reach " +
+					"is refused, and the refusal says which machine and why."},
+			{Name: "workspace", Type: "string",
+				Description: "\"ephemeral\" gives the agent a fresh, isolated checkout that can " +
+					"be rebuilt elsewhere if its machine goes away — right for unattended " +
+					"workers. \"pinned\" puts it in an existing working tree on one specific " +
+					"machine, so it sees your uncommitted changes but cannot be moved. " +
+					"Default: pinned."},
 		},
 		Required: []string{"prompt"},
 	}
@@ -81,6 +92,8 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		MaxDepth    *int     `json:"max_depth,omitempty"`
 		MaxCost     *float64 `json:"max_cost,omitempty"`
 		MaxChildren *int     `json:"max_children,omitempty"`
+		Executor    string   `json:"executor,omitempty"`
+		Workspace   string   `json:"workspace,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: invalid input: %w", err)
@@ -96,18 +109,27 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		cwd = t.cwd
 	}
 
+	// An unknown workspace mode is refused at the tool, not silently defaulted.
+	// "ephemeral" and "pinned" mean genuinely different things about whether
+	// the worker's uncommitted work can survive a machine going away.
+	if params.Workspace != "" && params.Workspace != "ephemeral" && params.Workspace != "pinned" {
+		return ToolResult{}, fmt.Errorf("agent_spawn: unknown workspace mode %q — must be \"ephemeral\" or \"pinned\"", params.Workspace)
+	}
+
 	// SpawnSpec carries no parent. The implementation supplies the caller's
 	// own id, which it closed over at construction.
 	info, err := t.agents.Spawn(ctx, SpawnSpec{
-		Name:        params.Name,
-		Model:       params.Model,
-		Cwd:         cwd,
-		Prompt:      params.Prompt,
-		Task:        params.Task,
-		Kind:        params.Kind,
-		MaxDepth:    params.MaxDepth,
-		MaxCost:     params.MaxCost,
-		MaxChildren: params.MaxChildren,
+		Name:             params.Name,
+		Model:            params.Model,
+		Cwd:              cwd,
+		Prompt:           params.Prompt,
+		Task:             params.Task,
+		Kind:             params.Kind,
+		MaxDepth:         params.MaxDepth,
+		MaxCost:          params.MaxCost,
+		MaxChildren:      params.MaxChildren,
+		ExecutorSelector: params.Executor,
+		WorkspaceMode:    params.Workspace,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)

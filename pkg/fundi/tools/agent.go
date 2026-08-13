@@ -56,6 +56,16 @@ type SpawnSpec struct {
 	MaxDepth    *int
 	MaxCost     *float64
 	MaxChildren *int
+
+	// ExecutorSelector is a label selector over EXECUTOR labels. The
+	// controller intersects it with the spawner's own effective set, so this
+	// can only ever narrow — a child cannot reach an executor its parent
+	// could not, whatever this says.
+	ExecutorSelector string
+	// WorkspaceMode is "ephemeral" or "pinned". It decides whether the child
+	// can be rescheduled when its machine goes away, which is the only reason
+	// the model is asked about it at all.
+	WorkspaceMode string
 }
 
 // AgentSpawner is the daemon-side capability behind the agent_* tools.

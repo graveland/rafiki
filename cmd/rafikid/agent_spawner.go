@@ -205,6 +205,8 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		MaxDepth:              spec.MaxDepth,
 		MaxCost:               spec.MaxCost,
 		MaxChildren:           spec.MaxChildren,
+		ExecutorSelector:      spec.ExecutorSelector,
+		WorkspaceMode:         spec.WorkspaceMode,
 	}
 	res, err := s.c.Spawn(ctx, req)
 	if err != nil {
