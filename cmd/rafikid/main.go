@@ -420,7 +420,16 @@ func runDaemon(opts runDaemonOpts) error {
 
 	st := childstore.New()
 	dumper := persist.NewLogDumper(logsDir, persist.ModeOnExit)
-	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx)
+
+	// The executor store backs both the control-plane verbs (enroll/list/
+	// label/disable) and the reverse-dial listener's authentication. Build it
+	// once, up front, when the listener is configured; both consumers share it.
+	var execStore executors.Store
+	if paths.Get(paths.ExecutorListen) != "" && pool != nil {
+		execStore = executors.NewPostgresStore(pool)
+	}
+
+	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore)
 	ctrl.wireEventBuffer() // a no-op until evbuf is populated (Task 4)
 	ctrl.SetCatalog(catalog)
 	if face != nil {
@@ -453,7 +462,6 @@ func runDaemon(opts runDaemonOpts) error {
 			slog.Error("executor listener failed", "addr", el, "error", err)
 			os.Exit(1)
 		}
-		execStore := executors.NewPostgresStore(pool)
 		execPool := execpool.New(execStore)
 		execPool.SetOnLost(ctrl.HandleExecutorLost)
 		ctrl.execPool = execPool

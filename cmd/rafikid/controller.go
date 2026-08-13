@@ -126,6 +126,10 @@ type Controller struct {
 	// executor listener is not configured.
 	execPool executorPool
 
+	// execStore is the durable executor registry. Nil when the executor
+	// listener is not configured (require the pool to mint tokens).
+	execStore executors.Store
+
 	// wsLabels holds workspace IDs and executor IDs provisioned for children
 	// whose spawn is in flight. Keyed by childID; set by agentRunner before
 	// Spawn builds the store record, consumed by Spawn for label insertion
@@ -175,7 +179,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	}
 }
 
-func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *routing.RawTraceStore, baseCtx context.Context) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *routing.RawTraceStore, baseCtx context.Context, execStore executors.Store) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -198,6 +202,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		baseCtx:     baseCtx,
 		tasks:       taskStore(pool),
 		evbuf:       newEventBuffer(),
+		execStore:   execStore,
 	}
 	// Wire the coster only when there is a database: without one every
 	// budgeted spawn fails closed (which is what checkBudget does when
@@ -3251,44 +3256,95 @@ func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest)
 	return c.tasks.List(ctx, f)
 }
 
-// ─── Executor stubs ─────────────────────────────────────────────────────────
+// ─── Executor management ────────────────────────────────────────────────────
+
+// requireExecutorStore returns a ControllerError when the executor store is
+// nil — controller methods call this so the error message names one condition
+// instead of five places that must all agree on wording.
+func (c *Controller) requireExecutorStore() error {
+	if c.execStore == nil {
+		return &control.ControllerError{
+			Code:    protocol.ErrInternal,
+			Message: "no executor store configured (requires RAFIKI_DB and RAFIKI_EXECUTOR_LISTEN)",
+		}
+	}
+	return nil
+}
 
 // ExecutorEnroll mints a one-time enrollment token.
 func (c *Controller) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
-	return protocol.ExecutorEnrollResponseData{}, &control.ControllerError{
-		Code:    protocol.ErrInternal,
-		Message: "executor enrollment not yet implemented (requires DB-backed executor store)",
+	if err := c.requireExecutorStore(); err != nil {
+		return protocol.ExecutorEnrollResponseData{}, err
 	}
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = 72 * time.Hour
+	}
+	token, err := c.execStore.MintToken(context.Background(), executors.NewToken{
+		Labels:        req.Labels,
+		Roots:         req.Roots,
+		Isolation:     req.Isolation,
+		WorkspaceMode: req.WorkspaceMode,
+		Admits:        req.Admits,
+		ExpiresAt:     time.Now().Add(ttl),
+	})
+	if err != nil {
+		return protocol.ExecutorEnrollResponseData{}, &control.ControllerError{
+			Code:    protocol.ErrInternal,
+			Message: "mint token: " + err.Error(),
+		}
+	}
+	return protocol.ExecutorEnrollResponseData{Token: token}, nil
 }
 
-// ExecutorList returns enrolled executors.
+// ExecutorList returns enrolled executors, optionally filtered.
 func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error) {
-	return nil, &control.ControllerError{
-		Code:    protocol.ErrInternal,
-		Message: "executor listing not yet implemented (requires DB-backed executor store)",
+	if err := c.requireExecutorStore(); err != nil {
+		return nil, err
 	}
+	execs, err := c.execStore.List(context.Background())
+	if err != nil {
+		return nil, &control.ControllerError{Code: protocol.ErrInternal, Message: err.Error()}
+	}
+	if req.Selector != "" {
+		sel, pErr := executors.ParseSelector(req.Selector)
+		if pErr != nil {
+			return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: pErr.Error()}
+		}
+		var filtered []executors.Executor
+		for _, e := range execs {
+			if sel.Matches(e.Labels) {
+				filtered = append(filtered, e)
+			}
+		}
+		execs = filtered
+	}
+	if req.Limit > 0 && len(execs) > req.Limit {
+		execs = execs[:req.Limit]
+	}
+	return execs, nil
 }
 
 // ExecutorLabel sets or removes labels on an executor row.
 func (c *Controller) ExecutorLabel(req protocol.ExecutorLabelRequest) (executors.Executor, error) {
-	return executors.Executor{}, &control.ControllerError{
-		Code:    protocol.ErrInternal,
-		Message: "executor labels not yet implemented (requires DB-backed executor store)",
+	if err := c.requireExecutorStore(); err != nil {
+		return executors.Executor{}, err
 	}
+	return c.execStore.SetLabels(context.Background(), req.ExecutorID, req.Set, req.Remove)
 }
 
 // ExecutorDisable disables an executor.
 func (c *Controller) ExecutorDisable(req protocol.ExecutorDisableRequest) error {
-	return &control.ControllerError{
-		Code:    protocol.ErrInternal,
-		Message: "executor disable not yet implemented (requires DB-backed executor store)",
+	if err := c.requireExecutorStore(); err != nil {
+		return err
 	}
+	return c.execStore.SetEnabled(context.Background(), req.ExecutorID, false)
 }
 
 // ExecutorEnable re-enables a disabled executor.
 func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
-	return &control.ControllerError{
-		Code:    protocol.ErrInternal,
-		Message: "executor enable not yet implemented (requires DB-backed executor store)",
+	if err := c.requireExecutorStore(); err != nil {
+		return err
 	}
+	return c.execStore.SetEnabled(context.Background(), req.ExecutorID, true)
 }
