@@ -279,6 +279,46 @@ reaped.
 
 See `docs/reference/executor-protocol.md` for the full wire protocol.
 
+### Container executors
+
+An executor can start containers — per-child, with bind mounts that *are* the
+child's grant, derived mechanically by the daemon from the worktree assignment.
+The model never writes a path.
+
+```
+rafiki-executor --isolation container --image alpine:3.19 --workspace-mode ephemeral
+```
+
+**Mounts:** the worktree is mounted read-write at `/work`; the repo is mounted
+read-only at `/repo` (when the worktree is inside a repo). Network defaults to
+`none` — an unattended worker that does not need egress should not have it.
+
+**No path vocabulary.** There is no way to restrict a worker to a subtree of
+its worktree, by design. For container executors, docker mounts express the
+ro/rw model exactly and the kernel enforces it. For native executors, path
+scoping would be fake in the only place it matters: the file tools could
+enforce structured path arguments in userspace, but `bash` could not. Native
+access is gated by **admission** (label-selection), not by paths.
+
+**The macOS caveat:** docker on macOS is a Linux VM, so a containerised
+executor means the agent works on Linux — different toolchain, different
+caches, bind-mount I/O that is not native-fast. Fine for rafiki (pure Go,
+cross-compiles); likely wrong for a Rust/Zig/ESP toolchain.
+
+### Workspace lifecycle
+
+Each child gets a workspace provisioned before it starts and released when it
+exits:
+
+- **ephemeral**: the executor constructs the workspace per child. It is
+  reconstructible, so the child can be rescheduled to another executor if
+  the first one is lost.
+- **pinned**: the executor exposes an existing tree. If the executor is lost,
+  the child is parked until it returns or the timeout expires.
+
+This distinction is what the park-vs-fail decision consults when an executor
+goes away.
+
 ## Subagents
 
 A fundi agent can spawn and steer its own descendants through six tools:
