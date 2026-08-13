@@ -272,3 +272,59 @@ func TestSteeringVerbsRequireAnAgentID(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentSpawnPassesTheExecutorGrantThrough(t *testing.T) {
+	sp := &fakeSpawner{nextID: "c_worker"}
+	reg, ctx := newAgentTools(t, sp)
+	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
+		`{"prompt":"build it","executor":"env=work,os=linux","workspace":"ephemeral"}`)); err != nil {
+		t.Fatalf("agent_spawn: %v", err)
+	}
+	got := sp.spawned[0]
+	if got.ExecutorSelector != "env=work,os=linux" {
+		t.Errorf("selector = %q", got.ExecutorSelector)
+	}
+	if got.WorkspaceMode != "ephemeral" {
+		t.Errorf("workspace = %q", got.WorkspaceMode)
+	}
+}
+
+// The entire model-facing grant is a selector and a mode. Nothing path-shaped
+// survives on the model-facing side — a coordinator choosing labels cannot
+// make the subtle mistakes a coordinator composing path allowlists would, and
+// that property is what makes grants safe to author without human review.
+func TestAgentSpawnHasNoPathShapedParameter(t *testing.T) {
+	schema := AgentSpawnBlueprint{}.InputSchema()
+	for _, p := range schema.Properties {
+		switch p.Name {
+		case "mount", "mounts", "roots", "path", "paths", "volume", "allow", "deny":
+			t.Errorf("agent_spawn grew a path-shaped parameter %q; the grant is a selector and a mode", p.Name)
+		}
+	}
+}
+
+// An unknown workspace mode is refused at the tool, not silently defaulted.
+// "ephemeral" and "pinned" mean genuinely different things about whether the
+// worker's uncommitted work can survive a machine going away.
+func TestUnknownWorkspaceModeIsRefused(t *testing.T) {
+	reg, ctx := newAgentTools(t, &fakeSpawner{})
+	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
+		`{"prompt":"x","workspace":"whatever"}`))
+	if err == nil {
+		t.Fatal("an unrecognised workspace mode must be refused")
+	}
+	if !strings.Contains(err.Error(), "ephemeral") || !strings.Contains(err.Error(), "pinned") {
+		t.Errorf("the refusal must name the valid values: %v", err)
+	}
+}
+
+// A malformed selector must fail at spawn with a message about the selector —
+// not later, as a mysterious no-match.
+func TestMalformedSelectorIsRefusedWithItsOwnMessage(t *testing.T) {
+	sp := &fakeSpawner{spawnErr: errors.New(`invalid executor selector "os in": ...`)}
+	reg, ctx := newAgentTools(t, sp)
+	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"prompt":"x","executor":"os in"}`))
+	if err == nil || !strings.Contains(err.Error(), "selector") {
+		t.Fatalf("got %v", err)
+	}
+}
