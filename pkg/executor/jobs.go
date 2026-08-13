@@ -197,3 +197,17 @@ func (r *jobRegistry) running() []string {
 	}
 	return handles
 }
+
+// killAll kills every registered job. Used when a workspace is released — a
+// background job in a removed container is not a job, and reporting it as
+// running is worse than reporting it gone.
+func (r *jobRegistry) killAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for handle, j := range r.jobs {
+		if j.cmd.Process != nil {
+			_ = j.cmd.Process.Kill()
+		}
+		delete(r.jobs, handle)
+	}
+}
