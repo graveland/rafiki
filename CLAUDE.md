@@ -95,3 +95,25 @@
   parent's is decidable for equality matches and a logic puzzle the moment
   `notin` appears — and it fails OPEN, which is the wrong direction for a
   confidentiality boundary.
+
+- **Container mounts ARE the grant, and the daemon derives them — nothing
+  model-facing contributes a path.** `pkg/workspace.Derive` takes a cwd and a
+  mode, and that signature is the enforcement: a coordinator choosing labels
+  and a workspace mode cannot make the subtle mistakes a coordinator composing
+  path allowlists would. Do not add a caller-supplied mount list. Note the
+  matching asymmetry for NATIVE executors: path scoping there is deliberately
+  absent, because the file tools could enforce it and `bash` could not, and a
+  scope that evaporates on the first shell command is worse than none — native
+  access is gated by admission, not by paths.
+
+- **`RepoRoot` must use `--git-common-dir`, never `--show-toplevel`.** Inside a
+  linked worktree `--show-toplevel` returns the worktree, which makes every
+  worktree its own repo and turns the read-only `/repo` mount into a duplicate
+  of `/work` — silently removing the read-only half of the grant. This is what
+  migration 0013's "repo_root groups worktrees of one repo; cwd alone does
+  not" is about.
+
+- **`Pool.ClientFor` returns a connection-scoped client; `ClientForWorkspace`
+  returns a child-scoped one.** A workspaced child handed the shared client
+  runs its tools in whatever workspace the previous caller used — a cross-child
+  leak no test catches, because both children see plausible files either way.
