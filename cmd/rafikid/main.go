@@ -455,6 +455,7 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 		execStore := executors.NewPostgresStore(pool)
 		ctrl.execPool = execpool.New(execStore)
+		ctrl.execPool.SetOnLost(ctrl.HandleExecutorLost)
 		go func() {
 			slog.Info("executor pool listening", "addr", el)
 			if err := ctrl.execPool.Serve(execLn); err != nil {

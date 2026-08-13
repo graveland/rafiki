@@ -174,7 +174,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			if c.wsLabels == nil {
 				c.wsLabels = make(map[string]workspaceLabels)
 			}
-			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID}
+			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID, mode: "ephemeral"}
 			c.wsLabelsMu.Unlock()
 			// Phase 09 reads roots for prompt visibility.
 			_ = wsRoots

@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -111,3 +114,104 @@ func (c *Controller) selectExecutorID(req protocol.SpawnRequest) (id string, cl 
 
 	return "", nil, fmt.Errorf("spawn refused: no executor satisfies %q", req.ExecutorSelector)
 }
+
+// HandleExecutorLost is called by the exec pool when a parked executor's
+// timeout expires and it is declared permanently lost. For each child on the
+// lost executor, it either re-provisions (ephemeral) or fails (pinned).
+func (c *Controller) HandleExecutorLost(lostID string) {
+	slog.Warn("executor lost — handling children", "executorId", lostID[:12])
+
+	live := c.execPool.Live()
+	children := c.st.List()
+
+	for _, snap := range children {
+		if snap.Labels["rafiki/executor"] != lostID {
+			continue
+		}
+		wsID := snap.Labels["rafiki/workspace"]
+		if wsID == "" {
+			continue
+		}
+
+		// Check the workspace mode from the child's labels.
+		mode := snap.Labels["rafiki/workspace-mode"]
+		if mode == "" {
+			mode = "ephemeral"
+		}
+
+		// Release the dead workspace first.
+		c.releaseWorkspace(context.Background(), lostID, wsID)
+
+		if mode == "pinned" {
+			// Pinned children cannot move — fail them.
+			slog.Warn("pinned child lost with executor",
+				"childId", snap.ChildID, "executorId", lostID[:12])
+			c.failChild(snap.ChildID, "executor lost — pinned workspace cannot be rescheduled")
+			continue
+		}
+
+		// Ephemeral: try to re-provision on another matching executor.
+		if !c.tryReschedule(snap, live) {
+			slog.Error("ephemeral child cannot be rescheduled — no matching executor",
+				"childId", snap.ChildID)
+			c.failChild(snap.ChildID, "executor lost — no matching executor available for reschedule")
+		}
+	}
+}
+
+// tryReschedule attempts to re-provision an ephemeral child on another
+// matching executor. Returns true on success.
+func (c *Controller) tryReschedule(snap childstore.Snapshot, live []execpool.LiveExecutor) bool {
+	if len(live) == 0 {
+		return false
+	}
+
+	// Re-provision on the first available matching executor.
+	// In a real implementation this would match the child's original selector.
+	for _, le := range live {
+		if le.Describe.WorkspaceMode == "ephemeral" {
+			wsID, _, _, err := c.provisionWorkspace(context.Background(),
+				protocol.SpawnRequest{Cwd: snap.Cwd}, le.Executor.ID)
+			if err != nil {
+				slog.Warn("reschedule provision failed",
+					"childId", snap.ChildID, "executorId", le.Executor.ID[:12], "error", err)
+				continue
+			}
+
+			// Update the child's store labels with the new workspace.
+			c.st.SetLabels(snap.ChildID, map[string]string{
+				"rafiki/workspace": wsID,
+				"rafiki/executor":  le.Executor.ID,
+			}, nil)
+
+			// Steer the child about its new workspace.
+			c.sendSteer(snap.ChildID, rescheduleSteer)
+
+			slog.Info("rescheduled child on new executor",
+				"childId", snap.ChildID, "newExecutorId", le.Executor.ID[:12])
+			return true
+		}
+	}
+	return false
+}
+
+// failChild sends a fatal steer to the child and transitions it to failed.
+func (c *Controller) failChild(childID, reason string) {
+	c.sendSteer(childID, reason)
+	// Best-effort: the steer tells the child it's done.
+	// Force-kill after a short grace period.
+	time.AfterFunc(10*time.Second, func() {
+		c.Kill(context.Background(), childID, 5000, 1000)
+	})
+}
+
+// sendSteer injects a steer message into the child's event stream.
+func (c *Controller) sendSteer(childID, message string) {
+	if c.evbuf != nil {
+		c.evbuf.PushSteer(childID, "executor", message)
+	}
+}
+
+const rescheduleSteer = `YOUR WORKSPACE WAS REBUILT on a different machine. The previous one is gone.
+Anything you had NOT committed is lost. Re-check the state of the working tree
+before continuing, and do not report as done anything you cannot now see.`
