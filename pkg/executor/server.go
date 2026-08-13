@@ -31,23 +31,40 @@ type Options struct {
 	Concurrency int
 	// Version is the executor build version, reported in Describe.
 	Version string
+	// Isolation is what this executor can actually provide: "none" (native)
+	// or "container". Reported in Describe and used to reject a Provision it
+	// cannot honour.
+	Isolation string
+	// WorkspaceMode is "pinned" (expose an existing tree) or "ephemeral"
+	// (construct one). A native executor is always pinned.
+	WorkspaceMode string
+	// Image is the container image for isolation=container.
+	Image string
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
 type Server struct {
 	executorpbconnect.UnimplementedExecutorServiceHandler
-	id     string
-	opts   Options
-	labels map[string]string
-	reg    *tools.Registry
-	jobs   *jobRegistry
-	sem    chan struct{} // bounds concurrent Execute calls
+	id      string
+	opts    Options
+	labels  map[string]string
+	reg     *tools.Registry
+	jobs    *jobRegistry
+	sem     chan struct{} // bounds concurrent Execute calls
+	backend Backend
+	wsReg   *workspaceRegistry
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
 func NewServer(opts Options) *Server {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 6
+	}
+	if opts.Isolation == "" {
+		opts.Isolation = "none"
+	}
+	if opts.WorkspaceMode == "" {
+		opts.WorkspaceMode = "pinned"
 	}
 	tr := tools.NewFileTracker()
 	// MaterializeOnly, not MaterializeAll: the full blueprint would give the
@@ -62,9 +79,11 @@ func NewServer(opts Options) *Server {
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
-		reg:  reg,
-		jobs: newJobRegistry(),
-		sem:  make(chan struct{}, opts.Concurrency),
+		reg:     reg,
+		jobs:    newJobRegistry(),
+		sem:     make(chan struct{}, opts.Concurrency),
+		backend: resolveBackend(opts),
+		wsReg:   newWorkspaceRegistry(),
 	}
 }
 
@@ -77,8 +96,8 @@ func (s *Server) Describe(
 		Platform:           runtime.GOOS + "/" + runtime.GOARCH,
 		Roots:              []string{s.opts.Root},
 		Concurrency:        int32(s.opts.Concurrency),
-		Isolation:          "none",
-		WorkspaceMode:      "pinned",
+		Isolation:          s.opts.Isolation,
+		WorkspaceMode:      s.opts.WorkspaceMode,
 		Tools:              tools.RoutedToExecutor(),
 		Version:            s.opts.Version,
 		SelfReportedLabels: s.labels,
@@ -100,6 +119,54 @@ func (s *Server) Health(
 	}), nil
 }
 
+func (s *Server) Provision(
+	_ context.Context,
+	req *connect.Request[executorpb.ProvisionRequest],
+) (*connect.Response[executorpb.ProvisionResponse], error) {
+	msg := req.Msg
+	if msg.WorkspaceMode != s.opts.WorkspaceMode {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("provision: this executor is %s; cannot honour workspace_mode=%q",
+				s.opts.WorkspaceMode, msg.WorkspaceMode))
+	}
+	ws, err := s.backend.Provision(context.Background(), msg)
+	if err != nil {
+		return nil, err
+	}
+	s.wsReg.put(ws)
+	return connect.NewResponse(&executorpb.ProvisionResponse{
+		WorkspaceId: ws.id,
+		Roots:       ws.roots,
+		Workdir:     ws.workdir,
+		Isolation:   ws.isolation,
+	}), nil
+}
+
+func (s *Server) Release(
+	_ context.Context,
+	req *connect.Request[executorpb.ReleaseRequest],
+) (*connect.Response[executorpb.ReleaseResponse], error) {
+	id := req.Msg.WorkspaceId
+	ws, ok := s.wsReg.get(id)
+	if ok {
+		_ = s.backend.Release(context.Background(), ws)
+		s.wsReg.remove(id)
+	}
+	// Idempotent: release a non-existent workspace without error.
+	return connect.NewResponse(&executorpb.ReleaseResponse{}), nil
+}
+
+// resolveBackend returns a Backend for the given options.
+func resolveBackend(opts Options) Backend {
+	switch opts.Isolation {
+	case "container":
+		// Task 4 provides this.
+		return newNativeBackend(opts.Root) // placeholder
+	default:
+		return newNativeBackend(opts.Root)
+	}
+}
+
 func (s *Server) Execute(
 	ctx context.Context,
 	req *connect.Request[executorpb.ExecuteRequest],
@@ -107,9 +174,27 @@ func (s *Server) Execute(
 ) error {
 	msg := req.Msg
 
+	// Look up the workspace. An empty workspace_id means the executor's own
+	// root — the pre-phase-08 compatibility path.
+	var ws *workspace
+	if msg.WorkspaceId != "" {
+		var ok bool
+		ws, ok = s.wsReg.get(msg.WorkspaceId)
+		if !ok {
+			return stream.Send(&executorpb.ExecuteResponse{
+				Event: &executorpb.ExecuteResponse_Failed{
+					Failed: &executorpb.Failure{
+						Code:    executorpb.Failure_CODE_EXECUTOR_LOST,
+						Message: fmt.Sprintf("unknown workspace %q", msg.WorkspaceId),
+					},
+				},
+			})
+		}
+	}
+
 	// Background bash — start a job, return a handle immediately.
 	if msg.Background && msg.Tool == "bash" {
-		return s.startBackground(ctx, msg, stream)
+		return s.startBackground(ctx, msg, ws, stream)
 	}
 
 	// Bound concurrent tool calls. Describe advertises Options.Concurrency
@@ -204,6 +289,7 @@ func (s *Server) Execute(
 func (s *Server) startBackground(
 	ctx context.Context,
 	msg *executorpb.ExecuteRequest,
+	ws *workspace,
 	stream *connect.ServerStream[executorpb.ExecuteResponse],
 ) error {
 	var in struct {
@@ -225,8 +311,12 @@ func (s *Server) startBackground(
 		handle = randomID()
 	}
 
+	cwd := s.opts.Root
+	if ws != nil {
+		cwd = ws.workdir
+	}
 	cmd := exec.CommandContext(context.Background(), "bash", "-c", in.Command)
-	cmd.Dir = s.opts.Root
+	cmd.Dir = cwd
 	if err := s.jobs.start(cmd, handle); err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{

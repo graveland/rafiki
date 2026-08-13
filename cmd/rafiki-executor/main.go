@@ -35,6 +35,9 @@ func main() {
 	enrollToken := flag.String("enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"), "one-time enrollment token, required on first connect")
 	credentialFile := flag.String("credential-file", "", "path the durable credential is stored at after enrollment")
 	pinnedFingerprint := flag.String("pin-cert", "", "SHA-256 fingerprint of rafikid's leaf certificate")
+	isolation := flag.String("isolation", "none", "isolation this executor provides: none|container")
+	workspaceMode := flag.String("workspace-mode", "pinned", "pinned (expose --root) or ephemeral (construct per child)")
+	image := flag.String("image", "", "container image for --isolation container")
 	flag.Parse()
 
 	if *socketPath != "" && *connectAddr != "" {
@@ -44,6 +47,14 @@ func main() {
 	if *socketPath == "" && *connectAddr == "" {
 		fmt.Fprintln(os.Stderr, "error: one of --socket or --connect is required")
 		flag.Usage()
+		os.Exit(2)
+	}
+	if *isolation == "container" && *image == "" {
+		fmt.Fprintln(os.Stderr, "error: --isolation container requires --image")
+		os.Exit(2)
+	}
+	if *isolation == "none" && *workspaceMode == "ephemeral" {
+		fmt.Fprintln(os.Stderr, "error: --isolation none does not support --workspace-mode ephemeral")
 		os.Exit(2)
 	}
 
@@ -66,9 +77,12 @@ func main() {
 	}
 
 	srv := executor.NewServer(executor.Options{
-		Root:        wd,
-		Concurrency: *concurrency,
-		Version:     version,
+		Root:          wd,
+		Concurrency:   *concurrency,
+		Version:       version,
+		Isolation:     *isolation,
+		WorkspaceMode: *workspaceMode,
+		Image:         *image,
 	})
 
 	mux := http.NewServeMux()
