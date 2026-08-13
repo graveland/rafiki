@@ -73,8 +73,9 @@ func NewServer(opts Options) *Server {
 		Cwd:         opts.Root,
 		FileTracker: tr,
 	}, tools.ExecutorLocalTools())
+	executorID := randomID()
 	return &Server{
-		id:   randomID(),
+		id:   executorID,
 		opts: opts,
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
@@ -82,7 +83,7 @@ func NewServer(opts Options) *Server {
 		reg:     reg,
 		jobs:    newJobRegistry(),
 		sem:     make(chan struct{}, opts.Concurrency),
-		backend: resolveBackend(opts),
+		backend: resolveBackend(opts, executorID),
 		wsReg:   newWorkspaceRegistry(),
 	}
 }
@@ -157,11 +158,10 @@ func (s *Server) Release(
 }
 
 // resolveBackend returns a Backend for the given options.
-func resolveBackend(opts Options) Backend {
+func resolveBackend(opts Options, executorID string) Backend {
 	switch opts.Isolation {
 	case "container":
-		// Task 4 provides this.
-		return newNativeBackend(opts.Root) // placeholder
+		return newContainerBackend(opts.Image, executorID)
 	default:
 		return newNativeBackend(opts.Root)
 	}
@@ -243,7 +243,20 @@ func (s *Server) Execute(
 	}
 
 	name := msg.Tool
-	resultStr, err := s.reg.Execute(ctx, name, json.RawMessage(msg.InputJson))
+
+	// When a workspace is set and the tool is bash, run it through the
+	// workspace's exec function — for containers this is docker exec,
+	// for native backends it's a direct local exec. Other tools (read,
+	// write, edit, glob, grep) still use the in-process registry whose
+	// Cwd is the executor root; they work correctly on the native backend
+	// and on containers where the executor root is bind-mounted.
+	var resultStr string
+	var err error
+	if ws != nil && name == "bash" {
+		resultStr, err = s.executeBashInWorkspace(ctx, ws, json.RawMessage(msg.InputJson))
+	} else {
+		resultStr, err = s.reg.Execute(ctx, name, json.RawMessage(msg.InputJson))
+	}
 
 	// Check the deadline before the tool's own error, and even when the
 	// tool reports success: bash specifically treats a killed-by-context
@@ -445,4 +458,23 @@ func randomID() string {
 		return "fallback"
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// executeBashInWorkspace runs a bash command through the workspace's exec
+// function — for containers this goes through docker exec, for native
+// backends through a direct local exec.
+func (s *Server) executeBashInWorkspace(ctx context.Context, ws *workspace, input json.RawMessage) (string, error) {
+	var in struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(input, &in); err != nil || in.Command == "" {
+		return "", fmt.Errorf("bash requires a command")
+	}
+
+	cmd := ws.exec(ctx, []string{"sh", "-c", in.Command})
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), nil // bash errors are content, not failures
+	}
+	return string(out), nil
 }
