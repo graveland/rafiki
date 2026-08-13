@@ -138,6 +138,7 @@ type Controller struct {
 type workspaceLabels struct {
 	workspaceID string
 	executorID  string
+	mode        string // "ephemeral" or "pinned"
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -767,6 +768,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		if wl, ok := c.wsLabels[childID]; ok {
 			initLabels["rafiki/workspace"] = wl.workspaceID
 			initLabels["rafiki/executor"] = wl.executorID
+			initLabels["rafiki/workspace-mode"] = wl.mode
 			delete(c.wsLabels, childID)
 		}
 	}
