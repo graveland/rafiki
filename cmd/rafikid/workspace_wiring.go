@@ -9,7 +9,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
-	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/workspace"
@@ -22,7 +22,7 @@ import (
 func (c *Controller) provisionWorkspace(
 	ctx context.Context,
 	req protocol.SpawnRequest, executorID string,
-) (workspaceID string, roots []string, exec tools.ExecutorClient, err error) {
+) (workspaceID string, wi *fundi.WorkspaceInfo, exec tools.ExecutorClient, err error) {
 	pool := c.execPool
 	if pool == nil {
 		return "", nil, nil, nil
@@ -45,17 +45,21 @@ func (c *Controller) provisionWorkspace(
 		Workdir:       grant.Workdir,
 		Network:       grant.Network,
 	}
+	var readOnlyRoots []string
 	for _, m := range grant.Mounts {
 		provisionReq.Mounts = append(provisionReq.Mounts, &executorpb.Mount{
 			HostPath:      m.HostPath,
 			ContainerPath: m.ContainerPath,
 			ReadOnly:      m.ReadOnly,
 		})
+		if m.ReadOnly {
+			readOnlyRoots = append(readOnlyRoots, m.ContainerPath)
+		}
 	}
 
 	resp, err := pp.Provision(ctx, executorID, provisionReq)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", executorID[:12], err)
+		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", shortID(executorID), err)
 	}
 
 	// Get a workspace-scoped client.
@@ -67,12 +71,22 @@ func (c *Controller) provisionWorkspace(
 
 	slog.Info("provisioned workspace",
 		"workspaceId", resp.WorkspaceId,
-		"executorId", executorID[:12],
+		"executorId", shortID(executorID),
 		"roots", resp.Roots,
 		"isolation", resp.Isolation,
 	)
 
-	return resp.WorkspaceId, resp.Roots, exec, nil
+	// Phase 09: the worker's system prompt names where it landed. Roots and
+	// read-only roots are what the provision actually produced; nothing here
+	// is guessed when the executor did not report it.
+	wi = &fundi.WorkspaceInfo{
+		Isolation:     resp.Isolation,
+		WorkspaceMode: string(workspace.ModeEphemeral),
+		Roots:         resp.Roots,
+		ReadOnlyRoots: readOnlyRoots,
+		Network:       grant.Network,
+	}
+	return resp.WorkspaceId, wi, exec, nil
 }
 
 // releaseWorkspace tears down a workspace on an executor.
@@ -96,33 +110,20 @@ func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspace
 }
 
 // selectExecutorID is like selectExecutor but returns the executor ID alongside
-// the client, so callers can provision workspaces.
+// the client, so callers can provision workspaces. It routes through
+// chooseExecutor so the provisioning path enforces the same narrowing as the
+// tool path — a workspace provisioned outside the parent's set would be the
+// confidentiality boundary leaking through the side door.
 func (c *Controller) selectExecutorID(req protocol.SpawnRequest) (id string, cl tools.ExecutorClient, err error) {
-	if c.execPool == nil {
-		return "", nil, fmt.Errorf("executor selector requested but no executor listener is configured")
-	}
-
-	sel, err := executors.ParseSelector(req.ExecutorSelector)
+	chosen, err := c.chooseExecutor(req)
 	if err != nil {
-		return "", nil, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
+		return "", nil, err
 	}
-
-	live := c.execPool.Live()
-	if len(live) == 0 {
-		return "", nil, fmt.Errorf("spawn refused: no executor satisfies %q (0 live executors)", req.ExecutorSelector)
+	cl, err = c.execPool.ClientFor(chosen.ID)
+	if err != nil {
+		return "", nil, fmt.Errorf("executor %s selected but not reachable: %w", shortID(chosen.ID), err)
 	}
-
-	for _, le := range live {
-		if sel.Matches(le.Executor.Labels) {
-			cl, err := c.execPool.ClientFor(le.Executor.ID)
-			if err != nil {
-				return "", nil, fmt.Errorf("executor %s selected but not reachable: %w", le.Executor.ID[:12], err)
-			}
-			return le.Executor.ID, cl, nil
-		}
-	}
-
-	return "", nil, fmt.Errorf("spawn refused: no executor satisfies %q", req.ExecutorSelector)
+	return chosen.ID, cl, nil
 }
 
 // HandleExecutorLost is called by the exec pool when a parked executor's

@@ -84,6 +84,10 @@ type Config struct {
 	// Cwd is reported in the system prompt's environment block.
 	Cwd string
 
+	// Workspace, when non-nil and Isolation != "none", appends a per-child
+	// machine block to the system prompt. Resolved by the daemon at spawn.
+	Workspace *WorkspaceInfo
+
 	// Ref correlates the conversation across restarts (llm.ByExternalRef);
 	// empty means no correlation (a fresh conversation every run).
 	Ref string
@@ -176,6 +180,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 			SkillsInventory: c.SkillsInventory,
 			Cwd:             c.Cwd,
 			ModelID:         c.Model,
+			Workspace:       c.Workspace,
 		})),
 	}
 	if c.Ref != "" {

@@ -29,9 +29,25 @@ type executorPool interface {
 // executor set — never Live() directly. A child can never reach an executor
 // its parent could not.
 func (c *Controller) selectExecutor(req protocol.SpawnRequest) (tools.ExecutorClient, error) {
+	chosen, err := c.chooseExecutor(req)
+	if err != nil {
+		return nil, err
+	}
+	cl, err := c.execPool.ClientFor(chosen.ID)
+	if err != nil {
+		return nil, fmt.Errorf("executor %s selected but not reachable: %w", shortID(chosen.ID), err)
+	}
+	return cl, nil
+}
+
+// chooseExecutor returns the executor the request's selector admits, computed
+// by narrowing the parent's effective set. It is the single place the choice
+// is made, so selectExecutor (client) and selectExecutorID (provisioning,
+// prompt visibility) can never disagree about which executor won.
+func (c *Controller) chooseExecutor(req protocol.SpawnRequest) (executors.Executor, error) {
 	sel, err := executors.ParseSelector(req.ExecutorSelector)
 	if err != nil {
-		return nil, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
+		return executors.Executor{}, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
 	}
 
 	// The child does not exist yet, so evaluate the PARENT's set and narrow
@@ -39,20 +55,14 @@ func (c *Controller) selectExecutor(req protocol.SpawnRequest) (tools.ExecutorCl
 	// effectiveExecutorSet will compute for the child once it is stored.
 	parentSet, err := c.effectiveExecutorSet(req.ParentChildID)
 	if err != nil {
-		return nil, err
+		return executors.Executor{}, err
 	}
 
 	candidates := executors.Narrow(parentSet, sel)
 	if len(candidates) == 0 {
-		return nil, c.explainNoMatch(req, sel, parentSet)
+		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet)
 	}
-
-	chosen := candidates[0]
-	cl, err := c.execPool.ClientFor(chosen.ID)
-	if err != nil {
-		return nil, fmt.Errorf("executor %s selected but not reachable: %w", chosen.ID[:12], err)
-	}
-	return cl, nil
+	return candidates[0], nil
 }
 
 // effectiveExecutorSet is every live executor childID may use.
