@@ -50,7 +50,7 @@ func selectFixture(t *testing.T, parentSelector string, live ...execpool.LiveExe
 	c := &Controller{st: childstore.New(), cm: newChildManager(), execPool: &fakePool{live: live}}
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_parent", Status: protocol.StatusIdle, StartedAt: time.Now(),
-		Kind: protocol.KindFundi, ExecutorSelector: parentSelector,
+		Kind: protocol.KindFundi, ExecutorSelector: parentSelector, MaxDepth: 1, MaxChildren: 8,
 	})
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_child", Status: protocol.StatusIdle, StartedAt: time.Now(),
