@@ -86,6 +86,10 @@ type RuntimeOptions struct {
 	// which is the default and preserves today's behaviour exactly.
 	Executor tools.ExecutorClient
 
+	// Workspace, when non-nil and Isolation != "none", appends a per-child
+	// machine block to the system prompt. Resolved by the daemon at spawn.
+	Workspace *WorkspaceInfo
+
 	// RTK selects the bash tool's rtk mode: "auto", "on", or "off".
 	// Empty means auto. See tools.ParseRTKMode.
 	RTK string
@@ -309,6 +313,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		ContextFiles:         contextFiles,
 		SkillsInventory:      skills.SkillsInventory(discovered),
 		Cwd:                  opts.Cwd,
+		Workspace:            opts.Workspace,
 		Ref:                  opts.Ref,
 		Name:                 opts.Name,
 		FakeTurns:            opts.FakeTurns,

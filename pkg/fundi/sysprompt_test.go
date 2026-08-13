@@ -75,3 +75,58 @@ func TestBuildSystemPromptEnvBlockCarriesPlatformAndDate(t *testing.T) {
 		t.Fatalf("expected platform (darwin/linux) in env block, got %q", got)
 	}
 }
+
+func TestSystemPromptCarriesTheWorkspaceAssignment(t *testing.T) {
+	got := BuildSystemPrompt(SysPromptConfig{
+		Base: "base.", Cwd: "/work", ModelID: "anthropic/claude-opus-5",
+		Workspace: &WorkspaceInfo{
+			ExecutorName:  "ci-runner-2",
+			Isolation:     "container",
+			WorkspaceMode: "ephemeral",
+			Roots:         []string{"/work", "/repo"},
+			ReadOnlyRoots: []string{"/repo"},
+			Network:       "none",
+		},
+	})
+	for _, want := range []string{
+		"ci-runner-2", "container", "ephemeral", "/work", "/repo", "read-only", "no network",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("system prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// Cache ordering: rafiki's prompt-cache breakpoint sits over the tools+system
+// prefix, so static content must precede anything that varies. The workspace
+// block varies BETWEEN children, so it belongs in the environment block at the
+// end — never before the skills inventory.
+func TestWorkspaceBlockComesAfterTheCacheableSections(t *testing.T) {
+	got := BuildSystemPrompt(SysPromptConfig{
+		Base: "BASE", SkillsInventory: "SKILLS", Cwd: "/w", ModelID: "m",
+		Workspace: &WorkspaceInfo{ExecutorName: "EXECNAME", Isolation: "container"},
+	})
+	if strings.Index(got, "EXECNAME") < strings.Index(got, "SKILLS") {
+		t.Fatal("the workspace block precedes the skills inventory, busting the cache prefix for every child")
+	}
+}
+
+// A native, unsandboxed agent gets NOTHING. The block is paid only by the
+// agents it is true for — the cheapest rung of prompting.md's cost ladder.
+func TestNoWorkspaceBlockWhenRunningNatively(t *testing.T) {
+	got := BuildSystemPrompt(SysPromptConfig{Base: "base.", Cwd: "/w", ModelID: "m"})
+	if strings.Contains(strings.ToLower(got), "isolation") {
+		t.Fatalf("an unsandboxed agent must not pay for a sandbox description:\n%s", got)
+	}
+}
+
+// The base prompt is not the place for this. defaultBasePrompt is four
+// sentences and names no tool; every line added there is paid on all traffic
+// by every agent forever.
+func TestDefaultBasePromptIsUnchanged(t *testing.T) {
+	if strings.Contains(defaultBasePrompt, "executor") ||
+		strings.Contains(defaultBasePrompt, "workspace") ||
+		strings.Contains(defaultBasePrompt, "container") {
+		t.Fatal("the executor grant leaked into defaultBasePrompt, which is paid on every request by every agent")
+	}
+}

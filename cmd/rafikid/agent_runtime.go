@@ -165,7 +165,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if req.ExecutorSelector != "" && c.execPool != nil {
 		execID, _, selErr := c.selectExecutorID(req)
 		if selErr == nil {
-			wsID, wsRoots, wsExec, wsErr := c.provisionWorkspace(context.Background(), req, execID)
+			wsID, wsInfo, wsExec, wsErr := c.provisionWorkspace(context.Background(), req, execID)
 			if wsErr != nil {
 				return fundi.RuntimeOptions{}, fmt.Errorf("workspace: %w", wsErr)
 			}
@@ -176,8 +176,15 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			}
 			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID, mode: "ephemeral"}
 			c.wsLabelsMu.Unlock()
-			// Phase 09 reads roots for prompt visibility.
-			_ = wsRoots
+			if wsInfo != nil {
+				// The worker's system prompt names where it landed. ExecutorName
+				// comes from the resolved executor, not from wsInfo — the
+				// provision response reports isolation and roots, not identity.
+				if chosen, cErr := c.chooseExecutor(req); cErr == nil {
+					wsInfo.ExecutorName = chosen.DisplayName
+				}
+				ro.Workspace = wsInfo
+			}
 		}
 	}
 
