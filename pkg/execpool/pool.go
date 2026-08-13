@@ -193,6 +193,89 @@ func (p *Pool) ClientFor(executorID string) (tools.ExecutorClient, error) {
 	return nil, fmt.Errorf("executor %s: %w", executorID, ErrExecutorLost)
 }
 
+// ClientForWorkspace returns a tools.ExecutorClient for executorID whose
+// Execute calls are scoped to workspaceID. The connection is shared; the
+// workspace is not. Returning the pool's shared client for a workspaced child
+// would run its tools in whatever workspace the last caller happened to use —
+// a cross-child data leak that no test would catch, because both children
+// usually see plausible files.
+func (p *Pool) ClientForWorkspace(executorID, workspaceID string) (tools.ExecutorClient, error) {
+	base, err := p.ClientFor(executorID)
+	if err != nil {
+		return nil, err
+	}
+	ec, ok := base.(*executorClient)
+	if !ok {
+		return nil, fmt.Errorf("execpool: client is not an *executorClient")
+	}
+	return &workspaceClient{executorClient: ec, workspaceID: workspaceID}, nil
+}
+
+// workspaceClient wraps an executorClient, adding a workspace id to every
+// Execute and StartJob call.
+type workspaceClient struct {
+	*executorClient
+	workspaceID string
+}
+
+func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.RawMessage) (string, error) {
+	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+		Tool:        tool,
+		InputJson:   input,
+		TimeoutMs:   600_000,
+		WorkspaceId: c.workspaceID,
+	}))
+	if err != nil {
+		return "", fmt.Errorf("executor execute: %w", err)
+	}
+	defer stream.Close()
+
+	var resultText string
+	for stream.Receive() {
+		switch ev := stream.Msg().Event.(type) {
+		case *executorpb.ExecuteResponse_Result:
+			for _, c := range ev.Result.Content {
+				if t := c.GetText(); t != "" {
+					resultText += t
+				}
+			}
+		case *executorpb.ExecuteResponse_Failed:
+			return "", fmt.Errorf("executor: %s", ev.Failed.Message)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", fmt.Errorf("executor stream: %w", err)
+	}
+	return resultText, nil
+}
+
+func (c *workspaceClient) StartJob(ctx context.Context, command string) (string, error) {
+	input, _ := json.Marshal(map[string]string{"command": command})
+	stream, err := c.inner.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+		Tool:        "bash",
+		InputJson:   input,
+		Background:  true,
+		WorkspaceId: c.workspaceID,
+	}))
+	if err != nil {
+		return "", fmt.Errorf("executor start job: %w", err)
+	}
+	defer stream.Close()
+	var handle string
+	for stream.Receive() {
+		if h := stream.Msg().GetHandle(); h != "" {
+			handle = h
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", fmt.Errorf("executor start job: %w", err)
+	}
+	if handle == "" {
+		return "", fmt.Errorf("executor start job: no handle returned")
+	}
+	return handle, nil
+}
+
 func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

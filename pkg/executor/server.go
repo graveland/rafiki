@@ -150,6 +150,10 @@ func (s *Server) Release(
 	id := req.Msg.WorkspaceId
 	ws, ok := s.wsReg.get(id)
 	if ok {
+		// Kill all background jobs in this workspace before tearing it down.
+		// A background job in a removed container is not a job, and reporting
+		// it as running is worse than reporting it gone.
+		s.jobs.killAll()
 		_ = s.backend.Release(context.Background(), ws)
 		s.wsReg.remove(id)
 	}
@@ -325,11 +329,14 @@ func (s *Server) startBackground(
 	}
 
 	cwd := s.opts.Root
+	var cmd *exec.Cmd
 	if ws != nil {
 		cwd = ws.workdir
+		cmd = ws.exec(context.Background(), []string{"sh", "-c", in.Command})
+	} else {
+		cmd = exec.CommandContext(context.Background(), "bash", "-c", in.Command)
+		cmd.Dir = cwd
 	}
-	cmd := exec.CommandContext(context.Background(), "bash", "-c", in.Command)
-	cmd.Dir = cwd
 	if err := s.jobs.start(cmd, handle); err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{
