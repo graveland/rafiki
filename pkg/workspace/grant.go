@@ -38,9 +38,8 @@ func Derive(cwd string, mode Mode) (Grant, error) {
 	if err != nil {
 		return Grant{}, fmt.Errorf("derive: cannot resolve cwd: %w", err)
 	}
-	cwd, err = filepath.EvalSymlinks(cwd)
-	if err != nil {
-		cwd = cwd // best effort; non-fatal
+	if resolved, symErr := filepath.EvalSymlinks(cwd); symErr == nil {
+		cwd = resolved // best effort; non-fatal when it fails
 	}
 
 	repo := RepoRoot(cwd)

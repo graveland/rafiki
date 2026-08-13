@@ -189,10 +189,13 @@ func (c *Controller) tryReschedule(snap childstore.Snapshot, live []execpool.Liv
 			}
 
 			// Update the child's store labels with the new workspace.
-			c.st.SetLabels(snap.ChildID, map[string]string{
+			if _, err := c.st.SetLabels(snap.ChildID, map[string]string{
 				"rafiki/workspace": wsID,
 				"rafiki/executor":  le.Executor.ID,
-			}, nil)
+			}, nil); err != nil {
+				slog.Warn("reschedule label update failed",
+					"childId", snap.ChildID, "error", err)
+			}
 
 			// Steer the child about its new workspace.
 			c.sendSteer(snap.ChildID, rescheduleSteer)
@@ -211,7 +214,9 @@ func (c *Controller) failChild(childID, reason string) {
 	// Best-effort: the steer tells the child it's done.
 	// Force-kill after a short grace period.
 	time.AfterFunc(10*time.Second, func() {
-		c.Kill(context.Background(), childID, 5000, 1000)
+		if _, err := c.Kill(context.Background(), childID, 5000, 1000); err != nil {
+			slog.Warn("failChild force-kill failed", "childId", childID, "error", err)
+		}
 	})
 }
 

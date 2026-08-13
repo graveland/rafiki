@@ -129,7 +129,6 @@ func (s *Store) FindByStatus(status protocol.Status) []Snapshot {
 	})
 }
 
-
 // Update applies fn to the session under its lock. The caller is responsible
 // for keeping index entries in sync if fn mutates indexed fields (Name, Cwd,
 // Status). Prefer the dedicated Rename / SetStatus methods for indexed mutations.

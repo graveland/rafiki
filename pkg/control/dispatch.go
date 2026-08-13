@@ -799,6 +799,7 @@ func (d *dispatcher) globalUnsubscribe(conn Connection, frame []byte, id string)
 const taskListMaxRows = 2000
 
 const maxExecutorListLimit = 500
+
 func (d *dispatcher) taskList(frame []byte, id string) []byte {
 	var req protocol.TaskListRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
