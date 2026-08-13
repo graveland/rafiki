@@ -29,10 +29,11 @@ import (
 // ─── TestMain: build binary once for all tests ────────────────────────────────
 
 var (
-	binaryPath string
-	cliPath    string
-	fakePiPath string
-	repoRoot   string
+	binaryPath         string
+	cliPath            string
+	executorBinaryPath string
+	fakePiPath         string
+	repoRoot           string
 )
 
 func TestMain(m *testing.M) {
@@ -55,6 +56,7 @@ func TestMain(m *testing.M) {
 	for _, cmd := range []struct{ bin, pkg string }{
 		{"rafikid", "./cmd/rafikid"},
 		{"rafiki", "./cmd/rafiki"},
+		{"rafiki-executor", "./cmd/rafiki-executor"},
 	} {
 		out := filepath.Join(binDir, cmd.bin)
 		build := exec.Command("go", "build", "-o", out, cmd.pkg)
@@ -68,6 +70,8 @@ func TestMain(m *testing.M) {
 			binaryPath = out
 		case "rafiki":
 			cliPath = out
+		case "rafiki-executor":
+			executorBinaryPath = out
 		}
 	}
 

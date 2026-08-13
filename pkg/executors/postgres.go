@@ -337,7 +337,7 @@ func scanExecutors(rows pgx.Rows) ([]Executor, error) {
 	for rows.Next() {
 		var e Executor
 		var labelsJSON, selfJSON, annotationsJSON []byte
-		var enrolledAt, lastSeenAt time.Time
+		var enrolledAt, lastSeenAt *time.Time
 		if err := rows.Scan(
 			&e.ID, &e.DisplayName,
 			&labelsJSON, &selfJSON, &annotationsJSON,
@@ -348,8 +348,12 @@ func scanExecutors(rows pgx.Rows) ([]Executor, error) {
 		json.Unmarshal(labelsJSON, &e.Labels)           //nolint:errcheck
 		json.Unmarshal(selfJSON, &e.SelfReported)       //nolint:errcheck
 		json.Unmarshal(annotationsJSON, &e.Annotations) //nolint:errcheck
-		e.EnrolledAt = enrolledAt
-		e.LastSeenAt = lastSeenAt
+		if enrolledAt != nil {
+			e.EnrolledAt = *enrolledAt
+		}
+		if lastSeenAt != nil {
+			e.LastSeenAt = *lastSeenAt
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
