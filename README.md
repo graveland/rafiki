@@ -349,6 +349,52 @@ than a transcript replay.
 non-terminal tasks is told once, naming the handles. A second settle with the
 same residue escalates to its coordinator instead of nudging again.
 
+### Where a subagent runs
+
+`agent_spawn` takes two more parameters, and they are the entire grant:
+
+| Parameter | Meaning |
+|---|---|
+| `executor` | a label selector over machines — `env=work,os=linux` |
+| `workspace` | `ephemeral` (fresh, rebuildable, reschedulable) or `pinned` (an existing tree on one machine) |
+
+Nothing path-shaped is model-facing. Mounts are derived by the daemon from the
+child's worktree; a coordinator choosing labels and a workspace mode cannot make
+the mistakes a coordinator composing path allowlists would, which is what makes
+these grants safe to author without human review.
+
+**A selector can only narrow.** The daemon computes the parent's effective
+executor set, evaluates the child's selector independently, and intersects. A
+child can never reach an executor its parent could not — by construction, not by
+a rule that has to be checked. A spawn matching nothing fails immediately and
+names the excluding predicate per candidate; it does not queue.
+
+**The worker is told where it landed** — machine, isolation, workspace mode,
+roots, and which of them are read-only — in its system prompt, at the moment the
+assignment is made. A sandboxed worker that does not know it is sandboxed
+misreads its first denial as a broken repository.
+
+#### What these grants do and do not defend against
+
+- **MCP bypasses the grant.** Any agent may use any MCP tool, so a worker
+  sandboxed to its worktree can still reach whatever the MCP surface reaches.
+  Correct today — an MCP server's containment is its operator's job — but adding
+  a filesystem- or kubectl-shaped MCP server silently widens every worker in the
+  fleet. Gating MCP at server granularity is a later change the vocabulary
+  leaves room for.
+- **A native executor grants everything its user can reach** — `~/.ssh`, every
+  repository on the machine. The mitigation is that admission is rare, not that
+  scope is narrow.
+- **Grants defend against the model, not against a compromised executor host.**
+  A remote executor self-applies the grant it is handed; a malicious one could
+  ignore it. Executors are infrastructure you deployed. mTLS would answer "is
+  this my executor", never "is my executor honest" — do not later mistake the
+  grant for a defence against a hostile host.
+- **Annotations are unverified claims across conversation boundaries.** Two
+  unrelated agents coordinate through shared mutable state; that is the value,
+  but a label write is a cross-conversation side effect rather than something
+  scoped to one child's lifetime. The same caveat applies to task metadata.
+
 ### Limits
 
 Three independent ceilings, all enforced by the daemon against stored state —
