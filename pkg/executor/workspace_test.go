@@ -74,9 +74,9 @@ func TestExecuteWithUnknownWorkspaceFails(t *testing.T) {
 	ctx := context.Background()
 
 	stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-		Tool:         "read",
-		InputJson:    []byte(`{"file_path":"` + root + `/nonexistent"}`),
-		WorkspaceId:  "dead-workspace",
+		Tool:        "read",
+		InputJson:   []byte(`{"file_path":"` + root + `/nonexistent"}`),
+		WorkspaceId: "dead-workspace",
 	}))
 	if err != nil {
 		t.Fatal(err)

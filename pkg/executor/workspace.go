@@ -47,11 +47,11 @@ func (b *nativeBackend) Provision(_ context.Context, req *executorpb.ProvisionRe
 	id := randomID()
 	ws := &workspace{
 		id:        id,
-		workdir:    b.root,
-		roots:      []string{b.root},
-		isolation:  "none",
-		childID:    req.ChildId,
-		exec:       func(ctx context.Context, argv []string) *exec.Cmd {
+		workdir:   b.root,
+		roots:     []string{b.root},
+		isolation: "none",
+		childID:   req.ChildId,
+		exec: func(ctx context.Context, argv []string) *exec.Cmd {
 			c := exec.CommandContext(ctx, argv[0], argv[1:]...)
 			c.Dir = b.root
 			return c
@@ -84,11 +84,4 @@ func (r *workspaceRegistry) get(id string) (*workspace, bool) {
 
 func (r *workspaceRegistry) remove(id string) {
 	delete(r.entries, id)
-}
-
-func (r *workspaceRegistry) releaseAll(b Backend) {
-	for id, ws := range r.entries {
-		_ = b.Release(context.Background(), ws)
-		delete(r.entries, id)
-	}
 }

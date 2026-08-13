@@ -331,7 +331,6 @@ func (s *Server) startBackground(
 	cwd := s.opts.Root
 	var cmd *exec.Cmd
 	if ws != nil {
-		cwd = ws.workdir
 		cmd = ws.exec(context.Background(), []string{"sh", "-c", in.Command})
 	} else {
 		cmd = exec.CommandContext(context.Background(), "bash", "-c", in.Command)
