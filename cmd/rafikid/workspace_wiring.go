@@ -23,8 +23,13 @@ func (c *Controller) provisionWorkspace(
 	ctx context.Context,
 	req protocol.SpawnRequest, executorID string,
 ) (workspaceID string, roots []string, exec tools.ExecutorClient, err error) {
-	if c.execPool == nil {
+	pool := c.execPool
+	if pool == nil {
 		return "", nil, nil, nil
+	}
+	pp, ok := pool.(*execpool.Pool)
+	if !ok {
+		return "", nil, nil, fmt.Errorf("execpool: not a real pool")
 	}
 
 	// Derive the grant from the child's worktree.
@@ -48,15 +53,15 @@ func (c *Controller) provisionWorkspace(
 		})
 	}
 
-	resp, err := c.execPool.Provision(ctx, executorID, provisionReq)
+	resp, err := pp.Provision(ctx, executorID, provisionReq)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", executorID[:12], err)
 	}
 
 	// Get a workspace-scoped client.
-	exec, err = c.execPool.ClientForWorkspace(executorID, resp.WorkspaceId)
+	exec, err = pp.ClientForWorkspace(executorID, resp.WorkspaceId)
 	if err != nil {
-		_ = c.execPool.Release(ctx, executorID, resp.WorkspaceId)
+		_ = pp.Release(ctx, executorID, resp.WorkspaceId)
 		return "", nil, nil, fmt.Errorf("workspace client: %w", err)
 	}
 
@@ -73,10 +78,15 @@ func (c *Controller) provisionWorkspace(
 // releaseWorkspace tears down a workspace on an executor.
 // Idempotent and best-effort — it must not wedge teardown.
 func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspaceID string) {
-	if c.execPool == nil || workspaceID == "" {
+	pool := c.execPool
+	if pool == nil || workspaceID == "" {
 		return
 	}
-	if err := c.execPool.Release(ctx, executorID, workspaceID); err != nil {
+	pp, ok := pool.(*execpool.Pool)
+	if !ok {
+		return
+	}
+	if err := pp.Release(ctx, executorID, workspaceID); err != nil {
 		slog.Warn("release workspace failed",
 			"workspaceId", workspaceID,
 			"executorId", executorID[:12],

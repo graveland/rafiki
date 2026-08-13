@@ -118,3 +118,14 @@ func TestReconnectBeforeTheTimeoutClearsThePark(t *testing.T) {
 		t.Fatal("a reconnect must clear the park")
 	}
 }
+
+// Draining is learned at DISPATCH, not after a polling interval. That is the
+// whole reason Leave is not an executor-initiated RPC.
+func TestDrainingIsLearnedOnTheNextCall(t *testing.T) {
+	p := New(nil)
+	lc := &liveConn{done: make(chan struct{}), draining: true}
+	p.live["exec-1"] = lc
+	if _, err := p.ClientFor("exec-1"); !errors.Is(err, ErrDraining) {
+		t.Fatalf("a draining executor must report ErrDraining so the caller can pick another; got %v", err)
+	}
+}

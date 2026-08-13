@@ -82,6 +82,17 @@ func Narrow(parentSet []Executor, child Selector) []Executor {
 	return out
 }
 
+// Explain returns "" when labels satisfies every term, otherwise the first
+// failing term in human words against the actual labels.
+func (s Selector) Explain(labels map[string]string) string {
+	for _, t := range s.terms {
+		if explain := t.explain(labels); explain != "" {
+			return explain
+		}
+	}
+	return ""
+}
+
 func (t selectorTerm) matches(labels map[string]string) bool {
 	v, exists := labels[t.key]
 	switch t.op {
@@ -116,6 +127,58 @@ func (t selectorTerm) matches(labels map[string]string) bool {
 	default:
 		return false
 	}
+}
+
+// explain returns "" when the term matches, otherwise a human-readable
+// description of why it failed against the actual labels.
+func (t selectorTerm) explain(labels map[string]string) string {
+	v, exists := labels[t.key]
+	switch t.op {
+	case opEq:
+		if !exists {
+			return fmt.Sprintf("no %s label, wanted %s=%s", t.key, t.key, t.values[0])
+		}
+		if v != t.values[0] {
+			return fmt.Sprintf("%s=%s, wanted %s=%s", t.key, v, t.key, t.values[0])
+		}
+		return ""
+	case opNeq:
+		if exists && v == t.values[0] {
+			return fmt.Sprintf("%s=%s, wanted %s!=%s", t.key, v, t.key, t.values[0])
+		}
+		return ""
+	case opExists:
+		if !exists {
+			return fmt.Sprintf("no %s label, wanted it present", t.key)
+		}
+		return ""
+	case opNotExists:
+		if exists {
+			return fmt.Sprintf("has %s=%s, wanted no %s label", t.key, v, t.key)
+		}
+		return ""
+	case opIn:
+		if !exists {
+			return fmt.Sprintf("no %s label, wanted %s in (%s)", t.key, t.key, strings.Join(t.values, ","))
+		}
+		for _, want := range t.values {
+			if v == want {
+				return ""
+			}
+		}
+		return fmt.Sprintf("%s=%s, wanted %s in (%s)", t.key, v, t.key, strings.Join(t.values, ","))
+	case opNotIn:
+		if !exists {
+			return ""
+		}
+		for _, excl := range t.values {
+			if v == excl {
+				return fmt.Sprintf("%s=%s, wanted %s notin (%s)", t.key, v, t.key, strings.Join(t.values, ","))
+			}
+		}
+		return ""
+	}
+	return ""
 }
 
 // splitSelector splits on comma, respecting parentheses.

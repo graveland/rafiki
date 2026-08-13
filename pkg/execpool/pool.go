@@ -37,6 +37,7 @@ type liveConn struct {
 	executor executors.Executor
 	describe *executorpb.DescribeResponse
 	client   *executorClient
+	draining bool
 	done     chan struct{}
 }
 
@@ -179,6 +180,9 @@ func (p *Pool) ClientFor(executorID string) (tools.ExecutorClient, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if lc, ok := p.live[executorID]; ok {
+		if lc.draining {
+			return nil, fmt.Errorf("executor %s: %w", executorID, ErrDraining)
+		}
 		return lc.client, nil
 	}
 	// Parked and lost are different answers, and the caller acts differently on
@@ -313,9 +317,16 @@ func (p *Pool) onHealthFailure(id string, lc *liveConn) {
 }
 
 func (p *Pool) healthCheck(ctx context.Context, id string, lc *liveConn) error {
-	_, err := lc.client.inner.Health(ctx, connect.NewRequest(&executorpb.HealthRequest{}))
+	resp, err := lc.client.inner.Health(ctx, connect.NewRequest(&executorpb.HealthRequest{}))
 	if err != nil {
 		return err
+	}
+	if resp.Msg.GetDraining() {
+		// Graceful leave, learned at dispatch. Children are told by the next
+		// ClientFor call, not by a polling interval.
+		p.mu.Lock()
+		lc.draining = true
+		p.mu.Unlock()
 	}
 	_ = p.store.TouchSeen(ctx, id)
 	return nil

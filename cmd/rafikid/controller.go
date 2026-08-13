@@ -28,7 +28,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
-	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -125,7 +124,7 @@ type Controller struct {
 
 	// execPool is the live executor connection registry. Nil when the
 	// executor listener is not configured.
-	execPool *execpool.Pool
+	execPool executorPool
 
 	// wsLabels holds workspace IDs and executor IDs provisioned for children
 	// whose spawn is in flight. Keyed by childID; set by agentRunner before
@@ -816,6 +815,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		ExtraArgs:          req.ExtraArgs,
 		RecordRequests:     req.RecordRequests,
 		ExecutorSocket:     req.ExecutorSocket,
+		ExecutorSelector:   req.ExecutorSelector,
+		WorkspaceMode:      req.WorkspaceMode,
 		MaxDepth:           grantedDepth(req, childDepthFor(c.st, req.ParentChildID), resolveAbsoluteDepthCeiling()),
 		MaxCost:            grantedCost(req),
 		MaxChildren:        grantedChildren(req),
@@ -1094,6 +1095,8 @@ func (c *Controller) activateLiveChild(
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
 		ExecutorSocket:     snap.ExecutorSocket,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 		MaxDepth:           snap.MaxDepth,
 		MaxCost:            snap.MaxCost,
 		MaxChildren:        snap.MaxChildren,
@@ -1170,6 +1173,8 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		Verbose:            snap.Verbose,
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 		RecordRequests:     snap.RecordRequests,
 		ExecutorSocket:     snap.ExecutorSocket,
 		MaxDepth:           &snap.MaxDepth,
@@ -3153,6 +3158,8 @@ func sessionFromRecord(rec persist.Record) *childstore.Session {
 		SystemPrompt:       rec.SystemPrompt,
 		AppendSystemPrompt: rec.AppendSystemPrompt,
 		Verbose:            rec.Verbose,
+		ExecutorSelector:   rec.ExecutorSelector,
+		WorkspaceMode:      rec.WorkspaceMode,
 		PiBinary:           rec.PiBinary,
 		ExtraArgs:          rec.ExtraArgs,
 		RecordRequests:     rec.RecordRequests,
@@ -3206,6 +3213,8 @@ func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
 		ExecutorSocket:     snap.ExecutorSocket,
+		ExecutorSelector:   snap.ExecutorSelector,
+		WorkspaceMode:      snap.WorkspaceMode,
 		MaxDepth:           snap.MaxDepth,
 		MaxCost:            snap.MaxCost,
 		MaxChildren:        snap.MaxChildren,

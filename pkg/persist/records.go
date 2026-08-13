@@ -65,6 +65,13 @@ type Record struct {
 	// lack the key and deserialise to empty.
 	ExecutorSocket string `json:"executorSocket,omitempty"`
 
+	// ExecutorSelector is the label selector this child was spawned with.
+	// Additive: records before its introduction deserialise to empty.
+	ExecutorSelector string `json:"executorSelector,omitempty"`
+
+	// WorkspaceMode is "ephemeral" or "pinned". Additive.
+	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
 	// Resource grants (phase 05). Additive: records written before their
 	// introduction lack these keys and deserialise to zero. A zero MaxDepth
 	// on an old record means "cannot spawn", which is the safe direction —

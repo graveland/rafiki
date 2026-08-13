@@ -92,6 +92,16 @@ type Session struct {
 	// child rejoins the same executor.
 	ExecutorSocket string
 
+	// ExecutorSelector is the label selector this child was spawned with
+	// (or the empty string for "no selector"). Persisted so the narrowing
+	// property survives resume: a resumed child's effective set is still its
+	// parent's set intersected with what IT asked for.
+	ExecutorSelector string
+
+	// WorkspaceMode is "ephemeral" or "pinned" as requested at spawn.
+	// Empty means the default (pinned). Persisted for the same reason.
+	WorkspaceMode string
+
 	// Resource grants, daemon-stamped at spawn and never re-read from the
 	// child. These are the FACTS the controller enforces against; a value
 	// arriving in a request is a request.
@@ -183,6 +193,12 @@ type Snapshot struct {
 	// this child's filesystem and shell tools run in.
 	ExecutorSocket string
 
+	// ExecutorSelector is the label selector this child was spawned with.
+	ExecutorSelector string
+
+	// WorkspaceMode is "ephemeral" or "pinned".
+	WorkspaceMode string
+
 	// Resource grants, daemon-stamped at spawn and never re-read from the
 	// child. These are the FACTS the controller enforces against; a value
 	// arriving in a request is a request.
@@ -253,6 +269,9 @@ func (s *Session) Snapshot() Snapshot {
 		RecordRequests: s.RecordRequests,
 
 		ExecutorSocket: s.ExecutorSocket,
+
+		ExecutorSelector: s.ExecutorSelector,
+		WorkspaceMode:    s.WorkspaceMode,
 
 		MaxDepth: s.MaxDepth, MaxCost: s.MaxCost, MaxChildren: s.MaxChildren,
 

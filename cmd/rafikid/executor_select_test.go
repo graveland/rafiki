@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -16,16 +19,28 @@ import (
 type fakePool struct{ live []execpool.LiveExecutor }
 
 func (f *fakePool) Live() []execpool.LiveExecutor { return f.live }
-func (f *fakePool) ClientFor(id string) (execpool.ExecutorClient, error) {
-	return nil, nil
+func (f *fakePool) ClientFor(id string) (tools.ExecutorClient, error) {
+	return &stubExecutorClient{}, nil
 }
 
+// stubExecutorClient satisfies tools.ExecutorClient for selection tests, which
+// never dispatch a tool call.
+type stubExecutorClient struct{}
+
+func (stubExecutorClient) Execute(context.Context, string, json.RawMessage) (string, error) {
+	return "", nil
+}
+func (stubExecutorClient) StartJob(context.Context, string) (string, error) { return "", nil }
+func (stubExecutorClient) JobOutput(context.Context, string, int64) (tools.JobSnapshot, error) {
+	return tools.JobSnapshot{}, nil
+}
+func (stubExecutorClient) KillJob(context.Context, string) error { return nil }
+func (stubExecutorClient) Ping(context.Context) error            { return nil }
+
 func ex(id string, labels map[string]string, admits string) execpool.LiveExecutor {
-	return execpool.LiveExecutor{
-		Executor: executors.Executor{
-			ID: id, DisplayName: id, Labels: labels, Admits: admits, Enabled: true,
-		},
-	}
+	return execpool.LiveExecutor{Executor: executors.Executor{
+		ID: id, DisplayName: id, Labels: labels, Admits: admits, Enabled: true,
+	}}
 }
 
 // selectFixture: a coordinator that landed on the `env=home` set, and a child
@@ -63,7 +78,7 @@ func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
 	if err == nil {
 		t.Fatal("a child reached outside its parent's effective set")
 	}
-	if !strings.Contains(err.Error(), "parent") {
+	if !strings.Contains(err.Error(), "parent") && !strings.Contains(err.Error(), "PARENT") {
 		t.Errorf("the refusal must say the parent's set is why: %v", err)
 	}
 }
@@ -142,6 +157,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 		"env=work,os=linux",     // what was required
 		"exec-home", "env=home", // wrong label value, named
 		"exec-mac", "os=darwin",
+		"exec-picky", "admission", "rafiki/kind", // the executor refused the child
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("refusal missing %q:\n%s", want, msg)
@@ -154,7 +170,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
 	c := selectFixture(t, "")
 	start := time.Now()
-	if _, err := c.selectExecutor(protocol.SpawnRequest{ExecutorSelector: "env=nowhere"}); err == nil {
+	if _, err := c.selectExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}); err == nil {
 		t.Fatal("want a refusal")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
