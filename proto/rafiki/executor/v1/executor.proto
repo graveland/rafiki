@@ -11,6 +11,13 @@ service ExecutorService {
   rpc Attach(AttachRequest) returns (stream AttachResponse);
   rpc Cancel(CancelRequest) returns (CancelResponse);
   rpc JobOutput(JobOutputRequest) returns (JobOutputResponse);
+  // Provision prepares a workspace for one child and returns a handle every
+  // later Execute carries. A native executor answers with its pinned root and
+  // does nothing else; a container executor starts a container.
+  rpc Provision(ProvisionRequest) returns (ProvisionResponse);
+  // Release tears a workspace down. Idempotent: a daemon restart that lost
+  // track of a workspace must be able to release it again without error.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
 }
 
 message DescribeRequest {}
@@ -52,6 +59,10 @@ message ExecuteRequest {
   int64  timeout_ms = 4;
   map<string, int64> expect_mtime = 5;
   bool   background = 6;
+  // workspace_id selects the workspace this call runs in. Empty means the
+  // executor's own root — the pre-phase-08 behaviour, kept so an executor and
+  // a daemon of different vintages still interoperate.
+  string workspace_id = 7;
 }
 
 message ExecuteResponse {
@@ -90,6 +101,53 @@ message AttachResponse {
 
 message CancelRequest { string call_id = 1; }
 message CancelResponse {}
+
+// Mount is one bind mount. The DAEMON derives these from the child's worktree
+// assignment; the model never writes a path, and the executor never invents
+// one. Anything the executor added here would be a grant nobody authorised.
+message Mount {
+  string host_path      = 1;
+  string container_path = 2;
+  bool   read_only      = 3;
+}
+
+message ProvisionRequest {
+  // child_id is the daemon's id for the child this workspace serves. It is
+  // used for naming and for idempotency, never for authority.
+  string child_id = 1;
+  // ephemeral: the executor constructs the workspace and it is
+  // reconstructible, so the child may be rescheduled elsewhere on loss.
+  // pinned: the executor exposes an existing tree; losing it means park or
+  // fail. This single field is what the park-vs-fail decision consults.
+  string workspace_mode = 2;
+  repeated Mount mounts = 3;
+  // workdir is the container path the child's tools start in. It must be one
+  // of the mounts' container_path values; an executor MUST reject anything
+  // else rather than silently starting somewhere the child cannot write.
+  string workdir = 4;
+  // network is "none" or "bridge". Default none: an unattended worker that
+  // does not need egress should not have it, and a build that needs a package
+  // registry is a deliberate choice rather than an accident.
+  string network = 5;
+  // Resource caps. Zero means the executor's own default.
+  int64 memory_bytes = 6;
+  double cpus        = 7;
+  map<string, string> env = 8;
+}
+
+message ProvisionResponse {
+  string workspace_id = 1;
+  // roots the workspace actually exposes, as the CHILD will see them. The
+  // daemon puts these in the child's system prompt (phase 09): a sandboxed
+  // worker that does not know it is sandboxed misreads its first denial as a
+  // broken repository.
+  repeated string roots = 2;
+  string workdir = 3;
+  string isolation = 4;
+}
+
+message ReleaseRequest  { string workspace_id = 1; }
+message ReleaseResponse {}
 
 // JobOutput is the one-shot poll behind bash_output. Attach is a stream and
 // draining it to answer "what has this printed so far" means either blocking

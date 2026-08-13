@@ -2,8 +2,8 @@
 
 The daemon dispatches filesystem and shell tool calls to a `rafiki-executor`
 process over Connect RPC on a local unix socket. This document describes the
-wire protocol: the five RPCs, their message shapes, the four failure codes, the
-background-handle lifecycle, and the mtime contract.
+wire protocol: the seven RPCs, their message shapes, the four failure codes, the
+background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 
 ## Transport
 
@@ -17,7 +17,7 @@ background-handle lifecycle, and the mtime contract.
 
 ## RPCs
 
-All five RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
+All seven RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
 
 ### Describe
 
@@ -42,12 +42,17 @@ background job; the daemon polls this to surface what's long-running.
 ### Execute
 
 ```
-Execute(callId, tool, inputJSON, timeoutMs, expectMtime, background)
+Execute(callId, tool, inputJSON, timeoutMs, expectMtime, background, workspaceId)
   → stream { Output(chunk) | Result(content[], isError, observedMtime)
             | Failed(code, msg) | handle }
 ```
 
-Server-streaming. Dispatches a single tool call. The normal path is:
+Server-streaming. Dispatches a single tool call. `workspaceId` selects the
+workspace this call runs in — empty means the executor's own root, the
+pre-phase-08 behaviour kept as a compatibility path so an executor and a
+daemon of different vintages still interoperate.
+
+The normal path is:
 
 1. The server checks `expectMtime` — if any path's current on-disk mtime
    does not match, it immediately streams `Failed(CODE_DENIED, …)`.
@@ -72,6 +77,40 @@ bytes, and the first chunk an attacher receives is prefixed with
 `... [earlier output dropped: buffer limit reached] ...` when that has
 happened. An unknown handle is `CodeNotFound`. Dropping the connection does
 not kill the job — reattaching resumes from what the ring still holds.
+
+### Provision
+
+```
+Provision(childId, workspaceMode, mounts[], workdir, network, memoryBytes, cpus, env)
+  → { workspaceId, roots[], workdir, isolation }
+```
+
+Unary. Prepares a workspace for one child and returns a handle every later
+`Execute` carries. A **native** executor answers with its pinned root and
+does nothing else; a **container** executor starts a container with the
+daemon-derived mounts.
+
+- `workspaceMode` is `"ephemeral"` (the executor constructs a reconstructible
+  workspace) or `"pinned"` (the executor exposes an existing tree). This
+  single field decides the park-vs-fail behaviour when an executor is lost.
+- `mounts[]` are bind mounts derived by the daemon from the child's worktree
+  assignment. The model never writes a path; the executor never invents one.
+- `workdir` must be one of the mounts' container paths — an executor MUST
+  reject a workdir outside the mounts rather than silently starting
+  somewhere the child cannot write.
+- `network` is `"none"` or `"bridge"`. Default: `"none"`.
+- Resource caps (`memoryBytes`, `cpus`) are zero-means-executor-default.
+
+### Release
+
+```
+Release(workspaceId) → {}
+```
+
+Unary. Tears a workspace down. **Idempotent:** a daemon restart that lost
+track of a workspace must be able to release it again without error. A
+released workspace kills its background jobs — a job in a removed container
+is not a job, and reporting it as running is worse than reporting it gone.
 
 ### Cancel
 
