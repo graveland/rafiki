@@ -15,6 +15,15 @@ import (
 	"go.graveland.dev/rafiki/pkg/workspace"
 )
 
+// wsMode resolves a requested workspace mode to its label value. Empty means
+// pinned, the model-facing default.
+func wsMode(requested string) string {
+	if requested == "" {
+		return "pinned"
+	}
+	return requested
+}
+
 // provisionWorkspace derives a grant from the child's cwd and provisions it
 // on the executor. The ordering matters: provision BEFORE the child is
 // registered, so a provisioning failure refuses the spawn with nothing to
@@ -32,8 +41,16 @@ func (c *Controller) provisionWorkspace(
 		return "", nil, nil, fmt.Errorf("execpool: not a real pool")
 	}
 
+	// Resolve the workspace mode. The model-facing default is pinned (an
+	// existing tree on one machine); ephemeral is what the container backend
+	// provisions. An empty mode means pinned.
+	mode := workspace.ModePinned
+	if req.WorkspaceMode == string(workspace.ModeEphemeral) {
+		mode = workspace.ModeEphemeral
+	}
+
 	// Derive the grant from the child's worktree.
-	grant, err := workspace.Derive(req.Cwd, workspace.ModeEphemeral)
+	grant, err := workspace.Derive(req.Cwd, mode)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("grant derivation: %w", err)
 	}
@@ -41,7 +58,7 @@ func (c *Controller) provisionWorkspace(
 	// Build provision request.
 	provisionReq := &executorpb.ProvisionRequest{
 		ChildId:       "", // set by caller
-		WorkspaceMode: string(workspace.ModeEphemeral),
+		WorkspaceMode: string(mode),
 		Workdir:       grant.Workdir,
 		Network:       grant.Network,
 	}
@@ -81,7 +98,7 @@ func (c *Controller) provisionWorkspace(
 	// is guessed when the executor did not report it.
 	wi = &fundi.WorkspaceInfo{
 		Isolation:     resp.Isolation,
-		WorkspaceMode: string(workspace.ModeEphemeral),
+		WorkspaceMode: string(mode),
 		Roots:         resp.Roots,
 		ReadOnlyRoots: readOnlyRoots,
 		Network:       grant.Network,

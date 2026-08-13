@@ -174,7 +174,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			if c.wsLabels == nil {
 				c.wsLabels = make(map[string]workspaceLabels)
 			}
-			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID, mode: "ephemeral"}
+			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID, mode: wsMode(req.WorkspaceMode)}
 			c.wsLabelsMu.Unlock()
 			if wsInfo != nil {
 				// The worker's system prompt names where it landed. ExecutorName
