@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/pricing"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -376,7 +376,7 @@ func (c *ModelCatalog) backingOff() bool {
 // for the next lazy refresh; there is deliberately no hardcoded fallback.
 //
 // Nil-receiver safe, like entryFor: Warm is reached through the
-// store.PriceSource interface, where a typed-nil *ModelCatalog makes the
+// pricing.PriceSource interface, where a typed-nil *ModelCatalog makes the
 // interface value itself non-nil, so the caller's `src == nil` check cannot
 // catch it. The sync runs in a bare goroutine with no recover, so a panic here
 // would take the server down.
@@ -551,7 +551,7 @@ func (c *ModelCatalog) normalizeTilde(id string) (string, bool) {
 // stripped, for shell-safe completion; the proxy re-adds it at routing time via
 // normalizeTilde), sorted + de-duplicated. Empty if the catalog hasn't loaded.
 // Nil-receiver safe for the same reason Warm is: it is reached through
-// store.PriceSource, where a typed nil arrives as a non-nil interface.
+// pricing.PriceSource, where a typed nil arrives as a non-nil interface.
 func (c *ModelCatalog) AllIDs() []string {
 	if c == nil {
 		return nil
@@ -613,47 +613,47 @@ func (c *ModelCatalog) ResolveID(model string) (string, bool) {
 	return m.ID, true
 }
 
-// Price reports the catalog's list price in the shape store.SyncModelPricing
+// Price reports the catalog's list price in the shape pkg/store SyncModelPricing
 // consumes. Unlike Pricing it reads the raw entry, so it can distinguish a
 // cache price OpenRouter omitted from one it reports as zero — see
 // optionalPrice. ok is false under the same conditions as Pricing.
-func (c *ModelCatalog) Price(model string) (store.ModelPrice, bool) {
+func (c *ModelCatalog) Price(model string) (pricing.ModelPrice, bool) {
 	m, found := c.entryFor(model)
 	if !found {
-		return store.ModelPrice{}, false
+		return pricing.ModelPrice{}, false
 	}
 	return priceFromEntry(m)
 }
 
-// Lookup resolves a model once and reports everything store.SyncModelPricing
-// records about it, letting *ModelCatalog satisfy store.PriceSource directly.
+// Lookup resolves a model once and reports everything pkg/store SyncModelPricing
+// records about it, letting *ModelCatalog satisfy pricing.PriceSource directly.
 // It is one entryFor call by design: the syncer runs over every catalog id plus
 // every observed model string, and each entryFor locks and scans a snapshot
 // shared with the live proxy's request path, so separate id/price accessors
 // multiplied that cost per key.
-func (c *ModelCatalog) Lookup(model string) (store.ModelInfo, bool) {
+func (c *ModelCatalog) Lookup(model string) (pricing.ModelInfo, bool) {
 	m, found := c.entryFor(model)
 	if !found {
-		return store.ModelInfo{}, false
+		return pricing.ModelInfo{}, false
 	}
 	price, priced := priceFromEntry(m)
-	return store.ModelInfo{ORID: m.ID, Price: price, Priced: priced}, true
+	return pricing.ModelInfo{ORID: m.ID, Price: price, Priced: priced}, true
 }
 
 // priceFromEntry projects a catalog entry's raw price strings into the store
 // shape. ok=false unless both base prices parse (a model with no usable base
 // price is unpriced), matching pricingFromOR; the cache prices differ in
 // keeping absent distinct from zero.
-func priceFromEntry(m orModel) (store.ModelPrice, bool) {
+func priceFromEntry(m orModel) (pricing.ModelPrice, bool) {
 	prompt, err := strconv.ParseFloat(m.Pricing.Prompt, 64)
 	if err != nil {
-		return store.ModelPrice{}, false
+		return pricing.ModelPrice{}, false
 	}
 	completion, err := strconv.ParseFloat(m.Pricing.Completion, 64)
 	if err != nil {
-		return store.ModelPrice{}, false
+		return pricing.ModelPrice{}, false
 	}
-	return store.ModelPrice{
+	return pricing.ModelPrice{
 		PromptUSD:     prompt,
 		CompletionUSD: completion,
 		CacheReadUSD:  optionalPrice(m.Pricing.InputCacheRead),
@@ -674,10 +674,10 @@ func optionalPrice(s string) *float64 {
 	return &v
 }
 
-// var _ store.PriceSource ensures *ModelCatalog keeps satisfying the interface
-// store.SyncModelPricing depends on; a signature drift here fails the build
+// var _ pricing.PriceSource ensures *ModelCatalog keeps satisfying the interface
+// pkg/store SyncModelPricing depends on; a signature drift here fails the build
 // instead of surfacing as a runtime type error in Task 3's caller.
-var _ store.PriceSource = (*ModelCatalog)(nil)
+var _ pricing.PriceSource = (*ModelCatalog)(nil)
 
 // entryFor resolves a requested model to its catalog orModel, shared by
 // ContextWindow and Pricing so both apply identical resolution and staleness

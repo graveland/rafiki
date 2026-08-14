@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/ejection"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -43,7 +44,7 @@ func TestBuildProviderGuardRehydrates(t *testing.T) {
 	// A model line unique to this test, so a real ejection recorded by the
 	// daemon can never make this pass or fail for the wrong reason.
 	const line = "vendor/wiring-test-model"
-	if err := routing.NewEjectionStore(pool).Append(ctx, routing.EjectionRecord{
+	if err := ejection.NewEjectionStore(pool).Append(ctx, routing.EjectionRecord{
 		Provider:  "WiringTestProvider",
 		ModelLine: line,
 		Reason:    routing.ReasonNoCache,

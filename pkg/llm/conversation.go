@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -210,7 +211,7 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 		// capture and no Resume. ID is local-only.
 		return &Conversation{client: c, ID: "mem-" + randomID(), cfg: cfg}, nil
 	}
-	ref := routing.ConversationRef{
+	ref := capture.ConversationRef{
 		OriginEntrypoint: cfg.entrypoint, DrivenBy: string(store.DrivenByServer),
 		Owner: cfg.owner, Persona: cfg.persona, Model: cfg.model, Name: cfg.name, ExternalRef: cfg.externalRef,
 	}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -49,7 +50,7 @@ type ChatCompletionsProxy struct {
 	metrics    *Metrics
 }
 
-func NewChatCompletionsProxy(cs *routing.CaptureStore, auth Authenticator, upstreams []OpenAIUpstream, routes []OpenAIRoute, defaultUpstream string, logger *slog.Logger) *ChatCompletionsProxy {
+func NewChatCompletionsProxy(cs *capture.CaptureStore, auth Authenticator, upstreams []OpenAIUpstream, routes []OpenAIRoute, defaultUpstream string, logger *slog.Logger) *ChatCompletionsProxy {
 	ups := make(map[string]OpenAIUpstream, len(upstreams))
 	for _, u := range upstreams {
 		ups[u.Name] = u
@@ -206,7 +207,7 @@ func (p *ChatCompletionsProxy) streamAndCapture(w http.ResponseWriter, r *http.R
 	}
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
-	if cerr := p.store.CompleteTurn(capCtx, routing.TurnResult{
+	if cerr := p.store.CompleteTurn(capCtx, capture.TurnResult{
 		TurnID: cr.turnID, CreatedAt: cr.createdAt, Model: usage.Model, Response: canonical, StopReason: finish, Upstream: upstream,
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
@@ -231,7 +232,7 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 	if source == "" {
 		source = "openai"
 	}
-	convID, err := p.store.EnsureConversationByExternalRef(r.Context(), routing.ConversationRef{
+	convID, err := p.store.EnsureConversationByExternalRef(r.Context(), capture.ConversationRef{
 		OriginEntrypoint: source, DrivenBy: string(store.DrivenByClient),
 		Owner: owner, ExternalRef: r.Header.Get("X-Rafiki-Session"),
 	})
@@ -239,7 +240,7 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 		p.logger.Warn("openai proxy capture: ensure-conversation failed", "error", err)
 		return captureRef{}
 	}
-	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), routing.TurnIntent{
+	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
 		ConversationID: convID, Ordinal: 0, Model: model, Request: reqBody,
 		Source: source, Author: owner, AuthorKind: "human",
 		PrefixHash: routing.PrefixHash(reqBody), Protocol: string(store.ProtocolOpenAI),

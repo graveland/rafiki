@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package routing
+package capture
 
 import (
 	"context"
@@ -16,13 +16,14 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // TestCaptureStore requires a real PostgreSQL/TimescaleDB instance. Set
 // RAFIKI_TEST_DSN to a connection string to run it, e.g.:
 //
-//	RAFIKI_TEST_DSN="postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable" go test ./routing/...
+//	RAFIKI_TEST_DSN="postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable" go test ./capture/...
 //
 // It is skipped by default so plain unit test runs (and CI without a
 // TimescaleDB instance) stay green.
@@ -261,12 +262,12 @@ func TestDecomposeRequest_MessagesAndPrefix(t *testing.T) {
 			{"role":"assistant","content":[{"type":"text","text":"yo"}]}
 		]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: PrefixHash(req), Protocol: "anthropic"})
+		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req), Protocol: "anthropic"})
 	if err != nil {
 		t.Fatalf("InsertTurnIntent: %v", err)
 	}
 
-	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req))
+	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req))
 	if err != nil {
 		t.Fatalf("DecomposeRequest: %v", err)
 	}
@@ -341,7 +342,7 @@ func TestDecomposeRequest_PrefixUnchangedIsNull(t *testing.T) {
 	}
 
 	req := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"}]}`)
-	h := PrefixHash(req)
+	h := routing.PrefixHash(req)
 	t1, c1, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
 	if err != nil {
 		t.Fatalf("InsertTurnIntent (t1): %v", err)
@@ -448,11 +449,11 @@ func TestDecomposeRequest_NullEscapeInContent(t *testing.T) {
 	}
 
 	req := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"text","text":"before\u0000after"}]}]}`)
-	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: PrefixHash(req)})
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
 	if err != nil {
 		t.Fatalf("InsertTurnIntent with a \\u0000 in request: %v", err)
 	}
-	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req)); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req)); err != nil {
 		t.Fatalf("DecomposeRequest with a \\u0000 in content should succeed, got: %v", err)
 	}
 
@@ -495,7 +496,7 @@ func TestDecomposeRequest_PrefixChangeReStores(t *testing.T) {
 	reqA := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"}]}`)
 	reqB := []byte(`{"model":"claude","tools":[{"name":"T"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
 	reqC := []byte(`{"model":"claude","tools":[{"name":"T"},{"name":"U"}],"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"},{"role":"assistant","content":"d"},{"role":"user","content":"e"}]}`)
-	hA, hB, hC := PrefixHash(reqA), PrefixHash(reqB), PrefixHash(reqC)
+	hA, hB, hC := routing.PrefixHash(reqA), routing.PrefixHash(reqB), routing.PrefixHash(reqC)
 	if hA != hB {
 		t.Fatalf("precondition: reqA and reqB must share a prefix hash (same envelope), got %q vs %q", hA, hB)
 	}
@@ -567,7 +568,7 @@ func TestDecomposeRequest_CrossTurnIdempotent(t *testing.T) {
 	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"a"}]}`)
 	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`)
 	for _, req := range [][]byte{req1, req2} {
-		h := PrefixHash(req)
+		h := routing.PrefixHash(req)
 		id, ca, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Request: req, PrefixHash: h})
 		if err != nil {
 			t.Fatalf("InsertTurnIntent: %v", err)
@@ -637,11 +638,11 @@ func TestDecomposeRequest_CacheBreakpoints(t *testing.T) {
 			{"role":"user","content":[{"type":"text","text":"this text literally says cache_control but has no such field"}]}
 		]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: PrefixHash(req)})
+		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
 	if err != nil {
 		t.Fatalf("InsertTurnIntent: %v", err)
 	}
-	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req)); err != nil {
+	if _, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req)); err != nil {
 		t.Fatalf("DecomposeRequest: %v", err)
 	}
 
@@ -692,11 +693,11 @@ func TestAppendResponseMessage(t *testing.T) {
 
 	req := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
 	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
-		ConversationID: convID, Request: req, PrefixHash: PrefixHash(req)})
+		ConversationID: convID, Request: req, PrefixHash: routing.PrefixHash(req)})
 	if err != nil {
 		t.Fatalf("InsertTurnIntent: %v", err)
 	}
-	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, PrefixHash(req))
+	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req, routing.PrefixHash(req))
 	if err != nil {
 		t.Fatalf("DecomposeRequest: %v", err)
 	}

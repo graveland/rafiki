@@ -16,7 +16,7 @@ import (
 
 // Messages persists and loads message-granularity conversation state
 // (conversations.conversation_message). Turn-granularity capture stays in
-// routing.CaptureStore; library-driven sends write both.
+// pkg/capture CaptureStore; library-driven sends write both.
 type Messages struct{ pool *pgxpool.Pool }
 
 func NewMessages(pool *pgxpool.Pool) *Messages { return &Messages{pool: pool} }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package routing
+package ejection
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -40,10 +41,10 @@ func TestEjectionStoreRoundTrip(t *testing.T) {
 
 	// A provider distinct enough that a parallel run can't collide with it.
 	provider := "TestProvider-" + t.Name()
-	rec := EjectionRecord{
+	rec := routing.EjectionRecord{
 		Provider:  provider,
 		ModelLine: "vendor/test-model",
-		Reason:    ReasonNoCache,
+		Reason:    routing.ReasonNoCache,
 		ExpiresAt: now.Add(time.Hour),
 		Evidence:  []byte(`{"streak":5}`),
 	}
@@ -68,7 +69,7 @@ func TestEjectionStoreRoundTrip(t *testing.T) {
 	}
 }
 
-func containsProvider(recs []EjectionRecord, provider string) bool {
+func containsProvider(recs []routing.EjectionRecord, provider string) bool {
 	for _, r := range recs {
 		if r.Provider == provider {
 			return true

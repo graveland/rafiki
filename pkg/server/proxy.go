@@ -19,17 +19,19 @@ import (
 
 	"golang.org/x/net/http2"
 
+	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 type proxyStore interface {
-	EnsureConversationByExternalRef(ctx context.Context, ref routing.ConversationRef) (string, error)
-	InsertTurnIntent(ctx context.Context, t routing.TurnIntent) (turnID string, createdAt time.Time, err error)
-	CompleteTurn(ctx context.Context, r routing.TurnResult) error
+	EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error)
+	InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (turnID string, createdAt time.Time, err error)
+	CompleteTurn(ctx context.Context, r capture.TurnResult) error
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
 	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error)
 	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error
-	ConversationTokens(ctx context.Context, convID string) ([]routing.ModelTokens, error)
+	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
 }
 
 type MessagesProxy struct {
@@ -59,8 +61,8 @@ type MessagesProxy struct {
 
 	metrics *Metrics // optional Prometheus instrumentation
 
-	rawTrace    *routing.RawTraceStore // nil when no pool configured
-	rawTraceAll bool                   // record all sessions (RAFIKI_RECORD_REQUESTS=1); else per-session via X-Rafiki-Record-Requests header
+	rawTrace    *rawtrace.RawTraceStore // nil when no pool configured
+	rawTraceAll bool                    // record all sessions (RAFIKI_RECORD_REQUESTS=1); else per-session via X-Rafiki-Record-Requests header
 
 	guard *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
 }
@@ -70,7 +72,7 @@ func (p *MessagesProxy) SetMetrics(m *Metrics) { p.metrics = m }
 
 // SetRawTrace enables raw HTTP request/response capture for debug. Pass nil to
 // disable (the default).
-func (p *MessagesProxy) SetRawTrace(s *routing.RawTraceStore, recordAll bool) {
+func (p *MessagesProxy) SetRawTrace(s *rawtrace.RawTraceStore, recordAll bool) {
 	p.rawTrace = s
 	p.rawTraceAll = recordAll
 }
@@ -180,7 +182,7 @@ func mergeIgnore(existing any, ignore []string) any {
 	return out
 }
 
-func NewMessagesProxy(store *routing.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *slog.Logger) *MessagesProxy {
+func NewMessagesProxy(store *capture.CaptureStore, auth Authenticator, apiKey, upstreamURL, defaultModel string, catalog *routing.ModelCatalog, logger *slog.Logger) *MessagesProxy {
 	// ResponseHeaderTimeout bounds connect + time-to-first-byte so a hung
 	// upstream can't wedge the stream-copy loop forever. It does NOT cap
 	// total streaming duration, so legitimate multi-minute SSE conversations
@@ -851,7 +853,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
 		respStatus := resp.StatusCode
 		convID := cr.convID
-		_ = p.rawTrace.Insert(capCtx, routing.RawHTTPRequest{
+		_ = p.rawTrace.Insert(capCtx, rawtrace.RawHTTPRequest{
 			Source:         "proxy",
 			Model:          model,
 			Upstream:       upstream,
@@ -869,7 +871,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	if !cr.on {
 		return
 	}
-	if cerr := p.store.CompleteTurn(capCtx, routing.TurnResult{
+	if cerr := p.store.CompleteTurn(capCtx, capture.TurnResult{
 		TurnID: cr.turnID, CreatedAt: cr.createdAt, Model: usage.Model, Response: nil, StopReason: stop, Upstream: upstream,
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheCreationTokens: usage.CacheCreationTokens,
@@ -1021,7 +1023,7 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
 		respStatus := resp.StatusCode
 		convID := cr.convID
-		_ = p.rawTrace.Insert(capCtx, routing.RawHTTPRequest{
+		_ = p.rawTrace.Insert(capCtx, rawtrace.RawHTTPRequest{
 			Source:         "proxy",
 			Model:          model,
 			Upstream:       upstream,
@@ -1147,7 +1149,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	if source == "" {
 		source = "claude"
 	}
-	convID, err := p.store.EnsureConversationByExternalRef(r.Context(), routing.ConversationRef{
+	convID, err := p.store.EnsureConversationByExternalRef(r.Context(), capture.ConversationRef{
 		OriginEntrypoint: source, DrivenBy: "client",
 		Owner: owner, ExternalRef: r.Header.Get("X-Rafiki-Session"),
 	})
@@ -1159,7 +1161,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// Request is no longer stored verbatim on the turn row — DecomposeRequest
 	// below covers it as conversation_message rows.
 	prefixHash := routing.PrefixHash(reqBody)
-	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), routing.TurnIntent{
+	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
 		ConversationID: convID, Ordinal: 0, Model: model, Request: nil,
 		Source: source, Author: owner, AuthorKind: "human", PrefixHash: prefixHash,
 	})

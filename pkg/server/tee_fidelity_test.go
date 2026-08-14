@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -285,20 +286,20 @@ func TestStaticTokenAuth(t *testing.T) {
 // recordingChatStore is a fake proxyStore for the OpenAI face.
 type recordingChatStore struct {
 	completes, fails int
-	last             routing.TurnResult
-	lastIntent       routing.TurnIntent
+	last             capture.TurnResult
+	lastIntent       capture.TurnIntent
 }
 
-func (f *recordingChatStore) EnsureConversationByExternalRef(_ context.Context, _ routing.ConversationRef) (string, error) {
+func (f *recordingChatStore) EnsureConversationByExternalRef(_ context.Context, _ capture.ConversationRef) (string, error) {
 	return "conv-openai", nil
 }
 
-func (f *recordingChatStore) InsertTurnIntent(_ context.Context, t routing.TurnIntent) (string, time.Time, error) {
+func (f *recordingChatStore) InsertTurnIntent(_ context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	f.lastIntent = t
 	return "turn-openai", time.Unix(0, 0), nil
 }
 
-func (f *recordingChatStore) CompleteTurn(_ context.Context, r routing.TurnResult) error {
+func (f *recordingChatStore) CompleteTurn(_ context.Context, r capture.TurnResult) error {
 	f.completes++
 	f.last = r
 	return nil
@@ -423,7 +424,7 @@ func TestMessagesTeeWithRealStore(t *testing.T) {
 	defer upstream.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	p := NewMessagesProxy(routing.NewCaptureStore(pool), nil, "real-key", upstream.URL, "", nil, logger)
+	p := NewMessagesProxy(capture.NewCaptureStore(pool), nil, "real-key", upstream.URL, "", nil, logger)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(fidelityBody))
@@ -610,6 +611,6 @@ func TestMessagesTeeForwardsPingsDuringUpstreamSilence(t *testing.T) {
 
 // ConversationTokens satisfies proxyStore; the tee fidelity tests assert on
 // streamed bytes, not cost, so an empty rollup is the honest answer here.
-func (s *recordingChatStore) ConversationTokens(context.Context, string) ([]routing.ModelTokens, error) {
+func (s *recordingChatStore) ConversationTokens(context.Context, string) ([]capture.ModelTokens, error) {
 	return nil, nil
 }

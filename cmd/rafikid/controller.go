@@ -34,6 +34,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -63,7 +64,7 @@ type Controller struct {
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Handed to agent children via
 	// fundi.RuntimeOptions.RawTrace.
-	rawTrace *routing.RawTraceStore
+	rawTrace *rawtrace.RawTraceStore
 
 	// insights answers the ctrl_conversation_* RPCs. Always constructed —
 	// agentcli/local.New is nil-pool-safe, so a nil pool just means every
@@ -179,7 +180,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	}
 }
 
-func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *routing.RawTraceStore, baseCtx context.Context, execStore executors.Store) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {

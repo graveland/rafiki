@@ -14,7 +14,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -247,7 +247,7 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := c.capture.InsertTurnIntent(ctx, routing.TurnIntent{
+	if _, _, err := c.capture.InsertTurnIntent(ctx, capture.TurnIntent{
 		ConversationID: convA.ID, Ordinal: 1, Model: "claude-haiku-4-5",
 		Request: []byte(`{"messages":[]}`),
 	}); err != nil {
