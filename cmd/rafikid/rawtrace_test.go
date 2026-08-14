@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -43,7 +43,7 @@ func TestRawTrace_Insert(t *testing.T) {
 		t.Fatalf("cleanup: %v", err)
 	}
 
-	store := routing.NewRawTraceStore(pool)
+	store := rawtrace.NewRawTraceStore(pool)
 	if store == nil {
 		t.Fatal("NewRawTraceStore returned nil")
 	}
@@ -51,7 +51,7 @@ func TestRawTrace_Insert(t *testing.T) {
 	convID := "00000000-0000-0000-0000-000000000001"
 	turnID := "00000000-0000-0000-0000-000000000002"
 	status := 200
-	r := routing.RawHTTPRequest{
+	r := rawtrace.RawHTTPRequest{
 		Source:         "proxy",
 		Model:          "claude-sonnet-4-5",
 		Upstream:       "anthropic",
@@ -112,12 +112,12 @@ func TestRawTrace_Insert(t *testing.T) {
 
 // TestRawTrace_InsertNilStore verifies that Insert on a nil store is a no-op.
 func TestRawTrace_InsertNilStore(t *testing.T) {
-	var nilStore *routing.RawTraceStore
+	var nilStore *rawtrace.RawTraceStore
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := nilStore.Insert(ctx, routing.RawHTTPRequest{Source: "fundi"}); err != nil {
+	if err := nilStore.Insert(ctx, rawtrace.RawHTTPRequest{Source: "fundi"}); err != nil {
 		t.Fatalf("nil store Insert: %v", err)
 	}
 }

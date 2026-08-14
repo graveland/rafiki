@@ -31,6 +31,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/version"
@@ -382,10 +383,10 @@ func runDaemon(opts runDaemonOpts) error {
 	// database pool so per-session opt-in via --record-requests always works.
 	// RAFIKI_RECORD_REQUESTS=1 lifts the per-session gate: every session (and
 	// every proxied request, regardless of header) is recorded unconditionally.
-	var rawTrace *routing.RawTraceStore
+	var rawTrace *rawtrace.RawTraceStore
 	rawTraceAll := false
 	if pool != nil {
-		rawTrace = routing.NewRawTraceStore(pool)
+		rawTrace = rawtrace.NewRawTraceStore(pool)
 		if paths.Get(paths.RecordRequests) == "1" {
 			rawTraceAll = true
 			slog.Info("raw request capture enabled (RAFIKI_RECORD_REQUESTS=1, record-all)")

@@ -15,7 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
-	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/tasks"
 )
@@ -73,7 +73,7 @@ type RuntimeOptions struct {
 	// RawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
-	RawTrace *routing.RawTraceStore
+	RawTrace *rawtrace.RawTraceStore
 
 	// Agents, when non-nil, gives this child the agent_* tools. Supplied by
 	// the daemon as a per-child adapter over the Controller; nil for the

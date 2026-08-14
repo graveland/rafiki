@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/capture"
 )
 
 type recordingStore struct {
@@ -21,17 +21,17 @@ type recordingStore struct {
 	lastAuthor string
 }
 
-func (s *recordingStore) EnsureConversationByExternalRef(ctx context.Context, ref routing.ConversationRef) (string, error) {
+func (s *recordingStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
 	s.lastOwner = ref.Owner
 	return "conv-1", nil
 }
 
-func (s *recordingStore) InsertTurnIntent(ctx context.Context, t routing.TurnIntent) (string, time.Time, error) {
+func (s *recordingStore) InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	s.lastAuthor = t.Author
 	return "turn-1", time.Unix(0, 0), nil
 }
 
-func (s *recordingStore) CompleteTurn(ctx context.Context, r routing.TurnResult) error { return nil }
+func (s *recordingStore) CompleteTurn(ctx context.Context, r capture.TurnResult) error { return nil }
 func (s *recordingStore) FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error {
 	return nil
 }
@@ -90,6 +90,6 @@ func TestMessagesProxyNilAuthenticatorIsAnonymous(t *testing.T) {
 
 // ConversationTokens satisfies proxyStore. The fake records nothing, so the
 // rollup is empty and cost_total reflects only the turn being logged.
-func (s *recordingStore) ConversationTokens(context.Context, string) ([]routing.ModelTokens, error) {
+func (s *recordingStore) ConversationTokens(context.Context, string) ([]capture.ModelTokens, error) {
 	return nil, nil
 }

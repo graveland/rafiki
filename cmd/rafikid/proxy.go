@@ -18,8 +18,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/trace"
 
+	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/ejection"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
 )
@@ -53,7 +56,7 @@ func buildProviderGuard(ctx context.Context, pool *pgxpool.Pool, logger *slog.Lo
 	if pool == nil {
 		return guard
 	}
-	guard.SetSink(routing.NewEjectionStore(pool))
+	guard.SetSink(ejection.NewEjectionStore(pool))
 	// Bounded: a slow database delays startup by at most this, and Rehydrate
 	// logs and swallows its own failure — ejection state is a cost
 	// optimisation, never a reason to refuse to boot.
@@ -112,15 +115,15 @@ const (
 // rather than parameters because the fold (config, dev mode, listen override)
 // adds fields, and a seven-argument constructor is a bug waiting to happen.
 type faceOptions struct {
-	Pool        *pgxpool.Pool          // nil = route but do not capture
-	Logger      *slog.Logger           // required
-	Tracer      trace.TracerProvider   // nil = no-op
-	Registry    *prometheus.Registry   // nil = metrics not mounted
-	Config      Config                 // named client tokens, openai routes, default model
-	Listen      string                 // overrides RAFIKI_PROXY_LISTEN when non-empty
-	Catalog     *routing.ModelCatalog  // shared with the Controller (ctrl_get/list's ContextWindow) via llm.WithCatalog; nil = the client builds its own
-	RawTrace    *routing.RawTraceStore // nil when no pool configured
-	RawTraceAll bool                   // RAFIKI_RECORD_REQUESTS=1: record all sessions unconditionally
+	Pool        *pgxpool.Pool           // nil = route but do not capture
+	Logger      *slog.Logger            // required
+	Tracer      trace.TracerProvider    // nil = no-op
+	Registry    *prometheus.Registry    // nil = metrics not mounted
+	Config      Config                  // named client tokens, openai routes, default model
+	Listen      string                  // overrides RAFIKI_PROXY_LISTEN when non-empty
+	Catalog     *routing.ModelCatalog   // shared with the Controller (ctrl_get/list's ContextWindow) via llm.WithCatalog; nil = the client builds its own
+	RawTrace    *rawtrace.RawTraceStore // nil when no pool configured
+	RawTraceAll bool                    // RAFIKI_RECORD_REQUESTS=1: record all sessions unconditionally
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -150,9 +153,9 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 			"env_file", paths.ServiceEnvFile())
 	}
 
-	var captureStore *routing.CaptureStore
+	var captureStore *capture.CaptureStore
 	if pool != nil {
-		captureStore = routing.NewCaptureStore(pool)
+		captureStore = capture.NewCaptureStore(pool)
 	} else {
 		logger.Warn("no agent database; proxied turns will be routed but NOT captured", "env", paths.DB)
 	}

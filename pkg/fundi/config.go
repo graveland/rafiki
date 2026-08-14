@@ -12,7 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
-	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 )
 
 // thinkingBudgets maps the --thinking flag's named levels to the Anthropic
@@ -130,7 +130,7 @@ type Config struct {
 
 	// RawTrace, when non-nil, enables raw LLM API request/response capture.
 	// Nil disables capture; passed directly to llm.WithRecordRequests.
-	RawTrace *routing.RawTraceStore
+	RawTrace *rawtrace.RawTraceStore
 }
 
 // BuildEngine constructs the llm.Client (wiring c.Pool via llm.WithStore when

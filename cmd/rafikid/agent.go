@@ -17,7 +17,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/paths"
-	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 )
 
 // stringSliceFlag implements flag.Value for a repeatable flag (--skills-dir).
@@ -258,7 +258,7 @@ func runAgentWithFlags(f agentFlags) int {
 		// NewRawTraceStore(nil) is documented to return nil, so this is safe
 		// even when --db was not given (opts.RawTrace then stays nil, same as
 		// not passing --record-requests at all).
-		opts.RawTrace = routing.NewRawTraceStore(pool)
+		opts.RawTrace = rawtrace.NewRawTraceStore(pool)
 	}
 
 	fe := fundi.NewFrontend(os.Stdin, os.Stdout, nil)

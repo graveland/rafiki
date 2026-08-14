@@ -19,6 +19,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -31,7 +33,7 @@ type Client struct {
 	senders  map[Upstream]Sender
 	breakers map[Upstream]*routing.Breaker
 	pool     *pgxpool.Pool
-	capture  *routing.CaptureStore
+	capture  *capture.CaptureStore
 	messages *store.Messages
 	catalog  *routing.ModelCatalog
 	logger   *slog.Logger
@@ -41,8 +43,8 @@ type Client struct {
 	defaultModel  string
 	modelGate     *ModelGate
 
-	rawTrace *routing.RawTraceStore // nil when disabled
-	guard    *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
+	rawTrace *rawtrace.RawTraceStore // nil when disabled
+	guard    *routing.ProviderGuard  // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
 }
 
 type ClientOption func(*Client)
@@ -88,7 +90,7 @@ func WithDefaultModel(m string) ClientOption {
 
 // WithRecordRequests enables raw HTTP request/response capture to the debug
 // raw_http_request hypertable. Pass nil to disable (the default).
-func WithRecordRequests(s *routing.RawTraceStore) ClientOption {
+func WithRecordRequests(s *rawtrace.RawTraceStore) ClientOption {
 	return func(c *Client) { c.rawTrace = s }
 }
 
@@ -125,7 +127,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		}
 	}
 	if c.pool != nil {
-		c.capture = routing.NewCaptureStore(c.pool)
+		c.capture = capture.NewCaptureStore(c.pool)
 		c.messages = store.NewMessages(c.pool)
 	}
 	c.modelGate = NewModelGate(10*time.Second, 300*time.Second)
@@ -781,7 +783,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	if drivenBy == "" {
 		drivenBy = store.DrivenByServer
 	}
-	convRef := routing.ConversationRef{
+	convRef := capture.ConversationRef{
 		ID: meta.ConversationID, OriginEntrypoint: meta.OriginEntrypoint, DrivenBy: string(drivenBy),
 		Owner: meta.Owner, Persona: meta.Persona, Model: string(params.Model), Name: meta.Name, ExternalRef: meta.ExternalRef,
 	}
@@ -809,7 +811,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 		source = meta.OriginEntrypoint
 	}
 	prefixHash := routing.PrefixHash(reqJSON)
-	turnID, createdAt, iErr := c.capture.InsertTurnIntent(ctx, routing.TurnIntent{
+	turnID, createdAt, iErr := c.capture.InsertTurnIntent(ctx, capture.TurnIntent{
 		ConversationID: convID, Ordinal: meta.Ordinal, Model: string(params.Model), Request: reqJSON,
 		Source: source, Author: meta.Author, AuthorKind: meta.AuthorKind,
 		PrefixHash: prefixHash, Protocol: string(store.ProtocolAnthropic),
@@ -837,7 +839,7 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 	if mErr != nil {
 		cErr, reason = mErr, "capture serialization failed: "
 		c.logger.Warn("capture: marshal response failed", "error", mErr)
-	} else if cErr = c.capture.CompleteTurn(ctx, routing.TurnResult{
+	} else if cErr = c.capture.CompleteTurn(ctx, capture.TurnResult{
 		TurnID: turnID, CreatedAt: createdAt, Model: string(resp.Model), Response: respJSON,
 		StopReason: string(resp.StopReason), Upstream: string(upstream),
 		InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
@@ -889,7 +891,7 @@ func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID strin
 		errStr = err.Error()
 	}
 
-	r := routing.RawHTTPRequest{
+	r := rawtrace.RawHTTPRequest{
 		Source:      "fundi",
 		Model:       string(params.Model),
 		Upstream:    string(upstream),

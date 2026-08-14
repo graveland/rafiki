@@ -20,12 +20,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
 type fakeProxyStore struct {
-	convTokens []routing.ModelTokens
+	convTokens []capture.ModelTokens
 
 	intents              int
 	completes            int
@@ -42,11 +43,11 @@ type fakeProxyStore struct {
 	completeErr          error  // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
 }
 
-func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref routing.ConversationRef) (string, error) {
+func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
 	return "conv-1", nil
 }
 
-func (f *fakeProxyStore) InsertTurnIntent(ctx context.Context, t routing.TurnIntent) (string, time.Time, error) {
+func (f *fakeProxyStore) InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	f.intents++
 	f.lastIntentModel = t.Model
 	f.lastIntentSource = t.Source
@@ -54,7 +55,7 @@ func (f *fakeProxyStore) InsertTurnIntent(ctx context.Context, t routing.TurnInt
 	return "turn-1", time.Unix(0, 0), nil
 }
 
-func (f *fakeProxyStore) CompleteTurn(ctx context.Context, r routing.TurnResult) error {
+func (f *fakeProxyStore) CompleteTurn(ctx context.Context, r capture.TurnResult) error {
 	f.completes++
 	f.lastStop = r.StopReason
 	f.lastOut = r.OutputTokens
@@ -991,7 +992,7 @@ func TestProxy_DecomposesConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cs := routing.NewCaptureStore(pool)
+	cs := capture.NewCaptureStore(pool)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"role":"assistant","content":[{"type":"text","text":"hi back"}],` +
@@ -1170,7 +1171,7 @@ func TestMessagesProxyEffortRetry(t *testing.T) {
 // ConversationTokens satisfies proxyStore. Returns a fixed two-model rollup so
 // the cost-logging path is exercised with a conversation that changed models
 // mid-flight — the case a flat SUM would price wrong.
-func (s *fakeProxyStore) ConversationTokens(context.Context, string) ([]routing.ModelTokens, error) {
+func (s *fakeProxyStore) ConversationTokens(context.Context, string) ([]capture.ModelTokens, error) {
 	return s.convTokens, nil
 }
 
@@ -1188,7 +1189,7 @@ func TestCostFieldsPricesTurnAndConversation(t *testing.T) {
 			PromptUSD: 0.000001, CompletionUSD: 0.000002,
 		}},
 	})
-	fs := &fakeProxyStore{convTokens: []routing.ModelTokens{
+	fs := &fakeProxyStore{convTokens: []capture.ModelTokens{
 		{Model: "claude-sonnet-5", InputTokens: 1_000_000},           // $3.00
 		{Model: "deepseek/deepseek-v4-pro", OutputTokens: 1_000_000}, // $2.00
 	}}
