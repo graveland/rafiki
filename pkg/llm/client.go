@@ -146,6 +146,38 @@ func (c *Client) Catalog() *routing.ModelCatalog { return c.catalog }
 // (store.UnfinishedConversations). Nil without WithStore.
 func (c *Client) Pool() *pgxpool.Pool { return c.pool }
 
+// ConversationCost returns the total list-price cost of a conversation's
+// completed turns so far, each priced at its own model's rate. It is the
+// fundi-side mirror of the proxy's cost rollup (pkg/server/proxy.go
+// costFields) so the two "cost_total" log fields mean the same thing: the
+// lifetime spend on this conversation, not the running cost of the current
+// turn.
+//
+// A conversation can change model mid-flight (a failover to OpenRouter, a
+// caller switching lines), so prior turns are priced per model via
+// ConversationTokens rather than summed flat and priced once. Returns 0 when
+// there is no capture store or the conversation id is empty; a rollup failure
+// is indistinguishable from "no prior turns" and also returns 0 — the caller
+// treats the field as best-effort, exactly as the proxy does.
+func (c *Client) ConversationCost(ctx context.Context, convID string) float64 {
+	if c.capture == nil || convID == "" {
+		return 0
+	}
+	prior, err := c.capture.ConversationTokens(ctx, convID)
+	if err != nil {
+		return 0
+	}
+	var total float64
+	for _, m := range prior {
+		mp, ok := c.catalog.Pricing(m.Model)
+		if !ok {
+			continue
+		}
+		total += mp.CostOf(m.InputTokens, m.OutputTokens, m.CacheReadTokens, m.CacheCreationTokens).Total
+	}
+	return total
+}
+
 // SetProviderGuard attaches the provider cache guard, which ejects an
 // OpenRouter provider from routing after it stops serving prompt-cache hits.
 // Pass nil to disable; a nil guard is inert at every call site.
@@ -272,7 +304,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	)
 	if servedBy == UpstreamOpenRouter {
 		c.guard.Observe(time.Now(), routing.Observation{
-			Provider: providerOf(resp), Model: string(params.Model), Conversation: ref.convID,
+			Provider: ProviderOf(resp), Model: string(params.Model), Conversation: ref.convID,
 			PrefixHash: ref.prefixHash, InputTokens: resp.Usage.InputTokens,
 			CacheReadTokens: resp.Usage.CacheReadInputTokens,
 		})
@@ -533,7 +565,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// has already run to completion) — this is a completed turn's final
 		// usage, not a partial mid-stream snapshot.
 		c.guard.Observe(time.Now(), routing.Observation{
-			Provider: providerOf(&acc), Model: string(params.Model), Conversation: ref.convID,
+			Provider: ProviderOf(&acc), Model: string(params.Model), Conversation: ref.convID,
 			PrefixHash: ref.prefixHash, InputTokens: acc.Usage.InputTokens,
 			CacheReadTokens: acc.Usage.CacheReadInputTokens,
 		})
@@ -739,11 +771,11 @@ func applyProviderPrefs(params *anthropic.MessageNewParams, g *routing.ProviderG
 	params.SetExtraFields(map[string]any{"provider": prefs})
 }
 
-// providerOf extracts OpenRouter's non-standard top-level "provider" field
+// ProviderOf extracts OpenRouter's non-standard top-level "provider" field
 // from a decoded Message. The Anthropic SDK has no such field, but it retains
 // unknown members in JSON.ExtraFields, so the value survives the decode.
 // Returns "" for native Anthropic responses, which carry no provider.
-func providerOf(msg *anthropic.Message) string {
+func ProviderOf(msg *anthropic.Message) string {
 	if msg == nil {
 		return ""
 	}
