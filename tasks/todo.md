@@ -58,25 +58,28 @@ to the daemon. So the client should ask.
 `pkg/routing` is now DB-free, and `rafiki claude` asks the daemon over
 `ctrl_model_info`. But `cmd/rafiki` still links pgx via:
 
-- `pkg/executors` — `cmd_executor.go` uses `executors.Executor` (a type), but
-  `pkg/executors` imports pgx (for the Postgres store).
-- `pkg/agentcli` + `pkg/insights` — `cmd_conversations.go` uses shared
-  rendering/filter/types, but both packages import pgx (for the backend/queries).
+- `pkg/agentcli` — `cmd_conversations.go` uses shared rendering/types, but
+  `agentcli/backend.go` imports `pkg/insights`, `pkg/analyze`, and `pkg/store` —
+  all pgx-backed.
 
-These were added by agent-platform and executor-platform work AFTER the routing
-split was planned.  The fix is the same pattern: split each package so the DB
-parts live in a pgx-importing sub-package (e.g.
-`pkg/insights` → types, `pkg/insightsdb` → queries), leaving the type/render
-surface pgx-free for the client.
+Progress so far:
 
-- [ ] Make `pkg/executors` DB-free (move `postgres.go` to a pgx sub-package;
-      keep `Executor` type and related pure helpers in `pkg/executors`).
-- [ ] Make `pkg/insights` DB-free (move query methods to a pgx sub-package;
-      keep `Stats`, `ConversationSummary`, `Transcript`, filter types, `Pricer`).
-- [ ] Make `pkg/agentcli` DB-free (the top-level render/filter layer should only
-      depend on pgx-free `pkg/insights` types; `local` backend stays pgx).
-- [ ] Once these are done, add the `TestClientDoesNotLinkPostgres` linker guard
-      test in `cmd/rafiki/no_postgres_test.go` (from the 2026-08-13 plan, Task 4).
+- [x] `pkg/routing`: DB-free (CaptureStore/RawTraceStore/EjectionStore moved out).
+- [x] `pkg/executors`: DB-free (`postgres.go` → `pkg/executorsdb`).
+- [x] `pkg/insightstypes`: new pgx-free types package (Stats, Transcript,
+      ConversationSummary, SearchFilter, Path, Pricer — everything cmd/rafiki
+      needs for rendering). `pkg/insights` still imports pgx (query engine stays).
+- [ ] `pkg/agentcli`: the last blocker. `backend.go` and `compare.go` must move
+      to `pkg/agentcli/local/` (they import insights/analyze/store → pgx). The
+      complication: `local/backend.go` already defines a `Backend` struct, and the
+      moved `backend.go` defines the `Backend` interface — name conflict. Fix:
+      rename the struct to `Impl`, move the interface, update daemon references
+      (`agentcli.Backend` → `local.Backend`). Also, `local/` needs access to
+      `errWriter`, `newAgentTable`, `dollars`, and `RenderTranscriptMD` (currently
+      in the top-level package). Extract the shared helpers to a pgx-free location
+      or import them across the package boundary.
+- [ ] Once agentcli is done, add the `TestClientDoesNotLinkPostgres` linker guard
+      test in `cmd/rafiki/no_postgres_test.go`.
 
 ---
 
