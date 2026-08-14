@@ -5,6 +5,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -68,6 +70,68 @@ func testClient(t *testing.T, pool *pgxpool.Pool, sender Sender) *Client {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// TestConversationCostRollsUpCompletedTurnsPerModel locks down the fundi-side
+// "cost_total" rollup: completed turns are priced at each turn's own served
+// model, summed across the conversation. It is the llm.Client half of the same
+// arithmetic the proxy's costFields does, so a conversation that changes model
+// mid-flight is billed per model, not flat.
+func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	// Served model + fixed token counts: input 100, output 50 per turn.
+	const served = `{"id":"msg_x","type":"message","role":"assistant","model":"claude-sonnet-5",
+		"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn",
+		"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		func(anthropic.MessageNewParams) (*anthropic.Message, error) { return cannedMessage(served), nil },
+		func(anthropic.MessageNewParams) (*anthropic.Message, error) { return cannedMessage(served), nil },
+	}}
+
+	cat := routing.NewModelCatalog(nil, time.Hour, testLogger(t))
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "anthropic/claude-sonnet-5", Created: 2, Pricing: &routing.ModelPricing{
+			PromptUSD: 0.001, CompletionUSD: 0.002,
+		}},
+	})
+	c, err := NewClient(
+		WithUpstream(UpstreamAnthropic, sender),
+		WithStore(pool),
+		WithCatalog(cat),
+		WithDefaultModel("haiku-latest"),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := c.Conversation(ctx, NewConversation("brent", "test"), Model("sonnet-latest"))
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	if _, err := conv.Send(ctx, UserText("one")); err != nil {
+		t.Fatalf("Send 1: %v", err)
+	}
+	if _, err := conv.Send(ctx, UserText("two")); err != nil {
+		t.Fatalf("Send 2: %v", err)
+	}
+
+	got := c.ConversationCost(ctx, conv.ID)
+	// 2 turns × (100×0.001 + 50×0.002) = 2 × 0.2 = 0.4
+	want := 0.4
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("ConversationCost = %v, want %v", got, want)
+	}
+
+	// A store-less client reports 0 rather than a bogus figure.
+	bare, err := NewClient(WithUpstream(UpstreamAnthropic, sender), WithDefaultModel("haiku-latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bare.ConversationCost(ctx, "some-id"); got != 0 {
+		t.Errorf("ConversationCost without a store = %v, want 0", got)
+	}
 }
 
 func TestConversationSendPersistsBothGranularities(t *testing.T) {

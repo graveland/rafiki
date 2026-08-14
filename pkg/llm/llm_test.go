@@ -818,8 +818,8 @@ func TestProviderSurvivesSDKDecode(t *testing.T) {
 	if err := json.Unmarshal(body, &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := providerOf(&msg); got != "CoreWeave" {
-		t.Errorf("providerOf = %q, want %q", got, "CoreWeave")
+	if got := ProviderOf(&msg); got != "CoreWeave" {
+		t.Errorf("ProviderOf = %q, want %q", got, "CoreWeave")
 	}
 }
 
@@ -832,7 +832,7 @@ func TestProviderOfMissing(t *testing.T) {
 	if err := json.Unmarshal(body, &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := providerOf(&msg); got != "" {
-		t.Errorf("providerOf = %q, want empty", got)
+	if got := ProviderOf(&msg); got != "" {
+		t.Errorf("ProviderOf = %q, want empty", got)
 	}
 }

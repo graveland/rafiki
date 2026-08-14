@@ -97,6 +97,7 @@ type EngineConfig struct {
 // abort cancels the running turn's context.
 type Engine struct {
 	conv       *llm.Conversation
+	client     *llm.Client
 	tools      agentloop.ToolSet
 	fe         *Frontend
 	em         *Emitter
@@ -161,6 +162,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 
 	e := &Engine{
 		conv:    conv,
+		client:  cfg.Client,
 		tools:   tools,
 		fe:      fe,
 		em:      NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
@@ -539,6 +541,22 @@ func (e *Engine) runTurn(text string) {
 	}
 }
 
+// priorConversationCost fetches the list-price cost of every completed turn
+// that precedes the current one, priced per model. It runs detached from the
+// turn's cancellable context on a short timeout, so a client that hung up
+// mid-stream (cancelling the turn) cannot also take the cost rollup down with
+// it. Returns 0 when the client has no capture store (no persistent
+// conversation) or the rollup fails — best-effort, exactly like the proxy's
+// costFields.
+func (e *Engine) priorConversationCost() float64 {
+	if e.client == nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(e.baseCtx), 3*time.Second)
+	defer cancel()
+	return e.client.ConversationCost(ctx, e.conv.ID)
+}
+
 // events wires the agent loop's observation callbacks to the pi emitter, and
 // returns the llm.SendOption that must ride along on every conv.Continue call
 // of THIS turn so the loop actually streams.
@@ -564,6 +582,12 @@ func (e *Engine) runTurn(text string) {
 // the handler ran (past the hasContent gate) THIS iteration, and OnTurn
 // falls back to the plain AssistantTurn triple when it didn't.
 func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
+	// Fetched once per turn: prior completed turns don't change while THIS
+	// turn is in flight, so the conversation-lifetime rollup is constant across
+	// the turn's iterations and only the current turn's running cost (tracked
+	// in e.em.usage) moves iteration to iteration.
+	priorCost := e.priorConversationCost()
+
 	var acc anthropic.Message
 	var streamed bool
 	var lastFlush time.Time
@@ -621,18 +645,25 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			if err != nil {
 				slog.Warn("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
-					"latency", dur.Round(100*time.Millisecond), "cost_total", e.em.usage.Cost.Total, "error", err)
+					"latency", dur.Round(100*time.Millisecond), "cost_total", fmt.Sprintf("%.2f", priorCost+e.em.usage.Cost.Total), "error", err)
 			} else {
-				turnCost := costOf(e.em.pricer, string(resp.Model), resp.Usage)
-				runningTotal := e.em.usage.Cost.Total + turnCost.Total
+				// cost_total is the conversation-lifetime spend: every completed
+				// prior turn (priorCost, rolled up over the capture store) plus this
+				// turn's running cost (prior iterations already folded into
+				// e.em.usage, this iteration added here). It mirrors the proxy's
+				// "llm turn" cost_total so the two log lines agree, and it does NOT
+				// reset at a turn boundary the way a per-turn running total would.
+				iterCost := costOf(e.em.pricer, string(resp.Model), resp.Usage)
+				conversationTotal := priorCost + e.em.usage.Cost.Total + iterCost.Total
 				cachePct := cacheHitPct(resp.Usage)
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
+					"upstream_provider", llm.ProviderOf(resp),
 					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
 					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
 					"cache_pct", cachePct,
 					"stop_reason", resp.StopReason, "latency", dur.Round(100*time.Millisecond),
-					"cost_turn", fmt.Sprintf("%.6f", turnCost.Total), "cost_total", fmt.Sprintf("%.2f", runningTotal))
+					"cost_total", fmt.Sprintf("%.2f", conversationTotal))
 			}
 			// Reset for the next iteration regardless of outcome, BEFORE any
 			// early return below, so a failed or non-streamed iteration never
