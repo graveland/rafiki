@@ -49,6 +49,7 @@ type fakeController struct {
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
 	contextWindowFn         func(string) (int, int, bool)
+	modelInfoFn             func(string) protocol.ModelInfoResponseData
 	getStreamsResult        control.GetStreamsResult
 	getStreamsErr           error
 	conversationStatsFn     func(context.Context, insights.StatsFilter) (*insights.Stats, error)
@@ -272,6 +273,13 @@ func (f *fakeController) ContextWindow(model string) (contextLen, maxCompletion 
 		return f.contextWindowFn(model)
 	}
 	return 0, 0, false
+}
+
+func (f *fakeController) ModelInfo(model string) protocol.ModelInfoResponseData {
+	if f.modelInfoFn != nil {
+		return f.modelInfoFn(model)
+	}
+	return protocol.ModelInfoResponseData{Model: model}
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1738,6 +1746,45 @@ func TestDispatch_ListPresets_HasLabelFilter(t *testing.T) {
 	if len(capturedHasLabel) != 1 || capturedHasLabel[0] != "team" {
 		t.Errorf("hasLabel not passed through: %v", capturedHasLabel)
 	}
+}
+
+// ─── ctrl_model_info ──────────────────────────────────────────────────────
+
+// TestDispatch_ModelInfo_BarePayload pins the response shape: the value is the
+// bare ModelInfoResponseData, not wrapped like ctrl_conversation_search's
+// {"rows":[...]}. The client decodes into protocol.ModelInfoResponseData, so a
+// shape mismatch here is a runtime unmarshal error a client-side unit test
+// (whose fixture encodes the same assumption) would not catch.
+func TestDispatch_ModelInfo_BarePayload(t *testing.T) {
+	c := &fakeController{
+		modelInfoFn: func(model string) protocol.ModelInfoResponseData {
+			return protocol.ModelInfoResponseData{
+				Model:               model,
+				ResolvedID:          "anthropic/claude-opus-5",
+				ContextWindow:       200000,
+				MaxCompletionTokens: 8192,
+				AutoCompactWindow:   190000,
+				Known:               true,
+			}
+		},
+	}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_model_info","id":"mi1","model":"anthropic/claude-opus-5"}`)))
+	if r.Command != protocol.TypeCtrlModelInfo {
+		t.Fatalf("command = %s", r.Command)
+	}
+	var data protocol.ModelInfoResponseData
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("decode bare ModelInfoResponseData: %v", err)
+	}
+	if data.Known != true || data.AutoCompactWindow != 190000 || data.ContextWindow != 200000 {
+		t.Fatalf("unexpected data: %+v", data)
+	}
+}
+
+func TestDispatch_ModelInfo_MissingModelIsInvalidArgs(t *testing.T) {
+	d := control.NewDispatch(&fakeController{})
+	mustError(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_model_info","id":"mi2"}`)), protocol.ErrInvalidArgs)
 }
 
 func TestDispatchGetStreams(t *testing.T) {

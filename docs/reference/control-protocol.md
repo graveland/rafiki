@@ -891,6 +891,44 @@ database configured.
 
 CLI: `rafiki tasks [--child <id>] [--status <s>] [--limit <n>] [--all]`.
 
+### 6.21 `ctrl_model_info`
+
+Answers what the daemon's warm OpenRouter catalog knows about a model, so a
+client never has to read that catalog off disk itself (which is what made
+`cmd/rafiki` link postgres — it imported `pkg/routing` for `ModelCatalog`).
+
+```jsonc
+{ "type": "ctrl_model_info", "id": "38", "model": "anthropic/claude-opus-5" }
+```
+
+Response `data` is bare (not wrapped in a `{"rows":[...]}` envelope, unlike
+`ctrl_conversation_search` — the same shape `ctrl_conversation_stats` and
+`ctrl_conversation_export` use):
+
+```jsonc
+{
+  "type": "ctrl_response", "command": "ctrl_model_info", "id": "38",
+  "success": true,
+  "data": {
+    "model":               "anthropic/claude-opus-5",
+    "resolvedId":          "anthropic/claude-opus-5",  // omitempty; absent when unknown
+    "contextWindow":       200000,
+    "maxCompletionTokens": 8192,
+    "autoCompactWindow":   190000,
+    "known":               true
+  }
+}
+```
+
+`known == false` is an ordinary answer, not an error: an unknown model and an
+unconfigured catalog (proxy disabled) both return zeroes with `known: false`.
+`autoCompactWindow` is computed daemon-side (`contextWindow` minus a reply
+reserve clamped to 5%–10%) so the formula does not live in two binaries. The
+raw numbers ride along for future callers; the `rafiki claude` client reads only
+`autoCompactWindow` and does no maths. There is no error code — an unreachable
+daemon is a transport failure the client handles by leaving the model's defaults
+alone, and an unknown model is `known: false`.
+
 ## 7. Controller → client events
 
 ### 7.1 `ctrl_event`
