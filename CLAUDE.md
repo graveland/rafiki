@@ -43,7 +43,14 @@
 
 - **`ProviderGuard` is inert without capture, by design.** It qualifies a cache miss using `prefix_hash` and the conversation id, both of which come from the capture path; with capture disabled it receives empty values, nothing qualifies as evidence, and it ejects nothing. That is the intended fail-safe (no evidence beats false evidence), not a bug to "fix" by loosening the qualification rules. The rules are pinned by replay tests over real traffic in `pkg/routing/testdata/`: loosening them makes `TestReplayHealthyNovitaNeverEjects` blacklist a provider that was working fine.
 
-- **The migration chain must be contiguous 1..N, and `main` and `agent-platform` diverged at 13.** `loadMigrations` hard-fails on a gap or a duplicate, and `Migrate` skips by version NUMBER, not name — so a migration numbered into an already-applied slot is silently never applied while looking correct on a fresh database. Both live databases were migrated by `agent-platform` and carry `13_tasks`, `14_tasks_ordinal_nulls`, `15_executors`; `main` has adopted those three verbatim so its chain can continue at 16. `agent-platform` still carries a duplicate `0013` (its own `0013_tasks` plus the `0013_or_broadcast_columns` it merged from main) which makes its chain fail to load outright — it must drop that copy and take main's `0016` when it merges. Before adding a migration, check the max version in the target database, not just the highest file on your branch.
+- **The migration chain must be contiguous 1..N, and `Migrate` skips by version
+  NUMBER, not name.** `loadMigrations` hard-fails on a gap or a duplicate, so a
+  branch that numbers a migration into a slot another branch already used will
+  not load at all — and worse, if it *does* load, a number already applied to a
+  live database is silently never applied while looking correct on a fresh one.
+  Before adding a migration, check the max version in the **target database**,
+  not just the highest file on your branch. This has bitten once already, when
+  `main` and `agent-platform` both claimed 13.
 
 - **No `Co-Authored-By` trailers in commit messages.**
 - **`make check` (vet + golangci-lint + unit tests, `-race`) is the only gate — there is no CI on this repo.** Run it before considering anything done.
@@ -95,6 +102,31 @@
   parent's is decidable for equality matches and a logic puzzle the moment
   `notin` appears — and it fails OPEN, which is the wrong direction for a
   confidentiality boundary.
+
+- **A child's executor set is its PARENT'S set intersected with its own
+  selector — never `Live()` filtered by the child's selector alone.** The first
+  version of `selectExecutor` did the latter, letting any child reach any
+  executor its selector happened to match, including one its parent was confined
+  away from. `effectiveExecutorSet` (`cmd/rafikid/executor_select.go`) walks the
+  lineage root-first so an ancestor's constraint can never be widened by a
+  descendant's, and a malformed selector — on either side — EXCLUDES rather
+  than admits.
+
+- **`Executor.Admits` is the executor-side half of selection and is easy to
+  store and never evaluate** (it shipped that way). An agent-side selector alone
+  is permissive by default: it says what the agent wants, not what the executor
+  will take. Both halves are evaluated in `effectiveExecutorSet` — a malformed
+  admission selector EXCLUDES, never admits, so an operator typo cannot silently
+  open a machine to every child.
+
+- **`Pool.mu` is a `sync.RWMutex` and is not reentrant — never block while
+  holding it.** A goroutine that blocks holding `Pool.mu` wedges `Live()`,
+  `ClientFor()` and every subsequent accept, so one unwell executor takes the
+  whole executor plane down. This shipped once (`healthLoop` calling `Park`
+  inside its own lock) and was invisible because `pkg/execpool` had no pool
+  test. `onHealthFailure` deletes from the live set under the lock, then calls
+  `Park` outside it; `sweepParkedOnce` fires `onLost` after the lock is dropped
+  for the same reason.
 
 - **Container mounts ARE the grant, and the daemon derives them — nothing
   model-facing contributes a path.** `pkg/workspace.Derive` takes a cwd and a
