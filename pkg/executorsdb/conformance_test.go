@@ -1,4 +1,4 @@
-package executors
+package executorsdb
 
 import (
 	"context"
@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.graveland.dev/rafiki/pkg/executors"
 )
 
 // testStore returns a Store for conformance testing, backed by RAFIKI_TEST_DSN.
-func testStore(t *testing.T) Store {
+func testStore(t *testing.T) executors.Store {
 	t.Helper()
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
@@ -51,7 +53,7 @@ func ensureTables(ctx context.Context, pool *pgxpool.Pool) error {
 func TestConcurrentEnrollmentHasExactlyOneWinner(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	tok, err := s.MintToken(ctx, NewToken{
+	tok, err := s.MintToken(ctx, executors.NewToken{
 		Labels:    map[string]string{"rafiki/env": "work"},
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -88,7 +90,7 @@ func TestConcurrentEnrollmentHasExactlyOneWinner(t *testing.T) {
 func TestAuthenticateReadsTheCurrentRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	tok, _ := s.MintToken(ctx, NewToken{
+	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"env": "home"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, cred, err := s.Enroll(ctx, tok, nil)
 	if err != nil {
@@ -109,7 +111,7 @@ func TestAuthenticateReadsTheCurrentRow(t *testing.T) {
 func TestDisabledExecutorCannotAuthenticate(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	tok, _ := s.MintToken(ctx, NewToken{ExpiresAt: time.Now().Add(time.Hour)})
+	tok, _ := s.MintToken(ctx, executors.NewToken{ExpiresAt: time.Now().Add(time.Hour)})
 	e, cred, _ := s.Enroll(ctx, tok, nil)
 	if err := s.SetEnabled(ctx, e.ID, false); err != nil {
 		t.Fatal(err)
@@ -122,7 +124,7 @@ func TestDisabledExecutorCannotAuthenticate(t *testing.T) {
 func TestExpiredTokenIsRejected(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	tok, _ := s.MintToken(ctx, NewToken{ExpiresAt: time.Now().Add(-time.Minute)})
+	tok, _ := s.MintToken(ctx, executors.NewToken{ExpiresAt: time.Now().Add(-time.Minute)})
 	if _, _, err := s.Enroll(ctx, tok, nil); !errors.Is(err, ErrTokenExpired) {
 		t.Fatalf("want ErrTokenExpired, got %v", err)
 	}
@@ -138,7 +140,7 @@ func TestUnknownCredentialIsRejectedNotAutoEnrolled(t *testing.T) {
 func TestSelfReportCannotOverwriteATrustLabel(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	tok, _ := s.MintToken(ctx, NewToken{
+	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"rafiki/env": "home"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, _, err := s.Enroll(ctx, tok, map[string]string{"rafiki/env": "work", "os": "linux"})
 	if err != nil {
@@ -157,7 +159,7 @@ func TestAdmissionSelectorIgnoresAnnotations(t *testing.T) {
 	// its way onto a machine. They ARE selectable for FINDING one.
 	s := testStore(t)
 	ctx := context.Background()
-	tok, _ := s.MintToken(ctx, NewToken{
+	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"env": "work"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, _, err := s.Enroll(ctx, tok, nil)
 	if err != nil {
@@ -177,7 +179,7 @@ func TestAdmissionSelectorIgnoresAnnotations(t *testing.T) {
 		t.Fatal("annotation was not stored")
 	}
 	// The annotation must not appear in a label selector match.
-	sel, _ := ParseSelector("sentinel=built")
+	sel, _ := executors.ParseSelector("sentinel=built")
 	if sel.Matches(got.Labels) {
 		t.Fatal("annotation appeared in labels — the selector is reading annotations, which is the admission hole")
 	}
@@ -191,7 +193,7 @@ func TestFindSelectorHonoursAnnotations(t *testing.T) {
 	// operations that include them. For now, verify they are stored correctly.
 	s := testStore(t)
 	ctx := context.Background()
-	tok, _ := s.MintToken(ctx, NewToken{
+	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"env": "test"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, _, err := s.Enroll(ctx, tok, nil)
 	if err != nil {

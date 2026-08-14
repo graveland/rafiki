@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/executorsdb"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -427,7 +428,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// once, up front, when the listener is configured; both consumers share it.
 	var execStore executors.Store
 	if paths.Get(paths.ExecutorListen) != "" && pool != nil {
-		execStore = executors.NewPostgresStore(pool)
+		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore)

@@ -1,4 +1,4 @@
-package executors
+package executorsdb
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.graveland.dev/rafiki/pkg/executors"
 )
 
 var (
@@ -22,7 +24,7 @@ var (
 )
 
 // NewPostgresStore creates an executor Store backed by pg.
-func NewPostgresStore(pool *pgxpool.Pool) Store {
+func NewPostgresStore(pool *pgxpool.Pool) executors.Store {
 	return &pgStore{pool: pool}
 }
 
@@ -30,7 +32,7 @@ type pgStore struct {
 	pool *pgxpool.Pool
 }
 
-func (s *pgStore) MintToken(ctx context.Context, t NewToken) (string, error) {
+func (s *pgStore) MintToken(ctx context.Context, t executors.NewToken) (string, error) {
 	plaintext, err := newToken()
 	if err != nil {
 		return "", err
@@ -62,10 +64,10 @@ func (s *pgStore) MintToken(ctx context.Context, t NewToken) (string, error) {
 	return plaintext, nil
 }
 
-func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]string) (Executor, string, error) {
+func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]string) (executors.Executor, string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Executor{}, "", err
+		return executors.Executor{}, "", err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
@@ -76,18 +78,18 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 		   FROM conversations.executor_enrollment_token WHERE token_hash = $1`,
 		hashed).Scan(&tr.labels, &tr.roots, &tr.isolation, &tr.workspaceMode, &tr.admits, &tr.expiresAt, &tr.consumedAt)
 	if err != nil {
-		return Executor{}, "", ErrTokenUnknown
+		return executors.Executor{}, "", ErrTokenUnknown
 	}
 	if tr.consumedAt != nil {
-		return Executor{}, "", ErrTokenConsumed
+		return executors.Executor{}, "", ErrTokenConsumed
 	}
 	if time.Now().After(tr.expiresAt) {
-		return Executor{}, "", ErrTokenExpired
+		return executors.Executor{}, "", ErrTokenExpired
 	}
 
 	credential, err := newToken()
 	if err != nil {
-		return Executor{}, "", err
+		return executors.Executor{}, "", err
 	}
 
 	selfJSON := jsonMap(self)
@@ -107,7 +109,7 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 		hashToken(credential), tr.labels, selfJSON, tr.roots,
 		isolation, wmode, tr.admits).Scan(&id)
 	if err != nil {
-		return Executor{}, "", fmt.Errorf("insert executor: %w", err)
+		return executors.Executor{}, "", fmt.Errorf("insert executor: %w", err)
 	}
 
 	tag, err := tx.Exec(ctx,
@@ -115,24 +117,24 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 		    SET consumed_at = now(), executor_id = $2
 		  WHERE token_hash = $1 AND consumed_at IS NULL`, hashed, id)
 	if err != nil {
-		return Executor{}, "", err
+		return executors.Executor{}, "", err
 	}
 	if tag.RowsAffected() == 0 {
-		return Executor{}, "", ErrTokenConsumed
+		return executors.Executor{}, "", ErrTokenConsumed
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Executor{}, "", err
+		return executors.Executor{}, "", err
 	}
 	e, err := s.Get(ctx, id)
 	return e, credential, err
 }
 
-func (s *pgStore) Authenticate(ctx context.Context, credential string) (Executor, error) {
+func (s *pgStore) Authenticate(ctx context.Context, credential string) (executors.Executor, error) {
 	return s.authenticateByHash(ctx, hashToken(credential))
 }
 
-func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (Executor, error) {
-	var e Executor
+func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (executors.Executor, error) {
+	var e executors.Executor
 	var labelsJSON, selfJSON, annotationsJSON []byte
 	var enrolledAt, lastSeenAt *time.Time
 	err := s.pool.QueryRow(ctx,
@@ -146,10 +148,10 @@ func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (Execu
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
 		&enrolledAt, &lastSeenAt)
 	if err != nil {
-		return Executor{}, ErrNotFound
+		return executors.Executor{}, ErrNotFound
 	}
 	if !e.Enabled {
-		return Executor{}, ErrDisabled
+		return executors.Executor{}, ErrDisabled
 	}
 	json.Unmarshal(labelsJSON, &e.Labels)           //nolint:errcheck
 	json.Unmarshal(selfJSON, &e.SelfReported)       //nolint:errcheck
@@ -163,8 +165,8 @@ func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (Execu
 	return e, nil
 }
 
-func (s *pgStore) Get(ctx context.Context, id string) (Executor, error) {
-	var e Executor
+func (s *pgStore) Get(ctx context.Context, id string) (executors.Executor, error) {
+	var e executors.Executor
 	var labelsJSON, selfJSON, annotationsJSON []byte
 	var enrolledAt, lastSeenAt *time.Time
 	err := s.pool.QueryRow(ctx,
@@ -178,7 +180,7 @@ func (s *pgStore) Get(ctx context.Context, id string) (Executor, error) {
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
 		&enrolledAt, &lastSeenAt)
 	if err != nil {
-		return Executor{}, ErrNotFound
+		return executors.Executor{}, ErrNotFound
 	}
 	json.Unmarshal(labelsJSON, &e.Labels)           //nolint:errcheck
 	json.Unmarshal(selfJSON, &e.SelfReported)       //nolint:errcheck
@@ -192,7 +194,7 @@ func (s *pgStore) Get(ctx context.Context, id string) (Executor, error) {
 	return e, nil
 }
 
-func (s *pgStore) List(ctx context.Context) ([]Executor, error) {
+func (s *pgStore) List(ctx context.Context) ([]executors.Executor, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, display_name, labels, self_reported, annotations,
 		        roots, isolation, workspace_mode, admits, enabled,
@@ -205,10 +207,10 @@ func (s *pgStore) List(ctx context.Context) ([]Executor, error) {
 	return scanExecutors(rows)
 }
 
-func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]string, remove []string) (Executor, error) {
+func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]string, remove []string) (executors.Executor, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Executor{}, err
+		return executors.Executor{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
@@ -216,7 +218,7 @@ func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]strin
 	err = tx.QueryRow(ctx,
 		`SELECT labels FROM conversations.executors WHERE id = $1 FOR UPDATE`, id).Scan(&currentJSON)
 	if err != nil {
-		return Executor{}, ErrNotFound
+		return executors.Executor{}, ErrNotFound
 	}
 	var current map[string]string
 	if err := json.Unmarshal(currentJSON, &current); err != nil {
@@ -236,10 +238,10 @@ func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]strin
 		`UPDATE conversations.executors SET labels = $1, updated_at = now() WHERE id = $2`,
 		newJSON, id)
 	if err != nil {
-		return Executor{}, err
+		return executors.Executor{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Executor{}, err
+		return executors.Executor{}, err
 	}
 	return s.Get(ctx, id)
 }
@@ -332,10 +334,10 @@ func jsonMap(m map[string]string) []byte {
 	return b
 }
 
-func scanExecutors(rows pgx.Rows) ([]Executor, error) {
-	var out []Executor
+func scanExecutors(rows pgx.Rows) ([]executors.Executor, error) {
+	var out []executors.Executor
 	for rows.Next() {
-		var e Executor
+		var e executors.Executor
 		var labelsJSON, selfJSON, annotationsJSON []byte
 		var enrolledAt, lastSeenAt *time.Time
 		if err := rows.Scan(
