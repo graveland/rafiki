@@ -119,6 +119,12 @@ type Controller interface {
 	// leave those fields unset rather than publish a false zero.
 	ContextWindow(model string) (contextLen, maxCompletion int, ok bool)
 
+	// ModelInfo answers ctrl_model_info from the daemon's warm catalog.
+	// Never returns an error: an unknown model and an unconfigured catalog
+	// are both Known=false. AutoCompactWindow is computed daemon-side so
+	// the formula does not live in two binaries.
+	ModelInfo(model string) protocol.ModelInfoResponseData
+
 	// ListPresets enumerates presets from <config dir>/presets.json (paths.PresetsFile()).
 	// labels and hasLabel apply the same AND-match filter semantics as ctrl_list.
 	ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error)
@@ -225,6 +231,8 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.listModels(frame, hdr.ID)
 	case protocol.TypeCtrlListPresets:
 		return d.listPresets(frame, hdr.ID)
+	case protocol.TypeCtrlModelInfo:
+		return d.modelInfo(frame, hdr.ID)
 	case protocol.TypeCtrlSubscribe:
 		return d.subscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUnsubscribe:
@@ -682,6 +690,20 @@ func (d *dispatcher) listPresets(frame []byte, id string) []byte {
 		presets = []protocol.PresetInfo{}
 	}
 	return okResponse(protocol.TypeCtrlListPresets, id, protocol.ListPresetsResponseData{Presets: presets})
+}
+
+func (d *dispatcher) modelInfo(frame []byte, id string) []byte {
+	var req protocol.ModelInfoRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlModelInfo, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.Model == "" {
+		return errResponse(protocol.TypeCtrlModelInfo, id, protocol.ErrInvalidArgs, "model required")
+	}
+	// Bare payload, matching ctrl_conversation_stats — not the {"rows":[...]}
+	// wrapper of ctrl_conversation_search. Never an error: an unknown model
+	// and an unconfigured catalog are both Known=false.
+	return okResponse(protocol.TypeCtrlModelInfo, id, d.c.ModelInfo(req.Model))
 }
 
 // ─── Labels handler ───────────────────────────────────────────────────────────

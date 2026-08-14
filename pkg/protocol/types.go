@@ -20,6 +20,7 @@ const (
 	TypeCtrlGet                = "ctrl_get"
 	TypeCtrlListModels         = "ctrl_list_models"
 	TypeCtrlListPresets        = "ctrl_list_presets"
+	TypeCtrlModelInfo          = "ctrl_model_info"
 	TypeCtrlSpawn              = "ctrl_spawn"
 	TypeCtrlResume             = "ctrl_resume"
 	TypeCtrlKill               = "ctrl_kill"
@@ -792,6 +793,38 @@ type PresetInfo struct {
 	Name   string            `json:"name"`
 	Model  string            `json:"model,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// ─── ctrl_model_info ────────────────────────────────────────────────────────
+
+// ModelInfoRequest asks the daemon what it knows about a model. It exists so
+// the CLIENT does not have to read the OpenRouter catalog itself: the daemon
+// already warms and caches it, and the client already holds a socket to the
+// daemon. Reading it client-side is what made cmd/rafiki link pgx.
+type ModelInfoRequest struct {
+	Type  string `json:"type"`
+	ID    string `json:"id,omitempty"`
+	Model string `json:"model"`
+}
+
+// ModelInfoResponseData answers it.
+//
+// Known == false means "the daemon has no entry for this model" and is an
+// ordinary answer, not an error: every caller degrades by leaving the model's
+// own defaults alone, and making it an error would force each of them to
+// distinguish "unknown model" from "daemon unreachable" when the handling is
+// identical.
+//
+// AutoCompactWindow is computed HERE, not by the caller. The formula would
+// otherwise live in two binaries that must agree with nothing enforcing it —
+// the drift class this repo already carries three documented instances of.
+type ModelInfoResponseData struct {
+	Model               string `json:"model"`
+	ResolvedID          string `json:"resolvedId,omitempty"`
+	ContextWindow       int    `json:"contextWindow"`
+	MaxCompletionTokens int    `json:"maxCompletionTokens"`
+	AutoCompactWindow   int    `json:"autoCompactWindow"`
+	Known               bool   `json:"known"`
 }
 
 // ExecutorHelloRequest is the executor's first frame on a reverse-dialled

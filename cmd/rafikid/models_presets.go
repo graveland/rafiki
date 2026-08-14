@@ -10,6 +10,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 // ContextWindow resolves model against the daemon's shared model catalog.
@@ -21,6 +22,27 @@ func (c *Controller) ContextWindow(model string) (contextLen, maxCompletion int,
 		return 0, 0, false
 	}
 	return c.catalog.ContextWindow(model)
+}
+
+// ModelInfo answers ctrl_model_info from the daemon's already-warm catalog.
+// Never returns an error: an unknown model and an unconfigured catalog are
+// both Known=false, which is what every caller degrades on.
+func (c *Controller) ModelInfo(model string) protocol.ModelInfoResponseData {
+	out := protocol.ModelInfoResponseData{Model: model}
+	ctxLen, maxComp, ok := c.ContextWindow(model)
+	if !ok {
+		return out
+	}
+	out.Known = true
+	out.ContextWindow = ctxLen
+	out.MaxCompletionTokens = maxComp
+	out.AutoCompactWindow = routing.AutoCompactWindow(ctxLen, maxComp)
+	if c.catalog != nil {
+		if id, ok := c.catalog.ResolveID(model); ok {
+			out.ResolvedID = id
+		}
+	}
+	return out
 }
 
 // ListModels enumerates LLM models from all configured sources.

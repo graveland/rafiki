@@ -4,14 +4,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,13 +18,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/client"
+	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
-	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 const (
-	claudeCatalogTTL     = 24 * time.Hour
-	claudeCatalogTimeout = 2 * time.Second
 	// claudeCatalogBudget caps how long the launch waits on the context-window
 	// lookup. Missing the pin costs a suboptimal compaction point; making the
 	// user wait costs every launch.
@@ -74,36 +73,48 @@ type claudeInvocation struct {
 	Args []string
 }
 
-// claudeAutoCompactWindow resolves model's real context window from the
-// disk-cached OpenRouter catalog and returns the CLAUDE_CODE_AUTO_COMPACT_WINDOW
-// threshold for it, or 0 to leave Claude Code's default alone.
+// claudeAutoCompactWindow asks the daemon for the CLAUDE_CODE_AUTO_COMPACT_WINDOW
+// threshold for model, or returns 0 to leave Claude Code's default alone.
 //
-// Best-effort by design: an unreachable catalog or an unknown model returns 0
-// rather than failing the launch, and the whole lookup is bounded so a slow
-// network cannot delay starting a session.
-func claudeAutoCompactWindow(ctx context.Context, model string, cacheDir string) int {
-	store := routing.FileSnapshotStore{Path: filepath.Join(cacheDir, "openrouter_catalog.json")}
-	cat := routing.NewModelCatalog(
-		&http.Client{Timeout: claudeCatalogTimeout},
-		claudeCatalogTTL,
-		slog.New(slog.DiscardHandler),
-	).WithCache(store)
-
+// Best-effort by design, and this is the load-bearing part: an unreachable
+// daemon, a daemon with no catalog, and an unknown model all return 0 and the
+// session starts normally. `rafiki claude` must keep working with the daemon
+// down — that is the difference between "the daemon is down" and "I cannot
+// start a coding session".
+func claudeAutoCompactWindow(ctx context.Context, model string) int {
 	ctx, cancel := context.WithTimeout(ctx, claudeCatalogBudget)
 	defer cancel()
-	done := make(chan struct{})
-	go func() { cat.Warm(); close(done) }()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return 0 // catalog too slow; don't delay the launch
-	}
 
-	ctxLen, maxComp, ok := cat.ContextWindow(model)
-	if !ok {
+	c, err := dialDaemon(ctx)
+	if err != nil {
 		return 0
 	}
-	return routing.AutoCompactWindow(ctxLen, maxComp)
+	defer c.Close()
+
+	resp, err := c.Request(ctx, protocol.ModelInfoRequest{
+		Type: protocol.TypeCtrlModelInfo, Model: model,
+	})
+	if err != nil || !resp.Success {
+		return 0
+	}
+	var data protocol.ModelInfoResponseData
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return 0
+	}
+	return data.AutoCompactWindow
+}
+
+// dialDaemon connects to the daemon's control endpoint, mirroring mustDial but
+// returning an error instead of exiting. Used where a dead daemon is graceful
+// degradation (return 0) rather than a fatal error. mustDial is exactly wrong
+// here: it calls os.Exit(2) on a connection failure, and `rafiki claude` must
+// keep working with the daemon down.
+func dialDaemon(ctx context.Context) (*client.Client, error) {
+	if url := paths.Get(paths.ControlURL); url != "" {
+		token := paths.ControlTokenFromEnv()
+		return client.DialURL(ctx, url, token)
+	}
+	return client.Dial(client.DefaultSocketPath())
 }
 
 // runClaude runs `rafiki claude [flags] [-- claude flags...]`.
@@ -142,10 +153,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 
 	autoCompact := 0
 	if model != "" {
-		cache, err := os.UserCacheDir()
-		if err == nil {
-			autoCompact = claudeAutoCompactWindow(context.Background(), model, filepath.Join(cache, "rafiki"))
-		}
+		autoCompact = claudeAutoCompactWindow(context.Background(), model)
 	}
 
 	env, modelArgs := proxyenv.Claude(os.Environ(), proxyenv.ClaudeOptions{
