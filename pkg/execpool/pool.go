@@ -39,6 +39,60 @@ type liveConn struct {
 	client   *executorClient
 	draining bool
 	done     chan struct{}
+	// closeOnce guards done. Teardown arrives from two independent
+	// directions — a health failure on this connection, and a reconnect that
+	// displaces it — and closing a channel twice panics the daemon rather
+	// than erroring.
+	closeOnce sync.Once
+}
+
+// shutdown signals everything waiting on this connection to unwind: its
+// handleConn (blocked on <-done) and its healthLoop. Idempotent by design.
+func (lc *liveConn) shutdown() {
+	lc.closeOnce.Do(func() { close(lc.done) })
+}
+
+// installLive publishes lc as THE connection for id, tearing down whatever it
+// displaces.
+//
+// An executor restart reconnects long before the old connection's health loop
+// notices its socket is dead — up to a full 30s tick later. Both connections
+// are therefore live at once, and the map can only hold one. Displacing the
+// old one is the right call rather than refusing the new: the whole point of
+// park/reattach is that a laptop waking up recovers immediately, and making it
+// wait out the previous connection's health timeout would undo that.
+//
+// But a displaced connection MUST be signalled. Its handleConn is parked on
+// <-done and its healthLoop on the same channel; with nothing to close it they
+// both run forever, holding a TLS connection and writing TouchSeen every 30s
+// on behalf of an executor that has already left.
+func (p *Pool) installLive(id string, lc *liveConn) {
+	p.mu.Lock()
+	displaced := p.live[id]
+	p.live[id] = lc
+	p.mu.Unlock()
+
+	if displaced != nil && displaced != lc {
+		slog.Info("execpool: executor reconnected; tearing down the previous connection", "executorId", id)
+		displaced.shutdown()
+	}
+}
+
+// removeLive deletes id's entry only if lc is still the connection mapped
+// there, and reports whether it did.
+//
+// Keying the delete on the ID alone let a stale connection evict its own
+// replacement: the old health loop fails, deletes the entry a reconnect had
+// just installed, and parks an executor that is working perfectly — after
+// which the park expiring fires onLost against children that are running fine.
+func (p *Pool) removeLive(id string, lc *liveConn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cur, ok := p.live[id]; ok && cur == lc {
+		delete(p.live, id)
+		return true
+	}
+	return false
 }
 
 // New creates a Pool backed by the executor store.
@@ -135,9 +189,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 		done:     make(chan struct{}),
 	}
 
-	p.mu.Lock()
-	p.live[e.ID] = lc
-	p.mu.Unlock()
+	p.installLive(e.ID, lc)
 
 	slog.Info("execpool: executor joined", "id", e.ID, "displayName", e.DisplayName, "tools", desc.Msg.Tools)
 
@@ -148,9 +200,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 	// we're the HTTP client, we detect departure when health fails).
 	<-lc.done
 
-	p.mu.Lock()
-	delete(p.live, e.ID)
-	p.mu.Unlock()
+	p.removeLive(e.ID, lc)
 	slog.Info("execpool: executor left", "id", e.ID)
 }
 
@@ -300,20 +350,28 @@ func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 // onHealthFailure drops a failed executor from the live set and parks it,
 // giving it parkTimeout to reconnect before its children are declared lost.
 //
-// The live-set delete and the Park are deliberately NOT one critical section.
+// Two things are load-bearing here.
+//
+// First, the park is conditional on the delete having HAPPENED. removeLive
+// reports false when this connection is no longer the mapped one, which means
+// a reconnect has already replaced it — the executor is healthy and parking it
+// would take a working machine out of service and eventually declare its
+// children lost. In that case this call tears down only its own connection.
+// (Park's own re-check of p.live would also catch this, but relying on it
+// leaves the intent invisible at exactly the site that gets it wrong.)
+//
+// Second, the delete and the Park are deliberately NOT one critical section.
 // Park takes p.mu itself and sync.RWMutex is not reentrant, so holding the lock
 // across the call deadlocks this goroutine WHILE IT HOLDS the pool lock — every
 // later Live(), ClientFor() and accept blocks behind it, and one unwell
-// executor takes the whole executor plane down. Splitting the lock also loses
-// nothing: Park re-checks p.live and no-ops if the executor reconnected in the
-// gap, which is the correct outcome rather than a race.
+// executor takes the whole executor plane down. The gap this opens is narrow
+// and benign: a reconnect landing inside it installs a new entry, and Park sees
+// it and no-ops.
 func (p *Pool) onHealthFailure(id string, lc *liveConn) {
-	p.mu.Lock()
-	delete(p.live, id)
-	p.mu.Unlock()
-
-	p.Park(id, parkTimeout)
-	close(lc.done)
+	if p.removeLive(id, lc) {
+		p.Park(id, parkTimeout)
+	}
+	lc.shutdown()
 }
 
 func (p *Pool) healthCheck(ctx context.Context, id string, lc *liveConn) error {

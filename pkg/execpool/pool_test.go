@@ -52,6 +52,98 @@ func TestHealthFailureParksWithoutWedgingThePool(t *testing.T) {
 	}
 }
 
+// An executor restart installs a NEW liveConn under the same ID, and the old
+// connection's health loop is still running — it does not learn its socket is
+// dead until its next 30s tick, which is comfortably after the reconnect. Both
+// the install and the delete were keyed by ID alone, so the stale loop deleted
+// its own replacement, parked a healthy executor, and (once the park expired)
+// fired onLost against children that were running fine.
+func TestStaleHealthLoopCannotEvictItsReplacement(t *testing.T) {
+	p := New(nil)
+	lc1 := &liveConn{done: make(chan struct{})}
+	lc2 := &liveConn{done: make(chan struct{})}
+
+	p.installLive("exec-1", lc1)
+	p.installLive("exec-1", lc2) // executor restarts
+
+	// The OLD loop now notices its dead socket.
+	p.onHealthFailure("exec-1", lc1)
+
+	if p.Parked("exec-1") {
+		t.Fatal("a stale health loop parked a live executor")
+	}
+	p.mu.RLock()
+	got := p.live["exec-1"]
+	p.mu.RUnlock()
+	if got != lc2 {
+		t.Fatal("the stale loop evicted its own replacement")
+	}
+	if _, err := p.ClientFor("exec-1"); err != nil {
+		t.Fatalf("the replacement must still serve clients: %v", err)
+	}
+}
+
+// The same identity check on handleConn's exit path. This one is reached by
+// every ordinary disconnect, so without it a slow-closing old connection
+// evicts the replacement it was displaced by.
+func TestHandleConnExitDoesNotEvictAReplacement(t *testing.T) {
+	p := New(nil)
+	lc1 := &liveConn{done: make(chan struct{})}
+	lc2 := &liveConn{done: make(chan struct{})}
+
+	p.installLive("exec-1", lc1)
+	p.installLive("exec-1", lc2)
+
+	p.removeLive("exec-1", lc1) // lc1's handleConn returning, late
+
+	p.mu.RLock()
+	got, ok := p.live["exec-1"]
+	p.mu.RUnlock()
+	if !ok || got != lc2 {
+		t.Fatal("a departing connection removed the entry belonging to its replacement")
+	}
+}
+
+// Displacing a connection must TEAR IT DOWN. Its handleConn is parked on
+// <-lc.done and its healthLoop on the same channel; if nothing closes it they
+// both live forever, holding a TLS connection and writing TouchSeen every 30s
+// for an executor that left. Leaking one of these per reconnect is a slow
+// resource leak that looks like nothing until a laptop has slept a hundred
+// times.
+func TestDisplacedConnectionIsTornDown(t *testing.T) {
+	p := New(nil)
+	lc1 := &liveConn{done: make(chan struct{})}
+	lc2 := &liveConn{done: make(chan struct{})}
+
+	p.installLive("exec-1", lc1)
+	p.installLive("exec-1", lc2)
+
+	select {
+	case <-lc1.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the displaced connection was never signalled; its handleConn and healthLoop leak")
+	}
+	select {
+	case <-lc2.done:
+		t.Fatal("the replacement was torn down instead of the connection it displaced")
+	default:
+	}
+}
+
+// Teardown arrives from two directions — the displacing install and the
+// connection's own health failure — and closing a channel twice is a panic
+// that takes the daemon with it, not a recoverable error.
+func TestTeardownIsIdempotent(t *testing.T) {
+	p := New(nil)
+	lc := &liveConn{done: make(chan struct{})}
+	p.installLive("exec-1", lc)
+	p.installLive("exec-1", &liveConn{done: make(chan struct{})}) // displaces lc
+
+	// lc's own health loop now fails, after it was already torn down.
+	p.onHealthFailure("exec-1", lc)
+	lc.shutdown()
+}
+
 // Re-parking an executor that reconnected in the meantime must not evict the
 // live connection. The existing Park has this check; moving the lock must not
 // lose it.
