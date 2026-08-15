@@ -22,7 +22,7 @@ const systemdUnitName = "rafiki"
 
 // unitTemplate is the systemd user service unit for the rafiki daemon.
 const unitTemplate = `[Unit]
-Description=rafiki daemon
+Description={{.UnitName}} daemon
 After=default.target
 
 [Service]
@@ -73,7 +73,12 @@ func renderServiceConfig(spec serviceSpec) (string, error) {
 		return "", err
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, unitData{serviceSpec: spec, Extra: sortedEnv(spec.ExtraEnv)}); err != nil {
+	data := struct {
+		serviceSpec
+		Extra    []envKV
+		UnitName string
+	}{serviceSpec: spec, Extra: sortedEnv(spec.ExtraEnv), UnitName: systemdUnitName}
+	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

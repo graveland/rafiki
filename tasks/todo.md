@@ -83,38 +83,6 @@ Progress so far:
 
 ---
 
-### Retire the pi-controller coexistence machinery
-
-**rafiki entirely replaces pi-controller** (decided 2026-08-02). A pile of code
-and docs exists solely to let the two run side by side, and it is now dead
-weight. Note the distinction that still matters: **pi** — the coding agent whose
-config lives in `~/.pi` and which rafiki spawns as `--kind pi` children — is a
-*different thing* from **pi-controller**. Separation from `~/.pi` stays correct;
-only the pi-controller-specific coexistence goes.
-
-Live code, not just comments:
-
-- [ ] `cmd/rafiki/cmd_install_extension.go` — `legacyHelpersDir`,
-      `warnAboutLegacyHelpers`, and the documented policy of *reporting but never
-      removing* a `pic-helpers/` directory. That whole apparatus exists because
-      "pi-controller installs an artifact with the identical name to the
-      identical path, and the two are indistinguishable." With pi-controller
-      gone, either delete the machinery or upgrade it to actually remove the
-      stale extension. Its tests (`cmd_install_extension_test.go`, the
-      `writeLegacyHelpers` fixture) go with it.
-- [ ] `cmd/rafiki/service_darwin.go` / `service_linux.go` — the "distinct from
-      pi-controller's label/unit name" justification. The labels are distinct
-      anyway; the *reason* is now history.
-- [ ] `README.md` §§ around lines 144–195 — instructions for running alongside
-      an existing pi-controller install, and the note that a `pic` on your
-      `$PATH` is pi-controller's client rather than rafiki's. Obsolete guidance.
-- [ ] `cmd/rafikid/main.go`, `cmd/rafiki/cli_helpers.go`, `pkg/paths/paths.go`,
-      `pkg/paths/paths_test.go` — comments explaining the socket collision that
-      motivated the XDG split. Keep the conclusion (do not live under `~/.pi`),
-      rewrite the motivation, which no longer needs to invoke a daemon that will
-      not exist.
-- [ ] `test/integration/cli_integration_test.go:103` — a commented-out
-      `./bin/pi-controller &` line.
 
 ## Correctness / consistency
 
@@ -131,11 +99,6 @@ Live code, not just comments:
       `pkg/childstore/session_kind_test.go`, `pkg/control/dispatch_test.go`.
       Correct at runtime — those spellings never changed — but inconsistent with
       the files that were touched during the kind rename.
-- [ ] **`Description=` is hand-typed.** `unitTemplate` in
-      `cmd/rafiki/service_linux.go` hardcodes `Description=rafiki daemon` rather
-      than deriving it from `systemdUnitName`. No functional impact (it is prose,
-      not a target), but it is the same "hardcoded separately" pattern that the
-      unit-name and launchd-label constants deliberately avoid.
 
 ---
 
