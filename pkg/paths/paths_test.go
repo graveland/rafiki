@@ -36,8 +36,7 @@ func TestXDGEnvOverrides(t *testing.T) {
 }
 
 // With the env unset, the spec's documented defaults apply — NOT ~/.pi, which
-// is pi-controller's directory and the reason the two daemons collided on the
-// controller socket.
+// belongs to the pi agent and is not rafiki's to write its runtime state into.
 func TestDefaultsFollowXDGSpec(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")
@@ -63,8 +62,8 @@ func TestDefaultsFollowXDGSpec(t *testing.T) {
 	}
 }
 
-// Nothing fundi owns may live under ~/.pi — that directory belongs to pi, and
-// sharing it is what prevented fundi and pi-controller from running together.
+// Nothing rafiki owns may live under ~/.pi — that directory belongs to pi, and
+// a daemon must not write its own state into another program's config directory.
 func TestNoPathLandsUnderDotPi(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")

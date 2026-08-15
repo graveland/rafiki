@@ -17,8 +17,10 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
-// Distinct from pi-controller's own "dev.graveland.pi-controller": sharing the
-// label would make the two services clobber each other's plist.
+// launchdLabel is the service identity: it names the plist, and `launchctl`
+// addresses the service by it. It is a constant rather than a literal in each
+// call site so the plist path, the load/unload commands and the status query
+// cannot drift apart.
 const launchdLabel = "dev.graveland.rafiki"
 
 // plistTemplate is the launchd property list for the rafiki daemon.

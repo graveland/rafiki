@@ -14,7 +14,10 @@ import (
 	"text/template"
 )
 
-// Distinct from pi-controller's unit name — see launchdLabel in service_darwin.go.
+// systemdUnitName is the service identity: it names the unit file, and
+// `systemctl` addresses the service by it. It is a constant rather than a
+// literal in each call site so the unit path, the enable/disable commands and
+// the status query cannot drift apart.
 const systemdUnitName = "rafiki"
 
 // unitTemplate is the systemd user service unit for the rafiki daemon.
