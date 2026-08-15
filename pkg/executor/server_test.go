@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -140,7 +141,10 @@ func TestExecuteHonoursTimeoutMs(t *testing.T) {
 func newTestClient(t *testing.T, srv *executor.Server) executorpbconnect.ExecutorServiceClient {
 	t.Helper()
 
-	sockPath := filepath.Join("/tmp", "rafiki-exec-"+t.Name()+".sock")
+	// t.Name() carries "/" for every subtest, which turns the socket path into
+	// a directory that does not exist; the failure ("bind: no such file or
+	// directory") reads as a permissions problem rather than as this.
+	sockPath := filepath.Join("/tmp", "rafiki-exec-"+strings.ReplaceAll(t.Name(), "/", "_")+".sock")
 	os.Remove(sockPath) // stale from a crashed run
 	t.Cleanup(func() { os.Remove(sockPath) })
 
