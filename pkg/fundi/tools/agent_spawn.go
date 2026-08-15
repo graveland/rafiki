@@ -50,15 +50,16 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 				Description: "How many agents may be alive beneath it at once. Default 4."},
 			{Name: "executor", Type: "string",
 				Description: "Where to run this agent, as a label selector over machines " +
-					"(e.g. \"env=work,os=linux\"). Omit to use the same machines you can. " +
-					"You can only ever narrow: a selector naming a machine you cannot reach " +
-					"is refused, and the refusal says which machine and why."},
+					"(e.g. \"env=work,os=linux\"). Omit to confine it to the same machines " +
+					"you are confined to — omitting narrows it to your reach, it does not " +
+					"free it. You can only ever narrow: a selector naming a machine you " +
+					"cannot reach is refused, and the refusal says which machine and why."},
 			{Name: "workspace", Type: "string",
 				Description: "\"ephemeral\" gives the agent a fresh, isolated checkout that can " +
 					"be rebuilt elsewhere if its machine goes away — right for unattended " +
 					"workers. \"pinned\" puts it in an existing working tree on one specific " +
 					"machine, so it sees your uncommitted changes but cannot be moved. " +
-					"Default: pinned."},
+					"Omit to inherit yours."},
 		},
 		Required: []string{"prompt"},
 	}

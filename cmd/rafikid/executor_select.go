@@ -132,6 +132,53 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 	return set, nil
 }
 
+// inheritExecutorGrant fills in an executor grant the request left silent,
+// from the SPAWNER's stored record.
+//
+// An omitted selector used to mean "no executor", which made it a confinement
+// escape rather than a default: resolveExecutor returned (nil, nil), so the
+// child's tools ran IN THE DAEMON PROCESS on the daemon host — outside every
+// executor its parent was restricted to. Worse, the escape compounded: the
+// child stored "" as its own selector, so lineageChain skipped it and its
+// entire subtree inherited the way out.
+//
+// Inheritance is the right default rather than a refusal. It is what
+// agent_spawn's tool description already promises the model ("omit to use the
+// same machines you can"), it keeps every existing top-level agent working,
+// and it composes: the child's stored selector is now non-empty, so ITS
+// children inherit in turn and the subtree cannot leak out a generation later.
+//
+// Read from the store, never from the request. That is the same rule the
+// limits checks follow, and for the same reason: a request is written by the
+// caller, and a caller that could name its own parent's grant could widen it.
+//
+// The two fields are independent. A parent confined to ephemeral workspaces
+// whose child inherits the selector but silently defaults to "pinned" has been
+// handed a wider grant than its parent's through the back door; and an
+// inherited mode the chosen executor cannot honour is refused by Provision,
+// which is the safe direction.
+//
+// A top-level spawn (no parent) has nothing to inherit and keeps today's
+// behaviour: no selector, tools in-process.
+func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.SpawnRequest {
+	if req.ParentChildID == "" {
+		return req
+	}
+	parent, ok := c.st.Get(req.ParentChildID)
+	if !ok {
+		// An unknown parent is refused by computeLineageLabels and
+		// checkSpawnLimits; inheriting nothing here is not the enforcement.
+		return req
+	}
+	if req.ExecutorSelector == "" {
+		req.ExecutorSelector = parent.ExecutorSelector
+	}
+	if req.WorkspaceMode == "" {
+		req.WorkspaceMode = parent.WorkspaceMode
+	}
+	return req
+}
+
 // lineageChain returns the stored executor selectors from the root down to
 // childID inclusive.
 func (c *Controller) lineageChain(childID string) ([]string, error) {
