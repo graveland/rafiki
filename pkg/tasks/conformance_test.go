@@ -188,6 +188,44 @@ func RunConformance(t *testing.T, mk func(*testing.T) (tasks.Store, string)) {
 		}
 	})
 
+	// Go has no NULL, so an unassigned in-memory row has Assignee == "". A bare
+	// equality match therefore orphans EVERY never-assigned row in the ledger,
+	// while Postgres (where assignee IS NULL) matches none — total data loss on
+	// one side, silent no-op on the other, from one identical call. The guard
+	// belongs in both implementations so the two agree by contract rather than
+	// by accident.
+	t.Run("orphaning the empty assignee is a no-op", func(t *testing.T) {
+		s, conv := mk(t)
+		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{
+			{Content: "never assigned"},
+			{Content: "held by a live agent"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Assign(ctx, conv, "2", "c_live"); err != nil {
+			t.Fatal(err)
+		}
+
+		n, err := s.OrphanAssigned(ctx, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf(`OrphanAssigned("") affected %d rows; it must affect none`, n)
+		}
+
+		all, err := s.List(ctx, tasks.ListFilter{ConversationID: conv})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range all {
+			if task.Status == tasks.StatusOrphaned {
+				t.Errorf("task %q (assignee %q) was orphaned by an empty-assignee sweep",
+					task.Content, task.Assignee)
+			}
+		}
+	})
+
 	t.Run("metadata filter selects", func(t *testing.T) {
 		s, conv := mk(t)
 		if _, err := s.Add(ctx, conv, "", []tasks.NewTask{

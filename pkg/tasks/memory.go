@@ -251,6 +251,15 @@ func (ms *memoryStore) Assign(ctx context.Context, convID, handle, assignee stri
 }
 
 func (ms *memoryStore) OrphanAssigned(ctx context.Context, assignee string) (int, error) {
+	// Go has no NULL: an unassigned row's Assignee is "", so the equality
+	// match below would orphan every never-assigned task in the ledger. The
+	// Postgres store matches none for the same call (assignee IS NULL), so
+	// without this guard the two stores disagree catastrophically on an
+	// argument that is only ever a caller bug. See the matching guard there.
+	if assignee == "" {
+		return 0, nil
+	}
+
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 

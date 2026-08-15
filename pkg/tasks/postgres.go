@@ -246,6 +246,14 @@ func (ps *postgresStore) Assign(ctx context.Context, convID, handle, assignee st
 }
 
 func (ps *postgresStore) OrphanAssigned(ctx context.Context, assignee string) (int, error) {
+	// Guarded here as well as in the memory store, so the two agree by
+	// contract rather than by accident. `assignee = ''` happens to match
+	// nothing today only because unassigned rows are NULL; a future NOT NULL
+	// DEFAULT '' would silently turn this into the memory store's data loss.
+	if assignee == "" {
+		return 0, nil
+	}
+
 	tag, err := ps.pool.Exec(ctx,
 		`UPDATE conversations.tasks
 		    SET status = 'orphaned', updated_at = now()
