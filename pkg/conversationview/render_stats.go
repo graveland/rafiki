@@ -2,7 +2,7 @@
 
 // Package agentcli defines the transport-agnostic seam between the CLI and
 // backend services, plus the typed renderers for stats/search/export output.
-package agentcli
+package conversationview
 
 import (
 	"cmp"
@@ -14,13 +14,13 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/jedib0t/go-pretty/v6/table"
 
-	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 )
 
 // RenderStats renders a stats bundle as a designed, human-first layout:
 // headline volume, owners, a token table with per-path rows, per-model cost
 // with a total, and one-line reliability/latency/prefix summaries.
-func RenderStats(w io.Writer, st *insights.Stats) error {
+func RenderStats(w io.Writer, st *insightstypes.Stats) error {
 	if st == nil || st.Volume.Turns == 0 {
 		_, err := fmt.Fprintln(w, "no captured turns match the filter")
 		return err
@@ -58,7 +58,7 @@ func RenderStats(w io.Writer, st *insights.Stats) error {
 		t.AppendHeader(table.Row{"Model", "Turns", "Input", "Output", "Cache Read", "Cost"})
 		// The server orders by token volume; cost is what the reader ranks by.
 		rows := slices.Clone(st.Cost)
-		slices.SortStableFunc(rows, func(a, b insights.CostRow) int {
+		slices.SortStableFunc(rows, func(a, b insightstypes.CostRow) int {
 			if c := cmp.Compare(b.CostUSD, a.CostUSD); c != 0 {
 				return c
 			}
@@ -92,7 +92,7 @@ func newAgentTable(w io.Writer, title string) table.Writer {
 	return t
 }
 
-func tokenRow(label string, ts insights.TokenStats) table.Row {
+func tokenRow(label string, ts insightstypes.TokenStats) table.Row {
 	return table.Row{label, humanize.Comma(ts.InputTokens), humanize.Comma(ts.OutputTokens),
 		humanize.Comma(ts.CacheReadTokens), humanize.Comma(ts.CacheCreationTokens), pct(ts.CacheHitRatio)}
 }
@@ -133,16 +133,4 @@ func RenderJSON(w io.Writer, v any, indent bool) error {
 	}
 	_, err = fmt.Fprintln(w, string(b))
 	return err
-}
-
-// NewAgentTable returns a table writer for agent output. Exported for
-// pkg/agentcli/local. See newAgentTable.
-func NewAgentTable(w io.Writer, title string) table.Writer {
-	return newAgentTable(w, title)
-}
-
-// Dollars formats a USD value for agent output. Exported for
-// pkg/agentcli/local. See dollars.
-func Dollars(v float64) string {
-	return dollars(v)
 }
