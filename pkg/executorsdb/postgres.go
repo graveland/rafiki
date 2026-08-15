@@ -15,12 +15,16 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 )
 
+// Aliases of the sentinels in pkg/executors, which owns them so the pool can
+// classify a rejection without linking a database driver. Kept here so every
+// existing executorsdb.ErrX reference — and errors.Is against either spelling
+// — keeps working.
 var (
-	ErrTokenUnknown  = fmt.Errorf("executor: enrollment token unknown")
-	ErrTokenConsumed = fmt.Errorf("executor: enrollment token already consumed")
-	ErrTokenExpired  = fmt.Errorf("executor: enrollment token expired")
-	ErrDisabled      = fmt.Errorf("executor: disabled")
-	ErrNotFound      = fmt.Errorf("executor: not found")
+	ErrTokenUnknown  = executors.ErrTokenUnknown
+	ErrTokenConsumed = executors.ErrTokenConsumed
+	ErrTokenExpired  = executors.ErrTokenExpired
+	ErrDisabled      = executors.ErrDisabled
+	ErrNotFound      = executors.ErrNotFound
 )
 
 // NewPostgresStore creates an executor Store backed by pg.

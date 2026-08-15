@@ -166,7 +166,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 		// First enrollment.
 		e, credential, err = p.store.Enroll(ctx, hello.Token, hello.SelfReported)
 		if err != nil {
-			writeHelloError(conn, err.Error())
+			writeAuthFailure(conn, err)
 			return
 		}
 		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
@@ -177,7 +177,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 	} else if hello.Credential != "" {
 		e, err = p.store.Authenticate(ctx, hello.Credential)
 		if err != nil {
-			writeHelloError(conn, err.Error())
+			writeAuthFailure(conn, err)
 			return
 		}
 		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
@@ -471,6 +471,29 @@ func writeHelloError(conn net.Conn, msg string) {
 	writeHelloResponse(conn, protocol.ExecutorHelloResponse{
 		Type:  "executor_hello",
 		Error: msg,
+	})
+}
+
+// writeAuthFailure answers a failed Enroll or Authenticate, telling the peer
+// whether the answer is about its CREDENTIAL or about our ability to check it.
+//
+// The retryable branch deliberately does not forward err.Error(). A store
+// failure is an internal error — a pgx message carrying the DSN, a hostname,
+// a query — and the peer on the other end has, by definition, not yet proved
+// who it is. The real error goes to the log, where it belongs.
+func writeAuthFailure(conn net.Conn, err error) {
+	if executors.IsTerminalAuthError(err) {
+		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
+			Type:  "executor_hello",
+			Error: err.Error(),
+		})
+		return
+	}
+	slog.Error("execpool: could not verify an executor credential", "error", err)
+	writeHelloResponse(conn, protocol.ExecutorHelloResponse{
+		Type:      "executor_hello",
+		Error:     "rafikid could not verify the credential right now; retry",
+		Retryable: true,
 	})
 }
 

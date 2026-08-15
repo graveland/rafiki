@@ -848,6 +848,15 @@ type ExecutorHelloResponse struct {
 	ExecutorID string `json:"executorId,omitempty"`
 	Credential string `json:"credential,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// Retryable discriminates "I could not check this credential" from "this
+	// credential is not valid". Only meaningful alongside Error.
+	//
+	// Without it the executor cannot tell a revoked row from a Postgres
+	// restart, and treating the second as the first makes every executor that
+	// reconnects during a database blip exit permanently — one transient
+	// failure taking down the whole fleet. Absent (false) means terminal,
+	// which keeps an older daemon's responses behaving as they always did.
+	Retryable bool `json:"retryable,omitempty"`
 }
 
 // ─── ctrl_executor_* constants ─────────────────────────────────────────────────
