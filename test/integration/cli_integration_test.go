@@ -100,7 +100,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 // MANUAL SMOKE PROCEDURE (not run in CI):
 //
 //	# Boot daemon
-//	./bin/pi-controller &
+//	./bin/rafikid &
 //	sleep 1
 //
 //	# Spawn a child interactively (attaches a TUI)
@@ -128,7 +128,6 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 //	# demo should now be "exited"
 //
 //	./bin/rafiki forget demo
-//	pkill pi-controller
 
 // TestCLI_CreateDetached verifies that `rafiki create --detached` spawns a child
 // and returns JSON containing a childId, then confirms the child appears in
