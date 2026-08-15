@@ -192,8 +192,9 @@ behavior. See `pkg/routing/effortmap.go` (`EffortCache`) and `pkg/server/proxy.g
 
 # rafiki — the agent daemon
 
-rafiki began as a fork of pi-controller and speaks the same JSONL wire protocol,
-so pi-controller's `pic` client and the pi TUI work against either. What it adds
+rafiki began as a fork of pi-controller, which is why the control plane is
+newline-delimited JSON frames over a unix socket rather than something more
+modern. What it adds
 is a **native agent runtime**: the `fundi` child kind drives the Anthropic API
 through `pkg/llm` and `pkg/agentloop` directly rather than shelling out. That is
 what makes in-band abort possible — abort arrives as a protocol frame and the
@@ -228,8 +229,6 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 | `rafiki` | the CLI client — the one you type |
 | `rafiki-attach` | the TUI, spawned by `rafiki create` / `rafiki attach` |
 | `rafiki-executor` | the executor. Serves filesystem and shell tools over Connect RPC on a local unix socket. Optional — when absent, tools run in-process as before |
-
-Note that a `pic` on your `$PATH` is *pi-controller's* client, not rafiki's.
 
 ## Executor
 
@@ -429,8 +428,7 @@ database keeps working.
 
 ## Paths
 
-rafiki follows the XDG base directories, so it coexists with a standalone
-pi-controller install instead of competing for its `~/.pi/run` socket:
+rafiki follows the XDG base directories:
 
 | | Default | Override |
 |---|---|---|
@@ -439,8 +437,7 @@ pi-controller install instead of competing for its `~/.pi/run` socket:
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `presets.json`) | `$XDG_CONFIG_HOME` |
 
-Its launchd/systemd service identity is `dev.graveland.rafiki` / `rafiki`, again
-distinct from pi-controller's.
+Its launchd/systemd service identity is `dev.graveland.rafiki` / `rafiki`.
 
 The one thing rafiki writes outside its own directories is the `rafiki-helpers`
 pi extension, into `~/.pi/agent/extensions/` — that is pi's contract, and how
