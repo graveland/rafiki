@@ -269,3 +269,59 @@ func TestCostLookupFailureDoesNotBlockAnUnbudgetedSpawn(t *testing.T) {
 		t.Fatalf("an unbudgeted parent must not be blocked by a cost query: %v", err)
 	}
 }
+
+// 0 means UNLIMITED in storage, so collapsing a negative to 0 mints an
+// unbudgeted child — and every descendant with it, since checkBudget returns
+// nil the moment the parent is unbudgeted. grantedDepth and grantedChildren
+// collapse negatives to 0 and thereby fail CLOSED; only cost inverts, because
+// only cost overloads 0.
+func TestNegativeMaxCostIsRefusedNotTreatedAsUnlimited(t *testing.T) {
+	c := limitsFixture(t, 3)
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 10.00 })
+	c.coster = fakeCoster{spend: 9.97}
+
+	neg := -1.0
+	err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0", MaxCost: &neg})
+	if err == nil {
+		t.Fatal("a negative budget must be refused, not collapsed to unlimited")
+	}
+	if !strings.Contains(err.Error(), "negative") {
+		t.Errorf("the refusal must name the problem: %v", err)
+	}
+}
+
+// A malformed argument is malformed whatever the parent's own budget is. Both
+// of these reach checkBudget's early returns, so a check placed after them
+// would leave the escape open on exactly the paths where nothing else bounds
+// the child.
+func TestNegativeMaxCostIsRefusedUnderAnUnbudgetedParent(t *testing.T) {
+	c := limitsFixture(t, 3) // c_d0 has MaxCost 0 = unlimited
+	neg := -1.0
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{
+		ParentChildID: "c_d0", MaxCost: &neg,
+	}); err == nil {
+		t.Fatal("an unbudgeted parent must still not be able to mint a negative budget")
+	}
+}
+
+func TestNegativeMaxCostIsRefusedForATopLevelSpawn(t *testing.T) {
+	c := limitsFixture(t)
+	neg := -0.01
+	if err := c.checkSpawnLimits(protocol.SpawnRequest{MaxCost: &neg}); err == nil {
+		t.Fatal("a top-level spawn must not be able to mint a negative budget either")
+	}
+}
+
+// The mirror image, asserted rather than assumed: a negative depth or child
+// cap must mean "cannot spawn", never "unlimited". These pass today; they are
+// here so a future symmetry-minded cleanup of grantedCost cannot quietly
+// invert them to match.
+func TestNegativeDepthAndChildrenGrantsFailClosed(t *testing.T) {
+	neg := -1
+	if got := grantedDepth(protocol.SpawnRequest{MaxDepth: &neg}, 0, 3); got != 0 {
+		t.Errorf("grantedDepth(-1) = %d, want 0 (cannot spawn)", got)
+	}
+	if got := grantedChildren(protocol.SpawnRequest{MaxChildren: &neg}); got != 0 {
+		t.Errorf("grantedChildren(-1) = %d, want 0 (cannot spawn)", got)
+	}
+}
