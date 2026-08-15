@@ -169,19 +169,46 @@ func (ps *postgresStore) Drop(ctx context.Context, convID, handle, reason string
 	}
 	allIDs := append([]string{t.ID}, subtreeIDs...)
 
-	// Check for live assignees.
-	var assigned string
-	err = tx.QueryRow(ctx,
+	// Check for live assignees — under a lock covering EVERY row the UPDATE
+	// below will touch.
+	//
+	// The unlocked version of this check was a TOCTOU: a plain SELECT reads a
+	// snapshot, and the UPDATE re-filters on id and status only, never
+	// re-reading the assignee. Under READ COMMITTED an Assign committing
+	// between the two dropped a task a live agent was holding — precisely what
+	// the Store contract says cannot happen.
+	//
+	// Three things about the shape:
+	//
+	//   - No `assignee IS NOT NULL` predicate. FOR UPDATE locks only the rows
+	//     it returns, so filtering here would lock the rows that already have
+	//     an assignee and leave every currently-unassigned row — the ones an
+	//     Assign is actually racing for — free. The filtering moves into Go.
+	//   - The whole subtree via allIDs, not just the target: the UPDATE
+	//     cascades, so a descendant is equally capable of being assigned.
+	//   - ORDER BY id gives concurrent Drops over overlapping subtrees a
+	//     consistent lock order. Add takes no row locks (it only inserts,
+	//     under an advisory lock Drop never touches) and Assign takes exactly
+	//     one and waits on nothing while holding it, so neither can complete
+	//     a cycle with this.
+	lockedRows, err := tx.Query(ctx,
 		`SELECT assignee FROM conversations.tasks
-		  WHERE id = ANY($1) AND assignee IS NOT NULL AND assignee <> ''
-		  LIMIT 1`,
+		  WHERE id = ANY($1)
+		  ORDER BY id
+		    FOR UPDATE`,
 		allIDs,
-	).Scan(&assigned)
-	if err == nil {
-		return nil, fmt.Errorf("%w: %s", ErrAssigned, assigned)
-	}
-	if err != pgx.ErrNoRows {
+	)
+	if err != nil {
 		return nil, fmt.Errorf("tasks drop: assignee check: %w", err)
+	}
+	assignees, err := pgx.CollectRows(lockedRows, pgx.RowTo[*string])
+	if err != nil {
+		return nil, fmt.Errorf("tasks drop: assignee check: %w", err)
+	}
+	for _, a := range assignees {
+		if a != nil && *a != "" {
+			return nil, fmt.Errorf("%w: %s", ErrAssigned, *a)
+		}
 	}
 
 	// Drop non-terminal nodes.
