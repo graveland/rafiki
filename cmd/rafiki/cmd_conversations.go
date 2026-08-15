@@ -9,9 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/conversationview"
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -50,9 +50,9 @@ func bindConversationFilterFlags(cmd *cobra.Command) {
 }
 
 // conversationFilterVals reads the shared filter flags into an
-// agentcli.FilterVals, the same flag-value bag rafiki agent binds from.
-func conversationFilterVals(cmd *cobra.Command) agentcli.FilterVals {
-	v := agentcli.FilterVals{}
+// conversationview.FilterVals, the same flag-value bag rafiki agent binds from.
+func conversationFilterVals(cmd *cobra.Command) conversationview.FilterVals {
+	v := conversationview.FilterVals{}
 	v.Since, _ = cmd.Flags().GetString("since")
 	v.Until, _ = cmd.Flags().GetString("until")
 	v.Owner, _ = cmd.Flags().GetString("owner")
@@ -75,26 +75,26 @@ func unixOrZero(t *time.Time) int64 {
 // conversationsMode maps the global --output flag onto the render mode shared
 // with `rafikid agent`. "auto" stays TTY-aware, matching every other rafiki
 // command: tables at a terminal, JSON when piped so `| jq` keeps working.
-func conversationsMode(cmd *cobra.Command) agentcli.Mode {
+func conversationsMode(cmd *cobra.Command) conversationview.Mode {
 	mode, _ := outputOpts(cmd)
 	if mode == outputTable {
-		return agentcli.ModeTable
+		return conversationview.ModeTable
 	}
-	return agentcli.ModeJSON
+	return conversationview.ModeJSON
 }
 
 // renderConversationResponse decodes a ctrl_conversation_* payload into the
 // domain type the daemon marshalled it from (pkg/control/dispatch.go hands
-// *insights.Stats and friends straight to okResponse) and hands it to the same
+// *insightstypes.Stats and friends straight to okResponse) and hands it to the same
 // renderer `rafikid agent` uses. Both surfaces read the same rows through the
-// same pkg/insights queries; routing both through agentcli.Render is what keeps
+// same pkg/insights queries; routing both through conversationview.Render is what keeps
 // them from presenting those rows differently.
-func renderConversationResponse[T any](w io.Writer, m agentcli.Mode, resp *protocol.Response, table func(io.Writer, T) error) error {
+func renderConversationResponse[T any](w io.Writer, m conversationview.Mode, resp *protocol.Response, table func(io.Writer, T) error) error {
 	var v T
 	if err := decodeConversationData(resp, &v); err != nil {
 		return err
 	}
-	return agentcli.Render(w, v, m, table)
+	return conversationview.Render(w, v, m, table)
 }
 
 // decodeConversationData decodes a ctrl_conversation_* payload into v. Split
@@ -128,7 +128,7 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 	if len(args) == 1 {
 		req.ConversationID = args[0]
 	} else {
-		f, err := agentcli.BindStatsFilter(conversationFilterVals(cmd))
+		f, err := conversationview.BindStatsFilter(conversationFilterVals(cmd))
 		if err != nil {
 			return err
 		}
@@ -148,7 +148,7 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_stats: %s", client.FormatError(resp))
 	}
-	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, agentcli.RenderStats)
+	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, conversationview.RenderStats)
 }
 
 // ─── search ─────────────────────────────────────────────────────────────────
@@ -179,7 +179,7 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 	v.Text, _ = cmd.Flags().GetString("text")
 	v.Limit, _ = cmd.Flags().GetInt("limit")
 
-	f, err := agentcli.BindSearchFilter(v)
+	f, err := conversationview.BindSearchFilter(v)
 	if err != nil {
 		return err
 	}
@@ -215,14 +215,14 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 // value bare, so it cannot go through renderConversationResponse. Unwrapping
 // here keeps both the table and the JSON matching `rafikid agent search`, which
 // prints the rows themselves.
-func renderConversationSearch(w io.Writer, m agentcli.Mode, resp *protocol.Response) error {
+func renderConversationSearch(w io.Writer, m conversationview.Mode, resp *protocol.Response) error {
 	var payload struct {
-		Rows []insights.ConversationSummary `json:"rows"`
+		Rows []insightstypes.ConversationSummary `json:"rows"`
 	}
 	if err := decodeConversationData(resp, &payload); err != nil {
 		return err
 	}
-	return agentcli.Render(w, payload.Rows, m, agentcli.RenderSearch)
+	return conversationview.Render(w, payload.Rows, m, conversationview.RenderSearch)
 }
 
 // ─── export ─────────────────────────────────────────────────────────────────
@@ -252,5 +252,5 @@ func runConversationsExport(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_export: %s", client.FormatError(resp))
 	}
-	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, agentcli.RenderTranscriptMD)
+	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, conversationview.RenderTranscriptMD)
 }

@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/agentcli"
-	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/conversationview"
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -61,20 +61,20 @@ func wireResponse(t *testing.T, command string, v any) *protocol.Response {
 	return &protocol.Response{Type: protocol.TypeCtrlResponse, Command: command, Success: true, Data: data}
 }
 
-func sampleStats() *insights.Stats {
-	return &insights.Stats{
-		Volume:   insights.VolumeStats{Conversations: 3, Turns: 17},
-		Adoption: insights.AdoptionStats{DistinctOwners: 2, PerOwner: []insights.OwnerCount{{Owner: "alice", Conversations: 2, Turns: 11}, {Owner: "", Conversations: 1, Turns: 6}}},
-		Tokens:   insights.TokenStats{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, CacheCreationTokens: 500, CacheHitRatio: 0.75},
-		Cost: []insights.CostRow{
+func sampleStats() *insightstypes.Stats {
+	return &insightstypes.Stats{
+		Volume:   insightstypes.VolumeStats{Conversations: 3, Turns: 17},
+		Adoption: insightstypes.AdoptionStats{DistinctOwners: 2, PerOwner: []insightstypes.OwnerCount{{Owner: "alice", Conversations: 2, Turns: 11}, {Owner: "", Conversations: 1, Turns: 6}}},
+		Tokens:   insightstypes.TokenStats{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 3000, CacheCreationTokens: 500, CacheHitRatio: 0.75},
+		Cost: []insightstypes.CostRow{
 			{Model: "claude-sonnet-5", Turns: 12, InputTokens: 800, OutputTokens: 150, CacheReadTokens: 2000, CostUSD: 0.042},
 			{Model: "claude-haiku-4-5", Turns: 5, InputTokens: 200, OutputTokens: 50, CacheReadTokens: 1000},
 		},
-		Failures:   insights.FailureStats{Turns: 17, Errors: 1, ErrorRate: 0.058, FailoverRate: 0.11},
-		Latency:    insights.LatencyStats{P50: 1200, P95: 4300, P99: 9100},
-		CacheWaste: insights.CacheWasteStats{WastedTurns: 2, WastedInputTokens: 9000, Threshold: 4096},
-		Prefix:     insights.PrefixStats{DistinctPrefixes: 4, TurnsWithPrefix: 15, ReuseRatio: 3.75, CrossUserPrefixes: 1, DriftedConversations: 2},
-		ByPath: map[string]insights.TokenStats{
+		Failures:   insightstypes.FailureStats{Turns: 17, Errors: 1, ErrorRate: 0.058, FailoverRate: 0.11},
+		Latency:    insightstypes.LatencyStats{P50: 1200, P95: 4300, P99: 9100},
+		CacheWaste: insightstypes.CacheWasteStats{WastedTurns: 2, WastedInputTokens: 9000, Threshold: 4096},
+		Prefix:     insightstypes.PrefixStats{DistinctPrefixes: 4, TurnsWithPrefix: 15, ReuseRatio: 3.75, CrossUserPrefixes: 1, DriftedConversations: 2},
+		ByPath: map[string]insightstypes.TokenStats{
 			"proxy":  {InputTokens: 700, OutputTokens: 140, CacheReadTokens: 2400, CacheHitRatio: 0.77},
 			"direct": {InputTokens: 300, OutputTokens: 60, CacheReadTokens: 600, CacheHitRatio: 0.66},
 		},
@@ -90,13 +90,13 @@ func TestConversationsStatsRendersLikeAgentCLI(t *testing.T) {
 	st := sampleStats()
 
 	var want bytes.Buffer
-	if err := agentcli.RenderStats(&want, st); err != nil {
+	if err := conversationview.RenderStats(&want, st); err != nil {
 		t.Fatal(err)
 	}
 
 	var got bytes.Buffer
 	resp := wireResponse(t, protocol.TypeCtrlConversationStats, st)
-	if err := renderConversationResponse(&got, agentcli.ModeTable, resp, agentcli.RenderStats); err != nil {
+	if err := renderConversationResponse(&got, conversationview.ModeTable, resp, conversationview.RenderStats); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,11 +109,11 @@ func TestConversationsStatsRendersLikeAgentCLI(t *testing.T) {
 // ctrl_conversation_search, kept here so these tests fail if the client stops
 // unwrapping it.
 type searchEnvelope struct {
-	Rows []insights.ConversationSummary `json:"rows"`
+	Rows []insightstypes.ConversationSummary `json:"rows"`
 }
 
-func sampleSearchRows() []insights.ConversationSummary {
-	return []insights.ConversationSummary{
+func sampleSearchRows() []insightstypes.ConversationSummary {
+	return []insightstypes.ConversationSummary{
 		{
 			ID: "conv-abc", Owner: "alice", Persona: "reviewer", Source: "cli", Model: "claude-sonnet-5",
 			Status: "completed", DrivenBy: "client", CreatedAt: time.Unix(1716000000, 0),
@@ -128,13 +128,13 @@ func TestConversationsSearchRendersLikeAgentCLI(t *testing.T) {
 	rows := sampleSearchRows()
 
 	var want bytes.Buffer
-	if err := agentcli.RenderSearch(&want, rows); err != nil {
+	if err := conversationview.RenderSearch(&want, rows); err != nil {
 		t.Fatal(err)
 	}
 
 	var got bytes.Buffer
 	resp := wireResponse(t, protocol.TypeCtrlConversationSearch, searchEnvelope{Rows: rows})
-	if err := renderConversationSearch(&got, agentcli.ModeTable, resp); err != nil {
+	if err := renderConversationSearch(&got, conversationview.ModeTable, resp); err != nil {
 		t.Fatal(err)
 	}
 
@@ -151,11 +151,11 @@ func TestConversationsSearchJSONEmitsBareRows(t *testing.T) {
 	resp := wireResponse(t, protocol.TypeCtrlConversationSearch, searchEnvelope{Rows: rows})
 
 	var got bytes.Buffer
-	if err := renderConversationSearch(&got, agentcli.ModeJSON, resp); err != nil {
+	if err := renderConversationSearch(&got, conversationview.ModeJSON, resp); err != nil {
 		t.Fatal(err)
 	}
 
-	var back []insights.ConversationSummary
+	var back []insightstypes.ConversationSummary
 	if err := json.Unmarshal(got.Bytes(), &back); err != nil {
 		t.Fatalf("output is not a bare rows array: %v\n%s", err, got.String())
 	}
@@ -165,23 +165,23 @@ func TestConversationsSearchJSONEmitsBareRows(t *testing.T) {
 }
 
 func TestConversationsExportRendersLikeAgentCLI(t *testing.T) {
-	tr := &insights.Transcript{
+	tr := &insightstypes.Transcript{
 		ConversationID: "conv-abc", Owner: "alice", Persona: "reviewer", Source: "cli", DrivenBy: "client",
 		AvailableSkills: []string{"td-go", "td-sql"},
-		Turns: []insights.TranscriptTurn{
+		Turns: []insightstypes.TranscriptTurn{
 			{Ordinal: 1, Role: "user", Content: json.RawMessage(`[{"type":"text","text":"hello"}]`)},
 			{Ordinal: 2, Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"hi"}]`), OutputTokens: 12, Model: "claude-sonnet-5"},
 		},
 	}
 
 	var want bytes.Buffer
-	if err := agentcli.RenderTranscriptMD(&want, tr); err != nil {
+	if err := conversationview.RenderTranscriptMD(&want, tr); err != nil {
 		t.Fatal(err)
 	}
 
 	var got bytes.Buffer
 	resp := wireResponse(t, protocol.TypeCtrlConversationExport, tr)
-	if err := renderConversationResponse(&got, agentcli.ModeTable, resp, agentcli.RenderTranscriptMD); err != nil {
+	if err := renderConversationResponse(&got, conversationview.ModeTable, resp, conversationview.RenderTranscriptMD); err != nil {
 		t.Fatal(err)
 	}
 
@@ -197,11 +197,11 @@ func TestConversationsJSONModeRoundTripsPayload(t *testing.T) {
 	resp := wireResponse(t, protocol.TypeCtrlConversationStats, st)
 
 	var got bytes.Buffer
-	if err := renderConversationResponse(&got, agentcli.ModeJSON, resp, agentcli.RenderStats); err != nil {
+	if err := renderConversationResponse(&got, conversationview.ModeJSON, resp, conversationview.RenderStats); err != nil {
 		t.Fatal(err)
 	}
 
-	var back insights.Stats
+	var back insightstypes.Stats
 	if err := json.Unmarshal(got.Bytes(), &back); err != nil {
 		t.Fatalf("output is not valid JSON: %v", err)
 	}
@@ -216,10 +216,10 @@ func TestConversationsJSONModeRoundTripsPayload(t *testing.T) {
 func TestConversationsModeFromOutputFlag(t *testing.T) {
 	for _, tc := range []struct {
 		flag string
-		want agentcli.Mode
+		want conversationview.Mode
 	}{
-		{"table", agentcli.ModeTable},
-		{"json", agentcli.ModeJSON},
+		{"table", conversationview.ModeTable},
+		{"json", conversationview.ModeJSON},
 	} {
 		root := newRootCmd()
 		stats, _, err := root.Find([]string{"conversations", "stats"})
@@ -227,7 +227,7 @@ func TestConversationsModeFromOutputFlag(t *testing.T) {
 			t.Fatalf("locate conversations stats: %v", err)
 		}
 
-		var got agentcli.Mode
+		var got conversationview.Mode
 		stats.RunE = func(cmd *cobra.Command, _ []string) error {
 			got = conversationsMode(cmd)
 			return nil
