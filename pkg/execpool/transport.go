@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/http2"
 )
@@ -67,6 +68,30 @@ func ClientForConn(conn net.Conn) (*http.Client, error) {
 			}
 			return conn, nil
 		},
+		// Keepalive, not tuning. This connection was DIALLED BY THE EXECUTOR,
+		// so when a laptop sleeps or a NAT drops its mapping there is no FIN
+		// and no RST — the socket stays open on our side and every write
+		// disappears. Without a PING probe the failure surfaces only when TCP
+		// retransmission finally gives up, on the order of fifteen minutes,
+		// during which every Execute on that executor hangs.
+		//
+		// With these, an unreachable peer is detected in at most
+		// ReadIdleTimeout+PingTimeout and the transport closes the
+		// connection, which turns the next call into a prompt error and lets
+		// the health loop park the executor while its park window is still
+		// useful.
+		ReadIdleTimeout: h2ReadIdleTimeout,
+		PingTimeout:     h2PingTimeout,
 	}
 	return &http.Client{Transport: tr}, nil
 }
+
+const (
+	// h2ReadIdleTimeout is how long the connection may be silent before the
+	// transport probes it. Health polls every 30s, so a connection idle
+	// beyond this is already anomalous.
+	h2ReadIdleTimeout = 15 * time.Second
+	// h2PingTimeout is how long a PING may go unacknowledged before the
+	// connection is declared dead.
+	h2PingTimeout = 10 * time.Second
+)
