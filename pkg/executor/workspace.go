@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sync"
 
 	"connectrpc.com/connect"
 
@@ -65,7 +66,14 @@ func (b *nativeBackend) Release(_ context.Context, _ *workspace) error {
 }
 
 // workspaceRegistry holds provisioned workspaces by id.
+//
+// The mutex is load-bearing, not defensive: Provision, Release and Execute are
+// one goroutine per Connect request, and Execute reads the registry before it
+// acquires the server's concurrency semaphore, so nothing else serialises them.
+// An unguarded map here is a Go fatal error — it takes down the executor
+// process and every child running on it, not just the racing call.
 type workspaceRegistry struct {
+	mu      sync.RWMutex
 	entries map[string]*workspace
 }
 
@@ -74,14 +82,20 @@ func newWorkspaceRegistry() *workspaceRegistry {
 }
 
 func (r *workspaceRegistry) put(ws *workspace) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.entries[ws.id] = ws
 }
 
 func (r *workspaceRegistry) get(id string) (*workspace, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ws, ok := r.entries[id]
 	return ws, ok
 }
 
 func (r *workspaceRegistry) remove(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	delete(r.entries, id)
 }
