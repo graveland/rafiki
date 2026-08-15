@@ -15,6 +15,49 @@ background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 - **Codec:** Binary protobuf by default; JSON also supported (Connect's
   auto-negotiation).
 
+## Enrollment handshake
+
+Over the reverse-dialled transport the executor sends one newline-delimited
+JSON frame before any HTTP/2 framing, and rafikid answers with one:
+
+```jsonc
+// executor -> rafikid
+{"type":"executor_hello","token":"<enrollment token>"}      // first join
+{"type":"executor_hello","credential":"<durable credential>"} // thereafter
+
+// rafikid -> executor
+{"type":"executor_hello","executorId":"…","credential":"…"}  // success
+{"type":"executor_hello","error":"…","retryable":true}       // failure
+```
+
+Both sides must read this frame **byte at a time**. A buffered reader that
+consumes past the newline swallows the start of the peer's HTTP/2 stream, and
+the connection then dies with an unhelpful protocol error rather than a
+diagnosable one.
+
+### `retryable`
+
+`retryable` discriminates *"rafikid could not check this credential"* from
+*"this credential is not valid"*, and it decides whether the executor exits:
+
+| `retryable` | Meaning | Executor behaviour |
+|---|---|---|
+| absent / `false` | A decision about the credential — unknown, consumed, expired, disabled, or no such row. | Stop. Retrying cannot un-revoke a row. `Connect` returns `ErrEnrollmentRejected`. |
+| `true` | The store could not be reached or read. | Keep reconnecting with backoff. |
+
+Absent means terminal, so an older daemon's responses behave as they always
+did.
+
+An unclassified error is reported as **retryable**. The failure directions are
+not symmetric: quitting on a genuinely dead credential costs a log line, while
+quitting on a transient one takes the machine out of service permanently — and
+because executors reconnect together, one database restart would otherwise
+take the entire fleet down.
+
+The `error` string for a retryable failure is deliberately generic. The peer
+has by definition not proved who it is, and a store error routinely carries a
+DSN, a hostname or a query; the real error goes to rafikid's log.
+
 ## RPCs
 
 All seven RPCs belong to the `rafiki.executor.v1.ExecutorService` service.

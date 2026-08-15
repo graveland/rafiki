@@ -30,13 +30,23 @@ type ConnectOptions struct {
 	Handler        http.Handler
 }
 
+// ErrEnrollmentRejected stops the reconnect loop for good. It means rafikid
+// gave an ANSWER about this credential — unknown, consumed, expired, disabled
+// — and no amount of retrying changes any of those. Everything else, including
+// a store that could not be reached, stays in the loop.
 var ErrEnrollmentRejected = errors.New("execpool: enrollment rejected by rafikid")
 
 // Connect dials rafikid, enrolls if needed, and serves the executor's Connect
 // handler on the connection until ctx is done.
+// Reconnect pacing. Vars rather than constants so tests can exercise the retry
+// loop in milliseconds; nothing outside tests changes them.
+var (
+	initialBackoff = 1 * time.Second
+	maxBackoff     = 30 * time.Second
+)
+
 func Connect(ctx context.Context, o ConnectOptions) error {
-	backoff := 1 * time.Second
-	const maxBackoff = 30 * time.Second
+	backoff := initialBackoff
 
 	for ctx.Err() == nil {
 		err := connectOnce(ctx, o)
@@ -129,6 +139,15 @@ func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse
 		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("read hello response: %w", err)
 	}
 	if resp.Error != "" {
+		// Retryable means rafikid could not CHECK the credential, not that it
+		// rejected one. Only the latter is worth exiting over: a revoked row
+		// will not un-revoke itself, but a database that is restarting will
+		// come back, and an executor that quits over it has turned a blip
+		// into an outage — across a fleet reconnecting together, the whole
+		// fleet's.
+		if resp.Retryable {
+			return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("rafikid could not verify the credential: %s", resp.Error)
+		}
 		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("%w: %s", ErrEnrollmentRejected, resp.Error)
 	}
 
