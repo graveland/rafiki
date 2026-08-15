@@ -8,20 +8,17 @@
   never open a postgres connection; `rafikid` owns every DSN.** That is the
   whole point of the split and the easiest invariant for a future change to
   violate silently. `cmd/rafiki` does currently *link* pgx transitively
-  (residual from pre-split days; see `tasks/todo.md`). Two concrete changes
+  (residual from pre-split days; see `tasks/todo.md`). Three concrete changes
   have already landed: the client asks the daemon for model information over
   `ctrl_model_info` instead of reading the OpenRouter catalog itself (the `claude`
-  subcommand no longer imports `pkg/routing`); and `CaptureStore`,
+  subcommand no longer imports `pkg/routing`); `CaptureStore`,
   `RawTraceStore`, and `EjectionStore` have moved out of `pkg/routing` so the
   catalog helpers (`ModelCatalog`, `AutoCompactWindow`, `PrefixHash`, etc.) are
-  DB-free — `pkg/routing` itself now links zero pgx packages. The remaining
-  pgx in `cmd/rafiki` comes from `pkg/agentcli` (which imports `pkg/insights`,
-  `pkg/analyze`, and `pkg/store` — all still pgx-backed). `pkg/routing`,
-  `pkg/executors`, and the new `pkg/insightstypes` (pure conversation-schema
-  types) are already DB-free. The remaining agentcli split requires moving
-  its backend/compare files and the `Backend` interface into `pkg/agentcli/local`
-  — the name-conflict and cross-package-reference issues are documented in
-  `tasks/todo.md`.
+  DB-free — `pkg/routing` itself now links zero pgx packages; and a new
+  `pkg/conversationview` package extracts the shared rendering from `pkg/agentcli`
+  using the pgx-free `pkg/insightstypes` types, so `cmd/rafiki` (the client)
+  also links zero pgx. `pkg/executors` is also DB-free. The linker-enforcement
+  test is `TestClientDoesNotLinkPostgres` in `cmd/rafiki/no_postgres_test.go`.
 - **`fundi` is not a retired name — it names the native agent runtime**, one of three child kinds. `pkg/fundi/`, `protocol.KindFundi`, `--kind fundi`, and `rafikid fundi` are all correct and must survive any sweep.
 - **`go test` caching cannot see through to the daemon.** `test/integration` builds the daemon binary via a subprocess inside `TestMain`, so its import graph (`go list -json ./test/integration/` → `XTestImports`) contains only `pkg/protocol`. A change to `pkg/paths`, `pkg/control`, or anything else the daemon reads at startup will **not** invalidate a cached PASS. Always use `-count=1` when changing daemon startup behaviour, or a stale `(cached)` result will hide a real break.
 - **`make check` does not run `make build-attach`.** The TypeScript TUI can be fully broken while the Go gate is green — this has already happened once, when a directory move under `cmd/` broke a relative import in `attach/src/`. Anything that moves files under `cmd/` must check `attach/src/` for imports reaching into them.
