@@ -25,12 +25,34 @@ import (
 // construction.
 const parkTimeout = 5 * time.Minute
 
+const (
+	// defaultHealthInterval is how often a live executor is polled.
+	defaultHealthInterval = 30 * time.Second
+	// defaultHealthTimeout bounds ONE Health call. Unbounded, a black-holed
+	// connection wedges the health loop forever: the executor is never
+	// parked, its children never learn it is gone, and the goroutine leaks
+	// for the lifetime of the daemon.
+	defaultHealthTimeout = 10 * time.Second
+	// defaultJoinTimeout bounds the Describe that admits an executor. The
+	// hello frame has its own read deadline, but that deadline is cleared
+	// before Describe runs -- an executor that completes the handshake and
+	// then stops answering held an accept goroutine open indefinitely.
+	defaultJoinTimeout = 10 * time.Second
+)
+
 type Pool struct {
 	mu     sync.RWMutex
 	store  executors.Store
 	live   map[string]*liveConn
 	parked map[string]*parkedEntry
 	onLost func(executorID string) // fired when a park expires; see SetOnLost
+
+	// Timeouts, fields rather than constants so the health path is testable
+	// in milliseconds instead of in half-minutes. Nothing outside tests
+	// changes them.
+	healthInterval time.Duration
+	healthTimeout  time.Duration
+	joinTimeout    time.Duration
 }
 
 type liveConn struct {
@@ -98,9 +120,12 @@ func (p *Pool) removeLive(id string, lc *liveConn) bool {
 // New creates a Pool backed by the executor store.
 func New(store executors.Store) *Pool {
 	return &Pool{
-		store:  store,
-		live:   make(map[string]*liveConn),
-		parked: make(map[string]*parkedEntry),
+		store:          store,
+		live:           make(map[string]*liveConn),
+		parked:         make(map[string]*parkedEntry),
+		healthInterval: defaultHealthInterval,
+		healthTimeout:  defaultHealthTimeout,
+		joinTimeout:    defaultJoinTimeout,
 	}
 }
 
@@ -171,7 +196,15 @@ func (p *Pool) handleConn(conn net.Conn) {
 	}
 
 	cl := executorpbconnect.NewExecutorServiceClient(httpClient, "http://executor")
-	desc, err := cl.Describe(ctx, connect.NewRequest(&executorpb.DescribeRequest{}))
+
+	// Bounded: the hello frame's read deadline was cleared above, and it has
+	// to be — it is a CONNECTION deadline, and this connection is about to
+	// live for hours. That leaves Describe as the one unbounded call on the
+	// admission path, where a peer that completes the handshake and then goes
+	// silent holds this goroutine and its connection open forever.
+	joinCtx, cancelJoin := context.WithTimeout(ctx, p.joinTimeout)
+	desc, err := cl.Describe(joinCtx, connect.NewRequest(&executorpb.DescribeRequest{}))
+	cancelJoin()
 	if err != nil {
 		slog.Warn("execpool: Describe failed on join", "error", err, "executorId", e.ID)
 		return
@@ -331,7 +364,7 @@ func (c *workspaceClient) StartJob(ctx context.Context, command string) (string,
 }
 
 func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(p.healthInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -375,7 +408,14 @@ func (p *Pool) onHealthFailure(id string, lc *liveConn) {
 }
 
 func (p *Pool) healthCheck(ctx context.Context, id string, lc *liveConn) error {
-	resp, err := lc.client.inner.Health(ctx, connect.NewRequest(&executorpb.HealthRequest{}))
+	// A health check that can hang is not a health check. The caller's ctx is
+	// the daemon's lifetime, so without this bound the one failure mode the
+	// poll exists to detect -- a peer that accepts and never answers -- is
+	// precisely the one it cannot report.
+	callCtx, cancel := context.WithTimeout(ctx, p.healthTimeout)
+	defer cancel()
+
+	resp, err := lc.client.inner.Health(callCtx, connect.NewRequest(&executorpb.HealthRequest{}))
 	if err != nil {
 		return err
 	}
