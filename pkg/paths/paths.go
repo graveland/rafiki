@@ -2,12 +2,17 @@
 // Base Directory specification.
 //
 // These deliberately do NOT live under ~/.pi. That directory belongs to pi
-// itself, and while rafiki is a pi-controller successor it is a distinct daemon:
-// sharing ~/.pi/run meant both processes claimed the same controller socket, so
-// running rafiki while pi-controller was up failed with "socket in use by a live
-// process". Genuine pi integration points (~/.pi/agent/models.json, pi's
-// extensions directory) are pi's contract and stay where they are — they are not
-// resolved here.
+// itself, whose config rafiki reads but does not own, and a daemon that writes
+// its own runtime state into another program's config directory makes both
+// harder to reason about, back up, and remove.
+//
+// (Historically this also prevented a socket collision with pi-controller,
+// which rafiki replaced. That collision is gone; the separation is still
+// correct for the reason above.)
+//
+// Genuine pi integration points (~/.pi/agent/models.json, pi's extensions
+// directory) are pi's contract and stay where they are — they are not resolved
+// here.
 package paths
 
 import (

@@ -1,7 +1,7 @@
-// Package main is the rafiki daemon entry point (a pi-controller successor,
-// speaking the same protocol). It sets up
-// directories, loads persisted state, starts the UDS server, and blocks
-// until a signal triggers graceful shutdown.
+// Package main is the rafiki daemon entry point. It sets up directories, loads
+// persisted state, starts the UDS server, and blocks until a signal triggers
+// graceful shutdown. (rafiki began as a fork of pi-controller, and the control
+// plane still speaks the same newline-delimited JSON frame protocol.)
 package main
 
 import (
@@ -282,9 +282,9 @@ func runDaemon(opts runDaemonOpts) error {
 		Level: slog.LevelInfo,
 	})))
 
-	// XDG locations, NOT ~/.pi — that is pi's own directory, and sharing its
-	// run dir meant rafiki and pi-controller claimed the same controller socket
-	// ("socket in use by a live process" whenever both were up).
+	// XDG locations, NOT ~/.pi — that is pi's own directory, and a daemon must
+	// not write its runtime state into another program's config directory.
+	// (Historically this also prevented a socket collision with pi-controller.)
 	stateDir := paths.RecordsDir()
 	logsDir := paths.LogsDir()
 	socketPath := paths.SocketPath()

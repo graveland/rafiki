@@ -167,11 +167,11 @@ func attachEnv(socket string) []string {
 // without extra error noise (rafiki-attach has already printed to stderr).
 //
 // socket is passed down explicitly in the environment. Letting rafiki-attach
-// resolve its own default was a live bug: the TS side never learned about the
-// XDG move and fell back to ~/.pi/run/controller.sock, which is
-// pi-controller's socket — so the TUI dialled the wrong daemon (or nothing)
-// unless the user happened to export the socket path by hand. It also means
-// --socket now reaches the TUI, which it previously did not.
+// resolve its own default was a live bug: the TypeScript and Go sides derive
+// the socket path independently (from APP_NAME, which is duplicated across
+// the boundary), and a mismatch means the TUI dials a path nothing is
+// listening on. It also means --socket now reaches the TUI, which it
+// previously did not.
 func execRafikiAttach(childID, socket string) error {
 	bin, err := findRafikiAttach()
 	if err != nil {
