@@ -180,6 +180,21 @@ type subtreeCoster interface {
 // to compare against, so the same failure is irrelevant to it and must not
 // block it — the daemon must keep working without a database.
 func (c *Controller) checkBudget(req protocol.SpawnRequest) error {
+	// A negative grant is malformed, and it is malformed independently of the
+	// parent — hence before the early returns below, both of which would
+	// otherwise let it through on exactly the paths where no other limit
+	// bounds the child.
+	//
+	// This is the one limit where clamping to 0 fails OPEN: grantedCost stores
+	// 0 as UNLIMITED, so --max-cost=-1 would mint an unbudgeted child, and
+	// then checkBudget returns nil for every one of ITS spawns in turn. Depth
+	// and children clamp negatives to 0 too, but there 0 means "cannot spawn",
+	// so they fail closed and need no equivalent guard.
+	if req.MaxCost != nil && *req.MaxCost < 0 {
+		return limitError(
+			"spawn refused: max-cost cannot be negative (asked for $%.2f). Omit it to grant an unlimited budget, or name a positive amount",
+			*req.MaxCost)
+	}
 	if req.ParentChildID == "" {
 		return nil
 	}
@@ -268,6 +283,11 @@ func childDepthFor(st *childstore.Store, parentID string) int {
 // grantedCost resolves the child's budget. Nil means unlimited, stored as 0 —
 // which is why every budget check must test "is this child budgeted at all"
 // before comparing, rather than treating 0 as "spend nothing".
+//
+// The negative clamp is unreachable: checkBudget refuses a negative grant at
+// admission, because HERE the clamp would fail open — 0 is unlimited. It is
+// kept only so a future caller that reaches this without going through
+// admission gets a defined value rather than a negative budget in the store.
 func grantedCost(req protocol.SpawnRequest) float64 {
 	if req.MaxCost == nil {
 		return 0
