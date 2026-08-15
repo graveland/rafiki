@@ -681,6 +681,12 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		return control.SpawnResult{}, err
 	}
 
+	// A silent executor grant INHERITS the spawner's. Done here, before
+	// anything reads req, so every path gets it: the runtime's
+	// resolveExecutor, the workspace provisioning check, and the selector
+	// stored on the new session.
+	req = c.inheritExecutorGrant(req)
+
 	// Resource admission. Deliberately before the childID is minted and long
 	// before anything is registered: a refusal must leave no process, no
 	// store entry, no record and — with phase 04's ordering — no task
