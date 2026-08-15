@@ -197,3 +197,10 @@ Both names are Swahili and the split is deliberate: a *fundi* is the craftsman
 who does the work; a *rafiki* is the friend who keeps the history. The proxy,
 the capture store and the insights CLI are rafiki. The thing that actually runs
 your code is fundi.
+
+## `pic-helpers/` left over from pi-controller
+
+rafiki no longer looks for a `pic-helpers/` directory. If you previously ran
+pi-controller alongside rafiki, a stale copy may remain in your extensions
+directory; it is inert, and you can delete it. rafiki's own helpers install as
+`rafiki-helpers/`.

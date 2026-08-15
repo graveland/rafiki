@@ -15,13 +15,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
-// legacyHelpersDir is the pre-rename extension directory. pi-controller's own
-// client installs an extension of the same name to the same path, so a stale
-// directory here may well be *its* working install, not our leftovers — and
-// there is no way to tell them apart. It is therefore only ever reported, never
-// removed. See warnAboutLegacyHelpers.
-const legacyHelpersDir = "pic-helpers"
-
 // piExtensionsDir is pi's own extensions directory. Deliberately not resolved
 // through internal/paths: that package covers what rafiki owns, and this is pi's
 // contract — writing extensions here is how pi discovers them.
@@ -42,37 +35,6 @@ func helpersDestDir() (string, error) {
 	return filepath.Join(dir, helpersembed.Dir), nil
 }
 
-// warnAboutLegacyHelpers reports a surviving pic-helpers/ directory without
-// touching it.
-//
-// pi loads *every* extension in its extensions directory, so leaving both
-// installed means the same slash commands get registered twice — that is
-// breakage, not untidiness. But the directory cannot safely be deleted either:
-// pi-controller installs an artifact with the identical name to the identical
-// path, so a pic-helpers/ we find may be its working install. We cannot
-// distinguish its copy from our own leftovers, and silently deleting a working
-// pi-controller extension is far worse than asking for one manual command.
-// Same principle as leaving pi-controller's launchd label alone.
-func warnAboutLegacyHelpers() {
-	dir, err := piExtensionsDir()
-	if err != nil {
-		return
-	}
-	legacy := filepath.Join(dir, legacyHelpersDir)
-	if _, statErr := os.Stat(legacy); statErr != nil {
-		return
-	}
-	fmt.Fprintf(os.Stderr, `
-warning: an old %s extension is still installed at
-  %s
-pi loads every extension in that directory, so if that copy is rafiki's, its
-slash commands are now registered twice. It is NOT removed automatically
-because pi-controller installs an extension of the same name to the same path,
-and the two are indistinguishable. If you do not use pi-controller, remove it:
-    rm -rf %s
-`, legacyHelpersDir, legacy, legacy)
-}
-
 func newInstallExtensionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install-extension",
@@ -85,11 +47,7 @@ skip). Running explicitly is useful if you want it installed without
 spawning a child.
 
 If rafiki-helpers is already installed at the bundled version, this is a
-no-op (use --force to reinstall anyway). Use --remove to uninstall.
-
-A pre-rename pic-helpers/ directory is reported but never removed: it may
-belong to pi-controller, which installs the same artifact name to the same
-path.`,
+no-op (use --force to reinstall anyway). Use --remove to uninstall.`,
 		Args: cobra.NoArgs,
 		RunE: runInstallExtension,
 	}
@@ -107,11 +65,8 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 
 	remove, _ := cmd.Flags().GetBool("remove")
 	if remove {
-		// Only ever removes rafiki-helpers. A legacy pic-helpers/ is left alone
-		// even here \u2014 we cannot tell it apart from pi-controller's.
 		if _, err := os.Stat(destDir); errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "%s is not installed at %s\n", helpersembed.Dir, destDir)
-			warnAboutLegacyHelpers()
 			return nil
 		}
 		if err := os.RemoveAll(destDir); err != nil {
@@ -129,10 +84,7 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 	force, _ := cmd.Flags().GetBool("force")
 	if installed != "" && installed == bundled && !force {
 		fmt.Fprintf(os.Stderr, "%s is up to date (version %s) at %s\n", helpersembed.Dir, installed, destDir)
-		// Warn even on the no-op path: this is the command a user runs to ask
-		// "is my extension healthy?", and a duplicate registration is exactly
-		// the kind of unhealthy it cannot see for itself.
-		warnAboutLegacyHelpers()
+
 		return nil
 	}
 
@@ -152,7 +104,6 @@ func runInstallExtension(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "reinstalled %s (version %s) at %s\n", helpersembed.Dir, bundled, destDir)
 	}
 	fmt.Fprintln(os.Stderr, "pi will auto-discover this extension on next run")
-	warnAboutLegacyHelpers()
 	return nil
 }
 
@@ -192,10 +143,6 @@ func ensureHelpersInstalled() error {
 	if err := installFromEmbed(destDir); err != nil {
 		return err
 	}
-	// Only warn on the path that actually wrote something. The up-to-date
-	// branch above returns early, so `rafiki create` does not repeat this on
-	// every single spawn.
-	warnAboutLegacyHelpers()
 	return nil
 }
 
