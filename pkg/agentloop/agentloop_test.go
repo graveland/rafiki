@@ -707,9 +707,18 @@ func (f *failingTools) Execute(ctx context.Context, name string, input json.RawM
 // (`load messages: context deadline exceeded`, or an unbounded hang
 // without a deadline) under pgxpool's default MaxConns even across two
 // UNRELATED conversations, i.e. with zero lock contention. It is not being
-// re-fixed here because Resume has no production caller in either rafiki
-// or fundi (grep confirms; fundi's live orphan-fabrication path is
-// internal/fundi/orphans.go's RepairOrphans, a separate implementation).
+// re-fixed here because nothing can currently enter Resume twice on ONE
+// conversation — which is a different claim from the one this comment used
+// to make ("Resume has no production caller"), and that one is no longer
+// true: pkg/fundi/engine.go calls agentloop.Resume on the live path.
+//
+// What holds instead, and what must stay true for this to remain skipped:
+// the only route to it is Controller.Resume/RespawnChild, both of which
+// take Controller.spawnClaims per childID (cmd/rafikid/controller.go), and
+// a childID maps to exactly one conversation. Serialized per childID plus
+// 1:1 childID<->conversation means no two Resumes share a conversation. A
+// second entry point, or one childID growing two conversations, makes this
+// race live again.
 // This test is also known to reproduce only ~4/10 runs, not reliably: the
 // two goroutines below have no start barrier, so the race window is
 // whatever happens to line up rather than a forced worst case. Skipped to

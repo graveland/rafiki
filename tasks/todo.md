@@ -1,8 +1,14 @@
 # rafiki — long-term backlog
 
-Durable, always-current. Unlike the ephemeral design/plan docs under `docs/plans/`,
-this file is committed and outlives any single piece of work. Add to it whenever
-something is deferred rather than done; delete entries when they land.
+Durable, always-current. Add to it whenever something is deferred rather than
+done; delete entries when they land.
+
+**This file is NOT in git — `tasks/` is gitignored, deliberately.** It survives
+across sessions and branches because it lives on disk, but it does not survive a
+fresh clone, a `git clean -xdf`, or a lost machine. That is a real limitation,
+not an oversight: if an entry here matters enough to survive those, promote its
+conclusion into `CLAUDE.md`, `README.md` or `docs/reference/`, which are tracked.
+(An earlier version of this header claimed the file was committed. It never was.)
 
 ---
 
@@ -15,68 +21,251 @@ Reviewed 2026-08-15 at `f2b5035`. Full detail in
 `docs/plans/2026-08-15-review-fixes-plan.md` — **both gitignored**, so the
 load-bearing content is duplicated here.
 
-**Six critical, three high, all verified against the code:**
+**Six critical, three high, all verified against the code.** Eight of nine were
+fixed on branch `fix/review-findings-2026-08-15` (2026-08-15), each with a
+regression test proven to fail before the fix. **D1 remains open** and is the
+only one still live.
 
-- [ ] **D1 · `executor/server.go:259`** — the container grant covers `bash` and
-      nothing else. `read`/`write`/`edit`/`glob`/`grep` go to a registry built
-      with `Cwd: opts.Root` on the host, and `resolveToolPath` passes absolute
-      paths through untouched and expands `~` to the executor user's home. A
-      containerised agent can `read ~/.aws/credentials` and `write ~/.zshenv`.
-      Also makes container mode non-functional for file tools (`/work` does not
-      exist on the host). `container_test.go` only exercises `execBash`.
-- [ ] **B1 · `rafikid/executor_wiring.go:24`** — omitting the executor selector
-      escapes confinement. `resolveExecutor` narrows only when a selector is
-      present, and `agent_spawner.go` never falls back to the spawner's stored
-      one, so the child runs in the daemon process — and since its stored
-      selector is `""` and `lineageChain` skips empty links, the whole subtree
-      inherits the escape. Fix: inherit the spawner's stored selector.
-- [ ] **A1 · `execpool/pool.go:139,152,311`** — `p.live` is mutated by executor
-      ID with no identity check, so after a restart a stale health loop deletes
-      its own replacement, parks a healthy executor, and 5 min later `onLost`
-      tears down its children. Compare the pointer before deleting; close any
-      displaced `liveConn`. The comment at `:306` describes a re-check its own
-      ordering defeats — fix it too.
-- [ ] **A2 · `execpool/pool.go:76,84,145`** — no deadline on `Describe`/`Health`
-      and no `ReadIdleTimeout`/`PingTimeout`, so a black-holed executor is never
-      parked. That is the sleeping-laptop case `departure.go` exists for.
-- [ ] **D2 · `executor/workspace.go:67`** — `workspaceRegistry` is an
-      unsynchronized map across concurrent RPC handlers. Concurrent map
-      read/write is a Go *fatal error*: the executor dies with every child on it.
-- [ ] **B2 · `rafikid/limits.go:275`** — a negative `max_cost` collapses to 0,
-      which means *unlimited*, for the child and its whole subtree.
-      `grantedDepth`/`grantedChildren` fail closed; only cost inverts.
-- [ ] **A3 · `execpool/pool.go:99`** — any `Authenticate` error is reported to
-      the executor as terminal, so a 5-second DB blip permanently downs every
-      executor host. Needs a retryable/terminal discriminator on the wire.
-- [ ] **C1 · `tasks/postgres.go:174`** — `Drop`'s live-assignee check has no
-      `FOR UPDATE` and the `UPDATE` never re-checks it, so a concurrent `Assign`
-      lets an assigned task be dropped. **The memory store is atomic under its
-      own mutex, so the conformance suite structurally cannot catch this** — the
-      test belongs in `postgres_test.go`.
-- [ ] **C2 · `tasks/memory.go:263`** — `OrphanAssigned("")` orphans every
-      unassigned row in memory (Go has no NULL) and no rows in Postgres
-      (`assignee IS NULL`). Latent, but total data loss one empty string away.
+- [ ] **D1 · `executor/server.go` — STILL OPEN.** On a container workspace only
+      `bash` enters the container; `read`/`write`/`edit`/`glob`/`grep` run in the
+      executor process on the HOST. Demonstrated against a real container
+      workspace granted only `/work` + `/repo:ro`: `read ~/.ssh/id_rsa` returned
+      the host's private key, `read /etc/passwd` succeeded, `grep path=/etc`
+      walked the host, and `write` landed outside every mount. `~` is expanded by
+      `resolveToolPath` via `os.UserHomeDir()` — the executor user's home.
+      It also makes container mode **non-functional**: every legitimate
+      container-path call fails (`/work` does not exist on the host), so the only
+      calls that succeed today are the escaping ones.
 
-**Three unconfirmed findings worth promoting on their own merits:**
+      Pinned by deliberately-skipped docker tests in
+      `pkg/executor/workspace_tools_test.go` (loud stderr banner; un-skip to
+      reproduce).
+
+      **The review plan's fix is wrong and must not be implemented.** It proposes
+      userspace path translation on the host, quoting `08-containers.md`'s "the
+      file tools could enforce it in userspace" — but that sentence is about
+      NATIVE executors and is an argument *against* path scoping, concluding "a
+      scope that holds for `read` and evaporates on the first shell command is
+      worse than no scope". For containers the same doc says "docker mounts are
+      the grant … enforced by the kernel". The fix is a tool server running
+      INSIDE the container, reached over `docker exec -i` stdio (there is no TCP:
+      `workspace.Derive` hardcodes `Network: "none"`), reusing `ServeInverted` /
+      `ClientForConn`. Planned in
+      `docs/plans/2026-08-15-in-container-tool-server-plan.md` (gitignored):
+      Task 0 there is a few-line fail-closed refusal that removes the escape
+      immediately and costs nothing that currently works.
+- [x] **B1** — an omitted executor selector escaped confinement. Fixed by
+      `Controller.inheritExecutorGrant`, called from `Controller.Spawn` rather
+      than from the spawner adapter, so `ctrl_spawn` straight from a client is
+      covered by the same code. `WorkspaceMode` inherits independently.
+- [x] **A1** — `p.live` mutated by executor ID with no identity check. Fixed by
+      `removeLive` (pointer compare, reports whether it deleted) and
+      `installLive` (tears down what it displaces); teardown made idempotent via
+      `sync.Once`, since it now arrives from two directions.
+- [x] **A2** — no deadline on `Describe`/`Health`, no h2 keepalive. Fixed;
+      timeouts are `Pool` fields so the health path is testable in milliseconds.
+      The park path is now exercised end to end over a real inverted TLS
+      connection, which it never was.
+- [x] **D2** — unsynchronized `workspaceRegistry`. Fixed with an `RWMutex`;
+      reproduced first as `fatal error: concurrent map writes`.
+- [x] **B2** — negative `max_cost` meaning unlimited. Refused in `checkBudget`
+      *before* its early returns, so a top-level spawn and an unbudgeted parent
+      are covered too.
+- [x] **A3** — every `Authenticate` error reported as terminal. Fixed with
+      `ExecutorHelloResponse.Retryable` + `executors.IsTerminalAuthError`
+      (sentinels moved to `pkg/executors` so the executor binary does not link
+      pgx). Also stopped forwarding the store's error text — it was handing a
+      DSN to an unauthenticated peer.
+- [x] **C1** — `Drop`'s TOCTOU. Fixed with `FOR UPDATE` over the whole subtree,
+      with the SQL predicate removed (it left exactly the rows a concurrent
+      `Assign` races for unlocked). Deterministic two-transaction test plus a
+      deadlock check against `Add`/`Assign`.
+- [x] **C2** — `OrphanAssigned("")`. Guarded in both stores; case added to the
+      shared conformance suite, which failed on memory and passed on Postgres.
+
+**Three unconfirmed findings worth promoting on their own merits** (B4 has since
+been **confirmed**):
 
 - [ ] **B3** — `effectiveExecutorSet` evaluates the `Admits` half against the
       *leaf's* labels only, and at placement against the *parent's* labels
       rather than the child being placed. The phase-07 "Admits is never
       evaluated" fix is therefore half-done.
-- [ ] **B4** — `workspace.Derive` receives a model-chosen `cwd` with no
-      containment check, so `agent_spawn(cwd="/", workspace="ephemeral")`
-      bind-mounts the executor host's root filesystem read-write at `/work`.
-      `grant.go:1-2` asserts the opposite invariant.
+- [ ] **B4 — CONFIRMED 2026-08-15.** `agent_spawn` exposes a model-facing `cwd`
+      ("Absolute working directory. Omit to use your own", `agent_spawn.go:39`).
+      It flows `SpawnSpec.Cwd` → `SpawnRequest.Cwd` → `workspace.Derive` with no
+      containment check, and Derive turns it into the read-write `/work` mount —
+      so `agent_spawn(cwd="/", workspace="ephemeral")` bind-mounts the executor
+      host's root filesystem RW. `TestAgentSpawnHasNoPathShapedParameter` does
+      not catch it: it blocklists `mount`/`mounts`/`roots`/`path`/`paths`/
+      `volume`/`allow`/`deny` and nothing else.
+      `grant.go`'s header claim and the `CLAUDE.md` entry have both been
+      corrected to stop asserting the opposite; the CODE is unchanged.
+      Fix shape: a containment check of the child's cwd against the SPAWNER's at
+      admission — the same intersection shape as the executor selector — in the
+      caller that knows the lineage, not inside the pure `Derive`.
 - [ ] **D3** — a workspace-less `Execute` runs on the host even when
       `Isolation == "container"`, and `executorclient` never sets `WorkspaceId`
       — so this is the **default** for every `--executor-socket` spawn, while
       `Describe` still reports `isolation: "container"`.
 
-The remaining 28 unconfirmed findings are in the findings doc. If that file is
-gone, the review method reproduces them: four `code-nitpicker` subagents over
-`pkg/execpool`, `cmd/rafikid/{limits,agent_spawner,executor_select}.go`,
-`pkg/eventbuf`+`pkg/tasks`, and `pkg/executor`, each briefed with the project's
-actual shipped failure modes.
+**Found while fixing the above, not in the review** (all verified, all small):
+
+- [ ] **`Server.Release` kills background jobs across ALL workspaces.** It calls
+      `s.jobs.killAll()`, which has no workspace filter, so releasing one child's
+      workspace kills every other child's background jobs on that executor. The
+      in-container plan's Task 6 dissolves this by moving the job registry inside
+      the container; fix it standalone if that plan slips.
+- [ ] **`TestReleaseRemovesTheContainer` passes vacuously.** `containerNameFor`
+      in `container_test.go` returns `"rafiki-ws-" + workspaceID`, but the
+      workspace id already *is* `"rafiki-ws-" + randomID()`. The double prefix
+      matches no container, so the `docker ps` filter is always empty and the
+      assertion cannot fail.
+- [x] **`newTestClient` could not be used from a subtest.** Its socket path
+      embedded `t.Name()` verbatim, so any `t.Run` name put a `/` in the path and
+      every subtest died with `bind: no such file or directory` — which reads as
+      a permissions problem. Fixed 2026-08-15.
+
+**A load-sensitive test bound, worth knowing before you chase it.**
+`pkg/inproc`'s `TestKillReportsTheSameExitShapeAsASignalledSubprocess` has a
+hardcoded 5s wait for the turn to go in flight (`runner_test.go:1015`) and
+failed once during a `make check` that ran 3× its usual wall time under
+concurrent `go test` processes. It failed at the SETUP barrier ("tool never
+started"), *before* `Kill` is called — so it is not the kill-path class CLAUDE.md
+warns is never a flake. Passes 5/5 standalone and in two clean `make check` runs.
+Consider a barrier instead of a timeout if it recurs.
+
+**The other 28 unconfirmed findings.** Reported by review agents, not yet
+verified by reading the code — treat each as a lead, not a fact.
+
+*`pkg/execpool` (A):*
+
+- [ ] **A4** `dial.go:106`, `transport.go:44-49` — `ServeInverted` passes
+      `context.Background()` to `http2.ServeConnOpts` and never watches the
+      caller's ctx, so SIGTERM does not shut the executor down. It sits through
+      the whole termination grace period and is SIGKILLed, taking running jobs.
+- [ ] **A5 — CONFIRMED 2026-08-15.** `dial.go`'s `writeHello` decodes rafikid's
+      hello response through `bufio.NewReaderSize(conn, 4096)` and then calls
+      `ServeInverted` on the same conn. That is the exact mirror of the rule the
+      daemon side follows byte-at-a-time and CLAUDE.md documents: if the response
+      and the HTTP/2 client preface arrive in one segment the buffered reader
+      swallows the preface and the connection dies mid-frame. Saved today only by
+      TLS record framing. Note the join-path `Describe` timeout added for A2 now
+      converts this from an indefinite hang into a bounded, logged failure — an
+      improvement, not a fix.
+- [ ] **A6** `dial.go:38-55` — reconnect backoff never resets after a successful
+      session, so an executor that flapped once waits the full 30s forever after.
+- [ ] **A7** `pool.go:482` — `executorID[:12]` slices unconditionally on an error
+      path; the guarded `shortID` exists at `executor_select.go:221`. Same raw
+      slice at `workspace_wiring.go:120,149,177`.
+
+*`cmd/rafikid` authority (B):*
+
+- [ ] **B5** `limits.go:141-161,281-289` — the concurrency cap binds one
+      generation only; a child granted `max_children=5000` is never re-checked
+      against its ancestor's cap. Note `05-limits.md`'s own table lists
+      concurrency's bound as "—", so this may be a knowingly accepted gap.
+- [ ] **B6** `controller.go:688` vs `:833` — TOCTOU between `checkSpawnLimits`
+      and `st.Insert`, spanning a process spawn. `agentloop` runs a turn's tool
+      calls through `errgroup` with `SetLimit(6)`, so six `agent_spawn` blocks in
+      one turn all read `live=0` and all proceed.
+- [ ] **B7** `limits.go:88,145,186` — all three limits key off
+      `req.ParentChildID`, and the control socket binds no per-connection
+      identity, so a child with a shell can run
+      `rafiki create --max-children 999` with no `--parent`. **Caveat: if the
+      control socket is an operator-only trust boundary this is by design.**
+      Settle it by deciding whether children should reach that socket at all.
+- [ ] **B8** `agent_runtime.go:166-167` — a failed executor re-selection is
+      swallowed and the unscoped client kept, so tools run on the executor
+      *outside any workspace* and the child gets no `rafiki/workspace` label.
+      Race-only, but the failure direction is "lose confinement silently".
+- [ ] **B9** `agent_spawner.go:220-222`, `agent_runtime.go:168-178` — two
+      refusal paths leave live state: prompt-delivery failure returns an error
+      after the child is registered; and a `child.Spawn` failure after successful
+      provisioning leaks a live remote container plus a `wsLabels` entry.
+- [ ] **B10** `executor_select.go:180-215` — `explainNoMatch` discloses the full
+      executor inventory (ids, `Admits`, labels) to an agent that matched
+      nothing, including machines its parent's set excluded.
+- [ ] **B-misc** `budget_sweep.go:49` — `budgetBreached` is referenced nowhere.
+
+*`pkg/eventbuf` and `pkg/tasks` (C):*
+
+- [ ] **C3** `memory.go:250` vs `postgres.go:244` — `Assign` returns
+      `Task{Handle: ""}` from memory and a populated handle from Postgres. Latent
+      (the caller discards it) and untested.
+- [ ] **C4** `buffer.go:336` — `redepositLocked` demotes keyed fragments to
+      unkeyed, losing last-write-wins and emitting older fragments *after*
+      fresher ones. **Reachable only via `PushNow`, which has zero callers
+      today**; wiring up one turns it on.
+- [ ] **C5** `buffer.go:66,294,338` — `pendingDelivery` can never be set to
+      `DeliverSteer` (every steer sets `forced = true`), so the "sticky steer"
+      invariant describes behaviour the code cannot produce. Dead invariant plus
+      a live footgun for the obvious future change.
+- [ ] **C6** `memory.go:124` — the memory store shares `Metadata` maps with
+      callers where Postgres hands out fresh ones, so a caller mutating a
+      returned `Task.Metadata` permanently edits the in-memory ledger.
+- [ ] **C7** `buffer.go:329-334` — `redepositLocked` can resurrect a `bufKey`
+      that `Forget` just deleted, stranding it with no timer for the daemon's
+      lifetime. Blocked today by `childIsBusy` returning false for exited
+      children. Fix as an invariant: do not create a key that does not exist.
+- [ ] **C8** `memory.go:177-183` vs `postgres.go:150-152` — `Drop` checks
+      `ctx.Err()` and `reason == ""` in opposite orders, so a cancelled context
+      with an empty reason yields a different error from each store.
+
+*`pkg/executor` (D):*
+
+- [ ] **D4** `server.go:156`, `jobs.go:204-213` — `Release` calls `killAll()`,
+      which takes no workspace argument and kills **every background job on the
+      executor across all children**. B's build dies when A's workspace is
+      released, and B's `bash_output` returns `Found: false`, indistinguishable
+      from "reaped".
+- [ ] **D5** `jobs.go:208` — `killAll` signals the process, not the process
+      group, though `kill` at `:167` does it correctly. Teardown leaves orphaned
+      `node`/worker trees holding ports. Same bug `128cf44` fixed elsewhere.
+- [ ] **D6** `container.go:78-80` — the container runs as **root** when
+      `user.Current()` fails (empty error branch), reachable with CGO disabled on
+      NSS/LDAP hosts. Files in the RW `/work` mount become root-owned on the
+      host. `os.Getuid()` cannot fail and is not used.
+- [ ] **D7** `container.go:71-76`, `workspace_wiring.go:59-64` —
+      `MemoryBytes`/`Cpus` are conditional and never populated, so **no memory or
+      CPU cap is ever applied**. `--pids-limit 512` is present.
+- [ ] **D8** container orphans, four compounding causes: `Release` is a silent
+      success no-op after an executor restart (in-memory registry only); no
+      startup reaper exists; `executorID` is regenerated per process so
+      label-based reaping could not work anyway; and
+      `dev.graveland.rafiki.child` is always empty because
+      `workspace_wiring.go:60` hardcodes `ChildId: ""` with `// set by caller`
+      and no caller sets it.
+- [ ] **D9** `jobs.go:166-175`, `container.go:113-123` — `bash_kill` and the
+      `Execute` deadline cannot reach a process inside a container: the
+      supervised process is the `docker exec` CLI client, and killing it does not
+      stop the workload.
+- [ ] **D10** `server.go:200-211` — background jobs return before the semaphore
+      is acquired and `jobRegistry` caps nothing, so `bash_start` in a loop is
+      unbounded processes plus 100 KB of retained ring each.
+- [ ] **D11** `server.go:69-75` — one `FileTracker` shared by every workspace and
+      child, so A's read satisfies B's read-before-write interlock and A's write
+      makes B's next write report a phantom modification. **Folded into the fix
+      plan's task 4.2** (same constructor).
+- [ ] **D12** `container.go:65` — `--network` is taken from the request with no
+      allowlist; an omitted value normalizes to bridge (full egress) rather than
+      failing closed. `req.Mounts.HostPath` is likewise used verbatim.
+- [ ] **D13** `server.go:397-422` — jobs are not bound to a workspace, so any
+      leaked handle is readable and killable by any caller.
+- [ ] **D14** `jobs.go:103-105` — two jobs can collide on a `CallId` handle,
+      orphaning the first with its process group unreachable.
+- [ ] **D15** `main.go:121-133` — the socket liveness pre-flight is TOCTOU (the
+      0600 umask-before-bind half is correct).
+- [ ] **D-misc** `server.go:133` `Provision` discards the request deadline;
+      `container.go:104` `buildRunArgv` returns nil for an out-of-mount workdir
+      so the operator sees docker usage text; `server.go:481-485` both branches
+      return `(out, nil)` so a `docker exec` failure reaches the model as
+      ordinary command output.
+
+If the findings doc is gone, the method reproduces all of this: four
+`code-nitpicker` subagents over `pkg/execpool`,
+`cmd/rafikid/{limits,agent_spawner,executor_select}.go`,
+`pkg/eventbuf`+`pkg/tasks`, and `pkg/executor` — each briefed with the project's
+actual shipped failure modes and told to report only what it can name a line for.
 
 **Two lessons worth more than any single finding:**
 

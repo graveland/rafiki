@@ -165,12 +165,17 @@
   leak no test catches, because both children see plausible files either way.
 
 - **The model-facing executor grant is exactly two fields — a label selector and
-  a workspace mode — and must stay that way.** `agent_spawn` has a test
-  asserting no path-shaped parameter exists (`TestAgentSpawnHasNoPathShapedParameter`).
-  Mounts are derived by the daemon from the child's worktree
-  (`pkg/workspace.Derive`); the moment a caller can contribute a path, grants
-  stop being safe to author without human review, which is the property the
-  whole selector model exists to buy.
+  a workspace mode — and must stay that way.** Mounts are derived by the daemon
+  from the child's worktree (`pkg/workspace.Derive`); the moment a caller can
+  compose a mount list, grants stop being safe to author without human review,
+  which is the property the whole selector model exists to buy.
+  `TestAgentSpawnHasNoPathShapedParameter` guards it, but read what it actually
+  asserts before trusting it: it blocklists `mount`/`mounts`/`roots`/`path`/
+  `paths`/`volume`/`allow`/`deny` **and nothing else**. `agent_spawn` does
+  expose a model-facing `cwd`, it reaches `workspace.Derive` unchecked, and
+  Derive turns it into the read-write `/work` mount — so `cwd="/"` bind-mounts
+  the host root RW. The two-field claim describes the mount SHAPE, not the
+  absence of every path. Tracked as B4 in `tasks/todo.md`.
 
 - **The workspace block belongs in the system prompt's ENVIRONMENT section,
   never in `defaultBasePrompt`.** It varies between children, and
@@ -185,3 +190,61 @@
   kept in sync by a comment). Expect the same class of bug between these two and
   do not rely on a compiler to catch it — when you change a workspace or
   isolation value on one side, grep the other.
+
+- **A confinement guard is only as good as the paths that reach it — look for
+  the bypass, not the flaw.** Two criticals shipped this way. The executor
+  selector narrowed correctly, but nothing required a child to HAVE one:
+  `resolveExecutor` returned `(nil, nil)` for an empty selector and the child's
+  tools ran in the daemon process, then it stored `""` so `lineageChain` skipped
+  it and the whole subtree inherited the escape. And the container grant was
+  enforced for `bash` while the other five tools went to a host-scoped registry
+  that never entered the container. In both cases the guard was right and
+  something routed around it. When you add a guard, enumerate every path to the
+  guarded resource and assert the guard sits on all of them.
+
+- **On a container workspace, only `bash` currently runs in the container —
+  `read`/`write`/`edit`/`glob`/`grep` still execute on the HOST.** This is a
+  live escape (finding D1): a workspace granted `/work` + `/repo:ro` can read
+  `~/.ssh/id_rsa` and write anywhere the executor user can. Pinned by
+  deliberately-skipped docker tests in `pkg/executor/workspace_tools_test.go`.
+  The fix is a tool server INSIDE the container
+  (`docs/plans/2026-08-15-in-container-tool-server-plan.md`), **not** userspace
+  path checking on the host: `08-containers.md`'s "the file tools could enforce
+  it in userspace" sentence is about NATIVE executors and is an argument
+  *against* path scoping ("a scope that holds for `read` and evaporates on the
+  first shell command is worse than no scope"). For containers the same doc says
+  the mounts are the grant and the kernel enforces them. That sentence has been
+  misread once already.
+
+- **`Pool.live` must be mutated on connection IDENTITY, never on executor ID
+  alone.** An executor restart installs a new `liveConn` under the same ID long
+  before the old connection's health loop notices — up to a full 30s tick — so
+  both are live at once. A delete keyed by ID let the stale loop evict its own
+  replacement, park a healthy executor, and fire `onLost` against children that
+  were running fine. Compare the pointer before deleting (`removeLive`), close
+  any `liveConn` you displace (`installLive`), and keep teardown idempotent:
+  it arrives from two directions and closing a channel twice panics the daemon.
+
+- **In `pkg/tasks` the memory store is atomic under its own mutex and Postgres
+  is not, so the conformance suite structurally CANNOT catch a Postgres-only
+  race.** `Drop`'s assignee check needed `FOR UPDATE` over the whole subtree;
+  the shared suite passed throughout. Concurrency defects in the postgres store
+  need a test in `postgres_test.go` that opens two transactions explicitly — an
+  uncommitted UPDATE makes a deterministic barrier where a sleep does not. Note
+  also that `FOR UPDATE` locks only the rows it RETURNS, so a predicate in the
+  SQL leaves the currently-unassigned rows — the ones a concurrent Assign is
+  actually racing for — unlocked; filter in Go instead. And Go has no NULL, so
+  `Assignee == ""` matches every unassigned in-memory row where SQL `= ''`
+  matches none: guard empty-string arguments in BOTH implementations.
+
+- **An auth failure has two meanings and they are not interchangeable.**
+  "This credential is not valid" is an answer and the executor should stop;
+  "I could not check it" is not, and an executor that treats the second as the
+  first takes itself out of service permanently over a database blip — across a
+  fleet reconnecting together, that is the whole fleet. `ExecutorHelloResponse.Retryable`
+  carries the distinction; `executors.IsTerminalAuthError` decides it and fails
+  toward RETRY, because quitting on a dead credential costs a log line and
+  quitting on a transient one costs the fleet. The sentinels live in
+  `pkg/executors`, not `pkg/executorsdb`, because `cmd/rafiki-executor` links
+  `pkg/execpool` and must not link pgx. Never forward the store's error text to
+  the peer: it has not proved who it is, and a pgx error carries the DSN.

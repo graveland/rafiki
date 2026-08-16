@@ -1,5 +1,19 @@
 // Package workspace derives a child's container grant from its worktree
-// assignment. The daemon calls Derive; nothing model-facing contributes a path.
+// assignment. The daemon calls Derive and chooses the mount SHAPE — which
+// paths are read-only, where they land in the container, what the workdir is —
+// from a cwd and a mode, and nothing model-facing composes a mount list.
+//
+// That is narrower than "nothing model-facing contributes a path", which this
+// comment used to claim and which is not true: agent_spawn exposes a `cwd`
+// parameter ("Absolute working directory. Omit to use your own"), it reaches
+// Derive unchecked through SpawnSpec.Cwd, and Derive turns it into the
+// read-write /work mount. A coordinator that names cwd="/" gets the host root
+// bind-mounted read-write.
+//
+// Recorded rather than fixed here because the fix is a containment check
+// against the SPAWNER's cwd at admission — the same shape as the executor
+// selector's intersection — and belongs with the caller that knows the
+// lineage, not in a pure derivation function. Tracked in tasks/todo.md as B4.
 package workspace
 
 import (
