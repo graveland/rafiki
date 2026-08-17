@@ -85,6 +85,15 @@
 - **Design/plan docs live in `docs/plans/YYYY-MM-DD-<topic>-design.md` and `...-plan.md`** (not the generic `docs/superpowers/` default) — follow this repo's existing convention when brainstorming or planning new work.
 - **Generated protobuf code is checked in** (`pkg/executorpb/`). A contributor without `protoc` or `buf` must still be able to build. The `make proto` target regenerates it when the `.proto` file changes; never hand-edit the generated `.pb.go` or `.connect.go` files.
 - **`pkg/protocol` must never import `pkg/executorpb`.** The protocol package promises zero dependencies in its own header and the executor protocol is a separate wire format with its own types and transport. Generated code, the client, and the server all live outside `pkg/protocol`.
+- **A background job on a container workspace lives INSIDE the container, and
+  `Release` kills only its own workspace's jobs.** `Attach`/`Cancel`/`JobOutput`
+  carry a handle and no workspace id, so `Server.innerJobs` maps handle →
+  workspace; without it the outer server cannot tell which container to forward
+  to. `Release` used to call a `killAll()` that took no workspace argument, so
+  releasing one child's workspace killed every other child's jobs on the executor
+  (finding D4) — it is `killWorkspace(id)` now, and it signals the process GROUP,
+  matching `kill()`, so a background `npm run dev` does not strand its tree.
+
 - **Two tool lists, and they are not the same list.** `tools.ExecutorLocalTools()` is what an executor process RUNS — `read`, `write`, `edit`, `glob`, `grep`, `bash` — and `executor.NewServer` builds its registry with `MaterializeOnly` over exactly that set. `tools.RoutedToExecutor()` is what the PARENT dispatches remotely: those six plus `bash_start`, `bash_output`, `bash_kill`, which are parent-side tools implemented as RPCs and never reach the executor's registry. Everything else — `skill`, `task_*`, `web_*`, `lsp_*`, MCP — stays parent-side, which is what keeps credentials above the boundary. Building the executor's registry with `MaterializeAll` instead is a live panic: `ToolOpts.Tasks` is nil there, and the `task_*` tools do not nil-check.
 - **`tools.AgentSpawner` is bound to ONE child at construction and takes no caller identity in any method.** That is the enforcement of §1.2's rule, and it is easy to undo by "simplifying" the adapter into a single shared value with a `selfID string` first parameter. Do not: fundi children run in-process, so a self id passed as a parameter is one refactor away from being a tool argument, and a tool argument is produced by an LLM that can be prompt-injected into naming a sibling. `newControllerSpawner` is called per-child from `agentRuntimeOptions`, where the daemon-stamped `childID` is already in hand.
 - **`SpawnRequest.MaxDepth/MaxCost/MaxChildren` are pointers because zero is
@@ -208,27 +217,40 @@
   something routed around it. When you add a guard, enumerate every path to the
   guarded resource and assert the guard sits on all of them.
 
-- **On a container workspace the non-`bash` tools are REFUSED, pending the
-  in-container tool server.** Only `bash` enters the container; `read`, `write`,
-  `edit`, `glob` and `grep` used to fall through to a host-scoped registry, which
-  was finding D1 — a workspace granted `/work` + `/repo:ro` read a real
-  `~/.ssh/id_rsa` off the host. They now fail closed. That costs nothing that
-  worked, because the registry was rooted on the host where `/work` does not
-  exist, so the only calls that ever succeeded on that path were the escaping
-  ones. `TestFileToolsCannotEscapeTheWorkspace` holds it;
-  `TestFileToolsWorkOnWorkspacePaths` stays skipped as the acceptance test for
-  the real fix.
+- **On a container workspace EVERY tool runs inside the container, and there is
+  NO host fallback.** Only `bash` used to; `read`, `write`, `edit`, `glob` and
+  `grep` fell through to a host-scoped registry, which was finding D1 — a
+  workspace granted `/work` + `/repo:ro` read a real `~/.ssh/id_rsa` off the
+  host. They are now served by a tool server INSIDE the container
+  (`rafiki executor serve-stdio`), reached over `docker exec -i` stdio wrapped as
+  a `net.Conn` by `execpool.NewStdioConn`, so `ServeInverted`/`ClientForConn`
+  apply unchanged. There is no TCP option: `workspace.Derive` sets
+  `Network: "none"`.
 
-  The real fix is a tool server INSIDE the container, reached over
-  `docker exec -i` stdio — `rafiki executor serve-stdio`, wrapped as a net.Conn
-  by `execpool.NewStdioConn` so `ServeInverted`/`ClientForConn` apply unchanged.
-  There is no TCP option: `workspace.Derive` sets `Network: "none"`.
+  **If the inner server is unavailable the call FAILS** (`CODE_EXECUTOR_LOST`),
+  never `s.reg`. A host fallback reintroduces the whole bug, and it is the single
+  most likely thing for a later "robustness" change to add;
+  `TestADeadInnerServerFailsRatherThanFallingBackToTheHost` pins it.
+
   It is **not** userspace path checking on the host: `08-containers.md`'s "the
   file tools could enforce it in userspace" sentence is about NATIVE executors
   and is an argument *against* path scoping ("a scope that holds for `read` and
   evaporates on the first shell command is worse than no scope"). For containers
   the same doc says the mounts are the grant and the kernel enforces them. That
   sentence has been misread once already.
+
+  Two consequences worth knowing when writing tests here. `read /etc/passwd` on a
+  container workspace now SUCCEEDS and is not an escape — it is the container's
+  own `/etc/passwd` — so an escape test must assert on host paths, on `:ro`
+  behaviour, or (best) prove placement positively: `bash` creates a file outside
+  every mount, `read` sees it, the host does not. And the refusals are now ordinary
+  errno text from the kernel, not policy messages, so asserting on their wording
+  is asserting on libc.
+
+- **`expect_mtime` is forwarded to the container, never evaluated on the host.**
+  `Execute` used to `os.Stat` those paths locally, which for a container path is
+  either a spurious "file changed under us" or a stat of an unrelated host file
+  that happens to exist. Only the inner server can see the real file.
 
 - **The container workspace image is a contract, validated at Provision, and the
   executor is BAKED INTO it rather than copied in.** It must carry `rafiki` (the

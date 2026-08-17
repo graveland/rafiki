@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -258,6 +259,102 @@ func TestASymlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
 	// The host file must still be there and unread.
 	if b, err := os.ReadFile(secret); err != nil || !strings.Contains(string(b), "do not read me") {
 		t.Errorf("the host file behind the symlink was disturbed: %v %s", err, b)
+	}
+}
+
+// Finding D11 dissolves with a tool server per container.
+//
+// NewServer built ONE registry with a single shared tools.FileTracker, so on a
+// multi-child executor agent A's read satisfied agent B's read-before-write
+// interlock — and A's write made B's next write report a phantom modification.
+// Each container now has its own server and therefore its own tracker.
+//
+// The two workspaces use the SAME container path, which is what makes this
+// sharp: a tracker keyed by path would be hit by both.
+//
+// Known limitation, recorded rather than papered over: on a NATIVE executor the
+// interlock is still shared between children, because they still share the one
+// in-process registry.
+func TestTheReadBeforeWriteInterlockIsNotSharedBetweenWorkspaces(t *testing.T) {
+	requireDocker(t)
+	srv := newContainerExecutor(t)
+
+	_, worktreeA := gitRepoWithDocker(t)
+	_, worktreeB := gitRepoWithDocker(t)
+	if err := os.WriteFile(filepath.Join(worktreeA, "shared.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeB, "shared.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wsA := provision(t, srv, worktreeA, "")
+	wsB := provision(t, srv, worktreeB, "")
+
+	// A reads its copy, satisfying A's interlock for that path.
+	if _, failure := execTool(t, srv, wsA.WorkspaceId, "read",
+		map[string]string{"file_path": "/work/shared.txt"}); failure != "" {
+		t.Fatalf("A's read failed: %s", failure)
+	}
+
+	// B has not read anything. Its edit of the same container path must still be
+	// refused; if it is not, the two children are sharing a FileTracker.
+	_, failure := execTool(t, srv, wsB.WorkspaceId, "edit", map[string]any{
+		"file_path": "/work/shared.txt", "old_string": "b", "new_string": "owned",
+	})
+	if failure == "" {
+		t.Fatal("B edited a file it never read — A's read satisfied B's interlock (finding D11)")
+	}
+	if !strings.Contains(failure, "read") {
+		t.Errorf("expected a read-before-write refusal, got: %s", failure)
+	}
+}
+
+// D-4: there is no host fallback, ever. If the inner server dies, every tool on
+// that workspace FAILS — it is never quietly served from the host, which is the
+// arrangement finding D1 was.
+//
+// This is the single most likely invariant for a later "robustness" change to
+// undo, which is why it is pinned rather than merely commented.
+func TestADeadInnerServerFailsRatherThanFallingBackToTheHost(t *testing.T) {
+	requireDocker(t)
+	srv := newContainerExecutor(t)
+	_, worktree := gitRepoWithDocker(t)
+	ws := provision(t, srv, worktree, "")
+
+	// A file that exists on the HOST and is readable by this process. If any
+	// fallback existed, this is what it would return.
+	hostFile := filepath.Join(t.TempDir(), "host-only.txt")
+	if err := os.WriteFile(hostFile, []byte("host-only content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Kill the `docker exec` client on the HOST, leaving the container up. That
+	// closes the stdio carrying the wire, which is the realistic failure — the
+	// transport dying under a workspace that still exists. (Killing the process
+	// inside the container instead would need procps in the image, which the
+	// contract does not require.)
+	if out, err := exec.Command("pkill", "-f", "docker exec.*"+ws.WorkspaceId).CombinedOutput(); err != nil {
+		t.Fatalf("could not kill the inner server's transport: %v\n%s", err, out)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		tool  string
+		input any
+	}{
+		{"a workspace path", "read", map[string]string{"file_path": "/work/README.md"}},
+		{"a host path", "read", map[string]string{"file_path": hostFile}},
+		{"bash", "bash", map[string]string{"command": "echo hello"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, failure := execTool(t, srv, ws.WorkspaceId, tc.tool, tc.input)
+			if failure == "" {
+				t.Fatalf("the call SUCCEEDED with no tool server; result: %s", truncate(result, 200))
+			}
+			if strings.Contains(result, "host-only content") {
+				t.Fatal("the call was served FROM THE HOST — the fallback that finding D1 was")
+			}
+		})
 	}
 }
 
