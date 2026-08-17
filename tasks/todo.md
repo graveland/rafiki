@@ -162,7 +162,33 @@ that file is gone, these are the decisions:
       binary exactly once. `rafiki executor` already hosts the operator verbs
       (`enroll`/`list`/`label`/`disable`/`enable`); `serve` does not collide
       with them.
-- [ ] **5.** In-container plan **Tasks 1, 3, 4, 5, 6, 7**. Task 1 DONE
+- [x] **5.** DONE 2026-08-17. **Finding D1 is closed.** Every tool on a
+      container workspace now runs inside it, through `rafiki executor
+      serve-stdio` reached over `docker exec -i` stdio. The acceptance test
+      that had been skipped since the review
+      (`TestFileToolsWorkOnWorkspacePaths`) passes, and `pkg/executor` runs
+      26 pass / 0 skip / 0 fail under `-race`.
+
+      Commits: ea7e424 (Task 1, stdioConn + serve-stdio), ad2efcd (Task 3,
+      baked image + contract validation), 54342d2 (Tasks 4-5, inner server at
+      Provision + route every tool), fda516d (Task 6, background jobs inside +
+      finding D4), 451d0cd (Task 7, D11 + no-fallback + docs).
+
+      Three things worth keeping:
+      - The plan's "biggest risk" (whether HTTP/2 needs connection deadlines,
+        which a pipe pair cannot provide) is closed by reading x/net/http2
+        v0.55.0 call site by call site rather than guessing: every conn
+        deadline call is guarded by a timeout we never set, and the Transport
+        never touches them at all. The net.Pipe fallback is unnecessary.
+      - `read /etc/passwd` on a container workspace now SUCCEEDS and is NOT an
+        escape — it is the container's own. Several cases in the escape test
+        stopped being escapes and had to be rewritten rather than re-run; the
+        strongest replacement is positive proof of placement (bash creates a
+        file outside every mount, read sees it, the host does not).
+      - Refusals are now kernel errno text, not policy messages. Asserting on
+        their wording is asserting on libc.
+
+      Superseded plan text: Task 1 DONE
       (ea7e424: `stdioConn` + `serve-stdio`; the deadline risk the plan called
       its biggest is closed — x/net/http2 never sets conn deadlines with our
       config, verified call site by call site, so the net.Pipe fallback is
@@ -180,7 +206,7 @@ that file is gone, these are the decisions:
       **D11** dissolves for free, since each container gets its own
       `FileTracker`. Fold in **D6** while in `container.go:78` — it runs the
       container as **root** when `user.Current()` fails.
-- [ ] **6.** Fill `TestExecutorPool_FullLifecycle` and
+- [ ] **6. NEXT.** Fill `TestExecutorPool_FullLifecycle` and
       `TestExecutorPool_Narrowing` in `test/integration/executor_pool_test.go`
       — empty bodies carrying stale `t.Skip("not yet implemented (plan-07
       scope)")` reasons, though the listener has been wired since
