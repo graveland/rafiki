@@ -46,10 +46,10 @@ type workspaceImageRequirement struct {
 // so it is worth keeping visible and short.
 var workspaceImageRequirements = []workspaceImageRequirement{
 	{
-		name: "rafiki-executor",
-		argv: []string{"rafiki-executor", "--version"},
-		why: "every tool on a container workspace runs through a tool server inside the container, " +
-			"so without this binary the workspace can run nothing at all",
+		name: "rafiki",
+		argv: []string{"rafiki", "--version"},
+		why: "every tool on a container workspace runs through `rafiki executor serve-stdio` inside " +
+			"the container, so without this binary the workspace can run nothing at all",
 		reportsVersion: true,
 	},
 	{
@@ -104,13 +104,33 @@ func (b *containerBackend) probe(ctx context.Context, id string, argv []string) 
 //
 // If the executor protocol ever grows a version field, that belongs here as a
 // hard refusal.
-func (b *containerBackend) warnOnVersionSkew(imageVersion string) {
-	if b.version == "" || imageVersion == "" || b.version == imageVersion {
+func (b *containerBackend) warnOnVersionSkew(probeOutput string) {
+	// `rafiki --version` prints "rafiki version X", not a bare X. Comparing the
+	// whole line against our version would differ every time and make this warn
+	// unconditionally — a warning that always fires is one nobody reads.
+	fields := strings.Fields(probeOutput)
+	if len(fields) == 0 {
 		return
 	}
-	slog.Warn("container: the executor baked into the workspace image is a different build than this one; "+
+	imageVersion := fields[len(fields)-1]
+
+	// A build that is not a release build carries a sentinel, and two sentinels
+	// tell you nothing about whether the code matches. Comparing them is pure
+	// noise in exactly the situation — local development — where it fires most.
+	if unversioned(imageVersion) || unversioned(b.version) || imageVersion == b.version {
+		return
+	}
+	slog.Warn("container: the rafiki baked into the workspace image is a different build than this executor; "+
 		"rebuild the image if tools behave unexpectedly",
-		"image", b.image, "image_executor_version", imageVersion, "our_version", b.version)
+		"image", b.image, "image_version", imageVersion, "our_version", b.version)
+}
+
+func unversioned(v string) bool {
+	switch v {
+	case "", "dev", "unknown", "test":
+		return true
+	}
+	return false
 }
 
 func (b *containerBackend) Provision(ctx context.Context, req *executorpb.ProvisionRequest) (*workspace, error) {

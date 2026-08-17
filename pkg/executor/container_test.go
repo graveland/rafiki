@@ -181,7 +181,7 @@ func TestProvisionRefusesAnImageMissingTheContract(t *testing.T) {
 	// The refusal has to be actionable: which image, what is missing, and how to
 	// get a good one. An accurate message nobody can act on costs a debugging
 	// session.
-	for _, want := range []string{"alpine:3.19", "rafiki-executor", "--target workspace"} {
+	for _, want := range []string{"alpine:3.19", "rafiki", "--target workspace"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal must mention %q; got: %v", want, err)
 		}

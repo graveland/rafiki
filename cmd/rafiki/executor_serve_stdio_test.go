@@ -28,7 +28,7 @@ import (
 func stdioServer(t *testing.T, root string) executorpbconnect.ExecutorServiceClient {
 	t.Helper()
 
-	bin := filepath.Join(t.TempDir(), "rafiki-executor")
+	bin := filepath.Join(t.TempDir(), "rafiki")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
@@ -50,7 +50,7 @@ func stdioServer(t *testing.T, root string) executorpbconnect.ExecutorServiceCli
 		return string(b)
 	}
 
-	cmd := exec.Command(bin, "--serve-stdio", "--root", root)
+	cmd := exec.Command(bin, "executor", "serve-stdio", "--root", root)
 	cmd.Stderr = errFile
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -82,7 +82,7 @@ func stdioServer(t *testing.T, root string) executorpbconnect.ExecutorServiceCli
 // execTool drives one Execute call to completion, keeping the result and the
 // failure message apart: a refusal is a Failed event, and folding the two
 // together cannot tell a refusal from a success.
-func execTool(t *testing.T, client executorpbconnect.ExecutorServiceClient, tool string, input any) (result, failure string) {
+func execStdioTool(t *testing.T, client executorpbconnect.ExecutorServiceClient, tool string, input any) (result, failure string) {
 	t.Helper()
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -150,7 +150,7 @@ func TestServeStdioRunsToolsAgainstRoot(t *testing.T) {
 	root := t.TempDir()
 	client := stdioServer(t, root)
 
-	if _, failure := execTool(t, client, "write", map[string]any{
+	if _, failure := execStdioTool(t, client, "write", map[string]any{
 		"file_path": filepath.Join(root, "hello.txt"),
 		"content":   "hello over stdio\n",
 	}); failure != "" {
@@ -166,7 +166,7 @@ func TestServeStdioRunsToolsAgainstRoot(t *testing.T) {
 		t.Fatalf("file contains %q", b)
 	}
 
-	result, failure := execTool(t, client, "read", map[string]any{
+	result, failure := execStdioTool(t, client, "read", map[string]any{
 		"file_path": filepath.Join(root, "hello.txt"),
 	})
 	if failure != "" {
@@ -178,14 +178,14 @@ func TestServeStdioRunsToolsAgainstRoot(t *testing.T) {
 
 	// A relative path resolves against --root. Inside the container this is what
 	// makes an agent's "read main.go" mean the workspace's main.go.
-	result, failure = execTool(t, client, "read", map[string]any{"file_path": "hello.txt"})
+	result, failure = execStdioTool(t, client, "read", map[string]any{"file_path": "hello.txt"})
 	if failure != "" || !strings.Contains(result, "hello over stdio") {
 		t.Fatalf("relative read: failure=%q result=%q", failure, result)
 	}
 
 	// bash runs there too, and its output survives the wire that its own stdout
 	// shares with the HTTP/2 framing.
-	result, failure = execTool(t, client, "bash", map[string]any{"command": "pwd && cat hello.txt"})
+	result, failure = execStdioTool(t, client, "bash", map[string]any{"command": "pwd && cat hello.txt"})
 	if failure != "" {
 		t.Fatalf("bash: %s", failure)
 	}
@@ -194,10 +194,11 @@ func TestServeStdioRunsToolsAgainstRoot(t *testing.T) {
 	}
 }
 
-// --serve-stdio is a third transport, and the pairwise checks it replaced were
-// the kind that grow a mode without growing a check.
-func TestServeStdioRejectsConflictingTransports(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "rafiki-executor")
+// `serve` still has two transports and must refuse an ambiguous pair. The
+// stdio/socket/connect three-way ambiguity is gone by construction now that
+// serve-stdio is its own subcommand — cobra cannot be asked for both.
+func TestExecutorServeRejectsConflictingFlags(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "rafiki")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
@@ -209,11 +210,13 @@ func TestServeStdioRejectsConflictingTransports(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"stdio with socket", []string{"--serve-stdio", "--socket", "/tmp/x.sock"}, "mutually exclusive"},
-		{"stdio with connect", []string{"--serve-stdio", "--connect", "127.0.0.1:9"}, "mutually exclusive"},
-		{"no transport at all", []string{}, "is required"},
-		{"stdio with container isolation", []string{"--serve-stdio", "--isolation", "container", "--image", "alpine"},
-			"runs inside a container workspace"},
+		{"both transports", []string{"executor", "serve", "--socket", "/tmp/x.sock", "--connect", "127.0.0.1:9"},
+			"mutually exclusive"},
+		{"neither transport", []string{"executor", "serve"}, "is required"},
+		{"container without an image", []string{"executor", "serve", "--socket", "/tmp/x.sock",
+			"--isolation", "container"}, "requires --image"},
+		{"ephemeral without isolation", []string{"executor", "serve", "--socket", "/tmp/x.sock",
+			"--workspace-mode", "ephemeral"}, "does not support"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := exec.Command(bin, tc.args...).CombinedOutput()

@@ -18,11 +18,14 @@ func newExecutorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "executor",
 		Aliases: []string{"exec", "ex"},
-		Short:   "Manage executor enrollment, labels and state",
-		Long: `Manage the executor pool: enroll new executors, list the pool,
-mutate labels, and enable/disable executors.
+		Short:   "Run an executor, or manage the executor pool",
+		Long: `Run an executor, or manage the pool of them.
 
-Output is always JSON.`,
+  serve, serve-stdio    BE an executor on this machine.
+  enroll, list, label,
+  disable, enable       administer the pool, via the daemon's control socket.
+
+The administrative verbs output JSON.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},
@@ -33,6 +36,12 @@ Output is always JSON.`,
 		newExecutorLabelCmd(),
 		newExecutorDisableCmd(),
 		newExecutorEnableCmd(),
+		// serve/serve-stdio are the executor ITSELF, not operator verbs against
+		// the daemon; see cmd_executor_serve.go. They sit under the same noun
+		// because "be an executor" and "administer executors" are the same
+		// subject, and `serve` does not collide with any verb above.
+		newExecutorServeCmd(),
+		newExecutorServeStdioCmd(),
 	)
 	return cmd
 }

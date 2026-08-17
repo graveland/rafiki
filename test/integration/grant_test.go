@@ -207,7 +207,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 	return &grantDaemon{daemon: d, store: store, fingerprint: fp, listenAddr: listenAddr}
 }
 
-// enrollExecutor mints a token and launches a native rafiki-executor
+// enrollExecutor mints a token and launches a native `rafiki executor serve`
 // subprocess that reverse-dials the daemon with it. Native executors need no
 // docker. Returns the enrolled executor's ID.
 func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) string {
@@ -224,7 +224,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 
 	root := t.TempDir()
 	credFile := filepath.Join(t.TempDir(), "cred")
-	cmd := exec.Command(executorBinaryPath,
+	cmd := exec.Command(cliPath, "executor", "serve",
 		"--connect", g.listenAddr,
 		"--enroll-token", token,
 		"--credential-file", credFile,
