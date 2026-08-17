@@ -20,6 +20,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // ---- scaffolding ----------------------------------------------------------
@@ -493,12 +494,12 @@ func TestInterruptedToolResultShape(t *testing.T) {
 
 func TestTruncateToolResult(t *testing.T) {
 	small := "short"
-	if truncateToolResult(small, MaxToolResultSize) != small {
+	if truncateToolResult(small, toolmeta.MaxToolResultSize) != small {
 		t.Error("small result must pass through")
 	}
 	big := strings.Repeat("line\n", 20*1024)
-	got := truncateToolResult(big, MaxToolResultSize)
-	if len(got) > MaxToolResultSize+64 {
+	got := truncateToolResult(big, toolmeta.MaxToolResultSize)
+	if len(got) > toolmeta.MaxToolResultSize+64 {
 		t.Errorf("truncated result too big: %d", len(got))
 	}
 	if !strings.Contains(got, "truncated,") {
@@ -802,7 +803,7 @@ func (r *recordingTools) Definitions() []anthropic.ToolUnionParam {
 }
 
 func (r *recordingTools) Execute(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
-	r.ctxID = ToolCallID(ctx)
+	r.ctxID = toolmeta.ToolCallID(ctx)
 	return "ok", nil
 }
 

@@ -18,6 +18,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/tasks"
+	"go.graveland.dev/rafiki/pkg/tasksdb"
 )
 
 // RuntimeOptions is everything BuildRuntime needs to assemble an Engine. It is
@@ -269,7 +270,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 
 	taskStore := tasks.Store(tasks.NewMemoryStore())
 	if opts.Pool != nil {
-		taskStore = tasks.NewPostgresStore(opts.Pool)
+		taskStore = tasksdb.NewPostgresStore(opts.Pool)
 	}
 
 	toolOpts := tools.ToolOpts{

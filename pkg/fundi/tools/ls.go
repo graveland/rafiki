@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 const (
@@ -128,7 +128,7 @@ func (lt *lsTool) Execute(ctx context.Context, input ToolInput) (ToolResult, err
 	// means two concurrent over-budget listings in the same turn both write
 	// <SpillDir>/ls, and the model follows the path printed in result A's
 	// elision marker into result B's tree, with nothing signalling the swap.
-	spillName := agentloop.ToolCallID(ctx)
+	spillName := toolmeta.ToolCallID(ctx)
 	if spillName == "" {
 		spillName = fmt.Sprintf("ls_%d", lt.fallback.Add(1))
 	}

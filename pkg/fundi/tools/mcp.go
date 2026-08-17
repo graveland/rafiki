@@ -14,7 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 // mcpClientName is the Implementation.Name fundi advertises to every MCP
@@ -258,7 +258,7 @@ func (a *mcpAdapter) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 		}
 	}
 
-	spillName := agentloop.ToolCallID(ctx)
+	spillName := toolmeta.ToolCallID(ctx)
 	if spillName == "" {
 		spillName = fmt.Sprintf("%s_%d", a.registeredName, a.spillCounter.Add(1))
 	}

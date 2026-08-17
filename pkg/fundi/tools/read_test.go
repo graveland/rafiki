@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 func TestReadTool(t *testing.T) {
@@ -288,7 +288,7 @@ func TestReadToolByteBudget(t *testing.T) {
 
 	// The whole result, trailer included, must fit under the budget. The
 	// old assertion allowed a 2 KB overshoot of a 50 KB contract, and that
-	// slack is exactly what hid the trailer being clipped by agentloop.
+	// slack is exactly what hid the trailer being clipped by toolmeta.
 	if len(out) > maxReadBytes+readTrailerReserve {
 		t.Fatalf("output too large: %d bytes (budget %d + reserve %d)", len(out), maxReadBytes, readTrailerReserve)
 	}
@@ -451,10 +451,10 @@ func TestReadToolRoundTripContinueOffset(t *testing.T) {
 // to resume from: the exact defect per-tool budgets were introduced to fix,
 // invisible to every test that called Execute directly.
 func TestReadBudgetLeavesRoomForTrailer(t *testing.T) {
-	if maxReadBytes >= agentloop.MaxToolResultSize {
-		t.Fatalf("maxReadBytes (%d) must be strictly below agentloop.MaxToolResultSize (%d), "+
+	if maxReadBytes >= toolmeta.MaxToolResultSize {
+		t.Fatalf("maxReadBytes (%d) must be strictly below toolmeta.MaxToolResultSize (%d), "+
 			"or the continuation trailer is clipped off by the outer cap",
-			maxReadBytes, agentloop.MaxToolResultSize)
+			maxReadBytes, toolmeta.MaxToolResultSize)
 	}
 
 	dir := t.TempDir()
@@ -478,9 +478,9 @@ func TestReadBudgetLeavesRoomForTrailer(t *testing.T) {
 
 	// The property that matters: the complete result, trailer included, is
 	// under the outer cap, so truncateToolResult never fires on a read.
-	if len(res.Text) > agentloop.MaxToolResultSize {
+	if len(res.Text) > toolmeta.MaxToolResultSize {
 		t.Fatalf("read result is %d bytes, over agentloop's %d cap: the trailer will be clipped",
-			len(res.Text), agentloop.MaxToolResultSize)
+			len(res.Text), toolmeta.MaxToolResultSize)
 	}
 	if !strings.Contains(res.Text, "offset=") {
 		t.Fatal("byte-capped read must carry a continuation offset")
