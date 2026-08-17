@@ -165,7 +165,7 @@ func (s *Server) Release(
 func resolveBackend(opts Options, executorID string) Backend {
 	switch opts.Isolation {
 	case "container":
-		return newContainerBackend(opts.Image, executorID)
+		return newContainerBackend(opts.Image, executorID, opts.Version)
 	default:
 		return newNativeBackend(opts.Root)
 	}

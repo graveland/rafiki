@@ -39,7 +39,16 @@ func main() {
 	isolation := flag.String("isolation", "none", "isolation this executor provides: none|container")
 	workspaceMode := flag.String("workspace-mode", "pinned", "pinned (expose --root) or ephemeral (construct per child)")
 	image := flag.String("image", "", "container image for --isolation container")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	// Before the transport checks: --version is how a container workspace image
+	// is probed for a usable executor binary, and it must not require naming a
+	// transport it is not going to use.
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	// Exactly one transport. Counted rather than compared pairwise: three modes
 	// need three pairwise checks and a fourth would need six, and the version of

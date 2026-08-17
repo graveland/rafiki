@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -44,9 +46,69 @@ func newContainerExecutor(t *testing.T) *executor.Server {
 		Root:          t.TempDir(),
 		Isolation:     "container",
 		WorkspaceMode: "ephemeral",
-		Image:         "alpine:3.19",
+		Image:         requireWorkspaceImage(t),
 		Version:       "test",
 	})
+}
+
+// testWorkspaceImage is built from the repo's own Dockerfile rather than pulled.
+const testWorkspaceImage = "rafiki-workspace:test"
+
+var (
+	workspaceImageOnce sync.Once
+	workspaceImageErr  error
+)
+
+// requireWorkspaceImage builds the reference workspace image once per test
+// binary and returns its tag.
+//
+// These tests used to run against alpine:3.19, which has neither ripgrep nor an
+// executor binary — so they could only ever exercise the paths that do not need
+// the image to be right. The image is part of this repo's code now (Dockerfile,
+// `--target workspace`), so it is built like TestMain builds the daemon rather
+// than assumed present: a loud skip would let the container path stop being
+// tested the moment someone had not built it by hand, and building also keeps
+// the baked binary in step with the source under test, which is what makes the
+// version-skew warning meaningful.
+func requireWorkspaceImage(t *testing.T) string {
+	t.Helper()
+	workspaceImageOnce.Do(func() {
+		root, err := moduleRoot()
+		if err != nil {
+			workspaceImageErr = err
+			return
+		}
+		// Cached after the first run in a working tree; a cold build is ~1 minute.
+		cmd := exec.Command("docker", "build", "--target", "workspace", "-t", testWorkspaceImage, root)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			workspaceImageErr = fmt.Errorf("docker build --target workspace: %v\n%s", err, out)
+		}
+	})
+	if workspaceImageErr != nil {
+		// Fail rather than skip: docker is available (requireDocker ran), so a
+		// build failure is a real break in the image or the Dockerfile.
+		t.Fatalf("cannot build the workspace image: %v", workspaceImageErr)
+	}
+	return testWorkspaceImage
+}
+
+// moduleRoot walks up from the working directory to the directory holding go.mod,
+// which is the docker build context.
+func moduleRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no go.mod above %s", dir)
+		}
+		dir = parent
+	}
 }
 
 func provision(t *testing.T, srv *executor.Server, worktree, repo string) *executorpb.ProvisionResponse {
@@ -77,6 +139,61 @@ func provision(t *testing.T, srv *executor.Server, worktree, repo string) *execu
 		}))
 	})
 	return resp.Msg
+}
+
+// The image contract has to be enforced at Provision, because every way of
+// discovering it later is worse. ripgrep is the sharp case: glob and grep
+// DECLINE when rg is absent rather than erroring, so an agent on a bad image is
+// told "no matches" and has nothing useful to report. An image with no executor
+// binary is worse still — every tool call fails with a transport error naming
+// nothing.
+//
+// alpine:3.19 is the fixture precisely because it has neither. It is what these
+// tests used to run against.
+func TestProvisionRefusesAnImageMissingTheContract(t *testing.T) {
+	requireDocker(t)
+	srv := executor.NewServer(executor.Options{
+		Root:          t.TempDir(),
+		Isolation:     "container",
+		WorkspaceMode: "ephemeral",
+		Image:         "alpine:3.19",
+		Version:       "test",
+	})
+	client := newTestClient(t, srv)
+	ctx := context.Background()
+
+	desc, err := client.Describe(ctx, connect.NewRequest(&executorpb.DescribeRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Provision(ctx, connect.NewRequest(&executorpb.ProvisionRequest{
+		ChildId:       "test-child",
+		WorkspaceMode: "ephemeral",
+		Mounts:        []*executorpb.Mount{{HostPath: t.TempDir(), ContainerPath: "/work"}},
+		Workdir:       "/work",
+		Network:       "none",
+	}))
+	if err == nil {
+		t.Fatal("Provision accepted an image with no executor binary and no ripgrep")
+	}
+
+	// The refusal has to be actionable: which image, what is missing, and how to
+	// get a good one. An accurate message nobody can act on costs a debugging
+	// session.
+	for _, want := range []string{"alpine:3.19", "rafiki-executor", "--target workspace"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal must mention %q; got: %v", want, err)
+		}
+	}
+
+	// And it must not leak the container it started before validating. A stray
+	// `sleep infinity` holds its mounts for as long as the docker daemon lives.
+	out, _ := exec.Command("docker", "ps", "-a", "-q",
+		"--filter", "label=dev.graveland.rafiki.executor="+desc.Msg.ExecutorId).Output()
+	if len(bytes.TrimSpace(out)) != 0 {
+		t.Errorf("a failed Provision leaked its container: %s", bytes.TrimSpace(out))
+	}
 }
 
 func execBash(t *testing.T, srv *executor.Server, ws *executorpb.ProvisionResponse, command string) (string, error) {
@@ -179,7 +296,6 @@ func TestReleaseRemovesTheContainer(t *testing.T) {
 		t.Fatalf("release: %v", err)
 	}
 
-	// Fetch the workspace id to derive the container name.
 	name := containerNameFor(ws.WorkspaceId)
 	out, _ := exec.Command("docker", "ps", "-a", "--filter", "name="+name, "-q").Output()
 	if len(bytes.TrimSpace(out)) != 0 {
@@ -188,9 +304,15 @@ func TestReleaseRemovesTheContainer(t *testing.T) {
 }
 
 // containerNameFor derives the docker container name from the workspace id.
-// Must match the naming scheme in the container backend.
+//
+// The workspace id IS the container name — containerBackend.Provision builds it
+// as "rafiki-ws-" + randomID() and passes it straight to `docker run --name`.
+// This helper used to prepend the prefix a second time, producing
+// "rafiki-ws-rafiki-ws-…", which matches no container: the `docker ps` filter
+// below was therefore always empty and TestReleaseRemovesTheContainer could not
+// fail. A test that cannot fail is worse than no test, because it is counted.
 func containerNameFor(workspaceID string) string {
-	return "rafiki-ws-" + workspaceID
+	return workspaceID
 }
 
 func gitRepoWithDocker(t *testing.T) (repo, worktree string) {
