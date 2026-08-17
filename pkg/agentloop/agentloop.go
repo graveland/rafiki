@@ -28,6 +28,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 const (
@@ -39,14 +40,6 @@ const (
 	// (see drive).
 	defaultMaxIterations = 250
 	maxConcurrentTools   = 6
-
-	// MaxToolResultSize is the blind, content-agnostic cap applied to every
-	// tool result by truncateToolResult. It is exported because a tool that
-	// budgets its own output must reserve headroom below this number: this
-	// clip cuts from the tail, so a tool whose own budget equals this one
-	// gets its trailing "here is how to get the rest" hint silently removed
-	// — exactly the failure the per-tool budgets exist to prevent.
-	MaxToolResultSize = 50 * 1024
 
 	// DefaultResumeCap bounds Resume attempts per conversation.
 	DefaultResumeCap = 3
@@ -127,15 +120,6 @@ func (e *Events) toolEnd(id, name, result string, err error) {
 	if e != nil && e.OnToolEnd != nil {
 		e.OnToolEnd(id, name, result, err)
 	}
-}
-
-type toolCallIDKey struct{}
-
-// ToolCallID returns the tool_use id of the call being executed on this
-// context, or "" when called outside a tool execution.
-func ToolCallID(ctx context.Context) string {
-	id, _ := ctx.Value(toolCallIDKey{}).(string)
-	return id
 }
 
 func (e *Events) turn(iteration int, resp *anthropic.Message, dur time.Duration, err error) {
@@ -553,12 +537,12 @@ func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse
 			ev.toolStart(use.id, use.name, use.input)
 			emitMu.Unlock()
 
-			tctx := context.WithValue(gctx, toolCallIDKey{}, use.id)
+			tctx := toolmeta.WithToolCallID(gctx, use.id)
 			result, err := tools.Execute(tctx, use.name, use.input)
 			if err != nil && result == "" {
 				result = fmt.Sprintf("Error executing tool: %v", err)
 			}
-			result = truncateToolResult(result, MaxToolResultSize)
+			result = truncateToolResult(result, toolmeta.MaxToolResultSize)
 
 			emitMu.Lock()
 			ev.toolResult(use.name, result, err)

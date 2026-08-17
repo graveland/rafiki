@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 const (
@@ -153,7 +153,7 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		}
 	}
 
-	spillName := agentloop.ToolCallID(ctx)
+	spillName := toolmeta.ToolCallID(ctx)
 	if spillName == "" {
 		spillName = fmt.Sprintf("bash_%d", bt.fallback.Add(1))
 	}

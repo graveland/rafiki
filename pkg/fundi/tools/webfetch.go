@@ -16,7 +16,7 @@ import (
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"golang.org/x/net/html"
 
-	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 func init() { DefaultBlueprint.Register(&WebfetchBlueprint{}) }
@@ -226,7 +226,7 @@ func (t *webfetchTool) Execute(ctx context.Context, input ToolInput) (ToolResult
 	// <SpillDir>/webfetch, and result A's "[... full output at ...]" marker
 	// then points at whichever of the two write() calls landed last, with
 	// nothing signalling the swap.
-	spillName := agentloop.ToolCallID(ctx)
+	spillName := toolmeta.ToolCallID(ctx)
 	if spillName == "" {
 		spillName = fmt.Sprintf("webfetch_%d", t.fallback.Add(1))
 	}
@@ -238,7 +238,7 @@ func (t *webfetchTool) Execute(ctx context.Context, input ToolInput) (ToolResult
 	// truncateToolResult with no spill file, leaving the model no way to
 	// reach the rest.
 	content = t.p.ClipBudget(fenceUntrusted(in.URL, content), spillName,
-		Budget{MaxBytes: agentloop.MaxToolResultSize - webfetchTrailerReserve})
+		Budget{MaxBytes: toolmeta.MaxToolResultSize - webfetchTrailerReserve})
 	return NewTextResult(content), nil
 }
 

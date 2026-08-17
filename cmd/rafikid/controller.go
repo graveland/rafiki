@@ -38,6 +38,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/tasks"
+	"go.graveland.dev/rafiki/pkg/tasksdb"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -219,7 +220,7 @@ func taskStore(pool *pgxpool.Pool) tasks.Store {
 	if pool == nil {
 		return nil
 	}
-	return tasks.NewPostgresStore(pool)
+	return tasksdb.NewPostgresStore(pool)
 }
 
 // startSweeper launches a background goroutine that periodically forgets

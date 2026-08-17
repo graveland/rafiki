@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
 const (
@@ -16,7 +16,7 @@ const (
 	// maxLineChars caps a single line; longer lines are truncated with a
 	// "… (line truncated)" suffix. Matches opencode's proven value.
 	maxLineChars = 2000
-	// readTrailerReserve is headroom left below agentloop.MaxToolResultSize
+	// readTrailerReserve is headroom left below toolmeta.MaxToolResultSize
 	// for read's continuation trailer. The trailer is appended *after* the
 	// byte budget is spent, so a budget equal to the outer cap pushes the
 	// result over it, and truncateToolResult — which cuts from the tail —
@@ -26,9 +26,9 @@ const (
 	// longest trailer this file can emit.
 	readTrailerReserve = 1024
 	// maxReadBytes is the total output byte budget for one read call. It
-	// must stay strictly below agentloop.MaxToolResultSize; see
+	// must stay strictly below toolmeta.MaxToolResultSize; see
 	// readTrailerReserve. TestReadBudgetLeavesRoomForTrailer pins this.
-	maxReadBytes = agentloop.MaxToolResultSize - readTrailerReserve
+	maxReadBytes = toolmeta.MaxToolResultSize - readTrailerReserve
 	// binaryCheckBytes is how many bytes at the head of the file are
 	// scanned for a NUL byte to detect binary content.
 	binaryCheckBytes = 8192

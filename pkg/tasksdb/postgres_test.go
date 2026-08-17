@@ -1,4 +1,4 @@
-package tasks_test
+package tasksdb_test
 
 import (
 	"context"
@@ -13,15 +13,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/tasks"
+	"go.graveland.dev/rafiki/pkg/tasks/tasktest"
+	"go.graveland.dev/rafiki/pkg/tasksdb"
 )
 
 func TestPostgresStoreConformance(t *testing.T) {
 	pool := testPool(t)
 
-	RunConformance(t, func(t *testing.T) (tasks.Store, string) {
+	tasktest.RunConformance(t, func(t *testing.T) (tasks.Store, string) {
 		// Create a fresh conversation row per subtest.
 		convID := newTestConversation(t, pool)
-		return tasks.NewPostgresStore(pool), convID
+		return tasksdb.NewPostgresStore(pool), convID
 	})
 }
 
@@ -69,7 +71,7 @@ func newTestConversation(t *testing.T, pool *pgxpool.Pool) string {
 // with SQLSTATE 22P02.
 func TestPostgresListWithoutConversationScope(t *testing.T) {
 	pool := testPool(t)
-	st := tasks.NewPostgresStore(pool)
+	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
 
 	convA := newTestConversation(t, pool)
@@ -120,12 +122,12 @@ func TestPostgresListWithoutConversationScope(t *testing.T) {
 // B commits, READ COMMITTED re-reads the row for whichever statement was
 // waiting:
 //
-//	fixed:   the SELECT ... FOR UPDATE now sees assignee='c_live' -> ErrAssigned
+//	fixed:   the SELECT ... FOR UPDATE now sees assignee='c_live' -> tasks.ErrAssigned
 //	unfixed: the UPDATE re-checks only id and status, both still matching,
 //	         and drops a task a live agent is holding.
 func TestDropRefusesAgainstAConcurrentAssign(t *testing.T) {
 	pool := testPool(t)
-	st := tasks.NewPostgresStore(pool)
+	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
 	conv := newTestConversation(t, pool)
 
@@ -185,7 +187,7 @@ func TestDropRefusesAgainstAConcurrentAssign(t *testing.T) {
 	}
 
 	if err := <-dropErr; !errors.Is(err, tasks.ErrAssigned) {
-		t.Fatalf("Drop returned %v; want ErrAssigned — a task held by a live agent was dropped", err)
+		t.Fatalf("Drop returned %v; want tasks.ErrAssigned — a task held by a live agent was dropped", err)
 	}
 
 	after, err := st.List(ctx, tasks.ListFilter{ConversationID: conv, IncludeDropped: true})
@@ -202,11 +204,11 @@ func TestDropRefusesAgainstAConcurrentAssign(t *testing.T) {
 // Drop now holds row locks across its whole subtree, which is exactly the
 // shape that introduces deadlocks. This hammers the three mutating paths
 // against one conversation and fails on SQLSTATE 40P01 specifically — an
-// ErrAssigned or ErrNotFound from a losing racer is a correct outcome and
+// tasks.ErrAssigned or tasks.ErrNotFound from a losing racer is a correct outcome and
 // must not be mistaken for one.
 func TestConcurrentAddAssignDropDoNotDeadlock(t *testing.T) {
 	pool := testPool(t)
-	st := tasks.NewPostgresStore(pool)
+	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
 	conv := newTestConversation(t, pool)
 
@@ -273,7 +275,7 @@ func handlesOf(rows []tasks.Task) []string {
 // constraint that treats NULL parent_id as equal.
 func TestPostgresConcurrentFirstAddDoesNotDuplicateOrdinal(t *testing.T) {
 	pool := testPool(t)
-	st := tasks.NewPostgresStore(pool)
+	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
 	conv := newTestConversation(t, pool)
 

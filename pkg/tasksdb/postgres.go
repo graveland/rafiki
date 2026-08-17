@@ -1,4 +1,15 @@
-package tasks
+// Package tasksdb is the Postgres implementation of tasks.Store.
+//
+// It is a separate package for one reason: Go imports whole packages, so while
+// this file lived in pkg/tasks every binary that touched a task type linked pgx
+// — including cmd/rafiki (a socket client that must never open a database) and
+// the executor, which reaches pkg/tasks through pkg/fundi/tools for the task_*
+// tool definitions and runs none of them. Same split as
+// pkg/executors/pkg/executorsdb, and for the same reason.
+//
+// The Store INTERFACE and every data type stay in pkg/tasks. Only the
+// implementation is here.
+package tasksdb
 
 import (
 	"context"
@@ -7,10 +18,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
-// NewPostgresStore returns a Store backed by the conversations.tasks table.
-func NewPostgresStore(pool *pgxpool.Pool) Store {
+// NewPostgresStore returns a tasks.Store backed by the conversations.tasks table.
+func NewPostgresStore(pool *pgxpool.Pool) tasks.Store {
 	return &postgresStore{pool: pool}
 }
 
@@ -18,7 +31,7 @@ type postgresStore struct {
 	pool *pgxpool.Pool
 }
 
-func (ps *postgresStore) Add(ctx context.Context, convID, parentHandle string, items []NewTask) ([]Task, error) {
+func (ps *postgresStore) Add(ctx context.Context, convID, parentHandle string, items []tasks.NewTask) ([]tasks.Task, error) {
 	tx, err := ps.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tasks add: begin: %w", err)
@@ -97,10 +110,10 @@ func (ps *postgresStore) Add(ctx context.Context, convID, parentHandle string, i
 	if err != nil {
 		return nil, err
 	}
-	all = AssignHandles(all)
+	all = tasks.AssignHandles(all)
 
 	// Return only added tasks.
-	var out []Task
+	var out []tasks.Task
 	for _, t := range all {
 		if addedIDs[t.ID] {
 			out = append(out, t)
@@ -109,7 +122,7 @@ func (ps *postgresStore) Add(ctx context.Context, convID, parentHandle string, i
 	return out, nil
 }
 
-func (ps *postgresStore) Update(ctx context.Context, convID string, changes []Change) ([]Task, error) {
+func (ps *postgresStore) Update(ctx context.Context, convID string, changes []tasks.Change) ([]tasks.Task, error) {
 	tx, err := ps.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tasks update: begin: %w", err)
@@ -118,7 +131,7 @@ func (ps *postgresStore) Update(ctx context.Context, convID string, changes []Ch
 
 	for _, ch := range changes {
 		if !ch.Status.UserSettable() {
-			return nil, fmt.Errorf("%w: %q", ErrInvalidStatus, ch.Status)
+			return nil, fmt.Errorf("%w: %q", tasks.ErrInvalidStatus, ch.Status)
 		}
 		t, err := ps.resolveInTx(ctx, tx, convID, ch.Handle)
 		if err != nil {
@@ -143,12 +156,12 @@ func (ps *postgresStore) Update(ctx context.Context, convID string, changes []Ch
 	if err != nil {
 		return nil, err
 	}
-	return AssignHandles(all), nil
+	return tasks.AssignHandles(all), nil
 }
 
-func (ps *postgresStore) Drop(ctx context.Context, convID, handle, reason string) ([]Task, error) {
+func (ps *postgresStore) Drop(ctx context.Context, convID, handle, reason string) ([]tasks.Task, error) {
 	if reason == "" {
-		return nil, ErrDropReason
+		return nil, tasks.ErrDropReason
 	}
 
 	tx, err := ps.pool.Begin(ctx)
@@ -176,7 +189,7 @@ func (ps *postgresStore) Drop(ctx context.Context, convID, handle, reason string
 	// snapshot, and the UPDATE re-filters on id and status only, never
 	// re-reading the assignee. Under READ COMMITTED an Assign committing
 	// between the two dropped a task a live agent was holding — precisely what
-	// the Store contract says cannot happen.
+	// the tasks.Store contract says cannot happen.
 	//
 	// Three things about the shape:
 	//
@@ -207,7 +220,7 @@ func (ps *postgresStore) Drop(ctx context.Context, convID, handle, reason string
 	}
 	for _, a := range assignees {
 		if a != nil && *a != "" {
-			return nil, fmt.Errorf("%w: %s", ErrAssigned, *a)
+			return nil, fmt.Errorf("%w: %s", tasks.ErrAssigned, *a)
 		}
 	}
 
@@ -231,27 +244,27 @@ func (ps *postgresStore) Drop(ctx context.Context, convID, handle, reason string
 	if err != nil {
 		return nil, err
 	}
-	return AssignHandles(all), nil
+	return tasks.AssignHandles(all), nil
 }
 
-func (ps *postgresStore) List(ctx context.Context, f ListFilter) ([]Task, error) {
+func (ps *postgresStore) List(ctx context.Context, f tasks.ListFilter) ([]tasks.Task, error) {
 	all, err := ps.loadAll(ctx, f.ConversationID)
 	if err != nil {
 		return nil, err
 	}
-	return FilterTasks(AssignHandles(all), f), nil
+	return tasks.FilterTasks(tasks.AssignHandles(all), f), nil
 }
 
-func (ps *postgresStore) Assign(ctx context.Context, convID, handle, assignee string) (Task, error) {
+func (ps *postgresStore) Assign(ctx context.Context, convID, handle, assignee string) (tasks.Task, error) {
 	tx, err := ps.pool.Begin(ctx)
 	if err != nil {
-		return Task{}, fmt.Errorf("tasks assign: begin: %w", err)
+		return tasks.Task{}, fmt.Errorf("tasks assign: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	t, err := ps.resolveInTx(ctx, tx, convID, handle)
 	if err != nil {
-		return Task{}, err
+		return tasks.Task{}, err
 	}
 
 	_, err = tx.Exec(ctx,
@@ -261,11 +274,11 @@ func (ps *postgresStore) Assign(ctx context.Context, convID, handle, assignee st
 		assignee, t.ID,
 	)
 	if err != nil {
-		return Task{}, fmt.Errorf("tasks assign: %w", err)
+		return tasks.Task{}, fmt.Errorf("tasks assign: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return Task{}, fmt.Errorf("tasks assign: commit: %w", err)
+		return tasks.Task{}, fmt.Errorf("tasks assign: commit: %w", err)
 	}
 
 	t.Assignee = assignee
@@ -300,7 +313,7 @@ func (ps *postgresStore) OrphanAssigned(ctx context.Context, assignee string) (i
 // The empty case is a separate statement rather than a guarded predicate:
 // conversation_id is UUID NOT NULL, and any expression that casts "" to uuid
 // fails at parse time regardless of whether the guard would short-circuit.
-func (ps *postgresStore) loadAll(ctx context.Context, convID string) ([]Task, error) {
+func (ps *postgresStore) loadAll(ctx context.Context, convID string) ([]tasks.Task, error) {
 	const cols = `id, conversation_id, parent_id, ordinal, content,
 	              active_form, status, drop_reason, assignee, metadata`
 
@@ -323,9 +336,9 @@ func (ps *postgresStore) loadAll(ctx context.Context, convID string) ([]Task, er
 	}
 	defer rows.Close()
 
-	var out []Task
+	var out []tasks.Task
 	for rows.Next() {
-		var t Task
+		var t tasks.Task
 		var parentID, dropReason, assignee *string
 		if err := rows.Scan(
 			&t.ID, &t.ConversationID, &parentID, &t.Ordinal,
@@ -355,22 +368,22 @@ func (ps *postgresStore) loadAll(ctx context.Context, convID string) ([]Task, er
 }
 
 // resolveInTx finds a task by handle within a transaction.
-func (ps *postgresStore) resolveInTx(ctx context.Context, tx pgx.Tx, convID, handle string) (*Task, error) {
+func (ps *postgresStore) resolveInTx(ctx context.Context, tx pgx.Tx, convID, handle string) (*tasks.Task, error) {
 	all, err := ps.loadAllInTx(ctx, tx, convID)
 	if err != nil {
 		return nil, err
 	}
-	all = AssignHandles(all)
+	all = tasks.AssignHandles(all)
 	for i := range all {
 		if all[i].Handle == handle {
 			return &all[i], nil
 		}
 	}
-	return nil, fmt.Errorf("%w: %q", ErrNotFound, handle)
+	return nil, fmt.Errorf("%w: %q", tasks.ErrNotFound, handle)
 }
 
 // loadAllInTx reads all tasks for convID within a transaction.
-func (ps *postgresStore) loadAllInTx(ctx context.Context, tx pgx.Tx, convID string) ([]Task, error) {
+func (ps *postgresStore) loadAllInTx(ctx context.Context, tx pgx.Tx, convID string) ([]tasks.Task, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT id, conversation_id, parent_id, ordinal, content,
 		        active_form, status, drop_reason, assignee, metadata
@@ -384,9 +397,9 @@ func (ps *postgresStore) loadAllInTx(ctx context.Context, tx pgx.Tx, convID stri
 	}
 	defer rows.Close()
 
-	var out []Task
+	var out []tasks.Task
 	for rows.Next() {
-		var t Task
+		var t tasks.Task
 		var parentID, dropReason, assignee *string
 		if err := rows.Scan(
 			&t.ID, &t.ConversationID, &parentID, &t.Ordinal,
