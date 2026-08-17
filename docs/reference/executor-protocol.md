@@ -142,7 +142,14 @@ Provision(childId, workspaceMode, mounts[], workdir, network, memoryBytes, cpus,
 Unary. Prepares a workspace for one child and returns a handle every later
 `Execute` carries. A **native** executor answers with its pinned root and
 does nothing else; a **container** executor starts a container with the
-daemon-derived mounts.
+daemon-derived mounts, **and starts a tool server inside it**.
+
+That inner server is `rafiki executor serve-stdio`, reached over the stdio of a
+`docker exec -i` — there is no TCP, because the grant sets `network: "none"`.
+Provision does not return until it has answered `Describe`, so a workspace that
+comes back is one whose tools can actually run; a dead one would otherwise
+surface as a confusing failure on the child's first tool call. Provision also
+validates the image (see below) and removes the container on any failure.
 
 - `workspaceMode` is `"ephemeral"` (the executor constructs a reconstructible
   workspace) or `"pinned"` (the executor exposes an existing tree). This
@@ -163,8 +170,29 @@ Release(workspaceId) → {}
 
 Unary. Tears a workspace down. **Idempotent:** a daemon restart that lost
 track of a workspace must be able to release it again without error. A
-released workspace kills its background jobs — a job in a removed container
-is not a job, and reporting it as running is worse than reporting it gone.
+released workspace kills **its own** background jobs — a job in a released
+workspace is not a job, and reporting it as running is worse than reporting it
+gone. It must not touch any other workspace's jobs.
+
+On a container workspace, Release stops the inner server first and then removes
+the container; the other order leaves the `docker exec` client reaping against a
+container that is already gone. Removing the container is what reaps the jobs,
+because they run inside it.
+
+### The container workspace image contract
+
+A container executor's `--image` must provide:
+
+| Requirement | Why |
+|---|---|
+| `rafiki` on `PATH` | every tool runs through `rafiki executor serve-stdio` inside the container |
+| `rg` (ripgrep) | `glob` and `grep` shell out to it and **decline** when absent, so a missing binary removes two tools silently instead of erroring |
+
+Provision validates both against the fresh container and fails with a message
+naming the image, the missing tool, and the command that builds a conforming
+one. The binary is baked into the image rather than copied in at Provision, so
+the in-image version can drift from the executor's; Provision warns on a
+mismatch and relies on the `Describe` above as the real compatibility check.
 
 ### Cancel
 
@@ -241,6 +269,12 @@ verifies at the moment of the write.
 4. The executor stats each path **before** dispatching the tool. If any
    mtime differs, it streams `Failed(CODE_DENIED, …)` and the write does
    not proceed.
+
+On a **container** workspace the stat happens inside the container: the outer
+executor forwards `expectMtime` untouched to the inner server rather than
+evaluating it. Statting a container path on the host is either a spurious "file
+changed under us" or a stat of an unrelated host file that happens to exist at
+the same path.
 
 Parent-side checking alone would be a TOCTOU — the file can change between
 the parent's check and the executor's write. The executor-side check at the
