@@ -281,7 +281,6 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Web:          opts.ToolsWeb,
 		LSP:          lspClient,
 		FileChanged:  lspNotifier,
-		Pool:         opts.Pool,
 		Tasks:        taskStore,
 		ChildID:      opts.Ref,
 		Agents:       opts.Agents,
