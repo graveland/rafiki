@@ -3,12 +3,14 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"sync"
 
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 )
 
 // Backend provisions and tears down workspaces. Two implementations: native
@@ -29,6 +31,42 @@ type workspace struct {
 	exec func(ctx context.Context, argv []string) *exec.Cmd
 	// childID is the daemon's id, carried for labelling.
 	childID string
+	// inner is the tool server running INSIDE this workspace. Non-nil for
+	// container isolation, nil for native. It is what makes the mounts the grant
+	// for every tool rather than for bash alone.
+	inner *innerServer
+}
+
+// innerServer is a tool server running inside a container workspace, reached
+// over the stdio of a `docker exec -i` process.
+//
+// There is no TCP option and adding one would undo part of the grant:
+// workspace.Derive sets Network: "none" for both grant shapes, so the container
+// has no network at all.
+type innerServer struct {
+	client executorpbconnect.ExecutorServiceClient
+	// cmd is the `docker exec -i` process whose stdio carries the wire.
+	// Deliberately NOT built with exec.CommandContext — see startInnerServer.
+	cmd  *exec.Cmd
+	conn net.Conn
+
+	closeOnce sync.Once
+}
+
+// Close tears the inner server down, once. Teardown arrives from two
+// directions — Release, and a Provision that failed after starting it — so the
+// second caller must not be handed an error for the first one's work.
+func (s *innerServer) Close() {
+	s.closeOnce.Do(func() {
+		// Closing the connection closes the exec process's stdin, which is how a
+		// healthy inner server learns to exit. Kill anyway rather than waiting on
+		// that: a wedged one would otherwise outlive `docker rm -f`.
+		_ = s.conn.Close()
+		if s.cmd.Process != nil {
+			_ = s.cmd.Process.Kill()
+		}
+		_ = s.cmd.Wait()
+	})
 }
 
 // nativeBackend implements Backend for a local filesystem. It is always pinned.

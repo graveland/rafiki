@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -194,6 +195,79 @@ func TestProvisionRefusesAnImageMissingTheContract(t *testing.T) {
 	if len(bytes.TrimSpace(out)) != 0 {
 		t.Errorf("a failed Provision leaked its container: %s", bytes.TrimSpace(out))
 	}
+}
+
+// Provision must not return until a tool server is running INSIDE the container
+// and has answered Describe. Returning a dead one turns into a confusing failure
+// on the child's first tool call, somewhere else entirely, rather than a clear
+// one here.
+//
+// `docker top` lists processes as the CONTAINER sees them, which is what makes
+// this test meaningful: a tool server running on the host — the D1 arrangement —
+// would not appear.
+func TestProvisionStartsAToolServerInsideTheContainer(t *testing.T) {
+	requireDocker(t)
+	srv := newContainerExecutor(t)
+	ws := provision(t, srv, t.TempDir(), "")
+
+	out, err := exec.Command("docker", "top", ws.WorkspaceId).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker top: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "serve-stdio") {
+		t.Fatalf("no tool server is running inside the container; docker top said:\n%s", out)
+	}
+}
+
+// Release must stop the `docker exec` process too, not just the container.
+// The exec client lives on the HOST — it is the process whose stdio carries the
+// wire — so removing the container without it leaves an orphan holding a pipe
+// pair for as long as the executor lives.
+func TestReleaseStopsTheInnerServerProcess(t *testing.T) {
+	requireDocker(t)
+	srv := newContainerExecutor(t)
+	ws := provision(t, srv, t.TempDir(), "")
+	client := newTestClient(t, srv)
+	ctx := context.Background()
+
+	if n := hostExecProcesses(t, ws.WorkspaceId); n == 0 {
+		t.Fatal("no `docker exec` process on the host for this workspace; the test cannot detect an orphan")
+	}
+
+	if _, err := client.Release(ctx, connect.NewRequest(&executorpb.ReleaseRequest{
+		WorkspaceId: ws.WorkspaceId,
+	})); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// Kill is asynchronous in the sense that the process table takes a moment to
+	// reflect a reaped child; poll briefly rather than racing it.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if hostExecProcesses(t, ws.WorkspaceId) == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("a `docker exec` process for %s outlived Release", ws.WorkspaceId)
+}
+
+// hostExecProcesses counts host processes whose command line names this
+// workspace — the `docker exec -i <id> rafiki executor serve-stdio` client.
+func hostExecProcesses(t *testing.T, workspaceID string) int {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-f", "docker exec.*"+workspaceID).Output()
+	if err != nil {
+		// pgrep exits 1 with no output when nothing matches, which is not an error.
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 func execBash(t *testing.T, srv *executor.Server, ws *executorpb.ProvisionResponse, command string) (string, error) {

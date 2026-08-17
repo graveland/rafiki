@@ -171,6 +171,76 @@ func resolveBackend(opts Options, executorID string) Backend {
 	}
 }
 
+// forwardToInner relays one Execute call to the tool server inside the container
+// workspace and streams its events back unchanged.
+//
+// **There is no host fallback, and adding one reintroduces finding D1 in full.**
+// If the inner server is missing or unreachable the call FAILS. This is the
+// single most likely thing for a later "robustness" change to undo: falling back
+// to s.reg here is exactly the arrangement that let `read ~/.ssh/id_rsa` through
+// a workspace granted only /work and /repo:ro.
+func (s *Server) forwardToInner(
+	ctx context.Context,
+	msg *executorpb.ExecuteRequest,
+	ws *workspace,
+	stream *connect.ServerStream[executorpb.ExecuteResponse],
+) error {
+	if ws.inner == nil {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code: executorpb.Failure_CODE_EXECUTOR_LOST,
+					Message: fmt.Sprintf("workspace %q has no tool server; the container cannot run tools "+
+						"and this call will not be run on the host", ws.id),
+				},
+			},
+		})
+	}
+
+	// workspace_id is deliberately cleared. The inner server is rooted at the
+	// workspace's workdir and provisions nothing of its own, so it has no
+	// registry to resolve this id against — forwarding it would make every call
+	// fail with "unknown workspace".
+	inner, err := ws.inner.client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
+		CallId:      msg.CallId,
+		Tool:        msg.Tool,
+		InputJson:   msg.InputJson,
+		TimeoutMs:   msg.TimeoutMs,
+		ExpectMtime: msg.ExpectMtime,
+		Background:  msg.Background,
+	}))
+	if err != nil {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code:    executorpb.Failure_CODE_EXECUTOR_LOST,
+					Message: fmt.Sprintf("the tool server in workspace %q is unreachable: %v", ws.id, err),
+				},
+			},
+		})
+	}
+
+	// Relay every event unchanged — Output, Result, Failed and Handle all pass
+	// through, so streaming behaviour and failure codes are the inner server's,
+	// not a re-interpretation of them.
+	for inner.Receive() {
+		if err := stream.Send(inner.Msg()); err != nil {
+			return err
+		}
+	}
+	if err := inner.Err(); err != nil {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code:    executorpb.Failure_CODE_EXECUTOR_LOST,
+					Message: fmt.Sprintf("the tool server in workspace %q failed mid-call: %v", ws.id, err),
+				},
+			},
+		})
+	}
+	return nil
+}
+
 func (s *Server) Execute(
 	ctx context.Context,
 	req *connect.Request[executorpb.ExecuteRequest],
@@ -196,33 +266,6 @@ func (s *Server) Execute(
 		}
 	}
 
-	// Fail closed on a container workspace: only bash is routed into the
-	// container, so every other tool would run in THIS process, on the host,
-	// with the executor user's full ambient authority — the container that is
-	// supposed to BE the grant not involved at all. Refusing costs nothing that
-	// worked: the in-process registry is rooted on the host, where /work does
-	// not exist, so the only calls that ever succeeded on this path were the
-	// escaping ones. That is finding D1, and it was demonstrated reading a real
-	// ~/.ssh/id_rsa through a workspace granted only /work and /repo:ro.
-	//
-	// A stopgap, deliberately. The fix is a tool server running INSIDE the
-	// container, after which every tool routes there and this branch goes away
-	// — NOT a userspace path check on the host, which would reimplement a
-	// boundary the kernel already enforces, and could not cover bash anyway.
-	// See docs/plans/2026-08-15-in-container-tool-server-plan.md.
-	if ws != nil && ws.isolation == "container" && msg.Tool != "bash" {
-		return stream.Send(&executorpb.ExecuteResponse{
-			Event: &executorpb.ExecuteResponse_Failed{
-				Failed: &executorpb.Failure{
-					Code: executorpb.Failure_CODE_DENIED,
-					Message: fmt.Sprintf("tool %q cannot run in a container workspace yet: only bash is routed into "+
-						"the container, and running %[1]q here would run it on the host, outside the workspace grant",
-						msg.Tool),
-				},
-			},
-		})
-	}
-
 	// Background bash — start a job, return a handle immediately.
 	if msg.Background && msg.Tool == "bash" {
 		return s.startBackground(ctx, msg, ws, stream)
@@ -244,6 +287,20 @@ func (s *Server) Execute(
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(msg.TimeoutMs)*time.Millisecond)
 		defer cancel()
+	}
+
+	// On a container workspace EVERY tool runs inside the container, through the
+	// tool server started at Provision — the mounts are the grant and the kernel
+	// enforces them, uniformly, for all six tools.
+	//
+	// This is placed after the semaphore and the deadline (which still bound the
+	// call) but BEFORE the expect_mtime check below, which stats paths on the
+	// HOST. For a container path that stat is either a spurious "file changed
+	// under us" or, worse, a stat of an unrelated host file that happens to
+	// exist. The inner server is the only side that can see the real file, so the
+	// map is forwarded and evaluated there.
+	if ws != nil && ws.isolation == "container" {
+		return s.forwardToInner(ctx, msg, ws, stream)
 	}
 
 	// Verify expect_mtime before dispatching.

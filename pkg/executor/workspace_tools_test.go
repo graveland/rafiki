@@ -49,32 +49,6 @@ func execTool(t *testing.T, srv *executor.Server, wsID, tool string, input any) 
 	return result, failure
 }
 
-// skipUntilInContainerToolServer parks the ACCEPTANCE test below, loudly.
-//
-// The escape half of D1 is closed: a container workspace now REFUSES every
-// non-bash tool instead of running it on the host, and
-// TestFileToolsCannotEscapeTheWorkspace runs unskipped to hold that. What
-// remains is the other half — container mode is still non-functional for those
-// five tools, because nothing runs them inside the container yet. The test
-// below asserts the functionality, so it stays skipped until the in-container
-// tool server lands and every tool routes through it.
-//
-// Keep it visible rather than deleting it: it is the acceptance test for that
-// work, and it already encodes what "working" has to mean — a write through
-// /work lands in the worktree on the host, a relative path resolves against the
-// workspace workdir, and the :ro mount stays readable.
-//
-//	docs/plans/2026-08-15-in-container-tool-server-plan.md
-func skipUntilInContainerToolServer(t *testing.T) {
-	t.Helper()
-	fmt.Fprintf(os.Stderr,
-		"\n!!! SKIPPING %s: read/write/edit/glob/grep are REFUSED on a container\n"+
-			"!!! workspace — fail-closed, no escape — but do not run INSIDE it yet.\n"+
-			"!!! See docs/plans/2026-08-15-in-container-tool-server-plan.md\n\n",
-		t.Name())
-	t.Skip("container mode is fail-closed for non-bash tools; the functionality awaits the in-container tool server")
-}
-
 // The grant must hold for EVERY tool, not just bash. container_test.go
 // exercises only execBash, which is why this shipped: the container argv, the
 // :ro mount and the kernel enforcement were all correct, and the other five
@@ -94,36 +68,80 @@ func TestFileToolsCannotEscapeTheWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Host paths must be unreachable. Every one of these SUCCEEDED before the
+	// tools ran inside the container — the first returned this machine's real
+	// private key.
+	//
+	// Note what does the refusing now: the kernel, via the mount namespace, not
+	// a policy check. So the messages are ordinary errno text (ENOENT, EACCES)
+	// rather than anything about "the workspace", and asserting on their wording
+	// would be asserting on libc.
 	for _, tc := range []struct {
 		name  string
 		tool  string
 		input any
 	}{
-		{"read a host absolute path", "read", map[string]string{"file_path": secret}},
-		{"read /etc/passwd", "read", map[string]string{"file_path": "/etc/passwd"}},
-		{"read via ~ expansion", "read", map[string]string{"file_path": "~/.ssh/id_rsa"}},
-		{"read via .. traversal", "read", map[string]string{"file_path": "/work/../../etc/passwd"}},
-		{"write outside every mount", "write", map[string]any{
+		{"a host absolute path", "read", map[string]string{"file_path": secret}},
+		{"the host user's ssh key via ~", "read", map[string]string{"file_path": "~/.ssh/id_rsa"}},
+		{"a write outside every mount", "write", map[string]any{
 			"file_path": filepath.Join(secretDir, "planted"), "content": "x"}},
-		{"write through ~", "write", map[string]any{"file_path": "~/.zshenv", "content": "x"}},
-		{"write through a read-only mount", "write", map[string]any{
-			"file_path": "/repo/planted", "content": "x"}},
-		{"edit through a read-only mount", "edit", map[string]any{
-			"file_path": "/repo/README.md", "old_string": "# test", "new_string": "# owned"}},
-		{"glob the host root", "glob", map[string]string{"pattern": "*", "path": "/etc"}},
-		{"grep the host root", "grep", map[string]string{"pattern": "root", "path": "/etc"}},
+		{"a write through ~", "write", map[string]any{"file_path": "~/.zshenv", "content": "x"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, failure := execTool(t, srv, ws.WorkspaceId, tc.tool, tc.input)
 			if failure == "" {
 				t.Fatalf("the call SUCCEEDED and must not have; result: %s", truncate(result, 300))
 			}
-			// A refusal the model cannot act on is a refusal it will retry.
-			if !strings.Contains(strings.ToLower(failure), "workspace") {
-				t.Errorf("the refusal must say the path is outside the workspace: %s", failure)
-			}
 		})
 	}
+
+	// The read-only mount is enforced by the kernel, so it fails with EROFS
+	// rather than with anything rafiki wrote. Read first: the read-before-write
+	// interlock would otherwise refuse the edit for its own reasons and this
+	// would pass without ever testing :ro.
+	t.Run("the read-only mount refuses writes", func(t *testing.T) {
+		if _, failure := execTool(t, srv, ws.WorkspaceId, "read",
+			map[string]string{"file_path": "/repo/README.md"}); failure != "" {
+			t.Fatalf("the read-only mount must be readable: %s", failure)
+		}
+		_, failure := execTool(t, srv, ws.WorkspaceId, "edit", map[string]any{
+			"file_path": "/repo/README.md", "old_string": "# test", "new_string": "# owned"})
+		if !strings.Contains(failure, "read-only") {
+			t.Errorf("edit through :ro must fail with a read-only filesystem error, got: %s", failure)
+		}
+		_, failure = execTool(t, srv, ws.WorkspaceId, "write", map[string]any{
+			"file_path": "/repo/planted", "content": "x"})
+		if !strings.Contains(failure, "read-only") {
+			t.Errorf("write through :ro must fail with a read-only filesystem error, got: %s", failure)
+		}
+	})
+
+	// Positive proof that the tools are served INSIDE the container, which is a
+	// sharper claim than "the escape attempts failed".
+	//
+	// /etc/passwd is now READABLE and that is not an escape: it is the
+	// container's own /etc/passwd, and refusing it would be pretending the
+	// container has no filesystem of its own. Asserting on its contents cannot
+	// distinguish host from container on a Linux host, so instead: bash creates
+	// a file outside every mount, where it can only exist inside the container,
+	// and `read` must see it while the host must not.
+	t.Run("tools run in the container filesystem", func(t *testing.T) {
+		marker := "/tmp/rafiki-container-marker-" + filepath.Base(t.TempDir())
+		if _, err := execBash(t, srv, ws, "echo container-only > "+marker); err != nil {
+			t.Fatalf("bash: %v", err)
+		}
+		result, failure := execTool(t, srv, ws.WorkspaceId, "read", map[string]string{"file_path": marker})
+		if failure != "" {
+			t.Fatalf("read could not see a file bash created in the container — "+
+				"the two are not in the same filesystem: %s", failure)
+		}
+		if !strings.Contains(result, "container-only") {
+			t.Fatalf("read returned %q", truncate(result, 200))
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Errorf("%s exists on the HOST; the container write escaped", marker)
+		}
+	})
 
 	// And the secret is still exactly as it was — no partial write got through.
 	if b, err := os.ReadFile(secret); err != nil || !strings.Contains(string(b), "hunter2") {
@@ -142,7 +160,6 @@ func TestFileToolsCannotEscapeTheWorkspace(t *testing.T) {
 // /work does not exist at all, so every legitimate call fails too. A fix that
 // only tightened the refusals would leave the feature broken.
 func TestFileToolsWorkOnWorkspacePaths(t *testing.T) {
-	skipUntilInContainerToolServer(t)
 	requireDocker(t)
 	repo, worktree := gitRepoWithDocker(t)
 	srv := newContainerExecutor(t)
@@ -232,12 +249,15 @@ func TestASymlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
 	if failure == "" {
 		t.Fatalf("a symlink out of the workspace was followed: %s", truncate(result, 200))
 	}
-	// It must be refused for the RIGHT reason. Before the fix this call also
-	// failed — with "no such file or directory", because /work does not exist
-	// on the host at all — which is a passing assertion for a workspace that
-	// enforces nothing.
-	if !strings.Contains(strings.ToLower(failure), "workspace") {
-		t.Fatalf("refused, but not as an escape: %s", failure)
+
+	// It fails because the link DANGLES: its target is a host path that does not
+	// exist inside the container's mount namespace. No path parsing is involved,
+	// which is the point — a userspace containment check would have had to
+	// resolve symlinks before comparing, and get every ordering hazard right.
+	//
+	// The host file must still be there and unread.
+	if b, err := os.ReadFile(secret); err != nil || !strings.Contains(string(b), "do not read me") {
+		t.Errorf("the host file behind the symlink was disturbed: %v %s", err, b)
 	}
 }
 
