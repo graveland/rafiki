@@ -7,9 +7,15 @@
 - **Two binaries, split by dependency: `rafiki` is a socket client that must
   never open a postgres connection; `rafikid` owns every DSN.** That is the
   whole point of the split and the easiest invariant for a future change to
-  violate silently. `cmd/rafiki` does currently *link* pgx transitively
-  (residual from pre-split days; see `tasks/todo.md`). Three concrete changes
-  have already landed: the client asks the daemon for model information over
+  violate silently. `cmd/rafiki` links **zero** pgx packages, enforced by
+  `TestClientDoesNotLinkPostgres`. `rafiki` is also the EXECUTOR
+  (`rafiki executor serve`, `rafiki executor serve-stdio`) — `cmd/rafiki-executor`
+  is retired, and its absence is deliberate: two artifacts, one client and one
+  server. Folding it in required `pkg/executor` to become pgx-free too, so that
+  test now covers the executor as well; `pkg/executor/no_postgres_test.go` keeps
+  the invariant attached to the packages so it survives further rearranging.
+  Several concrete changes got the client there: it asks the daemon for model
+  information over
   `ctrl_model_info` instead of reading the OpenRouter catalog itself (the `claude`
   subcommand no longer imports `pkg/routing`); `CaptureStore`,
   `RawTraceStore`, and `EjectionStore` have moved out of `pkg/routing` so the
@@ -202,19 +208,39 @@
   something routed around it. When you add a guard, enumerate every path to the
   guarded resource and assert the guard sits on all of them.
 
-- **On a container workspace, only `bash` currently runs in the container —
-  `read`/`write`/`edit`/`glob`/`grep` still execute on the HOST.** This is a
-  live escape (finding D1): a workspace granted `/work` + `/repo:ro` can read
-  `~/.ssh/id_rsa` and write anywhere the executor user can. Pinned by
-  deliberately-skipped docker tests in `pkg/executor/workspace_tools_test.go`.
-  The fix is a tool server INSIDE the container
-  (`docs/plans/2026-08-15-in-container-tool-server-plan.md`), **not** userspace
-  path checking on the host: `08-containers.md`'s "the file tools could enforce
-  it in userspace" sentence is about NATIVE executors and is an argument
-  *against* path scoping ("a scope that holds for `read` and evaporates on the
-  first shell command is worse than no scope"). For containers the same doc says
-  the mounts are the grant and the kernel enforces them. That sentence has been
-  misread once already.
+- **On a container workspace the non-`bash` tools are REFUSED, pending the
+  in-container tool server.** Only `bash` enters the container; `read`, `write`,
+  `edit`, `glob` and `grep` used to fall through to a host-scoped registry, which
+  was finding D1 — a workspace granted `/work` + `/repo:ro` read a real
+  `~/.ssh/id_rsa` off the host. They now fail closed. That costs nothing that
+  worked, because the registry was rooted on the host where `/work` does not
+  exist, so the only calls that ever succeeded on that path were the escaping
+  ones. `TestFileToolsCannotEscapeTheWorkspace` holds it;
+  `TestFileToolsWorkOnWorkspacePaths` stays skipped as the acceptance test for
+  the real fix.
+
+  The real fix is a tool server INSIDE the container, reached over
+  `docker exec -i` stdio — `rafiki executor serve-stdio`, wrapped as a net.Conn
+  by `execpool.NewStdioConn` so `ServeInverted`/`ClientForConn` apply unchanged.
+  There is no TCP option: `workspace.Derive` sets `Network: "none"`.
+  It is **not** userspace path checking on the host: `08-containers.md`'s "the
+  file tools could enforce it in userspace" sentence is about NATIVE executors
+  and is an argument *against* path scoping ("a scope that holds for `read` and
+  evaporates on the first shell command is worse than no scope"). For containers
+  the same doc says the mounts are the grant and the kernel enforces them. That
+  sentence has been misread once already.
+
+- **The container workspace image is a contract, validated at Provision, and the
+  executor is BAKED INTO it rather than copied in.** It must carry `rafiki` (the
+  tool server runs inside) and `rg` — `glob` and `grep` DECLINE without ripgrep
+  rather than erroring, so a missing binary removes two tools from the agent
+  silently. `docker build --target workspace` builds a reference image. Do not
+  reintroduce a `docker cp` of a cross-compiled static binary: baking keeps it a
+  shared read-only layer, and compiling it in-image sidesteps the macOS-host
+  cross-compile problem entirely. What baking costs is version skew, which
+  Provision warns about — and deliberately does not fail on, since a
+  version-string mismatch would force an image rebuild for every host-side
+  iteration while the thing that must actually agree is the wire.
 
 - **`Pool.live` must be mutated on connection IDENTITY, never on executor ID
   alone.** An executor restart installs a new `liveConn` under the same ID long
@@ -245,6 +271,6 @@
   carries the distinction; `executors.IsTerminalAuthError` decides it and fails
   toward RETRY, because quitting on a dead credential costs a log line and
   quitting on a transient one costs the fleet. The sentinels live in
-  `pkg/executors`, not `pkg/executorsdb`, because `cmd/rafiki-executor` links
-  `pkg/execpool` and must not link pgx. Never forward the store's error text to
+  `pkg/executors`, not `pkg/executorsdb`, because the executor links
+  `pkg/execpool` and must not link pgx (`pkg/executor/no_postgres_test.go`). Never forward the store's error text to
   the peer: it has not proved who it is, and a pgx error carries the DSN.

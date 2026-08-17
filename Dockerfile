@@ -17,10 +17,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -ldflags="-s -w -X go.graveland.dev/rafiki/pkg/version.Version=${VERSION}" -o /out/rafiki ./cmd/rafiki
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    go build -ldflags="-s -w -X go.graveland.dev/rafiki/pkg/version.Version=${VERSION}" -o /out/rafiki-executor ./cmd/rafiki-executor
-
 
 FROM debian:trixie-slim AS rtk
 
@@ -54,13 +50,14 @@ RUN set -eux; \
 #
 #   docker build --target workspace -t rafiki-workspace:dev .
 #
-# and pass it as `rafiki-executor --isolation container --image rafiki-workspace:dev`.
+# and pass it as `rafiki executor serve --isolation container --image rafiki-workspace:dev`.
 #
-# The executor binary is BAKED IN, not copied in at Provision time. An earlier
-# design had the daemon `docker cp` a statically linked linux binary into every
-# container, which needs a cross-compile target, an artifact-location flag, and a
-# refuse-to-start check — all to preserve the ability to bring an arbitrary
-# image. That ability was already spent: ripgrep is mandatory (glob and grep
+# The tool server is `rafiki executor serve-stdio`, and the rafiki binary is
+# BAKED IN rather than copied in at Provision time. An earlier design had the
+# daemon `docker cp` a statically linked linux binary into every container, which
+# needs a cross-compile target, an artifact-location flag, and a refuse-to-start
+# check — all to preserve the ability to bring an arbitrary image. That ability
+# was already spent: ripgrep is mandatory (glob and grep
 # DECLINE without it rather than erroring, silently removing two tools), so the
 # image is validated at Provision either way. Baking makes the binary a shared
 # read-only layer instead of ~30MB in every container's writable layer, and
@@ -84,7 +81,7 @@ FROM debian:trixie-slim AS workspace
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /out/rafiki-executor /usr/local/bin/rafiki-executor
+COPY --from=build /out/rafiki /usr/local/bin/rafiki
 COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
 
 # /work is the read-write mount the daemon derives from the child's worktree.
@@ -92,7 +89,7 @@ COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
 WORKDIR /work
 
 # No ENTRYPOINT: the daemon starts the container with `sleep infinity` and then
-# `docker exec`s the tool server into it (container.go).
+# `docker exec`s `rafiki executor serve-stdio` into it (container.go).
 
 
 FROM debian:trixie-slim AS release

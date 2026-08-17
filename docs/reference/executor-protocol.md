@@ -1,17 +1,28 @@
 # Executor protocol
 
-The daemon dispatches filesystem and shell tool calls to a `rafiki-executor`
-process over Connect RPC on a local unix socket. This document describes the
-wire protocol: the seven RPCs, their message shapes, the four failure codes, the
+The daemon dispatches filesystem and shell tool calls to an executor process
+(`rafiki executor serve`) over Connect RPC. This document describes the wire
+protocol: the seven RPCs, their message shapes, the four failure codes, the
 background-handle lifecycle, the workspace lifecycle, and the mtime contract.
+
+There are three transports for the same protocol, and they differ only in what
+carries the bytes:
+
+| Transport | Command | Used when |
+|---|---|---|
+| Unix socket | `rafiki executor serve --socket` | executor and daemon on one host |
+| Reverse-dialled TLS | `rafiki executor serve --connect` | the daemon cannot reach the executor's host (NAT, a laptop) |
+| `docker exec -i` stdio | `rafiki executor serve-stdio` | inside a container workspace, which has no network at all |
 
 ## Transport
 
 - **Protocol:** Connect (gRPC-compatible) over HTTP/2 cleartext (h2c).
 - **Socket:** Unix domain socket, filesystem mode `0600` — no authentication
   beyond filesystem permissions in this phase.
-- **Roles:** `rafikid` (the daemon) is the RPC client; `rafiki-executor` is the
-  server. Both binaries run on the same host.
+- **Roles:** `rafikid` (the daemon) is the RPC client; the executor is the
+  server. On the reverse-dialled transport the executor DIALS and then serves on
+  what it dialled, so the TLS roles and the HTTP roles are inverted relative to
+  each other — see pkg/execpool's package comment.
 - **Codec:** Binary protobuf by default; JSON also supported (Connect's
   auto-negotiation).
 

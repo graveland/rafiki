@@ -226,16 +226,21 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 | Binary | Role |
 |---|---|
 | `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself; `pi` and `claude` children remain subprocesses. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
-| `rafiki` | the CLI client — the one you type |
+| `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
 | `rafiki-attach` | the TUI, spawned by `rafiki create` / `rafiki attach` |
-| `rafiki-executor` | the executor. Serves filesystem and shell tools over Connect RPC on a local unix socket. Optional — when absent, tools run in-process as before |
 
 ## Executor
 
-`rafiki-executor` moves the filesystem and shell tools (`read`, `write`, `edit`,
-`glob`, `grep`, `bash`) behind a Connect RPC surface on a local unix socket. The
-daemon becomes the RPC client: when an executor socket is configured, tool calls
-are dispatched to it; when absent, every tool runs in-process as before.
+`rafiki executor serve` moves the filesystem and shell tools (`read`, `write`,
+`edit`, `glob`, `grep`, `bash`) behind a Connect RPC surface. The daemon becomes
+the RPC client: when an executor is configured, tool calls are dispatched to it;
+when absent, every tool runs in-process as before.
+
+It is a subcommand of `rafiki` rather than its own binary, so there are two
+artifacts to build and ship — one client, one server — not three. The
+administrative verbs alongside it (`enroll`, `list`, `label`, `disable`,
+`enable`) act on the daemon's control socket, which an executor host does not
+have, so their presence on such a host grants nothing.
 
 **Background execution** is the immediate win: `bash` is synchronous with a
 600s ceiling in-process, so dev servers, log tails, and any test suite slower
@@ -243,8 +248,8 @@ than ten minutes are unavailable. The executor's `Attach` stream survives a
 dropped connection — a laptop sleeping mid-build does not lose the build.
 
 ```bash
-go build -o bin/rafiki-executor ./cmd/rafiki-executor
-./bin/rafiki-executor --socket /tmp/exec.sock --root "$PWD"
+go build -o bin/rafiki ./cmd/rafiki
+./bin/rafiki executor serve --socket /tmp/exec.sock --root "$PWD"
 ```
 
 **Flags:**
@@ -286,14 +291,14 @@ The model never writes a path.
 
 ```
 docker build --target workspace -t rafiki-workspace:dev .
-rafiki-executor --isolation container --image rafiki-workspace:dev --workspace-mode ephemeral
+rafiki executor serve --isolation container --image rafiki-workspace:dev --workspace-mode ephemeral
 ```
 
 **The image is a contract, and it is validated at Provision.** It must carry:
 
 | Requirement | Why it is not optional |
 |---|---|
-| `rafiki-executor` on `PATH` | Every tool on a container workspace runs through a tool server *inside* the container, started with `--serve-stdio`. Without the binary the workspace can run nothing. |
+| `rafiki` on `PATH` | Every tool on a container workspace runs through `rafiki executor serve-stdio` *inside* the container. Without the binary the workspace can run nothing. |
 | `rg` (ripgrep) | `glob` and `grep` shell out to it and **decline** when it is absent, so a missing binary removes two tools from the agent silently instead of erroring. |
 
 `--target workspace` in this repo's `Dockerfile` builds a reference image meeting
