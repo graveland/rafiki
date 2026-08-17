@@ -4,12 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"os/user"
 	"strconv"
 	"strings"
+	"time"
 
+	"connectrpc.com/connect"
+
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 )
 
 // containerBackend implements Backend via the docker CLI. It is always
@@ -83,6 +89,81 @@ func (b *containerBackend) validateImage(ctx context.Context, id string) error {
 		}
 	}
 	return nil
+}
+
+// innerStartTimeout bounds the startup handshake with the inner server.
+//
+// The lesson is execpool's join path, where an unbounded Describe held a
+// goroutine forever against a peer that completed the handshake and then went
+// silent. Here the peer is a `docker exec` away, so the same shape applies: a
+// container that starts but never answers must fail the Provision rather than
+// hang it.
+const innerStartTimeout = 30 * time.Second
+
+// startInnerServer runs `rafiki executor serve-stdio` inside the container and
+// returns a client speaking to it.
+//
+// Confirming it answers Describe before returning is the point: a Provision that
+// hands back a dead inner server turns into a confusing failure on the child's
+// first tool call, somewhere else entirely, instead of a clear one here. It is
+// also the real compatibility check that the version-string comparison in
+// warnOnVersionSkew only approximates — if the baked binary cannot speak this
+// protocol, this is where it shows.
+func (b *containerBackend) startInnerServer(ctx context.Context, id, workdir string) (*innerServer, error) {
+	argv := []string{"exec", "-i"}
+	if workdir != "" {
+		argv = append(argv, "--workdir", workdir)
+	}
+	argv = append(argv, id, "rafiki", "executor", "serve-stdio")
+	if workdir != "" {
+		argv = append(argv, "--root", workdir)
+	}
+
+	// exec.Command, NOT exec.CommandContext. ctx here belongs to the Provision
+	// RPC and is cancelled the moment Provision returns; binding the process to
+	// it would kill the inner server exactly when the workspace becomes usable.
+	// Its lifetime is the workspace's, and Close ends it.
+	cmd := exec.Command("docker", argv...)
+	// The inner server logs to stderr, and forwarding it means a failure inside
+	// the container is visible in the executor's own log rather than swallowed.
+	// stdout is untouched: it is the wire.
+	cmd.Stderr = os.Stderr
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("provision: inner server stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("provision: inner server stdout: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("provision: start inner server: %w", err)
+	}
+
+	conn := execpool.NewStdioConn(stdout, stdin)
+	httpClient, err := execpool.ClientForConn(conn)
+	if err != nil {
+		_ = conn.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("provision: inner server transport: %w", err)
+	}
+
+	inner := &innerServer{
+		client: executorpbconnect.NewExecutorServiceClient(httpClient, "http://container"),
+		cmd:    cmd,
+		conn:   conn,
+	}
+
+	dctx, cancel := context.WithTimeout(ctx, innerStartTimeout)
+	defer cancel()
+	if _, err := inner.client.Describe(dctx, connect.NewRequest(&executorpb.DescribeRequest{})); err != nil {
+		inner.Close()
+		return nil, fmt.Errorf("provision: the tool server in image %q did not answer Describe within %s: %w",
+			b.image, innerStartTimeout, err)
+	}
+	return inner, nil
 }
 
 func (b *containerBackend) probe(ctx context.Context, id string, argv []string) (string, error) {
@@ -160,6 +241,12 @@ func (b *containerBackend) Provision(ctx context.Context, req *executorpb.Provis
 		return nil, err
 	}
 
+	inner, err := b.startInnerServer(ctx, id, req.Workdir)
+	if err != nil {
+		_ = b.removeContainer(context.WithoutCancel(ctx), id)
+		return nil, err
+	}
+
 	// Collect roots — one per mount.
 	var roots []string
 	for _, m := range req.Mounts {
@@ -173,6 +260,7 @@ func (b *containerBackend) Provision(ctx context.Context, req *executorpb.Provis
 		isolation: "container",
 		childID:   req.ChildId,
 		exec:      b.execFunc(id, req.Workdir),
+		inner:     inner,
 	}
 	return ws, nil
 }
@@ -244,6 +332,12 @@ func (b *containerBackend) execFunc(containerName, workdir string) func(ctx cont
 }
 
 func (b *containerBackend) Release(ctx context.Context, ws *workspace) error {
+	// Order matters: stop the inner server before removing the container.
+	// Removing first leaves the `docker exec` client reaping oddly against a
+	// container that is already gone.
+	if ws.inner != nil {
+		ws.inner.Close()
+	}
 	return b.removeContainer(ctx, ws.id)
 }
 
