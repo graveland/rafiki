@@ -32,6 +32,7 @@ func main() {
 	root := flag.String("root", "", "working directory root (defaults to current directory)")
 	concurrency := flag.Int("concurrency", 6, "maximum concurrent tool calls")
 	connectAddr := flag.String("connect", "", "rafikid executor endpoint to dial (host:port). Mutually exclusive with --socket")
+	serveStdio := flag.Bool("serve-stdio", false, "serve on stdin/stdout instead of a socket. Used inside a container workspace, where there is no network")
 	enrollToken := flag.String("enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"), "one-time enrollment token, required on first connect")
 	credentialFile := flag.String("credential-file", "", "path the durable credential is stored at after enrollment")
 	pinnedFingerprint := flag.String("pin-cert", "", "SHA-256 fingerprint of rafikid's leaf certificate")
@@ -40,13 +41,32 @@ func main() {
 	image := flag.String("image", "", "container image for --isolation container")
 	flag.Parse()
 
-	if *socketPath != "" && *connectAddr != "" {
-		fmt.Fprintln(os.Stderr, "error: --socket and --connect are mutually exclusive")
+	// Exactly one transport. Counted rather than compared pairwise: three modes
+	// need three pairwise checks and a fourth would need six, and the version of
+	// this that grows a mode without growing a check is the one that silently
+	// ignores a flag.
+	modes := 0
+	for _, selected := range []bool{*socketPath != "", *connectAddr != "", *serveStdio} {
+		if selected {
+			modes++
+		}
+	}
+	if modes > 1 {
+		fmt.Fprintln(os.Stderr, "error: --socket, --connect and --serve-stdio are mutually exclusive")
 		os.Exit(2)
 	}
-	if *socketPath == "" && *connectAddr == "" {
-		fmt.Fprintln(os.Stderr, "error: one of --socket or --connect is required")
+	if modes == 0 {
+		fmt.Fprintln(os.Stderr, "error: one of --socket, --connect or --serve-stdio is required")
 		flag.Usage()
+		os.Exit(2)
+	}
+	if *serveStdio && *isolation == "container" {
+		// A stdio server is already INSIDE the container. Honouring this would
+		// have it try to start containers of its own, which is both wrong and,
+		// with no docker socket in the workspace, a confusing failure at the
+		// first Provision rather than here.
+		fmt.Fprintln(os.Stderr, "error: --serve-stdio cannot be combined with --isolation container: "+
+			"the stdio server runs inside a container workspace and provisions none of its own")
 		os.Exit(2)
 	}
 	if *isolation == "container" && *image == "" {
@@ -90,6 +110,29 @@ func main() {
 	protos := new(http.Protocols)
 	protos.SetUnencryptedHTTP2(true)
 	httpSrv := mux
+
+	if *serveStdio {
+		// stdout is THE WIRE. Anything else written to it corrupts HTTP/2 framing
+		// and surfaces on the outer side as an unreadable protocol error rather
+		// than as "something printed to stdout", so every diagnostic on this path
+		// must go to stderr. slog's default handler already does; the checks
+		// above use os.Stderr explicitly for the same reason.
+		//
+		// Isolation is necessarily "none" and workspace_mode "pinned" here — the
+		// validation above refuses container isolation outright and rejects
+		// ephemeral on none — which is what we want: this server is already
+		// inside the box and provisions no workspaces of its own.
+		//
+		// No signal handling. Teardown is the outer executor killing the
+		// `docker exec` process, which closes our stdin and makes ServeConn
+		// return on EOF. A SIGTERM handler here would race that for no gain.
+		slog.Info("executor serving on stdio", "root", wd, "version", version)
+		if err := execpool.ServeInverted(execpool.NewStdioConn(os.Stdin, os.Stdout), httpSrv); err != nil {
+			fmt.Fprintf(os.Stderr, "error: serve-stdio: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *connectAddr != "" {
 		// Reverse-dial mode: dial rafikid, serve on the dialled connection.
