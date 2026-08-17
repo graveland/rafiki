@@ -270,6 +270,141 @@ func hostExecProcesses(t *testing.T, workspaceID string) int {
 	return n
 }
 
+// startBackgroundBash starts a background job and returns its handle.
+func startBackgroundBash(t *testing.T, srv *executor.Server, ws *executorpb.ProvisionResponse, command string) string {
+	t.Helper()
+	client := newTestClient(t, srv)
+	stream, err := client.Execute(context.Background(), connect.NewRequest(&executorpb.ExecuteRequest{
+		Tool:        "bash",
+		InputJson:   []byte(fmt.Sprintf(`{"command":%q}`, command)),
+		WorkspaceId: ws.WorkspaceId,
+		Background:  true,
+	}))
+	if err != nil {
+		t.Fatalf("start background: %v", err)
+	}
+	var handle string
+	for stream.Receive() {
+		switch ev := stream.Msg().Event.(type) {
+		case *executorpb.ExecuteResponse_Handle:
+			handle = ev.Handle
+		case *executorpb.ExecuteResponse_Failed:
+			t.Fatalf("start background: %s", ev.Failed.Message)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("start background stream: %v", err)
+	}
+	if handle == "" {
+		t.Fatal("background start returned no handle")
+	}
+	return handle
+}
+
+// jobIsLive reports whether the executor still knows about this handle and the
+// job behind it has not exited.
+func jobIsLive(t *testing.T, srv *executor.Server, handle string) bool {
+	t.Helper()
+	client := newTestClient(t, srv)
+	resp, err := client.JobOutput(context.Background(), connect.NewRequest(&executorpb.JobOutputRequest{
+		Handle: handle,
+	}))
+	if err != nil {
+		return false
+	}
+	return resp.Msg.Found && !resp.Msg.Exited
+}
+
+// Releasing one workspace must not touch another workspace's background jobs.
+//
+// It used to: Release called killAll(), which took no workspace argument, so B's
+// build died when A's workspace was released and B's next bash_output returned
+// Found: false — indistinguishable from "reaped". That was finding D4.
+//
+// On a container workspace the jobs now live inside the container, so removing
+// it is the kill, and one child's teardown cannot reach another's processes at
+// all.
+func TestReleaseKillsOnlyItsOwnBackgroundJobs(t *testing.T) {
+	requireDocker(t)
+	srv := newContainerExecutor(t)
+	client := newTestClient(t, srv)
+	ctx := context.Background()
+
+	wsA := provision(t, srv, t.TempDir(), "")
+	wsB := provision(t, srv, t.TempDir(), "")
+
+	handleA := startBackgroundBash(t, srv, wsA, "sleep 300")
+	handleB := startBackgroundBash(t, srv, wsB, "sleep 300")
+
+	if !jobIsLive(t, srv, handleA) {
+		t.Fatal("A's background job is not running; the test cannot show anything")
+	}
+	if !jobIsLive(t, srv, handleB) {
+		t.Fatal("B's background job is not running; the test cannot show anything")
+	}
+
+	if _, err := client.Release(ctx, connect.NewRequest(&executorpb.ReleaseRequest{
+		WorkspaceId: wsA.WorkspaceId,
+	})); err != nil {
+		t.Fatalf("release A: %v", err)
+	}
+
+	// The regression: B must be untouched.
+	if !jobIsLive(t, srv, handleB) {
+		t.Error("releasing workspace A killed workspace B's background job (finding D4)")
+	}
+	// And A's is genuinely gone rather than merely forgotten.
+	if jobIsLive(t, srv, handleA) {
+		t.Error("A's background job outlived the release of its own workspace")
+	}
+}
+
+// A background job must run INSIDE the container, so that removing the container
+// reaps its whole process tree. plan-08 left this as an open question because
+// the supervised process was the `docker exec` CLIENT — killing it never stopped
+// the workload on the other side.
+func TestBackgroundJobsRunInsideTheContainer(t *testing.T) {
+	requireDocker(t)
+	srv := newContainerExecutor(t)
+	ws := provision(t, srv, t.TempDir(), "")
+
+	// The marker has to reach the process's ARGV. A trailing `# marker` comment
+	// does not: the shell strips it, and `docker top` shows a bare `sleep 300`
+	// that matches nothing. An unusual duration is the marker instead.
+	marker := fmt.Sprintf("sleep %d", 30000+time.Now().UnixNano()%1000)
+	startBackgroundBash(t, srv, ws, marker)
+
+	// Visible inside the container...
+	out, err := exec.Command("docker", "top", ws.WorkspaceId).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker top: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), marker) {
+		t.Fatalf("the background job is not running inside the container:\n%s", out)
+	}
+
+	// ...and not as a host process.
+	if n := hostProcessesMatching(t, marker); n != 0 {
+		t.Errorf("the background job has %d process(es) on the HOST; it should exist only in the container", n)
+	}
+}
+
+// hostProcessesMatching counts host processes whose command line contains s.
+func hostProcessesMatching(t *testing.T, s string) int {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-f", s).Output()
+	if err != nil {
+		return 0 // pgrep exits 1 with no output when nothing matches
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
 func execBash(t *testing.T, srv *executor.Server, ws *executorpb.ProvisionResponse, command string) (string, error) {
 	t.Helper()
 	client := newTestClient(t, srv)

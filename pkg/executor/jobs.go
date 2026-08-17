@@ -66,6 +66,9 @@ type job struct {
 	cmd    *exec.Cmd
 	handle string
 	out    *ring
+	// workspaceID is the workspace this job belongs to, "" for a call that named
+	// no workspace. Releasing a workspace must kill ITS jobs and no others.
+	workspaceID string
 
 	mu       sync.Mutex
 	exited   bool
@@ -86,7 +89,7 @@ func newJobRegistry() *jobRegistry {
 // start launches cmd as a background job and captures its combined output.
 // It returns once the process is RUNNING, so cmd.Process is non-nil for
 // every caller that sees a nil error — kill must never race a start.
-func (r *jobRegistry) start(cmd *exec.Cmd, handle string) error {
+func (r *jobRegistry) start(cmd *exec.Cmd, handle, workspaceID string) error {
 	rg := &ring{}
 	cmd.Stdout = rg
 	cmd.Stderr = rg
@@ -99,7 +102,7 @@ func (r *jobRegistry) start(cmd *exec.Cmd, handle string) error {
 		return err
 	}
 
-	j := &job{cmd: cmd, handle: handle, out: rg, done: make(chan struct{})}
+	j := &job{cmd: cmd, handle: handle, out: rg, workspaceID: workspaceID, done: make(chan struct{})}
 	r.mu.Lock()
 	r.jobs[handle] = j
 	r.mu.Unlock()
@@ -198,15 +201,28 @@ func (r *jobRegistry) running() []string {
 	return handles
 }
 
-// killAll kills every registered job. Used when a workspace is released — a
-// background job in a removed container is not a job, and reporting it as
-// running is worse than reporting it gone.
-func (r *jobRegistry) killAll() {
+// killWorkspace kills the jobs belonging to one workspace. Used when that
+// workspace is released — a background job in a released workspace is not a job,
+// and reporting it as running is worse than reporting it gone.
+//
+// It replaces a killAll that took no argument, so releasing ONE child's
+// workspace killed every other child's background jobs on the executor: B's
+// build died when A's workspace was released, and B's next bash_output returned
+// Found: false, indistinguishable from "reaped". That was finding D4.
+//
+// Signals the process GROUP, not the process. start puts each job in its own
+// group precisely so a background `bash -c "npm run dev"` does not leave the
+// npm tree running when the bash is killed; killing only the leader here would
+// throw that away at teardown, which is when it matters most.
+func (r *jobRegistry) killWorkspace(workspaceID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for handle, j := range r.jobs {
+		if j.workspaceID != workspaceID {
+			continue
+		}
 		if j.cmd.Process != nil {
-			_ = j.cmd.Process.Kill()
+			_ = syscall.Kill(-j.cmd.Process.Pid, syscall.SIGKILL)
 		}
 		delete(r.jobs, handle)
 	}
