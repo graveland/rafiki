@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -39,6 +40,41 @@ func requireDocker(t *testing.T) {
 	}
 }
 
+// testWorkspaceImage is built from the repo's own Dockerfile, not pulled.
+const testWorkspaceImage = "rafiki-workspace:test"
+
+var (
+	workspaceImageOnce sync.Once
+	workspaceImageErr  error
+)
+
+// requireWorkspaceImage builds the reference workspace image once per test
+// binary and returns its tag.
+//
+// A container workspace's image must carry the executor binary and ripgrep —
+// Provision validates both and refuses otherwise, because glob and grep DECLINE
+// when rg is absent and would silently vanish from the agent. alpine:3.19, which
+// this test used to name, has neither, so it can no longer serve a workspace.
+//
+// Built lazily rather than in TestMain: TestMain runs for every integration test
+// including the ones that never touch docker, and an unconditional image build
+// would tax all of them.
+func requireWorkspaceImage(t *testing.T) string {
+	t.Helper()
+	workspaceImageOnce.Do(func() {
+		cmd := exec.Command("docker", "build", "--target", "workspace", "-t", testWorkspaceImage, repoRoot)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			workspaceImageErr = fmt.Errorf("docker build --target workspace: %v\n%s", err, out)
+		}
+	})
+	if workspaceImageErr != nil {
+		// Fail, not skip: requireDocker has already established docker works, so
+		// this is a real break in the Dockerfile.
+		t.Fatalf("cannot build the workspace image: %v", workspaceImageErr)
+	}
+	return testWorkspaceImage
+}
+
 // TestIntegration_ContainerIsolation verifies the full container executor path:
 // provision, execute, read-only enforcement, host isolation, release.
 func TestIntegration_ContainerIsolation(t *testing.T) {
@@ -61,7 +97,7 @@ func TestIntegration_ContainerIsolation(t *testing.T) {
 		Root:          worktree,
 		Isolation:     "container",
 		WorkspaceMode: "ephemeral",
-		Image:         "alpine:3.19",
+		Image:         requireWorkspaceImage(t),
 		Version:       "test",
 	})
 

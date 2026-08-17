@@ -285,12 +285,32 @@ child's grant, derived mechanically by the daemon from the worktree assignment.
 The model never writes a path.
 
 ```
-rafiki-executor --isolation container --image alpine:3.19 --workspace-mode ephemeral
+docker build --target workspace -t rafiki-workspace:dev .
+rafiki-executor --isolation container --image rafiki-workspace:dev --workspace-mode ephemeral
 ```
+
+**The image is a contract, and it is validated at Provision.** It must carry:
+
+| Requirement | Why it is not optional |
+|---|---|
+| `rafiki-executor` on `PATH` | Every tool on a container workspace runs through a tool server *inside* the container, started with `--serve-stdio`. Without the binary the workspace can run nothing. |
+| `rg` (ripgrep) | `glob` and `grep` shell out to it and **decline** when it is absent, so a missing binary removes two tools from the agent silently instead of erroring. |
+
+`--target workspace` in this repo's `Dockerfile` builds a reference image meeting
+it — debian-slim with ripgrep, git, a pinned `rtk`, and the executor compiled
+in-image so it is native for the target architecture. Bring your own image if you
+prefer; Provision will tell you exactly what is missing and how to fix it if it
+does not qualify. Note the executor binary is **baked in**, not copied in at
+Provision time: that keeps it a shared read-only layer rather than ~30 MB in
+every container's writable layer, and sidesteps cross-compiling a static binary
+on a macOS host. The cost is that the in-image binary can drift from the running
+executor, so Provision compares versions and warns.
 
 **Mounts:** the worktree is mounted read-write at `/work`; the repo is mounted
 read-only at `/repo` (when the worktree is inside a repo). Network defaults to
 `none` — an unattended worker that does not need egress should not have it.
+Because there is no network, the tool server inside the container is reached over
+`docker exec -i` stdio rather than a socket.
 
 **No path vocabulary.** There is no way to restrict a worker to a subtree of
 its worktree, by design. For container executors, docker mounts express the

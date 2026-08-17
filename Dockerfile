@@ -17,6 +17,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -ldflags="-s -w -X go.graveland.dev/rafiki/pkg/version.Version=${VERSION}" -o /out/rafiki ./cmd/rafiki
 
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -ldflags="-s -w -X go.graveland.dev/rafiki/pkg/version.Version=${VERSION}" -o /out/rafiki-executor ./cmd/rafiki-executor
+
 
 FROM debian:trixie-slim AS rtk
 
@@ -44,6 +48,51 @@ RUN set -eux; \
     tar -xzf "rtk-${target}.tar.gz" -C /usr/local/bin rtk; \
     chmod 0755 /usr/local/bin/rtk; \
     /usr/local/bin/rtk --version
+
+
+# The workspace image: what a container workspace runs. Build it with
+#
+#   docker build --target workspace -t rafiki-workspace:dev .
+#
+# and pass it as `rafiki-executor --isolation container --image rafiki-workspace:dev`.
+#
+# The executor binary is BAKED IN, not copied in at Provision time. An earlier
+# design had the daemon `docker cp` a statically linked linux binary into every
+# container, which needs a cross-compile target, an artifact-location flag, and a
+# refuse-to-start check — all to preserve the ability to bring an arbitrary
+# image. That ability was already spent: ripgrep is mandatory (glob and grep
+# DECLINE without it rather than erroring, silently removing two tools), so the
+# image is validated at Provision either way. Baking makes the binary a shared
+# read-only layer instead of ~30MB in every container's writable layer, and
+# building it here means it is compiled natively for the target arch — the
+# macOS-host cross-compile problem never arises.
+#
+# The cost baking introduces is version skew: the inner binary is no longer
+# guaranteed to match the outer executor. Provision checks it.
+#
+# No USER. The daemon passes `--user <host uid>:<host gid>` (container.go), so
+# writes through the read-write /work bind mount are owned by the invoking user
+# rather than by whoever the image happens to declare; a baked USER would be
+# overridden on every real run and is a false comfort. Running this image by
+# hand without --user therefore gets root — inside a container with --cap-drop
+# ALL, --network none and --pids-limit, whose mounts are the whole grant.
+FROM debian:trixie-slim AS workspace
+
+# ripgrep: required, glob and grep shell out to it.
+# git: the agent's own workflows need it, and /repo is mounted read-only for it.
+# ca-certificates: any HTTPS the workload does itself.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/rafiki-executor /usr/local/bin/rafiki-executor
+COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
+
+# /work is the read-write mount the daemon derives from the child's worktree.
+# It is created by the bind mount at run time; this only sets the default.
+WORKDIR /work
+
+# No ENTRYPOINT: the daemon starts the container with `sleep infinity` and then
+# `docker exec`s the tool server into it (container.go).
 
 
 FROM debian:trixie-slim AS release
