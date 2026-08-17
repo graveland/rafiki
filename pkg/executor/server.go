@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -53,6 +54,45 @@ type Server struct {
 	sem     chan struct{} // bounds concurrent Execute calls
 	backend Backend
 	wsReg   *workspaceRegistry
+
+	// innerJobs maps a background job's handle to the container workspace whose
+	// inner server owns it.
+	//
+	// It exists because Attach, Cancel and JobOutput carry a handle and nothing
+	// else — no workspace_id — so without it the outer server cannot tell which
+	// container to forward them to. Populated when a background Execute on a
+	// container workspace returns its handle, dropped when the workspace is
+	// released.
+	innerJobsMu sync.Mutex
+	innerJobs   map[string]*workspace
+}
+
+// rememberInnerJob records which container workspace owns a background handle.
+func (s *Server) rememberInnerJob(handle string, ws *workspace) {
+	s.innerJobsMu.Lock()
+	defer s.innerJobsMu.Unlock()
+	s.innerJobs[handle] = ws
+}
+
+// innerJobWorkspace returns the container workspace owning this handle, if any.
+func (s *Server) innerJobWorkspace(handle string) (*workspace, bool) {
+	s.innerJobsMu.Lock()
+	defer s.innerJobsMu.Unlock()
+	ws, ok := s.innerJobs[handle]
+	return ws, ok
+}
+
+// forgetInnerJobs drops every handle belonging to a released workspace. The
+// container is gone, so forwarding to it could only produce a confusing
+// transport error where "no such job" is the truth.
+func (s *Server) forgetInnerJobs(workspaceID string) {
+	s.innerJobsMu.Lock()
+	defer s.innerJobsMu.Unlock()
+	for handle, ws := range s.innerJobs {
+		if ws.id == workspaceID {
+			delete(s.innerJobs, handle)
+		}
+	}
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
@@ -80,11 +120,12 @@ func NewServer(opts Options) *Server {
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
-		reg:     reg,
-		jobs:    newJobRegistry(),
-		sem:     make(chan struct{}, opts.Concurrency),
-		backend: resolveBackend(opts, executorID),
-		wsReg:   newWorkspaceRegistry(),
+		reg:       reg,
+		jobs:      newJobRegistry(),
+		innerJobs: make(map[string]*workspace),
+		sem:       make(chan struct{}, opts.Concurrency),
+		backend:   resolveBackend(opts, executorID),
+		wsReg:     newWorkspaceRegistry(),
 	}
 }
 
@@ -150,10 +191,18 @@ func (s *Server) Release(
 	id := req.Msg.WorkspaceId
 	ws, ok := s.wsReg.get(id)
 	if ok {
-		// Kill all background jobs in this workspace before tearing it down.
-		// A background job in a removed container is not a job, and reporting
-		// it as running is worse than reporting it gone.
-		s.jobs.killAll()
+		// Kill THIS workspace's background jobs before tearing it down. A
+		// background job in a released workspace is not a job, and reporting it
+		// as running is worse than reporting it gone.
+		//
+		// Scoped to the workspace, not global: this used to be killAll(), so
+		// releasing one child's workspace killed every other child's jobs on the
+		// executor — finding D4. On a container workspace there is usually
+		// nothing here to kill, because the jobs live inside the container and
+		// `docker rm -f` reaps them; the call stays for the native case and for
+		// any job started before the workspace became container-backed.
+		s.jobs.killWorkspace(id)
+		s.forgetInnerJobs(id)
 		_ = s.backend.Release(context.Background(), ws)
 		s.wsReg.remove(id)
 	}
@@ -169,6 +218,13 @@ func resolveBackend(opts Options, executorID string) Backend {
 	default:
 		return newNativeBackend(opts.Root)
 	}
+}
+
+// isContainerWorkspace reports whether calls for this workspace must be served
+// inside a container. A nil workspace is the pre-phase-08 path: the executor's
+// own root, no container involved.
+func isContainerWorkspace(ws *workspace) bool {
+	return ws != nil && ws.isolation == "container"
 }
 
 // forwardToInner relays one Execute call to the tool server inside the container
@@ -224,6 +280,13 @@ func (s *Server) forwardToInner(
 	// through, so streaming behaviour and failure codes are the inner server's,
 	// not a re-interpretation of them.
 	for inner.Receive() {
+		// A Handle means a background job was started INSIDE the container. Record
+		// which workspace owns it: Attach, Cancel and JobOutput arrive later
+		// carrying only the handle, and without this the outer server has no way
+		// to know which container to ask.
+		if h, ok := inner.Msg().Event.(*executorpb.ExecuteResponse_Handle); ok {
+			s.rememberInnerJob(h.Handle, ws)
+		}
 		if err := stream.Send(inner.Msg()); err != nil {
 			return err
 		}
@@ -267,7 +330,14 @@ func (s *Server) Execute(
 	}
 
 	// Background bash — start a job, return a handle immediately.
-	if msg.Background && msg.Tool == "bash" {
+	//
+	// A CONTAINER workspace deliberately falls through to the forward below
+	// instead, so its background jobs start inside the container. The job's
+	// process tree then lives there and `docker rm -f` reaps it, which also
+	// disposes of plan-08's open question about killing through `docker exec`:
+	// the supervised process was the exec CLIENT, and killing it never stopped
+	// the workload.
+	if msg.Background && msg.Tool == "bash" && !isContainerWorkspace(ws) {
 		return s.startBackground(ctx, msg, ws, stream)
 	}
 
@@ -299,7 +369,7 @@ func (s *Server) Execute(
 	// under us" or, worse, a stat of an unrelated host file that happens to
 	// exist. The inner server is the only side that can see the real file, so the
 	// map is forwarded and evaluated there.
-	if ws != nil && ws.isolation == "container" {
+	if isContainerWorkspace(ws) {
 		return s.forwardToInner(ctx, msg, ws, stream)
 	}
 
@@ -426,7 +496,11 @@ func (s *Server) startBackground(
 		cmd = exec.CommandContext(context.Background(), "bash", "-c", in.Command)
 		cmd.Dir = cwd
 	}
-	if err := s.jobs.start(cmd, handle); err != nil {
+	wsID := ""
+	if ws != nil {
+		wsID = ws.id
+	}
+	if err := s.jobs.start(cmd, handle, wsID); err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{
 				Failed: &executorpb.Failure{
@@ -448,6 +522,23 @@ func (s *Server) Attach(
 	stream *connect.ServerStream[executorpb.AttachResponse],
 ) error {
 	handle := req.Msg.Handle
+
+	// A handle owned by a container workspace lives in that container's own job
+	// registry, so relay rather than answering from ours — where it does not
+	// exist and never will.
+	if ws, ok := s.innerJobWorkspace(handle); ok && ws.inner != nil {
+		inner, err := ws.inner.client.Attach(ctx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
+		if err != nil {
+			return connect.NewError(connect.CodeUnavailable,
+				fmt.Errorf("the tool server in workspace %q is unreachable: %w", ws.id, err))
+		}
+		for inner.Receive() {
+			if err := stream.Send(inner.Msg()); err != nil {
+				return err
+			}
+		}
+		return inner.Err()
+	}
 
 	// cursor is a byte offset into the job's lifetime output, not a length:
 	// the ring drops old bytes, so comparing lengths would replay or skip.
@@ -485,11 +576,19 @@ func (s *Server) Attach(
 }
 
 func (s *Server) Cancel(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[executorpb.CancelRequest],
 ) (*connect.Response[executorpb.CancelResponse], error) {
-	if err := s.jobs.kill(req.Msg.CallId); err != nil {
-		slog.Warn("executor: cancel failed", "handle", req.Msg.CallId, "error", err)
+	handle := req.Msg.CallId
+	if ws, ok := s.innerJobWorkspace(handle); ok && ws.inner != nil {
+		if _, err := ws.inner.client.Cancel(ctx,
+			connect.NewRequest(&executorpb.CancelRequest{CallId: handle})); err != nil {
+			slog.Warn("executor: cancel in container failed", "handle", handle, "workspace", ws.id, "error", err)
+		}
+		return connect.NewResponse(&executorpb.CancelResponse{}), nil
+	}
+	if err := s.jobs.kill(handle); err != nil {
+		slog.Warn("executor: cancel failed", "handle", handle, "error", err)
 	}
 	return connect.NewResponse(&executorpb.CancelResponse{}), nil
 }
@@ -498,9 +597,17 @@ func (s *Server) Cancel(
 // answers from the ring as it stands and returns immediately, whether or not
 // the job has exited.
 func (s *Server) JobOutput(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[executorpb.JobOutputRequest],
 ) (*connect.Response[executorpb.JobOutputResponse], error) {
+	if ws, ok := s.innerJobWorkspace(req.Msg.Handle); ok && ws.inner != nil {
+		resp, err := ws.inner.client.JobOutput(ctx, connect.NewRequest(req.Msg))
+		if err != nil {
+			return nil, connect.NewError(connect.CodeUnavailable,
+				fmt.Errorf("the tool server in workspace %q is unreachable: %w", ws.id, err))
+		}
+		return connect.NewResponse(resp.Msg), nil
+	}
 	data, total, exited, code, found := s.jobs.output(req.Msg.Handle, req.Msg.Since)
 	return connect.NewResponse(&executorpb.JobOutputResponse{
 		Data:     data,
