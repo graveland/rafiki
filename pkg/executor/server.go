@@ -196,6 +196,33 @@ func (s *Server) Execute(
 		}
 	}
 
+	// Fail closed on a container workspace: only bash is routed into the
+	// container, so every other tool would run in THIS process, on the host,
+	// with the executor user's full ambient authority — the container that is
+	// supposed to BE the grant not involved at all. Refusing costs nothing that
+	// worked: the in-process registry is rooted on the host, where /work does
+	// not exist, so the only calls that ever succeeded on this path were the
+	// escaping ones. That is finding D1, and it was demonstrated reading a real
+	// ~/.ssh/id_rsa through a workspace granted only /work and /repo:ro.
+	//
+	// A stopgap, deliberately. The fix is a tool server running INSIDE the
+	// container, after which every tool routes there and this branch goes away
+	// — NOT a userspace path check on the host, which would reimplement a
+	// boundary the kernel already enforces, and could not cover bash anyway.
+	// See docs/plans/2026-08-15-in-container-tool-server-plan.md.
+	if ws != nil && ws.isolation == "container" && msg.Tool != "bash" {
+		return stream.Send(&executorpb.ExecuteResponse{
+			Event: &executorpb.ExecuteResponse_Failed{
+				Failed: &executorpb.Failure{
+					Code: executorpb.Failure_CODE_DENIED,
+					Message: fmt.Sprintf("tool %q cannot run in a container workspace yet: only bash is routed into "+
+						"the container, and running %[1]q here would run it on the host, outside the workspace grant",
+						msg.Tool),
+				},
+			},
+		})
+	}
+
 	// Background bash — start a job, return a handle immediately.
 	if msg.Background && msg.Tool == "bash" {
 		return s.startBackground(ctx, msg, ws, stream)
@@ -249,11 +276,17 @@ func (s *Server) Execute(
 	name := msg.Tool
 
 	// When a workspace is set and the tool is bash, run it through the
-	// workspace's exec function — for containers this is docker exec,
-	// for native backends it's a direct local exec. Other tools (read,
-	// write, edit, glob, grep) still use the in-process registry whose
-	// Cwd is the executor root; they work correctly on the native backend
-	// and on containers where the executor root is bind-mounted.
+	// workspace's exec function — for containers this is docker exec, for
+	// native backends a direct local exec. Other tools use the in-process
+	// registry, whose Cwd is the executor's own root.
+	//
+	// That is correct ONLY for the native backend, where access is gated by
+	// admission rather than by paths (08-containers.md). A container workspace
+	// never reaches here for a non-bash tool: it is refused above, because the
+	// registry would run on the host and step straight out of the mounts. The
+	// comment this replaces claimed the registry also worked "on containers
+	// where the executor root is bind-mounted" — it does not, and that sentence
+	// is why D1 survived review.
 	var resultStr string
 	var err error
 	if ws != nil && name == "bash" {

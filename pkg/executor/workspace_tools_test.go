@@ -49,29 +49,30 @@ func execTool(t *testing.T, srv *executor.Server, wsID, tool string, input any) 
 	return result, failure
 }
 
-// skipUntilInContainerToolServer parks the tests below, LOUDLY.
+// skipUntilInContainerToolServer parks the ACCEPTANCE test below, loudly.
 //
-// They are not aspirational: run them today and they FAIL, because a container
-// workspace routes only `bash` into the container and sends the other five
-// tools to an in-process registry rooted on the host. That is finding D1, it is
-// a live host-filesystem escape, and these tests demonstrate it — `read` of
-// "~/.ssh/id_rsa" through a container workspace returns the executor host's
-// private key.
+// The escape half of D1 is closed: a container workspace now REFUSES every
+// non-bash tool instead of running it on the host, and
+// TestFileToolsCannotEscapeTheWorkspace runs unskipped to hold that. What
+// remains is the other half — container mode is still non-functional for those
+// five tools, because nothing runs them inside the container yet. The test
+// below asserts the functionality, so it stays skipped until the in-container
+// tool server lands and every tool routes through it.
 //
-// The fix is not a userspace path check on the host (see the plan for why the
-// review's D1 misreads 08-containers.md) but a tool server running INSIDE the
-// container. Until that lands they are kept, and kept visible, rather than
-// deleted: the knowledge is the point.
+// Keep it visible rather than deleting it: it is the acceptance test for that
+// work, and it already encodes what "working" has to mean — a write through
+// /work lands in the worktree on the host, a relative path resolves against the
+// workspace workdir, and the :ro mount stays readable.
 //
 //	docs/plans/2026-08-15-in-container-tool-server-plan.md
 func skipUntilInContainerToolServer(t *testing.T) {
 	t.Helper()
 	fmt.Fprintf(os.Stderr,
-		"\n!!! SKIPPING %s: container workspaces run only `bash` in the container;\n"+
-			"!!! read/write/edit/glob/grep still execute on the HOST (finding D1, UNFIXED).\n"+
+		"\n!!! SKIPPING %s: read/write/edit/glob/grep are REFUSED on a container\n"+
+			"!!! workspace — fail-closed, no escape — but do not run INSIDE it yet.\n"+
 			"!!! See docs/plans/2026-08-15-in-container-tool-server-plan.md\n\n",
 		t.Name())
-	t.Skip("D1 unfixed: file tools bypass the container (see the in-container tool server plan)")
+	t.Skip("container mode is fail-closed for non-bash tools; the functionality awaits the in-container tool server")
 }
 
 // The grant must hold for EVERY tool, not just bash. container_test.go
@@ -80,7 +81,6 @@ func skipUntilInContainerToolServer(t *testing.T) {
 // tools simply went somewhere else — an in-process registry rooted on the
 // HOST, with no mount table and no containment.
 func TestFileToolsCannotEscapeTheWorkspace(t *testing.T) {
-	skipUntilInContainerToolServer(t)
 	requireDocker(t)
 	repo, worktree := gitRepoWithDocker(t)
 	srv := newContainerExecutor(t)
@@ -213,7 +213,6 @@ func TestFileToolsWorkOnWorkspacePaths(t *testing.T) {
 // out. The containment check has to run AFTER symlink resolution or it is
 // checking a name rather than a location.
 func TestASymlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
-	skipUntilInContainerToolServer(t)
 	requireDocker(t)
 	_, worktree := gitRepoWithDocker(t)
 	srv := newContainerExecutor(t)

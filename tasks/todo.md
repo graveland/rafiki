@@ -65,11 +65,16 @@ that file is gone, these are the decisions:
 
 **Steps, in order. Each is independently committable and `make check`-green.**
 
-- [ ] **0.** `make check` on `fix/review-findings-2026-08-15`, then
+- [x] **0.** DONE 2026-08-17. `make check` on `fix/review-findings-2026-08-15`, then
       `git merge --ff-only` into `main`. Confirmed linear
       (`git merge-base --is-ancestor main HEAD`). **No push.** Eight finished
       review fixes; every step below builds on them.
-- [ ] **1.** In-container plan **Task 0 — fail closed.** A few lines in
+- [x] **1.** DONE 2026-08-17. Reproduced first: the un-skipped test read this
+      machine's real `~/.ssh/id_rsa` (`-----BEGIN OPENSSH PRIVATE KEY-----`),
+      `/etc/passwd`, an out-of-mount secret, and wrote a file outside every
+      mount — 10/10 escape cases plus the symlink. All refused now; `bash` and
+      its three container tests unaffected.
+      In-container plan **Task 0 — fail closed.** A few lines in
       `pkg/executor/server.go`: on a container workspace the five non-`bash`
       tools REFUSE rather than running on the host. Prove it by un-skipping
       `TestFileToolsCannotEscapeTheWorkspace` and
