@@ -3,16 +3,133 @@
 Durable, always-current. Add to it whenever something is deferred rather than
 done; delete entries when they land.
 
-**This file is NOT in git — `tasks/` is gitignored, deliberately.** It survives
-across sessions and branches because it lives on disk, but it does not survive a
-fresh clone, a `git clean -xdf`, or a lost machine. That is a real limitation,
-not an oversight: if an entry here matters enough to survive those, promote its
-conclusion into `CLAUDE.md`, `README.md` or `docs/reference/`, which are tracked.
-(An earlier version of this header claimed the file was committed. It never was.)
+**This file IS tracked in git, despite `.gitignore` listing `/tasks/`.** It
+predates that rule, and gitignore does not affect an already-tracked file — see
+the comment at `.gitignore:46`, which says so deliberately. Verify rather than
+trust either claim: `git ls-files tasks/`. So this file survives a fresh clone
+and a `git clean -xdf`, it shows up in diffs, and it should be committed
+alongside the work it describes. (Two earlier versions of this header got this
+backwards in both directions; checked again 2026-08-17.)
+
+`docs/plans/` is genuinely ignored. Anything load-bearing in a plan doc — a
+design decision, a supersession — must be duplicated here, or promoted into
+`CLAUDE.md`, `README.md` or `docs/reference/`.
 
 ---
 
 ## Open now
+
+### ▶ WORKING PLAN: make the executor functional (agreed 2026-08-17)
+
+**Goal:** a container-isolated executor that actually works, and the binary shape
+settled as one `rafiki` (client + executor) and one `rafikid` (server).
+
+**Settled design decisions.** These **supersede** parts of
+`docs/plans/2026-08-15-in-container-tool-server-plan.md`, which is gitignored. If
+that file is gone, these are the decisions:
+
+- **The workspace image BAKES `rafiki`. Nothing is copied into a container.**
+  The plan's **D-2** (`docker cp` a statically-linked linux binary in at
+  Provision) and its entire **Task 2** (`make build-executor-linux`, a
+  `--container-executor-binary` flag, startup location logic, a
+  missing-artifact refusal, and the "can't be `/proc/self/exe` on a macOS
+  host" cross-compile problem) are **deleted**.
+
+  The repo's existing `./Dockerfile` already *is* the reference image:
+  `debian:trixie-slim` with `ripgrep`, `rtk` pinned to a version and
+  checksum-verified, a non-root uid-1000 `rafiki` user, multi-arch via
+  `TARGETARCH`, and both binaries built in-image with `golang:1.26` — so the
+  cross-compile problem never arises. D-2's justification was preserving
+  arbitrary operator-supplied images, but **D-3 already mandates ripgrep and
+  validates it at Provision**, so that freedom was already spent; paying for it
+  again with a per-provision copy plus ~30 MB in every container's writable
+  layer (versus one shared read-only image layer) is strictly worse.
+- **One `rafiki`.** `cmd/rafiki-executor` folds into `rafiki executor serve`
+  (host-side reverse-dial) and `rafiki executor serve-stdio` (in-container). A
+  third `cmd/rafiki-toolserver` was considered and **rejected**: it existed only
+  to keep a copied payload small, and there is no payload now. Baking `rafiki`
+  also makes it available interactively inside the container for debugging.
+- **Two things baking must get right**, both silent when wrong:
+  1. *Version skew.* `docker cp` accidentally guaranteed the inner server
+     matched the host executor; baking does not. Provision must run the inner
+     hello/`Describe` and refuse on protocol mismatch, **naming the image**.
+     This replaces D-2's missing-artifact refusal rather than adding work.
+  2. *Never rely on the image's `USER`.* `/work` is a host path owned by the
+     host user, so the container uid must match or every write fails.
+     `docker run --user` (already derived from `user.Current()` at
+     `container.go:78`) overrides the image's `USER 1000`, and the baked
+     binaries must stay world-executable. Worth a test.
+- **D-4 still holds, and is the single most likely thing to be undone later:**
+  on a container workspace there is **no host fallback, ever**. If the inner
+  server cannot start or has died, `Execute` fails.
+
+**Steps, in order. Each is independently committable and `make check`-green.**
+
+- [ ] **0.** `make check` on `fix/review-findings-2026-08-15`, then
+      `git merge --ff-only` into `main`. Confirmed linear
+      (`git merge-base --is-ancestor main HEAD`). **No push.** Eight finished
+      review fixes; every step below builds on them.
+- [ ] **1.** In-container plan **Task 0 — fail closed.** A few lines in
+      `pkg/executor/server.go`: on a container workspace the five non-`bash`
+      tools REFUSE rather than running on the host. Prove it by un-skipping
+      `TestFileToolsCannotEscapeTheWorkspace` and
+      `TestASymlinkOutOfTheWorkspaceIsRefused` in
+      `pkg/executor/workspace_tools_test.go`. Breaks nothing that works: the
+      only calls that currently succeed on that path are the escaping ones.
+- [ ] **2.** Unbreak the build-tag gate — task 1 of
+      `docs/plans/2026-08-14-executor-e2e-and-tag-gate-plan.md`.
+      `test/integration/grant_test.go` has not compiled since `0acadf2` moved
+      `executors.NewPostgresStore` to `pkg/executorsdb`, and
+      `//go:build integration` hides that from both `go vet ./...` and
+      `go test ./...` (`subagent_test.go` shares the package, so phase 04's
+      e2e has not run either). Convert to a loud runtime skip. **Before** the
+      container work: it is the only thing that will notice a break in the code
+      steps 4–5 rewrite.
+- [ ] **3.** Split `pkg/tasks` → `pkg/tasksdb` (postgres store out; the
+      interface and memory store left DB-free), then add
+      `TestExecutorDoesNotLinkPostgres` mirroring
+      `cmd/rafiki/no_postgres_test.go`.
+
+      Today `cmd/rafiki-executor` links pgx via
+      `pkg/executor` → `pkg/fundi/tools` → `pkg/tasks`, and `pkg/execpool`
+      reaches it the same way — dragging in `pkg/agentloop`, `pkg/capture`,
+      `pkg/llm`, `pkg/store` and `pkg/rawtrace` too, none of them reachable
+      (the executor registers only `ExecutorLocalTools()` via
+      `MaterializeOnly`). Exactly the failure mode the client's own guard
+      describes: *"Go imports whole packages."* Not a security issue — nothing
+      calls it and there is no DSN on that host — but it is 12 MB of dead
+      weight, it couples the executor's build to pgx, and it is a **hard
+      prerequisite for step 4**: `rafiki` linking `pkg/executor` would trip
+      `TestClientDoesNotLinkPostgres`.
+
+      Also fix the now-false CLAUDE.md claim that `cmd/rafiki-executor`
+      "must not link pgx" — the sentinel move it justifies is still right on
+      its own merits, but the stated reason does not currently hold.
+- [ ] **4.** Fold `cmd/rafiki-executor` into `rafiki executor serve` /
+      `rafiki executor serve-stdio`, and add it to `./Dockerfile`. Before the
+      container work, so the image contract and the `docker exec` argv name the
+      binary exactly once. `rafiki executor` already hosts the operator verbs
+      (`enroll`/`list`/`label`/`disable`/`enable`); `serve` does not collide
+      with them.
+- [ ] **5.** In-container plan **Tasks 1, 3, 4, 5, 6, 7** against the baked
+      image (Task 2 deleted per above): `stdioConn` as a `net.Conn` over
+      `docker exec -i`; a workspace stage in the Dockerfile plus Provision-time
+      image-contract validation (`rg` present, inner protocol version matches);
+      start the inner server at Provision; route **every** tool through it,
+      retiring `executeBashInWorkspace` and the `docker exec` path with it —
+      one route, not two; background jobs inside the container (which also
+      dissolves **D4**, `Release` killing every job on the executor); and
+      **D11** dissolves for free, since each container gets its own
+      `FileTracker`. Fold in **D6** while in `container.go:78` — it runs the
+      container as **root** when `user.Current()` fails.
+- [ ] **6.** Fill `TestExecutorPool_FullLifecycle` and
+      `TestExecutorPool_Narrowing` in `test/integration/executor_pool_test.go`
+      — empty bodies carrying stale `t.Skip("not yet implemented (plan-07
+      scope)")` reasons, though the listener has been wired since
+      `cmd/rafikid/main.go:441`.
+
+**Deliberately out of scope:** **B3**, **B4** and **D3** below stay open. All
+three are real; none blocks a functional container executor.
 
 ### Code review of the 114-commit platform work — 9 confirmed defects, 31 unconfirmed
 
