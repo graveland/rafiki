@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -234,10 +233,6 @@ type ToolOpts struct {
 	// file so a language server can re-read it. nil disables the
 	// notification, which is correct when no LSP server is configured.
 	FileChanged FileChangeNotifier
-
-	// Pool, when non-nil, is the shared database pool backing per-conversation
-	// tool state persistence. nil means in-memory-only (tests, standalone).
-	Pool *pgxpool.Pool
 
 	// Tasks is the task ledger backing the task_* tools. It is NEVER nil once
 	// those tools exist: BuildRuntime supplies an in-memory store when no pool
