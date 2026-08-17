@@ -119,6 +119,43 @@ that file is gone, these are the decisions:
       Also fix the now-false CLAUDE.md claim that `cmd/rafiki-executor`
       "must not link pgx" — the sentinel move it justifies is still right on
       its own merits, but the stated reason does not currently hold.
+
+      **SCOPE CORRECTED 2026-08-17 — this is not one file move, it is four
+      edges, and the estimate of "mechanical" was wrong.** Measured with
+      `go list`, the packages that import pgx *directly* are: `cmd/rafikid`,
+      `pkg/agentcli/local`, `pkg/capture`, `pkg/ejection`, `pkg/executorsdb`,
+      `pkg/fundi`, `pkg/insights`, `pkg/llm`, `pkg/rawtrace`, `pkg/server`,
+      `pkg/store`, `pkg/tasks` (and, until `0454bf2`, `pkg/fundi/tools`). The
+      executor reaches pgx by four routes, not one:
+
+      1. ~~`ToolOpts.Pool` in `registry.go` — a dead field, declared and read
+         by nothing.~~ **DONE `0454bf2`**, 2 lines. `pkg/fundi/tools` no longer
+         imports pgx directly.
+      2. `pkg/tasks/postgres.go` → `pkg/tasksdb`. Mechanical, but harder than
+         the `executors`/`executorsdb` precedent: `pkg/tasks` has BOTH a memory
+         and a postgres store plus a shared `conformance_test.go` that runs
+         against both, so the suite must be extracted into an importable
+         `pkg/tasks/tasktest` helper package first. (`pkg/executors` had no
+         second implementation, so its split needed none of this.)
+      3. `pkg/agentloop` → `pkg/llm`, which holds a `*pgxpool.Pool` field with
+         `WithStore(pool)` and a `Pool()` accessor. This is a dependency
+         inversion, not a move: `pkg/llm` needs to take a capture interface it
+         defines rather than a pool. 2 production call sites
+         (`cmd/rafikid/proxy.go:174`, `pkg/fundi/config.go:160`) + 5 test sites.
+      4. `pkg/agentloop` → `pkg/store` directly. Another DB edge.
+
+      **The structural answer is probably not any of these individually.** It
+      is that `pkg/executor` should not import `pkg/fundi/tools` at all —
+      `ToolOpts` is one struct carrying every tool's dependencies and
+      `DefaultBlueprint` references every blueprint, so importing the package
+      for `read`/`write`/`edit`/`glob`/`grep`/`bash` drags in the entire agent
+      runtime. Splitting the six executor-local tools + the Registry/blueprint
+      machinery into a package free of the parent-side dependencies is the same
+      "split by dependency" move as `rafiki`/`rafikid`,
+      `executors`/`executorsdb` and the `pkg/routing` store extraction. It is
+      also the single biggest piece of work in this plan, and it is better
+      informed AFTER step 5, when it is clear what the executor-local tool
+      package actually has to contain.
 - [ ] **4.** Fold `cmd/rafiki-executor` into `rafiki executor serve` /
       `rafiki executor serve-stdio`, and add it to `./Dockerfile`. Before the
       container work, so the image contract and the `docker exec` argv name the
