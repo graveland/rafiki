@@ -99,7 +99,7 @@ that file is gone, these are the decisions:
       e2e has not run either). Convert to a loud runtime skip. **Before** the
       container work: it is the only thing that will notice a break in the code
       steps 4–5 rewrite.
-- [ ] **3.** Split `pkg/tasks` → `pkg/tasksdb` (postgres store out; the
+- [x] **3.** DONE 2026-08-17 (bca0a41). Split `pkg/tasks` → `pkg/tasksdb` (postgres store out; the
       interface and memory store left DB-free), then add
       `TestExecutorDoesNotLinkPostgres` mirroring
       `cmd/rafiki/no_postgres_test.go`.
@@ -156,13 +156,20 @@ that file is gone, these are the decisions:
       also the single biggest piece of work in this plan, and it is better
       informed AFTER step 5, when it is clear what the executor-local tool
       package actually has to contain.
-- [ ] **4.** Fold `cmd/rafiki-executor` into `rafiki executor serve` /
+- [x] **4.** DONE 2026-08-17 (a50c87d). Fold `cmd/rafiki-executor` into `rafiki executor serve` /
       `rafiki executor serve-stdio`, and add it to `./Dockerfile`. Before the
       container work, so the image contract and the `docker exec` argv name the
       binary exactly once. `rafiki executor` already hosts the operator verbs
       (`enroll`/`list`/`label`/`disable`/`enable`); `serve` does not collide
       with them.
-- [ ] **5.** In-container plan **Tasks 1, 3, 4, 5, 6, 7** against the baked
+- [ ] **5.** In-container plan **Tasks 1, 3, 4, 5, 6, 7**. Task 1 DONE
+      (ea7e424: `stdioConn` + `serve-stdio`; the deadline risk the plan called
+      its biggest is closed — x/net/http2 never sets conn deadlines with our
+      config, verified call site by call site, so the net.Pipe fallback is
+      unnecessary). Task 3 DONE (ad2efcd: baked reference image + Provision-time
+      contract validation). **Tasks 4-7 remain: start the inner server at
+      Provision, route every tool through it, background jobs inside, then D11
+      and docs.** against the baked
       image (Task 2 deleted per above): `stdioConn` as a `net.Conn` over
       `docker exec -i`; a workspace stage in the Dockerfile plus Provision-time
       image-contract validation (`rg` present, inner protocol version matches);
