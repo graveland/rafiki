@@ -81,7 +81,16 @@ that file is gone, these are the decisions:
       `TestASymlinkOutOfTheWorkspaceIsRefused` in
       `pkg/executor/workspace_tools_test.go`. Breaks nothing that works: the
       only calls that currently succeed on that path are the escaping ones.
-- [ ] **2.** Unbreak the build-tag gate — task 1 of
+- [x] **2.** DONE 2026-08-17. Dropped the tag rather than teaching the Makefile
+      `-tags` (the tag bought no isolation — both files call `bootDaemon`, same
+      as the untagged tests). `go vet ./...` then failed for the first time on
+      `grant_test.go:200`, which is the gate starting to tell the truth. Both
+      formerly-invisible tests — `TestGrant_NativeNarrowing` and
+      `TestSubagentLineagePersistence`, the only two in those files — now
+      compile and PASS, so nothing had regressed behind the tag. `make
+      build-linux` cross-vets them too. No `go:build integration` remains in
+      the repo.
+      Unbreak the build-tag gate — task 1 of
       `docs/plans/2026-08-14-executor-e2e-and-tag-gate-plan.md`.
       `test/integration/grant_test.go` has not compiled since `0acadf2` moved
       `executors.NewPostgresStore` to `pkg/executorsdb`, and
@@ -406,14 +415,15 @@ them**. `TestExecutorPool_FullLifecycle` and `TestExecutorPool_Narrowing` are
 empty bodies carrying stale `t.Skip("not yet implemented (plan-07 scope)")`
 reasons, though the listener has been wired since `cmd/rafikid/main.go:445`.
 
-Related and worse: `test/integration/grant_test.go` has not compiled since
-`0acadf2` moved `executors.NewPostgresStore` to `pkg/executorsdb`, and nothing
-noticed because the file carries `//go:build integration` — a tag `go vet ./...`
-and `go test ./...` both omit. `subagent_test.go` shares the package, so phase
-04's e2e has not run either.
+~~Related and worse: `test/integration/grant_test.go` has not compiled since
+`0acadf2`~~ — **fixed 2026-08-17** (task 1 of the plan below). The tag is gone
+from both files, the call points at `executorsdb.NewPostgresStore`, and
+`TestGrant_NativeNarrowing` + `TestSubagentLineagePersistence` both pass. They
+had not regressed; they had merely stopped being compiled.
 
-- [ ] Plan written: `docs/plans/2026-08-14-executor-e2e-and-tag-gate-plan.md`.
-      Fix the gate first (task 1), then fill the two tests.
+- [ ] Plan: `docs/plans/2026-08-14-executor-e2e-and-tag-gate-plan.md`. Task 1
+      done; **tasks 2 and 3 remain** — fill the two empty pool tests. That is
+      step 6 of the working plan at the top of this file.
 
 **Why this is the top entry:** every other item here is tidiness. This one is an
 untested transport in production code.

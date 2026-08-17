@@ -1,5 +1,3 @@
-//go:build integration
-
 package integration_test
 
 import (
@@ -27,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/executorsdb"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -199,7 +198,11 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		t.Fatalf("connect pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	store := executors.NewPostgresStore(pool)
+	// The constructor moved to pkg/executorsdb in 0acadf2 so pkg/executors
+	// stays pgx-free; the Store INTERFACE is still in pkg/executors, which is
+	// why grantDaemon.store keeps that type. Keeping the field typed as the
+	// interface is the point of the split, not an accident.
+	store := executorsdb.NewPostgresStore(pool)
 
 	return &grantDaemon{daemon: d, store: store, fingerprint: fp, listenAddr: listenAddr}
 }
