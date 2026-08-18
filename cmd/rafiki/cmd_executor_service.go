@@ -137,7 +137,6 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	for flag, dest := range map[string]string{
 		"pin-cert": "--pin-cert", "server-name": "--server-name",
-		"isolation": "--isolation", "workspace-mode": "--workspace-mode", "image": "--image",
 	} {
 		if v, _ := cmd.Flags().GetString(flag); v != "" {
 			args = append(args, dest, v)

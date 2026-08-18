@@ -80,9 +80,6 @@ func newExecutorServeCmd() *cobra.Command {
 		credential        string
 		pinnedFingerprint string
 		serverName        string
-		isolation         string
-		workspaceMode     string
-		image             string
 	)
 
 	cmd := &cobra.Command{
@@ -106,12 +103,6 @@ Two transports, exactly one of which must be given:
 			if socketPath == "" && connectAddr == "" {
 				return fmt.Errorf("one of --socket or --connect is required")
 			}
-			if isolation == "container" && image == "" {
-				return fmt.Errorf("--isolation container requires --image")
-			}
-			if isolation == "none" && workspaceMode == "ephemeral" {
-				return fmt.Errorf("--isolation none does not support --workspace-mode ephemeral")
-			}
 
 			wd, err := resolveRoot(root)
 			if err != nil {
@@ -119,12 +110,9 @@ Two transports, exactly one of which must be given:
 			}
 
 			srv := executor.NewServer(executor.Options{
-				Root:          wd,
-				Concurrency:   concurrency,
-				Version:       version.String(),
-				Isolation:     isolation,
-				WorkspaceMode: workspaceMode,
-				Image:         image,
+				Root:        wd,
+				Concurrency: concurrency,
+				Version:     version.String(),
 			})
 			handler := executorHandler(srv)
 
@@ -138,7 +126,12 @@ Two transports, exactly one of which must be given:
 
 	cmd.Flags().StringVar(&socketPath, "socket", "", "path to the unix socket to listen on")
 	cmd.Flags().StringVar(&connectAddr, "connect", "", "daemon executor endpoint to dial (host:port)")
-	cmd.Flags().StringVar(&root, "root", "", "working directory root (defaults to the current directory)")
+	cmd.Flags().StringVar(&root, "root", "",
+		"working directory for this executor's tools (defaults to the current directory). "+
+			"NOT a sandbox: an absolute path reaches outside it. What this executor may "+
+			"actually reach is its process's filesystem view — the container's mounts, or "+
+			"the host user's permissions — and the authoritative description of that lives "+
+			"on its database row")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 6, "maximum concurrent tool calls")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
@@ -150,10 +143,6 @@ Two transports, exactly one of which must be given:
 		"SHA-256 fingerprint of the daemon's leaf certificate. Pins the leaf instead of verifying against system roots — use for a self-signed or internal-CA daemon")
 	cmd.Flags().StringVar(&serverName, "server-name", "",
 		"TLS server name (SNI) to present, when it differs from the host in --connect. Needed when dialling an IP or a node port while the certificate names a hostname")
-	cmd.Flags().StringVar(&isolation, "isolation", "none", "isolation this executor provides: none|container")
-	cmd.Flags().StringVar(&workspaceMode, "workspace-mode", "pinned",
-		"pinned (expose --root) or ephemeral (construct a workspace per child)")
-	cmd.Flags().StringVar(&image, "image", "", "container image for --isolation container")
 
 	return cmd
 }
@@ -266,11 +255,9 @@ stdout is the wire. Every diagnostic goes to stderr.`,
 			// wrong and, with no docker socket in the workspace, a confusing
 			// failure at the first Provision rather than here.
 			srv := executor.NewServer(executor.Options{
-				Root:          wd,
-				Concurrency:   concurrency,
-				Version:       version.String(),
-				Isolation:     "none",
-				WorkspaceMode: "pinned",
+				Root:        wd,
+				Concurrency: concurrency,
+				Version:     version.String(),
 			})
 
 			// No signal handling. Teardown is the outer executor killing the
