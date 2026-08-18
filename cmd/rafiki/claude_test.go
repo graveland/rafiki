@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 func TestClaudeCmd_FlagDefaults(t *testing.T) {
@@ -24,7 +26,12 @@ func TestClaudeCmd_FlagDefaults(t *testing.T) {
 		want string
 	}{
 		{"url", "http://localhost:8035"},
-		{"token", "dev"},
+		// token has no flag-construction-time default at all, not even from
+		// RAFIKI_TOKEN — see TestResolveClaudeToken. A cobra flag default is
+		// computed once, when newClaudeCmd runs, so baking the token file's
+		// contents in here would miss a token minted later in the process's
+		// life; resolveClaudeToken runs at RunE time instead.
+		{"token", ""},
 		{"model", ""},
 		{"session", ""},
 	}
@@ -41,15 +48,16 @@ func TestClaudeCmd_FlagDefaults(t *testing.T) {
 
 func TestClaudeCmd_FlagDefaultsFromEnv(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "http://example:9000")
-	t.Setenv("RAFIKI_TOKEN", "secret")
 	t.Setenv("RAFIKI_MODEL", "glm-5.2")
 	t.Setenv("RAFIKI_SESSION", "sess-123")
 
 	cmd := newClaudeCmd()
 
+	// token deliberately excluded: RAFIKI_TOKEN no longer feeds a flag
+	// default (see TestClaudeCmd_FlagDefaults); it is read at RunE time by
+	// resolveClaudeToken instead.
 	want := map[string]string{
 		"url":     "http://example:9000",
-		"token":   "secret",
 		"model":   "glm-5.2",
 		"session": "sess-123",
 	}
@@ -58,6 +66,72 @@ func TestClaudeCmd_FlagDefaultsFromEnv(t *testing.T) {
 		if got != wantVal {
 			t.Errorf("--%s default = %q, want %q (from env)", flag, got, wantVal)
 		}
+	}
+}
+
+// resolveClaudeToken must not read RAFIKI_TOKEN or the token file when an
+// explicit --token was given: an explicit flag always wins.
+func TestResolveClaudeToken_FlagWins(t *testing.T) {
+	t.Setenv("RAFIKI_TOKEN", "from-env")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no token file here either
+
+	got, err := resolveClaudeToken("from-flag")
+	if err != nil {
+		t.Fatalf("resolveClaudeToken: %v", err)
+	}
+	if got != "from-flag" {
+		t.Errorf("token = %q, want %q", got, "from-flag")
+	}
+}
+
+// With no --token, RAFIKI_TOKEN is the first fallback — the same rule
+// paths.TokenFromEnv applies everywhere else in the CLI.
+func TestResolveClaudeToken_FallsBackToEnv(t *testing.T) {
+	t.Setenv("RAFIKI_TOKEN", "from-env")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	got, err := resolveClaudeToken("")
+	if err != nil {
+		t.Fatalf("resolveClaudeToken: %v", err)
+	}
+	if got != "from-env" {
+		t.Errorf("token = %q, want %q", got, "from-env")
+	}
+}
+
+// With no --token and no RAFIKI_TOKEN, ~/.config/rafiki/token is the second
+// fallback — this is what makes `rafiki user create` + `rafiki claude` work
+// with nothing exported.
+func TestResolveClaudeToken_FallsBackToTokenFile(t *testing.T) {
+	t.Setenv("RAFIKI_TOKEN", "")
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := writeTokenFile(paths.TokenFile(), "from-file"); err != nil {
+		t.Fatalf("writeTokenFile: %v", err)
+	}
+
+	got, err := resolveClaudeToken("")
+	if err != nil {
+		t.Fatalf("resolveClaudeToken: %v", err)
+	}
+	if got != "from-file" {
+		t.Errorf("token = %q, want %q", got, "from-file")
+	}
+}
+
+// No flag, no env, no file: this must be a clear, actionable error, not the
+// old "dev" literal silently authenticating against nothing and failing as a
+// confusing 401 several steps later.
+func TestResolveClaudeToken_NoneResolvesIsAnError(t *testing.T) {
+	t.Setenv("RAFIKI_TOKEN", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // empty: no token file
+
+	_, err := resolveClaudeToken("")
+	if err == nil {
+		t.Fatal("expected an error when no token resolves, got nil")
+	}
+	if !strings.Contains(err.Error(), "rafiki user create") {
+		t.Errorf("error = %v, want it to name `rafiki user create`", err)
 	}
 }
 
@@ -171,25 +245,27 @@ func TestRunClaude_PassthroughRejectsNonAnthropicModel(t *testing.T) {
 	}
 }
 
-// Without a rafiki token there is no X-Rafiki-Token header, so the proxy sees
-// only the OAuth bearer, tries it as rafiki's own token and 401s. Catch it here
-// where the message can say what is actually wrong.
-func TestRunClaude_PassthroughRequiresToken(t *testing.T) {
+// With no token resolvable from any source, runClaude must fail before ever
+// dialing the proxy — for ANY invocation, not just --passthrough-auth: a
+// literal-default token that authenticates against nothing (the old "dev")
+// is worse than refusing outright, because it turns a missing credential
+// into a confusing 401 several steps later instead of a clear error here.
+func TestRunClaude_NoTokenIsError(t *testing.T) {
+	t.Setenv("RAFIKI_TOKEN", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no token file either
+
 	cmd := newClaudeCmd()
 	for flag, val := range map[string]string{"url": "http://localhost:8035", "token": "", "model": "claude-opus-5"} {
 		if err := cmd.Flags().Set(flag, val); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := cmd.Flags().Set("passthrough-auth", "true"); err != nil {
-		t.Fatal(err)
-	}
 
 	err := runClaude(cmd, nil)
 	if err == nil {
-		t.Fatal("expected error for --passthrough-auth without a token, got nil")
+		t.Fatal("expected error with no token resolvable from any source, got nil")
 	}
-	if !strings.Contains(err.Error(), "--token") {
-		t.Errorf("error = %v, want it to mention --token", err)
+	if !strings.Contains(err.Error(), "rafiki user create") {
+		t.Errorf("error = %v, want it to name `rafiki user create`", err)
 	}
 }

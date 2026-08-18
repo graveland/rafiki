@@ -53,7 +53,12 @@ func newClaudeCmd() *cobra.Command {
 		RunE: runClaude,
 	}
 	cmd.Flags().String("url", envOr("RAFIKI_URL", "http://localhost:8035"), "rafiki proxy base URL (or RAFIKI_URL)")
-	cmd.Flags().String("token", envOr("RAFIKI_TOKEN", "dev"), "static bearer token for the proxy (or RAFIKI_TOKEN)")
+	// No default here: resolving paths.TokenFromEnv() (which falls back to
+	// ~/.config/rafiki/token) at flag-construction time would read the file
+	// once per process and bake in whatever existed then. Left empty and
+	// resolved in runClaude instead, so a token minted after the process
+	// started still works and an explicit --token still wins.
+	cmd.Flags().String("token", "", "static bearer token for the proxy (or RAFIKI_TOKEN, else ~/.config/rafiki/token)")
 	cmd.Flags().String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
 	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
 	// "1" exactly, matching every other boolean env var in the repo
@@ -131,17 +136,18 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	if url == "" {
 		return errors.New("--url (or RAFIKI_URL) is required")
 	}
-	// Both passthrough guards run before the TTY is handed over. The proxy
-	// enforces the same rules, but it can only do so on the session's first
-	// turn — by which point Claude Code owns the terminal and a clear error
-	// reads as a mysterious dead session.
-	if passthrough {
-		if token == "" {
-			return errors.New("--passthrough-auth needs --token (or RAFIKI_TOKEN): rafiki's own token moves to the X-Rafiki-Token header, leaving Authorization free for yours, and without it the proxy cannot authenticate the session")
-		}
-		if !proxyenv.AnthropicModel(model) {
-			return fmt.Errorf("--passthrough-auth bills your Claude subscription, which can only buy Anthropic models, but --model %q resolves to another provider; drop --passthrough-auth to bill the daemon's key instead", model)
-		}
+	token, err := resolveClaudeToken(token)
+	if err != nil {
+		return err
+	}
+	// This guard runs before the TTY is handed over. The proxy enforces the
+	// same rule, but it can only do so on the session's first turn — by which
+	// point Claude Code owns the terminal and a clear error reads as a
+	// mysterious dead session. (The old "needs a token" half of this guard is
+	// gone: resolveClaudeToken above already guarantees a non-empty token or
+	// this function has already returned.)
+	if passthrough && !proxyenv.AnthropicModel(model) {
+		return fmt.Errorf("--passthrough-auth bills your Claude subscription, which can only buy Anthropic models, but --model %q resolves to another provider; drop --passthrough-auth to bill the daemon's key instead", model)
 	}
 	// Preflight so a dead proxy is a clear message here rather than an opaque
 	// connection error from inside Claude Code after it has taken the TTY.
@@ -181,6 +187,29 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// resolveClaudeToken resolves the proxy bearer token: flagToken (the --token
+// flag's value) if it was given, else the same fallback the rest of the CLI
+// uses — RAFIKI_TOKEN, then ~/.config/rafiki/token (paths.TokenFromEnv).
+// Deliberately called at RunE time, not baked into the flag's default: a
+// cobra flag default is computed once, at command-construction time, so
+// reading the token file there would freeze in whatever token existed at
+// process start and miss one minted later in the same process's lifetime.
+//
+// There is no literal fallback (the old default was the string "dev", which
+// authenticates against nothing on a real daemon and turns a missing
+// credential into a confusing 401 rather than a clear error here).
+func resolveClaudeToken(flagToken string) (string, error) {
+	token := flagToken
+	if token == "" {
+		token = paths.TokenFromEnv()
+	}
+	if token == "" {
+		return "", errors.New("no rafiki token: pass --token, set RAFIKI_TOKEN, or run 'rafiki user create <name>' " +
+			"to mint one (written to ~/.config/rafiki/token)")
+	}
+	return token, nil
 }
 
 func claudePreflight(url string) error {

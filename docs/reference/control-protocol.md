@@ -29,7 +29,7 @@ Two transports, identical framing and protocol.
 
 ### 2.1 Unix domain socket (default)
 
-- Path: `$PI_CONTROLLER_SOCKET` or `~/.pi/run/controller.sock`.
+- Path: the daemon always binds `<RuntimeDir>/controller.sock` — `$XDG_RUNTIME_DIR/rafiki/` if that's set to an absolute path, else `$XDG_STATE_HOME/rafiki/` (default `~/.local/state/rafiki/`); see `pkg/paths.SocketPath`. `$RAFIKI_SOCKET` does **not** change where the daemon binds — it is a client-side override (`pkg/client.DefaultSocketPath`, what a spawned child is handed to find its own daemon) that must agree with the daemon's own path or a client dials a socket nobody is listening on. (`$PI_CONTROLLER_SOCKET` / `~/.pi/run/controller.sock` were the pre-rename names; nothing reads them any more.)
 - Mode: socket `0600`, parent directory `0700`. Filesystem permissions are
   the only authentication.
 - Stream-oriented (`SOCK_STREAM`). Multiple concurrent client connections.
