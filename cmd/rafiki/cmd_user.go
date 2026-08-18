@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -61,27 +62,54 @@ func runUserCreate(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 	}
-	var data protocol.UserCreateResponseData
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
 
 	noWrite, _ := cmd.Flags().GetBool("no-write")
-	if !noWrite {
-		path := paths.TokenFile()
-		if err := writeTokenFile(path, data.Token); err != nil {
-			// Do NOT swallow this: the token is unrecoverable, so a silent
-			// write failure means the user has just been handed their only
-			// copy in terminal scrollback without knowing it.
-			fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", path, err)
-			fmt.Fprintln(os.Stderr, "save the token below yourself — it cannot be shown again")
+	return renderUserCreate(os.Stdout, os.Stderr, resp, paths.TokenFile(), !noWrite, writeTokenFile)
+}
+
+// decodeUserCreate decodes a ctrl_user_create payload. dispatch.go hands this
+// straight to okResponse as a bare protocol.UserCreateResponseData
+// (okUserCreate → okResponse(protocol.TypeCtrlUserCreate, id, data)) — unlike
+// ctrl_user_list, whose rows are wrapped in {"users": [...]}. Read
+// pkg/control/dispatch.go before changing this, never infer the shape from a
+// sibling verb: that exact mistake once shipped for ctrl_conversation_search.
+func decodeUserCreate(resp *protocol.Response) (protocol.UserCreateResponseData, error) {
+	var data protocol.UserCreateResponseData
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return data, fmt.Errorf("decode response: %w", err)
+	}
+	return data, nil
+}
+
+// renderUserCreate decodes resp and prints the token exactly once, persisting
+// it via writeFn unless shouldWrite is false. writeFn is injected (rather than
+// calling writeTokenFile directly) so tests can exercise a write failure
+// without touching the filesystem.
+//
+// The token is printed to stdout UNCONDITIONALLY, including when writeFn
+// fails: it is the daemon's only transmission of the plaintext, so a write
+// failure must degrade to "you have to copy it from scrollback yourself,"
+// never to "it's gone."
+func renderUserCreate(stdout, stderr io.Writer, resp *protocol.Response, tokenPath string, shouldWrite bool, writeFn func(path, token string) error) error {
+	data, err := decodeUserCreate(resp)
+	if err != nil {
+		return err
+	}
+
+	if shouldWrite {
+		if err := writeFn(tokenPath, data.Token); err != nil {
+			fmt.Fprintf(stderr, "warning: could not write %s: %v\n", tokenPath, err)
+			fmt.Fprintln(stderr, "save the token below yourself — it cannot be shown again")
 		} else {
-			fmt.Fprintf(os.Stderr, "token written to %s\n", path)
+			fmt.Fprintf(stderr, "token written to %s\n", tokenPath)
 		}
 	}
 
-	out, _ := json.MarshalIndent(data, "", "  ")
-	fmt.Println(string(out))
+	out, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode response: %w", err)
+	}
+	fmt.Fprintln(stdout, string(out))
 	return nil
 }
 
@@ -96,13 +124,16 @@ func writeTokenFile(path, token string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	// An existing file keeps its old mode through OpenFile, so set it
-	// explicitly — a 0644 token file is a credential anyone can read.
+	// explicitly — a 0644 token file is a credential anyone can read. Close
+	// explicitly on every path (no defer) so a write or flush error on Close
+	// is never silently dropped behind a deferred second close.
 	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		return err
 	}
 	if _, err := f.WriteString(token + "\n"); err != nil {
+		_ = f.Close()
 		return err
 	}
 	return f.Close()
@@ -133,16 +164,38 @@ func runUserList(cmd *cobra.Command, _ []string) error {
 	if !resp.Success {
 		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 	}
-	// The rows are WRAPPED. ctrl_* payload shapes are not uniform — this
-	// matches ctrl_conversation_search, not ctrl_conversation_stats.
+	return renderUserList(os.Stdout, resp)
+}
+
+// decodeUserList decodes a ctrl_user_list payload. dispatch.go WRAPS the rows
+// (okUserList → okResponse(protocol.TypeCtrlUserList, id,
+// map[string]any{"users": list})) — unlike ctrl_user_create, which sends its
+// payload bare. This is the asymmetry documented on decodeUserCreate; getting
+// it backwards produces a runtime "cannot unmarshal object/array" that a test
+// built from the wrong sibling's shape would not catch.
+func decodeUserList(resp *protocol.Response) ([]json.RawMessage, error) {
 	var payload struct {
 		Users []json.RawMessage `json:"users"`
 	}
 	if err := json.Unmarshal(resp.Data, &payload); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	out, _ := json.MarshalIndent(payload.Users, "", "  ")
-	fmt.Println(string(out))
+	return payload.Users, nil
+}
+
+// renderUserList decodes resp and prints the user rows. Tokens are never part
+// of this payload (ctrl_user_list never returns them), so there is nothing to
+// redact here.
+func renderUserList(w io.Writer, resp *protocol.Response) error {
+	users, err := decodeUserList(resp)
+	if err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(users, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode response: %w", err)
+	}
+	fmt.Fprintln(w, string(out))
 	return nil
 }
 
