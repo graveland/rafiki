@@ -37,9 +37,78 @@ one container executor are isolated from the host but not from each other; per
 child isolation means one executor per child, which is a `docker run` or k8s Job
 concern.
 
+Also deleted: `rafiki executor serve-stdio` and `execpool.NewStdioConn`. The
+stdio transport existed because rafiki started a network-less container and had
+to reach a tool server inside it; with no container to start, it had no callers.
+
+**The row is authoritative only if something READS it, and the first cut of this
+work read the self-report everywhere.** Three consequences, all fixed, all
+invisible to a green test run:
+
+- `provisionWorkspace` built the child's `WorkspaceInfo` from `resp.Isolation`,
+  which is now empty for every executor, so `BuildSystemPrompt` dropped the
+  "Your machine" block for every sandboxed worker. It reads the row through
+  `workspaceInfoFromRow` now.
+- The `rafiki/workspace-mode` label was a hardcoded `"pinned"`, which made
+  `HandleExecutorLost` fail every child and left `tryReschedule` unreachable.
+  The label comes from the row's `workspace_mode`.
+- Nothing matched a child's requested mode against the executor it landed on —
+  the Provision-side check was deleted with the backend and not replaced — so an
+  inherited `ephemeral` silently accepted a pinned machine. `narrowByWorkspaceMode`
+  enforces it during selection, where the rest of the grant is enforced.
+
 - [ ] Follow-up: remove `Mount`, `mounts`, `network` and `workspace_mode` from
-      `proto/rafiki/executor/v1/executor.proto` and run `make proto`. Left on
-      the wire because regenerating needs buf/protoc.
+      `proto/rafiki/executor/v1/executor.proto`, and `isolation` from
+      `ProvisionResponse`, then run `make proto`. All are unset by the daemon
+      and ignored by the executor. Left on the wire because regenerating needs
+      buf/protoc.
+
+### ▶ WORKING PLAN: background bash on the executor (agreed 2026-08-18)
+
+`bash_start` had a confirmed hang and three divergences from foreground `bash`.
+
+- [x] A1. `jobRegistry.start` sets no `WaitDelay`, so `cmd.Wait()` blocks forever
+      on any command leaving a grandchild on the pipe (`npm run dev &`). The job
+      never reports exited, `RunningHandles` counts it forever, `purge` is never
+      scheduled, and the goroutine leaks. Verified with a standalone repro.
+- [x] A2. Exit bookkeeping unwraps `*exec.ExitError`, but a job that exits 0
+      with a lingering grandchild returns `exec.ErrWaitDelay` instead — recorded
+      as exit code -1 for a job that succeeded. `ProcessState.ExitCode()` is
+      correct in all three cases (verified) and simpler.
+- [x] B. Background output is a 100 KB in-memory ring that drops oldest bytes
+      permanently, violating "spill, never destroy" on the one path where output
+      is unbounded. Replace with a per-job file, drop-oldest at 8 MB, whose path
+      the reader is told when bytes were dropped — the same shape
+      `OutputPolicy.Clip` already uses for foreground results, and reachable by
+      the model through `read`/`grep` on the same executor.
+- [x] B2. Retention is a 10-minute timer from job exit, which is meaningless for
+      an async agent: a turn can end and resume hours later. No timers. Output
+      lives until the workspace is released, bounded by a per-workspace BYTE
+      budget (256 MB) with oldest-finished evicted first.
+- [x] C. The executor's registry passes no `RTK` mode, and `RTKMode("")` is not
+      `RTKOff`, so every executor silently rewrites through rtk with nobody
+      having chosen it. Make it an explicit `Options.RTK` + `--rtk`, default
+      `auto` (today's effective behaviour, now a decision).
+- [x] C2. Background never uses rtk and must not: the refusal fallback works by
+      inspecting stderr after exit and re-running, which a long-running job
+      cannot offer. Document at the site.
+
+**Not doing:** capping concurrent job count; routing background through
+`bashTool`; SIGTERM before SIGKILL.
+
+**Done 2026-08-18.** The memory ring is gone rather than supplemented: with
+reads capped at 100 KB either way, one file with drop-oldest does everything the
+ring plus a spill copy would have, at less code and near-zero memory. The
+registry now builds the command itself, so the background path cannot drift from
+the foreground one again — it had been running `sh -c` for a workspaced job and
+`bash -c` for a bare one. Also removed three dead `--isolation`/`--workspace-mode`/
+`--image` flag registrations left on `executor service install` when `serve` lost
+them.
+
+- [ ] Follow-up: an unreleased workspace retains its jobs until the executor
+      restarts. That is inherited, not new — a leaked workspace already leaks its
+      `wsReg` entry — and the byte budget bounds what it costs. Fix leaked
+      workspaces as their own thing rather than adding a timer back here.
 
 ### ▶ WORKING PLAN: make the executor functional (agreed 2026-08-17)
 
@@ -234,8 +303,9 @@ that file is gone, these are the decisions:
       scope)")` reasons, though the listener has been wired since
       `cmd/rafikid/main.go:441`.
 
-**Deliberately out of scope:** **B3**, **B4** and **D3** below stay open. All
-three are real; none blocks a functional container executor.
+**Deliberately out of scope:** **B3** below stays open; it is real and does not
+block a functional container executor. B4 and D3 are closed — the executor-model
+change deleted the mechanism each one exploited.
 
 ### Code review of the 114-commit platform work — 9 confirmed defects, 31 unconfirmed
 
@@ -306,42 +376,38 @@ only one still live.
 - [x] **C2** — `OrphanAssigned("")`. Guarded in both stores; case added to the
       shared conformance suite, which failed on memory and passed on Postgres.
 
-**Three unconfirmed findings worth promoting on their own merits** (B4 has since
-been **confirmed**):
+**Three unconfirmed findings worth promoting on their own merits** (B4 was
+confirmed, then closed structurally — see below):
 
 - [ ] **B3** — `effectiveExecutorSet` evaluates the `Admits` half against the
       *leaf's* labels only, and at placement against the *parent's* labels
       rather than the child being placed. The phase-07 "Admits is never
       evaluated" fix is therefore half-done.
-- [ ] **B4 — CONFIRMED 2026-08-15.** `agent_spawn` exposes a model-facing `cwd`
-      ("Absolute working directory. Omit to use your own", `agent_spawn.go:39`).
-      It flows `SpawnSpec.Cwd` → `SpawnRequest.Cwd` → `workspace.Derive` with no
-      containment check, and Derive turns it into the read-write `/work` mount —
-      so `agent_spawn(cwd="/", workspace="ephemeral")` bind-mounts the executor
-      host's root filesystem RW. `TestAgentSpawnHasNoPathShapedParameter` does
-      not catch it: it blocklists `mount`/`mounts`/`roots`/`path`/`paths`/
-      `volume`/`allow`/`deny` and nothing else.
-      `grant.go`'s header claim and the `CLAUDE.md` entry have both been
-      corrected to stop asserting the opposite; the CODE is unchanged.
-      Fix shape: a containment check of the child's cwd against the SPAWNER's at
-      admission — the same intersection shape as the executor selector — in the
-      caller that knows the lineage, not inside the pure `Derive`.
-- [ ] **D3** — a workspace-less `Execute` runs on the host even when
-      `Isolation == "container"`, and `executorclient` never sets `WorkspaceId`
-      — so this is the **default** for every `--executor-socket` spawn, while
-      `Describe` still reports `isolation: "container"`.
+- [x] **B4 — CLOSED 2026-08-17, structurally.** `agent_spawn`'s model-facing
+      `cwd` flowed `SpawnSpec.Cwd` → `SpawnRequest.Cwd` → `workspace.Derive`
+      with no containment check, and Derive turned it into the read-write
+      `/work` mount — so `agent_spawn(cwd="/", workspace="ephemeral")`
+      bind-mounted the executor host's root filesystem RW. The planned fix was a
+      containment check against the spawner's cwd. It was not needed: rafiki no
+      longer derives mounts at all, `workspace.Derive` is deleted, and the
+      daemon does not send a workdir. Nothing model-facing reaches a mount,
+      because nothing composes one.
+- [x] **D3 — CLOSED 2026-08-17, structurally.** A workspace-less `Execute` ran
+      on the host even when `Isolation == "container"`, and `executorclient`
+      never set `WorkspaceId`, making that the default for every
+      `--executor-socket` spawn. There is no host/container split inside an
+      executor any more: every call runs in the executor process, wherever the
+      operator started it, workspace or not.
 
 **Found while fixing the above, not in the review** (all verified, all small):
 
-- [ ] **`Server.Release` kills background jobs across ALL workspaces.** It calls
-      `s.jobs.killAll()`, which has no workspace filter, so releasing one child's
-      workspace kills every other child's background jobs on that executor. The
-      in-container plan's Task 6 dissolves this by moving the job registry inside
-      the container; fix it standalone if that plan slips.
-- [ ] **`TestReleaseRemovesTheContainer` passes vacuously.** `containerNameFor`
-      in `container_test.go` returns `"rafiki-ws-" + workspaceID`, but the
-      workspace id already *is* `"rafiki-ws-" + randomID()`. The double prefix
-      matches no container, so the `docker ps` filter is always empty and the
+- [x] **`Server.Release` kills background jobs across ALL workspaces.** Fixed:
+      `releaseWorkspace(id)` replaced `killAll()`, and it signals the process GROUP.
+- [x] **`TestReleaseRemovesTheContainer` passes vacuously.** Moot: the test and
+      the container backend it exercised are both deleted. The double-prefix
+      trap is worth remembering if a `docker ps` filter is ever written again —
+      `containerNameFor` returned `"rafiki-ws-" + workspaceID` when the
+      workspace id already WAS `"rafiki-ws-" + randomID()`, so the filter
       assertion cannot fail.
 - [x] **`newTestClient` could not be used from a subtest.** Its socket path
       embedded `t.Name()` verbatim, so any `t.Run` name put a `/` in the path and

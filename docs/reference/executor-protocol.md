@@ -5,14 +5,19 @@ The daemon dispatches filesystem and shell tool calls to an executor process
 protocol: the seven RPCs, their message shapes, the four failure codes, the
 background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 
-There are three transports for the same protocol, and they differ only in what
+There are two transports for the same protocol, and they differ only in what
 carries the bytes:
 
 | Transport | Command | Used when |
 |---|---|---|
 | Unix socket | `rafiki executor serve --socket` | executor and daemon on one host |
 | Reverse-dialled TLS | `rafiki executor serve --connect` | the daemon cannot reach the executor's host (NAT, a laptop) |
-| `docker exec -i` stdio | `rafiki executor serve-stdio` | inside a container workspace, which has no network at all |
+
+A container executor uses one of those two like any other host. There was once a
+third — `rafiki executor serve-stdio`, spoken over the stdio of a `docker exec
+-i` — because rafiki started the container itself and gave it no network. It
+does not start containers any more, so the container has whatever network the
+operator gave it in `docker run`, and the stdio transport had no callers left.
 
 ## Reaching the daemon
 
@@ -157,12 +162,12 @@ Attach(handle) → stream { Output(chunk) | exitCode }
 ```
 
 `Attach` streams a job's output from the beginning of what is still retained,
-then incremental deltas every 200ms, then a final `exit_code`. Output is held
-in a 100 KB tail ring: a job that writes more than that loses its OLDEST
-bytes, and the first chunk an attacher receives is prefixed with
-`... [earlier output dropped: buffer limit reached] ...` when that has
-happened. An unknown handle is `CodeNotFound`. Dropping the connection does
-not kill the job — reattaching resumes from what the ring still holds.
+then incremental deltas every 200ms, then a final `exit_code`. A single reply
+carries at most 100 KB, taken from the END — a poll wants the newest output —
+and a reply that had to clip is prefixed with a note naming the FILE holding
+the fuller record, which the model can `read` or `grep` on the same executor.
+An unknown handle is `CodeNotFound`. Dropping the connection does not kill the
+job — reattaching resumes from what is still retained.
 
 ### Provision
 
@@ -172,11 +177,21 @@ Provision(childId, workspaceMode, mounts[], workdir, network, memoryBytes, cpus,
 ```
 
 Provision prepares a workspace and returns the handle later `Execute` calls
-carry. There is one backend: the executor's own root. rafiki does not start
-containers — a container running the executor IS one — so `mounts` and
-`network` are unset by the daemon and ignored by the executor. They remain on
-the wire for compatibility and should be removed the next time the proto is
-regenerated.
+carry. A workspace is a handle bound to the root the executor was started with;
+there is nothing else it could be, because rafiki does not start containers — a
+container running the executor IS one.
+
+Everything describing a shape the executor might build is therefore dead on this
+call. `mounts`, `network`, `workdir` and `workspaceMode` are unset by the daemon
+and ignored by the executor; they remain on the wire only until the proto is
+next regenerated.
+
+`isolation` in the response is deliberately **empty**, as it is in `Describe`.
+An executor does not know whether it is running in a container and must not
+guess: the answer gates where other people's children may run, so the
+authoritative copy is the `isolation` column on the executor's row, written by
+the operator at token-mint time. A daemon that reads it from here gets "none"
+for every child on every machine.
 
 ### Release
 
@@ -207,11 +222,11 @@ One-shot poll of a background job. Never blocks.
 |---|---|---|
 | `handle` | → | the handle returned by a background `Execute` |
 | `since` | → | byte offset into lifetime output; pass back the previous `total` |
-| `data` | ← | bytes from `since` (or the ring's oldest byte) to `total` |
-| `total` | ← | bytes the job has ever written, including any dropped |
+| `data` | ← | bytes from `since` to `total`, capped at 100 KB from the end |
+| `total` | ← | bytes the job has ever written, including any not returned |
 | `exited` | ← | whether the process has been reaped |
 | `exit_code` | ← | meaningful only when `exited` |
-| `found` | ← | false when the handle is unknown or was reaped after 10 minutes |
+| `found` | ← | false when the handle is unknown, or its output was evicted by the workspace's byte budget |
 
 `Attach` remains the streaming path. Use `JobOutput` when you want a snapshot.
 
@@ -241,11 +256,26 @@ Kill:  Cancel(callId) → {}
 ```
 
 - A handle is the `callId` from `ExecuteRequest`. The parent picks it.
-- A job's output ring buffer is capped at 100 KB; once exceeded, the OLDEST
-  bytes are dropped so the live tail is always available. Byte offsets are
-  tracked against a monotonic total so a re-`Attach` after data has been
-  dropped can tell the caller it missed output, rather than silently
-  replaying or skipping bytes.
+- A job's output goes to a FILE on the executor, retained with drop-oldest at
+  8 MB, and a single reply returns at most 100 KB of it from the end. Byte
+  offsets are tracked against a monotonic total, so a re-`Attach` after data
+  has been dropped can tell the caller it missed output rather than silently
+  replaying or skipping bytes — and unlike the in-memory ring this replaces,
+  what it missed usually still exists, at a path the reply names. That is the
+  same "spill, never destroy" rule foreground tool results follow; background
+  output was the one place output was both unbounded and thrown away.
+- **Retention has no time limit.** A finished job's output lives until its
+  workspace is released, which is exactly as long as the agent that might ask
+  for it. A wall-clock window cannot work here: an async agent's turn can end
+  and resume hours later, so a 10-minute timer expired output while the agent
+  that started the job was still alive and idle. Memory is bounded instead by
+  a per-workspace BYTE budget (256 MB by default, `--job-output-budget-mb`),
+  evicting the oldest FINISHED job first. Running jobs are never evicted:
+  their output is a live stream, not an archive.
+- Background commands are never rewritten through `rtk`, whatever `--rtk` says.
+  The rewrite is only safe because the foreground path can watch stderr after
+  the command exits and re-run the original when rtk itself refused; a
+  long-running job offers no exit to inspect and no output it could take back.
 - A job survives a dropped `Attach` connection — the parent may re-attach
   at any time.
 - `Health().runningHandles` lists every handle whose process has not yet
@@ -266,11 +296,8 @@ verifies at the moment of the write.
    mtime differs, it streams `Failed(CODE_DENIED, …)` and the write does
    not proceed.
 
-On a **container** workspace the stat happens inside the container: the outer
-executor forwards `expectMtime` untouched to the inner server rather than
-evaluating it. Statting a container path on the host is either a spurious "file
-changed under us" or a stat of an unrelated host file that happens to exist at
-the same path.
+The stat happens in the executor process, which is the only place the file is
+visible: if that process is in a container, the path it stats is the container's.
 
 Parent-side checking alone would be a TOCTOU — the file can change between
 the parent's check and the executor's write. The executor-side check at the
