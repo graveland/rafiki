@@ -11,18 +11,15 @@ func TestLoadConfig_EmptyPathIsZeroValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig(\"\"): %v", err)
 	}
-	if len(cfg.Tokens) != 0 || len(cfg.OpenAIRoutes) != 0 || cfg.DefaultModel != "" {
+	if len(cfg.OpenAIRoutes) != 0 || cfg.DefaultModel != "" {
 		t.Errorf("empty path should yield a zero Config, got %+v", cfg)
 	}
 }
 
-func TestLoadConfig_ParsesTokensRoutesAndModel(t *testing.T) {
+func TestLoadConfig_ParsesRoutesAndModel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rafiki.yaml")
-	body := `tokens:
-  sentinel: tok-sentinel
-  editor: tok-editor
-openai_routes:
+	body := `openai_routes:
   - prefix: "moonshotai/"
     upstream: openrouter
 default_model: haiku-latest
@@ -34,9 +31,6 @@ default_model: haiku-latest
 	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
-	}
-	if got := cfg.Tokens["sentinel"]; got != "tok-sentinel" {
-		t.Errorf("Tokens[sentinel] = %q, want tok-sentinel", got)
 	}
 	if len(cfg.OpenAIRoutes) != 1 || cfg.OpenAIRoutes[0].Prefix != "moonshotai/" {
 		t.Errorf("OpenAIRoutes = %+v, want one moonshotai/ route", cfg.OpenAIRoutes)
@@ -60,7 +54,7 @@ func TestLoadConfig_MalformedYAMLIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.yaml")
 	// Unclosed flow mapping: not valid YAML at any indentation.
-	body := "tokens: [this is not valid yaml"
+	body := "openai_routes: [this is not valid yaml"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

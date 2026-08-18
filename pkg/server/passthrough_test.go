@@ -14,8 +14,8 @@ import (
 
 // A caller that puts rafiki's token in X-Rafiki-Token is declaring that its
 // Authorization header holds its own upstream credential.
-func TestStaticTokenAuth_XRafikiTokenMarksPassthrough(t *testing.T) {
-	auth := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"})
+func TestUserTokenAuth_XRafikiTokenMarksPassthrough(t *testing.T) {
+	auth := newTestUserAuth(map[string]string{"rafiki-token": "cli"})
 	var gotIdentity, gotCred string
 	h := auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		if id := IdentityFromContext(r.Context()); id != nil {
@@ -44,8 +44,8 @@ func TestStaticTokenAuth_XRafikiTokenMarksPassthrough(t *testing.T) {
 // The ordinary path must be untouched: an Authorization-authenticated request
 // has no passthrough credential, or every existing caller would start leaking
 // its bearer upstream.
-func TestStaticTokenAuth_BearerIsNotPassthrough(t *testing.T) {
-	auth := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"})
+func TestUserTokenAuth_BearerIsNotPassthrough(t *testing.T) {
+	auth := newTestUserAuth(map[string]string{"rafiki-token": "cli"})
 	var gotCred string
 	h := auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		gotCred = PassthroughCredential(r.Context())
@@ -66,8 +66,8 @@ func TestStaticTokenAuth_BearerIsNotPassthrough(t *testing.T) {
 
 // X-Rafiki-Token is a credential like any other: an unknown value is a 401,
 // not an anonymous pass.
-func TestStaticTokenAuth_XRafikiTokenUnknownRejected(t *testing.T) {
-	auth := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"})
+func TestUserTokenAuth_XRafikiTokenUnknownRejected(t *testing.T) {
+	auth := newTestUserAuth(map[string]string{"rafiki-token": "cli"})
 	h := auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("handler reached with an unknown token")
 	}))
@@ -88,8 +88,8 @@ func TestStaticTokenAuth_XRafikiTokenUnknownRejected(t *testing.T) {
 // key silently — the precise outcome passthrough exists to avoid — so it fails
 // closed. Reachable whenever Claude Code has no OAuth credential to send: the
 // user is logged out, or CLAUDE_CODE_USE_BEDROCK/VERTEX is set.
-func TestStaticTokenAuth_XRafikiTokenWithoutAuthorizationIsRejected(t *testing.T) {
-	auth := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"})
+func TestUserTokenAuth_XRafikiTokenWithoutAuthorizationIsRejected(t *testing.T) {
+	auth := newTestUserAuth(map[string]string{"rafiki-token": "cli"})
 	h := auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("handler reached; the request must be refused, not billed to the daemon")
 	}))
@@ -107,8 +107,8 @@ func TestStaticTokenAuth_XRafikiTokenWithoutAuthorizationIsRejected(t *testing.T
 // A client that puts rafiki's own token in BOTH headers must not have that
 // token relayed to Anthropic: it is our secret, it buys nothing there, and the
 // turn would die on an opaque upstream 401.
-func TestStaticTokenAuth_RefusesToForwardOwnToken(t *testing.T) {
-	auth := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"})
+func TestUserTokenAuth_RefusesToForwardOwnToken(t *testing.T) {
+	auth := newTestUserAuth(map[string]string{"rafiki-token": "cli"})
 	h := auth.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("handler reached; rafiki's own token must never be forwarded upstream")
 	}))
@@ -141,7 +141,7 @@ func TestMessagesProxy_PassthroughForwardsClientCredential(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "daemon-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
-	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+	h := newTestUserAuth(map[string]string{"rafiki-token": "cli"}).Middleware(p)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
@@ -180,7 +180,7 @@ func TestMessagesProxy_OrdinaryRequestStillUsesDaemonKey(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "daemon-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
-	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+	h := newTestUserAuth(map[string]string{"rafiki-token": "cli"}).Middleware(p)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
@@ -212,7 +212,7 @@ func TestMessagesProxy_PassthroughRejectsSlashModel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "daemon-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
 	p.SetFallback("or-key", upstream.URL, nil)
-	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+	h := newTestUserAuth(map[string]string{"rafiki-token": "cli"}).Middleware(p)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"openai/gpt-4o","messages":[]}`))
@@ -244,7 +244,7 @@ func TestChatCompletionsProxy_RejectsPassthrough(t *testing.T) {
 	p := NewChatCompletionsProxy(nil, nil,
 		[]OpenAIUpstream{{Name: "u", BaseURL: upstream.URL, APIKey: "daemon-key"}},
 		nil, "u", logger)
-	h := NewStaticTokenAuth(map[string]string{"cli": "rafiki-token"}).Middleware(p)
+	h := newTestUserAuth(map[string]string{"rafiki-token": "cli"}).Middleware(p)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"gpt-4o","messages":[]}`))

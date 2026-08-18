@@ -26,6 +26,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // providerGuardEnabled reports whether the provider cache guard runs. Anything
@@ -108,20 +109,6 @@ type proxyFace struct {
 // token anyone else could know.
 const defaultProxyListen = ":8035"
 
-// childTokenName and configuredTokenName are the two token-map keys the daemon
-// assigns itself; a config file naming a client either of these would either
-// silently overwrite the per-boot child secret (every real spawned child then
-// gets rejected as "unknown token") or the RAFIKI_SERVE_TOKEN slot. Both are
-// therefore reserved — see the collision check in startProxyFace.
-//
-// childTokenName was "fundi-child" before the rename to rafiki; it is a
-// captured owner string written to the database, so historical rows keep the
-// old value — only newly-generated per-boot tokens use the new name.
-const (
-	childTokenName      = "rafiki-child"
-	configuredTokenName = "configured"
-)
-
 // faceOptions carries everything the proxy face needs from the daemon. A struct
 // rather than parameters because the fold (config, dev mode, listen override)
 // adds fields, and a seven-argument constructor is a bug waiting to happen.
@@ -130,11 +117,12 @@ type faceOptions struct {
 	Logger      *slog.Logger            // required
 	Tracer      trace.TracerProvider    // nil = no-op
 	Registry    *prometheus.Registry    // nil = metrics not mounted
-	Config      Config                  // named client tokens, openai routes, default model
+	Config      Config                  // openai routes, default model
 	Listen      string                  // overrides RAFIKI_PROXY_LISTEN when non-empty
 	Catalog     *routing.ModelCatalog   // shared with the Controller (ctrl_get/list's ContextWindow) via llm.WithCatalog; nil = the client builds its own
 	RawTrace    *rawtrace.RawTraceStore // nil when no pool configured
 	RawTraceAll bool                    // RAFIKI_RECORD_REQUESTS=1: record all sessions unconditionally
+	Users       users.Store             // nil = RAFIKI_DB unset; only the per-boot child token authenticates
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -270,39 +258,15 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A token even on loopback: any process on this machine can reach a local
-	// port, and this one forwards to a paid API on the daemon's credentials.
-	// The per-boot token is generated fresh, written nowhere, and handed only
-	// to the children the daemon spawns.
-	tokens := map[string]string{childTokenName: token}
-
-	// Named tokens from the config file: each NAME becomes the captured owner
-	// identity, which is the one thing an environment variable cannot express.
-	// childTokenName and configuredTokenName are reserved — a config entry
-	// using either name would silently overwrite the per-boot child secret (or
-	// the RAFIKI_SERVE_TOKEN slot below) and every real spawned child would
-	// then present the true per-boot token only to be rejected as "unknown
-	// token". That is a startup-time configuration error, not something to
-	// resolve silently in either direction.
-	for name, tok := range opts.Config.Tokens {
-		if name == childTokenName || name == configuredTokenName {
-			return nil, fmt.Errorf("config token name %q is reserved for the daemon's own use; rename it", name)
-		}
-		tokens[name] = tok
-	}
-
-	// RAFIKI_SERVE_TOKEN names an ADDITIONAL token this face accepts — for
-	// humans and tools that are not children (`rafiki claude`, an editor
-	// plugin, curl). They cannot know a per-boot secret.
+	// A token even on loopback: any process on this machine can reach a
+	// local port, and this one forwards to a paid API on the daemon's
+	// credentials. The per-boot token is generated fresh, written nowhere,
+	// and handed only to the children the daemon spawns.
 	//
-	// Unconditional, unlike the variable it replaces: the old
-	// FUNDI_PROXY_TOKEN meant "accept this" when serving and "send this"
-	// when pointing away, so it needed a guard to tell which. Two names, no
-	// guard.
-	if extra := paths.Get(paths.ServeToken); extra != "" {
-		tokens[configuredTokenName] = extra
-	}
-	tokenAuth := server.NewStaticTokenAuth(tokens)
+	// Everything else authenticates as a USER. opts.Users is nil when
+	// RAFIKI_DB is unset, which leaves the child token as the only accepted
+	// credential — exactly the DB-less daemon's situation.
+	tokenAuth := server.NewUserTokenAuth(opts.Users, token, server.DefaultAuthCacheTTL)
 
 	mux := http.NewServeMux()
 	h := &server.Handler{Messages: messages, Chat: chat}
@@ -345,15 +309,6 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s (is a `rafiki serve` or another rafikid already there?): %w", addr, err)
-	}
-	if offBox(addr) && paths.Get(paths.ServeToken) == "" {
-		// Reachable from the network but the only valid token is the per-boot
-		// one, which only this daemon's own children ever see. Nothing else can
-		// authenticate, so the face is off-box in name only — and the operator
-		// who opened it up plainly meant otherwise.
-		logger.Warn("proxy face is reachable off-box but no shared token is set, "+
-			"so only this daemon's own children can use it",
-			"addr", addr, "set", paths.ServeToken, "in", paths.ServiceEnvFile())
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
