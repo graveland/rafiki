@@ -38,6 +38,8 @@ type fakeController struct {
 	forgetFn                func(string) error
 	forgetAllExitedFn       func(int64) (int, error)
 	sendFn                  func(string, json.RawMessage) error
+	userCreateFn            func(context.Context, string) (protocol.UserCreateResponseData, error)
+	countActiveFn           func(context.Context) (int, error)
 	subscribeFn             func(string, control.Connection, protocol.SubscribeFilter) error
 	unsubscribeFn           func(string, control.Connection) error
 	globalSubscribeFn       func(control.Connection) error
@@ -263,12 +265,34 @@ func (f *fakeController) ExecutorEnable(req protocol.ExecutorEnableRequest) erro
 }
 
 func (f *fakeController) UserCreate(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	if f.userCreateFn != nil {
+		return f.userCreateFn(ctx, username)
+	}
 	if username == "taken" {
 		return protocol.UserCreateResponseData{}, users.ErrUsernameTaken
 	}
 	return protocol.UserCreateResponseData{
 		ID: "11111111-1111-1111-1111-111111111111", Username: username, Token: "rfk_tok",
 	}, nil
+}
+
+// UserCreateBootstrap mirrors the real Controller: re-check the window on
+// THIS request, then delegate. A fake that skipped the re-check would make
+// the bootstrap tests assert nothing.
+func (f *fakeController) UserCreateBootstrap(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	if f.countActiveFn != nil {
+		n, err := f.countActiveFn(ctx)
+		if err != nil {
+			return protocol.UserCreateResponseData{}, err
+		}
+		if n > 0 {
+			return protocol.UserCreateResponseData{}, &control.ControllerError{
+				Code:    protocol.ErrAuthRequired,
+				Message: "a user already exists; authenticate with ctrl_auth to create more users",
+			}
+		}
+	}
+	return f.UserCreate(ctx, username)
 }
 
 func (f *fakeController) UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error) {

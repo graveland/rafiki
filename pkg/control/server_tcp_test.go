@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,14 +63,19 @@ func pemEncode(typ string, der []byte) []byte {
 	return pem.EncodeToMemory(b)
 }
 
-// fakeAuth is a users.Store-shaped authenticator with no database.
+// fakeAuth is a users.Store-shaped authenticator with no database. active is
+// guarded because a test may close the bootstrap window (from a handler
+// goroutine) while the server reads it.
 type fakeAuth struct {
+	mu     sync.Mutex
 	tokens map[string]users.Identity
 	active int
 	err    error // non-nil = "I could not check", not "invalid"
 }
 
 func (f *fakeAuth) Authenticate(_ context.Context, token string) (users.Identity, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return users.Identity{}, f.err
 	}
@@ -81,10 +87,18 @@ func (f *fakeAuth) Authenticate(_ context.Context, token string) (users.Identity
 }
 
 func (f *fakeAuth) CountActive(_ context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return 0, f.err
 	}
 	return f.active, nil
+}
+
+func (f *fakeAuth) setActive(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.active = n
 }
 
 // oneUser is the ordinary state: a single user whose token authenticates, so
@@ -123,7 +137,14 @@ func tlsServer(t *testing.T, auth control.Authenticator) (addr string, cleanup f
 // is exercised end to end.
 func tlsDispatchServer(t *testing.T, auth control.Authenticator) (addr string, cleanup func()) {
 	t.Helper()
-	return tlsServerHandler(t, auth, control.NewDispatch(&fakeController{}))
+	return tlsDispatchServerCtrl(t, auth, &fakeController{})
+}
+
+// tlsDispatchServerCtrl is tlsDispatchServer with a caller-supplied
+// controller, for tests that need the store to answer differently over time.
+func tlsDispatchServerCtrl(t *testing.T, auth control.Authenticator, ctrl control.Controller) (addr string, cleanup func()) {
+	t.Helper()
+	return tlsServerHandler(t, auth, control.NewDispatch(ctrl))
 }
 
 // tlsDial dials a TLS server using an insecure (self-signed) config,
@@ -533,5 +554,165 @@ func TestOnceAUserExistsBootstrapIsClosed(t *testing.T) {
 	}
 	if resp.Error.Code != protocol.ErrAuthRequired {
 		t.Fatalf("code = %q, want %q", resp.Error.Code, protocol.ErrAuthRequired)
+	}
+}
+
+// ─── the bootstrap window closes, and stays closed ─────────────────────────────
+
+// Admission is decided once, when the connection is accepted, and is never
+// revisited. So the dangerous case is not a race between two first arrivals
+// (first writer wins — that is Decision 7 and it is fine): it is a peer that
+// connected during the window and simply HOLDS THE CONNECTION OPEN. Without a
+// per-request re-check it keeps minting users for the life of the daemon,
+// days after the operator's first user closed the window for everyone else.
+func TestARestrictedConnectionCannotMintUsersAfterTheWindowCloses(t *testing.T) {
+	auth := &fakeAuth{tokens: map[string]users.Identity{}, active: 0}
+	ctrl := &fakeController{
+		countActiveFn: auth.CountActive,
+		userCreateFn: func(_ context.Context, username string) (protocol.UserCreateResponseData, error) {
+			// Creating a user closes the window, exactly as the real store
+			// does — the next CountActive sees it.
+			auth.setActive(1)
+			return protocol.UserCreateResponseData{ID: "u1", Username: username, Token: "rfk_tok"}, nil
+		},
+	}
+	addr, done := tlsDispatchServerCtrl(t, auth, ctrl)
+	defer done()
+
+	conn := tlsDialRaw(t, addr)
+	defer conn.Close()
+
+	writeJSONFrame(t, conn, protocol.UserCreateRequest{
+		Type: protocol.TypeCtrlUserCreate, ID: "1", Username: "first",
+	})
+	if first := readResponse(t, conn); !first.Success {
+		t.Fatalf("the first bootstrap user_create failed: %+v", first.Error)
+	}
+
+	// Same connection, still admitted, still restricted — and now stale.
+	writeJSONFrame(t, conn, protocol.UserCreateRequest{
+		Type: protocol.TypeCtrlUserCreate, ID: "2", Username: "mallory",
+	})
+	second := readResponse(t, conn)
+	if second.Success {
+		t.Fatal("a held-open bootstrap connection minted a second user after the window closed")
+	}
+	if second.Error.Code != protocol.ErrAuthRequired {
+		t.Fatalf("code = %q, want %q", second.Error.Code, protocol.ErrAuthRequired)
+	}
+}
+
+// The same re-check, reached the other way: the connection was admitted while
+// the window was open, but a user appeared from somewhere else entirely
+// (another daemon replica, an operator on the UDS) before the first request.
+func TestARestrictedConnectionRechecksTheStoreNotItsAdmission(t *testing.T) {
+	auth := &fakeAuth{tokens: map[string]users.Identity{}, active: 0}
+	ctrl := &fakeController{countActiveFn: auth.CountActive}
+	addr, done := tlsDispatchServerCtrl(t, auth, ctrl)
+	defer done()
+
+	conn := tlsDialRaw(t, addr)
+	defer conn.Close()
+
+	// Admitted with the window open...
+	writeJSONFrame(t, conn, protocol.UserCreateRequest{
+		Type: protocol.TypeCtrlUserCreate, ID: "1", Username: "first",
+	})
+	if first := readResponse(t, conn); !first.Success {
+		t.Fatalf("the first bootstrap user_create failed: %+v", first.Error)
+	}
+
+	// ...and someone else creates the first user out of band.
+	auth.setActive(1)
+
+	writeJSONFrame(t, conn, protocol.UserCreateRequest{
+		Type: protocol.TypeCtrlUserCreate, ID: "2", Username: "mallory",
+	})
+	second := readResponse(t, conn)
+	if second.Success || second.Error.Code != protocol.ErrAuthRequired {
+		t.Fatalf("resp = %+v, want auth_required", second)
+	}
+}
+
+// A store error on the re-check is "I could not check": it must be neither an
+// admission nor a claim that the window is closed, and it must not carry the
+// store's text (see the next test).
+func TestARestrictedUserCreateIsRefusedWhenTheWindowCannotBeChecked(t *testing.T) {
+	auth := &fakeAuth{tokens: map[string]users.Identity{}, active: 0}
+	ctrl := &fakeController{
+		countActiveFn: func(context.Context) (int, error) {
+			return 0, errors.New("failed to connect to host=db.internal user=rafiki database=rafiki")
+		},
+		userCreateFn: func(context.Context, string) (protocol.UserCreateResponseData, error) {
+			t.Error("user_create ran despite an unreadable user count")
+			return protocol.UserCreateResponseData{}, nil
+		},
+	}
+	addr, done := tlsDispatchServerCtrl(t, auth, ctrl)
+	defer done()
+
+	conn := tlsDialRaw(t, addr)
+	defer conn.Close()
+	writeJSONFrame(t, conn, protocol.UserCreateRequest{
+		Type: protocol.TypeCtrlUserCreate, ID: "1", Username: "brent",
+	})
+
+	resp := readResponse(t, conn)
+	if resp.Success {
+		t.Fatal("user_create succeeded without the window being checked")
+	}
+	if resp.Error.Code != protocol.ErrInternal {
+		t.Fatalf("code = %q, want %q", resp.Error.Code, protocol.ErrInternal)
+	}
+	if strings.Contains(resp.Error.Message, "db.internal") {
+		t.Fatalf("store error text leaked to an unauthenticated peer: %q", resp.Error.Message)
+	}
+}
+
+// The handshake already refuses to hand a store error to a stranger. Dispatch
+// is the other half, and bootstrap makes ctrl_user_create the first verb an
+// unauthenticated peer can reach at all: a pgx error names the host, the user
+// and the database.
+func TestADispatchErrorNeverLeaksTheStoresTextToABootstrapPeer(t *testing.T) {
+	const pgxErr = "failed to connect to host=db.internal user=rafiki database=rafiki: dial error"
+	auth := &fakeAuth{tokens: map[string]users.Identity{}, active: 0}
+	ctrl := &fakeController{
+		countActiveFn: auth.CountActive,
+		userCreateFn: func(context.Context, string) (protocol.UserCreateResponseData, error) {
+			return protocol.UserCreateResponseData{}, errors.New(pgxErr)
+		},
+	}
+	addr, done := tlsDispatchServerCtrl(t, auth, ctrl)
+	defer done()
+
+	conn := tlsDialRaw(t, addr)
+	defer conn.Close()
+	writeJSONFrame(t, conn, protocol.UserCreateRequest{
+		Type: protocol.TypeCtrlUserCreate, ID: "1", Username: "brent",
+	})
+
+	resp := readResponse(t, conn)
+	if resp.Success {
+		t.Fatal("user_create succeeded despite a store failure")
+	}
+	if resp.Error.Code != protocol.ErrInternal {
+		t.Fatalf("code = %q, want %q", resp.Error.Code, protocol.ErrInternal)
+	}
+	for _, leak := range []string{"db.internal", "user=rafiki", "database=rafiki", pgxErr} {
+		if strings.Contains(resp.Error.Message, leak) {
+			t.Fatalf("store error text leaked to an unauthenticated peer: %q contains %q",
+				resp.Error.Message, leak)
+		}
+	}
+}
+
+// A nil Authenticator is a wiring mistake. It must not reach a per-connection
+// goroutine, where a nil deref takes the whole daemon down over one dial.
+func TestListenTCPRefusesANilAuthenticator(t *testing.T) {
+	noop := control.FuncHandler(func(control.Connection, []byte) []byte { return nil })
+	srv, err := control.ListenTCP("127.0.0.1:0", nil, newSelfSignedTLSConfig(t), noop)
+	if err == nil {
+		srv.Close()
+		t.Fatal("ListenTCP accepted a nil Authenticator")
 	}
 }
