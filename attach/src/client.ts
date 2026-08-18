@@ -215,14 +215,16 @@ export class Client {
 
     /**
      * Opens a TLS connection to url, authenticates via ctrl_auth, and
-     * returns a ready Client. url must be "tls://host:port". On auth
-     * failure the server closes the connection, which surfaces as a
-     * connect error or read error.
+     * returns a ready Client. url must be "https://host[:port]" — the
+     * control plane is an HTTP upgrade at /control on the shared TLS
+     * listener, so https is the honest spelling of what the retired tls:
+     * scheme always meant. On auth failure the server closes the
+     * connection, which surfaces as a connect error or read error.
      */
     static async dialURL(url: string, token: string): Promise<Client> {
         const u = new URL(url);
-        if (u.protocol !== "tls:") {
-            throw new Error(`control-url scheme must be "tls:", got "${u.protocol}"`);
+        if (u.protocol !== "https:") {
+            throw new Error(`RAFIKI_URL scheme must be "https:" to reach the control plane, got "${u.protocol}"`);
         }
         const port = u.port ? parseInt(u.port, 10) : 443;
 
