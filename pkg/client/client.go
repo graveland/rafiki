@@ -73,8 +73,30 @@ func DefaultSocketPath() string {
 
 // ─── Remote (TCP/TLS) dialing ──────────────────────────────────────────────────
 
-// DialURL opens a TLS connection to rawURL and authenticates via ctrl_auth.
-// rawURL must be "tls://host:port". token is sent as the first frame.
+// IsRemoteURL reports whether raw names a remote rafikid worth dialing for
+// the CONTROL plane.
+//
+// Only https does. An http:// URL is the local loopback face — one hostname
+// serving the face, the control plane and the executor link is a TLS-only
+// arrangement, so there is no plaintext control listener to dial. An empty
+// URL means the local daemon. Both keep control on the UDS.
+func IsRemoteURL(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Host != ""
+}
+
+// DialURL opens a TLS connection to rawURL and, if token is non-empty,
+// authenticates via ctrl_auth. rawURL must be "https://host[:port]".
+//
+// When token is empty, the ctrl_auth frame is skipped entirely: the caller's
+// first Request becomes the first frame the server reads. This is what makes
+// bootstrap reachable — a daemon with no users admits a connection only when
+// its first frame is NOT ctrl_auth, and dispatches that frame as the request
+// (restricted to ctrl_user_create). Sending ctrl_auth with an empty token
+// would instead resolve to an unknown identity and be rejected outright.
 //
 // Auth success is implicit — the server keeps the connection open.
 // Auth failure is detected when the server closes the connection: the
@@ -108,22 +130,16 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 	// behind its 101 would otherwise be stranded in the upgrade's own buffer.
 	var rawConn net.Conn = upConn
 
-	// Auth handshake: send ctrl_auth. The server reads one frame, validates
-	// the token, and either proceeds silently (success) or closes the
-	// connection after writing an error frame (failure). On success we
-	// build the Client and start the readLoop — the first frame the
-	// readLoop sees will be a real event or response, not an auth confirmation.
-	authReq := protocol.AuthRequest{Type: protocol.TypeCtrlAuth, ID: "0", Token: token}
-	authB, _ := json.Marshal(authReq)
-	if err := protocol.WriteFrame(rawConn, authB); err != nil {
+	if err := sendAuthFrame(rawConn, token); err != nil {
 		rawConn.Close()
 		return nil, fmt.Errorf("send auth: %w", err)
 	}
 
-	// Auth succeeded (server didn't close the connection). Build a Client
-	// around the TLS conn. If auth actually failed, the server-side close
-	// will cause readLoop to fail, and the next Request/Subscribe will
-	// surface the error.
+	// Auth succeeded (server didn't close the connection), or there was
+	// nothing to authenticate (no token). Build a Client around the TLS
+	// conn. If auth actually failed, the server-side close will cause
+	// readLoop to fail, and the next Request/Subscribe will surface the
+	// error.
 	c := &Client{
 		conn:    rawConn,
 		closeCh: make(chan struct{}),
@@ -133,17 +149,42 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 	return c, nil
 }
 
-// parseControlURL validates and parses a control URL. Scheme must be "tls".
+// sendAuthFrame writes a ctrl_auth frame carrying token, or does nothing at
+// all when token is empty.
+//
+// The empty case is not "auth with a blank credential" — it is "skip the
+// handshake": a bootstrap daemon (no users yet) admits a connection only when
+// its very first frame is NOT ctrl_auth, and then dispatches that frame as
+// the request (restricted to ctrl_user_create). Writing a ctrl_auth frame
+// with an empty token would instead resolve to an unknown identity on a
+// non-bootstrap daemon, or consume the bootstrap slot on a wrong frame type
+// on one — either way the caller's real first request would land as the
+// SECOND frame and never be read as the bootstrap command.
+func sendAuthFrame(conn net.Conn, token string) error {
+	if token == "" {
+		return nil
+	}
+	authReq := protocol.AuthRequest{Type: protocol.TypeCtrlAuth, ID: "0", Token: token}
+	authB, err := json.Marshal(authReq)
+	if err != nil {
+		return err
+	}
+	return protocol.WriteFrame(conn, authB)
+}
+
+// parseControlURL validates a control URL and returns it. Scheme must be
+// "https": the control plane is an HTTP upgrade at /control on the shared TLS
+// listener, so https is the honest spelling of what tls:// always meant.
 func parseControlURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("parse control-url: %w", err)
+		return nil, fmt.Errorf("parse rafiki url: %w", err)
 	}
-	if u.Scheme != "tls" {
-		return nil, fmt.Errorf("control-url scheme must be 'tls', got %q", u.Scheme)
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("RAFIKI_URL scheme must be 'https' to reach the control plane, got %q", u.Scheme)
 	}
 	if u.Host == "" {
-		return nil, errors.New("control-url missing host")
+		return nil, errors.New("RAFIKI_URL missing host")
 	}
 	return u, nil
 }

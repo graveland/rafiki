@@ -271,14 +271,14 @@ func TestMergeEnvFile_RoundTripsAwkwardValues(t *testing.T) {
 // than silently discarded or silently overwritten.
 func TestMergeEnvFile_NeverRewritesAnExistingKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "service.env")
-	original := "# hand written\nRAFIKI_DB=postgres://old@h/db\nRAFIKI_SERVE_TOKEN=same\n"
+	original := "# hand written\nRAFIKI_DB=postgres://old@h/db\nRAFIKI_SAMPLE_SECRET=same\n"
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	res, err := MergeEnvFile(path, map[string]string{
 		"RAFIKI_DB":          "postgres://new@h/db", // differs -> Conflict
-		"RAFIKI_SERVE_TOKEN": "same",                // identical -> Existing
+		"RAFIKI_SAMPLE_SECRET": "same",                // identical -> Existing
 		"ANTHROPIC_API_KEY":  "sk-ant",              // new -> Added
 	}, "test")
 	if err != nil {
@@ -287,13 +287,13 @@ func TestMergeEnvFile_NeverRewritesAnExistingKey(t *testing.T) {
 	if !slices.Equal(res.Added, []string{"ANTHROPIC_API_KEY"}) {
 		t.Errorf("Added = %v, want [ANTHROPIC_API_KEY]", res.Added)
 	}
-	if !slices.Equal(res.Existing, []string{"RAFIKI_SERVE_TOKEN"}) {
-		t.Errorf("Existing = %v, want [RAFIKI_SERVE_TOKEN]", res.Existing)
+	if !slices.Equal(res.Existing, []string{"RAFIKI_SAMPLE_SECRET"}) {
+		t.Errorf("Existing = %v, want [RAFIKI_SAMPLE_SECRET]", res.Existing)
 	}
 	if !slices.Equal(res.Conflict, []string{"RAFIKI_DB"}) {
 		t.Errorf("Conflict = %v, want [RAFIKI_DB]", res.Conflict)
 	}
-	if !slices.Equal(res.Defined, []string{"RAFIKI_DB", "RAFIKI_SERVE_TOKEN"}) {
+	if !slices.Equal(res.Defined, []string{"RAFIKI_DB", "RAFIKI_SAMPLE_SECRET"}) {
 		t.Errorf("Defined = %v, want the file's pre-merge keys in order", res.Defined)
 	}
 

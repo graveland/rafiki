@@ -185,27 +185,6 @@ func GlobalLSPConfig() string {
 	return filepath.Join(ConfigDir(), "lsp.json")
 }
 
-// ControlTokenFile is the shared-secret file for control-plane auth:
-// <ConfigDir>/control.token. Expected mode 0600; the daemon reads it at
-// startup (env wins), and the client re-reads it on every dial so token
-// rotation works without a restart.
-func ControlTokenFile() string { return filepath.Join(ConfigDir(), "control.token") }
-
-// ControlTokenFromEnv returns the control-plane token for CLIENTS:
-// RAFIKI_CONTROL_TOKEN env, else the trimmed contents of ControlTokenFile()
-// if it exists, else "". The daemon reads only the env var (not the file)
-// so it never accidentally reads a client-side token file.
-func ControlTokenFromEnv() string {
-	if t := os.Getenv("RAFIKI_CONTROL_TOKEN"); t != "" {
-		return t
-	}
-	b, err := os.ReadFile(ControlTokenFile())
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
-
 // TokenFile is the client's bearer token: <ConfigDir>/token, mode 0600.
 // Written by `rafiki user create`, re-read on every dial so `user rm` +
 // `user create` rotation works without a restart.

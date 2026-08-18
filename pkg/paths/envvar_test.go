@@ -24,9 +24,10 @@ func TestGet_DoesNotFallBackToRetiredSpellings(t *testing.T) {
 	}
 }
 
-// The three merges: six variables became three, and neither survivor is
-// overloaded. RAFIKI_URL/RAFIKI_TOKEN are client-side (what this process
-// presents); RAFIKI_SERVE_TOKEN is server-side (what the face accepts).
+// RAFIKI_URL/RAFIKI_TOKEN are client-side — what this process presents — and
+// now serve both surfaces a client reaches: an LLM proxy and (https:// only)
+// a remote daemon's control plane. The separate control-only URL, token and
+// server-accept-token variables are retired; these two names carry all of it.
 func TestOwnedVariableNames(t *testing.T) {
 	cases := map[string]string{
 		Socket:       "RAFIKI_SOCKET",
@@ -34,7 +35,6 @@ func TestOwnedVariableNames(t *testing.T) {
 		DB:           "RAFIKI_DB",
 		URL:          "RAFIKI_URL",
 		Token:        "RAFIKI_TOKEN",
-		ServeToken:   "RAFIKI_SERVE_TOKEN",
 		DefaultModel: "RAFIKI_DEFAULT_MODEL",
 		Instructions: "RAFIKI_INSTRUCTIONS",
 	}
