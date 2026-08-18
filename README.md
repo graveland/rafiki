@@ -277,9 +277,16 @@ that plain `bash` cannot offer, because plain `bash` is synchronous with a
 
 They are parent-side tools implemented as RPCs, and they **do not exist**
 when no executor is configured — a tool that can only answer "not configured"
-costs a turn to learn nothing. Output is held in a 100 KB tail ring on the
-executor and a finished job stays readable for 10 minutes before it is
-reaped.
+costs a turn to learn nothing. Output is written to a file on the executor,
+retained with drop-oldest at 8 MB, and a poll returns at most 100 KB of it from
+the end — when it clips, the reply names the file so the agent can `read` or
+`grep` the rest on the same machine.
+
+A finished job's output has **no expiry**. It lives until the agent's workspace
+is released, because a wall-clock window cannot know when an async agent will
+come back for it: a turn can end and resume hours later. What bounds it is a
+per-workspace byte budget (`--job-output-budget-mb`, 256 MB), which evicts the
+oldest finished job first and never evicts a running one.
 
 See `docs/reference/executor-protocol.md` for the full wire protocol.
 
@@ -301,6 +308,22 @@ process's filesystem view — the container's mounts, chosen in `docker run`, or
 the host user's permissions — is the boundary. The executor declares nothing
 about itself: `isolation`, `workspace_mode`, `roots` and `labels` live only on
 the database row set at token-mint time.
+
+**Which means the row is where you say it is a container**, when you mint the
+credential:
+
+```
+rafiki executor create --isolation container --workspace-mode ephemeral \
+  --root /work --label env=ci
+```
+
+Nothing detects this and nothing ever will — an executor sniffing
+`/proc/1/cgroup` would be asserting a fact that gates it. The row is what
+selects the machine (`--workspace-mode` narrows placement), what decides whether
+losing it fails a child or moves it, and what tells the child it is sandboxed at
+all. Leave `--isolation` at its `none` default on a machine that really is a
+container and the worker is never told, so its first denied path reads as a
+broken repository rather than as the sandbox working.
 
 **No path vocabulary.** There is no way to restrict a worker to a subtree of
 its worktree, by design. For container executors, `docker run -v` expresses the

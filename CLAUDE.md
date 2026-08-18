@@ -9,9 +9,8 @@
   whole point of the split and the easiest invariant for a future change to
   violate silently. `cmd/rafiki` links **zero** pgx packages, enforced by
   `TestClientDoesNotLinkPostgres`. `rafiki` is also the EXECUTOR
-  (`rafiki executor serve`, `rafiki executor serve-stdio`) — `cmd/rafiki-executor`
-  is retired, and its absence is deliberate: two artifacts, one client and one
-  server. Folding it in required `pkg/executor` to become pgx-free too, so that
+  (`rafiki executor serve`) — `cmd/rafiki-executor` is retired, and its absence
+  is deliberate: two artifacts, one client and one server. Folding it in required `pkg/executor` to become pgx-free too, so that
   test now covers the executor as well; `pkg/executor/no_postgres_test.go` keeps
   the invariant attached to the packages so it survives further rearranging.
   Several concrete changes got the client there: it asks the daemon for model
@@ -91,7 +90,7 @@
   workspace; without it the outer server cannot tell which container to forward
   to. `Release` used to call a `killAll()` that took no workspace argument, so
   releasing one child's workspace killed every other child's jobs on the executor
-  (finding D4) — it is `killWorkspace(id)` now, and it signals the process GROUP,
+  (finding D4) — it is `releaseWorkspace(id)` now, and it signals the process GROUP,
   matching `kill()`, so a background `npm run dev` does not strand its tree.
 
 - **Two tool lists, and they are not the same list.** `tools.ExecutorLocalTools()` is what an executor process RUNS — `read`, `write`, `edit`, `glob`, `grep`, `bash` — and `executor.NewServer` builds its registry with `MaterializeOnly` over exactly that set. `tools.RoutedToExecutor()` is what the PARENT dispatches remotely: those six plus `bash_start`, `bash_output`, `bash_kill`, which are parent-side tools implemented as RPCs and never reach the executor's registry. Everything else — `skill`, `task_*`, `web_*`, `lsp_*`, MCP — stays parent-side, which is what keeps credentials above the boundary. Building the executor's registry with `MaterializeAll` instead is a live panic: `ToolOpts.Tasks` is nil there, and the `task_*` tools do not nil-check.
@@ -177,40 +176,39 @@
   `Park` outside it; `sweepParkedOnce` fires `onLost` after the lock is dropped
   for the same reason.
 
-- **Container mounts ARE the grant, and the daemon derives them — nothing
-  model-facing contributes a path.** `pkg/workspace.Derive` takes a cwd and a
-  mode, and that signature is the enforcement: a coordinator choosing labels
-  and a workspace mode cannot make the subtle mistakes a coordinator composing
-  path allowlists would. Do not add a caller-supplied mount list. Note the
-  matching asymmetry for NATIVE executors: path scoping there is deliberately
-  absent, because the file tools could enforce it and `bash` could not, and a
-  scope that evaporates on the first shell command is worse than none — native
-  access is gated by admission, not by paths.
+- **The executor row is the ONLY authority on what an executor is, and the
+  standing bug is a consumer that reads the self-report instead.** `Describe`
+  and `ProvisionResponse` deliberately leave `isolation` and `workspace_mode`
+  EMPTY — an executor does not know whether it is in a container and must not
+  guess, because that fact gates where other people's children run. Everything
+  downstream must read `executors.Executor` (the row the operator wrote at mint
+  time): `workspaceInfoFromRow` for what the child is told, the
+  `rafiki/workspace-mode` label for reschedule-vs-fail,
+  `narrowByWorkspaceMode` for selection. This has already failed twice in one
+  direction — the daemon believed `resp.Isolation`, got "none" for every child,
+  and `BuildSystemPrompt` silently dropped the entire "Your machine" block for
+  exactly the sandboxed workers it exists to warn; and the workspace-mode label
+  was hardcoded `"pinned"`, which made the whole reschedule path dead code. Both
+  were invisible: no test failed, because the tests had been updated to match
+  the self-report. When you touch this path, ask what row field the value came
+  from.
 
-- **`RepoRoot` must use `--git-common-dir`, never `--show-toplevel`.** Inside a
-  linked worktree `--show-toplevel` returns the worktree, which makes every
-  worktree its own repo and turns the read-only `/repo` mount into a duplicate
-  of `/work` — silently removing the read-only half of the grant. This is what
-  migration 0013's "repo_root groups worktrees of one repo; cwd alone does
-  not" is about.
+- **An unknown workspace mode is PINNED, never ephemeral** (`workspaceModeOrPinned`).
+  Pinned means an executor loss fails the child where it stood; ephemeral means
+  the daemon moves it onto another machine. Defaulting an absent value to
+  ephemeral — which `HandleExecutorLost` did — reschedules children onto
+  machines no operator ever marked interchangeable.
 
-- **`Pool.ClientFor` returns a connection-scoped client; `ClientForWorkspace`
-  returns a child-scoped one.** A workspaced child handed the shared client
-  runs its tools in whatever workspace the previous caller used — a cross-child
-  leak no test catches, because both children see plausible files either way.
-
-- **The model-facing executor grant is exactly two fields — a label selector and
-  a workspace mode — and must stay that way.** Mounts are derived by the daemon
-  from the child's worktree (`pkg/workspace.Derive`); the moment a caller can
-  compose a mount list, grants stop being safe to author without human review,
-  which is the property the whole selector model exists to buy.
-  `TestAgentSpawnHasNoPathShapedParameter` guards it, but read what it actually
-  asserts before trusting it: it blocklists `mount`/`mounts`/`roots`/`path`/
-  `paths`/`volume`/`allow`/`deny` **and nothing else**. `agent_spawn` does
-  expose a model-facing `cwd`, it reaches `workspace.Derive` unchecked, and
-  Derive turns it into the read-write `/work` mount — so `cwd="/"` bind-mounts
-  the host root RW. The two-field claim describes the mount SHAPE, not the
-  absence of every path. Tracked as B4 in `tasks/todo.md`.
+- **Native executors have NO path scoping, deliberately, and `--root` is a
+  working directory rather than a sandbox.** The file tools could enforce a
+  scope in userspace and `bash` could not, and a scope that evaporates on the
+  first shell command is worse than none — native access is gated by
+  admission, not by paths. For containers the mounts are the grant and the
+  kernel enforces them, but rafiki does not compose them: the operator does, in
+  `docker run`. The row's `roots` DESCRIBES that view for humans and selectors;
+  nothing enforces it and nothing may imply it does. This is why the workspace
+  block prints roots bare — the daemon no longer knows which are read-only, and
+  an invented "read-write" label is a claim it cannot back.
 
 - **The workspace block belongs in the system prompt's ENVIRONMENT section,
   never in `defaultBasePrompt`.** It varies between children, and
@@ -246,14 +244,36 @@
   detection must never be added**: sniffing `/proc/1/cgroup` is the executor
   asserting a fact that gates it, which is what `SelfReported` already forbids.
 
-- **`--root` is a working directory, not a sandbox.** Native executors have no
-  path scoping by design, so an absolute path reaches outside it. The boundary
-  is the process's filesystem view — the container's mounts, chosen in
-  `docker run`, or the host user's permissions. The row's `roots` DESCRIBES that
-  view for humans and selectors; nothing enforces it and nothing may imply it
-  does. `Describe`'s isolation and workspace_mode are self-reported and must
-  never be read by anything that gates: `executorAcceptsReschedule` reads the
-  row for exactly this reason.
+- **A background job needs `WaitDelay`, and its exit code comes from
+  `ProcessState`, not from the error.** `exec.Cmd.Wait` waits for the process
+  AND for its output pipes to reach EOF; a backgrounded grandchild inherits
+  those pipes and holds them, so `bash_start "npm run dev &"` exits instantly
+  and `Wait` NEVER returns — the job reports running forever, `RunningHandles`
+  counts it forever, retention never starts, and the goroutine leaks. With the
+  delay set, a zero exit alongside a lingering grandchild returns
+  `exec.ErrWaitDelay` rather than an `*exec.ExitError`, so unwrapping the error
+  records -1 for a job that SUCCEEDED; `cmd.ProcessState.ExitCode()` is right in
+  every case. `pkg/fundi/tools/bash.go` has carried `bashWaitDelay` for the
+  foreground path all along — the background path simply never got it.
+
+- **Background job output is retained by BYTES until the workspace is released,
+  never by a timer.** A wall-clock window is meaningless for an async agent: a
+  turn can end and resume hours later, so the old 10-minute sweep expired output
+  while the agent that started the job was alive and idle. The workspace's
+  lifetime already means "as long as someone could ask". A byte budget bounds it
+  (`--job-output-budget-mb`), evicting the oldest FINISHED job first — a count
+  would treat 32 `git status` jobs and 32 saturated build logs as equal, and a
+  running job is never evictable because its output is a live stream.
+
+- **`tools.RTKMode("")` is NOT `RTKOff`** — `rtkRewrite` short-circuits only on
+  the literal `"off"`, so a zero value behaves like `auto`. The executor built
+  its registry with no `RTK` field at all, which meant every executor silently
+  rewrote commands through rtk with nobody having chosen it. `Options.RTK` is
+  explicit now and `toolOptsFor` exists to make the whole Options→ToolOpts
+  mapping testable, because an unset field there does not fail — it takes a zero
+  value that may not mean what it looks like. Note background bash is never
+  rewritten regardless: the refusal fallback needs an exit to inspect and output
+  it can take back, and a long-running job has neither.
 
 - **`Pool.live` must be mutated on connection IDENTITY, never on executor ID
   alone.** An executor restart installs a new `liveConn` under the same ID long
