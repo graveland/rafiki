@@ -132,11 +132,11 @@ func TestServeStdioAnswersDescribe(t *testing.T) {
 	}
 	// The inner server is already inside the box. If it ever reported container
 	// isolation it would try to provision containers of its own.
-	if m.Isolation != "none" {
-		t.Errorf("Isolation = %q; want none", m.Isolation)
-	}
-	if m.WorkspaceMode != "pinned" {
-		t.Errorf("WorkspaceMode = %q; want pinned", m.WorkspaceMode)
+	// Isolation and WorkspaceMode are deliberately EMPTY here. They are
+	// self-reported fields and the authoritative copy lives on the row.
+	if m.Isolation != "" || m.WorkspaceMode != "" {
+		t.Errorf("Describe must not self-report isolation/workspace_mode; got %q/%q",
+			m.Isolation, m.WorkspaceMode)
 	}
 	if m.Platform != runtime.GOOS+"/"+runtime.GOARCH {
 		t.Errorf("Platform = %q; want %s/%s", m.Platform, runtime.GOOS, runtime.GOARCH)
@@ -213,10 +213,6 @@ func TestExecutorServeRejectsConflictingFlags(t *testing.T) {
 		{"both transports", []string{"executor", "serve", "--socket", "/tmp/x.sock", "--connect", "127.0.0.1:9"},
 			"mutually exclusive"},
 		{"neither transport", []string{"executor", "serve"}, "is required"},
-		{"container without an image", []string{"executor", "serve", "--socket", "/tmp/x.sock",
-			"--isolation", "container"}, "requires --image"},
-		{"ephemeral without isolation", []string{"executor", "serve", "--socket", "/tmp/x.sock",
-			"--workspace-mode", "ephemeral"}, "does not support"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := exec.Command(bin, tc.args...).CombinedOutput()

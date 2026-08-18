@@ -246,8 +246,6 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 		"--enroll-token", token,
 		"--credential-file", credFile,
 		"--pin-cert", g.fingerprint,
-		"--isolation", "none",
-		"--workspace-mode", "pinned",
 		"--root", root,
 	)
 	cmd.Env = os.Environ()
