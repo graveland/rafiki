@@ -98,6 +98,14 @@ func IsRemoteURL(raw string) bool {
 // (restricted to ctrl_user_create). Sending ctrl_auth with an empty token
 // would instead resolve to an unknown identity and be rejected outright.
 //
+// With no ctrl_auth frame, the server's authHandshakeTimeout (10s) bounds
+// dial-completion all the way to the CALLER'S FIRST REQUEST, not to a
+// handshake write DialURL itself makes — nothing is sent on this path until
+// the caller does. A command that dials and then does other work (prompts,
+// reads a file) before its first Request risks tripping that budget for
+// reasons this doesn't otherwise explain; today's only no-token caller
+// (`rafiki user create`) sends immediately, so it doesn't.
+//
 // Auth success is implicit — the server keeps the connection open.
 // Auth failure is detected when the server closes the connection: the
 // subsequent read in readLoop will fail with an auth-related read error.
@@ -128,10 +136,18 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 	}
 	// Everything from here reads through upConn: bytes the server pipelines
 	// behind its 101 would otherwise be stranded in the upgrade's own buffer.
-	var rawConn net.Conn = upConn
+	return serveConn(upConn, token)
+}
 
-	if err := sendAuthFrame(rawConn, token); err != nil {
-		rawConn.Close()
+// serveConn is DialURL's tail: send (or skip) the auth frame on an
+// already-connected conn, then hand it to a Client and start reading.
+// Split out from DialURL so it is drivable directly over a net.Pipe in
+// tests — DialURL itself only ever trusts system root CAs, so a test
+// server's self-signed certificate can never get far enough through TLS
+// verification to reach this code at all.
+func serveConn(conn net.Conn, token string) (*Client, error) {
+	if err := sendAuthFrame(conn, token); err != nil {
+		conn.Close()
 		return nil, fmt.Errorf("send auth: %w", err)
 	}
 
@@ -141,7 +157,7 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 	// readLoop to fail, and the next Request/Subscribe will surface the
 	// error.
 	c := &Client{
-		conn:    rawConn,
+		conn:    conn,
 		closeCh: make(chan struct{}),
 		subs:    make(map[uint64]chan []byte),
 	}
@@ -264,7 +280,12 @@ func (c *Client) readLoop() {
 	for {
 		frame, err := r.ReadFrame()
 		if err != nil {
-			if err != io.EOF {
+			// A more specific reason may already be stashed below (an
+			// auth-failure response with no waiter to deliver it to) — don't
+			// let the connection's mundane teardown error (EOF, or a "write
+			// on closed pipe" from the peer having already hung up) clobber
+			// it. First stored reason wins.
+			if err != io.EOF && c.readErr.Load() == nil {
 				c.readErr.Store(err)
 			}
 			c.closed.Store(true)
@@ -291,6 +312,19 @@ func (c *Client) readLoop() {
 				case chAny.(chan *protocol.Response) <- &resp:
 				default:
 				}
+				break
+			}
+			// No Request is waiting on this id. The one case that matters is
+			// a rejected ctrl_auth: DialURL writes it before any Request has
+			// registered a waiter (id "0", never reused by a real request),
+			// and a no-token bootstrap-or-refused dial gets the SAME shape
+			// back for its very first frame, whatever id the caller gave it.
+			// Either way the server closes right after, so without this the
+			// only thing callers ever see is errClosedConn(nil) —
+			// "client connection closed" — with the real reason (auth_invalid,
+			// auth_required, ...) silently dropped here and lost forever.
+			if resp.Command == protocol.TypeCtrlAuth && !resp.Success {
+				c.readErr.Store(authError(&resp))
 			}
 		default:
 			// Event frames (ctrl_event, ctrl_child_*). Hand off to Subscribe
@@ -369,4 +403,17 @@ func errClosedConn(stored any) error {
 		return errors.New("client connection closed")
 	}
 	return fmt.Errorf("client connection closed: %w", stored.(error))
+}
+
+// authError renders a failed ctrl_auth response (auth_invalid, auth_required,
+// ...) as a Go error, for readLoop to stash in c.readErr when nobody is
+// waiting to receive the response frame itself.
+func authError(resp *protocol.Response) error {
+	if resp.Error == nil {
+		return errors.New("auth: rejected")
+	}
+	if resp.Error.Message == "" {
+		return fmt.Errorf("auth: %s", resp.Error.Code)
+	}
+	return fmt.Errorf("auth: %s: %s", resp.Error.Code, resp.Error.Message)
 }
