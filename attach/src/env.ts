@@ -32,25 +32,28 @@ export function envIsSet(name: string, legacy?: string): boolean {
 }
 
 /**
- * Returns the remote control URL (e.g. "tls://rafiki.graveland.dev:443").
- * When set it wins over RAFIKI_SOCKET for selecting the daemon to dial.
+ * Returns the remote control URL (e.g. "https://rafiki.graveland.dev:443").
+ * When set (and https://) it wins over RAFIKI_SOCKET for selecting the
+ * daemon to dial. This is the same RAFIKI_URL the Go side reads — one dial
+ * target for both the LLM proxy and (https:// only) the control plane.
  */
 export function controlURL(): string | null {
-    return process.env["RAFIKI_CONTROL_URL"] || null;
+    return process.env["RAFIKI_URL"] || null;
 }
 
 /**
- * Returns the control-plane auth token: RAFIKI_CONTROL_TOKEN env, else the
- * content of ~/.config/rafiki/control.token, else null.
+ * Returns the control-plane auth token: RAFIKI_TOKEN env, else the content
+ * of ~/.config/rafiki/token, else null. One credential for both surfaces —
+ * written by `rafiki user create`.
  */
 export function controlToken(): string | null {
-    const env = process.env["RAFIKI_CONTROL_TOKEN"];
+    const env = process.env["RAFIKI_TOKEN"];
     if (env) return env;
     try {
         const { readFileSync } = require("node:fs");
         const { homedir } = require("node:os");
         const p = require("node:path");
-        const tokenPath = p.join(homedir(), ".config", "rafiki", "control.token");
+        const tokenPath = p.join(homedir(), ".config", "rafiki", "token");
         const content = readFileSync(tokenPath, "utf8") as string;
         return content.trim() || null;
     } catch {
