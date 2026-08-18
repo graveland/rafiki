@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/version"
 )
@@ -34,11 +35,6 @@ import (
 // `label`, `disable`, `enable`) only work against the daemon's control socket,
 // which an executor host does not have, so shipping them to one is inert rather
 // than a widening of authority.
-//
-// `serve` and `serve-stdio` are separate subcommands rather than one command
-// with a mode flag: the mutual exclusion is then structural, cobra enforces it,
-// and `serve-stdio` does not advertise a dozen flags that mean nothing inside a
-// container.
 
 // resolveRoot turns a possibly-empty, possibly-relative --root into an absolute
 // path, defaulting to the working directory.
@@ -80,6 +76,9 @@ func newExecutorServeCmd() *cobra.Command {
 		credential        string
 		pinnedFingerprint string
 		serverName        string
+		rtkMode           string
+		spillDir          string
+		jobBudgetMB       int64
 	)
 
 	cmd := &cobra.Command{
@@ -110,9 +109,12 @@ Two transports, exactly one of which must be given:
 			}
 
 			srv := executor.NewServer(executor.Options{
-				Root:        wd,
-				Concurrency: concurrency,
-				Version:     version.String(),
+				Root:            wd,
+				Concurrency:     concurrency,
+				Version:         version.String(),
+				RTK:             tools.ParseRTKMode(rtkMode),
+				SpillDir:        spillDir,
+				JobOutputBudget: jobBudgetMB << 20,
 			})
 			handler := executorHandler(srv)
 
@@ -133,6 +135,14 @@ Two transports, exactly one of which must be given:
 			"the host user's permissions — and the authoritative description of that lives "+
 			"on its database row")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 6, "maximum concurrent tool calls")
+	cmd.Flags().StringVar(&rtkMode, "rtk", "auto",
+		"rewrite known commands through rtk: auto|on|off. The executor operator's choice, "+
+			"not the child's — a child cannot see what is installed on this machine")
+	cmd.Flags().StringVar(&spillDir, "spill-dir", "",
+		"where oversized tool results and background job output are written (defaults to the system temp dir)")
+	cmd.Flags().Int64Var(&jobBudgetMB, "job-output-budget-mb", 256,
+		"megabytes of background-job output retained per workspace, oldest finished job dropped "+
+			"first. Output is kept until the workspace is released; there is no time limit")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
@@ -219,61 +229,4 @@ func serveUnixSocket(socketPath, wd string, handler http.Handler) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
-}
-
-// ─── serve-stdio ───────────────────────────────────────────────────────────────
-
-func newExecutorServeStdioCmd() *cobra.Command {
-	var (
-		root        string
-		concurrency int
-	)
-
-	cmd := &cobra.Command{
-		Use:   "serve-stdio",
-		Short: "Serve tools on stdin/stdout (used inside a container workspace)",
-		Long: `Serve the executor's tool surface over stdin and stdout.
-
-This is how a container workspace runs tools. The container has no network at
-all — the daemon derives the grant with Network: "none" — so there is no socket
-to listen on; the outer executor reaches this process through the stdio of a
-` + "`docker exec -i`" + ` and speaks the same HTTP/2 it would over TLS.
-
-stdout is the wire. Every diagnostic goes to stderr.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmd.SilenceUsage = true
-
-			wd, err := resolveRoot(root)
-			if err != nil {
-				return err
-			}
-
-			// Isolation is fixed at "none" and the workspace mode at "pinned",
-			// not taken from a flag: this process is already inside the box, and an
-			// inner server that provisioned containers of its own would be both
-			// wrong and, with no docker socket in the workspace, a confusing
-			// failure at the first Provision rather than here.
-			srv := executor.NewServer(executor.Options{
-				Root:        wd,
-				Concurrency: concurrency,
-				Version:     version.String(),
-			})
-
-			// No signal handling. Teardown is the outer executor killing the
-			// `docker exec` process, which closes our stdin and makes ServeConn
-			// return on EOF; a SIGTERM handler would race that for no gain.
-			slog.Info("executor serving on stdio", "root", wd, "version", version.String())
-			if err := execpool.ServeInverted(
-				execpool.NewStdioConn(os.Stdin, os.Stdout), executorHandler(srv)); err != nil {
-				return fmt.Errorf("serve-stdio: %w", err)
-			}
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&root, "root", "", "working directory root (defaults to the current directory)")
-	cmd.Flags().IntVar(&concurrency, "concurrency", 6, "maximum concurrent tool calls")
-
-	return cmd
 }

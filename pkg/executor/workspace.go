@@ -1,61 +1,26 @@
 package executor
 
 import (
-	"context"
-	"os/exec"
 	"sync"
-
-	"go.graveland.dev/rafiki/pkg/executorpb"
 )
 
-// Backend provisions and tears down workspaces. There is one implementation:
-// native (this file, always pinned).
-type Backend interface {
-	Provision(ctx context.Context, req *executorpb.ProvisionRequest) (*workspace, error)
-	Release(ctx context.Context, ws *workspace) error
-}
-
 // workspace is one provisioned place to run tools.
+//
+// There is one kind. An executor serves the filesystem it can see, working from
+// the --root it was started with, and a workspace is a handle bound to that
+// root for one child's lifetime. It used to be an interface with a native and a
+// container implementation; rafiki does not launch containers any more, because
+// a container running `rafiki executor serve` IS a container executor and
+// docker already knows how to start one.
+//
+// Nothing here describes isolation. Whether this process's filesystem view is a
+// container is a fact about the machine, and the authoritative copy lives on the
+// executor's database row where the operator put it — not in a field this
+// process fills in about itself.
 type workspace struct {
-	id        string
-	workdir   string // host path for native; container path for container
-	roots     []string
-	isolation string
-	// exec runs a command IN this workspace. Native shells out directly;
-	// container goes through `docker exec`.
-	exec func(ctx context.Context, argv []string) *exec.Cmd
-	// childID is the daemon's id, carried for labelling.
-	childID string
-}
-
-// nativeBackend implements Backend for a local filesystem. It is always pinned.
-type nativeBackend struct {
-	root string
-}
-
-func newNativeBackend(root string) *nativeBackend {
-	return &nativeBackend{root: root}
-}
-
-func (b *nativeBackend) Provision(_ context.Context, req *executorpb.ProvisionRequest) (*workspace, error) {
-	id := randomID()
-	ws := &workspace{
-		id:        id,
-		workdir:   b.root,
-		roots:     []string{b.root},
-		isolation: "none",
-		childID:   req.ChildId,
-		exec: func(ctx context.Context, argv []string) *exec.Cmd {
-			c := exec.CommandContext(ctx, argv[0], argv[1:]...)
-			c.Dir = b.root
-			return c
-		},
-	}
-	return ws, nil
-}
-
-func (b *nativeBackend) Release(_ context.Context, _ *workspace) error {
-	return nil
+	id      string
+	workdir string
+	roots   []string
 }
 
 // workspaceRegistry holds provisioned workspaces by id.

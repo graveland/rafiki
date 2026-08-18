@@ -22,16 +22,19 @@ const (
 
 	bashOutputDescription = "Read what a background job has printed. Pass the handle " +
 		"from bash_start. Reports whether the job is still running and, once it has " +
-		"finished, its exit code. Safe to call repeatedly — each call returns " +
-		"everything the job has produced so far."
+		"finished, its exit code. Safe to call repeatedly. A job that has printed more " +
+		"than fits in one result is clipped to the most recent output, and the reply " +
+		"names a file on the executor holding the fuller record — read or grep that " +
+		"file rather than assuming the earlier output is gone."
 
 	bashKillDescription = "Stop a background job and everything it spawned. Pass the " +
 		"handle from bash_start. A job left running holds a process on the machine " +
 		"after you are done with it; kill the ones you started."
 
 	// maxJobOutputChars bounds what one bash_output call puts in the context.
-	// The executor keeps a 100 KB ring; handing all of it to the model on
-	// every poll is how a watch-mode job eats a context window.
+	// The executor caps its own reply too, and keeps far more than either on
+	// disk; handing all of it to the model on every poll is how a watch-mode
+	// job eats a context window.
 	maxJobOutputChars = 20_000
 )
 
@@ -138,8 +141,13 @@ func (t *bashOutputTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		return NewErrorResult(fmt.Errorf("bash_output: %w", err)), nil
 	}
 	if !snap.Found {
+		// Deliberately not a time window: a finished job's output is kept until
+		// its agent's workspace is released, and dropped early only when the
+		// workspace exceeds its output budget. A wall-clock retention window
+		// cannot know when an async agent will come back for its output.
 		return NewTextResult(fmt.Sprintf(
-			"no such job %q — it was never started, or it finished more than 10 minutes ago and was reaped.",
+			"no such job %q — it was never started, the handle is wrong, or its output was "+
+				"released to stay within this workspace's output budget (oldest finished job first).",
 			params.Handle)), nil
 	}
 

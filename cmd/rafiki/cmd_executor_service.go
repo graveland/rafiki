@@ -77,10 +77,10 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 	cmd.Flags().String("credential-file", "", "where the credential is stored (default: <data dir>/executor.cred)")
 	cmd.Flags().String("pin-cert", "", "SHA-256 fingerprint of the daemon's leaf certificate")
 	cmd.Flags().String("server-name", "", "TLS server name (SNI), when it differs from the --connect host")
-	cmd.Flags().String("isolation", "none", "isolation this executor provides: none|container")
-	cmd.Flags().String("workspace-mode", "pinned", "pinned or ephemeral")
-	cmd.Flags().String("image", "", "container image for --isolation container")
 	cmd.Flags().Int("concurrency", 6, "maximum concurrent tool calls")
+	cmd.Flags().String("rtk", "", "rewrite known commands through rtk: auto|on|off")
+	cmd.Flags().String("spill-dir", "", "where oversized results and background job output are written")
+	cmd.Flags().Int64("job-output-budget-mb", 0, "megabytes of background-job output retained per workspace")
 	cmd.Flags().String("binary", "", "path to the rafiki binary (default: this one)")
 	cmd.Flags().String("path-env", "", "PATH value for the service environment (default: auto-detect)")
 	return cmd
@@ -137,6 +137,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	for flag, dest := range map[string]string{
 		"pin-cert": "--pin-cert", "server-name": "--server-name",
+		"rtk": "--rtk", "spill-dir": "--spill-dir",
 	} {
 		if v, _ := cmd.Flags().GetString(flag); v != "" {
 			args = append(args, dest, v)
@@ -144,6 +145,9 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	if c, _ := cmd.Flags().GetInt("concurrency"); c > 0 && c != 6 {
 		args = append(args, "--concurrency", fmt.Sprint(c))
+	}
+	if b, _ := cmd.Flags().GetInt64("job-output-budget-mb"); b > 0 {
+		args = append(args, "--job-output-budget-mb", fmt.Sprint(b))
 	}
 
 	pathEnv, _ := cmd.Flags().GetString("path-env")
