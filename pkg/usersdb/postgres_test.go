@@ -222,3 +222,65 @@ func TestTokensAreDistinctAcrossUsers(t *testing.T) {
 		seen[tok] = true
 	}
 }
+
+// A store that cannot reach the database has not learned the credential is
+// invalid — it has learned nothing. Authenticate must not collapse "I could
+// not check" into ErrNotFound, because a caller maps ErrNotFound to 401 and
+// everything else to 503; the reference implementation this package was
+// modelled on (executorsdb.pgStore.authenticateByHash) gets this wrong today,
+// returning ErrNotFound for every error including a closed pool.
+func TestAuthenticateOnClosedPoolIsNotErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	s, pool := testStore(t)
+	pool.Close()
+
+	_, err := s.Authenticate(ctx, "rfk_whatever")
+	if err == nil {
+		t.Fatal("expected an error against a closed pool, got nil")
+	}
+	if errors.Is(err, users.ErrNotFound) {
+		t.Fatalf("closed-pool error must not be ErrNotFound (that means the credential is invalid, not that the check failed): %v", err)
+	}
+}
+
+// List's limit parameter must actually reach the query, not just be accepted
+// and ignored.
+func TestListRespectsLimit(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+	for _, name := range []string{"a", "b", "c"} {
+		if _, _, err := s.Create(ctx, name); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+
+	limited, err := s.List(ctx, false, 2)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Fatalf("List(limit=2) over 3 active users returned %d rows, want 2", len(limited))
+	}
+}
+
+func TestDeleteUnknownUsernameIsErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+	if err := s.Delete(ctx, "nobody"); !errors.Is(err, users.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteAlreadyTombstonedUsernameIsErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+	if _, _, err := s.Create(ctx, "brent"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.Delete(ctx, "brent"); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	if err := s.Delete(ctx, "brent"); !errors.Is(err, users.ErrNotFound) {
+		t.Fatalf("second delete on an already-tombstoned user: err = %v, want ErrNotFound", err)
+	}
+}
