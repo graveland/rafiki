@@ -34,7 +34,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ReplacedSessionContext } from "./session.ts";
 import { Client } from "./client.ts";
 import { RemoteAgentSession } from "./session.ts";
-import { envFlag, envValue } from "./env.ts";
+import { controlToken, controlURL, envFlag, envValue } from "./env.ts";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -91,7 +91,10 @@ export class RemoteAgentSessionRuntime {
      * initialised runtime.
      */
     static async connect(opts: ConnectOptions): Promise<RemoteAgentSessionRuntime> {
-        const client = await Client.dial({ socket: opts.socket });
+        const remote = controlURL();
+        const client = remote
+            ? await Client.dialURL(remote, controlToken() ?? "")
+            : await Client.dial({ socket: opts.socket });
         let meta: ChildMetadata;
         try {
             meta = await fetchChildMetadata(client, opts.childId);

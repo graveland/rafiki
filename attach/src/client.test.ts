@@ -10,7 +10,7 @@ import * as net from "node:net";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Client, FrameSplitter, defaultSocketPath } from "./client.ts";
+import { Client, FrameSplitter, defaultSocketPath, upgradeAndServe } from "./client.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -423,5 +423,105 @@ describe("defaultSocketPath", () => {
         const got = defaultSocketPath();
         expect(got).toBe(path.join(os.homedir(), ".local", "state", "rafiki", "controller.sock"));
         expect(got).not.toContain(`${path.sep}.pi${path.sep}`);
+    });
+});
+
+/** Serves one HTTP upgrade at /control, then whatever the handler writes. */
+async function startUpgradeServer(
+    onUpgraded: (conn: net.Socket, head: string) => void
+): Promise<{ port: number; server: net.Server; close: () => Promise<void> }> {
+    const server = net.createServer((conn) => {
+        let buf = "";
+        const onData = (chunk: Buffer) => {
+            buf += chunk.toString("utf8");
+            const end = buf.indexOf("\r\n\r\n");
+            if (end === -1) return;
+            conn.off("data", onData);
+            const head = buf.slice(0, end);
+            onUpgraded(conn, head);
+        };
+        conn.on("data", onData);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as net.AddressInfo).port;
+    return {
+        port,
+        server,
+        close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+}
+
+describe("upgradeAndServe", () => {
+    it("sends GET /control with the rafiki-control upgrade headers", async () => {
+        let head = "";
+        const srv = await startUpgradeServer((conn, h) => {
+            head = h;
+            conn.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: rafiki-control\r\nConnection: Upgrade\r\n\r\n");
+        });
+        const sock = net.createConnection({ port: srv.port, host: "127.0.0.1" });
+        await new Promise((r) => sock.once("connect", r));
+        const client = await upgradeAndServe(sock, `127.0.0.1:${srv.port}`, "rfk_tok");
+
+        expect(head).toContain("GET /control HTTP/1.1");
+        expect(head.toLowerCase()).toContain("upgrade: rafiki-control");
+        expect(head.toLowerCase()).toContain("connection: upgrade");
+        await client.close();
+        await srv.close();
+    });
+
+    it("rejects a response that is not 101", async () => {
+        const srv = await startUpgradeServer((conn) => {
+            conn.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        });
+        const sock = net.createConnection({ port: srv.port, host: "127.0.0.1" });
+        await new Promise((r) => sock.once("connect", r));
+        await expect(
+            upgradeAndServe(sock, `127.0.0.1:${srv.port}`, "rfk_tok")
+        ).rejects.toThrow(/101/);
+        await srv.close();
+    });
+
+    // THE regression test. The server puts the 101 head and a response frame in
+    // ONE write, exactly as a real daemon may. A client that reads the head and
+    // then starts a fresh reader on the socket loses the frame and hangs to its
+    // request timeout — the same hazard upgradeconn.Conn exists to solve on the
+    // Go side, and the one CLAUDE.md documents.
+    it("does not lose a frame pipelined behind the 101", async () => {
+        const srv = await startUpgradeServer((conn) => {
+            const resp = JSON.stringify({
+                type: "ctrl_response", command: "ctrl_status", id: "c1",
+                success: true, data: { ok: true },
+            });
+            conn.write(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: rafiki-control\r\nConnection: Upgrade\r\n\r\n" +
+                resp + "\n"
+            );
+        });
+        const sock = net.createConnection({ port: srv.port, host: "127.0.0.1" });
+        await new Promise((r) => sock.once("connect", r));
+        const client = await upgradeAndServe(sock, `127.0.0.1:${srv.port}`, "");
+
+        // The frame was already on the wire before we asked for it.
+        const resp = await client.request({ type: "ctrl_status", id: "c1" });
+        expect(resp.success).toBe(true);
+        await client.close();
+        await srv.close();
+    });
+
+    it("writes the ctrl_auth frame when a token is given, and none when empty", async () => {
+        for (const [token, wantAuth] of [["rfk_tok", true], ["", false]] as const) {
+            let after = "";
+            const srv = await startUpgradeServer((conn, _h) => {
+                conn.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: rafiki-control\r\nConnection: Upgrade\r\n\r\n");
+                conn.on("data", (c: Buffer) => { after += c.toString("utf8"); });
+            });
+            const sock = net.createConnection({ port: srv.port, host: "127.0.0.1" });
+            await new Promise((r) => sock.once("connect", r));
+            const client = await upgradeAndServe(sock, `127.0.0.1:${srv.port}`, token);
+            await new Promise((r) => setTimeout(r, 50));
+            expect(after.includes("ctrl_auth")).toBe(wantAuth);
+            await client.close();
+            await srv.close();
+        }
     });
 });
