@@ -12,19 +12,9 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/workspace"
 )
 
-// wsMode resolves a requested workspace mode to its label value. Empty means
-// pinned, the model-facing default.
-func wsMode(requested string) string {
-	if requested == "" {
-		return "pinned"
-	}
-	return requested
-}
-
-// provisionWorkspace derives a grant from the child's cwd and provisions it
+// provisionWorkspace provisions a workspace on the executor.
 // on the executor. The ordering matters: provision BEFORE the child is
 // registered, so a provisioning failure refuses the spawn with nothing to
 // clean up.
@@ -41,40 +31,23 @@ func (c *Controller) provisionWorkspace(
 		return "", nil, nil, fmt.Errorf("execpool: not a real pool")
 	}
 
-	// Resolve the workspace mode. The model-facing default is pinned (an
-	// existing tree on one machine); ephemeral is what the container backend
-	// provisions. An empty mode means pinned.
-	mode := workspace.ModePinned
-	if req.WorkspaceMode == string(workspace.ModeEphemeral) {
-		mode = workspace.ModeEphemeral
+	cwd := req.Cwd
+	if cwd == "" {
+		cwd = "."
 	}
 
-	// Derive the grant from the child's worktree.
-	grant, err := workspace.Derive(req.Cwd, mode)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("grant derivation: %w", err)
-	}
-
-	// Build provision request.
-	provisionReq := &executorpb.ProvisionRequest{
-		ChildId:       "", // set by caller
-		WorkspaceMode: string(mode),
-		Workdir:       grant.Workdir,
-		Network:       grant.Network,
-	}
-	var readOnlyRoots []string
-	for _, m := range grant.Mounts {
-		provisionReq.Mounts = append(provisionReq.Mounts, &executorpb.Mount{
-			HostPath:      m.HostPath,
-			ContainerPath: m.ContainerPath,
-			ReadOnly:      m.ReadOnly,
-		})
-		if m.ReadOnly {
-			readOnlyRoots = append(readOnlyRoots, m.ContainerPath)
-		}
-	}
-
-	resp, err := pp.Provision(ctx, executorID, provisionReq)
+	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{
+		// ChildId and Workdir only.
+		//
+		// Mounts are not derived any more and the field is left unset. The
+		// executor serves the filesystem it can see; for a container
+		// executor that view was chosen in `docker run -v ...` by the
+		// operator, exactly as they chose the image. rafiki's grant is the
+		// label selector plus the row's roots — nothing here composes a
+		// path.
+		ChildId: "",
+		Workdir: cwd,
+	})
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", shortID(executorID), err)
 	}
@@ -93,15 +66,10 @@ func (c *Controller) provisionWorkspace(
 		"isolation", resp.Isolation,
 	)
 
-	// Phase 09: the worker's system prompt names where it landed. Roots and
-	// read-only roots are what the provision actually produced; nothing here
-	// is guessed when the executor did not report it.
 	wi = &fundi.WorkspaceInfo{
 		Isolation:     resp.Isolation,
-		WorkspaceMode: string(mode),
+		WorkspaceMode: "pinned",
 		Roots:         resp.Roots,
-		ReadOnlyRoots: readOnlyRoots,
-		Network:       grant.Network,
 	}
 	return resp.WorkspaceId, wi, exec, nil
 }
