@@ -23,6 +23,12 @@ import (
 // cannot drift apart.
 const launchdLabel = "dev.graveland.rafiki"
 
+// executorLaunchdLabel names the EXECUTOR's unit. A second label rather than a
+// second field on the first: the two are independent services with independent
+// lifecycles — an executor is expected to run on machines that host no daemon at
+// all — and sharing an identity would make `stop` ambiguous.
+const executorLaunchdLabel = "dev.graveland.rafiki-executor"
+
 // plistTemplate is the launchd property list for the rafiki daemon.
 const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,7 +38,10 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 	<string>{{.Label}}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>{{.DaemonBinary}}</string>
+		<string>{{xml .DaemonBinary}}</string>
+{{- range .Args}}
+		<string>{{xml .}}</string>
+{{- end}}
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -85,34 +94,49 @@ func xmlEscape(s string) (string, error) {
 }
 
 // renderServiceConfig renders the launchd plist content for the given spec.
-func renderServiceConfig(spec serviceSpec) (string, error) {
+func renderServiceConfig(spec serviceSpec, label string) (string, error) {
 	tmpl, err := template.New("plist").Funcs(template.FuncMap{"xml": xmlEscape}).Parse(plistTemplate)
 	if err != nil {
 		return "", err
 	}
 	var buf bytes.Buffer
-	data := plistData{serviceSpec: spec, Label: launchdLabel, Extra: sortedEnv(spec.ExtraEnv)}
+	data := plistData{serviceSpec: spec, Label: label, Extra: sortedEnv(spec.ExtraEnv)}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
 }
 
-type darwinBackend struct{}
+type darwinBackend struct {
+	// label is the launchd identity: it names the plist and every launchctl
+	// target. Held on the backend so the daemon's unit and the executor's are
+	// managed by the same code with different identities.
+	label string
+	// logPath is where this unit's stdout/stderr go. Held per backend so the
+	// daemon's log and the executor's do not interleave.
+	logPath string
+}
 
-func newServiceBackend() serviceBackend { return &darwinBackend{} }
+func newServiceBackend() serviceBackend {
+	return &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+}
+
+// newExecutorServiceBackend manages the executor's unit rather than the daemon's.
+func newExecutorServiceBackend() serviceBackend {
+	return &darwinBackend{label: executorLaunchdLabel, logPath: paths.ExecutorServiceLogPath()}
+}
 
 func (b *darwinBackend) plistPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"), nil
+	return filepath.Join(home, "Library", "LaunchAgents", b.label+".plist"), nil
 }
 
 // serviceTarget returns the launchctl service target string (gui/UID/label).
 func (b *darwinBackend) serviceTarget() string {
-	return fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), b.label)
 }
 
 // domainTarget returns the launchctl domain target string (gui/UID).
@@ -120,9 +144,7 @@ func (b *darwinBackend) domainTarget() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
 }
 
-func (b *darwinBackend) LogPath() string {
-	return paths.ServiceLogPath()
-}
+func (b *darwinBackend) LogPath() string { return b.logPath }
 
 func (b *darwinBackend) Install(spec serviceSpec) error {
 	plistPath, err := b.plistPath()
@@ -136,7 +158,7 @@ func (b *darwinBackend) Install(spec serviceSpec) error {
 		return fmt.Errorf("create log directory %s: %w", logDir, err)
 	}
 
-	content, err := renderServiceConfig(spec)
+	content, err := renderServiceConfig(spec, b.label)
 	if err != nil {
 		return fmt.Errorf("render plist: %w", err)
 	}

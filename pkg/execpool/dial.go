@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -21,10 +22,22 @@ import (
 // ConnectOptions carries everything the executor side needs to dial, enroll,
 // and serve on a reverse-dialled connection.
 type ConnectOptions struct {
-	Addr           string
-	ServerName     string
-	PinCert        string
-	EnrollToken    string
+	Addr        string
+	ServerName  string
+	PinCert     string
+	EnrollToken string
+
+	// Credential, when set, is used directly and NOTHING is written to disk.
+	// It is how a stateless deployment authenticates: inject the credential
+	// from a secret store as an environment variable and mount no volume.
+	//
+	// Takes precedence over CredentialFile. Enrollment cannot happen on this
+	// path — a credential already names a row — so a lost credential is
+	// re-issued by the operator rather than re-enrolled by the machine.
+	Credential string
+
+	// CredentialFile is where an ENROLLED executor persists the credential it
+	// was issued, and where it reads it back on reconnect. Empty disables both.
 	CredentialFile string
 	SelfReported   map[string]string
 	Handler        http.Handler
@@ -106,7 +119,13 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 		return err
 	}
 
-	if credential != "" {
+	if credential != "" && o.CredentialFile != "" {
+		// The directory may not exist yet: the default lives under the user's
+		// data dir, deliberately NOT under --root, where the executor's own file
+		// tools could read it.
+		if err := os.MkdirAll(filepath.Dir(o.CredentialFile), 0o700); err != nil {
+			return fmt.Errorf("create credential directory: %w", err)
+		}
 		if err := os.WriteFile(o.CredentialFile, []byte(credential+"\n"), 0600); err != nil {
 			return fmt.Errorf("write credential: %w", err)
 		}
@@ -116,14 +135,30 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	return ServeInverted(conn, o.Handler)
 }
 
+// credFileHas reports whether a readable, non-empty credential file exists.
+func credFileHas(path string) bool {
+	if path == "" {
+		return false
+	}
+	cred, err := readCredential(path)
+	return err == nil && cred != ""
+}
+
 func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse, string, error) {
 	var req protocol.ExecutorHelloRequest
-	if cred, err := readCredential(o.CredentialFile); err == nil && cred != "" {
+	switch {
+	case o.Credential != "":
+		// Supplied directly; no file is read and none will be written.
+		req.Credential = o.Credential
+	case credFileHas(o.CredentialFile):
+		cred, _ := readCredential(o.CredentialFile)
 		req.Credential = cred
-	} else if o.EnrollToken != "" {
+	case o.EnrollToken != "":
 		req.Token = o.EnrollToken
-	} else {
-		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("no credential file at %s and no enroll token; cannot authenticate", o.CredentialFile)
+	default:
+		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf(
+			"nothing to authenticate with: no --credential, no credential file at %s, and no --enroll-token",
+			o.CredentialFile)
 	}
 	req.Type = "executor_hello"
 	req.SelfReported = o.SelfReported

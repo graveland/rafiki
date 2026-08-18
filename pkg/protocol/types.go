@@ -863,6 +863,7 @@ type ExecutorHelloResponse struct {
 
 const (
 	TypeCtrlExecutorEnroll  = "ctrl_executor_enroll"
+	TypeCtrlExecutorCreate  = "ctrl_executor_create"
 	TypeCtrlExecutorList    = "ctrl_executor_list"
 	TypeCtrlExecutorLabel   = "ctrl_executor_label"
 	TypeCtrlExecutorDisable = "ctrl_executor_disable"
@@ -886,6 +887,38 @@ type ExecutorEnrollRequest struct {
 // ExecutorEnrollResponseData is the data payload for ctrl_executor_enroll.
 type ExecutorEnrollResponseData struct {
 	Token string `json:"token"`
+}
+
+// ─── ctrl_executor_create ──────────────────────────────────────────────────────
+
+// ExecutorCreateRequest mints an executor row and its durable credential in one
+// step, with no enrollment handshake.
+//
+// This is the STATELESS path. An enrolled executor persists the credential it
+// was issued, and one that loses that file cannot rejoin — its enrollment token
+// was consumed — which makes enrollment awkward for a deployment with no durable
+// local storage. Here the operator receives the credential and injects it from a
+// secret store instead.
+//
+// The trade runs the other way from enrollment: the operator handles a
+// long-lived secret, and a theft is silent rather than announcing itself by
+// consuming a one-time token. Prefer enrollment where the machine can keep a
+// file.
+type ExecutorCreateRequest struct {
+	Type          string            `json:"type"` // "ctrl_executor_create"
+	ID            string            `json:"id,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Roots         []string          `json:"roots,omitempty"`
+	Isolation     string            `json:"isolation,omitempty"`
+	WorkspaceMode string            `json:"workspaceMode,omitempty"`
+	Admits        string            `json:"admits,omitempty"`
+}
+
+// ExecutorCreateResponseData carries the new row's id and its credential. The
+// credential is shown ONCE; only its hash is stored.
+type ExecutorCreateResponseData struct {
+	ExecutorID string `json:"executorId"`
+	Credential string `json:"credential"`
 }
 
 // ─── ctrl_executor_list ────────────────────────────────────────────────────────

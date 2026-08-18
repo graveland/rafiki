@@ -133,6 +133,38 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 	return e, credential, err
 }
 
+// Create inserts an executor row and returns its credential, skipping the
+// enrollment handshake entirely. See the Store interface for when to prefer it.
+func (s *pgStore) Create(ctx context.Context, t executors.NewToken) (executors.Executor, string, error) {
+	credential, err := newToken()
+	if err != nil {
+		return executors.Executor{}, "", err
+	}
+
+	isolation := t.Isolation
+	if isolation == "" {
+		isolation = "none"
+	}
+	wmode := t.WorkspaceMode
+	if wmode == "" {
+		wmode = "pinned"
+	}
+
+	var id string
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO conversations.executors
+		   (credential_hash, labels, self_reported, roots, isolation, workspace_mode, admits)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+		hashToken(credential), jsonMap(t.Labels), jsonMap(nil), t.Roots,
+		isolation, wmode, t.Admits).Scan(&id)
+	if err != nil {
+		return executors.Executor{}, "", fmt.Errorf("insert executor: %w", err)
+	}
+
+	e, err := s.Get(ctx, id)
+	return e, credential, err
+}
+
 func (s *pgStore) Authenticate(ctx context.Context, credential string) (executors.Executor, error) {
 	return s.authenticateByHash(ctx, hashToken(credential))
 }

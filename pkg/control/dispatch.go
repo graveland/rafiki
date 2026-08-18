@@ -152,6 +152,10 @@ type Controller interface {
 
 	// ExecutorEnroll mints a one-time enrollment token for a new executor.
 	ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
+
+	// ExecutorCreate mints a row and its credential directly, for executors that
+	// cannot persist an enrollment.
+	ExecutorCreate(req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error)
 	// ExecutorList returns enrolled executors, optionally filtered.
 	ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error)
 	// ExecutorLabel sets or removes labels on an executor row.
@@ -243,6 +247,8 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.globalUnsubscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlExecutorEnroll:
 		return d.executorEnroll(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorCreate:
+		return d.executorCreate(frame, hdr.ID)
 	case protocol.TypeCtrlExecutorList:
 		return d.executorList(frame, hdr.ID)
 	case protocol.TypeCtrlExecutorLabel:
@@ -861,6 +867,18 @@ func (d *dispatcher) executorEnroll(frame []byte, id string) []byte {
 		return mapErr(protocol.TypeCtrlExecutorEnroll, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlExecutorEnroll, id, result)
+}
+
+func (d *dispatcher) executorCreate(frame []byte, id string) []byte {
+	var req protocol.ExecutorCreateRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorCreate, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	result, err := d.c.ExecutorCreate(req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlExecutorCreate, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorCreate, id, result)
 }
 
 func (d *dispatcher) executorList(frame []byte, id string) []byte {

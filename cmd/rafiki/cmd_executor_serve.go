@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -76,6 +77,7 @@ func newExecutorServeCmd() *cobra.Command {
 		concurrency       int
 		enrollToken       string
 		credentialFile    string
+		credential        string
 		pinnedFingerprint string
 		serverName        string
 		isolation         string
@@ -127,7 +129,8 @@ Two transports, exactly one of which must be given:
 			handler := executorHandler(srv)
 
 			if connectAddr != "" {
-				return serveReverseDial(connectAddr, pinnedFingerprint, serverName, enrollToken, credentialFile, wd, handler)
+				return serveReverseDial(connectAddr, pinnedFingerprint, serverName,
+					enrollToken, credential, credentialFile, handler)
 			}
 			return serveUnixSocket(socketPath, wd, handler)
 		},
@@ -140,7 +143,9 @@ Two transports, exactly one of which must be given:
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
-		"where the durable credential is stored after enrollment")
+		"where the durable credential is stored after enrollment (default: <data dir>/executor.cred)")
+	cmd.Flags().StringVar(&credential, "credential", os.Getenv("RAFIKI_EXECUTOR_CREDENTIAL"),
+		"use this credential directly and write nothing to disk. For stateless deployments that inject it from a secret store; skips enrollment entirely")
 	cmd.Flags().StringVar(&pinnedFingerprint, "pin-cert", "",
 		"SHA-256 fingerprint of the daemon's leaf certificate. Pins the leaf instead of verifying against system roots — use for a self-signed or internal-CA daemon")
 	cmd.Flags().StringVar(&serverName, "server-name", "",
@@ -153,10 +158,17 @@ Two transports, exactly one of which must be given:
 	return cmd
 }
 
-func serveReverseDial(addr, pinCert, serverName, enrollToken, credentialFile, wd string, handler http.Handler) error {
+func serveReverseDial(addr, pinCert, serverName, enrollToken, credential, credentialFile string, handler http.Handler) error {
+	// The default deliberately does NOT sit under --root. It used to
+	// (`<root>/.rafiki-executor-credential`), which put the executor's own
+	// credential inside the very directory tree its file tools operate on — and
+	// native executors have no path scoping, by design. An agent running on the
+	// executor could read it and reconnect as that machine, including after an
+	// operator disabled it. paths.DataDir is for state that must survive a
+	// reboot, which a credential must: losing it means re-enrolling by hand.
 	credFile := credentialFile
-	if credFile == "" {
-		credFile = filepath.Join(wd, ".rafiki-executor-credential")
+	if credFile == "" && credential == "" {
+		credFile = filepath.Join(paths.DataDir(), "executor.cred")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -165,6 +177,7 @@ func serveReverseDial(addr, pinCert, serverName, enrollToken, credentialFile, wd
 		PinCert:        pinCert,
 		ServerName:     serverName,
 		EnrollToken:    enrollToken,
+		Credential:     credential,
 		CredentialFile: credFile,
 		SelfReported: map[string]string{
 			"os":      runtime.GOOS,

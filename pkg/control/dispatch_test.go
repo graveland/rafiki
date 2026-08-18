@@ -42,6 +42,7 @@ type fakeController struct {
 	subscribeLabeledFn      func(control.Connection, map[string]string, []string, protocol.SubscribeFilter) error
 	onConnectionCloseFn     func(control.Connection)
 	executorEnrollFn        func(protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
+	executorCreateFn        func(protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error)
 	executorListFn          func(protocol.ExecutorListRequest) ([]executors.Executor, error)
 	executorLabelFn         func(protocol.ExecutorLabelRequest) (executors.Executor, error)
 	executorDisableFn       func(protocol.ExecutorDisableRequest) error
@@ -220,6 +221,13 @@ func (f *fakeController) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (pro
 		return f.executorEnrollFn(req)
 	}
 	return protocol.ExecutorEnrollResponseData{}, nil
+}
+
+func (f *fakeController) ExecutorCreate(req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error) {
+	if f.executorCreateFn != nil {
+		return f.executorCreateFn(req)
+	}
+	return protocol.ExecutorCreateResponseData{ExecutorID: "exec-1", Credential: "cred"}, nil
 }
 
 func (f *fakeController) ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error) {

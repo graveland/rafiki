@@ -3280,6 +3280,26 @@ func (c *Controller) requireExecutorStore() error {
 }
 
 // ExecutorEnroll mints a one-time enrollment token.
+func (c *Controller) ExecutorCreate(req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error) {
+	if err := c.requireExecutorStore(); err != nil {
+		return protocol.ExecutorCreateResponseData{}, err
+	}
+	e, credential, err := c.execStore.Create(context.Background(), executors.NewToken{
+		Labels:        req.Labels,
+		Roots:         req.Roots,
+		Isolation:     req.Isolation,
+		WorkspaceMode: req.WorkspaceMode,
+		Admits:        req.Admits,
+	})
+	if err != nil {
+		return protocol.ExecutorCreateResponseData{}, &control.ControllerError{
+			Code:    protocol.ErrInternal,
+			Message: "create executor: " + err.Error(),
+		}
+	}
+	return protocol.ExecutorCreateResponseData{ExecutorID: e.ID, Credential: credential}, nil
+}
+
 func (c *Controller) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
 	if err := c.requireExecutorStore(); err != nil {
 		return protocol.ExecutorEnrollResponseData{}, err

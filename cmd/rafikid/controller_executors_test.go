@@ -22,6 +22,12 @@ func newFakeExecStore() *fakeExecStore {
 	return &fakeExecStore{execs: map[string]executors.Executor{}}
 }
 
+func (f *fakeExecStore) Create(_ context.Context, t executors.NewToken) (executors.Executor, string, error) {
+	e := executors.Executor{ID: "exec-created", Labels: t.Labels, Enabled: true}
+	f.execs[e.ID] = e
+	return e, "credential", nil
+}
+
 func (f *fakeExecStore) MintToken(_ context.Context, t executors.NewToken) (string, error) {
 	f.minted = append(f.minted, t)
 	return "tok-1", nil

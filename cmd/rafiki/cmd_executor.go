@@ -21,9 +21,11 @@ func newExecutorCmd() *cobra.Command {
 		Short:   "Run an executor, or manage the executor pool",
 		Long: `Run an executor, or manage the pool of them.
 
-  serve, serve-stdio    BE an executor on this machine.
-  enroll, list, label,
-  disable, enable       administer the pool, via the daemon's control socket.
+  serve, serve-stdio    BE an executor on this machine, in the foreground.
+  service               run it as a per-user system service (launchd/systemd).
+  enroll, create, list,
+  label, disable,
+  enable                administer the pool, via the daemon's control socket.
 
 The administrative verbs output JSON.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -32,6 +34,7 @@ The administrative verbs output JSON.`,
 	}
 	cmd.AddCommand(
 		newExecutorEnrollCmd(),
+		newExecutorCreateCmd(),
 		newExecutorListCmd(),
 		newExecutorLabelCmd(),
 		newExecutorDisableCmd(),
@@ -42,6 +45,7 @@ The administrative verbs output JSON.`,
 		// subject, and `serve` does not collide with any verb above.
 		newExecutorServeCmd(),
 		newExecutorServeStdioCmd(),
+		newExecutorServiceCmd(),
 	)
 	return cmd
 }
@@ -199,6 +203,68 @@ func executorFormatLabels(labels map[string]string) string {
 		parts = append(parts, k+"="+v)
 	}
 	return strings.Join(parts, ",")
+}
+
+// ─── create ────────────────────────────────────────────────────────────────────
+
+func newExecutorCreateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create an executor and print its durable credential (stateless path)",
+		Long: `Create an executor row and its durable credential in one step.
+
+	The credential is printed ONCE and only its hash is stored. Give it to the
+	executor as --credential or RAFIKI_EXECUTOR_CREDENTIAL; that executor writes
+	nothing to disk, which is what a deployment with no durable local storage
+	needs.
+
+	Prefer ` + "`enroll`" + ` where the machine can keep a file. Enrollment hands the
+	operator only a short-lived one-time token, so a leak expires by itself and a
+	theft announces itself — the thief consumes the token and the real executor
+	fails loudly. A credential from this command is long-lived and a theft of it
+	is silent. Revoke with ` + "`rafiki executor disable`" + `, which takes effect on a
+	live connection within one health interval.`,
+		RunE: runExecutorCreate,
+	}
+	cmd.Flags().StringArray("label", nil, "Label to bind to the executor (repeatable, k=v)")
+	cmd.Flags().StringArray("root", nil, "Root path the executor may access (repeatable)")
+	cmd.Flags().String("isolation", "none", "Isolation level: none|container")
+	cmd.Flags().String("workspace-mode", "pinned", "Workspace provisioning: ephemeral|pinned")
+	cmd.Flags().String("admits", "", "Executor-side admission selector over child labels")
+	return cmd
+}
+
+func runExecutorCreate(cmd *cobra.Command, _ []string) error {
+	c := mustDial(cmd)
+	defer c.Close()
+
+	labelPairs, _ := cmd.Flags().GetStringArray("label")
+	labels, err := parseLabelPairs(labelPairs)
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	roots, _ := cmd.Flags().GetStringArray("root")
+	isolation, _ := cmd.Flags().GetString("isolation")
+	workspaceMode, _ := cmd.Flags().GetString("workspace-mode")
+	admits, _ := cmd.Flags().GetString("admits")
+
+	resp, err := c.Request(cmdCtx(cmd), protocol.ExecutorCreateRequest{
+		Type:          protocol.TypeCtrlExecutorCreate,
+		Labels:        labels,
+		Roots:         roots,
+		Isolation:     isolation,
+		WorkspaceMode: workspaceMode,
+		Admits:        admits,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("ctrl_executor_create: %s", client.FormatError(resp))
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(json.RawMessage(resp.Data))
 }
 
 // ─── label ─────────────────────────────────────────────────────────────────────
