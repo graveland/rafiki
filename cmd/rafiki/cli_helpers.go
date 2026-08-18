@@ -20,13 +20,30 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
+// remoteDialURL returns RAFIKI_URL when it names a remote control plane
+// (client.IsRemoteURL — https:// only), else "". This is the ONE gate mustDial
+// and dialDaemon both dial through: an http:// RAFIKI_URL is the local
+// loopback face, which has no control listener, and treating it as remote
+// would send every CLI command in an installation that only ever set the
+// documented proxy URL (.env.example's RAFIKI_URL=http://localhost:8035)
+// straight into a TLS dial against a plaintext port. Centralised rather than
+// duplicated at each call site so the two can never drift on which scheme
+// counts as remote.
+func remoteDialURL() string {
+	u := paths.Get(paths.URL)
+	if client.IsRemoteURL(u) {
+		return u
+	}
+	return ""
+}
+
 // mustDial connects to the daemon. An https:// RAFIKI_URL dials the remote
 // daemon's shared TLS listener; anything else (an http:// loopback face URL,
 // or none) uses the local UDS, which the --socket flag overrides. Exits with
 // code 2 on failure so connection errors stay distinguishable from
 // user-input errors (exit 1).
 func mustDial(cmd *cobra.Command) *client.Client {
-	if u := paths.Get(paths.URL); client.IsRemoteURL(u) {
+	if u := remoteDialURL(); u != "" {
 		c, err := client.DialURL(cmdCtx(cmd), u, paths.TokenFromEnv())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: connect %s: %v\n", u, err)

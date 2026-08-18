@@ -214,12 +214,20 @@ export class Client {
     }
 
     /**
-     * Opens a TLS connection to url, authenticates via ctrl_auth, and
-     * returns a ready Client. url must be "https://host[:port]" — the
-     * control plane is an HTTP upgrade at /control on the shared TLS
-     * listener, so https is the honest spelling of what the retired tls:
-     * scheme always meant. On auth failure the server closes the
-     * connection, which surfaces as a connect error or read error.
+     * NOT CURRENTLY FUNCTIONAL against the shipped daemon — zero callers
+     * under attach/, kept only so it doesn't drift further while dead.
+     * The control plane is reached by an HTTP Upgrade at /control on the
+     * shared TLS listener (see pkg/upgradeconn on the Go side; the Go
+     * client's DialURL performs this upgrade before sending ctrl_auth).
+     * This function does NOT: it writes ctrl_auth straight onto the raw
+     * TLS socket with no upgrade request, so it cannot complete a
+     * handshake against `control.ListenTCP` as currently wired
+     * (production only ever attaches that path behind the upgrade, at
+     * cmd/rafikid/main.go). url must be "https://host[:port]" — https is
+     * the honest spelling of what the retired tls: scheme always meant,
+     * independent of the upgrade gap above. On auth failure the server
+     * closes the connection, which surfaces as a connect error or read
+     * error.
      */
     static async dialURL(url: string, token: string): Promise<Client> {
         const u = new URL(url);

@@ -109,8 +109,12 @@ func claudeAutoCompactWindow(ctx context.Context, model string) int {
 // degradation (return 0) rather than a fatal error. mustDial is exactly wrong
 // here: it calls os.Exit(2) on a connection failure, and `rafiki claude` must
 // keep working with the daemon down.
+//
+// Shares remoteDialURL (cli_helpers.go) with mustDial rather than repeating
+// the client.IsRemoteURL gate inline — see that function's comment for why
+// the two must never independently decide what counts as remote.
 func dialDaemon(ctx context.Context) (*client.Client, error) {
-	if u := paths.Get(paths.URL); client.IsRemoteURL(u) {
+	if u := remoteDialURL(); u != "" {
 		return client.DialURL(ctx, u, paths.TokenFromEnv())
 	}
 	return client.Dial(client.DefaultSocketPath())
