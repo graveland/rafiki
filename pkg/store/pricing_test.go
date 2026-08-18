@@ -52,56 +52,62 @@ func TestViewsExcludePayloadColumns(t *testing.T) {
 	}
 }
 
-func TestOwnerCanonicalRewritesDashDomain(t *testing.T) {
+// owner_username is resolved by joining users on the conversation's FK. The
+// column it replaced, owner_canonical, tried to reverse an identity out of free
+// text (rewriting a dash-for-at typo, then classifying human/service/system by
+// shape). A users row answers all of that directly, so the heuristics were
+// deleted in 0019 rather than ported.
+func TestOwnerUsernameResolvesThroughUsersJoin(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 
-	// kubecfg-svcaccount is deliberately NOT mapped: the real account is
-	// svc@example.com, so the obvious rewrite would be wrong. Only the
-	// dash-for-at typo is safe to correct. Its kind is "service", not "human":
-	// it is a kubeconfig credential, and counting it as a person inflated the
-	// distinct-active-owners adoption metric.
-	cases := []struct{ owner, want, wantKind string }{
-		{"dev-example.com", "dev@example.com", "human"},
-		{"dev@example.com", "dev@example.com", "human"},
-		{"dev-mail.example.com", "dev@mail.example.com", "human"},
-		{"foo-bar-example.com", "foo-bar@example.com", "human"},
-		{"kubecfg-svcaccount", "kubecfg-svcaccount", "service"},
-		{"system:diagnose", "system:diagnose", "system"},
-		// Neither system:-prefixed nor an email address → a machine identity.
-		{"ci-runner", "ci-runner", "service"},
-		// Regression: a service identity whose raw owner happens to carry a
-		// dotted hostname must NOT be rewritten into an email-shaped
-		// canonical, or it silently reclassifies as 'human' and inflates the
-		// distinct-active-owners adoption metric with a robot.
-		{"kubecfg-deploy.prod.internal", "kubecfg-deploy.prod.internal", "service"},
+	var userID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO conversations.users (username, token_sha256)
+		VALUES ('brent', 'digest-1') RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("insert user: %v", err)
 	}
-	for _, c := range cases {
-		var id string
-		if err := pool.QueryRow(ctx, `
-			INSERT INTO conversations.conversation (owner, origin_entrypoint, driven_by)
-			VALUES ($1, 'claude', 'client') RETURNING id`, c.owner).Scan(&id); err != nil {
-			t.Fatalf("insert %q: %v", c.owner, err)
-		}
-		var got, gotKind string
-		if err := pool.QueryRow(ctx,
-			`SELECT owner_canonical, owner_kind FROM conversations.v_conversation WHERE id = $1`,
-			id).Scan(&got, &gotKind); err != nil {
-			t.Fatalf("select %q: %v", c.owner, err)
-		}
-		if got != c.want || gotKind != c.wantKind {
-			t.Errorf("owner %q => (%q, %q), want (%q, %q)", c.owner, got, gotKind, c.want, c.wantKind)
-		}
+	var convID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO conversations.conversation (owner_user_id, origin_entrypoint, driven_by)
+		VALUES ($1, 'claude', 'client') RETURNING id`, userID).Scan(&convID); err != nil {
+		t.Fatalf("insert conversation: %v", err)
+	}
+
+	var got string
+	if err := pool.QueryRow(ctx,
+		`SELECT owner_username FROM conversations.v_conversation WHERE id = $1`,
+		convID).Scan(&got); err != nil {
+		t.Fatalf("select owner_username: %v", err)
+	}
+	if got != "brent" {
+		t.Errorf("owner_username = %q, want brent", got)
+	}
+
+	// `user rm` tombstones rather than deleting precisely so history keeps
+	// resolving to a name. The view's join must not filter on deleted_at.
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.users SET deleted_at = now() WHERE id = $1`, userID); err != nil {
+		t.Fatalf("tombstone user: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT owner_username FROM conversations.v_conversation WHERE id = $1`,
+		convID).Scan(&got); err != nil {
+		t.Fatalf("select owner_username after tombstone: %v", err)
+	}
+	if got != "brent" {
+		t.Errorf("owner_username after tombstone = %q, want brent", got)
 	}
 }
 
-// owner is nullable ("nullable for now" per the baseline migration). A NULL
-// owner must read as an unknown owner_kind, never as "human" — asserting
-// something we do not know.
-func TestOwnerCanonicalNullOwnerIsUnknownKind(t *testing.T) {
+// owner_user_id is nullable: a proxy request with no authenticated caller is
+// captured unattributed. That must read as NULL — not as an empty string and
+// not as a guessed identity — and the conversation must still appear, which is
+// why the users join is a LEFT JOIN.
+func TestOwnerUsernameNullForUnattributedConversation(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	if err := Migrate(ctx, pool); err != nil {
@@ -112,19 +118,16 @@ func TestOwnerCanonicalNullOwnerIsUnknownKind(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
 		VALUES ('claude', 'client') RETURNING id`).Scan(&id); err != nil {
-		t.Fatalf("insert null-owner conversation: %v", err)
+		t.Fatalf("insert unattributed conversation: %v", err)
 	}
-	var canonical, kind *string
+	var username *string
 	if err := pool.QueryRow(ctx,
-		`SELECT owner_canonical, owner_kind FROM conversations.v_conversation WHERE id = $1`,
-		id).Scan(&canonical, &kind); err != nil {
-		t.Fatalf("select null-owner row: %v", err)
+		`SELECT owner_username FROM conversations.v_conversation WHERE id = $1`,
+		id).Scan(&username); err != nil {
+		t.Fatalf("select unattributed row: %v", err)
 	}
-	if canonical != nil {
-		t.Errorf("owner_canonical = %q, want NULL for a NULL owner", *canonical)
-	}
-	if kind != nil {
-		t.Errorf("owner_kind = %q, want NULL for a NULL owner, not a guessed \"human\"", *kind)
+	if username != nil {
+		t.Errorf("owner_username = %q, want NULL for an unattributed conversation", *username)
 	}
 }
 
@@ -139,8 +142,8 @@ func TestTurnCostUnpricedModelFlagged(t *testing.T) {
 
 	var convID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO conversations.conversation (owner, origin_entrypoint, driven_by)
-		VALUES ('dev@example.com', 'claude', 'client') RETURNING id`).Scan(&convID); err != nil {
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('claude', 'client') RETURNING id`).Scan(&convID); err != nil {
 		t.Fatalf("insert conversation: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -201,8 +204,8 @@ func TestTurnCostPartialPricingRowFlaggedUnpriced(t *testing.T) {
 
 	var convID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO conversations.conversation (owner, origin_entrypoint, driven_by)
-		VALUES ('dev@example.com', 'claude', 'client') RETURNING id`).Scan(&convID); err != nil {
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('claude', 'client') RETURNING id`).Scan(&convID); err != nil {
 		t.Fatalf("insert conversation: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -275,8 +278,8 @@ func TestSyncModelPricingPricesCatalogAndObservedModels(t *testing.T) {
 	// unpriced.
 	var convID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO conversations.conversation (owner, origin_entrypoint, driven_by)
-		VALUES ('dev@example.com', 'claude', 'client') RETURNING id`).Scan(&convID); err != nil {
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('claude', 'client') RETURNING id`).Scan(&convID); err != nil {
 		t.Fatalf("insert conversation: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -428,8 +431,8 @@ func TestTurnNullDimensionsReadAsSentinelNotNull(t *testing.T) {
 
 	var convID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO conversations.conversation (owner, origin_entrypoint, driven_by)
-		VALUES ('dev@example.com', 'claude', 'client') RETURNING id`).Scan(&convID); err != nil {
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('claude', 'client') RETURNING id`).Scan(&convID); err != nil {
 		t.Fatalf("insert conversation: %v", err)
 	}
 	// model, source and upstream all NULL — the shape of a real errored turn.
@@ -487,16 +490,16 @@ func TestTurnOrphanedTurnStillAppearsUnattributed(t *testing.T) {
 		t.Fatalf("insert orphaned turn: %v", err)
 	}
 
-	var owner, ownerKind, entrypoint, drivenBy string
+	var owner, entrypoint, drivenBy string
 	var in, out int64
 	if err := pool.QueryRow(ctx, `
-		SELECT owner_canonical, owner_kind, origin_entrypoint, driven_by, input_tokens, output_tokens
+		SELECT owner_username, origin_entrypoint, driven_by, input_tokens, output_tokens
 		FROM conversations.v_turn WHERE conversation_id = $1`,
-		turnConv).Scan(&owner, &ownerKind, &entrypoint, &drivenBy, &in, &out); err != nil {
+		turnConv).Scan(&owner, &entrypoint, &drivenBy, &in, &out); err != nil {
 		t.Fatalf("orphaned turn missing from v_turn: %v", err)
 	}
 	for _, c := range []struct{ col, got string }{
-		{"owner_canonical", owner}, {"owner_kind", ownerKind},
+		{"owner_username", owner},
 		{"origin_entrypoint", entrypoint}, {"driven_by", drivenBy},
 	} {
 		if c.got != "(unattributed)" {
@@ -521,8 +524,8 @@ func TestTurnCacheSavingsUnknownWhenCacheUnpriced(t *testing.T) {
 
 	var convID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO conversations.conversation (owner, origin_entrypoint, driven_by)
-		VALUES ('dev@example.com', 'claude', 'client') RETURNING id`).Scan(&convID); err != nil {
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('claude', 'client') RETURNING id`).Scan(&convID); err != nil {
 		t.Fatalf("insert conversation: %v", err)
 	}
 	// Base prices known, cache prices NULL: a model the source doesn't cache.
@@ -648,8 +651,8 @@ func TestSyncModelPricingBoundsObservedModelsButKeepsKnownOnes(t *testing.T) {
 
 	var convID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO conversations.conversation (owner, origin_entrypoint, driven_by)
-		VALUES ('dev@example.com', 'claude', 'client') RETURNING id`).Scan(&convID); err != nil {
+		INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
+		VALUES ('claude', 'client') RETURNING id`).Scan(&convID); err != nil {
 		t.Fatalf("insert conversation: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `

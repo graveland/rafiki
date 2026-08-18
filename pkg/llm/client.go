@@ -190,13 +190,13 @@ type SendMeta struct {
 	ConversationID   string
 	OriginEntrypoint string
 	DrivenBy         store.DrivenBy
-	Owner            string
+	OwnerUserID      string // conversations.users.id; empty → unattributed
 	Persona          string
 	Name             string
 	ExternalRef      string
 	Ordinal          int
 	Source           string
-	Author           string
+	AuthorUserID     string // conversations.users.id; empty → unattributed
 	AuthorKind       string
 	RateLimit        RateLimitPolicy
 
@@ -817,7 +817,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	}
 	convRef := capture.ConversationRef{
 		ID: meta.ConversationID, OriginEntrypoint: meta.OriginEntrypoint, DrivenBy: string(drivenBy),
-		Owner: meta.Owner, Persona: meta.Persona, Model: string(params.Model), Name: meta.Name, ExternalRef: meta.ExternalRef,
+		OwnerUserID: meta.OwnerUserID, Persona: meta.Persona, Model: string(params.Model), Name: meta.Name, ExternalRef: meta.ExternalRef,
 	}
 	var convID string
 	var err error
@@ -845,7 +845,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 	prefixHash := routing.PrefixHash(reqJSON)
 	turnID, createdAt, iErr := c.capture.InsertTurnIntent(ctx, capture.TurnIntent{
 		ConversationID: convID, Ordinal: meta.Ordinal, Model: string(params.Model), Request: reqJSON,
-		Source: source, Author: meta.Author, AuthorKind: meta.AuthorKind,
+		Source: source, AuthorUserID: meta.AuthorUserID, AuthorKind: meta.AuthorKind,
 		PrefixHash: prefixHash, Protocol: string(store.ProtocolAnthropic),
 	})
 	if iErr != nil {

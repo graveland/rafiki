@@ -73,7 +73,9 @@ func assertBaselineSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 			t.Errorf("conversations.%s missing after Migrate", table)
 		}
 	}
-	for _, col := range []string{"source", "author", "author_kind", "prefix_hash"} {
+	// author_user_id, not author: 0019 replaced the free-text column with the
+	// users FK. author_kind survives — it is a role marker, not an identity.
+	for _, col := range []string{"source", "author_user_id", "author_kind", "prefix_hash"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM information_schema.columns
@@ -209,5 +211,157 @@ func TestMigrate0018UsersTable(t *testing.T) {
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO conversations.users (username, token_sha256) VALUES ('brent','h3')`); err == nil {
 		t.Fatal("two ACTIVE users share a username; the partial unique index is missing")
+	}
+}
+
+func TestMigrate0019UserAttribution(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// The free-text identity columns are gone.
+	for _, c := range []struct{ table, col string }{
+		{"conversation", "owner"},
+		{"conversation_turn", "author"},
+	} {
+		var exists bool
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) > 0 FROM information_schema.columns
+			 WHERE table_schema='conversations' AND table_name=$1 AND column_name=$2`,
+			c.table, c.col).Scan(&exists); err != nil {
+			t.Fatalf("probe %s.%s: %v", c.table, c.col, err)
+		}
+		if exists {
+			t.Fatalf("conversations.%s.%s still exists", c.table, c.col)
+		}
+	}
+
+	// author_kind survives: it is a ROLE marker, not an identity, and it is
+	// what separates human turns from the agent's own.
+	var kindExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) > 0 FROM information_schema.columns
+		 WHERE table_schema='conversations' AND table_name='conversation_turn'
+		   AND column_name='author_kind'`).Scan(&kindExists); err != nil {
+		t.Fatalf("probe author_kind: %v", err)
+	}
+	if !kindExists {
+		t.Fatal("author_kind was dropped; it is a role marker and must survive")
+	}
+
+	// Both FKs exist and point at users.
+	var fks int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.table_constraints tc
+		  JOIN information_schema.constraint_column_usage ccu
+		    ON ccu.constraint_name = tc.constraint_name
+		 WHERE tc.table_schema='conversations' AND tc.constraint_type='FOREIGN KEY'
+		   AND ccu.table_name='users'`).Scan(&fks); err != nil {
+		t.Fatalf("probe fks: %v", err)
+	}
+	if fks < 2 {
+		t.Fatalf("found %d FKs to users, want 2 (conversation and conversation_turn)", fks)
+	}
+
+	// The views were rebuilt and resolve the username through the join.
+	var uid, cid string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.users (username, token_sha256)
+		 VALUES ('brent','h1') RETURNING id::text`).Scan(&uid); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.conversation (owner_user_id, driven_by, origin_entrypoint)
+		 VALUES ($1::uuid,'server','test') RETURNING id::text`, uid).Scan(&cid); err != nil {
+		t.Fatalf("insert conversation: %v", err)
+	}
+	var username string
+	if err := pool.QueryRow(ctx,
+		`SELECT owner_username FROM conversations.v_conversation WHERE id=$1::uuid`,
+		cid).Scan(&username); err != nil {
+		t.Fatalf("select v_conversation.owner_username: %v", err)
+	}
+	if username != "brent" {
+		t.Fatalf("owner_username = %q, want brent", username)
+	}
+
+	// The turn-level FK resolves the same way, through its own join.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, request, author_user_id)
+		 VALUES ($1::uuid, 0, '{}'::jsonb, $2::uuid)`, cid, uid); err != nil {
+		t.Fatalf("insert turn: %v", err)
+	}
+	var author string
+	if err := pool.QueryRow(ctx,
+		`SELECT author_username FROM conversations.v_turn WHERE conversation_id=$1::uuid`,
+		cid).Scan(&author); err != nil {
+		t.Fatalf("select v_turn.author_username: %v", err)
+	}
+	if author != "brent" {
+		t.Fatalf("author_username = %q, want brent", author)
+	}
+
+	// The FK is enforced inside the hypertable's chunks, not merely declared:
+	// adding the constraint separately from the column (the only form
+	// columnstore accepts) must still reject an unknown user.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, request, author_user_id)
+		 VALUES ($1::uuid, 1, '{}'::jsonb, '00000000-0000-0000-0000-000000000001'::uuid)`, cid); err == nil {
+		t.Fatal("a turn referencing an unknown user was accepted; the hypertable FK is not enforced")
+	}
+
+	// A tombstoned user still resolves — that is the point of not deleting.
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.users SET deleted_at=now() WHERE id=$1::uuid`, uid); err != nil {
+		t.Fatalf("tombstone: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT owner_username FROM conversations.v_conversation WHERE id=$1::uuid`,
+		cid).Scan(&username); err != nil {
+		t.Fatalf("select after tombstone: %v", err)
+	}
+	if username != "brent" {
+		t.Fatalf("owner_username after tombstone = %q, want brent", username)
+	}
+
+	// The guessing heuristics are gone: a users row answers what they used
+	// to infer from the shape of a string.
+	var heuristics int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema='conversations' AND table_name IN ('v_conversation','v_turn')
+		   AND column_name IN ('owner_canonical','owner_kind','owner','author')`).Scan(&heuristics); err != nil {
+		t.Fatalf("probe view columns: %v", err)
+	}
+	if heuristics != 0 {
+		t.Fatalf("%d free-text owner columns survive in the views", heuristics)
+	}
+
+	// v_analysis and v_finding do not depend on v_conversation (pg_depend says
+	// only v_turn does), so the CASCADE must not have reached them.
+	for _, v := range []string{"v_conversation", "v_turn", "v_analysis", "v_finding"} {
+		var ok bool
+		if err := pool.QueryRow(ctx,
+			`SELECT to_regclass('conversations.'||$1) IS NOT NULL`, v).Scan(&ok); err != nil {
+			t.Fatalf("probe %s: %v", v, err)
+		}
+		if !ok {
+			t.Fatalf("view conversations.%s was not recreated", v)
+		}
+	}
+
+	// conversation_turn is still a hypertable with columnstore enabled: the
+	// two-statement column+constraint form exists to avoid downgrading it.
+	var compressed bool
+	if err := pool.QueryRow(ctx, `
+		SELECT compression_enabled FROM timescaledb_information.hypertables
+		 WHERE hypertable_schema='conversations' AND hypertable_name='conversation_turn'`,
+	).Scan(&compressed); err != nil {
+		t.Fatalf("probe hypertable: %v", err)
+	}
+	if !compressed {
+		t.Fatal("conversation_turn lost its columnstore hypertable status")
 	}
 }

@@ -62,6 +62,27 @@
 
 - **`ProviderGuard` is inert without capture, by design.** It qualifies a cache miss using `prefix_hash` and the conversation id, both of which come from the capture path; with capture disabled it receives empty values, nothing qualifies as evidence, and it ejects nothing. That is the intended fail-safe (no evidence beats false evidence), not a bug to "fix" by loosening the qualification rules. The rules are pinned by replay tests over real traffic in `pkg/routing/testdata/`: loosening them makes `TestReplayHealthyNovitaNeverEjects` blacklist a provider that was working fine.
 
+- **A hypertable with columnstore rejects `ADD COLUMN ... REFERENCES`, but
+  accepts the same FK as a separate `ADD CONSTRAINT`.** The inline form fails
+  with "cannot add column with constraints to a hypertable that has columnstore
+  enabled"; `ALTER TABLE … ADD COLUMN x UUID` followed by `ALTER TABLE … ADD
+  CONSTRAINT … FOREIGN KEY (x) REFERENCES …` is accepted and propagates to the
+  chunks (verified: an insert of an unknown id is rejected by the chunk, not the
+  parent). `0019_user_attribution` does exactly this for
+  `conversation_turn.author_user_id`. Never "solve" this by dropping columnstore
+  or by leaving the column app-enforced.
+
+- **`conversations.v_analysis` and `v_finding` do NOT depend on
+  `v_conversation`** — they read `conversation_analysis` and `analysis_finding`
+  directly, so `DROP VIEW v_conversation CASCADE` reaches only `v_turn`
+  (`pg_depend` confirms). Two design docs in this repo claim otherwise. When you
+  rebuild the views, drop and recreate only the two that actually select the
+  changed columns; retyping the other two is regression surface for nothing. The
+  view-body chain is now 0007, 0008, 0011, 0019 — review all four before
+  touching `v_turn`, whose ~10 pricing expressions this repo has no other copy
+  of. `pg_get_viewdef('conversations.v_turn', true)` before and after is the
+  cheap way to prove you changed only what you meant to.
+
 - **The migration chain must be contiguous 1..N, and `Migrate` skips by version
   NUMBER, not name.** `loadMigrations` hard-fails on a gap or a duplicate, so a
   branch that numbers a migration into a slot another branch already used will

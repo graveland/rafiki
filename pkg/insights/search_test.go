@@ -327,3 +327,52 @@ func TestSearch_FiltersByEntrypoint(t *testing.T) {
 		t.Fatalf("unfiltered results = %d, want 2", len(all))
 	}
 }
+
+// `user rm` tombstones instead of deleting and the username uniqueness index
+// is partial (WHERE deleted_at IS NULL), so after a remove + recreate several
+// rows share one name. The owner filter resolves that to the most recent
+// ACTIVE-or-not row; a bare `username = ...` subquery would fail the whole
+// query with "more than one row returned by a subquery used as an expression".
+func TestSearch_OwnerFilterSurvivesAReusedUsername(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	oldID := ensureUser(t, pool, "carol")
+	oldConv := seedConversation(t, pool, "client", "carol")
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.users SET deleted_at = now() WHERE id = $1::uuid`, oldID); err != nil {
+		t.Fatalf("tombstone carol: %v", err)
+	}
+	// A second, live carol: ensureUser only ever finds the active row.
+	newID := ensureUser(t, pool, "carol")
+	if newID == oldID {
+		t.Fatal("recreating a tombstoned username reused the same row")
+	}
+	newConv := seedConversation(t, pool, "client", "carol")
+
+	got, err := New(pool).Search(ctx, SearchFilter{Owner: "carol"})
+	if err != nil {
+		t.Fatalf("search by a reused owner name: %v", err)
+	}
+	// The subselect picks the newest row, so only the live carol's
+	// conversation matches — the tombstoned one keeps its own id.
+	if len(got) != 1 || got[0].ID != newConv {
+		t.Fatalf("owner filter returned %+v, want only the live carol's conversation %s", got, newConv)
+	}
+	if got[0].Owner != "carol" {
+		t.Errorf("owner = %q, want carol", got[0].Owner)
+	}
+
+	// The tombstoned user's own conversation still renders their name: the
+	// display join is unfiltered by deleted_at even though the filter is not.
+	var name string
+	if err := pool.QueryRow(ctx,
+		`SELECT coalesce(u.username,'') FROM conversations.conversation c
+		   LEFT JOIN conversations.users u ON u.id = c.owner_user_id
+		  WHERE c.id = $1::uuid`, oldConv).Scan(&name); err != nil {
+		t.Fatalf("read tombstoned owner name: %v", err)
+	}
+	if name != "carol" {
+		t.Errorf("tombstoned owner resolves to %q, want carol", name)
+	}
+}

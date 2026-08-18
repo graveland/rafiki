@@ -138,7 +138,7 @@ func testConversation(t *testing.T, bodies ...string) *llm.Conversation {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := client.Conversation(context.Background(), llm.NewConversation("fundi", "agent"))
+	conv, err := client.Conversation(context.Background(), llm.NewConversation("", "agent"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := client.Conversation(context.Background(), llm.NewConversation("fundi", "agent"))
+	conv, err := client.Conversation(context.Background(), llm.NewConversation("", "agent"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -75,17 +75,19 @@ type detectorOutput struct {
 // (rendered as markdown) to p.DetectorModel under p.EffectiveDetectorPrompt,
 // forcing the report_findings tool, and parses the result into an Analysis.
 // t is assumed already compacted by the caller — Detect does not call
-// Compact itself. owner is the conversation attribution recorded on the
-// underlying llm.Conversation. pricer may be nil, in which case CostUSD is 0.
+// Compact itself. ownerUserID is the conversation attribution recorded on the
+// underlying llm.Conversation — a conversations.users id, not a username, and
+// empty for the daemon's own analyzer runs. pricer may be nil, in which case
+// CostUSD is 0.
 //
 // On a malformed or unparseable report_findings call, Detect retries ONCE,
 // appending the parse error as a follow-up user turn and re-forcing the
 // tool. A second failure returns the error.
-func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profile, owner string, pricer insights.Pricer) (*Analysis, error) {
+func Detect(ctx context.Context, c *llm.Client, t *insights.Transcript, p *Profile, ownerUserID string, pricer insights.Pricer) (*Analysis, error) {
 	model := p.DetectorModel
 	sys := p.EffectiveDetectorPrompt(builtinDetectorPrompt)
 
-	conv, err := c.Conversation(ctx, llm.NewConversation(owner, "analyze"), llm.Model(model), llm.SystemText(sys))
+	conv, err := c.Conversation(ctx, llm.NewConversation(ownerUserID, "analyze"), llm.Model(model), llm.SystemText(sys))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: detect: %w", err)
 	}

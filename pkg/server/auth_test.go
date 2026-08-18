@@ -17,17 +17,17 @@ import (
 )
 
 type recordingStore struct {
-	lastOwner  string
-	lastAuthor string
+	lastOwnerUserID  string
+	lastAuthorUserID string
 }
 
 func (s *recordingStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
-	s.lastOwner = ref.Owner
+	s.lastOwnerUserID = ref.OwnerUserID
 	return "conv-1", nil
 }
 
 func (s *recordingStore) InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (string, time.Time, error) {
-	s.lastAuthor = t.Author
+	s.lastAuthorUserID = t.AuthorUserID
 	return "turn-1", time.Unix(0, 0), nil
 }
 
@@ -46,7 +46,10 @@ type staticAuthenticator struct{ id *Identity }
 
 func (a staticAuthenticator) Identify(*http.Request) *Identity { return a.id }
 
-func TestMessagesProxyAuthenticatorSetsOwner(t *testing.T) {
+// The proxy persists the USER ID, never the username: the username is
+// resolved at read time through the users FK, and Identity.Username exists for
+// logs and CLI output only.
+func TestMessagesProxyAuthenticatorSetsOwnerUserID(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"type":"message","stop_reason":"end_turn","usage":{"output_tokens":1}}`)
@@ -55,15 +58,17 @@ func TestMessagesProxyAuthenticatorSetsOwner(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &recordingStore{}
-	p := NewMessagesProxy(nil, staticAuthenticator{id: &Identity{Username: "brent"}}, "real-key", upstream.URL, "", nil, logger)
+	p := NewMessagesProxy(nil, staticAuthenticator{id: &Identity{UserID: "9f1c7b2e-0000-4000-8000-000000000001", Username: "brent"}}, "real-key", upstream.URL, "", nil, logger)
 	p.store = fs
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude"}`))
 	p.ServeHTTP(rec, req)
 
-	if fs.lastOwner != "brent" || fs.lastAuthor != "brent" {
-		t.Errorf("owner=%q author=%q, want brent/brent (from Authenticator)", fs.lastOwner, fs.lastAuthor)
+	const wantID = "9f1c7b2e-0000-4000-8000-000000000001"
+	if fs.lastOwnerUserID != wantID || fs.lastAuthorUserID != wantID {
+		t.Errorf("owner_user_id=%q author_user_id=%q, want %s for both (from Authenticator)",
+			fs.lastOwnerUserID, fs.lastAuthorUserID, wantID)
 	}
 }
 
@@ -83,8 +88,9 @@ func TestMessagesProxyNilAuthenticatorIsAnonymous(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude"}`))
 	p.ServeHTTP(rec, req)
 
-	if fs.lastOwner != "" || fs.lastAuthor != "" {
-		t.Errorf("owner=%q author=%q, want empty/empty (anonymous)", fs.lastOwner, fs.lastAuthor)
+	if fs.lastOwnerUserID != "" || fs.lastAuthorUserID != "" {
+		t.Errorf("owner_user_id=%q author_user_id=%q, want empty/empty (anonymous)",
+			fs.lastOwnerUserID, fs.lastAuthorUserID)
 	}
 }
 

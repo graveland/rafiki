@@ -51,8 +51,10 @@ type draftOutput struct {
 // sends the finding (and any current skill file contents) to p.DraftModel
 // under p.EffectiveDraftPrompt, forcing the propose_skill_edit tool, and
 // parses the result into a SkillEdit. current is empty for a new-skill
-// recommendation and non-empty when editing an existing skill file. owner is
-// the conversation attribution recorded on the underlying llm.Conversation.
+// recommendation and non-empty when editing an existing skill file.
+// ownerUserID is the conversation attribution recorded on the underlying
+// llm.Conversation — a conversations.users id, not a username, and empty for
+// the daemon's own analyzer runs.
 //
 // On a malformed, unparseable, or schema-invalid propose_skill_edit call,
 // Draft retries ONCE, appending the parse error as a follow-up user turn and
@@ -63,11 +65,11 @@ type draftOutput struct {
 // catalog-mediated failover can differ from p.DraftModel) — mirroring
 // Detect's own pricer parameter and detectCost helper exactly. nil is safe
 // (CostUSD stays 0).
-func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillFile, p *Profile, owner string, pricer insights.Pricer) (*SkillEdit, error) {
+func Draft(ctx context.Context, c *llm.Client, f RankedFinding, current []SkillFile, p *Profile, ownerUserID string, pricer insights.Pricer) (*SkillEdit, error) {
 	model := p.DraftModel
 	sys := p.EffectiveDraftPrompt(builtinDraftPrompt)
 
-	conv, err := c.Conversation(ctx, llm.NewConversation(owner, "analyze"), llm.Model(model), llm.SystemText(sys))
+	conv, err := c.Conversation(ctx, llm.NewConversation(ownerUserID, "analyze"), llm.Model(model), llm.SystemText(sys))
 	if err != nil {
 		return nil, fmt.Errorf("analyze: draft: %w", err)
 	}

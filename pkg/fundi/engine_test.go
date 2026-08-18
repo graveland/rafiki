@@ -153,7 +153,7 @@ func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*
 		Provider: "anthropic",
 		ModelID:  "claude-x",
 		Name:     "w1",
-		ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 	}, fe)
 	if err != nil {
 		t.Fatal(err)
@@ -647,7 +647,7 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 		Provider: "anthropic",
 		ModelID:  "claude-x",
 		Name:     "w1",
-		ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 	}, fe)
 	if err != nil {
 		t.Fatal(err)

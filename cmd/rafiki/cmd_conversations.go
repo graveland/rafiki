@@ -42,7 +42,7 @@ terminal, JSON when piped.`,
 func bindConversationFilterFlags(cmd *cobra.Command) {
 	cmd.Flags().String("since", "", "RFC3339 timestamp or duration like 24h")
 	cmd.Flags().String("until", "", "RFC3339 timestamp or duration like 24h")
-	cmd.Flags().String("owner", "", "filter by owner")
+	cmd.Flags().String("owner", "", "filter by owner username")
 	cmd.Flags().String("persona", "", "filter by persona")
 	cmd.Flags().String("source", "", "filter by source")
 	cmd.Flags().String("model", "", "filter by model")

@@ -18,7 +18,7 @@ import (
 // GlobalStats selects with the same filter.
 type SearchFilter struct {
 	Since, Until      *time.Time
-	Owner             string
+	Owner             string // owner USERNAME; matched against conversations.users
 	Persona           string
 	Source            string
 	Model             string
@@ -36,7 +36,7 @@ type SearchFilter struct {
 type ConversationSummary struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Owner    string `json:"owner"`
+	Owner    string `json:"owner"` // username, resolved through the users FK
 	Persona  string `json:"persona"`
 	Source   string `json:"source"`
 	Model    string `json:"model"`
@@ -79,7 +79,19 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 		convConds = append(convConds, "c.driven_by = "+a.next(db))
 	}
 	if f.Owner != "" {
-		convConds = append(convConds, "c.owner = "+a.next(f.Owner))
+		// convConds filters the conversation table alone, before the users
+		// join exists. A subselect keeps the filter where the condition list
+		// can use it, and matches tombstoned users too, so filtering by a
+		// removed user's name still finds their history.
+		//
+		// ORDER BY created_at DESC LIMIT 1 is load-bearing: `user rm`
+		// tombstones rather than deletes and the unique index on username is
+		// partial (WHERE deleted_at IS NULL), so after a remove + recreate
+		// several rows share a name and a bare `=` would error with "more than
+		// one row returned by a subquery".
+		convConds = append(convConds,
+			"c.owner_user_id = (SELECT id FROM conversations.users WHERE username = "+a.next(f.Owner)+
+				" ORDER BY created_at DESC LIMIT 1)")
 	}
 	if f.Persona != "" {
 		convConds = append(convConds, "c.persona = "+a.next(f.Persona))
@@ -141,13 +153,16 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 	}
 
 	query := `
-SELECT c.id::text, coalesce(c.name,''), coalesce(c.owner,''), coalesce(c.persona,''),
+SELECT c.id::text, coalesce(c.name,''), coalesce(u.username,''), coalesce(c.persona,''),
        coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at,
        coalesce(t.turns,0), coalesce(t.in_tok,0), coalesce(t.out_tok,0), coalesce(t.cache_read,0),
        coalesce(tc.cost_usd, 0),
        coalesce(coalesce(t.cache_read,0) * 1.0 / nullif(coalesce(t.in_tok,0) + coalesce(t.cache_read,0), 0), 0),
        coalesce(left(fm.first_text, 200), '')
 FROM ` + from + `
+-- Unfiltered by deleted_at on purpose: a tombstoned user's conversations keep
+-- showing their name.
+LEFT JOIN conversations.users u ON u.id = c.owner_user_id
 LEFT JOIN LATERAL (
     SELECT count(*) AS turns,
            sum(input_tokens) AS in_tok, sum(output_tokens) AS out_tok,

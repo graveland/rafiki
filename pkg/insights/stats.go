@@ -21,7 +21,7 @@ const cacheWasteInputThreshold int64 = 4096
 // StatsFilter narrows the population for GlobalStats. Zero-value fields are ignored.
 type StatsFilter struct {
 	Since, Until *time.Time
-	Owner        string
+	Owner        string // owner USERNAME; matched against conversations.users
 	Persona      string
 	Source       string
 	Model        string
@@ -53,7 +53,7 @@ type AdoptionStats struct {
 }
 
 type OwnerCount struct {
-	Owner         string `json:"owner"`
+	Owner         string `json:"owner"` // username, resolved through the users FK
 	Conversations int64  `json:"conversations"`
 	Turns         int64  `json:"turns"`
 }
@@ -118,8 +118,14 @@ type statsScope struct {
 	global bool
 }
 
+// statsFrom carries the users join so every query in this file reads the
+// owner's name for free. LEFT JOIN on both halves: an unattributed
+// conversation (owner_user_id NULL) must still count, and the join is
+// deliberately unfiltered by deleted_at so a tombstoned user's history keeps
+// resolving to their name.
 const statsFrom = `FROM conversations.conversation_turn t
-	JOIN conversations.conversation c ON c.id = t.conversation_id`
+	JOIN conversations.conversation c ON c.id = t.conversation_id
+	LEFT JOIN conversations.users u ON u.id = c.owner_user_id`
 
 // pathForDrivenBy labels a driven_by value with the Path string used in
 // per-path result maps ("proxy"/"direct"); unknown values pass through so an
@@ -146,7 +152,7 @@ func (i *Insights) GlobalStats(ctx context.Context, f StatsFilter) (*Stats, erro
 		conds = append(conds, "c.driven_by = "+a.next(db))
 	}
 	if f.Owner != "" {
-		conds = append(conds, "c.owner = "+a.next(f.Owner))
+		conds = append(conds, "u.username = "+a.next(f.Owner))
 	}
 	if f.Persona != "" {
 		conds = append(conds, "c.persona = "+a.next(f.Persona))
@@ -219,7 +225,7 @@ func (i *Insights) scalars(ctx context.Context, sc statsScope, s *Stats) error {
 	var failoverTurns int64
 	err := i.pool.QueryRow(ctx,
 		`SELECT count(DISTINCT t.conversation_id), count(t.id),
-		        count(DISTINCT coalesce(c.owner,'')),
+		        count(DISTINCT coalesce(u.username,'')),
 		        `+tokenSums+`,
 		        count(t.id) FILTER (WHERE t.status='error'),
 		        count(t.id) FILTER (WHERE t.upstream='openrouter'),
@@ -258,9 +264,9 @@ func (i *Insights) scalars(ctx context.Context, sc statsScope, s *Stats) error {
 
 func (i *Insights) perOwner(ctx context.Context, sc statsScope, s *Stats) error {
 	rows, err := i.pool.Query(ctx,
-		`SELECT coalesce(c.owner,''), count(DISTINCT c.id), count(t.id) `+statsFrom+`
+		`SELECT coalesce(u.username,''), count(DISTINCT c.id), count(t.id) `+statsFrom+`
 		 WHERE `+sc.where+`
-		 GROUP BY c.owner ORDER BY count(t.id) DESC, c.owner LIMIT 100`, sc.args...)
+		 GROUP BY u.username ORDER BY count(t.id) DESC, u.username LIMIT 100`, sc.args...)
 	if err != nil {
 		return fmt.Errorf("stats: per-owner: %w", err)
 	}
@@ -365,7 +371,7 @@ func (i *Insights) prefixGrouped(ctx context.Context, sc statsScope, s *Stats) e
 			`SELECT count(*) FROM (
 			   SELECT t.prefix_hash `+statsFrom+`
 			   WHERE `+sc.where+` AND t.prefix_hash IS NOT NULL
-			   GROUP BY t.prefix_hash HAVING count(DISTINCT c.owner) > 1
+			   GROUP BY t.prefix_hash HAVING count(DISTINCT c.owner_user_id) > 1
 			 ) x`, sc.args...).Scan(&s.Prefix.CrossUserPrefixes); err != nil {
 			return fmt.Errorf("stats: cross-user prefix: %w", err)
 		}

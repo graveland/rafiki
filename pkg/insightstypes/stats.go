@@ -12,7 +12,7 @@ import (
 // StatsFilter narrows the population for GlobalStats. Zero-value fields are ignored.
 type StatsFilter struct {
 	Since, Until *time.Time
-	Owner        string
+	Owner        string // owner USERNAME; resolved to a users id server-side
 	Persona      string
 	Source       string
 	Model        string
@@ -44,7 +44,7 @@ type AdoptionStats struct {
 }
 
 type OwnerCount struct {
-	Owner         string `json:"owner"`
+	Owner         string `json:"owner"` // username, resolved through the users FK
 	Conversations int64  `json:"conversations"`
 	Turns         int64  `json:"turns"`
 }

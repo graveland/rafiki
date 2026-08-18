@@ -43,7 +43,7 @@ type Conversation struct {
 type convConfig struct {
 	// identity/creation
 	externalRef string
-	owner       string
+	ownerUserID string
 	entrypoint  string
 	persona     string
 	name        string
@@ -71,10 +71,13 @@ func ByExternalRef(ref string) ConvOption {
 	return func(c *convConfig) { c.externalRef = ref }
 }
 
-// NewConversation creates a fresh conversation owned by owner, originating
-// from entrypoint (e.g. "diagnose", "coredump").
-func NewConversation(owner, entrypoint string) ConvOption {
-	return func(c *convConfig) { c.owner, c.entrypoint = owner, entrypoint }
+// NewConversation creates a fresh conversation owned by ownerUserID — a
+// conversations.users id, NOT a username — originating from entrypoint (e.g.
+// "diagnose", "coredump"). Empty means unattributed, which is what a daemon-run
+// conversation (the analyzer, a core-dump pass) should pass: it runs as the
+// daemon, not as a person.
+func NewConversation(ownerUserID, entrypoint string) ConvOption {
+	return func(c *convConfig) { c.ownerUserID, c.entrypoint = ownerUserID, entrypoint }
 }
 
 // Entrypoint sets origin_entrypoint when combined with ByExternalRef.
@@ -213,7 +216,7 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 	}
 	ref := capture.ConversationRef{
 		OriginEntrypoint: cfg.entrypoint, DrivenBy: string(store.DrivenByServer),
-		Owner: cfg.owner, Persona: cfg.persona, Model: cfg.model, Name: cfg.name, ExternalRef: cfg.externalRef,
+		OwnerUserID: cfg.ownerUserID, Persona: cfg.persona, Model: cfg.model, Name: cfg.name, ExternalRef: cfg.externalRef,
 	}
 	var convID string
 	if cfg.externalRef != "" {
@@ -236,7 +239,7 @@ type sendConfig struct {
 	maxTokens     int64
 	tools         []anthropic.ToolUnionParam
 	source        string
-	author        string
+	authorUserID  string
 	toolChoice    string
 	streamHandler StreamHandler
 }
@@ -288,8 +291,11 @@ func WithTools(tools []anthropic.ToolUnionParam) SendOption {
 // WithSource overrides the per-turn inbound entrypoint.
 func WithSource(src string) SendOption { return func(s *sendConfig) { s.source = src } }
 
-// WithAuthor stamps the per-turn author identity.
-func WithAuthor(a string) SendOption { return func(s *sendConfig) { s.author = a } }
+// WithAuthorUserID stamps the per-turn author identity: a conversations.users
+// id, never a username.
+func WithAuthorUserID(id string) SendOption {
+	return func(s *sendConfig) { s.authorUserID = id }
+}
 
 // WithToolChoice forces the named tool for this send only.
 func WithToolChoice(name string) SendOption {
@@ -496,12 +502,12 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		ConversationID:   conv.ID,
 		OriginEntrypoint: conv.cfg.entrypoint,
 		DrivenBy:         store.DrivenByServer,
-		Owner:            conv.cfg.owner,
+		OwnerUserID:      conv.cfg.ownerUserID,
 		Persona:          conv.cfg.persona,
 		Name:             conv.cfg.name,
 		Ordinal:          ordinal, // history-derived: stable across handles and resumes
 		Source:           scfg.source,
-		Author:           scfg.author,
+		AuthorUserID:     scfg.authorUserID,
 		AuthorKind:       conv.cfg.authorKind,
 		RateLimit:        conv.cfg.rateLimit,
 		Primary:          conv.cfg.primary,

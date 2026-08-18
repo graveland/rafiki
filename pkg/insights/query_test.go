@@ -38,7 +38,7 @@ func TestQuery_ReturnsRowsAndTruncates(t *testing.T) {
 	ins := New(pool)
 
 	all, truncated, err := ins.Query(ctx,
-		"SELECT id::text, owner FROM conversations.conversation ORDER BY owner", 10, selectOnly)
+		"SELECT id::text, owner_username AS owner FROM conversations.v_conversation ORDER BY owner_username", 10, selectOnly)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}

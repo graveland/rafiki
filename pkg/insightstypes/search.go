@@ -15,7 +15,7 @@ import (
 // GlobalStats selects with the same filter.
 type SearchFilter struct {
 	Since, Until      *time.Time
-	Owner             string
+	Owner             string // owner USERNAME; resolved to a users id server-side
 	Persona           string
 	Source            string
 	Model             string
@@ -33,7 +33,7 @@ type SearchFilter struct {
 type ConversationSummary struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Owner    string `json:"owner"`
+	Owner    string `json:"owner"` // username, resolved through the users FK
 	Persona  string `json:"persona"`
 	Source   string `json:"source"`
 	Model    string `json:"model"`

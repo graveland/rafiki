@@ -28,7 +28,7 @@ type ConversationRef struct {
 	ID               string // empty → insert a new conversation and return its id
 	OriginEntrypoint string
 	DrivenBy         string // "server" | "client"
-	Owner            string
+	OwnerUserID      string // conversations.users.id; empty → unattributed (SQL NULL)
 	Persona          string
 	Model            string
 	Name             string
@@ -47,9 +47,9 @@ type ConversationRef struct {
 func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationRef) (string, error) {
 	if ref.ID != "" {
 		_, err := s.pool.Exec(ctx,
-			`INSERT INTO conversations.conversation (id, owner, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
-			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
-			ref.ID, nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
+			`INSERT INTO conversations.conversation (id, owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
+			 VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING`,
+			ref.ID, nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
 			nullify(ref.Cwd), nullify(ref.RepoRoot),
 		)
 		if err != nil {
@@ -59,9 +59,9 @@ func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationR
 	}
 	var id string
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text`,
-		nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
+		`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
+		 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text`,
+		nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), nullify(ref.ExternalRef),
 		nullify(ref.Cwd), nullify(ref.RepoRoot),
 	).Scan(&id)
 	return id, err
@@ -80,10 +80,10 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 		// loser gets no row and falls through to SELECT the existing one.
 		var id string
 		err := s.pool.QueryRow(ctx,
-			`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
+			`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by, name, external_ref, cwd, repo_root)
+			 VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (external_ref, driven_by) WHERE external_ref IS NOT NULL DO NOTHING
 			 RETURNING id::text`,
-			nullify(ref.Owner), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), ref.ExternalRef,
+			nullUUID(ref.OwnerUserID), nullify(ref.Persona), nullify(ref.Model), ref.OriginEntrypoint, ref.DrivenBy, nullify(ref.Name), ref.ExternalRef,
 			nullify(ref.Cwd), nullify(ref.RepoRoot),
 		).Scan(&id)
 		if err == nil {
@@ -100,7 +100,7 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 	}
 	return s.EnsureConversation(ctx, ConversationRef{
 		OriginEntrypoint: ref.OriginEntrypoint, DrivenBy: ref.DrivenBy,
-		Owner: ref.Owner, Persona: ref.Persona, Model: ref.Model, Name: ref.Name, ExternalRef: ref.ExternalRef,
+		OwnerUserID: ref.OwnerUserID, Persona: ref.Persona, Model: ref.Model, Name: ref.Name, ExternalRef: ref.ExternalRef,
 		Cwd: ref.Cwd, RepoRoot: ref.RepoRoot,
 	})
 }
@@ -111,7 +111,7 @@ type TurnIntent struct {
 	Model          string
 	Request        []byte // marshaled request JSON
 	Source         string // inbound entrypoint: 'claude' | 'tui' | 'slack' | 'diagnose' | ...
-	Author         string // who-is username / slack user id (may be empty)
+	AuthorUserID   string // conversations.users.id; empty → unattributed (SQL NULL)
 	AuthorKind     string // 'human' | 'agent' | 'system' (may be empty)
 	PrefixHash     string // sha256 of the static cache-prefix (request minus messages); see PrefixHash
 	Protocol       string // 'anthropic' (default when empty) | 'openai'; how to read the JSONB
@@ -128,10 +128,10 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 		protocol = string(store.ProtocolAnthropic)
 	}
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, status, model, request, source, author, author_kind, prefix_hash, protocol)
-		 VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9) RETURNING id::text, created_at`,
+		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, status, model, request, source, author_user_id, author_kind, prefix_hash, protocol)
+		 VALUES ($1,$2,'pending',$3,$4,$5,$6::uuid,$7,$8,$9) RETURNING id::text, created_at`,
 		t.ConversationID, t.Ordinal, nullify(t.Model), nullifyBytes(jsonbSafe(t.Request)),
-		nullify(t.Source), nullify(t.Author), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol).Scan(&turnID, &createdAt)
+		nullify(t.Source), nullUUID(t.AuthorUserID), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol).Scan(&turnID, &createdAt)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -455,6 +455,16 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 		}
 		return nil
 	})
+}
+
+// nullUUID renders an empty id as SQL NULL. Kept separate from nullify to
+// mark the columns it feeds as UUID foreign keys, where an empty string is
+// not merely "unattributed" — it is a cast error at insert time.
+func nullUUID(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // nullify maps "" to nil so empty strings persist as SQL NULL.
