@@ -3,6 +3,7 @@ package execpool
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"go.graveland.dev/rafiki/pkg/executors"
 )
@@ -11,6 +12,10 @@ import (
 // the methods the pool actually calls do anything; the rest exist to satisfy
 // the interface and fail loudly if the pool ever starts using them.
 type fakeStore struct {
+	// mu guards executor. The health loop re-reads the row on its own goroutine
+	// now, so a test mutating it (to relabel or disable) races the pool without
+	// this — and -race would fail the suite rather than the assertion.
+	mu       sync.Mutex
 	executor executors.Executor
 
 	// authErr, when non-nil, is what Authenticate returns.
@@ -28,6 +33,8 @@ func newFakeStore(id string) *fakeStore {
 }
 
 func (f *fakeStore) Authenticate(context.Context, string) (executors.Executor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	select {
 	case f.authCalls <- struct{}{}:
 	default:
@@ -45,13 +52,25 @@ func (f *fakeStore) Enroll(context.Context, string, map[string]string) (executor
 func (f *fakeStore) TouchSeen(context.Context, string) error { return nil }
 
 func (f *fakeStore) Get(_ context.Context, id string) (executors.Executor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if id != f.executor.ID {
 		return executors.Executor{}, errors.New("no such executor")
 	}
 	return f.executor, nil
 }
 
+// update mutates the stored row the way an operator would: `rafiki executor
+// label` / `disable` are row updates and nothing else.
+func (f *fakeStore) update(fn func(*executors.Executor)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(&f.executor)
+}
+
 func (f *fakeStore) List(context.Context) ([]executors.Executor, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return []executors.Executor{f.executor}, nil
 }
 

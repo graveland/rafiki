@@ -3,6 +3,7 @@ package execpool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -369,6 +370,12 @@ func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 	for {
 		select {
 		case <-ticker.C:
+			if err := p.refreshRow(ctx, id, lc); err != nil {
+				slog.Warn("execpool: executor revoked; removing it from the pool",
+					"executorId", id, "error", err)
+				p.onHealthFailure(id, lc)
+				return
+			}
 			if err := p.healthCheck(ctx, id, lc); err != nil {
 				slog.Warn("execpool: health check failed; parking executor", "executorId", id, "error", err)
 				p.onHealthFailure(id, lc)
@@ -378,6 +385,46 @@ func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 			return
 		}
 	}
+}
+
+// ErrExecutorRevoked reports that an executor's row says it may no longer serve.
+var ErrExecutorRevoked = errors.New("execpool: executor is disabled")
+
+// refreshRow re-reads the executor's row and applies it to the live connection.
+//
+// `conversations.executors` is authoritative, and the design says so — but the
+// row was previously read exactly ONCE, at Authenticate during the handshake,
+// and then cached in liveConn.executor for the connection's lifetime. Selection
+// reads that cache through Live(). So an executor that stayed connected kept its
+// enrollment-time labels for as long as it stayed connected, and
+// `rafiki executor disable` did not stop it serving: revocation took effect at
+// the next reconnect, which for a long-lived laptop connection may be days away
+// or never. "Authoritative on every connection" is only true if connections are
+// short, and these are deliberately long.
+//
+// A failure to READ the row is not a revocation — the A3 lesson, in a second
+// place. A database blip must not take the fleet out of service, so an
+// unreadable row keeps the last known one and tries again on the next tick.
+// Only an answer ("this row says disabled") removes the executor.
+func (p *Pool) refreshRow(ctx context.Context, id string, lc *liveConn) error {
+	ctx, cancel := context.WithTimeout(ctx, p.healthTimeout)
+	defer cancel()
+
+	e, err := p.store.Get(ctx, id)
+	if err != nil {
+		slog.Warn("execpool: could not re-read the executor row; keeping the last known one",
+			"executorId", id, "error", err)
+		return nil
+	}
+	if !e.Enabled {
+		return ErrExecutorRevoked
+	}
+
+	// Under the write lock: Live() reads this field under RLock.
+	p.mu.Lock()
+	lc.executor = e
+	p.mu.Unlock()
+	return nil
 }
 
 // onHealthFailure drops a failed executor from the live set and parks it,

@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/big"
 	"net"
 	"os"
@@ -212,6 +213,20 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 // docker. Returns the enrolled executor's ID.
 func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) string {
 	t.Helper()
+
+	// A label unique to THIS enrollment, so the row can be identified by the
+	// enrollment that created it rather than by the caller's labels.
+	//
+	// Matching on the caller's labels was wrong and silently so: the test
+	// database accumulates executor rows across runs, every one of them left
+	// with env=home and a non-zero LastSeenAt, so the loop below returned
+	// whichever stale row came first. Tests that only inspected refusal MESSAGES
+	// never noticed; the moment a test asserted on placement identity, it
+	// compared against a row from a run an hour earlier.
+	marker := fmt.Sprintf("t%d", time.Now().UnixNano())
+	labels = maps.Clone(labels)
+	labels["test-run"] = marker
+
 	token, err := g.store.MintToken(context.Background(), executors.NewToken{
 		Labels:        labels,
 		Isolation:     "none",
@@ -249,7 +264,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 	for time.Now().Before(deadline) {
 		execs, _ := g.store.List(context.Background())
 		for _, e := range execs {
-			if e.Labels["env"] == labels["env"] && !e.LastSeenAt.IsZero() {
+			if e.Labels["test-run"] == marker && !e.LastSeenAt.IsZero() {
 				enrolledID = e.ID
 				break
 			}
