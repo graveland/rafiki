@@ -691,18 +691,6 @@ func closePoolBounded(pool *pgxpool.Pool, timeout time.Duration) {
 	}
 }
 
-// parseControlListenAddr returns the TCP address string from
-// RAFIKI_CONTROL_LISTEN, stripping an optional "tcp:" prefix. Returns ""
-// when the env var is unset or not a valid host:port.
-//
-// A bare port after stripping the prefix (the documented "tcp:8036" form,
-// used verbatim in .env.example, README.md, and
-// docs/reference/control-protocol.md) has no colon at all, so
-// net.SplitHostPort would reject it with "missing port in address" — that
-// silently disabled the TCP control listener for anyone following the docs.
-// Such a value is promoted to ":8036" (all-interfaces, that port) before
-// validation. Already-valid forms ("host:port", ":port") pass through
-// unchanged.
 // unclaimedWarnInterval is how often the daemon repeats the bootstrap
 // warning while no user exists.
 const unclaimedWarnInterval = time.Minute
@@ -739,6 +727,18 @@ func warnWhileUnclaimed(ctx context.Context, userStore users.Store, addr string,
 	}
 }
 
+// parseControlListenAddr returns the TCP address string from
+// RAFIKI_CONTROL_LISTEN, stripping an optional "tcp:" prefix. Returns ""
+// when the env var is unset or not a valid host:port.
+//
+// A bare port after stripping the prefix (the documented "tcp:8036" form,
+// used verbatim in .env.example, README.md, and
+// docs/reference/control-protocol.md) has no colon at all, so
+// net.SplitHostPort would reject it with "missing port in address" — that
+// silently disabled the TCP control listener for anyone following the docs.
+// Such a value is promoted to ":8036" (all-interfaces, that port) before
+// validation. Already-valid forms ("host:port", ":port") pass through
+// unchanged.
 func parseControlListenAddr() string {
 	v := paths.Get(paths.ControlListen)
 	if v == "" {

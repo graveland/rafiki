@@ -474,6 +474,11 @@ func (s *Server) ServeUpgraded(conn net.Conn, auth Authenticator) {
 // which arrive with no token and are marked Restricted so the dispatcher
 // accepts only ctrl_user_create on them.
 func ListenTCP(addr string, auth Authenticator, tlsConfig *tls.Config, handler ConnectionLifecycleHandler) (*Server, error) {
+	// Fail here rather than per connection: a nil authenticator is a wiring
+	// mistake, and the loud version of it is a listener that never binds.
+	if auth == nil {
+		return nil, errors.New("control: ListenTCP requires an Authenticator")
+	}
 	ln, err := tls.Listen("tcp", addr, tlsConfig)
 	if err != nil {
 		return nil, err
@@ -543,6 +548,15 @@ func (s *Server) authHandshake(conn net.Conn, auth Authenticator) (admission, bo
 		return admission{}, false
 	}
 	const authRequired = "ctrl_auth required as first frame on TCP connections"
+
+	// ListenTCP rejects a nil authenticator up front, but ServeUpgraded has
+	// no error to return, and this runs on a per-connection goroutine: a nil
+	// deref here would take the whole daemon down over one connection.
+	// Refusing everything is the safe reading of "no way to check".
+	if auth == nil {
+		slog.Error("server: auth: no authenticator configured", "remote", remote)
+		return refuse(protocol.ErrInternal, "identity store unavailable")
+	}
 
 	if err := conn.SetReadDeadline(time.Now().Add(authHandshakeTimeout)); err != nil {
 		slog.Warn("server: auth: set read deadline", "remote", remote, "error", err)

@@ -64,6 +64,19 @@ Two transports, identical framing and protocol.
   `auth_required`. The first `ctrl_user_create` therefore claims the daemon,
   and closes the window for everyone else. The daemon logs a warning on each
   such connection and once a minute for as long as the window is open.
+- **The window is re-checked on every restricted request, not just at
+  admission.** Admission is decided once, when the connection is accepted,
+  and is never revisited; so `ctrl_user_create` on a restricted connection
+  re-reads the active user count from the store and answers `auth_required`
+  if it is non-zero. Without that, a peer that connected during the window
+  and simply held the socket open would keep minting users indefinitely.
+  Two callers racing for the very first user is a different matter and is
+  accepted: the database decides, first writer wins.
+- **An unauthenticated peer never receives an underlying error's text.** On a
+  restricted connection an `internal` response carries a fixed message
+  ("identity store unavailable") and the real error goes to the daemon log.
+  This mirrors the handshake rule above and exists for the same reason: a pgx
+  connection error names the host, the user and the database.
 - UDS connections skip auth entirely — local filesystem permissions
   (0600 socket, 0700 directory) are the only trust mechanism. They are never
   bootstrap-restricted and carry no user identity.
@@ -1064,7 +1077,7 @@ Defined error codes:
 | `auth_required`         | TCP connection sent a non-`ctrl_auth` frame first, or sent a command other than `ctrl_user_create` on a bootstrap connection. |
 | `auth_invalid`          | TCP auth token names no active user.                               |
 | `not_found`             | Generic; e.g., `ctrl_resume` against unknown id.                   |
-| `internal`              | Unexpected controller-side error. Message contains details.        |
+| `internal`              | Unexpected controller-side error. The message carries details **only for an authenticated connection**; on an unauthenticated (bootstrap) one it is a fixed string and the real error is logged server-side only — a pgx failure names the host, user and database. |
 | `no_agent_db`           | `ctrl_conversation_*`: no agent database configured (`RAFIKI_DB` unset). |
 | `payload_too_large`     | `ctrl_conversation_export`: transcript exceeds the maximum response frame size. |
 

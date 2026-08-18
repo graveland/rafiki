@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -171,6 +172,14 @@ type Controller interface {
 	// UserCreate returns the plaintext token, which the daemon cannot
 	// reproduce afterwards.
 	UserCreate(ctx context.Context, username string) (protocol.UserCreateResponseData, error)
+	// UserCreateBootstrap is UserCreate for an UNAUTHENTICATED bootstrap
+	// connection. It must re-verify that zero active users exist at REQUEST
+	// time and refuse otherwise: admission was decided when the connection
+	// was accepted, and a peer that simply holds that connection open would
+	// otherwise keep minting users long after the first one closed the
+	// window. A race between two simultaneous first arrivals is accepted
+	// (first writer wins); persistence past the window is not.
+	UserCreateBootstrap(ctx context.Context, username string) (protocol.UserCreateResponseData, error)
 	UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error)
 	UserRm(ctx context.Context, username string) error
 }
@@ -275,7 +284,7 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 	case protocol.TypeCtrlExecutorEnable:
 		return d.executorEnable(frame, hdr.ID)
 	case protocol.TypeCtrlUserCreate:
-		return d.userCreate(frame, hdr.ID)
+		return d.userCreate(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUserList:
 		return d.userList(frame, hdr.ID)
 	case protocol.TypeCtrlUserRm:
@@ -330,6 +339,25 @@ func mapErr(cmd, id string, err error, fallbackCode string) []byte {
 		fallbackCode = protocol.ErrInternal
 	}
 	return errResponse(cmd, id, fallbackCode, err.Error())
+}
+
+// guardedErr answers an error to a peer that has NOT authenticated — today
+// only a bootstrap connection's ctrl_user_create, the one verb reachable
+// without a credential.
+//
+// A *ControllerError carries a message this codebase wrote and is safe to
+// send. Anything else is the underlying error's own text, and the store
+// behind this verb is Postgres: a pgx connection failure reads
+// "failed to connect to host=db.internal user=rafiki database=rafiki: …".
+// That goes to the log, never to a stranger. The handshake already applies
+// this rule (server.go's authHandshake); dispatch is the other half.
+func guardedErr(cmd, id string, err error) []byte {
+	var ce *ControllerError
+	if errors.As(err, &ce) {
+		return errResponse(cmd, id, ce.Code, ce.Message)
+	}
+	slog.Error("control: unauthenticated request failed", "command", cmd, "error", err)
+	return errResponse(cmd, id, protocol.ErrInternal, "identity store unavailable")
 }
 
 // ─── snapshotToSummary ────────────────────────────────────────────────────────
@@ -991,7 +1019,13 @@ func (d *dispatcher) executorEnable(frame []byte, id string) []byte {
 // reader tears the connection down and the client sees "connection closed".
 const maxUserListLimit = 500
 
-func (d *dispatcher) userCreate(frame []byte, id string) []byte {
+func (d *dispatcher) userCreate(conn Connection, frame []byte, id string) []byte {
+	// A restricted connection was admitted with no credential at all, so its
+	// request takes the bootstrap path: the window is re-checked against the
+	// store on THIS request, and errors are sanitized before they reach a
+	// peer that has not proved who it is.
+	restricted := conn != nil && conn.Restricted()
+
 	var req protocol.UserCreateRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlUserCreate, id, protocol.ErrInvalidArgs, "malformed request")
@@ -999,12 +1033,20 @@ func (d *dispatcher) userCreate(frame []byte, id string) []byte {
 	if req.Username == "" {
 		return errResponse(protocol.TypeCtrlUserCreate, id, protocol.ErrInvalidArgs, "username is required")
 	}
-	data, err := d.c.UserCreate(context.Background(), req.Username)
+
+	create := d.c.UserCreate
+	if restricted {
+		create = d.c.UserCreateBootstrap
+	}
+	data, err := create(context.Background(), req.Username)
 	if errors.Is(err, users.ErrUsernameTaken) {
 		return errResponse(protocol.TypeCtrlUserCreate, id, protocol.ErrInvalidArgs,
 			"username "+req.Username+" is already taken")
 	}
 	if err != nil {
+		if restricted {
+			return guardedErr(protocol.TypeCtrlUserCreate, id, err)
+		}
 		return mapErr(protocol.TypeCtrlUserCreate, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlUserCreate, id, data)

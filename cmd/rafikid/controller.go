@@ -3408,6 +3408,42 @@ func (c *Controller) UserCreate(ctx context.Context, username string) (protocol.
 	}, nil
 }
 
+// errBootstrapClosed is the answer to an unauthenticated user_create once a
+// user exists. It is ErrAuthRequired rather than ErrInvalidArgs because that
+// is what the caller must do about it: present a token.
+var errBootstrapClosed = &control.ControllerError{
+	Code:    protocol.ErrAuthRequired,
+	Message: "a user already exists; authenticate with ctrl_auth to create more users",
+}
+
+// UserCreateBootstrap serves ctrl_user_create on a connection that was
+// admitted with NO credential, because no user existed when it connected.
+//
+// The re-check is the whole point of this method existing. Admission is
+// decided once, at accept time, and is never revisited for the life of the
+// connection — so without a check here a peer that connected during the
+// window and simply held the socket open would keep minting users for as
+// long as the daemon ran, days after the operator's first user closed the
+// window for everyone else. Reading the count from the STORE, per request,
+// is what makes "the first user closes the window" true.
+//
+// A store error is not an answer: it propagates as an internal error (the
+// dispatcher strips its text before it reaches an unauthenticated peer) and
+// never as "the window is closed" or as permission to proceed.
+func (c *Controller) UserCreateBootstrap(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	if c.users == nil {
+		return protocol.UserCreateResponseData{}, errNoUserStore
+	}
+	n, err := c.users.CountActive(ctx)
+	if err != nil {
+		return protocol.UserCreateResponseData{}, err
+	}
+	if n > 0 {
+		return protocol.UserCreateResponseData{}, errBootstrapClosed
+	}
+	return c.UserCreate(ctx, username)
+}
+
 func (c *Controller) UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error) {
 	if c.users == nil {
 		return nil, errNoUserStore
