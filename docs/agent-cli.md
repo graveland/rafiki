@@ -63,12 +63,21 @@ is the only command any listener accepts (see README's "First user" section).
 
 `~/.config/rafiki/token` is distinct from the older, now-unread
 `~/.config/rafiki/control.token`: nothing resolves the old path any more, so a
-leftover file there is inert, not a fallback. Also note `rafiki`'s dial helper
-(`mustDial`) reads the same `~/.config/rafiki/token` for every command, so a
-stale token left over from a *different* daemon (or a wiped one) turns what
-should be a no-credential bootstrap dial into an authenticated one that then
-fails `auth_invalid` — if `rafiki user create` unexpectedly refuses on a daemon
-you know is fresh, check that file before suspecting the daemon.
+leftover file there is inert, not a fallback.
+
+**This only bites on a remote (`https://`) daemon, not the local dev loop.**
+`mustDial` (`cmd/rafiki/cli_helpers.go`) reads `~/.config/rafiki/token`
+(`paths.TokenFromEnv()`) ONLY on the branch that dials a remote `RAFIKI_URL`
+over TLS; the default local path (`client.Dial(socket)`, no `RAFIKI_URL` set)
+reads no token at all, because UDS connections skip auth entirely and are
+never bootstrap-restricted. So a stale token file cannot be why a *local*
+`rafiki user create` fails on a fresh daemon — that path is structurally
+unaffected by the file's contents. It genuinely bites during the
+`kubectl port-forward` first-user sequence: a token file left over from a
+different (or wiped) remote daemon turns what should be a no-credential
+bootstrap dial into an authenticated one, which then fails `auth_invalid`. If
+`rafiki user create` unexpectedly refuses against a remote daemon you know is
+fresh, check that file before suspecting the daemon.
 
 ## `stats`
 
