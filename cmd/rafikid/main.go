@@ -36,6 +36,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+	"go.graveland.dev/rafiki/pkg/users"
+	"go.graveland.dev/rafiki/pkg/usersdb"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -395,6 +397,13 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
+	// Identity store. Nil when RAFIKI_DB is unset — every user verb then
+	// returns ErrNoAgentDB rather than pretending an empty user table.
+	var userStore users.Store
+	if pool != nil {
+		userStore = usersdb.NewPostgresStore(pool)
+	}
+
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:        pool,
 		Logger:      slog.Default(),
@@ -432,7 +441,7 @@ func runDaemon(opts runDaemonOpts) error {
 		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
-	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore)
 	ctrl.wireEventBuffer() // a no-op until evbuf is populated (Task 4)
 	ctrl.SetCatalog(catalog)
 	if face != nil {

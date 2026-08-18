@@ -13,6 +13,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // discardConn is a no-op Connection used in dispatch tests where event
@@ -57,6 +58,7 @@ type fakeController struct {
 	conversationStatsByIDFn func(context.Context, string) (*insights.Stats, error)
 	conversationSearchFn    func(context.Context, insights.SearchFilter) ([]insights.ConversationSummary, error)
 	conversationExportFn    func(context.Context, string) (*insights.Transcript, error)
+	lastUserListLimit       int
 }
 
 func (f *fakeController) List(filter protocol.ListFilter) []childstore.Snapshot {
@@ -254,6 +256,27 @@ func (f *fakeController) ExecutorDisable(req protocol.ExecutorDisableRequest) er
 func (f *fakeController) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
 	if f.executorEnableFn != nil {
 		return f.executorEnableFn(req)
+	}
+	return nil
+}
+
+func (f *fakeController) UserCreate(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	if username == "taken" {
+		return protocol.UserCreateResponseData{}, users.ErrUsernameTaken
+	}
+	return protocol.UserCreateResponseData{
+		ID: "11111111-1111-1111-1111-111111111111", Username: username, Token: "rfk_tok",
+	}, nil
+}
+
+func (f *fakeController) UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error) {
+	f.lastUserListLimit = limit
+	return []users.User{{ID: "u1", Username: "brent"}}, nil
+}
+
+func (f *fakeController) UserRm(ctx context.Context, username string) error {
+	if username == "ghost" {
+		return users.ErrNotFound
 	}
 	return nil
 }
@@ -1851,4 +1874,57 @@ func TestDispatchGetStreams(t *testing.T) {
 		req := []byte(`{"type":"ctrl_get_streams","id":"x5","childId":"child-1"}`)
 		mustError(t, d.HandleFrame(nil, req), protocol.ErrChildNotFound)
 	})
+}
+
+// ─── ctrl_user_* ────────────────────────────────────────────────────────────
+
+func TestUserCreateReturnsThePlaintextTokenOnce(t *testing.T) {
+	d := control.NewDispatch(&fakeController{})
+	req := []byte(`{"type":"ctrl_user_create","id":"1","username":"brent"}`)
+	got := mustSuccess(t, d.HandleFrame(nil, req))
+	var data protocol.UserCreateResponseData
+	if err := json.Unmarshal(got.Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data.Token != "rfk_tok" || data.Username != "brent" {
+		t.Fatalf("data = %+v", data)
+	}
+}
+
+func TestUserCreateMapsDuplicateNameToAnInvalidArgsError(t *testing.T) {
+	d := control.NewDispatch(&fakeController{})
+	req := []byte(`{"type":"ctrl_user_create","id":"1","username":"taken"}`)
+	mustError(t, d.HandleFrame(nil, req), protocol.ErrInvalidArgs)
+}
+
+// The response is capped at MaxFrameBytes, so an unbounded limit is a
+// protocol break, not just a slow query. 500 mirrors the unexported
+// maxUserListLimit in dispatch.go, which this external test package cannot
+// reference directly.
+func TestUserListClampsItsLimit(t *testing.T) {
+	const wantClamp = 500
+	f := &fakeController{}
+	d := control.NewDispatch(f)
+	req := []byte(`{"type":"ctrl_user_list","id":"1","limit":100000}`)
+	got := mustSuccess(t, d.HandleFrame(nil, req))
+	if f.lastUserListLimit != wantClamp {
+		t.Fatalf("limit = %d, want clamp to %d", f.lastUserListLimit, wantClamp)
+	}
+	// The rows are wrapped, matching ctrl_conversation_search — read
+	// dispatch.go before assuming a shape, the verbs are not uniform.
+	var payload struct {
+		Users []users.User `json:"users"`
+	}
+	if err := json.Unmarshal(got.Data, &payload); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if len(payload.Users) != 1 || payload.Users[0].Username != "brent" {
+		t.Fatalf("users = %+v", payload.Users)
+	}
+}
+
+func TestUserRmUnknownNameIsNotFound(t *testing.T) {
+	d := control.NewDispatch(&fakeController{})
+	req := []byte(`{"type":"ctrl_user_rm","id":"1","username":"ghost"}`)
+	mustError(t, d.HandleFrame(nil, req), protocol.ErrNotFound)
 }

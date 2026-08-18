@@ -14,6 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // ─── ControllerError ──────────────────────────────────────────────────────────
@@ -164,6 +165,14 @@ type Controller interface {
 	ExecutorDisable(req protocol.ExecutorDisableRequest) error
 	// ExecutorEnable re-enables a disabled executor.
 	ExecutorEnable(req protocol.ExecutorEnableRequest) error
+
+	// ─── Identity ────────────────────────────────────────────────────────────
+
+	// UserCreate returns the plaintext token, which the daemon cannot
+	// reproduce afterwards.
+	UserCreate(ctx context.Context, username string) (protocol.UserCreateResponseData, error)
+	UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error)
+	UserRm(ctx context.Context, username string) error
 }
 
 // ─── Dispatch factory ─────────────────────────────────────────────────────────
@@ -257,6 +266,12 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.executorDisable(frame, hdr.ID)
 	case protocol.TypeCtrlExecutorEnable:
 		return d.executorEnable(frame, hdr.ID)
+	case protocol.TypeCtrlUserCreate:
+		return d.userCreate(frame, hdr.ID)
+	case protocol.TypeCtrlUserList:
+		return d.userList(frame, hdr.ID)
+	case protocol.TypeCtrlUserRm:
+		return d.userRm(frame, hdr.ID)
 	default:
 		return errResponse(hdr.Type, hdr.ID, protocol.ErrInvalidArgs, "unknown command type: "+hdr.Type)
 	}
@@ -959,4 +974,65 @@ func (d *dispatcher) executorEnable(frame []byte, id string) []byte {
 		return mapErr(protocol.TypeCtrlExecutorEnable, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlExecutorEnable, id, nil)
+}
+
+// ─── Identity ───────────────────────────────────────────────────────────────
+
+// maxUserListLimit bounds ctrl_user_list. Every response shares one 16 MiB
+// frame budget, and a writer that exceeds it does not error cleanly — the
+// reader tears the connection down and the client sees "connection closed".
+const maxUserListLimit = 500
+
+func (d *dispatcher) userCreate(frame []byte, id string) []byte {
+	var req protocol.UserCreateRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlUserCreate, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.Username == "" {
+		return errResponse(protocol.TypeCtrlUserCreate, id, protocol.ErrInvalidArgs, "username is required")
+	}
+	data, err := d.c.UserCreate(context.Background(), req.Username)
+	if errors.Is(err, users.ErrUsernameTaken) {
+		return errResponse(protocol.TypeCtrlUserCreate, id, protocol.ErrInvalidArgs,
+			"username "+req.Username+" is already taken")
+	}
+	if err != nil {
+		return mapErr(protocol.TypeCtrlUserCreate, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlUserCreate, id, data)
+}
+
+func (d *dispatcher) userList(frame []byte, id string) []byte {
+	var req protocol.UserListRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlUserList, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.Limit <= 0 || req.Limit > maxUserListLimit {
+		req.Limit = maxUserListLimit
+	}
+	list, err := d.c.UserList(context.Background(), req.IncludeDeleted, req.Limit)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlUserList, id, err, protocol.ErrInternal)
+	}
+	if list == nil {
+		list = []users.User{}
+	}
+	return okResponse(protocol.TypeCtrlUserList, id, map[string]any{"users": list})
+}
+
+func (d *dispatcher) userRm(frame []byte, id string) []byte {
+	var req protocol.UserRmRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlUserRm, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.Username == "" {
+		return errResponse(protocol.TypeCtrlUserRm, id, protocol.ErrInvalidArgs, "username is required")
+	}
+	if err := d.c.UserRm(context.Background(), req.Username); errors.Is(err, users.ErrNotFound) {
+		return errResponse(protocol.TypeCtrlUserRm, id, protocol.ErrNotFound,
+			"no active user named "+req.Username)
+	} else if err != nil {
+		return mapErr(protocol.TypeCtrlUserRm, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlUserRm, id, nil)
 }

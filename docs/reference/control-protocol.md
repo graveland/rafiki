@@ -1507,7 +1507,89 @@ authentication on its next connection.
 
 **Response** (success) — `data` is omitted (null).
 
-## 16. Reference: pi RPC pass-through
+## 16. User management (ctrl_user_*)
+
+Commands for managing rafiki user identities. Auth is not yet enforced by
+these commands — a later task adds the bootstrap gate and per-user
+authentication; today every `ctrl_user_*` verb is reachable exactly like any
+other `ctrl_*` command, subject to normal UDS/TCP-TLS connection auth. All
+three verbs return `no_agent_db` when the daemon has no database pool
+(`RAFIKI_DB` unset) — there is no in-memory fallback for identity.
+
+### 16.1 `ctrl_user_create`
+
+Mint a user row and its bearer token.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_user_create",
+  "username": "brent"
+}
+```
+
+**Response** (success)
+```jsonc
+{
+  "type": "ctrl_response",
+  "command": "ctrl_user_create",
+  "success": true,
+  "data": {
+    "id": "...",
+    "username": "brent",
+    "token": "rfk_...",           // PLAINTEXT token — shown once, never again
+    "created_at": "2026-08-18T00:00:00Z"
+  }
+}
+```
+
+A `username` already held by an active (non-tombstoned) user returns
+`invalid_args`.
+
+### 16.2 `ctrl_user_list`
+
+Enumerate users. Tokens are never returned.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_user_list",
+  "include_deleted": false,
+  "limit": 50                     // clamped to 500
+}
+```
+
+**Response** (success)
+```jsonc
+{
+  "type": "ctrl_response",
+  "command": "ctrl_user_list",
+  "success": true,
+  "data": {
+    "users": [
+      {"id": "...", "username": "brent", "created_at": "..."}
+    ]
+  }
+}
+```
+
+### 16.3 `ctrl_user_rm`
+
+Tombstone a user: its token stops authenticating, but history keeps
+resolving the username.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_user_rm",
+  "username": "brent"
+}
+```
+
+**Response** (success) — `data` is omitted (null). An unknown or already
+tombstoned username returns `not_found`.
+
+## 17. Reference: pi RPC pass-through
 
 For completeness, the controller is transparent for routing and content of
 pi's `--mode rpc` protocol, with the two intercepted commands documented in
