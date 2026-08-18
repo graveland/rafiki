@@ -10,8 +10,15 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb"
 )
 
-// The native backend must be a no-op that reports the truth: it exposes the
-func TestNativeProvisionAcceptsPinned(t *testing.T) {
+// Provision exposes the root the executor was started with, and says nothing
+// about isolation.
+//
+// The empty isolation is the assertion, not an oversight: an executor does not
+// know whether it is running in a container and must not guess, because the
+// answer gates where other people's children may run. The operator's copy is on
+// the row. This process reporting "none" is exactly how every sandboxed child
+// came to be told it was unsandboxed.
+func TestProvisionExposesTheRootAndDeclaresNoIsolation(t *testing.T) {
 	root := t.TempDir()
 	srv := executor.NewServer(executor.Options{Root: root, Version: "test"})
 	client := newTestClient(t, srv)
@@ -23,8 +30,8 @@ func TestNativeProvisionAcceptsPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Msg.Isolation != "none" {
-		t.Errorf("a native executor's isolation is none; claiming otherwise is a grant nobody enforces: %q", resp.Msg.Isolation)
+	if resp.Msg.Isolation != "" {
+		t.Errorf("the executor self-reported isolation %q; that fact lives on its row, not in its own answer", resp.Msg.Isolation)
 	}
 	if len(resp.Msg.Roots) != 1 || resp.Msg.Roots[0] != root {
 		t.Errorf("roots = %v, want [%s]", resp.Msg.Roots, root)

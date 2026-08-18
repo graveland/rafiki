@@ -21,7 +21,7 @@ func newExecutorCmd() *cobra.Command {
 		Short:   "Run an executor, or manage the executor pool",
 		Long: `Run an executor, or manage the pool of them.
 
-  serve, serve-stdio    BE an executor on this machine, in the foreground.
+  serve                 BE an executor on this machine, in the foreground.
   service               run it as a per-user system service (launchd/systemd).
   enroll, create, list,
   label, disable,
@@ -39,12 +39,11 @@ The administrative verbs output JSON.`,
 		newExecutorLabelCmd(),
 		newExecutorDisableCmd(),
 		newExecutorEnableCmd(),
-		// serve/serve-stdio are the executor ITSELF, not operator verbs against
-		// the daemon; see cmd_executor_serve.go. They sit under the same noun
+		// serve is the executor ITSELF, not an operator verb against the
+		// daemon; see cmd_executor_serve.go. It sits under the same noun
 		// because "be an executor" and "administer executors" are the same
 		// subject, and `serve` does not collide with any verb above.
 		newExecutorServeCmd(),
-		newExecutorServeStdioCmd(),
 		newExecutorServiceCmd(),
 	)
 	return cmd

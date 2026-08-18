@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"runtime"
 	"time"
 
@@ -31,19 +30,32 @@ type Options struct {
 	Concurrency int
 	// Version is the executor build version, reported in Describe.
 	Version string
+	// RTK is whether tools may rewrite commands through rtk.
+	//
+	// Explicit, because the zero RTKMode is NOT RTKOff — rtkRewrite only
+	// short-circuits on the literal "off" — so leaving this unset made every
+	// executor rewrite through rtk with nobody having chosen it. It is the
+	// executor operator's setting rather than the child's: the executor is a
+	// different machine, and the child cannot know what is installed there.
+	RTK tools.RTKMode
+	// SpillDir is where oversized tool results and background job output are
+	// written. Empty means os.TempDir().
+	SpillDir string
+	// JobOutputBudget is how many bytes of retained background-job output one
+	// workspace may hold. Zero means defaultJobBudget.
+	JobOutputBudget int64
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
 type Server struct {
 	executorpbconnect.UnimplementedExecutorServiceHandler
-	id      string
-	opts    Options
-	labels  map[string]string
-	reg     *tools.Registry
-	jobs    *jobRegistry
-	sem     chan struct{} // bounds concurrent Execute calls
-	backend Backend
-	wsReg   *workspaceRegistry
+	id     string
+	opts   Options
+	labels map[string]string
+	reg    *tools.Registry
+	jobs   *jobRegistry
+	sem    chan struct{} // bounds concurrent Execute calls
+	wsReg  *workspaceRegistry
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
@@ -51,25 +63,41 @@ func NewServer(opts Options) *Server {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 6
 	}
-	tr := tools.NewFileTracker()
+	if opts.SpillDir == "" {
+		opts.SpillDir = os.TempDir()
+	}
+	if opts.RTK == "" {
+		opts.RTK = tools.RTKAuto
+	}
 	// MaterializeOnly, not MaterializeAll: the full blueprint would give the
 	// executor the parent's credentialed tools and a nil task store.
-	reg := tools.DefaultBlueprint.MaterializeOnly(tools.ToolOpts{
-		Cwd:         opts.Root,
-		FileTracker: tr,
-	}, tools.ExecutorLocalTools())
-	executorID := randomID()
+	reg := tools.DefaultBlueprint.MaterializeOnly(
+		toolOptsFor(opts, tools.NewFileTracker()), tools.ExecutorLocalTools())
 	return &Server{
-		id:   executorID,
+		id:   randomID(),
 		opts: opts,
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
-		reg:     reg,
-		jobs:    newJobRegistry(),
-		sem:     make(chan struct{}, opts.Concurrency),
-		backend: resolveBackend(opts, executorID),
-		wsReg:   newWorkspaceRegistry(),
+		reg:   reg,
+		jobs:  newJobRegistry(opts.SpillDir, opts.Root, opts.JobOutputBudget),
+		sem:   make(chan struct{}, opts.Concurrency),
+		wsReg: newWorkspaceRegistry(),
+	}
+}
+
+// toolOptsFor maps the executor's options onto the tool options its registry is
+// built from. Extracted so the mapping is testable: every field here was once
+// simply absent, and an unset ToolOpts field does not fail — it takes a zero
+// value that may not mean what the zero value looks like. RTK is the example:
+// RTKMode("") is not RTKOff, so leaving it unset made every executor rewrite
+// commands through rtk with nobody having chosen it.
+func toolOptsFor(opts Options, tr *tools.FileTracker) tools.ToolOpts {
+	return tools.ToolOpts{
+		Cwd:          opts.Root,
+		FileTracker:  tr,
+		RTK:          opts.RTK,
+		OutputPolicy: tools.OutputPolicy{SpillDir: opts.SpillDir},
 	}
 }
 
@@ -107,17 +135,23 @@ func (s *Server) Provision(
 	_ context.Context,
 	req *connect.Request[executorpb.ProvisionRequest],
 ) (*connect.Response[executorpb.ProvisionResponse], error) {
-	msg := req.Msg
-	ws, err := s.backend.Provision(context.Background(), msg)
-	if err != nil {
-		return nil, err
+	// The request's mounts, network, workdir and workspace_mode are all
+	// ignored, and the response's isolation is left EMPTY on purpose. This
+	// process serves the root it was started with; what that root can reach is
+	// decided by its filesystem view — the container's mounts, chosen in
+	// `docker run`, or the host user's permissions — and described, for humans
+	// and for selectors, on the executor's row. An isolation string invented
+	// here would be the executor asserting a fact that gates it.
+	ws := &workspace{
+		id:      randomID(),
+		workdir: s.opts.Root,
+		roots:   []string{s.opts.Root},
 	}
 	s.wsReg.put(ws)
 	return connect.NewResponse(&executorpb.ProvisionResponse{
 		WorkspaceId: ws.id,
 		Roots:       ws.roots,
 		Workdir:     ws.workdir,
-		Isolation:   ws.isolation,
 	}), nil
 }
 
@@ -126,28 +160,21 @@ func (s *Server) Release(
 	req *connect.Request[executorpb.ReleaseRequest],
 ) (*connect.Response[executorpb.ReleaseResponse], error) {
 	id := req.Msg.WorkspaceId
-	ws, ok := s.wsReg.get(id)
-	if ok {
-		// Kill THIS workspace's background jobs before tearing it down. A
+	if _, ok := s.wsReg.get(id); ok {
+		// End THIS workspace's background jobs before tearing it down: kill the
+		// running ones, drop the finished ones, remove their output files. A
 		// background job in a released workspace is not a job, and reporting it
 		// as running is worse than reporting it gone.
-		s.jobs.killWorkspace(id)
-		_ = s.backend.Release(context.Background(), ws)
+		//
+		// This is also what ends retention. There is no timer anywhere: a
+		// wall-clock window cannot know when an async agent will come back for
+		// its output, and the workspace already outlives exactly the agent that
+		// could ask.
+		s.jobs.releaseWorkspace(id)
 		s.wsReg.remove(id)
 	}
 	// Idempotent: release a non-existent workspace without error.
 	return connect.NewResponse(&executorpb.ReleaseResponse{}), nil
-}
-
-// resolveBackend returns the workspace backend.
-//
-// There is only one. An executor serves the filesystem it can see, and whether
-// that view is a container is the operator's claim on the executor's ROW, not
-// something this process arranges or inspects. rafiki does not launch
-// containers: running this binary inside one is what makes a container
-// executor, and docker or k8s already does that.
-func resolveBackend(opts Options, _ string) Backend {
-	return newNativeBackend(opts.Root)
 }
 
 func (s *Server) Execute(
@@ -288,24 +315,23 @@ func (s *Server) startBackground(
 		})
 	}
 
-	handle := msg.CallId
-	if handle == "" {
-		handle = randomID()
-	}
-
-	cwd := s.opts.Root
-	var cmd *exec.Cmd
-	if ws != nil {
-		cmd = ws.exec(context.Background(), []string{"sh", "-c", in.Command})
-	} else {
-		cmd = exec.CommandContext(context.Background(), "bash", "-c", in.Command)
-		cmd.Dir = cwd
-	}
 	wsID := ""
 	if ws != nil {
 		wsID = ws.id
 	}
-	if err := s.jobs.start(cmd, handle, wsID); err != nil {
+
+	// A background job is never rewritten through rtk, whatever Options.RTK
+	// says, and that is deliberate rather than an omission. The rewrite is only
+	// safe because bash.go can watch stderr after the command exits and re-run
+	// the original when rtk itself refused — a long-running job offers no exit
+	// to inspect and no output it could take back, so a rewrite here would be
+	// one with no way to undo it.
+	//
+	// The registry builds the command. It used to be built here, which is how
+	// the background path came to run `sh -c` for a workspaced job and
+	// `bash -c` for a bare one.
+	handle, err := s.jobs.start(in.Command, msg.CallId, wsID)
+	if err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{
 				Failed: &executorpb.Failure{
