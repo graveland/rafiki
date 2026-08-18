@@ -84,14 +84,12 @@
 - **Design/plan docs live in `docs/plans/YYYY-MM-DD-<topic>-design.md` and `...-plan.md`** (not the generic `docs/superpowers/` default) — follow this repo's existing convention when brainstorming or planning new work.
 - **Generated protobuf code is checked in** (`pkg/executorpb/`). A contributor without `protoc` or `buf` must still be able to build. The `make proto` target regenerates it when the `.proto` file changes; never hand-edit the generated `.pb.go` or `.connect.go` files.
 - **`pkg/protocol` must never import `pkg/executorpb`.** The protocol package promises zero dependencies in its own header and the executor protocol is a separate wire format with its own types and transport. Generated code, the client, and the server all live outside `pkg/protocol`.
-- **A background job on a container workspace lives INSIDE the container, and
-  `Release` kills only its own workspace's jobs.** `Attach`/`Cancel`/`JobOutput`
-  carry a handle and no workspace id, so `Server.innerJobs` maps handle →
-  workspace; without it the outer server cannot tell which container to forward
-  to. `Release` used to call a `killAll()` that took no workspace argument, so
-  releasing one child's workspace killed every other child's jobs on the executor
-  (finding D4) — it is `releaseWorkspace(id)` now, and it signals the process GROUP,
-  matching `kill()`, so a background `npm run dev` does not strand its tree.
+- **`Release` ends only its OWN workspace's jobs.** It used to call a `killAll()`
+  that took no workspace argument, so releasing one child's workspace killed
+  every other child's background jobs on the executor — finding D4. It is
+  `releaseWorkspace(id)` now, and it signals the process GROUP, matching
+  `kill()`, so a background `npm run dev` does not strand its tree. It is also
+  the only thing that ends output retention, since there is no timer.
 
 - **Two tool lists, and they are not the same list.** `tools.ExecutorLocalTools()` is what an executor process RUNS — `read`, `write`, `edit`, `glob`, `grep`, `bash` — and `executor.NewServer` builds its registry with `MaterializeOnly` over exactly that set. `tools.RoutedToExecutor()` is what the PARENT dispatches remotely: those six plus `bash_start`, `bash_output`, `bash_kill`, which are parent-side tools implemented as RPCs and never reach the executor's registry. Everything else — `skill`, `task_*`, `web_*`, `lsp_*`, MCP — stays parent-side, which is what keeps credentials above the boundary. Building the executor's registry with `MaterializeAll` instead is a live panic: `ToolOpts.Tasks` is nil there, and the `task_*` tools do not nil-check.
 - **`tools.AgentSpawner` is bound to ONE child at construction and takes no caller identity in any method.** That is the enforcement of §1.2's rule, and it is easy to undo by "simplifying" the adapter into a single shared value with a `selfID string` first parameter. Do not: fundi children run in-process, so a self id passed as a parameter is one refactor away from being a tool argument, and a tool argument is produced by an LLM that can be prompt-injected into naming a sibling. `newControllerSpawner` is called per-child from `agentRuntimeOptions`, where the daemon-stamped `childID` is already in hand.
