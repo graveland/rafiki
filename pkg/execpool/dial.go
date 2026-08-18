@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
 // ConnectOptions carries everything the executor side needs to dial, enroll,
@@ -92,6 +93,10 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 
 	tlsCfg := &tls.Config{
 		ServerName: sni,
+		// http/1.1, not h2: the outer connection is an ordinary HTTP/1.1
+		// request that gets UPGRADED, and net/http can only hijack an HTTP/1.1
+		// connection. The inverted HTTP/2 begins after the 101, directly on the
+		// byte stream, where ALPN plays no part.
 		NextProtos: ALPNProtocols,
 	}
 	if o.PinCert != "" {
@@ -108,12 +113,21 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	if err := conn.HandshakeContext(ctx); err != nil {
 		return fmt.Errorf("tls handshake: %w", err)
 	}
-	if got := conn.ConnectionState().NegotiatedProtocol; got != "h2" {
-		return fmt.Errorf("execpool: ALPN negotiated %q, want h2", got)
+
+	// Reach the executor endpoint by PATH on the shared listener, upgrading out
+	// of HTTP/1.1. This is what lets the control plane and the executor link
+	// share one port and one certificate; a wrong endpoint now fails with a
+	// readable HTTP status instead of as garbage in the first frame.
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	upConn, err := upgradeconn.Dial(conn, upgradeconn.Executor, sni)
+	if err != nil {
+		return err
 	}
 
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	hello, credential, err := writeHello(conn, o)
+	// From here everything reads through upConn. The hello frame and the HTTP/2
+	// preface that follows it arrive in one stream, and the upgrade's buffer is
+	// part of that stream rather than something to be discarded.
+	hello, credential, err := writeHello(upConn, o)
 	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
 		return err
@@ -132,7 +146,7 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 		slog.Info("executor: enrolled", "id", hello.ExecutorID, "credentialFile", o.CredentialFile)
 	}
 
-	return ServeInverted(conn, o.Handler)
+	return ServeInverted(upConn, o.Handler)
 }
 
 // credFileHas reports whether a readable, non-empty credential file exists.
