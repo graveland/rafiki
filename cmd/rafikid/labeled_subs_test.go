@@ -8,6 +8,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // ─── fake Connection ──────────────────────────────────────────────────────────
@@ -23,6 +24,9 @@ func (c *collectConn) Deliver(frame []byte) {
 	defer c.mu.Unlock()
 	c.frames = append(c.frames, frame)
 }
+
+func (*collectConn) Identity() users.Identity { return users.Identity{} }
+func (*collectConn) Restricted() bool         { return false }
 
 func (c *collectConn) count() int {
 	c.mu.Lock()

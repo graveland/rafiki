@@ -7,7 +7,6 @@ package control
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // Connection represents the write side of a single client connection. It is
@@ -33,6 +33,31 @@ type Connection interface {
 	// Errors (including timeouts) are logged, not discarded — see
 	// netConn.Deliver.
 	Deliver(frame []byte)
+
+	// Identity is the authenticated caller. The zero value means "not a
+	// user": a UDS connection (locally trusted, no handshake) or a
+	// bootstrap connection (no users exist yet).
+	Identity() users.Identity
+
+	// Restricted reports a bootstrap-admitted connection, which may send
+	// only ctrl_user_create. UDS connections are never restricted — the
+	// socket is the local trust boundary and always has been.
+	Restricted() bool
+}
+
+// Authenticator resolves control-plane credentials. It is the users.Store
+// interface narrowed to what the handshake needs, so pkg/control does not
+// depend on a database package.
+type Authenticator interface {
+	// Authenticate resolves a ctrl_auth token. users.ErrNotFound means the
+	// token is invalid — an answer. Any other error means the check could
+	// not be performed and MUST NOT be reported as an auth failure.
+	Authenticate(ctx context.Context, token string) (users.Identity, error)
+
+	// CountActive reports how many users exist. Zero puts the listener in
+	// bootstrap mode: a connection is admitted without a token and may send
+	// only ctrl_user_create.
+	CountActive(ctx context.Context) (int, error)
 }
 
 // FrameHandler is called once per inbound JSONL frame. It may return a
@@ -144,7 +169,7 @@ func (s *Server) acceptLoop() {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.handleConn(conn, nil)
+			s.handleConn(conn, admission{})
 		}()
 	}
 }
@@ -155,7 +180,17 @@ func (s *Server) acceptLoop() {
 type netConn struct {
 	conn net.Conn
 	mu   sync.Mutex
+
+	// identity and restricted are decided once, by the auth handshake,
+	// before any frame is dispatched, and never change afterwards — so
+	// they need no lock. The zero values are the UDS path's: locally
+	// trusted, not a user, not restricted.
+	identity   users.Identity
+	restricted bool
 }
+
+func (c *netConn) Identity() users.Identity { return c.identity }
+func (c *netConn) Restricted() bool         { return c.restricted }
 
 // deliverWriteTimeout bounds a single frame write. A subscriber that has
 // stopped reading (a suspended terminal, `fundi tail` into a pager) would
@@ -248,11 +283,32 @@ func (c *netConn) Deliver(frame []byte) {
 	}
 }
 
-// handleConn drives the frame-read loop for one connection. r, if non-nil,
-// is a FrameReader already positioned past a prior auth handshake read (see
-// the comment above its use below); pass nil for connections with no
-// handshake (the plain UDS listener).
-func (s *Server) handleConn(conn net.Conn, r *protocol.FrameReader) {
+// admission is what the auth handshake decided about one connection. Its
+// zero value is the plain UDS path: no handshake ran, so there is no reader
+// to inherit, no user, and no restriction.
+type admission struct {
+	// reader read the handshake frame and may already hold bytes the client
+	// pipelined behind it — handleConn must reuse it, never rebuild it. Nil
+	// means no handshake ran.
+	reader *protocol.FrameReader
+
+	// identity is the authenticated caller; the zero value means "not a user".
+	identity users.Identity
+
+	// restricted marks a bootstrap connection: admitted without a token and
+	// permitted only ctrl_user_create (enforced by the dispatcher).
+	restricted bool
+
+	// pending is a frame already consumed from reader that is a REQUEST
+	// rather than a handshake frame — the bootstrap ctrl_user_create. It is
+	// gone from the socket and cannot be read again, so handleConn must
+	// dispatch it before entering its read loop.
+	pending []byte
+}
+
+// handleConn drives the frame-read loop for one connection. Pass the zero
+// admission for connections with no handshake (the plain UDS listener).
+func (s *Server) handleConn(conn net.Conn, a admission) {
 	defer conn.Close()
 
 	// Close this connection when the server shuts down so ReadFrame unblocks.
@@ -266,7 +322,7 @@ func (s *Server) handleConn(conn net.Conn, r *protocol.FrameReader) {
 		}
 	}()
 
-	nc := &netConn{conn: conn}
+	nc := &netConn{conn: conn, identity: a.identity, restricted: a.restricted}
 
 	// Register this connection in the broadcast registry.
 	s.connsMu.Lock()
@@ -279,15 +335,25 @@ func (s *Server) handleConn(conn net.Conn, r *protocol.FrameReader) {
 	}()
 
 	defer s.handler.HandleClose(nc)
-	// r is non-nil when a preceding auth handshake (TCP/TLS path) already
-	// constructed a FrameReader and read the auth frame off conn: that
-	// bufio.Reader may have buffered bytes past the auth frame's trailing
+
+	// a.pending is a request frame the handshake already consumed from
+	// a.reader (the bootstrap ctrl_user_create). Those bytes are gone from
+	// the socket: re-reading conn would block forever, so it is dispatched
+	// here, before the loop, or it is lost.
+	if len(a.pending) > 0 && !s.serveFrame(nc, a.pending) {
+		return
+	}
+
+	// a.reader is non-nil when a preceding auth handshake (TCP/TLS path)
+	// already constructed a FrameReader and read the first frame off conn:
+	// that bufio.Reader may have buffered bytes past the frame's trailing
 	// newline (a client's first real request landing in the same TCP
 	// segment as ctrl_auth is common — client.DialURL writes auth and
 	// returns immediately). Reusing it, instead of wrapping conn in a
 	// second FrameReader here, is what keeps those buffered bytes from
 	// being silently dropped. The plain UDS path (Listen/acceptLoop) has
-	// no handshake, so r is nil and gets a fresh FrameReader as before.
+	// no handshake, so it is nil and gets a fresh FrameReader as before.
+	r := a.reader
 	if r == nil {
 		r = protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
 	}
@@ -299,22 +365,31 @@ func (s *Server) handleConn(conn net.Conn, r *protocol.FrameReader) {
 			}
 			return
 		}
-		resp := s.handler.HandleFrame(nc, frame)
-		if len(resp) > 0 {
-			// Route through nc.writeFrame (not a bare protocol.WriteFrame on
-			// conn) so this response write shares the same per-connection
-			// mutex and own-deadline-per-write discipline as Deliver: it
-			// cannot interleave with a concurrent subscription frame, and it
-			// gets its own fresh deadline rather than firing against one a
-			// prior Deliver left behind.
-			if err := nc.writeFrame(resp); err != nil {
-				if s.ctx.Err() == nil {
-					slog.Warn("server: write frame", "remote", conn.RemoteAddr(), "error", err)
-				}
-				return
-			}
+		if !s.serveFrame(nc, frame) {
+			return
 		}
 	}
+}
+
+// serveFrame dispatches one frame and writes any response back. It reports
+// whether the connection may continue.
+func (s *Server) serveFrame(nc *netConn, frame []byte) bool {
+	resp := s.handler.HandleFrame(nc, frame)
+	if len(resp) == 0 {
+		return true
+	}
+	// Route through nc.writeFrame (not a bare protocol.WriteFrame on conn)
+	// so this response write shares the same per-connection mutex and
+	// own-deadline-per-write discipline as Deliver: it cannot interleave
+	// with a concurrent subscription frame, and it gets its own fresh
+	// deadline rather than firing against one a prior Deliver left behind.
+	if err := nc.writeFrame(resp); err != nil {
+		if s.ctx.Err() == nil {
+			slog.Warn("server: write frame", "remote", nc.conn.RemoteAddr(), "error", err)
+		}
+		return false
+	}
+	return true
 }
 
 // Broadcast delivers frame to every currently-active connection.  Best-effort:
@@ -377,25 +452,28 @@ func NewAttached(handler ConnectionLifecycleHandler) *Server {
 // socket — reading past the wrapper drops them and hangs the client to its
 // timeout. The wrapper reads the buffer first, so authHandshake's FrameReader
 // sees an unbroken stream.
-func (s *Server) ServeUpgraded(conn net.Conn, wantToken string) {
+func (s *Server) ServeUpgraded(conn net.Conn, auth Authenticator) {
 	s.wg.Add(1)
 	defer s.wg.Done()
 
-	r, ok := s.authHandshake(conn, wantToken)
+	a, ok := s.authHandshake(conn, auth)
 	if !ok {
 		conn.Close()
 		return
 	}
-	s.handleConn(conn, r)
+	s.handleConn(conn, a)
 }
 
 // ─── TCP/TLS listener ──────────────────────────────────────────────────────────
 
 // ListenTCP starts a TLS-wrapped TCP listener that enforces ctrl_auth as the
-// mandatory first frame. tlsConfig.Certificates MUST be set before calling —
-// TLS is mandatory, no plaintext ever. The handler receives only
-// successfully-authed connections.
-func ListenTCP(addr string, wantToken string, tlsConfig *tls.Config, handler ConnectionLifecycleHandler) (*Server, error) {
+// mandatory first frame, resolving its token through auth.
+// tlsConfig.Certificates MUST be set before calling — TLS is mandatory, no
+// plaintext ever. The handler receives only admitted connections: those that
+// authenticated, plus — while auth reports zero users — bootstrap connections,
+// which arrive with no token and are marked Restricted so the dispatcher
+// accepts only ctrl_user_create on them.
+func ListenTCP(addr string, auth Authenticator, tlsConfig *tls.Config, handler ConnectionLifecycleHandler) (*Server, error) {
 	ln, err := tls.Listen("tcp", addr, tlsConfig)
 	if err != nil {
 		return nil, err
@@ -408,11 +486,11 @@ func ListenTCP(addr string, wantToken string, tlsConfig *tls.Config, handler Con
 		cancel:  cancel,
 		conns:   make(map[Connection]struct{}),
 	}
-	go s.acceptTCPLoop(wantToken)
+	go s.acceptTCPLoop(auth)
 	return s, nil
 }
 
-func (s *Server) acceptTCPLoop(wantToken string) {
+func (s *Server) acceptTCPLoop(auth Authenticator) {
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
@@ -437,12 +515,12 @@ func (s *Server) acceptTCPLoop(wantToken string) {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			r, ok := s.authHandshake(conn, wantToken)
+			a, ok := s.authHandshake(conn, auth)
 			if !ok {
 				conn.Close()
 				return
 			}
-			s.handleConn(conn, r)
+			s.handleConn(conn, a)
 		}()
 	}
 }
@@ -453,52 +531,88 @@ func (s *Server) acceptTCPLoop(wantToken string) {
 // handleConn, so it never affects the normal request path's read timing.
 const authHandshakeTimeout = 10 * time.Second
 
-// authHandshake reads one frame from conn and validates it as a ctrl_auth
-// with a matching token. On success it returns the FrameReader used to read
-// that frame (which may already hold buffered bytes from a request the
-// client pipelined right after auth — see handleConn) and true. On failure
-// it writes the appropriate error frame and returns (nil, false).
-func (s *Server) authHandshake(conn net.Conn, wantToken string) (*protocol.FrameReader, bool) {
+// authHandshake reads the first frame and decides how the connection may
+// proceed: as an authenticated user, as a bootstrap connection (no users
+// exist yet, and the frame it just read is the ctrl_user_create that creates
+// the first one), or not at all. On failure it writes the appropriate error
+// frame and returns ok=false; the caller closes the connection.
+func (s *Server) authHandshake(conn net.Conn, auth Authenticator) (admission, bool) {
 	remote := conn.RemoteAddr()
+	refuse := func(code, msg string) (admission, bool) {
+		s.writeAuthError(conn, code, msg)
+		return admission{}, false
+	}
+	const authRequired = "ctrl_auth required as first frame on TCP connections"
 
 	if err := conn.SetReadDeadline(time.Now().Add(authHandshakeTimeout)); err != nil {
 		slog.Warn("server: auth: set read deadline", "remote", remote, "error", err)
-		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
-		return nil, false
+		return refuse(protocol.ErrAuthRequired, authRequired)
 	}
 
 	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
 	frame, err := r.ReadFrame()
 	if err != nil {
 		slog.Warn("server: auth read first frame", "remote", remote, "error", err)
-		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
-		return nil, false
+		return refuse(protocol.ErrAuthRequired, authRequired)
 	}
+
+	ctx, cancel := context.WithTimeout(s.ctx, authHandshakeTimeout)
+	defer cancel()
 
 	var req protocol.AuthRequest
 	if err := json.Unmarshal(frame, &req); err != nil || req.Type != protocol.TypeCtrlAuth {
-		slog.Warn("server: auth: non-ctrl_auth first frame", "remote", remote)
-		s.writeAuthError(conn, protocol.ErrAuthRequired, "ctrl_auth required as first frame on TCP connections")
-		return nil, false
+		// Not a ctrl_auth frame. This is legal in exactly one situation: no
+		// user exists yet, and the frame is the ctrl_user_create that
+		// creates the first one. The dispatcher enforces the command
+		// restriction; the handshake only decides admission.
+		n, cerr := auth.CountActive(ctx)
+		if cerr != nil {
+			// "I could not check" — never reported as an auth answer, and
+			// never with the store's error text.
+			slog.Error("server: auth: cannot determine bootstrap state", "remote", remote, "error", cerr)
+			return refuse(protocol.ErrInternal, "identity store unavailable")
+		}
+		if n > 0 {
+			slog.Warn("server: auth: non-ctrl_auth first frame", "remote", remote)
+			return refuse(protocol.ErrAuthRequired, authRequired)
+		}
+		slog.Warn("server: BOOTSTRAP connection admitted without a token — no users exist; "+
+			"the first ctrl_user_create claims this daemon", "remote", remote)
+		s.clearDeadline(conn, remote)
+		// The frame just read is the client's first REQUEST, not a
+		// handshake frame: hand it back so handleConn dispatches it. It has
+		// already been consumed from the socket and cannot be recovered any
+		// other way.
+		return admission{reader: r, restricted: true, pending: frame}, true
 	}
 
-	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(wantToken)) != 1 {
+	id, err := auth.Authenticate(ctx, req.Token)
+	if errors.Is(err, users.ErrNotFound) {
 		slog.Warn("server: auth: invalid token", "remote", remote)
-		s.writeAuthError(conn, protocol.ErrAuthInvalid, "invalid auth token")
-		return nil, false
+		return refuse(protocol.ErrAuthInvalid, "invalid auth token")
+	}
+	if err != nil {
+		// "I could not check" — never reported as an invalid credential,
+		// and never with the store's error text: this peer has not proved
+		// who it is and a pgx error carries the DSN.
+		slog.Error("server: auth: identity store unavailable", "remote", remote, "error", err)
+		return refuse(protocol.ErrInternal, "identity store unavailable")
 	}
 
-	// Clear the deadline before handleConn takes over: a stale deadline
-	// left in place would leak into the normal request path and cause
-	// spurious read timeouts unrelated to authHandshakeTimeout's purpose.
+	s.clearDeadline(conn, remote)
+	return admission{reader: r, identity: id}, true
+}
+
+// clearDeadline drops the handshake read deadline before handleConn takes
+// over: a stale deadline left in place would leak into the normal request
+// path and cause spurious read timeouts unrelated to authHandshakeTimeout's
+// purpose. A failure here is logged and ignored — refusing the connection
+// over a failed deadline-clear would be a worse outcome than the (rare) risk
+// of a stale deadline.
+func (s *Server) clearDeadline(conn net.Conn, remote net.Addr) {
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		slog.Warn("server: auth: clear read deadline", "remote", remote, "error", err)
-		// Fall through: the handshake itself succeeded, and refusing the
-		// connection over a failed deadline-clear would be a worse outcome
-		// than the (rare) risk of a stale deadline on this conn.
 	}
-
-	return r, true
 }
 
 // writeAuthError sends an auth-failure ctrl_response frame and closes the

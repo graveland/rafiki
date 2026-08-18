@@ -205,6 +205,14 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 	if err := json.Unmarshal(frame, &hdr); err != nil {
 		return errResponse("", "", protocol.ErrInvalidArgs, "malformed JSON")
 	}
+	// A bootstrap connection carries no credential. It exists to create the
+	// first user and nothing else — every other verb is a full-access
+	// command, and full access without a token is the whole thing bootstrap
+	// mode is a narrow exception to. conn is nil in many dispatch tests.
+	if conn != nil && conn.Restricted() && hdr.Type != protocol.TypeCtrlUserCreate {
+		return errResponse(hdr.Type, hdr.ID, protocol.ErrAuthRequired,
+			"no users exist yet; only ctrl_user_create is accepted until the first user is created")
+	}
 	switch hdr.Type {
 	case protocol.TypeCtrlList:
 		return d.list(frame, hdr.ID)

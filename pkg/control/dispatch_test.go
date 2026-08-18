@@ -20,7 +20,9 @@ import (
 // delivery is not under test.
 type discardConn struct{}
 
-func (discardConn) Deliver(_ []byte) {}
+func (discardConn) Deliver(_ []byte)         {}
+func (discardConn) Identity() users.Identity { return users.Identity{} }
+func (discardConn) Restricted() bool         { return false }
 
 // ─── fakeController ───────────────────────────────────────────────────────────
 
