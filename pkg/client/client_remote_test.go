@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 func newSelfSignedConfig(t *testing.T) *tls.Config {
@@ -52,13 +53,26 @@ func newSelfSignedConfig(t *testing.T) *tls.Config {
 	}
 }
 
+// oneUserAuth authenticates exactly one token and reports one active user, so
+// the listener is out of bootstrap mode.
+type oneUserAuth struct{ token string }
+
+func (a oneUserAuth) Authenticate(_ context.Context, token string) (users.Identity, error) {
+	if token != a.token {
+		return users.Identity{}, users.ErrNotFound
+	}
+	return users.Identity{UserID: "u1", Username: "brent"}, nil
+}
+
+func (oneUserAuth) CountActive(context.Context) (int, error) { return 1, nil }
+
 func startEchoTCPServer(t *testing.T, token string) (addr string, cleanup func()) {
 	t.Helper()
 	tlsCfg := newSelfSignedConfig(t)
 	echo := control.FuncHandler(func(_ control.Connection, frame []byte) []byte {
 		return append([]byte("echo:"), frame...)
 	})
-	srv, err := control.ListenTCP("127.0.0.1:0", token, tlsCfg, echo)
+	srv, err := control.ListenTCP("127.0.0.1:0", oneUserAuth{token: token}, tlsCfg, echo)
 	if err != nil {
 		t.Fatal(err)
 	}

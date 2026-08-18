@@ -478,9 +478,13 @@ func runDaemon(opts runDaemonOpts) error {
 	// TCP control listener (optional — for remote attach, k8s deployment).
 	var tcpSrv *control.Server
 	if addr := parseControlListenAddr(); addr != "" {
-		controlToken := paths.Get(paths.ControlToken)
-		if controlToken == "" {
-			slog.Error("RAFIKI_CONTROL_TOKEN must be set when RAFIKI_CONTROL_LISTEN is set")
+		// Remote serving requires a database: user auth is row-backed and
+		// there is nothing to degrade to. Without this check the daemon
+		// comes up serving a TLS listener stuck in permanent bootstrap
+		// mode — unauthenticated ctrl_user_create accepted from anywhere,
+		// then failing on the insert.
+		if userStore == nil {
+			slog.Error("RAFIKI_CONTROL_LISTEN requires RAFIKI_DB: user identity is database-backed")
 			os.Exit(1)
 		}
 		certFile := paths.Get(paths.ControlTLSCert)
@@ -523,7 +527,7 @@ func runDaemon(opts runDaemonOpts) error {
 		mux := http.NewServeMux()
 		mux.Handle(upgradeconn.PathFor(upgradeconn.Control),
 			upgradeconn.Handler(upgradeconn.Control, func(c *upgradeconn.Conn) {
-				attached.ServeUpgraded(c, controlToken)
+				attached.ServeUpgraded(c, userStore)
 			}))
 		if execPool != nil {
 			mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), execPool.UpgradeHandler())
@@ -548,6 +552,11 @@ func runDaemon(opts runDaemonOpts) error {
 				slog.Error("control/executor listener stopped", "error", err)
 			}
 		}()
+		// While no user exists, anyone who can reach this listener can claim
+		// the daemon with the first ctrl_user_create. That window is
+		// deliberate, but it should never be quiet.
+		go warnWhileUnclaimed(ctx, userStore, addr, unclaimedWarnInterval)
+
 		slog.Info("rafiki daemon listening (TCP/TLS)", "addr", addr,
 			"control", upgradeconn.PathFor(upgradeconn.Control),
 			"executor", upgradeconn.PathFor(upgradeconn.Executor),
@@ -694,6 +703,42 @@ func closePoolBounded(pool *pgxpool.Pool, timeout time.Duration) {
 // Such a value is promoted to ":8036" (all-interfaces, that port) before
 // validation. Already-valid forms ("host:port", ":port") pass through
 // unchanged.
+// unclaimedWarnInterval is how often the daemon repeats the bootstrap
+// warning while no user exists.
+const unclaimedWarnInterval = time.Minute
+
+// warnWhileUnclaimed logs a warning every unclaimedWarnInterval for as long as
+// the TLS listener is in bootstrap mode. It checks first and waits second, so
+// the warning lands when the listener comes up — the moment an operator is
+// actually reading the log — rather than a minute later.
+//
+// It stops only when a user exists. A store error keeps it ticking: "I could
+// not check" is not evidence the window is closed, and returning on the first
+// blip would silence the warning for the daemon's whole lifetime.
+func warnWhileUnclaimed(ctx context.Context, userStore users.Store, addr string, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		n, err := userStore.CountActive(ctx)
+		if err == nil {
+			if n > 0 {
+				return
+			}
+			slog.Warn("no users exist: this listener accepts an unauthenticated "+
+				"ctrl_user_create from anyone who can reach it. Run `rafiki user create <name>` now.",
+				"addr", addr)
+		}
+		// A store error falls through to the next tick: it is not evidence
+		// the window is closed. It is not logged here either — the outage
+		// logs itself, on every request that touches the database.
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 func parseControlListenAddr() string {
 	v := paths.Get(paths.ControlListen)
 	if v == "" {

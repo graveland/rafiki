@@ -500,8 +500,8 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
 | `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
-| `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only |
-| `RAFIKI_CONTROL_TOKEN` | shared secret for control-plane auth; daemon checks it, clients present it |
+| `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only. **Requires `RAFIKI_DB`** — control-plane identity is row-backed, and a listener without a user table is fatal at startup |
+| `RAFIKI_CONTROL_TOKEN` | client-side: the per-user token to present on `ctrl_auth`, else `~/.config/rafiki/control.token`. The daemon no longer reads it — it authenticates against the `users` table, and mints tokens with `rafiki user create` |
 | `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_URL` | client-side: remote rafikid URL to dial (e.g. `tls://rafiki.graveland.dev:443`). Wins over `RAFIKI_SOCKET` |

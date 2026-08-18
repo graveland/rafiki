@@ -39,18 +39,34 @@ Two transports, identical framing and protocol.
 - Address: `RAFIKI_CONTROL_LISTEN` (e.g. `tcp:8036`). Unset → TCP disabled;
   the daemon listens on the UDS only.
 - TLS is **mandatory** on TCP — the daemon refuses to start without
-  `RAFIKI_CONTROL_TLS_CERT`, `RAFIKI_CONTROL_TLS_KEY`, and
-  `RAFIKI_CONTROL_TOKEN` all set. No plaintext TCP control plane, ever.
+  `RAFIKI_CONTROL_TLS_CERT` and `RAFIKI_CONTROL_TLS_KEY`. No plaintext TCP
+  control plane, ever.
+- `RAFIKI_CONTROL_LISTEN` also **requires `RAFIKI_DB`**: control-plane
+  identity is row-backed and there is nothing to degrade to. Without a
+  database the daemon exits at startup rather than serving a listener stuck
+  in permanent bootstrap mode.
 - Certificates are re-read from disk per handshake via
   `tls.Config.GetCertificate`, so cert-manager rotation needs no pod restart.
   Minimum TLS version: 1.2.
-- Authentication: shared-secret, mandatory. The first frame on a TCP
-  connection must be `ctrl_auth` (see §6.6). The token is the daemon's
-  `RAFIKI_CONTROL_TOKEN` value (env-var only, no file fallback on the
-  daemon side). Clients resolve it from `RAFIKI_CONTROL_TOKEN` env, else
-  `~/.config/rafiki/control.token` (0600).
+- Authentication: **per-user tokens**, mandatory. The first frame on a TCP
+  connection must be `ctrl_auth` (see §6.6), carrying a token minted by
+  `ctrl_user_create` and stored as a digest in `conversations.users`. The
+  resolved identity is attached to the connection for its lifetime.
+- Failure modes are distinct and must stay distinct: an unknown or
+  tombstoned token answers `auth_invalid`; an identity store that cannot be
+  reached answers `internal` with a fixed message ("identity store
+  unavailable") and never the store's own error text. Reporting an outage as
+  an invalid credential makes clients discard working tokens.
+- **Bootstrap mode.** While zero active users exist, a TCP connection is
+  admitted with no `ctrl_auth` frame at all, and the first frame it sent is
+  dispatched as an ordinary request — but the connection is *restricted*:
+  every command other than `ctrl_user_create` is refused with
+  `auth_required`. The first `ctrl_user_create` therefore claims the daemon,
+  and closes the window for everyone else. The daemon logs a warning on each
+  such connection and once a minute for as long as the window is open.
 - UDS connections skip auth entirely — local filesystem permissions
-  (0600 socket, 0700 directory) are the only trust mechanism.
+  (0600 socket, 0700 directory) are the only trust mechanism. They are never
+  bootstrap-restricted and carry no user identity.
 
 ## 3. Framing
 
@@ -538,12 +554,20 @@ from stdin EOF alone.
 { "type": "ctrl_auth", "id": "0", "token": "..." }
 ```
 
-Must be the first frame on a TCP connection. TCP connections run over
-mandatory TLS (see §2.2); there is no plaintext TCP control plane.
-On success, the connection proceeds normally — no explicit success response
-is written. On failure (missing token, wrong token, or a non-`ctrl_auth`
-first frame) the controller sends an error response and closes the
-connection. UDS connections skip auth entirely.
+Must be the first frame on a TCP connection, except in bootstrap mode
+(§2.2), where the first frame may instead be a `ctrl_user_create`. TCP
+connections run over mandatory TLS (see §2.2); there is no plaintext TCP
+control plane.
+
+The token is a per-user token minted by `ctrl_user_create`. On success, the
+connection proceeds normally — no explicit success response is written, and
+the resolved identity is attached to the connection for its lifetime. On
+failure the controller sends an error response and closes the connection:
+`auth_invalid` for a token that names no active user, `auth_required` for a
+non-`ctrl_auth` first frame once a user exists, and `internal` ("identity
+store unavailable") when the store could not be consulted at all — a
+distinction clients depend on, since `auth_invalid` means "discard this
+credential". UDS connections skip auth entirely.
 
 ### 6.7 `ctrl_subscribe`
 
@@ -1037,8 +1061,8 @@ Defined error codes:
 | `backpressure`          | The child's command channel is full; client should retry.          |
 | `invalid_args`          | Request fields failed validation.                                  |
 | `spawn_failed`          | `pi` subprocess failed to start or exited immediately.             |
-| `auth_required`         | TCP connection sent a non-`ctrl_auth` frame first.                 |
-| `auth_invalid`          | TCP auth token did not match.                                      |
+| `auth_required`         | TCP connection sent a non-`ctrl_auth` frame first, or sent a command other than `ctrl_user_create` on a bootstrap connection. |
+| `auth_invalid`          | TCP auth token names no active user.                               |
 | `not_found`             | Generic; e.g., `ctrl_resume` against unknown id.                   |
 | `internal`              | Unexpected controller-side error. Message contains details.        |
 | `no_agent_db`           | `ctrl_conversation_*`: no agent database configured (`RAFIKI_DB` unset). |
