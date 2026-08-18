@@ -285,44 +285,29 @@ See `docs/reference/executor-protocol.md` for the full wire protocol.
 
 ### Container executors
 
-An executor can start containers — per-child, with bind mounts that *are* the
-child's grant, derived mechanically by the daemon from the worktree assignment.
-The model never writes a path.
+An executor serves the filesystem it can see. Whether that view is a container
+is determined by how the operator starts it, not by a flag. To run a container
+executor, put `rafiki executor serve` inside a container the operator starts:
 
 ```
-docker build --target workspace -t rafiki-workspace:dev .
-rafiki executor serve --isolation container --image rafiki-workspace:dev --workspace-mode ephemeral
+docker run -d --name rafiki-executor \
+  -v /home/user/worktrees:/work \
+  rafiki-executor:latest \
+  rafiki executor serve --connect daemon.example.com:443 --enroll-token <token>
 ```
 
-**The image is a contract, and it is validated at Provision.** It must carry:
-
-| Requirement | Why it is not optional |
-|---|---|
-| `rafiki` on `PATH` | Every tool on a container workspace runs through `rafiki executor serve-stdio` *inside* the container. Without the binary the workspace can run nothing. |
-| `rg` (ripgrep) | `glob` and `grep` shell out to it and **decline** when it is absent, so a missing binary removes two tools from the agent silently instead of erroring. |
-
-`--target workspace` in this repo's `Dockerfile` builds a reference image meeting
-it — debian-slim with ripgrep, git, a pinned `rtk`, and the executor compiled
-in-image so it is native for the target architecture. Bring your own image if you
-prefer; Provision will tell you exactly what is missing and how to fix it if it
-does not qualify. Note the executor binary is **baked in**, not copied in at
-Provision time: that keeps it a shared read-only layer rather than ~30 MB in
-every container's writable layer, and sidesteps cross-compiling a static binary
-on a macOS host. The cost is that the in-image binary can drift from the running
-executor, so Provision compares versions and warns.
-
-**Mounts:** the worktree is mounted read-write at `/work`; the repo is mounted
-read-only at `/repo` (when the worktree is inside a repo). Network defaults to
-`none` — an unattended worker that does not need egress should not have it.
-Because there is no network, the tool server inside the container is reached over
-`docker exec -i` stdio rather than a socket.
+The `--root` flag sets the working directory; it is NOT a sandbox. The
+process's filesystem view — the container's mounts, chosen in `docker run`, or
+the host user's permissions — is the boundary. The executor declares nothing
+about itself: `isolation`, `workspace_mode`, `roots` and `labels` live only on
+the database row set at token-mint time.
 
 **No path vocabulary.** There is no way to restrict a worker to a subtree of
-its worktree, by design. For container executors, docker mounts express the
-ro/rw model exactly and the kernel enforces it. For native executors, path
-scoping would be fake in the only place it matters: the file tools could
-enforce structured path arguments in userspace, but `bash` could not. Native
-access is gated by **admission** (label-selection), not by paths.
+its worktree, by design. For container executors, `docker run -v` expresses the
+ro/rw model and the kernel enforces it. For native executors, path scoping would
+be fake in the only place it matters: the file tools could enforce structured
+path arguments in userspace, but `bash` could not. Native access is gated by
+**admission** (label-selection), not by paths.
 
 **The macOS caveat:** docker on macOS is a Linux VM, so a containerised
 executor means the agent works on Linux — different toolchain, different

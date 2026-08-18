@@ -19,6 +19,28 @@ design decision, a supersession — must be duplicated here, or promoted into
 
 ## Open now
 
+### Executor model: rafiki no longer launches containers (2026-08-17)
+
+A container running `rafiki executor serve` IS a container executor. Every fact
+that gates access comes from the row, set at mint time. `--isolation`,
+`--workspace-mode` and `--image` are gone; `--root` is a working directory, not
+a sandbox. Container detection must never be added — it is self-assertion of a
+gating fact.
+
+Deleted: containerBackend, the in-container tool server, pkg/workspace, the
+image contract, all docker-gated tests. B4 (model-chosen cwd becoming a RW bind
+mount) died structurally: nothing model-facing becomes a mount. D1's bug class
+died too — there is no host/container split inside an executor any more.
+
+Accepted cost: isolation granularity equals executor granularity. Children on
+one container executor are isolated from the host but not from each other; per
+child isolation means one executor per child, which is a `docker run` or k8s Job
+concern.
+
+- [ ] Follow-up: remove `Mount`, `mounts`, `network` and `workspace_mode` from
+      `proto/rafiki/executor/v1/executor.proto` and run `make proto`. Left on
+      the wire because regenerating needs buf/protoc.
+
 ### ▶ WORKING PLAN: make the executor functional (agreed 2026-08-17)
 
 **Goal:** a container-isolated executor that actually works, and the binary shape

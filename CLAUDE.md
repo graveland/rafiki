@@ -237,52 +237,23 @@
   something routed around it. When you add a guard, enumerate every path to the
   guarded resource and assert the guard sits on all of them.
 
-- **On a container workspace EVERY tool runs inside the container, and there is
-  NO host fallback.** Only `bash` used to; `read`, `write`, `edit`, `glob` and
-  `grep` fell through to a host-scoped registry, which was finding D1 — a
-  workspace granted `/work` + `/repo:ro` read a real `~/.ssh/id_rsa` off the
-  host. They are now served by a tool server INSIDE the container
-  (`rafiki executor serve-stdio`), reached over `docker exec -i` stdio wrapped as
-  a `net.Conn` by `execpool.NewStdioConn`, so `ServeInverted`/`ClientForConn`
-  apply unchanged. There is no TCP option: `workspace.Derive` sets
-  `Network: "none"`.
+- **rafiki does not launch containers, and an executor declares nothing about
+  itself.** A container running `rafiki executor serve` IS a container executor;
+  starting containers is what docker and k8s already are. Every fact that gates
+  access — `labels`, `isolation`, `workspace_mode`, `roots`, `admits` — comes
+  from `conversations.executors`, set at token-mint time by the operator. There
+  is no `--isolation`, `--workspace-mode` or `--image`, and **container
+  detection must never be added**: sniffing `/proc/1/cgroup` is the executor
+  asserting a fact that gates it, which is what `SelfReported` already forbids.
 
-  **If the inner server is unavailable the call FAILS** (`CODE_EXECUTOR_LOST`),
-  never `s.reg`. A host fallback reintroduces the whole bug, and it is the single
-  most likely thing for a later "robustness" change to add;
-  `TestADeadInnerServerFailsRatherThanFallingBackToTheHost` pins it.
-
-  It is **not** userspace path checking on the host: `08-containers.md`'s "the
-  file tools could enforce it in userspace" sentence is about NATIVE executors
-  and is an argument *against* path scoping ("a scope that holds for `read` and
-  evaporates on the first shell command is worse than no scope"). For containers
-  the same doc says the mounts are the grant and the kernel enforces them. That
-  sentence has been misread once already.
-
-  Two consequences worth knowing when writing tests here. `read /etc/passwd` on a
-  container workspace now SUCCEEDS and is not an escape — it is the container's
-  own `/etc/passwd` — so an escape test must assert on host paths, on `:ro`
-  behaviour, or (best) prove placement positively: `bash` creates a file outside
-  every mount, `read` sees it, the host does not. And the refusals are now ordinary
-  errno text from the kernel, not policy messages, so asserting on their wording
-  is asserting on libc.
-
-- **`expect_mtime` is forwarded to the container, never evaluated on the host.**
-  `Execute` used to `os.Stat` those paths locally, which for a container path is
-  either a spurious "file changed under us" or a stat of an unrelated host file
-  that happens to exist. Only the inner server can see the real file.
-
-- **The container workspace image is a contract, validated at Provision, and the
-  executor is BAKED INTO it rather than copied in.** It must carry `rafiki` (the
-  tool server runs inside) and `rg` — `glob` and `grep` DECLINE without ripgrep
-  rather than erroring, so a missing binary removes two tools from the agent
-  silently. `docker build --target workspace` builds a reference image. Do not
-  reintroduce a `docker cp` of a cross-compiled static binary: baking keeps it a
-  shared read-only layer, and compiling it in-image sidesteps the macOS-host
-  cross-compile problem entirely. What baking costs is version skew, which
-  Provision warns about — and deliberately does not fail on, since a
-  version-string mismatch would force an image rebuild for every host-side
-  iteration while the thing that must actually agree is the wire.
+- **`--root` is a working directory, not a sandbox.** Native executors have no
+  path scoping by design, so an absolute path reaches outside it. The boundary
+  is the process's filesystem view — the container's mounts, chosen in
+  `docker run`, or the host user's permissions. The row's `roots` DESCRIBES that
+  view for humans and selectors; nothing enforces it and nothing may imply it
+  does. `Describe`'s isolation and workspace_mode are self-reported and must
+  never be read by anything that gates: `executorAcceptsReschedule` reads the
+  row for exactly this reason.
 
 - **`Pool.live` must be mutated on connection IDENTITY, never on executor ID
   alone.** An executor restart installs a new `liveConn` under the same ID long

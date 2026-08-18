@@ -171,28 +171,12 @@ Provision(childId, workspaceMode, mounts[], workdir, network, memoryBytes, cpus,
   → { workspaceId, roots[], workdir, isolation }
 ```
 
-Unary. Prepares a workspace for one child and returns a handle every later
-`Execute` carries. A **native** executor answers with its pinned root and
-does nothing else; a **container** executor starts a container with the
-daemon-derived mounts, **and starts a tool server inside it**.
-
-That inner server is `rafiki executor serve-stdio`, reached over the stdio of a
-`docker exec -i` — there is no TCP, because the grant sets `network: "none"`.
-Provision does not return until it has answered `Describe`, so a workspace that
-comes back is one whose tools can actually run; a dead one would otherwise
-surface as a confusing failure on the child's first tool call. Provision also
-validates the image (see below) and removes the container on any failure.
-
-- `workspaceMode` is `"ephemeral"` (the executor constructs a reconstructible
-  workspace) or `"pinned"` (the executor exposes an existing tree). This
-  single field decides the park-vs-fail behaviour when an executor is lost.
-- `mounts[]` are bind mounts derived by the daemon from the child's worktree
-  assignment. The model never writes a path; the executor never invents one.
-- `workdir` must be one of the mounts' container paths — an executor MUST
-  reject a workdir outside the mounts rather than silently starting
-  somewhere the child cannot write.
-- `network` is `"none"` or `"bridge"`. Default: `"none"`.
-- Resource caps (`memoryBytes`, `cpus`) are zero-means-executor-default.
+Provision prepares a workspace and returns the handle later `Execute` calls
+carry. There is one backend: the executor's own root. rafiki does not start
+containers — a container running the executor IS one — so `mounts` and
+`network` are unset by the daemon and ignored by the executor. They remain on
+the wire for compatibility and should be removed the next time the proto is
+regenerated.
 
 ### Release
 
@@ -205,26 +189,6 @@ track of a workspace must be able to release it again without error. A
 released workspace kills **its own** background jobs — a job in a released
 workspace is not a job, and reporting it as running is worse than reporting it
 gone. It must not touch any other workspace's jobs.
-
-On a container workspace, Release stops the inner server first and then removes
-the container; the other order leaves the `docker exec` client reaping against a
-container that is already gone. Removing the container is what reaps the jobs,
-because they run inside it.
-
-### The container workspace image contract
-
-A container executor's `--image` must provide:
-
-| Requirement | Why |
-|---|---|
-| `rafiki` on `PATH` | every tool runs through `rafiki executor serve-stdio` inside the container |
-| `rg` (ripgrep) | `glob` and `grep` shell out to it and **decline** when absent, so a missing binary removes two tools silently instead of erroring |
-
-Provision validates both against the fresh container and fails with a message
-naming the image, the missing tool, and the command that builds a conforming
-one. The binary is baked into the image rather than copied in at Provision, so
-the in-image version can drift from the executor's; Provision warns on a
-mismatch and relies on the `Describe` above as the real compatibility check.
 
 ### Cancel
 
