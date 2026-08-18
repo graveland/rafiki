@@ -74,8 +74,12 @@ it currently *means*:
 
 - if you also set a proxy URL, it was the token being **sent** to that host, and
   becomes `RAFIKI_TOKEN`;
-- if the daemon serves the proxy face itself, it was a token being **accepted**,
-  and becomes `RAFIKI_SERVE_TOKEN`.
+- if the daemon serves the proxy face itself, it was a token being **accepted**
+  — at the time of this rename, `RAFIKI_SERVE_TOKEN`. That variable is itself
+  retired now: the face and the control plane both authenticate against the
+  `users` table (a later change, not part of this rename), so a token the face
+  accepts is minted with `rafiki user create` rather than exported. See the
+  "first user" section in `README.md`.
 
 Those two used to be the same variable wearing opposite meanings depending on
 context. They are now separate, and neither is overloaded.
@@ -87,7 +91,7 @@ context. They are now separate, and neither is overloaded.
 | `FUNDI_AGENT_DB`, `RAFIKI_DB` | `RAFIKI_DB` (always the same database) |
 | `FUNDI_PROXY_URL`, `RAFIKI_PROXY_URL`, `RAFIKI_URL` | `RAFIKI_URL` |
 | `RAFIKI_PROXY_TOKEN`, `RAFIKI_TOKEN`, client half of `FUNDI_PROXY_TOKEN` | `RAFIKI_TOKEN` (what this process *presents*) |
-| server half of `FUNDI_PROXY_TOKEN` | `RAFIKI_SERVE_TOKEN` (what the face *accepts*) |
+| server half of `FUNDI_PROXY_TOKEN` | `RAFIKI_SERVE_TOKEN` at the time, since retired — see above |
 
 `RAFIKI_PROXY_KINDS` and `RAFIKI_PROXY_LISTEN` keep the `PROXY_` infix — one
 names which child kinds get routed, the other what address the face binds.

@@ -47,10 +47,18 @@ help: ## Display this help.
 # pointed at a local rafiki keeps working, and pi/claude children get capture,
 # failover and model resolution without a second process to start.
 #
-# RAFIKI_SERVE_TOKEN=dev makes the face accept the same token `make claude`
-# sends as RAFIKI_TOKEN. The daemon also mints a per-boot token for its own
-# children; this is the extra one for humans and tools, which cannot know a
-# per-boot secret.
+# RAFIKI_SERVE_TOKEN is retired: the face authenticates against the `users`
+# table now, not a shared secret in the environment. Without RAFIKI_DB, only
+# the daemon's per-boot child token authenticates — which `make claude`, a
+# separate human-invoked process, cannot know. So a fresh dev daemon needs
+# RAFIKI_DB set (see below) and, once, a real user:
+#
+#   go run ./cmd/rafiki user create dev
+#
+# That mints a token and writes it to ~/.config/rafiki/token (0600), which
+# `make claude` picks up automatically (RAFIKI_TOKEN unset falls back to that
+# file) — no export needed. Re-run it any time the token file is missing or
+# stale; `rafiki user list` shows what already exists.
 #
 # RAFIKI_DB is what makes turns land in the conversations schema, for
 # proxied children and in-process agent children alike — the server's own DSN
@@ -61,7 +69,6 @@ help: ## Display this help.
 .PHONY: run
 run: ## Run rafikid in the foreground, serving the proxy face on :8035.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	export RAFIKI_SERVE_TOKEN="$${RAFIKI_SERVE_TOKEN:-dev}"; \
 	go run ./cmd/rafikid
 
 # NOTE (merge): fundi's `build` also depended on build-attach. It no longer

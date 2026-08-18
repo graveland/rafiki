@@ -1487,9 +1487,14 @@ List enrolled executors, optionally filtered by a label selector.
 {
   "type": "ctrl_executor_list",
   "selector": "env=work",                   // optional label selector filter
-  "limit": 50                               // clamped to 100
+  "limit": 50                               // unspecified/zero defaults to 50; > 500 clamps to 500
 }
 ```
+
+Two branches, not one: `limit <= 0` defaults to 50 (not the ceiling); `limit >
+500` clamps down to 500. `ctrl_user_list` (§16.2) clamps differently — zero,
+negative *and* oversized all collapse to the same 500 — so do not assume the
+two `*_list` verbs share a convention.
 
 **Response** (success)
 ```jsonc
@@ -1547,10 +1552,11 @@ authentication on its next connection.
 
 ## 16. User management (ctrl_user_*)
 
-Commands for managing rafiki user identities. Auth is not yet enforced by
-these commands — a later task adds the bootstrap gate and per-user
-authentication; today every `ctrl_user_*` verb is reachable exactly like any
-other `ctrl_*` command, subject to normal UDS/TCP-TLS connection auth. All
+Commands for managing rafiki user identities. These are ordinary `ctrl_*`
+commands, subject to the same connection auth as everything else (§2.2): UDS
+is always trusted, a TCP/TLS connection needs a valid `ctrl_auth` identity —
+**except** `ctrl_user_create`, which is also the one command a *bootstrap*
+connection may send with no identity at all, per §2.2's bootstrap rule. All
 three verbs return `no_agent_db` when the daemon has no database pool
 (`RAFIKI_DB` unset) — there is no in-memory fallback for identity.
 
@@ -1593,9 +1599,16 @@ Enumerate users. Tokens are never returned.
 {
   "type": "ctrl_user_list",
   "include_deleted": false,
-  "limit": 50                     // clamped to 500
+  "limit": 900                    // > 500: clamped down to 500
 }
 ```
+
+`limit` collapses to 500 whenever it is **zero, negative, or greater than
+500** — one clamp, no default-vs-ceiling distinction. This differs from
+`ctrl_executor_list` (§15.2), which treats "not specified" (`<= 0`) and "too
+large" (`> 500`) as two separate branches, defaulting the former to 50 rather
+than 500. Two neighbouring `*_list` verbs, two different conventions for what
+"no limit given" means — do not infer one from the other.
 
 **Response** (success)
 ```jsonc
