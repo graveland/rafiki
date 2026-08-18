@@ -187,6 +187,15 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 	}
 }
 
+// executorAcceptsReschedule reports whether a child may be moved onto le.
+//
+// Reads the ROW (le.Executor), never le.Describe. Describe is the executor's
+// own account of itself; a value that decides where other people's children run
+// cannot be asserted by the machine that wants them.
+func executorAcceptsReschedule(le execpool.LiveExecutor) bool {
+	return le.Executor.WorkspaceMode == "ephemeral"
+}
+
 // tryReschedule attempts to re-provision an ephemeral child on another
 // matching executor. Returns true on success.
 func (c *Controller) tryReschedule(snap childstore.Snapshot, live []execpool.LiveExecutor) bool {
@@ -197,7 +206,7 @@ func (c *Controller) tryReschedule(snap childstore.Snapshot, live []execpool.Liv
 	// Re-provision on the first available matching executor.
 	// In a real implementation this would match the child's original selector.
 	for _, le := range live {
-		if le.Describe.WorkspaceMode == "ephemeral" {
+		if executorAcceptsReschedule(le) {
 			wsID, _, _, err := c.provisionWorkspace(context.Background(),
 				protocol.SpawnRequest{Cwd: snap.Cwd}, le.Executor.ID)
 			if err != nil {
