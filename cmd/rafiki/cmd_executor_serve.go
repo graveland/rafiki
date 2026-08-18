@@ -77,6 +77,7 @@ func newExecutorServeCmd() *cobra.Command {
 		enrollToken       string
 		credentialFile    string
 		pinnedFingerprint string
+		serverName        string
 		isolation         string
 		workspaceMode     string
 		image             string
@@ -126,7 +127,7 @@ Two transports, exactly one of which must be given:
 			handler := executorHandler(srv)
 
 			if connectAddr != "" {
-				return serveReverseDial(connectAddr, pinnedFingerprint, enrollToken, credentialFile, wd, handler)
+				return serveReverseDial(connectAddr, pinnedFingerprint, serverName, enrollToken, credentialFile, wd, handler)
 			}
 			return serveUnixSocket(socketPath, wd, handler)
 		},
@@ -141,7 +142,9 @@ Two transports, exactly one of which must be given:
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
 		"where the durable credential is stored after enrollment")
 	cmd.Flags().StringVar(&pinnedFingerprint, "pin-cert", "",
-		"SHA-256 fingerprint of the daemon's leaf certificate")
+		"SHA-256 fingerprint of the daemon's leaf certificate. Pins the leaf instead of verifying against system roots — use for a self-signed or internal-CA daemon")
+	cmd.Flags().StringVar(&serverName, "server-name", "",
+		"TLS server name (SNI) to present, when it differs from the host in --connect. Needed when dialling an IP or a node port while the certificate names a hostname")
 	cmd.Flags().StringVar(&isolation, "isolation", "none", "isolation this executor provides: none|container")
 	cmd.Flags().StringVar(&workspaceMode, "workspace-mode", "pinned",
 		"pinned (expose --root) or ephemeral (construct a workspace per child)")
@@ -150,7 +153,7 @@ Two transports, exactly one of which must be given:
 	return cmd
 }
 
-func serveReverseDial(addr, pinCert, enrollToken, credentialFile, wd string, handler http.Handler) error {
+func serveReverseDial(addr, pinCert, serverName, enrollToken, credentialFile, wd string, handler http.Handler) error {
 	credFile := credentialFile
 	if credFile == "" {
 		credFile = filepath.Join(wd, ".rafiki-executor-credential")
@@ -160,6 +163,7 @@ func serveReverseDial(addr, pinCert, enrollToken, credentialFile, wd string, han
 	if err := execpool.Connect(ctx, execpool.ConnectOptions{
 		Addr:           addr,
 		PinCert:        pinCert,
+		ServerName:     serverName,
 		EnrollToken:    enrollToken,
 		CredentialFile: credFile,
 		SelfReported: map[string]string{
