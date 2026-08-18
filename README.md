@@ -501,10 +501,10 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
 | `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
 | `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only. **Requires `RAFIKI_DB`** — control-plane identity is row-backed, and a listener without a user table is fatal at startup |
-| `RAFIKI_CONTROL_TOKEN` | client-side: the per-user token to present on `ctrl_auth`, else `~/.config/rafiki/control.token`. The daemon no longer reads it — it authenticates against the `users` table, and mints tokens with `rafiki user create` |
 | `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
-| `RAFIKI_CONTROL_URL` | client-side: remote rafikid URL to dial (e.g. `tls://rafiki.graveland.dev:443`). Wins over `RAFIKI_SOCKET` |
+| `RAFIKI_URL` | client-side: the one dial target, `https://host[:port]`. Reaches the LLM proxy and, over TLS, the control plane's `/control` upgrade (`client.IsRemoteURL` — `https://` only). Unset or `http://` means local: the loopback proxy face and, for control-plane commands, the UDS. Wins over `RAFIKI_SOCKET` when it names a remote control plane. `tls://` is retired — always spell a remote daemon as `https://` |
+| `RAFIKI_TOKEN` | client-side: the one bearer credential, presented as the proxy's `Authorization`/`X-Rafiki-Token` and the control plane's `ctrl_auth` token. Unset falls back to `~/.config/rafiki/token` (0600), written by `rafiki user create` |
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
@@ -550,6 +550,42 @@ time), while `rafikid agent --db` defaults to your shell's `RAFIKI_DB`, then
 `rafiki --help` covers the client. See `docs/reference/control-protocol.md` for the
 wire protocol spec and `docs/plans/2026-07-20-fundi-design.md` for the
 architecture.
+
+### First user: claiming a fresh daemon
+
+Identity is row-backed (`conversations.users`), so a daemon that has never had
+`rafiki user create` run against it has no users at all — and **while that is
+true, both faces are wide open**: the proxy face accepts only its per-boot
+child secret (unknown outside the process tree, so effectively closed to
+anyone else), but every listener the control plane serves — UDS and, if
+configured, the TCP/TLS one — admits a connection with no `ctrl_auth` frame
+and lets it run exactly one command, `ctrl_user_create`. **Whoever's
+`ctrl_user_create` lands first becomes the daemon's first (and, until they add
+more, only) user.** This is deliberate — a freshly-started pod has no operator
+shell to hand it a token through — but it means the window between "the
+listener is reachable" and "the first user exists" is a real, if narrow,
+race, bounded only by how quickly the operator closes it. The daemon logs a
+WARN once a minute for as long as it stays open, and logs the peer address of
+whoever's `ctrl_user_create` claims it.
+
+Three sequences close the window before anything untrusted can reach the
+daemon:
+
+- **Local daemon, central database.** Run a `rafikid` on your own machine
+  pointed at the same `RAFIKI_DB` the real deployment will use, and
+  `rafiki user create` against that — the row lands in the shared database
+  before the real daemon ever serves a socket.
+- **Port-forward before ingress.** In Kubernetes, `kubectl port-forward` to
+  the pod and create the first user through the tunnel before any Service or
+  Ingress makes the control plane reachable from outside the cluster.
+- **Before upstream credentials exist.** Create the first user before
+  `ANTHROPIC_API_KEY`/`OPENROUTER_API_KEY` are configured, so a daemon claimed
+  during the window has nothing to spend even if someone else's
+  `ctrl_user_create` wins the race.
+
+Once a user exists, every other command — on any listener — requires a valid
+`ctrl_auth`/bearer token; deleting the last active user (`rafiki user rm`)
+returns the daemon to bootstrap mode, so the same window reopens.
 
 ---
 
@@ -600,8 +636,10 @@ success, which is indistinguishable from a clean pass.
 ## Running locally
 
 ```bash
-cp .env.example .env   # fill in ANTHROPIC_API_KEY (+ OPENROUTER_API_KEY)
-make run               # rafikid in the foreground, proxy face on :8035
+cp .env.example .env   # fill in ANTHROPIC_API_KEY (+ OPENROUTER_API_KEY), and RAFIKI_DB
+set -a; . ./.env; set +a
+go run ./cmd/rafikid migrate   # once, against a fresh database
+make run                       # rafikid in the foreground, proxy face on :8035
 ```
 
 **`rafikid` serves the proxy itself.** It mounts the same `/v1/messages` and
@@ -613,19 +651,25 @@ it: it reaches the library in-process.
 
 The face binds **all interfaces** by default (`RAFIKI_PROXY_LISTEN`, default
 `:8035`), so other hosts on your network can use one capture store and one set
-of breakers. Auth is always required. The daemon mints a per-boot token for its
-own children; `RAFIKI_SERVE_TOKEN` names an additional token for everything
-else, which is what `make run` sets to `dev` so `make claude` (which sends
-`RAFIKI_TOKEN`) works. A busy port is a hard error rather than a fallback —
-the address is a contract, and silently landing elsewhere would mean talking
-to whatever *did* claim it.
+of breakers. Auth is always required: the daemon mints a per-boot token for its
+own spawned children, but that secret is unknown to any human or tool
+connecting from outside, so `make claude` needs a real user. A fresh daemon has
+none — it starts in bootstrap mode (see
+[First user](#first-user-claiming-a-fresh-daemon) below) — so create one once,
+in another shell, while `make run` is still up:
+
+```bash
+go run ./cmd/rafiki user create dev
+```
+
+That mints a token and writes it to `~/.config/rafiki/token` (0600); `make
+claude`'s default `RAFIKI_TOKEN` falls back to that file with nothing further
+to export. A busy port is a hard error rather than a fallback — the address is
+a contract, and silently landing elsewhere would mean talking to whatever
+*did* claim it.
 
 Because `make run` is now the daemon, it and the installed `rafiki service`
 cannot both hold the port. Use one or the other.
-
-`make run` does **not** migrate, where the old standalone `rafiki serve --dev`
-did — run `go run ./cmd/rafikid migrate` once against a fresh database. Then,
-in another shell:
 
 ```bash
 make claude                                   # Claude Code through the local proxy

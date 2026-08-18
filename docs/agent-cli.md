@@ -31,6 +31,45 @@ then `RAFIKI_TEST_DSN`; `rafiki conversations` uses the daemon's, baked into
 the service unit at install time. Differing *numbers* between them is a DSN
 mismatch, not a rendering bug.
 
+## `rafiki user`
+
+The one non-`rafikid agent` command documented here, because `stats`/`search`'s
+`--owner` filter takes a name straight out of `rafiki user list` and readers
+need the source before the consumer. It talks to the daemon's control socket
+(`ctrl_user_create`/`ctrl_user_list`/`ctrl_user_rm` — see
+`docs/reference/control-protocol.md` §16), not Postgres directly, so it works
+wherever `rafiki` itself works, DSN or none.
+
+```
+rafiki user create <name>   # mint a user; prints its token once
+rafiki user list            # active users; --all also lists tombstoned ones
+rafiki user rm <name>       # tombstone a user; its token stops working at once
+```
+
+`rafiki user create` is also how a fresh daemon gets its first identity: while
+zero active users exist, the daemon is in bootstrap mode and `ctrl_user_create`
+is the only command any listener accepts (see README's "First user" section).
+
+- **`--no-write`** (create only): print the token but skip writing it to
+  `~/.config/rafiki/token` (mode 0600). Without it, `rafiki user create` both
+  mints the user AND logs this machine in as them — the plaintext token is
+  shown exactly once either way, since the daemon stores only its digest and
+  cannot show it again.
+- **`--all`** (list only): include tombstoned (removed) users. Without it,
+  `list` shows only active users — the ones a token could still authenticate
+  as. A tombstoned user still resolves in historical conversation/turn
+  attribution (`user rm` never deletes the row), so `--all` is what makes that
+  history's names explicable.
+
+`~/.config/rafiki/token` is distinct from the older, now-unread
+`~/.config/rafiki/control.token`: nothing resolves the old path any more, so a
+leftover file there is inert, not a fallback. Also note `rafiki`'s dial helper
+(`mustDial`) reads the same `~/.config/rafiki/token` for every command, so a
+stale token left over from a *different* daemon (or a wiped one) turns what
+should be a no-credential bootstrap dial into an authenticated one that then
+fails `auth_invalid` — if `rafiki user create` unexpectedly refuses on a daemon
+you know is fresh, check that file before suspecting the daemon.
+
 ## `stats`
 
 Global stats, or stats for one conversation if given a positional id.

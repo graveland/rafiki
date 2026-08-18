@@ -62,6 +62,37 @@
 
 - **`ProviderGuard` is inert without capture, by design.** It qualifies a cache miss using `prefix_hash` and the conversation id, both of which come from the capture path; with capture disabled it receives empty values, nothing qualifies as evidence, and it ejects nothing. That is the intended fail-safe (no evidence beats false evidence), not a bug to "fix" by loosening the qualification rules. The rules are pinned by replay tests over real traffic in `pkg/routing/testdata/`: loosening them makes `TestReplayHealthyNovitaNeverEjects` blacklist a provider that was working fine.
 
+- **One credential scheme: `base64url(sha256(token))` in an indexed TEXT
+  column, for BOTH `users` and `executors`.** Not bcrypt, and the reason is
+  not just speed: bcrypt salts per row, so a digest cannot be looked up and
+  every authentication becomes a full-table scan of bcrypt comparisons — paid
+  per HTTP request on the proxy face, which authenticates per request rather
+  than per connection. The tokens are 256 bits of `crypto/rand`, so a work
+  factor defends nothing. `users.HashToken` and `executorsdb.hashToken` must
+  stay identical; the `executors.credential_hash` column comment still says
+  "bcrypt/argon2 digest" and has always been wrong.
+- **`users` rows are TOMBSTONED, never deleted, and joins must be by id.**
+  `deleted_at` keeps history resolving to a real username and avoids an
+  `ON DELETE SET NULL` rewrite across compressed hypertable chunks. The
+  consequence: `username` is unique only among ACTIVE users (partial index
+  `users_username_active`), so one name can belong to one active row plus any
+  number of tombstones. A query that joins `users` by name will eventually
+  return multiple rows — `pkg/insights/search.go`'s owner filter carries an
+  `ORDER BY created_at DESC LIMIT 1` for exactly this.
+- **An auth failure and an auth OUTAGE are different answers on both
+  surfaces.** `users.ErrNotFound` → 401 / `ERR_AUTH_INVALID`. Any other store
+  error → 503 / `ERR_INTERNAL`, never 401: a 401 tells clients their
+  credential is bad and they respond by discarding it, so answering a database
+  blip with 401 logs out everyone at once. The store's error text never
+  reaches the peer — it has not proved who it is and a pgx error carries the
+  DSN. Same rule as `executors.IsTerminalAuthError`.
+- **The daemon has no users until someone creates one, and that window is
+  open on every listener.** With no active user a TLS control connection is
+  admitted WITHOUT a token and may send only `ctrl_user_create` — first writer
+  claims the daemon. Deliberate (a k8s pod has no operator shell on its UDS);
+  bounded by operator sequencing, a per-minute WARN, and a logged peer
+  address. `RAFIKI_CONTROL_LISTEN` without `RAFIKI_DB` is fatal at startup,
+  because otherwise the listener sits in permanent bootstrap mode.
 - **A hypertable with columnstore rejects `ADD COLUMN ... REFERENCES`, but
   accepts the same FK as a separate `ADD CONSTRAINT`.** The inline form fails
   with "cannot add column with constraints to a hypertable that has columnstore
@@ -81,7 +112,10 @@
   view-body chain is now 0007, 0008, 0011, 0019 — review all four before
   touching `v_turn`, whose ~10 pricing expressions this repo has no other copy
   of. `pg_get_viewdef('conversations.v_turn', true)` before and after is the
-  cheap way to prove you changed only what you meant to.
+  cheap way to prove you changed only what you meant to. `owner_canonical` and
+  `owner_kind` (present in the 0007/0008 view bodies) no longer exist as of
+  0019 — they guessed an identity out of free text, which a `users` join now
+  answers directly.
 
 - **The migration chain must be contiguous 1..N, and `Migrate` skips by version
   NUMBER, not name.** `loadMigrations` hard-fails on a gap or a duplicate, so a
