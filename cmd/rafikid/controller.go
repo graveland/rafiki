@@ -39,6 +39,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/tasksdb"
+	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -132,6 +133,11 @@ type Controller struct {
 	// listener is not configured (require the pool to mint tokens).
 	execStore executors.Store
 
+	// users is the identity store backing ctrl_user_*. Nil when RAFIKI_DB is
+	// unset — every user verb then returns errNoUserStore rather than
+	// pretending an empty user table.
+	users users.Store
+
 	// wsLabels holds workspace IDs and executor IDs provisioned for children
 	// whose spawn is in flight. Keyed by childID; set by agentRunner before
 	// Spawn builds the store record, consumed by Spawn for label insertion
@@ -181,7 +187,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	}
 }
 
-func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store, userStore users.Store) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -205,6 +211,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		tasks:       taskStore(pool),
 		evbuf:       newEventBuffer(),
 		execStore:   execStore,
+		users:       userStore,
 	}
 	// Wire the coster only when there is a database: without one every
 	// budgeted spawn fails closed (which is what checkBudget does when
@@ -3375,4 +3382,46 @@ func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
 		return err
 	}
 	return c.execStore.SetEnabled(context.Background(), req.ExecutorID, true)
+}
+
+// ─── Identity ──────────────────────────────────────────────────────────────
+
+// errNoUserStore is returned when identity commands are used on a daemon with
+// no database. Every user verb needs a row; there is nothing to degrade to.
+var errNoUserStore = &control.ControllerError{
+	Code:    protocol.ErrNoAgentDB,
+	Message: "no database configured (RAFIKI_DB unset); user identity requires one",
+}
+
+func (c *Controller) UserCreate(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	if c.users == nil {
+		return protocol.UserCreateResponseData{}, errNoUserStore
+	}
+	u, token, err := c.users.Create(ctx, username)
+	if err != nil {
+		return protocol.UserCreateResponseData{}, err
+	}
+	slog.Info("user created", "username", u.Username, "id", u.ID)
+	return protocol.UserCreateResponseData{
+		ID: u.ID, Username: u.Username, Token: token,
+		CreatedAt: u.CreatedAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func (c *Controller) UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error) {
+	if c.users == nil {
+		return nil, errNoUserStore
+	}
+	return c.users.List(ctx, includeDeleted, limit)
+}
+
+func (c *Controller) UserRm(ctx context.Context, username string) error {
+	if c.users == nil {
+		return errNoUserStore
+	}
+	if err := c.users.Delete(ctx, username); err != nil {
+		return err
+	}
+	slog.Info("user removed", "username", username)
+	return nil
 }

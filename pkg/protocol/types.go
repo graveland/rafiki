@@ -967,3 +967,53 @@ type ExecutorEnableRequest struct {
 	ID         string `json:"id,omitempty"`
 	ExecutorID string `json:"executorId"`
 }
+
+// ─── ctrl_user_* constants ──────────────────────────────────────────────────────
+
+const (
+	TypeCtrlUserCreate = "ctrl_user_create"
+	TypeCtrlUserList   = "ctrl_user_list"
+	TypeCtrlUserRm     = "ctrl_user_rm"
+)
+
+// ─── ctrl_user_create ────────────────────────────────────────────────────────
+
+// UserCreateRequest asks the daemon to mint a user and its bearer token.
+//
+// This is the ONE command accepted without authentication, and only while no
+// active user exists — see the control server's bootstrap gate. Once a user
+// exists it requires an authenticated caller like every other verb.
+type UserCreateRequest struct {
+	Type     string `json:"type"` // "ctrl_user_create"
+	ID       string `json:"id,omitempty"`
+	Username string `json:"username"`
+}
+
+// UserCreateResponseData carries the plaintext token. It is the only time it
+// is ever transmitted: the daemon stores a digest and cannot reproduce it.
+type UserCreateResponseData struct {
+	ID        string `json:"id"`
+	Username  string `json:"username"`
+	Token     string `json:"token"`
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// ─── ctrl_user_list ──────────────────────────────────────────────────────────
+
+// UserListRequest enumerates users. Tokens are never returned.
+type UserListRequest struct {
+	Type           string `json:"type"` // "ctrl_user_list"
+	ID             string `json:"id,omitempty"`
+	IncludeDeleted bool   `json:"include_deleted,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+}
+
+// ─── ctrl_user_rm ────────────────────────────────────────────────────────────
+
+// UserRmRequest tombstones a user: the token stops working, history keeps
+// resolving the username.
+type UserRmRequest struct {
+	Type     string `json:"type"` // "ctrl_user_rm"
+	ID       string `json:"id,omitempty"`
+	Username string `json:"username"`
+}
