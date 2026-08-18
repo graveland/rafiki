@@ -161,7 +161,7 @@ func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.Sender) *llm.Conversat
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := c.Conversation(context.Background(), llm.NewConversation("brent", "loop-test"),
+	conv, err := c.Conversation(context.Background(), llm.NewConversation("", "loop-test"),
 		llm.Model("claude-test"), llm.SystemText("test system"))
 	if err != nil {
 		t.Fatal(err)
@@ -782,7 +782,7 @@ func newMemConv(t *testing.T, sender llm.Sender) *llm.Conversation {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := c.Conversation(context.Background(), llm.NewConversation("brent", "loop-test"),
+	conv, err := c.Conversation(context.Background(), llm.NewConversation("", "loop-test"),
 		llm.Model("claude-test"), llm.SystemText("test system"))
 	if err != nil {
 		t.Fatal(err)

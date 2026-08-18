@@ -37,7 +37,7 @@ type TranscriptTurn struct {
 // list, and the recovered skill catalog available to the agent.
 type Transcript struct {
 	ConversationID string `json:"conversation_id"`
-	Owner          string `json:"owner"`
+	Owner          string `json:"owner"` // username, resolved through the users FK
 	Persona        string `json:"persona"`
 	Source         string `json:"source"`
 	DrivenBy       string `json:"driven_by"`
@@ -60,10 +60,12 @@ func (i *Insights) Export(ctx context.Context, conversationID string) (*Transcri
 	tr := &Transcript{ConversationID: conversationID}
 
 	err := i.pool.QueryRow(ctx, `
-		SELECT coalesce(c.owner,''), coalesce(c.persona,''), c.driven_by,
+		SELECT coalesce(u.username,''), coalesce(c.persona,''), c.driven_by,
 		       coalesce((SELECT min(source) FROM conversations.conversation_turn
 		                  WHERE conversation_id = c.id), '')
-		  FROM conversations.conversation c WHERE c.id = $1::uuid`,
+		  FROM conversations.conversation c
+		  LEFT JOIN conversations.users u ON u.id = c.owner_user_id
+		 WHERE c.id = $1::uuid`,
 		conversationID).Scan(&tr.Owner, &tr.Persona, &tr.DrivenBy, &tr.Source)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

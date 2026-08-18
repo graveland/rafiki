@@ -38,15 +38,15 @@ Global stats, or stats for one conversation if given a positional id.
 ```
 rafikid agent stats
 rafikid agent stats <conv-id>
-rafikid agent stats --since 24h --owner alice@example.com --model claude-sonnet-5
+rafikid agent stats --since 24h --owner alice --model claude-sonnet-5
 ```
 
 Verified: `RAFIKI_DB=postgres://... rafikid agent stats` against a live DB
 prints the real stats table.
 
 Filter flags (global stats only, ignored when a conv-id is given):
-`--since`, `--until` (RFC3339 or a duration like `24h`), `--owner`,
-`--persona`, `--source`, `--model`, `--path`.
+`--since`, `--until` (RFC3339 or a duration like `24h`), `--owner` (a user
+name from `rafiki user list`), `--persona`, `--source`, `--model`, `--path`.
 
 ## `search`
 

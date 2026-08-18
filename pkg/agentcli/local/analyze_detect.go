@@ -73,7 +73,7 @@ func (b *Backend) analyzeOne(ctx context.Context, send func(agentcli.AnalyzeEven
 		return nil, nil
 	}
 
-	analysis, err := analyze.Detect(ctx, b.llm, compacted, profile, b.owner, b.pricer)
+	analysis, err := analyze.Detect(ctx, b.llm, compacted, profile, analyzerOwnerUserID, b.pricer)
 	if err != nil {
 		if !noStore {
 			if recErr := b.recordFailure(ctx, it.id, profile, promptHash, fmt.Errorf("detect: %w", err)); recErr != nil {

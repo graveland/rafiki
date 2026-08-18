@@ -73,16 +73,45 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// insertConversation creates a conversation row and returns its id.
+// insertConversation creates a conversation row and returns its id. owner is a
+// USERNAME: the row stores conversations.users.id, so the user is created (or
+// reused) first.
 func insertConversation(t *testing.T, pool *pgxpool.Pool, drivenBy, owner string) string {
 	t.Helper()
+	var ownerArg any
+	if owner != "" {
+		ownerArg = ensureUser(t, pool, owner)
+	}
 	var id string
 	err := pool.QueryRow(context.Background(),
-		`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by)
-		 VALUES ($1, 'team-platform', 'claude-fable-5', 'test', $2) RETURNING id::text`,
-		owner, drivenBy).Scan(&id)
+		`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by)
+		 VALUES ($1::uuid, 'team-platform', 'claude-fable-5', 'test', $2) RETURNING id::text`,
+		ownerArg, drivenBy).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert conversation: %v", err)
+	}
+	return id
+}
+
+// ensureUser returns the id of the ACTIVE user named username, creating one on
+// first use.
+func ensureUser(t *testing.T, pool *pgxpool.Pool, username string) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	if err := pool.QueryRow(ctx,
+		`SELECT id::text FROM conversations.users WHERE username = $1 AND deleted_at IS NULL`,
+		username).Scan(&id); err == nil {
+		return id
+	}
+	// token_sha256 is globally unique and tombstones keep their row, so a
+	// recreated username needs a fresh digest — reusing the name would collide
+	// with the removed user's row.
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.users (username, token_sha256)
+		 VALUES ($1, $1 || ':' || gen_random_uuid()::text) RETURNING id::text`,
+		username).Scan(&id); err != nil {
+		t.Fatalf("insert user %q: %v", username, err)
 	}
 	return id
 }

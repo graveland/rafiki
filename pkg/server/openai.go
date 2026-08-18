@@ -222,10 +222,10 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 	if p.store == nil {
 		return captureRef{}
 	}
-	owner := ""
+	ownerUserID := ""
 	if p.auth != nil {
 		if id := p.auth.Identify(r); id != nil {
-			owner = id.Username
+			ownerUserID = id.UserID
 		}
 	}
 	source := r.Header.Get("X-Rafiki-Source")
@@ -234,7 +234,7 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 	}
 	convID, err := p.store.EnsureConversationByExternalRef(r.Context(), capture.ConversationRef{
 		OriginEntrypoint: source, DrivenBy: string(store.DrivenByClient),
-		Owner: owner, ExternalRef: r.Header.Get("X-Rafiki-Session"),
+		OwnerUserID: ownerUserID, ExternalRef: r.Header.Get("X-Rafiki-Session"),
 	})
 	if err != nil {
 		p.logger.Warn("openai proxy capture: ensure-conversation failed", "error", err)
@@ -242,7 +242,7 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 	}
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
 		ConversationID: convID, Ordinal: 0, Model: model, Request: reqBody,
-		Source: source, Author: owner, AuthorKind: "human",
+		Source: source, AuthorUserID: ownerUserID, AuthorKind: "human",
 		PrefixHash: routing.PrefixHash(reqBody), Protocol: string(store.ProtocolOpenAI),
 	})
 	if err != nil {

@@ -106,7 +106,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := c.Conversation(ctx, NewConversation("brent", "test"), Model("sonnet-latest"))
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
 	if err != nil {
 		t.Fatalf("Conversation: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestConversationSendPersistsBothGranularities(t *testing.T) {
 	c := testClient(t, pool, sender)
 
 	conv, err := c.Conversation(ctx,
-		NewConversation("brent", "test"),
+		NewConversation("", "test"),
 		Model("sonnet-latest"), // must resolve at creation via the seeded catalog
 		SystemText("you are a test"),
 	)
@@ -231,7 +231,7 @@ func TestConversationTrimRetryKeepsPrefixAndRows(t *testing.T) {
 		respondText("after trim"),
 	}}
 	c := testClient(t, pool, sender)
-	conv, err := c.Conversation(ctx, NewConversation("brent", "test"), Model("claude-haiku-4-5"),
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("claude-haiku-4-5"),
 		SystemText("sys"))
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +307,7 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	c := testClient(t, pool, sender)
 
 	// Conversation A: a pending turn (call never resolved).
-	convA, err := c.Conversation(ctx, NewConversation("brent", "test"))
+	convA, err := c.Conversation(ctx, NewConversation("", "test"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	}
 
 	// Conversation B: an assistant tool_use with no matching tool_result.
-	convB, err := c.Conversation(ctx, NewConversation("brent", "test"))
+	convB, err := c.Conversation(ctx, NewConversation("", "test"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestUnfinishedConversationsAndResumeCounter(t *testing.T) {
 	}
 
 	// Conversation C: clean (a full Send).
-	convC, err := c.Conversation(ctx, NewConversation("brent", "test"))
+	convC, err := c.Conversation(ctx, NewConversation("", "test"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestConversationStoresPrefixOnChange(t *testing.T) {
 	}}
 	c := testClient(t, pool, sender)
 
-	conv, err := c.Conversation(ctx, NewConversation("brent", "test"),
+	conv, err := c.Conversation(ctx, NewConversation("", "test"),
 		Model("sonnet-latest"), SystemText("you are a test"))
 	if err != nil {
 		t.Fatalf("Conversation: %v", err)
@@ -489,7 +489,7 @@ func TestConversationWithToolChoice(t *testing.T) {
 	c := testClient(t, pool, sender)
 
 	conv, err := c.Conversation(ctx,
-		NewConversation("brent", "test"),
+		NewConversation("", "test"),
 		Model("sonnet-latest"),
 		SystemText("you are a test"))
 	if err != nil {
@@ -529,5 +529,90 @@ func TestConversationWithToolChoice(t *testing.T) {
 
 	if sender.lastReq[1].ToolChoice.OfTool != nil {
 		t.Errorf("ToolChoice.OfTool should be nil when WithToolChoice not used, got %v", sender.lastReq[1].ToolChoice.OfTool)
+	}
+}
+
+// Attribution is persisted as a conversations.users id, never a name: the
+// username is resolved at read time through the FK. This covers the whole
+// round trip — NewConversation's owner id onto conversation.owner_user_id,
+// WithAuthorUserID onto conversation_turn.author_user_id, and both back out
+// through the views as usernames.
+func TestConversationPersistsUserIDsNotNames(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	var userID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.users (username, token_sha256)
+		 VALUES ('brent', 'digest-llm') RETURNING id::text`).Scan(&userID); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("reply"),
+	}}
+	c := testClient(t, pool, sender)
+
+	conv, err := c.Conversation(ctx, NewConversation(userID, "test"), Model("sonnet-latest"))
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	if _, err := conv.Send(ctx, UserText("hello"), WithAuthorUserID(userID)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var ownerUserID, authorUserID string
+	if err := pool.QueryRow(ctx,
+		`SELECT c.owner_user_id::text, t.author_user_id::text
+		   FROM conversations.conversation c
+		   JOIN conversations.conversation_turn t ON t.conversation_id = c.id
+		  WHERE c.id = $1::uuid`, conv.ID).Scan(&ownerUserID, &authorUserID); err != nil {
+		t.Fatalf("read attribution columns: %v", err)
+	}
+	if ownerUserID != userID || authorUserID != userID {
+		t.Errorf("owner_user_id=%q author_user_id=%q, want %s for both", ownerUserID, authorUserID, userID)
+	}
+
+	var ownerName, authorName string
+	if err := pool.QueryRow(ctx,
+		`SELECT owner_username, author_username FROM conversations.v_turn
+		  WHERE conversation_id = $1::uuid`, conv.ID).Scan(&ownerName, &authorName); err != nil {
+		t.Fatalf("read v_turn usernames: %v", err)
+	}
+	if ownerName != "brent" || authorName != "brent" {
+		t.Errorf("v_turn owner_username=%q author_username=%q, want brent for both", ownerName, authorName)
+	}
+}
+
+// An unattributed conversation — the anonymous proxy path, and every
+// daemon-run analyzer conversation — must persist SQL NULL. The columns are
+// UUID foreign keys, so an empty Go string reaching them as the empty
+// string is a cast error at insert time, not merely a mislabelled row.
+func TestConversationEmptyUserIDPersistsAsNull(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("reply"),
+	}}
+	c := testClient(t, pool, sender)
+
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("sonnet-latest"))
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	if _, err := conv.Send(ctx, UserText("hello")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var owner, author *string
+	if err := pool.QueryRow(ctx,
+		`SELECT c.owner_user_id::text, t.author_user_id::text
+		   FROM conversations.conversation c
+		   JOIN conversations.conversation_turn t ON t.conversation_id = c.id
+		  WHERE c.id = $1::uuid`, conv.ID).Scan(&owner, &author); err != nil {
+		t.Fatalf("read attribution columns: %v", err)
+	}
+	if owner != nil || author != nil {
+		t.Errorf("owner_user_id=%v author_user_id=%v, want NULL for both", owner, author)
 	}
 }

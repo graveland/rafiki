@@ -827,7 +827,8 @@ pi-controller daemon gets `unknown command`.
 
 Global stats over persisted conversation history, or stats for one conversation when
 `conversationId` is given (filter fields are then ignored). `sinceUnix`/`untilUnix` are Unix
-seconds (0/absent = unbounded).
+seconds (0/absent = unbounded). `owner` is a **username** from `conversations.users` — the
+daemon resolves it to a user id server-side; rows store the id, never the name.
 
 ```jsonc
 {

@@ -324,7 +324,7 @@ func (b *Backend) draftTopFindings(ctx context.Context, ranked []agentcli.Ranked
 		}
 		count++
 		current := currentSkillFiles(f.Recommendation.SkillName, skillFiles)
-		edit, err := analyze.Draft(ctx, b.llm, f, current, profile, b.owner, b.pricer)
+		edit, err := analyze.Draft(ctx, b.llm, f, current, profile, analyzerOwnerUserID, b.pricer)
 		if err != nil {
 			failures = append(failures, draftFailure{title: f.Title, err: err})
 			continue

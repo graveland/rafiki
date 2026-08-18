@@ -29,25 +29,26 @@ var ErrNoLLM = errors.New("agentcli/local: no LLM client configured")
 // configured (corpus-only runs). Corpus Analyze does not require a pool.
 var ErrNoPool = errors.New("agentcli/local: no database pool configured (corpus-only backend)")
 
-// defaultOwner attributes conversations run through this backend when
-// Options.Owner is empty.
-const defaultOwner = "rafiki-cli"
+// analyzerOwnerUserID is the attribution the analyzer's own LLM conversations
+// carry: none. The analyzer runs as the daemon, not as a person, and
+// conversation.owner_user_id is a users FK — the free-text "rafiki-cli" it used
+// to stamp was a code artifact masquerading as an identity, which is exactly
+// what migration 0019 removed.
+const analyzerOwnerUserID = ""
 
 // Options configures a Backend.
 type Options struct {
 	Pool   *pgxpool.Pool   // nil ⇒ corpus-only Analyze runs only; read methods and findings persistence return errors
 	LLM    *llm.Client     // nil ⇒ Analyze returns ErrNoLLM unless StopAfter=="compact"
 	Pricer insights.Pricer // nil-safe
-	Owner  string          // conversation attribution; default "rafiki-cli"
 }
 
 // Backend implements agentcli.Backend directly against a Postgres pool: no
 // gRPC, no auth. Analyze needs an *llm.Client; the read paths do not.
 type Backend struct {
-	pool  *pgxpool.Pool
-	ins   *insights.Insights
-	llm   *llm.Client
-	owner string
+	pool *pgxpool.Pool
+	ins  *insights.Insights
+	llm  *llm.Client
 
 	// pricer is kept directly on Backend (in addition to being handed to
 	// insights.Insights) because analyze.Detect and analyze.Draft take an
@@ -62,10 +63,6 @@ var _ agentcli.Backend = (*Backend)(nil)
 // Analyze runs; read paths then return ErrNoPool. o.LLM may be nil: read
 // paths work without one, but Analyze then returns ErrNoLLM.
 func New(o Options) *Backend {
-	owner := o.Owner
-	if owner == "" {
-		owner = defaultOwner
-	}
 	var ins *insights.Insights
 	if o.Pool != nil {
 		ins = insights.New(o.Pool).WithPricer(o.Pricer)
@@ -74,7 +71,6 @@ func New(o Options) *Backend {
 		pool:   o.Pool,
 		ins:    ins,
 		llm:    o.LLM,
-		owner:  owner,
 		pricer: o.Pricer,
 	}
 }

@@ -424,7 +424,7 @@ func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 		WithCatalog(seededCatalog(t)),
 	)
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("t", "test"), Model("anthropic/sonnet-latest"))
+		NewConversation("", "test"), Model("anthropic/sonnet-latest"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +454,7 @@ func TestConversationNoModelNoDefaultErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Conversation(context.Background(), NewConversation("t", "test")); err == nil {
+	if _, err := c.Conversation(context.Background(), NewConversation("", "test")); err == nil {
 		t.Fatal("no per-conversation model + no default must error, not silently pick haiku")
 	}
 }
@@ -516,7 +516,7 @@ func TestInMemoryConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := c.Conversation(context.Background(), NewConversation("brent", "cli"),
+	conv, err := c.Conversation(context.Background(), NewConversation("", "cli"),
 		Model("claude-haiku-4-5"), SystemText("sys"))
 	if err != nil {
 		t.Fatalf("store-less Conversation: %v", err)
@@ -770,7 +770,7 @@ func TestPrimaryOptionRoutesUpstream(t *testing.T) {
 		WithUpstream(UpstreamOpenRouter, openrouterSender),
 	)
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("t", "test"), Model("claude-test"), Primary(UpstreamOpenRouter))
+		NewConversation("", "test"), Model("claude-test"), Primary(UpstreamOpenRouter))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +791,7 @@ func TestThinkingBudgetSetsParam(t *testing.T) {
 	}}
 	c := newMemClient(t, WithUpstream(UpstreamAnthropic, sender))
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("t", "test"), Model("claude-test"), ThinkingBudget(8192))
+		NewConversation("", "test"), Model("claude-test"), ThinkingBudget(8192))
 	if err != nil {
 		t.Fatal(err)
 	}

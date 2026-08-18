@@ -88,7 +88,7 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 		Provider: "anthropic",
 		ModelID:  "claude-x",
 		Name:     "w1",
-		ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 		OnFatal:  func(err error) { fatalCalled <- err },
 	}, fe)
 	if err != nil {
@@ -155,7 +155,7 @@ func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
 		Provider: "anthropic",
 		ModelID:  "claude-x",
 		Name:     "w1",
-		ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 		// Snapshot what has been emitted at the moment the owner is told to end
 		// the child: the agent_error must already be there.
 		OnFatal: func(error) { seenAtFatal <- out.String() },

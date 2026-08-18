@@ -75,7 +75,7 @@ func dbFromCmd(cmd *cobra.Command) string {
 func registerFilterFlags(fs *pflag.FlagSet) {
 	fs.String("since", "", "RFC3339 timestamp or duration like 24h")
 	fs.String("until", "", "RFC3339 timestamp or duration like 24h")
-	fs.String("owner", "", "filter by owner")
+	fs.String("owner", "", "filter by owner username")
 	fs.String("persona", "", "filter by persona")
 	fs.String("source", "", "filter by source")
 	fs.String("model", "", "filter by model")
@@ -876,7 +876,7 @@ func runAnalyze(a analyzeArgs) error {
 	if llmClient != nil {
 		pricer = llmClient.Catalog().Pricing
 	}
-	b := local.New(local.Options{Pool: pool, LLM: llmClient, Pricer: pricer, Owner: "rafiki-cli"})
+	b := local.New(local.Options{Pool: pool, LLM: llmClient, Pricer: pricer})
 
 	jsonMode := a.Indent || a.Compact
 

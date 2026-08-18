@@ -425,7 +425,7 @@ func blockingBuildFunc(started chan struct{}, fakeTurnsPath string) BuildFunc {
 			ModelID:  "claude-x",
 			Name:     "w1",
 			BaseCtx:  ctx,
-			ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+			ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 		}, fe)
 		if err != nil {
 			return nil, nil, err
@@ -797,7 +797,7 @@ func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
 			Name:     "w1",
 			BaseCtx:  ctx,
 			OnFatal:  ro.OnFatal,
-			ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+			ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 		}, fe)
 		if err != nil {
 			return nil, nil, err
@@ -889,7 +889,7 @@ func panickingTurnBuildFunc() BuildFunc {
 			Name:     "w1",
 			BaseCtx:  ctx,
 			OnFatal:  ro.OnFatal,
-			ConvOpts: []llm.ConvOption{llm.NewConversation("fundi", "agent")},
+			ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 		}, fe)
 		if err != nil {
 			return nil, nil, err

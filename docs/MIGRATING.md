@@ -180,9 +180,15 @@ A `--has-label rafiki/kind=…` filter written after upgrading will silently not
 match it. Kill and forget pre-existing children, or expect the seam.
 
 **Captured owner identity.** The proxy face's per-boot token identity changed
-from `fundi-child` to `rafiki-child`. Historical database rows keep the old
-string. This is deliberate: it is a captured identity, not a key, and rewriting
-history to match a rename is worse than a visible discontinuity in it.
+from `fundi-child` to `rafiki-child`, and historical database rows kept the old
+string. Both spellings are now gone: migration `0019_user_attribution` replaced
+the free-text `conversation.owner` / `conversation_turn.author` columns with
+`owner_user_id` / `author_user_id`, foreign keys into `conversations.users`. The
+old values were code artifacts rather than people (`dev`, `configured`,
+`rafiki-child`), so they were dropped rather than backfilled — every
+pre-upgrade conversation now reads as unattributed. Attribution from here on
+comes from `rafiki user create`, and a rename is an UPDATE to one row rather
+than a discontinuity in history.
 
 ## Why `fundi` still appears
 

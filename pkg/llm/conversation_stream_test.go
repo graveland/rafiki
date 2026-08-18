@@ -28,7 +28,7 @@ func newTestConversation(t *testing.T, sender Sender) *Conversation {
 		t.Fatal(err)
 	}
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Co
 		t.Fatal(err)
 	}
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback(UpstreamOpenRouter))
 	if err != nil {
 		t.Fatal(err)
@@ -567,7 +567,7 @@ func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback(UpstreamOpenRouter))
 	if err != nil {
 		t.Fatal(err)
@@ -620,7 +620,7 @@ func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback(UpstreamOpenRouter))
 	if err != nil {
 		t.Fatal(err)
@@ -685,7 +685,7 @@ func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testin
 		t.Fatal(err)
 	}
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback(UpstreamOpenRouter))
 	if err != nil {
 		t.Fatal(err)
@@ -802,7 +802,7 @@ func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
 	}
 	c.modelGate = NewModelGate(10*time.Millisecond, 50*time.Millisecond)
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -893,7 +893,7 @@ func TestSend_StreamRespectsRateLimitPolicyMaxRetries(t *testing.T) {
 	c.modelGate = gate
 
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("brent", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		WithRateLimitPolicy(RateLimitPolicy{MaxRetries: 2}))
 	if err != nil {
 		t.Fatal(err)

@@ -1127,19 +1127,21 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	if p.store == nil {
 		return captureRef{} // capture-less (no store configured)
 	}
-	owner := ""
+	ownerUserID := ""
 	if p.auth != nil {
 		if id := p.auth.Identify(r); id != nil {
-			owner = id.Username
+			ownerUserID = id.UserID
 		}
 	}
 	// Source lets a single proxy serve multiple entrypoints (Claude Code, a TUI, a
 	// slack bot): the client stamps X-Rafiki-Source; default to the conversation's
 	// own entrypoint. These are interactive, human-driven sessions.
 	//
-	// Conversation-row population on this (client-driven) path: owner comes
-	// from the Authenticator (token name / host identity; NULL when
-	// anonymous); model is backfilled by the first turn's resolved model
+	// Conversation-row population on this (client-driven) path: owner_user_id
+	// comes from the Authenticator (a conversations.users id; NULL when
+	// anonymous or when the caller is not a user — the username is resolved at
+	// read time through the FK and is never stored on the row); model is
+	// backfilled by the first turn's resolved model
 	// (first-seen wins); external_ref is X-Rafiki-Session — WITHOUT the
 	// header each request DELIBERATELY becomes its own conversation (no
 	// implicit correlation heuristics: guessing by owner or time would merge
@@ -1152,7 +1154,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 	convID, err := p.store.EnsureConversationByExternalRef(r.Context(), capture.ConversationRef{
 		OriginEntrypoint: source, DrivenBy: "client",
-		Owner: owner, ExternalRef: r.Header.Get("X-Rafiki-Session"),
+		OwnerUserID: ownerUserID, ExternalRef: r.Header.Get("X-Rafiki-Session"),
 	})
 	if err != nil {
 		p.logger.Warn("proxy capture: ensure-conversation failed", "error", err)
@@ -1164,7 +1166,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	prefixHash := routing.PrefixHash(reqBody)
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
 		ConversationID: convID, Ordinal: 0, Model: model, Request: nil,
-		Source: source, Author: owner, AuthorKind: "human", PrefixHash: prefixHash,
+		Source: source, AuthorUserID: ownerUserID, AuthorKind: "human", PrefixHash: prefixHash,
 	})
 	if err != nil {
 		p.logger.Warn("proxy capture: insert-intent failed", "conversation", convID, "error", err)

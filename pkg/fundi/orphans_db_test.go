@@ -136,7 +136,7 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	conv, err := client.Conversation(background, llm.NewConversation("fundi", "agent"))
+	conv, err := client.Conversation(background, llm.NewConversation("", "agent"))
 	if err != nil {
 		t.Fatalf("Conversation: %v", err)
 	}

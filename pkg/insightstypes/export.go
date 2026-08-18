@@ -28,7 +28,7 @@ type TranscriptTurn struct {
 // list, and the recovered skill catalog available to the agent.
 type Transcript struct {
 	ConversationID string `json:"conversation_id"`
-	Owner          string `json:"owner"`
+	Owner          string `json:"owner"` // username, resolved through the users FK
 	Persona        string `json:"persona"`
 	Source         string `json:"source"`
 	DrivenBy       string `json:"driven_by"`

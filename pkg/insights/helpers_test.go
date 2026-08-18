@@ -66,21 +66,48 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// insertConversation creates a conversation row and returns its id. owner is
-// stored NULL when empty.
+// insertConversation creates a conversation row and returns its id. owner is a
+// USERNAME: the row stores conversations.users.id, so the user is created (or
+// reused) first. An empty owner leaves owner_user_id NULL — an unattributed
+// conversation, which the readers must still return.
 func insertConversation(t *testing.T, pool *pgxpool.Pool, drivenBy, owner string) string {
 	t.Helper()
 	var ownerArg any
 	if owner != "" {
-		ownerArg = owner
+		ownerArg = ensureUser(t, pool, owner)
 	}
 	var id string
 	err := pool.QueryRow(context.Background(),
-		`INSERT INTO conversations.conversation (owner, persona, model, origin_entrypoint, driven_by)
-		 VALUES ($1, 'team-platform', 'claude-fable-5', 'test', $2) RETURNING id::text`,
+		`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by)
+		 VALUES ($1::uuid, 'team-platform', 'claude-fable-5', 'test', $2) RETURNING id::text`,
 		ownerArg, drivenBy).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert conversation: %v", err)
+	}
+	return id
+}
+
+// ensureUser returns the id of the ACTIVE user named username, creating one on
+// first use. Lookups filter deleted_at because the unique index does: a
+// tombstoned row may share the name and is not the user a test means.
+func ensureUser(t *testing.T, pool *pgxpool.Pool, username string) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	err := pool.QueryRow(ctx,
+		`SELECT id::text FROM conversations.users WHERE username = $1 AND deleted_at IS NULL`,
+		username).Scan(&id)
+	if err == nil {
+		return id
+	}
+	// token_sha256 is globally unique and tombstones keep their row, so a
+	// recreated username needs a fresh digest — reusing the name would collide
+	// with the removed user's row.
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.users (username, token_sha256)
+		 VALUES ($1, $1 || ':' || gen_random_uuid()::text) RETURNING id::text`,
+		username).Scan(&id); err != nil {
+		t.Fatalf("insert user %q: %v", username, err)
 	}
 	return id
 }
