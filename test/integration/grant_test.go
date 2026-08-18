@@ -159,7 +159,6 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		"RAFIKI_DB="+dsn,
 		"RAFIKI_EXECUTORS_ENABLED=1",
 		"RAFIKI_CONTROL_LISTEN="+listenAddr,
-		"RAFIKI_CONTROL_TOKEN=grant-test-token",
 		"RAFIKI_CONTROL_TLS_CERT="+certPath,
 		"RAFIKI_CONTROL_TLS_KEY="+keyPath,
 	)

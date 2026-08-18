@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // The behaviour that must never regress: an unreachable daemon returns 0,
@@ -21,7 +23,7 @@ import (
 func TestAutoCompactWindowReturnsZeroWhenDaemonDown(t *testing.T) {
 	// Point both the remote-control URL and the UDS at nothing, so the dial
 	// fails deterministically even if a real daemon happens to be running.
-	t.Setenv("RAFIKI_CONTROL_URL", "")
+	t.Setenv(paths.URL, "")
 	t.Setenv("RAFIKI_SOCKET", filepath.Join(t.TempDir(), "no-such.sock"))
 
 	got := claudeAutoCompactWindow(context.Background(), "anthropic/claude-opus-5")
@@ -33,7 +35,7 @@ func TestAutoCompactWindowReturnsZeroWhenDaemonDown(t *testing.T) {
 // Bounded: a slow lookup must not delay the launch. The whole RPC is raced
 // against a budget; whatever replaces it must keep that property.
 func TestAutoCompactWindowIsBounded(t *testing.T) {
-	t.Setenv("RAFIKI_CONTROL_URL", "")
+	t.Setenv(paths.URL, "")
 	t.Setenv("RAFIKI_SOCKET", filepath.Join(t.TempDir(), "no-such.sock"))
 
 	ctx, cancel := context.WithCancel(context.Background())

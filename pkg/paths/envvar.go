@@ -49,23 +49,24 @@ const (
 	// FUNDI_AGENT_DB and RAFIKI_DB were always the same database.
 	DB = "RAFIKI_DB"
 
-	// URL is the base URL of a rafiki proxy this process should route LLM
-	// calls through. Client-side. Absorbs FUNDI_PROXY_URL and
-	// RAFIKI_PROXY_URL, which meant the same thing to different callers.
+	// URL is the single dial target for both surfaces a client reaches: an
+	// LLM proxy this process routes calls through, and (when the scheme is
+	// https) the remote daemon's control plane. Client-side. One name now
+	// covers what a separate, retired control-URL variable used to carry —
+	// both always meant "where do I send this", just to different callers.
 	//
-	// Empty DISABLES the mechanism: children talk to providers directly.
+	// Empty DISABLES the proxy mechanism: children talk to providers
+	// directly. client.IsRemoteURL decides whether a given value also
+	// names a control-plane host (https:// only — an http:// value is the
+	// local loopback face, which has no control listener).
 	URL = "RAFIKI_URL"
 
-	// Token is the bearer token this process PRESENTS to a proxy.
-	// Client-side, always. Absorbs RAFIKI_PROXY_TOKEN and the client half of
-	// FUNDI_PROXY_TOKEN.
+	// Token is the bearer token this process PRESENTS — to a proxy's
+	// Authorization header, and to a remote daemon's ctrl_auth frame. One
+	// name now covers what a separate, retired control-token variable used
+	// to carry. Client-side, always. See paths.TokenFromEnv, which also
+	// falls back to paths.TokenFile().
 	Token = "RAFIKI_TOKEN"
-
-	// ServeToken is one additional token rafikid's own face ACCEPTS, on top
-	// of the per-boot child secret. Server-side, always. This is the server
-	// half of the old FUNDI_PROXY_TOKEN, split out so neither survivor means
-	// two opposite things depending on what else is set.
-	ServeToken = "RAFIKI_SERVE_TOKEN"
 
 	// ProxyKinds limits which child kinds are routed, comma-separated. Default
 	// "pi,claude"; the agent kind is never listed because it reaches rafiki
@@ -115,10 +116,6 @@ const (
 	// (e.g. "tcp:8036"). Unset = UDS only.
 	ControlListen = "RAFIKI_CONTROL_LISTEN"
 
-	// ControlToken is the shared secret for control-plane auth.
-	// Daemon checks it; clients present it as the first frame on TCP.
-	ControlToken = "RAFIKI_CONTROL_TOKEN"
-
 	// ControlTLSCert is the PEM TLS certificate path for the control
 	// plane's TCP listener. Mandatory when ControlListen is set.
 	ControlTLSCert = "RAFIKI_CONTROL_TLS_CERT"
@@ -130,10 +127,6 @@ const (
 	// BroadcastListen, when set, binds a dedicated HTTP listener for
 	// OpenRouter's OTLP broadcast webhook. Empty = disabled.
 	BroadcastListen = "RAFIKI_BROADCAST_LISTEN"
-
-	// ControlURL is the remote rafikid URL a client dials
-	// (e.g. "tls://rafiki.graveland.dev:443"). Wins over RAFIKI_SOCKET.
-	ControlURL = "RAFIKI_CONTROL_URL"
 
 	// RecordRequests, when "1", enables raw HTTP request/response capture to
 	// the conversations.raw_http_request hypertable. Debug-only; off by default.

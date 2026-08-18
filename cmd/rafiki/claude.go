@@ -110,9 +110,8 @@ func claudeAutoCompactWindow(ctx context.Context, model string) int {
 // here: it calls os.Exit(2) on a connection failure, and `rafiki claude` must
 // keep working with the daemon down.
 func dialDaemon(ctx context.Context) (*client.Client, error) {
-	if url := paths.Get(paths.ControlURL); url != "" {
-		token := paths.ControlTokenFromEnv()
-		return client.DialURL(ctx, url, token)
+	if u := paths.Get(paths.URL); client.IsRemoteURL(u) {
+		return client.DialURL(ctx, u, paths.TokenFromEnv())
 	}
 	return client.Dial(client.DefaultSocketPath())
 }

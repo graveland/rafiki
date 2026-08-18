@@ -120,7 +120,6 @@ const (
 var secretEnvVars = []string{
 	paths.DB,
 	paths.Token,
-	paths.ServeToken,
 	anthropicAPIKeyEnv,
 	openrouterAPIKeyEnv,
 }

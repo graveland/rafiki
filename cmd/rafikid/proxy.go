@@ -399,19 +399,3 @@ func randomToken() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-
-// offBox reports whether a listen address is reachable from outside this
-// machine. An empty or wildcard host binds every interface; anything else that
-// is not a loopback literal is a specific external address.
-func offBox(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return true // unparseable: assume the riskier reading
-	}
-	switch host {
-	case "", "0.0.0.0", "::", "[::]":
-		return true
-	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip == nil || !ip.IsLoopback()
-}

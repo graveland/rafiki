@@ -215,12 +215,11 @@ func TestCaptureDaemonEnv_RoutesCredentialsToSecrets(t *testing.T) {
 		"ANTHROPIC_API_KEY=sk-ant",
 		"OPENROUTER_API_KEY=sk-or",
 		"RAFIKI_TOKEN=client",
-		"RAFIKI_SERVE_TOKEN=server",
 	})
 	if len(unit) != 0 {
 		t.Errorf("credentials reached the unit: %v", unit)
 	}
-	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "RAFIKI_TOKEN", "RAFIKI_SERVE_TOKEN"} {
+	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "RAFIKI_TOKEN"} {
 		if _, ok := secret[k]; !ok {
 			t.Errorf("%s was not routed to service.env", k)
 		}
@@ -353,13 +352,13 @@ func TestInstallReport_ListsEachDestination(t *testing.T) {
 	}
 	res := paths.MergeResult{
 		Added:    []string{"ANTHROPIC_API_KEY", "RAFIKI_DB"},
-		Existing: []string{"RAFIKI_SERVE_TOKEN"},
-		Defined:  []string{"RAFIKI_SERVE_TOKEN"},
+		Existing: []string{"RAFIKI_SAMPLE_SECRET"},
+		Defined:  []string{"RAFIKI_SAMPLE_SECRET"},
 	}
 
 	out := installReport(spec, "/cfg/service.env", res, nil)
 
-	for _, want := range []string{"RAFIKI_PROXY_KINDS", "ANTHROPIC_API_KEY", "RAFIKI_DB", "RAFIKI_SERVE_TOKEN", "/cfg/service.env"} {
+	for _, want := range []string{"RAFIKI_PROXY_KINDS", "ANTHROPIC_API_KEY", "RAFIKI_DB", "RAFIKI_SAMPLE_SECRET", "/cfg/service.env"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report does not mention %s:\n%s", want, out)
 		}

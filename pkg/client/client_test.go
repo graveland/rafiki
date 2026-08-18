@@ -200,3 +200,25 @@ func TestClient_Subscribe_ReceivesEvents(t *testing.T) {
 		t.Fatalf("got %d events, want 3", len(got))
 	}
 }
+
+// The scheme is the whole routing rule: https means "there is a TLS listener
+// out there"; http is the LOCAL loopback face, which has no control plane, so
+// control must stay on the UDS.
+func TestIsRemoteURL(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"https://rafiki.example.dev", true},
+		{"https://rafiki.example.dev:8443", true},
+		{"http://127.0.0.1:8035", false},
+		{"http://localhost:8035", false},
+		{"", false},
+		{"tls://rafiki.example.dev:443", false}, // retired spelling
+		{"nonsense", false},
+	} {
+		if got := client.IsRemoteURL(tc.raw); got != tc.want {
+			t.Errorf("IsRemoteURL(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}
