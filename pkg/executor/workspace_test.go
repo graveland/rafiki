@@ -11,23 +11,6 @@ import (
 )
 
 // The native backend must be a no-op that reports the truth: it exposes the
-// root it was started with, ignores mounts it cannot honour, and says so.
-func TestNativeProvisionRefusesEphemeral(t *testing.T) {
-	root := t.TempDir()
-	srv := executor.NewServer(executor.Options{Root: root, Version: "test"})
-	client := newTestClient(t, srv)
-	ctx := context.Background()
-
-	_, err := client.Provision(ctx, connect.NewRequest(&executorpb.ProvisionRequest{
-		ChildId:       "c_1",
-		WorkspaceMode: "ephemeral", // asked for; cannot be honoured
-	}))
-	if err == nil {
-		t.Fatal("a native executor cannot construct an ephemeral workspace and must refuse rather than pretend")
-	}
-	t.Logf("refused ephemeral (correct): %v", err)
-}
-
 func TestNativeProvisionAcceptsPinned(t *testing.T) {
 	root := t.TempDir()
 	srv := executor.NewServer(executor.Options{Root: root, Version: "test"})

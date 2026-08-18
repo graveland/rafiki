@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -32,15 +31,6 @@ type Options struct {
 	Concurrency int
 	// Version is the executor build version, reported in Describe.
 	Version string
-	// Isolation is what this executor can actually provide: "none" (native)
-	// or "container". Reported in Describe and used to reject a Provision it
-	// cannot honour.
-	Isolation string
-	// WorkspaceMode is "pinned" (expose an existing tree) or "ephemeral"
-	// (construct one). A native executor is always pinned.
-	WorkspaceMode string
-	// Image is the container image for isolation=container.
-	Image string
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -54,57 +44,12 @@ type Server struct {
 	sem     chan struct{} // bounds concurrent Execute calls
 	backend Backend
 	wsReg   *workspaceRegistry
-
-	// innerJobs maps a background job's handle to the container workspace whose
-	// inner server owns it.
-	//
-	// It exists because Attach, Cancel and JobOutput carry a handle and nothing
-	// else — no workspace_id — so without it the outer server cannot tell which
-	// container to forward them to. Populated when a background Execute on a
-	// container workspace returns its handle, dropped when the workspace is
-	// released.
-	innerJobsMu sync.Mutex
-	innerJobs   map[string]*workspace
-}
-
-// rememberInnerJob records which container workspace owns a background handle.
-func (s *Server) rememberInnerJob(handle string, ws *workspace) {
-	s.innerJobsMu.Lock()
-	defer s.innerJobsMu.Unlock()
-	s.innerJobs[handle] = ws
-}
-
-// innerJobWorkspace returns the container workspace owning this handle, if any.
-func (s *Server) innerJobWorkspace(handle string) (*workspace, bool) {
-	s.innerJobsMu.Lock()
-	defer s.innerJobsMu.Unlock()
-	ws, ok := s.innerJobs[handle]
-	return ws, ok
-}
-
-// forgetInnerJobs drops every handle belonging to a released workspace. The
-// container is gone, so forwarding to it could only produce a confusing
-// transport error where "no such job" is the truth.
-func (s *Server) forgetInnerJobs(workspaceID string) {
-	s.innerJobsMu.Lock()
-	defer s.innerJobsMu.Unlock()
-	for handle, ws := range s.innerJobs {
-		if ws.id == workspaceID {
-			delete(s.innerJobs, handle)
-		}
-	}
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
 func NewServer(opts Options) *Server {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 6
-	}
-	if opts.Isolation == "" {
-		opts.Isolation = "none"
-	}
-	if opts.WorkspaceMode == "" {
-		opts.WorkspaceMode = "pinned"
 	}
 	tr := tools.NewFileTracker()
 	// MaterializeOnly, not MaterializeAll: the full blueprint would give the
@@ -120,12 +65,11 @@ func NewServer(opts Options) *Server {
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
-		reg:       reg,
-		jobs:      newJobRegistry(),
-		innerJobs: make(map[string]*workspace),
-		sem:       make(chan struct{}, opts.Concurrency),
-		backend:   resolveBackend(opts, executorID),
-		wsReg:     newWorkspaceRegistry(),
+		reg:     reg,
+		jobs:    newJobRegistry(),
+		sem:     make(chan struct{}, opts.Concurrency),
+		backend: resolveBackend(opts, executorID),
+		wsReg:   newWorkspaceRegistry(),
 	}
 }
 
@@ -138,8 +82,6 @@ func (s *Server) Describe(
 		Platform:           runtime.GOOS + "/" + runtime.GOARCH,
 		Roots:              []string{s.opts.Root},
 		Concurrency:        int32(s.opts.Concurrency),
-		Isolation:          s.opts.Isolation,
-		WorkspaceMode:      s.opts.WorkspaceMode,
 		Tools:              tools.RoutedToExecutor(),
 		Version:            s.opts.Version,
 		SelfReportedLabels: s.labels,
@@ -166,11 +108,6 @@ func (s *Server) Provision(
 	req *connect.Request[executorpb.ProvisionRequest],
 ) (*connect.Response[executorpb.ProvisionResponse], error) {
 	msg := req.Msg
-	if msg.WorkspaceMode != s.opts.WorkspaceMode {
-		return nil, connect.NewError(connect.CodeInvalidArgument,
-			fmt.Errorf("provision: this executor is %s; cannot honour workspace_mode=%q",
-				s.opts.WorkspaceMode, msg.WorkspaceMode))
-	}
 	ws, err := s.backend.Provision(context.Background(), msg)
 	if err != nil {
 		return nil, err
@@ -194,15 +131,7 @@ func (s *Server) Release(
 		// Kill THIS workspace's background jobs before tearing it down. A
 		// background job in a released workspace is not a job, and reporting it
 		// as running is worse than reporting it gone.
-		//
-		// Scoped to the workspace, not global: this used to be killAll(), so
-		// releasing one child's workspace killed every other child's jobs on the
-		// executor — finding D4. On a container workspace there is usually
-		// nothing here to kill, because the jobs live inside the container and
-		// `docker rm -f` reaps them; the call stays for the native case and for
-		// any job started before the workspace became container-backed.
 		s.jobs.killWorkspace(id)
-		s.forgetInnerJobs(id)
 		_ = s.backend.Release(context.Background(), ws)
 		s.wsReg.remove(id)
 	}
@@ -210,98 +139,15 @@ func (s *Server) Release(
 	return connect.NewResponse(&executorpb.ReleaseResponse{}), nil
 }
 
-// resolveBackend returns a Backend for the given options.
-func resolveBackend(opts Options, executorID string) Backend {
-	switch opts.Isolation {
-	case "container":
-		return newContainerBackend(opts.Image, executorID, opts.Version)
-	default:
-		return newNativeBackend(opts.Root)
-	}
-}
-
-// isContainerWorkspace reports whether calls for this workspace must be served
-// inside a container. A nil workspace is the pre-phase-08 path: the executor's
-// own root, no container involved.
-func isContainerWorkspace(ws *workspace) bool {
-	return ws != nil && ws.isolation == "container"
-}
-
-// forwardToInner relays one Execute call to the tool server inside the container
-// workspace and streams its events back unchanged.
+// resolveBackend returns the workspace backend.
 //
-// **There is no host fallback, and adding one reintroduces finding D1 in full.**
-// If the inner server is missing or unreachable the call FAILS. This is the
-// single most likely thing for a later "robustness" change to undo: falling back
-// to s.reg here is exactly the arrangement that let `read ~/.ssh/id_rsa` through
-// a workspace granted only /work and /repo:ro.
-func (s *Server) forwardToInner(
-	ctx context.Context,
-	msg *executorpb.ExecuteRequest,
-	ws *workspace,
-	stream *connect.ServerStream[executorpb.ExecuteResponse],
-) error {
-	if ws.inner == nil {
-		return stream.Send(&executorpb.ExecuteResponse{
-			Event: &executorpb.ExecuteResponse_Failed{
-				Failed: &executorpb.Failure{
-					Code: executorpb.Failure_CODE_EXECUTOR_LOST,
-					Message: fmt.Sprintf("workspace %q has no tool server; the container cannot run tools "+
-						"and this call will not be run on the host", ws.id),
-				},
-			},
-		})
-	}
-
-	// workspace_id is deliberately cleared. The inner server is rooted at the
-	// workspace's workdir and provisions nothing of its own, so it has no
-	// registry to resolve this id against — forwarding it would make every call
-	// fail with "unknown workspace".
-	inner, err := ws.inner.client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
-		CallId:      msg.CallId,
-		Tool:        msg.Tool,
-		InputJson:   msg.InputJson,
-		TimeoutMs:   msg.TimeoutMs,
-		ExpectMtime: msg.ExpectMtime,
-		Background:  msg.Background,
-	}))
-	if err != nil {
-		return stream.Send(&executorpb.ExecuteResponse{
-			Event: &executorpb.ExecuteResponse_Failed{
-				Failed: &executorpb.Failure{
-					Code:    executorpb.Failure_CODE_EXECUTOR_LOST,
-					Message: fmt.Sprintf("the tool server in workspace %q is unreachable: %v", ws.id, err),
-				},
-			},
-		})
-	}
-
-	// Relay every event unchanged — Output, Result, Failed and Handle all pass
-	// through, so streaming behaviour and failure codes are the inner server's,
-	// not a re-interpretation of them.
-	for inner.Receive() {
-		// A Handle means a background job was started INSIDE the container. Record
-		// which workspace owns it: Attach, Cancel and JobOutput arrive later
-		// carrying only the handle, and without this the outer server has no way
-		// to know which container to ask.
-		if h, ok := inner.Msg().Event.(*executorpb.ExecuteResponse_Handle); ok {
-			s.rememberInnerJob(h.Handle, ws)
-		}
-		if err := stream.Send(inner.Msg()); err != nil {
-			return err
-		}
-	}
-	if err := inner.Err(); err != nil {
-		return stream.Send(&executorpb.ExecuteResponse{
-			Event: &executorpb.ExecuteResponse_Failed{
-				Failed: &executorpb.Failure{
-					Code:    executorpb.Failure_CODE_EXECUTOR_LOST,
-					Message: fmt.Sprintf("the tool server in workspace %q failed mid-call: %v", ws.id, err),
-				},
-			},
-		})
-	}
-	return nil
+// There is only one. An executor serves the filesystem it can see, and whether
+// that view is a container is the operator's claim on the executor's ROW, not
+// something this process arranges or inspects. rafiki does not launch
+// containers: running this binary inside one is what makes a container
+// executor, and docker or k8s already does that.
+func resolveBackend(opts Options, _ string) Backend {
+	return newNativeBackend(opts.Root)
 }
 
 func (s *Server) Execute(
@@ -312,7 +158,7 @@ func (s *Server) Execute(
 	msg := req.Msg
 
 	// Look up the workspace. An empty workspace_id means the executor's own
-	// root — the pre-phase-08 compatibility path.
+	// root.
 	var ws *workspace
 	if msg.WorkspaceId != "" {
 		var ok bool
@@ -330,14 +176,7 @@ func (s *Server) Execute(
 	}
 
 	// Background bash — start a job, return a handle immediately.
-	//
-	// A CONTAINER workspace deliberately falls through to the forward below
-	// instead, so its background jobs start inside the container. The job's
-	// process tree then lives there and `docker rm -f` reaps it, which also
-	// disposes of plan-08's open question about killing through `docker exec`:
-	// the supervised process was the exec CLIENT, and killing it never stopped
-	// the workload.
-	if msg.Background && msg.Tool == "bash" && !isContainerWorkspace(ws) {
+	if msg.Background && msg.Tool == "bash" {
 		return s.startBackground(ctx, msg, ws, stream)
 	}
 
@@ -357,20 +196,6 @@ func (s *Server) Execute(
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(msg.TimeoutMs)*time.Millisecond)
 		defer cancel()
-	}
-
-	// On a container workspace EVERY tool runs inside the container, through the
-	// tool server started at Provision — the mounts are the grant and the kernel
-	// enforces them, uniformly, for all six tools.
-	//
-	// This is placed after the semaphore and the deadline (which still bound the
-	// call) but BEFORE the expect_mtime check below, which stats paths on the
-	// HOST. For a container path that stat is either a spurious "file changed
-	// under us" or, worse, a stat of an unrelated host file that happens to
-	// exist. The inner server is the only side that can see the real file, so the
-	// map is forwarded and evaluated there.
-	if isContainerWorkspace(ws) {
-		return s.forwardToInner(ctx, msg, ws, stream)
 	}
 
 	// Verify expect_mtime before dispatching.
@@ -400,27 +225,7 @@ func (s *Server) Execute(
 		}
 	}
 
-	name := msg.Tool
-
-	// When a workspace is set and the tool is bash, run it through the
-	// workspace's exec function — for containers this is docker exec, for
-	// native backends a direct local exec. Other tools use the in-process
-	// registry, whose Cwd is the executor's own root.
-	//
-	// That is correct ONLY for the native backend, where access is gated by
-	// admission rather than by paths (08-containers.md). A container workspace
-	// never reaches here for a non-bash tool: it is refused above, because the
-	// registry would run on the host and step straight out of the mounts. The
-	// comment this replaces claimed the registry also worked "on containers
-	// where the executor root is bind-mounted" — it does not, and that sentence
-	// is why D1 survived review.
-	var resultStr string
-	var err error
-	if ws != nil && name == "bash" {
-		resultStr, err = s.executeBashInWorkspace(ctx, ws, json.RawMessage(msg.InputJson))
-	} else {
-		resultStr, err = s.reg.Execute(ctx, name, json.RawMessage(msg.InputJson))
-	}
+	resultStr, err := s.reg.Execute(ctx, msg.Tool, json.RawMessage(msg.InputJson))
 
 	// Check the deadline before the tool's own error, and even when the
 	// tool reports success: bash specifically treats a killed-by-context
@@ -434,7 +239,7 @@ func (s *Server) Execute(
 			Event: &executorpb.ExecuteResponse_Failed{
 				Failed: &executorpb.Failure{
 					Code:    executorpb.Failure_CODE_TIMEOUT,
-					Message: fmt.Sprintf("tool %q exceeded timeout_ms=%d", name, msg.TimeoutMs),
+					Message: fmt.Sprintf("tool %q exceeded timeout_ms=%d", msg.Tool, msg.TimeoutMs),
 				},
 			},
 		})
@@ -523,23 +328,6 @@ func (s *Server) Attach(
 ) error {
 	handle := req.Msg.Handle
 
-	// A handle owned by a container workspace lives in that container's own job
-	// registry, so relay rather than answering from ours — where it does not
-	// exist and never will.
-	if ws, ok := s.innerJobWorkspace(handle); ok && ws.inner != nil {
-		inner, err := ws.inner.client.Attach(ctx, connect.NewRequest(&executorpb.AttachRequest{Handle: handle}))
-		if err != nil {
-			return connect.NewError(connect.CodeUnavailable,
-				fmt.Errorf("the tool server in workspace %q is unreachable: %w", ws.id, err))
-		}
-		for inner.Receive() {
-			if err := stream.Send(inner.Msg()); err != nil {
-				return err
-			}
-		}
-		return inner.Err()
-	}
-
 	// cursor is a byte offset into the job's lifetime output, not a length:
 	// the ring drops old bytes, so comparing lengths would replay or skip.
 	var cursor int64
@@ -580,13 +368,6 @@ func (s *Server) Cancel(
 	req *connect.Request[executorpb.CancelRequest],
 ) (*connect.Response[executorpb.CancelResponse], error) {
 	handle := req.Msg.CallId
-	if ws, ok := s.innerJobWorkspace(handle); ok && ws.inner != nil {
-		if _, err := ws.inner.client.Cancel(ctx,
-			connect.NewRequest(&executorpb.CancelRequest{CallId: handle})); err != nil {
-			slog.Warn("executor: cancel in container failed", "handle", handle, "workspace", ws.id, "error", err)
-		}
-		return connect.NewResponse(&executorpb.CancelResponse{}), nil
-	}
 	if err := s.jobs.kill(handle); err != nil {
 		slog.Warn("executor: cancel failed", "handle", handle, "error", err)
 	}
@@ -600,14 +381,6 @@ func (s *Server) JobOutput(
 	ctx context.Context,
 	req *connect.Request[executorpb.JobOutputRequest],
 ) (*connect.Response[executorpb.JobOutputResponse], error) {
-	if ws, ok := s.innerJobWorkspace(req.Msg.Handle); ok && ws.inner != nil {
-		resp, err := ws.inner.client.JobOutput(ctx, connect.NewRequest(req.Msg))
-		if err != nil {
-			return nil, connect.NewError(connect.CodeUnavailable,
-				fmt.Errorf("the tool server in workspace %q is unreachable: %w", ws.id, err))
-		}
-		return connect.NewResponse(resp.Msg), nil
-	}
 	data, total, exited, code, found := s.jobs.output(req.Msg.Handle, req.Msg.Since)
 	return connect.NewResponse(&executorpb.JobOutputResponse{
 		Data:     data,
@@ -661,23 +434,4 @@ func randomID() string {
 		return "fallback"
 	}
 	return hex.EncodeToString(b[:])
-}
-
-// executeBashInWorkspace runs a bash command through the workspace's exec
-// function — for containers this goes through docker exec, for native
-// backends through a direct local exec.
-func (s *Server) executeBashInWorkspace(ctx context.Context, ws *workspace, input json.RawMessage) (string, error) {
-	var in struct {
-		Command string `json:"command"`
-	}
-	if err := json.Unmarshal(input, &in); err != nil || in.Command == "" {
-		return "", fmt.Errorf("bash requires a command")
-	}
-
-	cmd := ws.exec(ctx, []string{"sh", "-c", in.Command})
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), nil // bash errors are content, not failures
-	}
-	return string(out), nil
 }

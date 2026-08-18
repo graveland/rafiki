@@ -51,11 +51,13 @@ func TestDescribeReportsCapabilities(t *testing.T) {
 	if len(m.Roots) != 1 || m.Roots[0] != root {
 		t.Errorf("Roots = %v; want [%s]", m.Roots, root)
 	}
-	if m.Isolation != "none" {
-		t.Errorf("Isolation = %q; want none", m.Isolation)
-	}
-	if m.WorkspaceMode != "pinned" {
-		t.Errorf("WorkspaceMode = %q; want pinned", m.WorkspaceMode)
+	// Isolation and WorkspaceMode are deliberately EMPTY here. They are
+	// self-reported fields, and the authoritative copies live on the executor's
+	// database row. An executor that filled them in would be asserting facts
+	// that gate its own placement.
+	if m.Isolation != "" || m.WorkspaceMode != "" {
+		t.Errorf("Describe must not self-report isolation/workspace_mode; got %q/%q",
+			m.Isolation, m.WorkspaceMode)
 	}
 }
 
