@@ -521,6 +521,18 @@ func runDaemon(opts runDaemonOpts) error {
 			execPool.StartSweeper(ctx)
 		}
 
+		// Everything else on this listener is the proxy face: /v1/messages,
+		// /v1/chat/completions, /healthz, /metrics and its unrouted-request
+		// logger. ServeMux prefers the longest matching pattern, so the two
+		// exact paths above win and the rest falls through here.
+		//
+		// This is what makes ONE hostname on ONE port serve all three surfaces.
+		// The face keeps its loopback listener too — children talk to their own
+		// daemon over 127.0.0.1 and should not need a certificate to do it.
+		if face != nil && face.Handler != nil {
+			mux.Handle("/", face.Handler)
+		}
+
 		muxSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := muxSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {

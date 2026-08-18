@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -80,6 +81,16 @@ type proxyFace struct {
 	URL   string // http://127.0.0.1:<port>
 	Token string
 	srv   *http.Server
+
+	// Handler is the face's routes, exposed so the TLS listener can serve them
+	// too.
+	//
+	// The face keeps its own plaintext loopback listener regardless: children
+	// reach it over 127.0.0.1 and must not need a certificate to talk to their
+	// own daemon. Mounting the same handler on the TLS listener is what puts
+	// /v1/messages on the public host alongside /control and
+	// /executor/connect — one hostname, one port, one certificate.
+	Handler http.Handler
 }
 
 // defaultProxyListen is where the face binds unless RAFIKI_PROXY_LISTEN says
@@ -138,6 +149,28 @@ type faceOptions struct {
 // routing, failover and model resolution are still worth having, and refusing
 // to start over a missing database would take pi and claude children down for a
 // feature they may not use.
+// unroutedSeen dedupes the unrouted-request warning by method+path. A package
+// var rather than a field because the face is built once per process and this
+// is diagnostics, not state anything reads back.
+var unroutedSeen sync.Map
+
+// unroutedHandler answers anything the face does not route, and says so.
+//
+// Logged once per method+path so an unhandled endpoint called every turn costs
+// one line rather than a flood, and at WARN because a client asking for
+// something we do not serve is a real gap even when it degrades quietly.
+// Nothing from the body or headers is logged: they carry credentials.
+func unroutedHandler(logger *slog.Logger, seen *sync.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, already := seen.LoadOrStore(r.Method+" "+r.URL.Path, struct{}{}); !already {
+			logger.Warn("proxy: unrouted request; this face serves /v1/messages, "+
+				"/v1/chat/completions, /healthz and /metrics",
+				"method", r.Method, "path", r.URL.Path)
+		}
+		http.NotFound(w, r)
+	}
+}
+
 func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	logger := opts.Logger
 	pool := opts.Pool
@@ -285,6 +318,23 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		mux.Handle("/metrics", promhttp.HandlerFor(opts.Registry, promhttp.HandlerOpts{}))
 	}
 
+	// Everything unrouted lands here, and says so.
+	//
+	// The face serves four paths. Anything else — and a real client asks for
+	// more than /v1/messages — used to 404 out of the ServeMux with no trace at
+	// all, so "which endpoints does this client actually need?" was
+	// unanswerable without reading the client's binary. Claude Code alone is
+	// suspected of wanting /v1/messages/count_tokens (a 404 there pushes it onto
+	// local token estimation, which is a silent behaviour change, not an error)
+	// and some form of hello probe.
+	//
+	// Logged once per method+path so an unhandled endpoint called every turn
+	// costs one line rather than a log flood, and at WARN because a client
+	// asking for something we do not serve is a real gap even when it degrades
+	// quietly. Nothing from the request body or headers is logged: they carry
+	// credentials.
+	mux.HandleFunc("/", unroutedHandler(logger, &unroutedSeen))
+
 	addr := opts.Listen
 	if addr == "" {
 		addr = paths.Get(paths.ProxyListen)
@@ -321,9 +371,10 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		return nil, fmt.Errorf("resolve proxy port from %s: %w", ln.Addr(), err)
 	}
 	f := &proxyFace{
-		URL:   "http://127.0.0.1:" + port,
-		Token: token,
-		srv:   srv,
+		URL:     "http://127.0.0.1:" + port,
+		Token:   token,
+		srv:     srv,
+		Handler: mux,
 	}
 	logger.Info("proxy face listening",
 		"addr", ln.Addr().String(), "children_use", f.URL, "captured", pool != nil)
