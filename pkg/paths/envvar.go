@@ -164,9 +164,15 @@ const (
 	// --executor-socket` when the flag is not given.
 	ExecutorSocket = "RAFIKI_EXECUTOR_SOCKET"
 
-	// ExecutorListen is the address rafikid binds for executor reverse-dial
-	// connections (e.g. "tcp:8037"). Unset = executor pool disabled.
-	ExecutorListen = "RAFIKI_EXECUTOR_LISTEN"
+	// ExecutorsEnabled turns on the executor endpoint. Any non-empty value
+	// enables it; unset means executors are refused entirely.
+	//
+	// It is a flag rather than an address because the endpoint no longer has one
+	// of its own: executors are reached at a PATH on the control listener
+	// (RAFIKI_CONTROL_LISTEN), upgraded out of HTTP/1.1, so one port and one
+	// certificate serve both. It stays an explicit opt-in so that turning on a
+	// TCP control plane does not silently also open executor enrollment.
+	ExecutorsEnabled = "RAFIKI_EXECUTORS_ENABLED"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the

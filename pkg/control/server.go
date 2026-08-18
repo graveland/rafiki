@@ -68,7 +68,12 @@ type Server struct {
 
 // Addr returns the listener's network address. For a UDS server this is
 // the socket path; for a TCP server it is the bound host:port.
-func (s *Server) Addr() net.Addr { return s.ln.Addr() }
+func (s *Server) Addr() net.Addr {
+	if s.ln == nil {
+		return nil // an attached server owns no listener; see NewAttached
+	}
+	return s.ln.Addr()
+}
 
 // Listen creates a Unix-domain-socket listener at path. If a stale socket
 // file exists at path and no process is actively listening on it, the file is
@@ -336,9 +341,52 @@ func (s *Server) Broadcast(frame []byte) int {
 // the accept loop), and waits for all connection goroutines to finish.
 func (s *Server) Close() error {
 	s.cancel()
-	err := s.ln.Close()
+	var err error
+	if s.ln != nil {
+		err = s.ln.Close()
+	}
 	s.wg.Wait()
 	return err
+}
+
+// NewAttached returns a Server with no listener of its own, for connections
+// delivered by someone else's accept loop.
+//
+// That someone else is the shared TLS listener's HTTP mux: the control plane is
+// reached at a PATH there, upgraded out of HTTP, and the resulting connection
+// handed here. One port and one certificate serve the control plane, the
+// executor link and anything added later, and each is routed by path rather
+// than by sniffing its first bytes.
+func NewAttached(handler ConnectionLifecycleHandler) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Server{
+		handler: handler,
+		ctx:     ctx,
+		cancel:  cancel,
+		conns:   make(map[Connection]struct{}),
+	}
+}
+
+// ServeUpgraded runs the control protocol on a connection someone else
+// accepted: the same ctrl_auth handshake and request loop the TCP listener
+// runs, minus the accept.
+//
+// conn MUST be the upgraded connection wrapper, not the raw socket underneath
+// it. A client routinely pipelines its first request behind the auth frame, and
+// after an HTTP upgrade those bytes sit in the hijack buffer rather than on the
+// socket — reading past the wrapper drops them and hangs the client to its
+// timeout. The wrapper reads the buffer first, so authHandshake's FrameReader
+// sees an unbroken stream.
+func (s *Server) ServeUpgraded(conn net.Conn, wantToken string) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+
+	r, ok := s.authHandshake(conn, wantToken)
+	if !ok {
+		conn.Close()
+		return
+	}
+	s.handleConn(conn, r)
 }
 
 // ─── TCP/TLS listener ──────────────────────────────────────────────────────────

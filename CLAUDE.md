@@ -106,6 +106,26 @@
   `grantedDepth` / `grantedChildren` (`cmd/rafikid/limits.go`) and nowhere
   else — do not re-derive it at a call site.
 
+- **Control plane and executor link share ONE TLS listener, routed by PATH.**
+  Both are reached by an HTTP/1.1 `Upgrade` (`/control`, `/executor/connect`)
+  that `pkg/upgradeconn` hijacks; `RAFIKI_EXECUTORS_ENABLED=1` turns the
+  executor path on and it has no address of its own. Why an upgrade rather than
+  a byte-sniffing demultiplexer: a mux answers requests, and on the executor
+  connection rafikid is the one ASKING — the request direction reverses once the
+  connection is up — so there is nothing to route on until you put an HTTP
+  request in FRONT of the stream.
+
+  Two consequences. **ALPN stopped being load-bearing**: the outer connection is
+  `http/1.1` because net/http can only hijack HTTP/1.1, and the inverted h2
+  starts after the 101 on the raw stream where ALPN is not consulted. And
+  **after Upgrade, never read the underlying net.Conn** — read the
+  `upgradeconn.Conn`. The hijack buffer holds anything the peer pipelined behind
+  the request, which is the control plane's auth+request case exactly; and the
+  same wrapper keeps the executor's h2 preface from being swallowed by a
+  throwaway reader. Those were documented as OPPOSITE rules in two places; one
+  wrapper dissolves both, because over-reading is harmless when nothing is
+  discarded.
+
 - **The executor DIALS rafikid and then SERVES HTTP/2 on what it dialled;
   rafikid accepts and is the HTTP client.** Four things fail silently if you
   get them wrong (`pkg/execpool/transport.go` documents each at its site):

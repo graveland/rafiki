@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
 // Pool is the live executor registry. It holds connections; the DATABASE holds
@@ -189,21 +191,40 @@ func New(store executors.Store) *Pool {
 	}
 }
 
-// Serve accepts executor connections on ln, authenticating each against the
-// store and promoting them to pool entries. It blocks until ln is closed.
+// UpgradeHandler is the executor endpoint as an http.Handler, for mounting on a
+// mux alongside anything else.
+//
+// The executor is reached by PATH and upgraded out of HTTP/1.1, which is what
+// lets it share a port and a certificate with the control plane. Exposed as a
+// handler rather than a listener so the daemon can mount it on the listener it
+// already has.
+func (p *Pool) UpgradeHandler() http.Handler {
+	return upgradeconn.Handler(upgradeconn.Executor, func(c *upgradeconn.Conn) {
+		p.handleConn(c)
+	})
+}
+
+// Serve runs the executor endpoint on a listener of its own.
+//
+// It mounts UpgradeHandler on a private mux, so a dedicated executor port and a
+// shared one run byte-for-byte the same code. That matters more than the
+// convenience: this repo has twice shipped a correct guard that something else
+// routed around, and two accept paths is exactly that shape.
 func (p *Pool) Serve(ln net.Listener) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go p.parkSweep(ctx)
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return err
-		}
-		go p.handleConn(conn)
-	}
+	mux := http.NewServeMux()
+	mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), p.UpgradeHandler())
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	return srv.Serve(ln)
 }
+
+// StartSweeper runs the park sweeper for a pool whose connections arrive from
+// someone else's listener. Serve does this itself; a mounted pool needs it
+// started once.
+func (p *Pool) StartSweeper(ctx context.Context) { go p.parkSweep(ctx) }
 
 func (p *Pool) handleConn(conn net.Conn) {
 	defer conn.Close()

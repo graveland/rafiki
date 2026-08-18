@@ -45,8 +45,20 @@ func TestConnectOverInvertedTLSConnection(t *testing.T) {
 	if err := dialed.Handshake(); err != nil {
 		t.Fatal(err)
 	}
-	if got := dialed.ConnectionState().NegotiatedProtocol; got != "h2" {
-		t.Fatalf("ALPN negotiated %q, want h2", got)
+	// http/1.1, not h2 — and this is the point rather than a regression.
+	//
+	// ALPN used to be what made both sides agree to speak HTTP/2, and getting it
+	// wrong was silent: omit NextProtos and it resolves to "" while ServeConn
+	// works anyway. It is no longer load-bearing. The connection now starts as
+	// an ordinary HTTP/1.1 request that is UPGRADED (net/http can only hijack
+	// 1.1), and the inverted h2 below begins on the raw byte stream afterwards,
+	// where ALPN is not consulted at all. Agreement is now the Upgrade header's
+	// job, which fails with a readable HTTP status instead of a TLS alert.
+	//
+	// This test drives the inversion directly, without the upgrade in front, to
+	// keep the transport primitive covered on its own.
+	if got := dialed.ConnectionState().NegotiatedProtocol; got != "http/1.1" {
+		t.Fatalf("ALPN negotiated %q, want http/1.1", got)
 	}
 
 	_, fakeHandler := executorpbconnect.NewExecutorServiceHandler(

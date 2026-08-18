@@ -34,11 +34,19 @@ import (
 // connection was handed in.
 var ErrRedialed = errors.New("execpool: transport requested a second connection; the executor connection is gone")
 
-// ALPNProtocols is what BOTH sides must advertise. If the executor — the TLS
-// CLIENT in this arrangement — omits it, ALPN resolves to "" and ServeConn
-// still works, so the negotiation guarantee is lost silently rather than
-// loudly. Exported so the executor side cannot spell it differently.
-var ALPNProtocols = []string{"h2"}
+// ALPNProtocols is what BOTH sides advertise on the shared TLS listener.
+//
+// It is http/1.1, not h2, and that is not a downgrade: the connection starts as
+// an ordinary HTTP/1.1 request that is UPGRADED to the executor protocol, and
+// net/http can only hijack an HTTP/1.1 connection. The inverted HTTP/2 begins
+// after the 101 response, directly on the byte stream, where ALPN plays no part
+// at all.
+//
+// ALPN therefore stopped being the thing that guarantees both sides agree — the
+// Upgrade header is, and it says so in words, failing with a readable HTTP
+// status rather than a TLS alert. Exported so both sides cannot spell it
+// differently.
+var ALPNProtocols = []string{"http/1.1"}
 
 // ServeInverted runs an HTTP/2 server on a connection this process DIALLED.
 // Executor side.

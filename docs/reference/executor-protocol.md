@@ -14,6 +14,38 @@ carries the bytes:
 | Reverse-dialled TLS | `rafiki executor serve --connect` | the daemon cannot reach the executor's host (NAT, a laptop) |
 | `docker exec -i` stdio | `rafiki executor serve-stdio` | inside a container workspace, which has no network at all |
 
+## Reaching the daemon
+
+The reverse-dial transport is reached at a **path** on the daemon's control
+listener, upgraded out of HTTP/1.1:
+
+```
+GET /executor/connect HTTP/1.1
+Upgrade: rafiki-executor
+Connection: Upgrade
+        ↓
+HTTP/1.1 101 Switching Protocols
+        ↓
+{"type":"executor_hello",…}\n     then HTTP/2, roles inverted
+```
+
+One port and one certificate therefore serve the control plane (`/control`) and
+the executor link (`/executor/connect`). Enable it with
+`RAFIKI_EXECUTORS_ENABLED=1`; it has no listener of its own.
+
+Two consequences worth knowing:
+
+- **ALPN is no longer load-bearing.** The outer connection negotiates
+  `http/1.1` — net/http can only hijack an HTTP/1.1 connection — and the
+  inverted HTTP/2 begins after the 101, directly on the byte stream, where ALPN
+  is not consulted. Agreement is the `Upgrade` header's job now, and a mismatch
+  fails with a readable HTTP status instead of a TLS alert.
+- **An HTTP proxy can carry it.** An Upgrade tunnel is the same machinery as
+  WebSocket, so an ingress may terminate TLS and forward rather than requiring
+  TCP passthrough. Terminating means the daemon↔executor hop is no longer
+  end-to-end encrypted and `--pin-cert` pins the proxy's certificate, so that is
+  a deployment choice rather than a default.
+
 ## Transport
 
 - **Protocol:** Connect (gRPC-compatible) over HTTP/2 cleartext (h2c).

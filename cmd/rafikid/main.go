@@ -35,6 +35,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -427,7 +428,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// label/disable) and the reverse-dial listener's authentication. Build it
 	// once, up front, when the listener is configured; both consumers share it.
 	var execStore executors.Store
-	if paths.Get(paths.ExecutorListen) != "" && pool != nil {
+	if paths.Get(paths.ExecutorsEnabled) != "" && pool != nil {
 		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
@@ -437,42 +438,16 @@ func runDaemon(opts runDaemonOpts) error {
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
 	}
-	// Executor pool listener: accepts reverse-dialled executor connections.
-	if el := paths.Get(paths.ExecutorListen); el != "" {
-		certFile := paths.Get(paths.ControlTLSCert)
-		keyFile := paths.Get(paths.ControlTLSKey)
-		if certFile == "" || keyFile == "" {
-			slog.Error("RAFIKI_CONTROL_TLS_CERT and RAFIKI_CONTROL_TLS_KEY must be set when RAFIKI_EXECUTOR_LISTEN is set")
-			os.Exit(1)
-		}
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			slog.Error("failed to load TLS cert/key for executor listener", "cert", certFile, "key", keyFile, "error", err)
-			os.Exit(1)
-		}
-		execTLS := &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   execpool.ALPNProtocols,
-		}
-		execAddr := el
-		if !strings.Contains(el, ":") {
-			execAddr = "tcp:" + el
-		}
-		execLn, err := tls.Listen("tcp", strings.TrimPrefix(execAddr, "tcp:"), execTLS)
-		if err != nil {
-			slog.Error("executor listener failed", "addr", el, "error", err)
-			os.Exit(1)
-		}
-		execPool := execpool.New(execStore)
+	// The executor pool no longer owns a listener. It is reached at a PATH on
+	// the shared TLS listener below, upgraded out of HTTP/1.1, so the control
+	// plane and the executor link share one port and one certificate — and the
+	// executor link inherits GetCertificate, which its own listener never had
+	// (a cert-manager rotation used to need a pod restart to reach it).
+	var execPool *execpool.Pool
+	if execStore != nil {
+		execPool = execpool.New(execStore)
 		execPool.SetOnLost(ctrl.HandleExecutorLost)
 		ctrl.execPool = execPool
-		go func() {
-			slog.Info("executor pool listening", "addr", el)
-			if err := execPool.Serve(execLn); err != nil {
-				slog.Error("executor pool serve", "error", err)
-			}
-		}()
 	}
 	ctrl.loadOrphans(records)
 	ctrl.startSweeper(ctx)
@@ -522,12 +497,40 @@ func runDaemon(opts runDaemonOpts) error {
 				return &cert, nil
 			},
 		}
-		tcpSrv, err = control.ListenTCP(addr, controlToken, tlsConfig, handler)
+		// http/1.1 only. net/http can hijack an HTTP/1.1 connection and not an
+		// HTTP/2 one, and every protocol here is reached by upgrading out of a
+		// plain request.
+		tlsConfig.NextProtos = execpool.ALPNProtocols
+
+		ln, err := tls.Listen("tcp", addr, tlsConfig)
 		if err != nil {
 			slog.Error("TCP control listener failed", "addr", addr, "error", err)
 			os.Exit(1)
 		}
-		slog.Info("rafiki daemon listening (TCP/TLS)", "addr", addr)
+
+		attached := control.NewAttached(handler)
+		tcpSrv = attached
+
+		mux := http.NewServeMux()
+		mux.Handle(upgradeconn.PathFor(upgradeconn.Control),
+			upgradeconn.Handler(upgradeconn.Control, func(c *upgradeconn.Conn) {
+				attached.ServeUpgraded(c, controlToken)
+			}))
+		if execPool != nil {
+			mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), execPool.UpgradeHandler())
+			execPool.StartSweeper(ctx)
+		}
+
+		muxSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			if err := muxSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("control/executor listener stopped", "error", err)
+			}
+		}()
+		slog.Info("rafiki daemon listening (TCP/TLS)", "addr", addr,
+			"control", upgradeconn.PathFor(upgradeconn.Control),
+			"executor", upgradeconn.PathFor(upgradeconn.Executor),
+			"executorEnabled", execPool != nil)
 	}
 
 	sigCh := make(chan os.Signal, 1)

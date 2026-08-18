@@ -18,6 +18,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
 // Client is a connected JSONL client to the fundi daemon.
@@ -88,10 +89,24 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 	}
 
 	dialer := &tls.Dialer{Config: &tls.Config{MinVersion: tls.VersionTLS12}}
-	rawConn, err := dialer.DialContext(ctx, "tcp", u.Host)
+	tlsConn, err := dialer.DialContext(ctx, "tcp", u.Host)
 	if err != nil {
 		return nil, fmt.Errorf("tls dial %s: %w", u.Host, err)
 	}
+
+	// The control plane is reached at a PATH on a shared TLS listener, upgraded
+	// out of HTTP/1.1. One port and one certificate serve it, the executor link
+	// and anything added later — and an Upgrade tunnel is something every HTTP
+	// proxy already understands, so an ingress can carry it without TLS
+	// passthrough.
+	upConn, err := upgradeconn.Dial(tlsConn, upgradeconn.Control, u.Host)
+	if err != nil {
+		tlsConn.Close()
+		return nil, err
+	}
+	// Everything from here reads through upConn: bytes the server pipelines
+	// behind its 101 would otherwise be stranded in the upgrade's own buffer.
+	var rawConn net.Conn = upConn
 
 	// Auth handshake: send ctrl_auth. The server reads one frame, validates
 	// the token, and either proceeds silently (success) or closes the
