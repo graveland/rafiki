@@ -4,9 +4,15 @@ package server
 
 import "net/http"
 
-// Identity is the authenticated caller of a proxy face, captured as the
-// conversation owner / turn author.
+// Identity is the authenticated caller of a proxy face.
+//
+// UserID is the persisted attribution (conversation.owner_user_id,
+// conversation_turn.author_user_id) and is empty for non-user callers: a
+// spawned child on the per-boot token, or an anonymous request. Username is
+// for logs and CLI output only — it is NEVER written to a row, because the
+// username is resolved at read time through the users FK.
 type Identity struct {
+	UserID   string
 	Username string
 }
 

@@ -10,13 +10,12 @@ import (
 )
 
 // Config is the daemon's optional deployment config file. Everything in it has
-// an environment-variable or flag equivalent for local use; the file exists for
-// the one thing environment variables cannot express — a MAP of named client
-// tokens, where each name becomes the captured owner identity.
+// an environment-variable or flag equivalent for local use; client auth is now
+// resolved against the users table (see pkg/server.UserTokenAuth), not this
+// file.
 type Config struct {
-	Tokens       map[string]string `yaml:"tokens"`
-	OpenAIRoutes []OpenAIRoute     `yaml:"openai_routes"`
-	DefaultModel string            `yaml:"default_model"`
+	OpenAIRoutes []OpenAIRoute `yaml:"openai_routes"`
+	DefaultModel string        `yaml:"default_model"`
 }
 
 // OpenAIRoute maps a model-id prefix to an upstream name on the

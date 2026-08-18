@@ -132,12 +132,6 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if dev {
-				if cfg.Tokens == nil {
-					cfg.Tokens = map[string]string{}
-				}
-				cfg.Tokens["dev"] = "dev"
-			}
 			return runDaemon(runDaemonOpts{
 				Config: cfg,
 				Listen: listenAddr,
@@ -147,10 +141,10 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 
-	root.Flags().StringVar(&configPath, "config", "", "config file (named client tokens, openai routes, default model)")
+	root.Flags().StringVar(&configPath, "config", "", "config file (openai routes, default model)")
 	root.Flags().StringVar(&listenAddr, "listen", "", "proxy face listen address (overrides RAFIKI_PROXY_LISTEN)")
 	root.Flags().StringVar(&dbDSN, "db", "", "postgres DSN (overrides RAFIKI_DB)")
-	root.Flags().BoolVar(&dev, "dev", false, "dev mode: auto-migrate the schema, accept the token \"dev\"")
+	root.Flags().BoolVar(&dev, "dev", false, "dev mode: auto-migrate the schema")
 
 	root.AddCommand(newFundiCmd())
 	root.AddCommand(newAgentCmd())
@@ -414,6 +408,7 @@ func runDaemon(opts runDaemonOpts) error {
 		Catalog:     catalog,
 		RawTrace:    rawTrace,
 		RawTraceAll: rawTraceAll,
+		Users:       userStore,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are

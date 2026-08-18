@@ -6,7 +6,7 @@ import "net/http"
 
 // Handler bundles the proxy faces for mounting: hosts mount both faces under
 // their own middleware stack (sc's auth+tailnet middlewares in embedded mode,
-// StaticTokenAuth.Middleware standalone).
+// UserTokenAuth.Middleware standalone).
 type Handler struct {
 	Messages *MessagesProxy
 	Chat     *ChatCompletionsProxy // optional; nil when the OpenAI face is disabled

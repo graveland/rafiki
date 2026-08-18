@@ -244,8 +244,8 @@ func TestChatCompletionsRoutesByModelPrefix(t *testing.T) {
 	}
 }
 
-func TestStaticTokenAuth(t *testing.T) {
-	auth := NewStaticTokenAuth(map[string]string{"sentinel": "tok-sentinel", "pi": "tok-pi"})
+func TestUserTokenAuth_HeaderVariantsMultipleUsers(t *testing.T) {
+	auth := newTestUserAuth(map[string]string{"tok-sentinel": "sentinel", "tok-pi": "pi"})
 	var gotIdentity *Identity
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotIdentity = IdentityFromContext(r.Context())

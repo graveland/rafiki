@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // The face must expose /metrics and /healthz WITHOUT a token: scrapers and
@@ -70,8 +72,8 @@ func TestProxyFace_MessagesStillRequiresToken(t *testing.T) {
 	}
 }
 
-// A token named in the config file is accepted by the face, alongside the
-// per-boot child secret.
+// A token minted for a real user (via pkg/server.UserTokenAuth's store) is
+// accepted by the face, alongside the per-boot child secret.
 //
 // This does NOT assert on status code alone: a request with a token our own
 // middleware accepts still gets forwarded upstream (ANTHROPIC_API_KEY is a
@@ -79,10 +81,10 @@ func TestProxyFace_MessagesStillRequiresToken(t *testing.T) {
 // this environment has — legitimately returns its own 401 for the bad
 // upstream key. That is indistinguishable from OUR middleware's 401 by status
 // code alone. So the assertion instead checks the response body does not
-// carry StaticTokenAuth's own rejection text (see pkg/server/statictoken.go),
+// carry UserTokenAuth's own rejection text (see pkg/server/usertoken.go),
 // which is the one thing that can only come from OUR middleware refusing the
 // token, never from an upstream response.
-func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
+func TestProxyFace_UserTokenIsAccepted(t *testing.T) {
 	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -92,7 +94,7 @@ func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
 	face, err := startProxyFace(ctx, faceOptions{
 		Logger:   slog.New(slog.DiscardHandler),
 		Registry: prometheus.NewRegistry(),
-		Config:   Config{Tokens: map[string]string{"sentinel": "tok-sentinel"}},
+		Users:    fakeUserStore{token: "rfk_sentinel", id: users.Identity{UserID: "u1", Username: "sentinel"}},
 	})
 	if err != nil {
 		t.Fatalf("startProxyFace: %v", err)
@@ -103,7 +105,7 @@ func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer tok-sentinel")
+	req.Header.Set("Authorization", "Bearer rfk_sentinel")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /v1/messages: %v", err)
@@ -111,34 +113,21 @@ func TestProxyFace_ConfigTokenIsAccepted(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(string(body), "unknown token") {
-		t.Errorf("a token named in the config file was rejected as unauthorized: %s", body)
+		t.Errorf("a token known to the user store was rejected as unauthorized: %s", body)
 	}
 }
 
-// A config file naming a client "rafiki-child" must not be allowed to silently
-// overwrite the per-boot child secret: every real spawned child would then
-// present the true per-boot token and be rejected as "unknown token". This
-// must fail at startup, loudly, naming the offending key — not resolve the
-// collision quietly in either direction.
-func TestStartProxyFace_ReservedChildTokenNameIsRejected(t *testing.T) {
-	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
-	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+// fakeUserStore is a minimal users.Store for wiring tests: it knows exactly
+// one token.
+type fakeUserStore struct {
+	users.Store
+	token string
+	id    users.Identity
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	face, err := startProxyFace(ctx, faceOptions{
-		Logger:   slog.New(slog.DiscardHandler),
-		Registry: prometheus.NewRegistry(),
-		Config:   Config{Tokens: map[string]string{"rafiki-child": "whatever"}},
-	})
-	if face != nil {
-		defer face.Close(ctx)
+func (s fakeUserStore) Authenticate(_ context.Context, token string) (users.Identity, error) {
+	if token == s.token {
+		return s.id, nil
 	}
-	if err == nil {
-		t.Fatal("startProxyFace with a config token named \"rafiki-child\" should fail, got nil error")
-	}
-	if !strings.Contains(err.Error(), "rafiki-child") {
-		t.Errorf("error %q should name the offending key %q", err.Error(), "rafiki-child")
-	}
+	return users.Identity{}, users.ErrNotFound
 }
