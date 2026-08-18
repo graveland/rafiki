@@ -178,17 +178,41 @@ export class Client {
     private readonly sock: net.Socket;
     private readonly splitter: FrameSplitter;
     private readonly pending = new Map<string, PendingEntry>();
+    // Responses that arrived before request() registered a waiter for their
+    // id — possible only for bytes pipelined behind the upgrade response,
+    // since in every other case the response cannot exist on the wire until
+    // after request() has sent it. request() consults this before creating
+    // its own waiter, so such a frame is delivered rather than dropped.
+    // Capacity-bounded like AsyncQueue: a well-behaved daemon never fills it.
+    private readonly earlyResponses = new Map<string, Response>();
     private readonly queues = new Set<AsyncQueue<Record<string, unknown>>>();
     private readonly timeoutMs: number;
     private _closed = false;
     private _readError: Error | null = null;
     private nextID = 0;
 
-    private constructor(sock: net.Socket, opts: Required<ClientOptions>) {
+    // Not private: upgradeAndServe (module scope, same file) constructs a
+    // Client directly once the upgrade + optional ctrl_auth write are done.
+    // Outside this module there is no exported way to reach it — dial(),
+    // dialURL() and upgradeAndServe() remain the only entry points.
+    constructor(
+        sock: net.Socket,
+        opts: Required<ClientOptions>,
+        pending?: Buffer,
+    ) {
         this.sock = sock;
         this.splitter = new FrameSplitter(opts.maxFrameBytes);
         this.timeoutMs = opts.requestTimeoutMs;
         this.startReadLoop();
+        // Bytes the peer pipelined behind the upgrade response. They belong to
+        // the frame stream and were consumed while reading the HTTP head, so
+        // they can only arrive this way — re-reading the socket would not
+        // produce them, and a second parser would drop them.
+        if (pending && pending.length > 0) {
+            for (const frame of this.splitter.push(pending)) {
+                this.dispatchFrame(frame);
+            }
+        }
     }
 
     // ─── Static factories ──────────────────────────────────────────────────────
@@ -214,51 +238,22 @@ export class Client {
     }
 
     /**
-     * NOT CURRENTLY FUNCTIONAL against the shipped daemon — zero callers
-     * under attach/, kept only so it doesn't drift further while dead.
-     * The control plane is reached by an HTTP Upgrade at /control on the
-     * shared TLS listener (see pkg/upgradeconn on the Go side; the Go
-     * client's DialURL performs this upgrade before sending ctrl_auth).
-     * This function does NOT: it writes ctrl_auth straight onto the raw
-     * TLS socket with no upgrade request, so it cannot complete a
-     * handshake against `control.ListenTCP` as currently wired
-     * (production only ever attaches that path behind the upgrade, at
-     * cmd/rafikid/main.go). url must be "https://host[:port]" — https is
-     * the honest spelling of what the retired tls: scheme always meant,
-     * independent of the upgrade gap above. On auth failure the server
-     * closes the connection, which surfaces as a connect error or read
-     * error.
+     * Opens a TLS connection to url and returns a ready Client. url must be
+     * "https://host[:port]" — the scheme the daemon's shared listener speaks.
      */
     static async dialURL(url: string, token: string): Promise<Client> {
         const u = new URL(url);
         if (u.protocol !== "https:") {
-            throw new Error(`RAFIKI_URL scheme must be "https:" to reach the control plane, got "${u.protocol}"`);
+            throw new Error(`RAFIKI_URL scheme must be "https:", got "${u.protocol}"`);
         }
         const port = u.port ? parseInt(u.port, 10) : 443;
-
         const tls = await import("node:tls");
-        const sock = await new Promise<tls.TLSSocket>((resolve, reject) => {
-            const s = tls.connect({
-                host: u.hostname,
-                port,
-                rejectUnauthorized: true,
-            });
-            s.once("connect", () => {
-                s.removeAllListeners("error");
-                resolve(s);
-            });
+        const sock = await new Promise<import("node:tls").TLSSocket>((resolve, reject) => {
+            const s = tls.connect({ host: u.hostname, port, rejectUnauthorized: true });
+            s.once("secureConnect", () => { s.removeAllListeners("error"); resolve(s); });
             s.once("error", reject);
         });
-
-        // Send auth frame. Auth success is implicit — the server keeps
-        // the connection open. Auth failure means the server closes the
-        // connection after writing an error frame; the read loop will
-        // fire the "end"/"error" event and close the Client.
-        const authFrame = JSON.stringify({ type: "ctrl_auth", id: "0", token }) + "\n";
-        sock.write(authFrame, "utf8");
-
-        const opts = Client.resolveTLSOpts();
-        return new Client(sock, opts);
+        return upgradeAndServe(sock, `${u.hostname}:${port}`, token);
     }
 
     // ─── Public API ───────────────────────────────────────────────────────────
@@ -285,6 +280,12 @@ export class Client {
                 ? req["id"]
                 : `c${++this.nextID}`;
         const frame: Record<string, unknown> = { ...req, id };
+
+        const early = this.earlyResponses.get(id);
+        if (early) {
+            this.earlyResponses.delete(id);
+            return Promise.resolve(early);
+        }
 
         const payload = JSON.stringify(frame) + "\n";
 
@@ -419,6 +420,8 @@ export class Client {
                 clearTimeout(entry.timer);
                 this.pending.delete(id);
                 entry.resolve(obj as unknown as Response);
+            } else if (this.earlyResponses.size < 256) {
+                this.earlyResponses.set(id, obj as unknown as Response);
             }
             return;
         }
@@ -448,11 +451,76 @@ export class Client {
 
     // resolveTLSOpts returns default ClientOptions for a TLS connection
     // (no socket path — the underlying socket is already connected).
-    private static resolveTLSOpts(): Required<ClientOptions> {
+    // Not private: upgradeAndServe (module scope, same file) needs it.
+    static resolveTLSOpts(): Required<ClientOptions> {
         return {
             socket: "", // unused — the socket is already connected
             requestTimeoutMs: 30_000,
             maxFrameBytes: 16 << 20,
         };
     }
+}
+
+/**
+ * Performs the daemon's HTTP upgrade on an already-connected socket, writes the
+ * ctrl_auth frame when a token is supplied, and returns a ready Client.
+ *
+ * host is the authority for the Host header ("example.dev:443"). An empty token
+ * skips ctrl_auth entirely, matching the Go client: the daemon's bootstrap mode
+ * admits a connection only when its first frame is NOT ctrl_auth.
+ */
+export async function upgradeAndServe(
+    sock: net.Socket,
+    host: string,
+    token: string,
+): Promise<Client> {
+    const head =
+        `GET /control HTTP/1.1\r\n` +
+        `Host: ${host}\r\n` +
+        `Upgrade: rafiki-control\r\n` +
+        `Connection: Upgrade\r\n\r\n`;
+    sock.write(head, "utf8");
+
+    // Read exactly the response head and not one byte further into the frame
+    // stream. Anything after the blank line is already-framed payload.
+    const pending = await new Promise<Buffer>((resolve, reject) => {
+        let buf = Buffer.alloc(0);
+        const onData = (chunk: Buffer) => {
+            buf = Buffer.concat([buf, chunk]);
+            const end = buf.indexOf("\r\n\r\n");
+            if (end === -1) {
+                if (buf.length > 64 * 1024) {
+                    cleanup();
+                    sock.destroy();
+                    reject(new Error("upgrade: response head exceeded 64 KiB"));
+                }
+                return;
+            }
+            const statusLine = buf.subarray(0, buf.indexOf("\r\n")).toString("utf8");
+            cleanup();
+            if (!/^HTTP\/1\.1 101\b/.test(statusLine)) {
+                sock.destroy();
+                reject(new Error(`upgrade: server answered "${statusLine}", want 101 Switching Protocols`));
+                return;
+            }
+            resolve(buf.subarray(end + 4));
+        };
+        const onErr = (err: Error) => { cleanup(); sock.destroy(); reject(err); };
+        const onEnd = () => { cleanup(); sock.destroy(); reject(new Error("upgrade: connection closed before response")); };
+        const cleanup = () => {
+            sock.off("data", onData);
+            sock.off("error", onErr);
+            sock.off("end", onEnd);
+        };
+        sock.on("data", onData);
+        sock.on("error", onErr);
+        sock.on("end", onEnd);
+    });
+
+    // Auth success is implicit: the daemon stays silent and holds the
+    // connection open. Do not wait for an acknowledgement — none is coming.
+    if (token !== "") {
+        sock.write(JSON.stringify({ type: "ctrl_auth", id: "0", token }) + "\n", "utf8");
+    }
+    return new Client(sock, Client.resolveTLSOpts(), pending);
 }
