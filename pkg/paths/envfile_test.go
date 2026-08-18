@@ -277,9 +277,9 @@ func TestMergeEnvFile_NeverRewritesAnExistingKey(t *testing.T) {
 	}
 
 	res, err := MergeEnvFile(path, map[string]string{
-		"RAFIKI_DB":          "postgres://new@h/db", // differs -> Conflict
+		"RAFIKI_DB":            "postgres://new@h/db", // differs -> Conflict
 		"RAFIKI_SAMPLE_SECRET": "same",                // identical -> Existing
-		"ANTHROPIC_API_KEY":  "sk-ant",              // new -> Added
+		"ANTHROPIC_API_KEY":    "sk-ant",              // new -> Added
 	}, "test")
 	if err != nil {
 		t.Fatalf("MergeEnvFile: %v", err)
