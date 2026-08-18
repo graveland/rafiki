@@ -488,35 +488,58 @@ describe("upgradeAndServe", () => {
     // upgradeAndServe reads the full 101 before writing anything of its own,
     // so the daemon has nothing to answer yet. But pkg/upgradeconn.Dial's own
     // comment is explicit that "a future protocol might" pipeline behind its
-    // 101, and this proves the machinery — pushing leftover bytes through the
-    // SAME FrameSplitter the read loop uses — actually holds frame
-    // boundaries intact rather than silently dropping or corrupting them.
-    it("keeps frame boundaries intact when a frame is pipelined behind the 101", async () => {
+    // 101.
+    //
+    // The regression this guards against is losing the SPLIT POINT, not just
+    // the bytes: the frame must arrive split mid-JSON across two writes — the
+    // first half riding along with the 101 (becoming `pending`), the second
+    // half arriving later over the ordinary socket "data" path — and be
+    // reassembled by the SAME FrameSplitter the read loop uses. A version
+    // that drops `pending`, or that feeds it to a second, throwaway
+    // FrameSplitter instead of `this.splitter`, leaves the real splitter
+    // starting mid-frame on the second half: the resulting bytes fail to
+    // parse as JSON, dispatchFrame discards them as malformed, and the
+    // subscriber below never observes the event. Asserting on delivery (via
+    // subscribe()), not on unrelated later traffic, is what makes that
+    // observable — a request/response check after the fact stays green
+    // whether the pipelined bytes were processed, misrouted, or dropped.
+    it("reassembles a frame split mid-JSON across the 101 write and a later one", async () => {
+        const event = { type: "ctrl_event", kind: "hello" };
+        const payload = JSON.stringify(event) + "\n";
+        const splitAt = Math.floor(payload.length / 2); // mid-object, never on the trailing \n
+        const first = payload.slice(0, splitAt);
+        const second = payload.slice(splitAt);
+        expect(first.includes("\n")).toBe(false);
+        expect(second.includes("\n")).toBe(true);
+
+        let sendRest: (() => void) | undefined;
+        const untilToldToSendRest = new Promise<void>((resolve) => {
+            sendRest = resolve;
+        });
+
         const srv = await startUpgradeServer((conn) => {
-            const event = JSON.stringify({ type: "ctrl_event", kind: "hello" });
+            // The 101 head and the FIRST half of the frame in one write —
+            // this is what becomes `pending`.
             conn.write(
                 "HTTP/1.1 101 Switching Protocols\r\nUpgrade: rafiki-control\r\nConnection: Upgrade\r\n\r\n" +
-                event + "\n"
+                first
             );
-            // From here on, behave like an ordinary daemon: answer whatever
-            // request arrives next.
-            conn.on("data", (chunk: Buffer) => {
-                const req = JSON.parse(chunk.toString("utf8").trim()) as { type: string; id: string };
-                conn.write(JSON.stringify({
-                    type: "ctrl_response", command: req.type, id: req.id,
-                    success: true, data: { ok: true },
-                }) + "\n");
-            });
+            // The second half arrives later, over the ordinary post-upgrade
+            // stream — only once the test says so, so the client is
+            // guaranteed to be constructed (and subscribed) first.
+            untilToldToSendRest.then(() => conn.write(second));
         });
         const sock = net.createConnection({ port: srv.port, host: "127.0.0.1" });
         await new Promise((r) => sock.once("connect", r));
         const client = await upgradeAndServe(sock, `127.0.0.1:${srv.port}`, "");
 
-        // If the pipelined event frame had left partial bytes behind (or
-        // consumed too many), this real request/response round trip would
-        // desync and hang.
-        const resp = await client.request({ type: "ctrl_status" });
-        expect(resp.success).toBe(true);
+        const sub = client.subscribe();
+        sendRest!();
+        const { value, done } = await sub.next();
+
+        expect(done).toBe(false);
+        expect(value).toEqual(event);
+        await sub.return?.();
         await client.close();
         await srv.close();
     });
