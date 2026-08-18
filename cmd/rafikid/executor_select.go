@@ -59,10 +59,37 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest) (executors.Execut
 	}
 
 	candidates := executors.Narrow(parentSet, sel)
+	candidates = narrowByWorkspaceMode(candidates, req.WorkspaceMode)
 	if len(candidates) == 0 {
 		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet)
 	}
 	return candidates[0], nil
+}
+
+// narrowByWorkspaceMode drops executors whose ROW does not offer the requested
+// workspace mode. An empty request matches everything.
+//
+// This is where the mode is enforced. It used to be enforced by Provision, on
+// the executor, from a flag the executor was started with — which stopped being
+// true when the executor stopped declaring anything about itself. Nothing
+// replaced it for one commit, and in that window a child that inherited
+// "ephemeral" from a parent confined to disposable machines would land happily
+// on a pinned one: the grant widened silently, which is the direction that
+// matters.
+//
+// An executor whose row leaves the mode unset counts as pinned, matching
+// workspaceModeOrPinned. It is the reading that offers the child less.
+func narrowByWorkspaceMode(candidates []executors.Executor, want string) []executors.Executor {
+	if want == "" {
+		return candidates
+	}
+	var kept []executors.Executor
+	for _, e := range candidates {
+		if workspaceModeOrPinned(e.WorkspaceMode) == want {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // effectiveExecutorSet is every live executor childID may use.
@@ -155,8 +182,8 @@ func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor,
 // The two fields are independent. A parent confined to ephemeral workspaces
 // whose child inherits the selector but silently defaults to "pinned" has been
 // handed a wider grant than its parent's through the back door; and an
-// inherited mode the chosen executor cannot honour is refused by Provision,
-// which is the safe direction.
+// inherited mode no live executor's ROW offers excludes every candidate in
+// narrowByWorkspaceMode, refusing the spawn, which is the safe direction.
 //
 // A top-level spawn (no parent) has nothing to inherit and keeps today's
 // behaviour: no selector, tools in-process.
@@ -211,15 +238,21 @@ const maxLineageWalk = 64
 // explainNoMatch builds a refusal message naming the excluding predicate per
 // candidate, so the reason is legible to the caller.
 //
-// Three exclusion reasons are distinguished:
+// Four exclusion reasons are distinguished:
 //   - The child's own selector excludes the executor (the parent's set would
 //     have allowed it).
 //   - The parent's set excludes the executor (the child never got to evaluate
 //     it).
 //   - The executor's admission selector refused the child.
+//   - The executor's row does not offer the requested workspace mode.
 func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor) error {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "spawn refused: no executor satisfies %q.\n", req.ExecutorSelector)
+	if req.WorkspaceMode != "" {
+		fmt.Fprintf(&sb, "spawn refused: no executor satisfies %q with workspace_mode=%s.\n",
+			req.ExecutorSelector, req.WorkspaceMode)
+	} else {
+		fmt.Fprintf(&sb, "spawn refused: no executor satisfies %q.\n", req.ExecutorSelector)
+	}
 	fmt.Fprintf(&sb, "  %d live executor(s), %d in your parent's set:\n",
 		len(c.execPool.Live()), len(parentSet))
 
@@ -238,6 +271,9 @@ func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executor
 			}
 			if !admitsSel.Matches(childLabels) {
 				reason = fmt.Sprintf("excluded by ITS admission selector %q: this child is %v", e.Admits, childLabels)
+			} else if req.WorkspaceMode != "" && workspaceModeOrPinned(e.WorkspaceMode) != req.WorkspaceMode {
+				reason = fmt.Sprintf("offers workspace_mode=%s; you asked for %s",
+					workspaceModeOrPinned(e.WorkspaceMode), req.WorkspaceMode)
 			} else {
 				inParentSet := false
 				for _, p := range parentSet {

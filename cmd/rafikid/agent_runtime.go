@@ -170,16 +170,27 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 				return fundi.RuntimeOptions{}, fmt.Errorf("workspace: %w", wsErr)
 			}
 			exec = wsExec
+
+			// The mode comes from the executor's ROW, carried here on wsInfo.
+			// It decides whether losing the executor fails this child or moves
+			// it, so it cannot be a literal and it cannot be the executor's own
+			// claim about itself.
+			mode := "pinned"
+			if wsInfo != nil {
+				mode = workspaceModeOrPinned(wsInfo.WorkspaceMode)
+			}
 			c.wsLabelsMu.Lock()
 			if c.wsLabels == nil {
 				c.wsLabels = make(map[string]workspaceLabels)
 			}
-			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID, mode: "pinned"}
+			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID, mode: mode}
 			c.wsLabelsMu.Unlock()
+
 			if wsInfo != nil {
 				// The worker's system prompt names where it landed. ExecutorName
-				// comes from the resolved executor, not from wsInfo — the
-				// provision response reports isolation and roots, not identity.
+				// comes from the resolved executor rather than from the row read
+				// during provisioning only because chooseExecutor already has the
+				// display name in hand.
 				if chosen, cErr := c.chooseExecutor(req); cErr == nil {
 					wsInfo.ExecutorName = chosen.DisplayName
 				}
