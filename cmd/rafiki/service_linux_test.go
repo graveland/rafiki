@@ -3,6 +3,7 @@
 package main
 
 import (
+	"go.graveland.dev/rafiki/pkg/paths"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -110,7 +111,7 @@ func TestUnitQuote(t *testing.T) {
 // test at all — the daemon-facing unit file could drift from what
 // `systemctl` targets with nothing catching it.
 func TestUnitPath_UsesSystemdUnitName(t *testing.T) {
-	b := &linuxBackend{}
+	b := &linuxBackend{unit: systemdUnitName + ".service", logPath: paths.ServiceLogPath()}
 	got, err := b.unitPath()
 	if err != nil {
 		t.Fatalf("unitPath: %v", err)
@@ -138,7 +139,7 @@ func TestSystemctlCommands_UseSystemdUnitName(t *testing.T) {
 	// Status() is deliberately excluded: it short-circuits on os.Stat(unitPath)
 	// before ever calling runOSCmd, so whether it contributes a call depends on
 	// whether this machine happens to have the unit file installed for real.
-	b := &linuxBackend{}
+	b := &linuxBackend{unit: systemdUnitName + ".service", logPath: paths.ServiceLogPath()}
 	_ = b.Start()
 	_ = b.Stop()
 	_ = b.Restart()

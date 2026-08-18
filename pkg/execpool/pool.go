@@ -61,7 +61,11 @@ type liveConn struct {
 	describe *executorpb.DescribeResponse
 	client   *executorClient
 	draining bool
-	done     chan struct{}
+	// remoteAddr is the peer address, kept for the log line when a second
+	// connection is refused: two different addresses for one credential is the
+	// shape of a credential on two machines.
+	remoteAddr string
+	done       chan struct{}
 	// closeOnce guards done. Teardown arrives from two independent
 	// directions — a health failure on this connection, and a reconnect that
 	// displaces it — and closing a channel twice panics the daemon rather
@@ -73,6 +77,61 @@ type liveConn struct {
 // handleConn (blocked on <-done) and its healthLoop. Idempotent by design.
 func (lc *liveConn) shutdown() {
 	lc.closeOnce.Do(func() { close(lc.done) })
+}
+
+// ErrAlreadyConnected refuses a second connection for one executor identity.
+var ErrAlreadyConnected = errors.New("execpool: this executor already has a live connection")
+
+// admit decides whether a newly authenticated connection may join.
+//
+// One credential names one row, and the pool holds one connection per row, so a
+// second connection is one of two things: a reconnect whose predecessor is not
+// yet known to be dead, or the same credential on two machines. Arrival order
+// cannot tell those apart — but LIVENESS can, so the incumbent is probed and
+// only one that fails to answer is replaced.
+//
+// Refusing rather than displacing is the point. Displacing meant a stolen
+// credential could kick the legitimate executor off its own daemon, and the two
+// would then flap against each other indefinitely, each displacement looking
+// exactly like an ordinary reconnect in the log.
+//
+// Displacing WAS defensible when a dead connection took ~15 minutes of TCP
+// retransmission to notice, because defending an incumbent that had silently
+// gone away would have stranded the real executor for that long. The h2
+// keepalive added for A2 changed that: a black-holed peer now fails this probe
+// within healthTimeout, so defending the incumbent costs a waking laptop one
+// bounded probe rather than a quarter of an hour.
+func (p *Pool) admit(ctx context.Context, id, remote string) error {
+	p.mu.RLock()
+	incumbent := p.live[id]
+	p.mu.RUnlock()
+
+	if incumbent == nil {
+		return nil
+	}
+
+	// Probed with the lock RELEASED. Blocking on a network call while holding
+	// p.mu wedges Live(), ClientFor() and every subsequent accept — one unwell
+	// executor taking the whole executor plane down.
+	if p.connIsAlive(ctx, incumbent) {
+		slog.Warn("execpool: refused a second connection for an executor that is already connected. "+
+			"If this repeats, the credential is in use on more than one machine",
+			"executorId", id, "incumbent", incumbent.remoteAddr, "refused", remote)
+		return ErrAlreadyConnected
+	}
+
+	slog.Info("execpool: the previous connection no longer answers; admitting the new one",
+		"executorId", id, "previous", incumbent.remoteAddr, "new", remote)
+	return nil
+}
+
+// connIsAlive reports whether a connection still answers, bounded by
+// healthTimeout so a black hole cannot stall an accept.
+func (p *Pool) connIsAlive(ctx context.Context, lc *liveConn) bool {
+	ctx, cancel := context.WithTimeout(ctx, p.healthTimeout)
+	defer cancel()
+	_, err := lc.client.inner.Health(ctx, connect.NewRequest(&executorpb.HealthRequest{}))
+	return err == nil
 }
 
 // installLive publishes lc as THE connection for id, tearing down whatever it
@@ -163,32 +222,39 @@ func (p *Pool) handleConn(conn net.Conn) {
 	var credential string
 	ctx := context.Background()
 
-	if hello.Token != "" {
+	switch {
+	case hello.Token != "":
 		// First enrollment.
 		e, credential, err = p.store.Enroll(ctx, hello.Token, hello.SelfReported)
-		if err != nil {
-			writeAuthFailure(conn, err)
-			return
-		}
-		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-			Type:       "executor_hello",
-			ExecutorID: e.ID,
-			Credential: credential,
-		})
-	} else if hello.Credential != "" {
+	case hello.Credential != "":
 		e, err = p.store.Authenticate(ctx, hello.Credential)
-		if err != nil {
-			writeAuthFailure(conn, err)
-			return
-		}
-		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-			Type:       "executor_hello",
-			ExecutorID: e.ID,
-		})
-	} else {
+	default:
 		writeHelloError(conn, "no token or credential in hello")
 		return
 	}
+	if err != nil {
+		writeAuthFailure(conn, err)
+		return
+	}
+
+	// Decided BEFORE the hello response, so a refused peer is told why rather
+	// than watching an authenticated connection close under it.
+	remote := conn.RemoteAddr().String()
+	if err := p.admit(ctx, e.ID, remote); err != nil {
+		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
+			Type: "executor_hello",
+			Error: "another connection for this executor is already live and answering; " +
+				"if this machine is not sharing its credential with another, retry shortly",
+			Retryable: true,
+		})
+		return
+	}
+
+	writeHelloResponse(conn, protocol.ExecutorHelloResponse{
+		Type:       "executor_hello",
+		ExecutorID: e.ID,
+		Credential: credential, // empty except on first enrollment
+	})
 
 	httpClient, err := ClientForConn(conn)
 	if err != nil {
@@ -217,10 +283,11 @@ func (p *Pool) handleConn(conn net.Conn) {
 	p.reattach(e.ID)
 
 	lc := &liveConn{
-		executor: e,
-		describe: desc.Msg,
-		client:   &executorClient{inner: cl},
-		done:     make(chan struct{}),
+		executor:   e,
+		describe:   desc.Msg,
+		client:     &executorClient{inner: cl},
+		remoteAddr: remote,
+		done:       make(chan struct{}),
 	}
 
 	p.installLive(e.ID, lc)

@@ -97,6 +97,12 @@ func LogsDir() string { return filepath.Join(StateDir(), "logs") }
 // stdout and stderr.
 func ServiceLogPath() string { return filepath.Join(StateDir(), "controller.log") }
 
+// ExecutorServiceLogPath is where the EXECUTOR's service unit sends its output.
+// Separate from the daemon's: a machine can run both, and interleaving two
+// services into one file makes each one's log harder to read than either would
+// be alone.
+func ExecutorServiceLogPath() string { return filepath.Join(StateDir(), "executor.log") }
+
 // ActiveFile records the child id `fundi` treats as the current one. Runtime
 // state, so it sits beside the socket rather than with the persisted records.
 func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }

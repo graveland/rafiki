@@ -15,6 +15,8 @@ type unsupportedBackend struct{}
 
 func newServiceBackend() serviceBackend { return &unsupportedBackend{} }
 
+func newExecutorServiceBackend() serviceBackend { return &unsupportedBackend{} }
+
 func (b *unsupportedBackend) Install(_ serviceSpec) error { return errUnsupportedOS }
 func (b *unsupportedBackend) Uninstall() error            { return errUnsupportedOS }
 func (b *unsupportedBackend) Start() error                { return errUnsupportedOS }

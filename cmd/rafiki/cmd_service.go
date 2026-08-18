@@ -33,8 +33,12 @@ type serviceBackend interface {
 // serviceSpec carries the information needed to write the service unit.
 type serviceSpec struct {
 	DaemonBinary string
-	PathEnv      string
-	HomeEnv      string
+	// Args are the arguments the unit passes to DaemonBinary. Empty for the
+	// daemon, which takes none; the executor unit uses them to run
+	// `rafiki executor serve --connect …`.
+	Args    []string
+	PathEnv string
+	HomeEnv string
 	// LogPath is where the unit sends the daemon's stdout/stderr. Resolved at
 	// install time and baked in as an absolute path: launchd and systemd do not
 	// inherit the interactive shell's XDG_* variables, so a unit that referenced
@@ -508,13 +512,17 @@ func runServiceTail(cmd *cobra.Command, _ []string) error {
 // streamServiceLog copies the daemon log to stdout. When follow is false it
 // stops at EOF; when true it keeps polling for new writes until ctx is done.
 func streamServiceLog(ctx context.Context, follow bool) error {
-	b := newServiceBackend()
-	logPath := b.LogPath()
+	return streamLogFile(ctx, newServiceBackend().LogPath(), follow)
+}
+
+// streamLogFile is streamServiceLog over an explicit path, so the executor
+// service can reuse it without pretending to be the daemon.
+func streamLogFile(ctx context.Context, logPath string, follow bool) error {
 
 	f, err := os.Open(logPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("log file not found: %s (has the daemon ever run?)", logPath)
+			return fmt.Errorf("log file not found: %s (has the service ever run?)", logPath)
 		}
 		return err
 	}

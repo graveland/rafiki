@@ -43,6 +43,18 @@ type NewToken struct {
 type Store interface {
 	MintToken(ctx context.Context, t NewToken) (plaintext string, err error)
 	Enroll(ctx context.Context, token string, self map[string]string) (Executor, string, error)
+	// Create mints a row and its durable credential in one step, with no
+	// enrollment handshake. It is the STATELESS path: the operator injects the
+	// returned credential from a secret store and the executor writes nothing to
+	// disk, which is what an immutable or rescheduled deployment needs — an
+	// enrolled executor that loses its credential file cannot rejoin, because
+	// its enrollment token was consumed.
+	//
+	// The trade is deliberate and runs the other way from Enroll. Here the
+	// operator handles a long-lived secret, and a theft is silent rather than
+	// announcing itself by consuming a one-time token. Prefer Enroll where the
+	// machine can keep a file.
+	Create(ctx context.Context, t NewToken) (Executor, string, error)
 	Authenticate(ctx context.Context, credential string) (Executor, error)
 	Get(ctx context.Context, id string) (Executor, error)
 	List(ctx context.Context) ([]Executor, error)

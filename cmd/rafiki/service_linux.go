@@ -20,13 +20,18 @@ import (
 // the status query cannot drift apart.
 const systemdUnitName = "rafiki"
 
+// systemdExecutorUnitName names the EXECUTOR's unit. Separate from the daemon's
+// because the two are independent services with independent lifecycles — an
+// executor commonly runs on a machine hosting no daemon at all.
+const systemdExecutorUnitName = "rafiki-executor"
+
 // unitTemplate is the systemd user service unit for the rafiki daemon.
 const unitTemplate = `[Unit]
 Description={{.UnitName}} daemon
 After=default.target
 
 [Service]
-ExecStart={{.DaemonBinary}}
+ExecStart={{.DaemonBinary}}{{range .Args}} {{unitq .}}{{end}}
 Restart=on-failure
 RestartSec=2
 # systemd default TimeoutStopSec is 90s.  the daemon's own graceful
@@ -84,21 +89,33 @@ func renderServiceConfig(spec serviceSpec) (string, error) {
 	return buf.String(), nil
 }
 
-type linuxBackend struct{}
+type linuxBackend struct {
+	// unit is the systemd unit name, held on the backend so the daemon's and
+	// the executor's units are managed by the same code with distinct
+	// identities.
+	unit string
+	// logPath is where this unit's stdout/stderr go; see the darwin backend.
+	logPath string
+}
 
-func newServiceBackend() serviceBackend { return &linuxBackend{} }
+func newServiceBackend() serviceBackend {
+	return &linuxBackend{unit: systemdUnitName + ".service", logPath: paths.ServiceLogPath()}
+}
+
+// newExecutorServiceBackend manages the executor's unit rather than the daemon's.
+func newExecutorServiceBackend() serviceBackend {
+	return &linuxBackend{unit: systemdExecutorUnitName + ".service", logPath: paths.ExecutorServiceLogPath()}
+}
 
 func (b *linuxBackend) unitPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	return filepath.Join(home, ".config", "systemd", "user", systemdUnitName+".service"), nil
+	return filepath.Join(home, ".config", "systemd", "user", b.unit), nil
 }
 
-func (b *linuxBackend) LogPath() string {
-	return paths.ServiceLogPath()
-}
+func (b *linuxBackend) LogPath() string { return b.logPath }
 
 func (b *linuxBackend) Install(spec serviceSpec) error {
 	unitPath, err := b.unitPath()
@@ -152,7 +169,7 @@ func (b *linuxBackend) Uninstall() error {
 }
 
 func (b *linuxBackend) Start() error {
-	out, err := runOSCmd("systemctl", "--user", "start", systemdUnitName)
+	out, err := runOSCmd("systemctl", "--user", "start", b.unit)
 	if err != nil {
 		return fmt.Errorf("systemctl start: %s", strings.TrimSpace(out))
 	}

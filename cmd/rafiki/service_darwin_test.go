@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // testSpec returns a minimal serviceSpec for template rendering tests.
@@ -23,7 +25,7 @@ func testSpec() serviceSpec {
 }
 
 func TestRenderPlist_ContainsSpecFields(t *testing.T) {
-	content, err := renderServiceConfig(testSpec())
+	content, err := renderServiceConfig(testSpec(), launchdLabel)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -41,7 +43,7 @@ func TestRenderPlist_ContainsSpecFields(t *testing.T) {
 }
 
 func TestRenderPlist_Format(t *testing.T) {
-	content, err := renderServiceConfig(testSpec())
+	content, err := renderServiceConfig(testSpec(), launchdLabel)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -73,7 +75,7 @@ func TestRenderPlist_IncludesCapturedEnv(t *testing.T) {
 		"RAFIKI_URL":    "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
 		"RAFIKI_SOCKET": "/tmp/rafiki.sock",
 	}
-	out, err := renderServiceConfig(spec)
+	out, err := renderServiceConfig(spec, launchdLabel)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -96,7 +98,7 @@ func TestRenderPlist_EscapesXML(t *testing.T) {
 	spec.ExtraEnv = map[string]string{
 		"RAFIKI_URL": "postgres://h/db?sslmode=disable&application_name=rafiki<1>",
 	}
-	out, err := renderServiceConfig(spec)
+	out, err := renderServiceConfig(spec, launchdLabel)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -124,12 +126,12 @@ func TestRenderPlist_Deterministic(t *testing.T) {
 		"RAFIKI_URL": "url", "RAFIKI_SOCKET": "/s", "RAFIKI_PI_BINARY": "/pi",
 		"RAFIKI_DEFAULT_MODEL": "m", "RAFIKI_MCP_CONFIG": "/c",
 	}
-	first, err := renderServiceConfig(spec)
+	first, err := renderServiceConfig(spec, launchdLabel)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
 	for range 20 {
-		again, err := renderServiceConfig(spec)
+		again, err := renderServiceConfig(spec, launchdLabel)
 		if err != nil {
 			t.Fatalf("renderServiceConfig: %v", err)
 		}
@@ -152,7 +154,7 @@ func TestRenderServiceConfig_NeverContainsADSN(t *testing.T) {
 		LogPath:      "/tmp/rafiki.log",
 		ExtraEnv:     unit,
 		SecretEnv:    secret,
-	})
+	}, launchdLabel)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -169,7 +171,7 @@ func TestRenderServiceConfig_NeverContainsADSN(t *testing.T) {
 // No captured environment must still render a valid plist — the pre-existing
 // HOME/PATH-only shape.
 func TestRenderPlist_EmptyExtraEnv(t *testing.T) {
-	out, err := renderServiceConfig(testSpec())
+	out, err := renderServiceConfig(testSpec(), launchdLabel)
 	if err != nil {
 		t.Fatalf("renderServiceConfig: %v", err)
 	}
@@ -209,7 +211,7 @@ func TestDarwinInstall_BootsOutBeforeBootstrappingSoAReinstallActuallyReloads(t 
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 
@@ -267,7 +269,7 @@ func TestDarwinInstall_SucceedsWhenBootoutFailsBecauseNotLoaded(t *testing.T) {
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 	if err := b.Install(spec); err != nil {
@@ -316,7 +318,7 @@ func TestDarwinInstall_LyingLoadExitZeroStillReportsErrorWhenVerificationFindsNo
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 	err := b.Install(spec)
@@ -375,7 +377,7 @@ func TestDarwinInstall_PollsUntilUnloadedThenBootstraps(t *testing.T) {
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 	if err := b.Install(spec); err != nil {
@@ -427,7 +429,7 @@ func TestDarwinInstall_PollCapExpiryStillAttemptsBootstrap(t *testing.T) {
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 	if err := b.Install(spec); err != nil {
@@ -485,7 +487,7 @@ func TestDarwinInstall_UnconfirmedUnloadWithFailedBootstrapIsAnError(t *testing.
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 	err := b.Install(spec)
@@ -540,7 +542,7 @@ func TestDarwinRestart_BootoutThenBootstrap(t *testing.T) {
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	if err := b.Restart(); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -602,7 +604,7 @@ func TestDarwinRestart_NotLoadedSkipsPollAndBootstraps(t *testing.T) {
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	if err := b.Restart(); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -663,7 +665,7 @@ func TestDarwinRestart_PollsUntilUnloadedThenBootstraps(t *testing.T) {
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	if err := b.Restart(); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -715,7 +717,7 @@ func TestDarwinRestart_PollCapExpiryStillBootstraps(t *testing.T) {
 		return "", nil
 	}
 
-	b := &darwinBackend{}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	if err := b.Restart(); err != nil {
 		t.Fatalf("Restart: %v, want the cap expiring to still fall through to bootstrap and succeed", err)
 	}

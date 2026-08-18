@@ -46,6 +46,14 @@ func (f *fakeStore) Authenticate(context.Context, string) (executors.Executor, e
 }
 
 func (f *fakeStore) Enroll(context.Context, string, map[string]string) (executors.Executor, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.executor, "credential", nil
+}
+
+func (f *fakeStore) Create(context.Context, executors.NewToken) (executors.Executor, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.executor, "credential", nil
 }
 
