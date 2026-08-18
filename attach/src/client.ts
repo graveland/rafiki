@@ -72,6 +72,17 @@ export interface Response {
     error?: { code: string; message?: string };
 }
 
+/**
+ * Renders a failed ctrl_auth response (auth_invalid, auth_required, ...) as
+ * an Error, for dispatchFrame to stash when nobody is waiting to receive the
+ * response frame itself. Mirrors pkg/client/client.go's authError.
+ */
+function authError(resp: Response): Error {
+    if (!resp.error) return new Error("auth: rejected");
+    if (!resp.error.message) return new Error(`auth: ${resp.error.code}`);
+    return new Error(`auth: ${resp.error.code}: ${resp.error.message}`);
+}
+
 // ─── Frame splitter ───────────────────────────────────────────────────────────
 
 /**
@@ -178,24 +189,13 @@ export class Client {
     private readonly sock: net.Socket;
     private readonly splitter: FrameSplitter;
     private readonly pending = new Map<string, PendingEntry>();
-    // Responses that arrived before request() registered a waiter for their
-    // id — possible only for bytes pipelined behind the upgrade response,
-    // since in every other case the response cannot exist on the wire until
-    // after request() has sent it. request() consults this before creating
-    // its own waiter, so such a frame is delivered rather than dropped.
-    // Capacity-bounded like AsyncQueue: a well-behaved daemon never fills it.
-    private readonly earlyResponses = new Map<string, Response>();
     private readonly queues = new Set<AsyncQueue<Record<string, unknown>>>();
     private readonly timeoutMs: number;
     private _closed = false;
     private _readError: Error | null = null;
     private nextID = 0;
 
-    // Not private: upgradeAndServe (module scope, same file) constructs a
-    // Client directly once the upgrade + optional ctrl_auth write are done.
-    // Outside this module there is no exported way to reach it — dial(),
-    // dialURL() and upgradeAndServe() remain the only entry points.
-    constructor(
+    private constructor(
         sock: net.Socket,
         opts: Required<ClientOptions>,
         pending?: Buffer,
@@ -204,15 +204,31 @@ export class Client {
         this.splitter = new FrameSplitter(opts.maxFrameBytes);
         this.timeoutMs = opts.requestTimeoutMs;
         this.startReadLoop();
-        // Bytes the peer pipelined behind the upgrade response. They belong to
-        // the frame stream and were consumed while reading the HTTP head, so
-        // they can only arrive this way — re-reading the socket would not
-        // produce them, and a second parser would drop them.
+        // Bytes the peer pipelined behind the upgrade response, pushed through
+        // the SAME FrameSplitter the read loop uses rather than a second
+        // parser. No production path fills this today — upgradeAndServe reads
+        // the full 101 before writing anything of its own, so the daemon has
+        // nothing to answer yet — but pkg/upgradeconn.Dial's Go-side comment
+        // is explicit that a future protocol might pipeline behind its 101,
+        // and this is what makes that forward-compatible rather than a
+        // silent frame loss.
         if (pending && pending.length > 0) {
             for (const frame of this.splitter.push(pending)) {
                 this.dispatchFrame(frame);
             }
         }
+    }
+
+    /**
+     * Constructs a Client from a socket that has already completed the HTTP
+     * upgrade (and, if applicable, sent ctrl_auth). The only caller is
+     * upgradeAndServe; this exists solely so the constructor can stay
+     * private — TypeScript has no module-private access modifier, so a
+     * bare `constructor` here would also be callable, bypassing dial()/
+     * dialURL()/upgradeAndServe(), from any file that imports Client.
+     */
+    static fromUpgrade(sock: net.Socket, opts: Required<ClientOptions>, pending?: Buffer): Client {
+        return new Client(sock, opts, pending);
     }
 
     // ─── Static factories ──────────────────────────────────────────────────────
@@ -280,12 +296,6 @@ export class Client {
                 ? req["id"]
                 : `c${++this.nextID}`;
         const frame: Record<string, unknown> = { ...req, id };
-
-        const early = this.earlyResponses.get(id);
-        if (early) {
-            this.earlyResponses.delete(id);
-            return Promise.resolve(early);
-        }
 
         const payload = JSON.stringify(frame) + "\n";
 
@@ -420,8 +430,20 @@ export class Client {
                 clearTimeout(entry.timer);
                 this.pending.delete(id);
                 entry.resolve(obj as unknown as Response);
-            } else if (this.earlyResponses.size < 256) {
-                this.earlyResponses.set(id, obj as unknown as Response);
+                return;
+            }
+            // No Request is waiting on this id. The one case that matters is
+            // a rejected ctrl_auth: upgradeAndServe writes it before any
+            // request() has registered a waiter (id "0", never reused by a
+            // real request — request()'s auto-ids start at "c1"), and the
+            // daemon's writeAuthError reply arrives with nobody listening.
+            // Stash the reason so the caller sees "auth_invalid"/
+            // "auth_required" instead of a bare "client connection closed"
+            // once the daemon hangs up. Mirrors pkg/client/client.go's
+            // authError handling in readLoop.
+            const resp = obj as unknown as Response;
+            if (resp.command === "ctrl_auth" && resp.success === false) {
+                this._readError = authError(resp);
             }
             return;
         }
@@ -522,5 +544,5 @@ export async function upgradeAndServe(
     if (token !== "") {
         sock.write(JSON.stringify({ type: "ctrl_auth", id: "0", token }) + "\n", "utf8");
     }
-    return new Client(sock, Client.resolveTLSOpts(), pending);
+    return Client.fromUpgrade(sock, Client.resolveTLSOpts(), pending);
 }

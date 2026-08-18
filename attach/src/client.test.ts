@@ -481,30 +481,72 @@ describe("upgradeAndServe", () => {
         await srv.close();
     });
 
-    // THE regression test. The server puts the 101 head and a response frame in
-    // ONE write, exactly as a real daemon may. A client that reads the head and
-    // then starts a fresh reader on the socket loses the frame and hangs to its
-    // request timeout — the same hazard upgradeconn.Conn exists to solve on the
-    // Go side, and the one CLAUDE.md documents.
-    it("does not lose a frame pipelined behind the 101", async () => {
+    // A client that reads the 101 head and then starts a fresh reader on the
+    // socket would lose any bytes the peer wrote in the same segment — the
+    // hazard pkg/upgradeconn.Conn exists to solve on the Go side (CLAUDE.md
+    // documents it there). No production path fills this today:
+    // upgradeAndServe reads the full 101 before writing anything of its own,
+    // so the daemon has nothing to answer yet. But pkg/upgradeconn.Dial's own
+    // comment is explicit that "a future protocol might" pipeline behind its
+    // 101, and this proves the machinery — pushing leftover bytes through the
+    // SAME FrameSplitter the read loop uses — actually holds frame
+    // boundaries intact rather than silently dropping or corrupting them.
+    it("keeps frame boundaries intact when a frame is pipelined behind the 101", async () => {
         const srv = await startUpgradeServer((conn) => {
-            const resp = JSON.stringify({
-                type: "ctrl_response", command: "ctrl_status", id: "c1",
-                success: true, data: { ok: true },
-            });
+            const event = JSON.stringify({ type: "ctrl_event", kind: "hello" });
             conn.write(
                 "HTTP/1.1 101 Switching Protocols\r\nUpgrade: rafiki-control\r\nConnection: Upgrade\r\n\r\n" +
-                resp + "\n"
+                event + "\n"
             );
+            // From here on, behave like an ordinary daemon: answer whatever
+            // request arrives next.
+            conn.on("data", (chunk: Buffer) => {
+                const req = JSON.parse(chunk.toString("utf8").trim()) as { type: string; id: string };
+                conn.write(JSON.stringify({
+                    type: "ctrl_response", command: req.type, id: req.id,
+                    success: true, data: { ok: true },
+                }) + "\n");
+            });
         });
         const sock = net.createConnection({ port: srv.port, host: "127.0.0.1" });
         await new Promise((r) => sock.once("connect", r));
         const client = await upgradeAndServe(sock, `127.0.0.1:${srv.port}`, "");
 
-        // The frame was already on the wire before we asked for it.
-        const resp = await client.request({ type: "ctrl_status", id: "c1" });
+        // If the pipelined event frame had left partial bytes behind (or
+        // consumed too many), this real request/response round trip would
+        // desync and hang.
+        const resp = await client.request({ type: "ctrl_status" });
         expect(resp.success).toBe(true);
         await client.close();
+        await srv.close();
+    });
+
+    // Reachable in production: a bad or missing token. pkg/control/server.go's
+    // writeAuthError answers ctrl_auth (id "0", which request()'s auto-ids
+    // never reuse) with success:false and then hangs up — this arrives
+    // through the ordinary read loop, after the Client already exists, with
+    // nobody waiting on id "0". Without the fix, the caller's next request
+    // sees only "client connection closed"; mirroring pkg/client/client.go's
+    // authError handling surfaces the real reason instead.
+    it("surfaces the daemon's auth-failure reason instead of a bare closed error", async () => {
+        const srv = await startUpgradeServer((conn) => {
+            conn.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: rafiki-control\r\nConnection: Upgrade\r\n\r\n");
+            conn.on("data", () => {
+                conn.write(JSON.stringify({
+                    type: "ctrl_response", command: "ctrl_auth", id: "0",
+                    success: false, error: { code: "auth_invalid", message: "invalid auth token" },
+                }) + "\n");
+                conn.end();
+            });
+        });
+        const sock = net.createConnection({ port: srv.port, host: "127.0.0.1" });
+        await new Promise((r) => sock.once("connect", r));
+        const client = await upgradeAndServe(sock, `127.0.0.1:${srv.port}`, "bad_tok");
+
+        // Give the auth-failure response and the ensuing close a moment to land.
+        await new Promise((r) => setTimeout(r, 50));
+        expect(client.closed).toBe(true);
+        await expect(client.request({ type: "ctrl_status" })).rejects.toThrow(/auth_invalid/);
         await srv.close();
     });
 
