@@ -21,8 +21,6 @@ type WorkspaceInfo struct {
 	Isolation     string // "none" | "container"
 	WorkspaceMode string // "pinned" | "ephemeral"
 	Roots         []string
-	ReadOnlyRoots []string
-	Network       string // "none" | "bridge"
 }
 
 // SysPromptConfig is the input to BuildSystemPrompt. Base is the runtime's
@@ -107,28 +105,19 @@ func workspaceBlock(w *WorkspaceInfo) string {
 	}
 	sb.WriteString("\n")
 
+	// Roots are the operator's description of what this machine exposes, from
+	// the executor's row. rafiki does not build the mounts and so cannot say
+	// which are read-only or whether there is a network — an earlier version
+	// labelled every root "read-write / your checkout" from data the daemon
+	// derived itself, and that data no longer exists. Better to name the paths
+	// and let the kernel's refusals speak than to assert a mode we do not know.
 	if len(w.Roots) > 0 {
 		sb.WriteString("\n")
-		readOnly := map[string]bool{}
-		for _, r := range w.ReadOnlyRoots {
-			readOnly[r] = true
-		}
 		for _, root := range w.Roots {
-			mode := "read-write"
-			label := ""
-			if readOnly[root] {
-				mode = "read-only"
-				label = "the repository this was cloned from"
-			} else {
-				label = "your checkout"
-			}
-			fmt.Fprintf(&sb, "  %-8s %-11s %s\n", root, mode, label)
+			fmt.Fprintf(&sb, "  %s\n", root)
 		}
 		sb.WriteString("\nNothing outside those paths exists for you — not the host's home directory,\nnot other checkouts. A \"no such file or directory\" outside them is the sandbox\nworking, not a broken repository.")
 	}
 
-	if w.Network == "none" {
-		sb.WriteString(" There is no network access.")
-	}
 	return strings.TrimRight(sb.String(), "\n")
 }

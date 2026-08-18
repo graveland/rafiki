@@ -84,12 +84,10 @@ func TestSystemPromptCarriesTheWorkspaceAssignment(t *testing.T) {
 			Isolation:     "container",
 			WorkspaceMode: "ephemeral",
 			Roots:         []string{"/work", "/repo"},
-			ReadOnlyRoots: []string{"/repo"},
-			Network:       "none",
 		},
 	})
 	for _, want := range []string{
-		"ci-runner-2", "container", "ephemeral", "/work", "/repo", "read-only", "no network",
+		"ci-runner-2", "container", "ephemeral", "/work", "/repo",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("system prompt missing %q:\n%s", want, got)

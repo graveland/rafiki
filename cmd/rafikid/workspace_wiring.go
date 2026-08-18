@@ -9,15 +9,32 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// provisionWorkspace provisions a workspace on the executor.
-// on the executor. The ordering matters: provision BEFORE the child is
-// registered, so a provisioning failure refuses the spawn with nothing to
-// clean up.
+// executorRow returns the operator's record for a live executor.
+//
+// The ROW is the authority on what an executor is. Describe and the Provision
+// response are the executor's own account of itself, and an executor that could
+// name its own isolation could tell a child it is sandboxed when it is not.
+func (c *Controller) executorRow(executorID string) (executors.Executor, bool) {
+	if c.execPool == nil {
+		return executors.Executor{}, false
+	}
+	for _, le := range c.execPool.Live() {
+		if le.Executor.ID == executorID {
+			return le.Executor, true
+		}
+	}
+	return executors.Executor{}, false
+}
+
+// provisionWorkspace provisions a workspace on the executor. The ordering
+// matters: provision BEFORE the child is registered, so a provisioning failure
+// refuses the spawn with nothing to clean up.
 func (c *Controller) provisionWorkspace(
 	ctx context.Context,
 	req protocol.SpawnRequest, executorID string,
@@ -31,23 +48,15 @@ func (c *Controller) provisionWorkspace(
 		return "", nil, nil, fmt.Errorf("execpool: not a real pool")
 	}
 
-	cwd := req.Cwd
-	if cwd == "" {
-		cwd = "."
-	}
-
-	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{
-		// ChildId and Workdir only.
-		//
-		// Mounts are not derived any more and the field is left unset. The
-		// executor serves the filesystem it can see; for a container
-		// executor that view was chosen in `docker run -v ...` by the
-		// operator, exactly as they chose the image. rafiki's grant is the
-		// label selector plus the row's roots — nothing here composes a
-		// path.
-		ChildId: "",
-		Workdir: cwd,
-	})
+	// ChildId only.
+	//
+	// Mounts, network and workdir are all left unset. The executor serves the
+	// filesystem it can see, working from the --root it was started with; for a
+	// container executor that view was chosen in `docker run -v ...` by the
+	// operator, exactly as they chose the image. rafiki's grant is the label
+	// selector plus the row — nothing here composes a path, and a workdir sent
+	// from here would be a host path with no meaning inside the container.
+	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{ChildId: ""})
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", shortID(executorID), err)
 	}
@@ -59,19 +68,56 @@ func (c *Controller) provisionWorkspace(
 		return "", nil, nil, fmt.Errorf("workspace client: %w", err)
 	}
 
+	// Everything the child is TOLD about its machine comes from the row, not
+	// from resp. The executor reports isolation "none" for every workspace —
+	// it does not know whether it is in a container, and this branch forbids it
+	// from finding out — so believing resp here is what made the "Your machine"
+	// block silently vanish for exactly the children that need it.
+	row, haveRow := c.executorRow(executorID)
+	if !haveRow {
+		slog.Warn("provisioned a workspace on an executor with no live row",
+			"workspaceId", resp.WorkspaceId, "executorId", shortID(executorID))
+	}
+
 	slog.Info("provisioned workspace",
 		"workspaceId", resp.WorkspaceId,
 		"executorId", shortID(executorID),
-		"roots", resp.Roots,
-		"isolation", resp.Isolation,
+		"roots", row.Roots,
+		"isolation", row.Isolation,
+		"workspaceMode", workspaceModeOrPinned(row.WorkspaceMode),
 	)
 
-	wi = &fundi.WorkspaceInfo{
-		Isolation:     resp.Isolation,
-		WorkspaceMode: "pinned",
-		Roots:         resp.Roots,
+	return resp.WorkspaceId, workspaceInfoFromRow(row), exec, nil
+}
+
+// workspaceInfoFromRow builds what the child is TOLD about its machine.
+//
+// It takes a row and nothing else, and that signature is the point. The
+// executor reports isolation "none" for every workspace it provisions — it does
+// not know whether it is running in a container, and it is not allowed to find
+// out — so a version of this that read the Provision response produced
+// Isolation "none" for every child, which silently suppressed the whole "Your
+// machine" block for exactly the sandboxed workers it exists to warn.
+func workspaceInfoFromRow(row executors.Executor) *fundi.WorkspaceInfo {
+	return &fundi.WorkspaceInfo{
+		Isolation:     row.Isolation,
+		WorkspaceMode: workspaceModeOrPinned(row.WorkspaceMode),
+		Roots:         row.Roots,
 	}
-	return resp.WorkspaceId, wi, exec, nil
+}
+
+// workspaceModeOrPinned resolves an unset workspace_mode to "pinned".
+//
+// Pinned is the conservative reading in both places this is used. In the
+// system prompt it promises the child less (its tree stays put); on the
+// rafiki/workspace-mode label it means an executor loss FAILS the child rather
+// than silently moving it onto a machine the operator never marked as
+// interchangeable.
+func workspaceModeOrPinned(mode string) string {
+	if mode == "" {
+		return "pinned"
+	}
+	return mode
 }
 
 // releaseWorkspace tears down a workspace on an executor.
@@ -129,11 +175,12 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 			continue
 		}
 
-		// Check the workspace mode from the child's labels.
-		mode := snap.Labels["rafiki/workspace-mode"]
-		if mode == "" {
-			mode = "ephemeral"
-		}
+		// Check the workspace mode from the child's labels. The label is
+		// daemon-written from the executor's row at provision time; an absent
+		// one means a child from before the label existed, and PINNED is the
+		// conservative reading — moving a child onto a machine no operator
+		// marked interchangeable is worse than failing it where it stood.
+		mode := workspaceModeOrPinned(snap.Labels["rafiki/workspace-mode"])
 
 		// Release the dead workspace first.
 		c.releaseWorkspace(context.Background(), lostID, wsID)
