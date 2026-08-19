@@ -232,7 +232,8 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 ## Executor
 
 `rafiki executor serve` moves the filesystem and shell tools (`read`, `write`,
-`edit`, `glob`, `grep`, `bash`) behind a Connect RPC surface. The daemon becomes
+`edit`, `glob`, `grep`, `ls`, `bash`) and the language-server tools (`lsp_*`)
+behind a Connect RPC surface. The daemon becomes
 the RPC client: when an executor is configured, tool calls are dispatched to it;
 when absent, every tool runs in-process as before.
 
@@ -256,6 +257,14 @@ go build -o bin/rafiki ./cmd/rafiki
 - `--socket` — path to the unix socket (required)
 - `--root` — working directory root (defaults to current directory)
 - `--concurrency` — maximum concurrent tool calls (default 6)
+
+**Language servers run on the executor**, because that is where the files are. With no
+`--lsp-config`, the executor auto-detects what is installed on its own `PATH`; a config
+naming a server that is not installed leaves the `lsp_*` tools out of the agent's tool list
+rather than advertising eight tools that can only answer "executable file not found".
+`--no-lsp` disables them entirely.
+
+New flags: `--lsp-config` (path to an `lsp.json`), `--no-lsp`.
 
 **Socket permissions are the only access control in this phase.** The socket
 is created under a `0177` umask, so it is `0600` from the moment it exists —

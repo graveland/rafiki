@@ -120,6 +120,8 @@ Describe() → { executorId, platform, roots[], concurrency, isolation,
 Unary. Called at startup and periodically to discover the executor's
 capabilities. The `tools[]` list is the authority for which tool names the
 parent may route — if a name isn't here, the parent keeps it in-process.
+`tools[]` includes the seven `lsp_*` verbs alongside the file and shell tools:
+language servers run on the executor, where the files are.
 
 ### Health
 
