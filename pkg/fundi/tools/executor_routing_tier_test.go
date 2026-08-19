@@ -133,6 +133,35 @@ func TestLSPToolsMaterializeWithAnExecutor(t *testing.T) {
 	}
 }
 
+// ExecutorTools is the executor's Describe set. A routed tool it omits must not
+// reach the child's envelope: proxying it would dispatch to a registry that
+// answers "unknown tool". The file tools the executor always serves stay.
+func TestRoutedToolsAreFilteredByTheExecutorsDescribe(t *testing.T) {
+	served := map[string]bool{
+		"read": true, "write": true, "edit": true, "glob": true,
+		"grep": true, "ls": true, "bash": true,
+	}
+	got := registryNames(DefaultBlueprint.MaterializeAll(ToolOpts{
+		Cwd:           t.TempDir(),
+		Executor:      stubExecutorClient{},
+		ExecutorTools: served,
+	}))
+
+	for name := range served {
+		if !got[name] {
+			t.Errorf("%q declined though the executor's Describe serves it", name)
+		}
+	}
+	for _, name := range []string{
+		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
+		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
+	} {
+		if got[name] {
+			t.Errorf("%q materialized though the executor's Describe omits it", name)
+		}
+	}
+}
+
 // stubExecutorClient satisfies ExecutorClient so a ToolOpts can carry a
 // non-nil Executor. No method is ever called: these tests assert on which
 // tools materialize, never on what they do.

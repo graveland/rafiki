@@ -32,6 +32,22 @@ func (c *Controller) executorRow(executorID string) (executors.Executor, bool) {
 	return executors.Executor{}, false
 }
 
+// executorToolsFor returns the served tool set the chosen executor reported in
+// its last Describe, or nil when unknown (no pool, no live entry, or no
+// Describe yet). The caller treats nil as "leave routing unfiltered", which
+// is what keeps the legacy socket path and a pre-Describe join working.
+func (c *Controller) executorToolsFor(executorID string) []string {
+	if c.execPool == nil {
+		return nil
+	}
+	for _, le := range c.execPool.Live() {
+		if le.Executor.ID == executorID && le.Describe != nil {
+			return le.Describe.Tools
+		}
+	}
+	return nil
+}
+
 // provisionWorkspace provisions a workspace on the executor. The ordering
 // matters: provision BEFORE the child is registered, so a provisioning failure
 // refuses the spawn with nothing to clean up.

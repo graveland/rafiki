@@ -87,6 +87,11 @@ type RuntimeOptions struct {
 	// which is the default and preserves today's behaviour exactly.
 	Executor tools.ExecutorClient
 
+	// ExecutorTools, when non-nil, is the exact set of tool names the chosen
+	// executor serves (from its Describe). nil means unknown — the legacy
+	// socket path — and leaves the child's routed set unfiltered.
+	ExecutorTools []string
+
 	// Workspace, when non-nil and Isolation != "none", appends a per-child
 	// machine block to the system prompt. Resolved by the daemon at spawn.
 	Workspace *WorkspaceInfo
@@ -173,6 +178,20 @@ func checkRTK(mode tools.RTKMode) error {
 			"plain bash when rtk is absent")
 	}
 	return nil
+}
+
+// executorToolSet converts a Describe.tools slice into the lookup map the
+// registry's routing filter uses. A nil slice stays nil — the distinction
+// between "unknown" and "empty" is what keeps the socket path unfiltered.
+func executorToolSet(served []string) map[string]bool {
+	if served == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(served))
+	for _, name := range served {
+		out[name] = true
+	}
+	return out
 }
 
 // BuildRuntime assembles the tool registry, skills, MCP connections, and the
@@ -273,18 +292,19 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	toolOpts := tools.ToolOpts{
-		Cwd:          opts.Cwd,
-		FileTracker:  fileTracker,
-		OutputPolicy: outputPolicy,
-		Skills:       discovered,
-		RTK:          tools.ParseRTKMode(opts.RTK),
-		Web:          opts.ToolsWeb,
-		LSP:          lspClient,
-		FileChanged:  lspNotifier,
-		Tasks:        taskStore,
-		ChildID:      opts.Ref,
-		Agents:       opts.Agents,
-		Executor:     opts.Executor,
+		Cwd:           opts.Cwd,
+		FileTracker:   fileTracker,
+		OutputPolicy:  outputPolicy,
+		Skills:        discovered,
+		RTK:           tools.ParseRTKMode(opts.RTK),
+		Web:           opts.ToolsWeb,
+		LSP:           lspClient,
+		FileChanged:   lspNotifier,
+		Tasks:         taskStore,
+		ChildID:       opts.Ref,
+		Agents:        opts.Agents,
+		Executor:      opts.Executor,
+		ExecutorTools: executorToolSet(opts.ExecutorTools),
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 

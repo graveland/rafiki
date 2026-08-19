@@ -118,10 +118,12 @@ Describe() → { executorId, platform, roots[], concurrency, isolation,
 ```
 
 Unary. Called at startup and periodically to discover the executor's
-capabilities. The `tools[]` list is the authority for which tool names the
-parent may route — if a name isn't here, the parent keeps it in-process.
-`tools[]` includes the seven `lsp_*` verbs alongside the file and shell tools:
-language servers run on the executor, where the files are.
+capabilities. `tools[]` is the executor's *actual* served set — the names its
+registry materialized, not a static list — and it is what the parent builds the
+child's `tools[]` from at spawn, so a name that isn't here never reaches the
+child's envelope. It includes the `lsp_*` verbs only when a language server is
+installed (or `--lsp-config` names one), and never the parent-side
+`bash_start`/`bash_output`/`bash_kill` RPCs, which the daemon implements itself.
 
 ### Health
 
