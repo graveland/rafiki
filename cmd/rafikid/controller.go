@@ -689,6 +689,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 		return control.SpawnResult{}, err
 	}
 
+	// Before the grant is inherited, not after: this asks what the PARENT was
+	// confined to, and inheritExecutorGrant would copy that grant onto a child
+	// whose kind cannot honour it, making the two indistinguishable.
+	if err := checkKindNarrowing(c.st, req); err != nil {
+		return control.SpawnResult{}, err
+	}
+
 	// A silent executor grant INHERITS the spawner's. Done here, before
 	// anything reads req, so every path gets it: the runtime's
 	// resolveExecutor, the workspace provisioning check, and the selector

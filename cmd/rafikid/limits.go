@@ -307,3 +307,49 @@ func grantedChildren(req protocol.SpawnRequest) int {
 	}
 	return *req.MaxChildren
 }
+
+// checkKindNarrowing refuses a child whose kind would escape its parent's
+// executor grant.
+//
+// claude and pi are forked on the daemon's own host: agentRunner returns a nil
+// Runner for them, so resolveExecutor is never called and both
+// ExecutorSelector and ExecutorSocket are ignored outright. A confined parent
+// could therefore spawn an unconfined sibling simply by naming a kind — and
+// agent_spawn exposes `kind` to the model, so the escape is one prompt
+// injection away.
+//
+// This is the same monotonicity effectiveExecutorSet enforces for selectors: a
+// descendant may narrow, never widen. It reads only the parent row the daemon
+// stamped — nothing from the caller, nothing from the model — so ctrl_spawn,
+// ctrl_resume and agent_spawn are all covered by the one check, with no route
+// left to enumerate.
+func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest) error {
+	if req.Kind == protocol.KindFundi {
+		return nil
+	}
+	if req.ParentChildID == "" {
+		return nil // top-level: nothing to widen
+	}
+	parent, ok := st.Get(req.ParentChildID)
+	if !ok {
+		// computeLineageLabels refuses an unknown parent with a better
+		// message; not finding one here is not this check's business.
+		return nil
+	}
+	if parent.ExecutorSelector == "" && parent.ExecutorSocket == "" {
+		return nil // parent is already unconfined on this host
+	}
+
+	// An omitted kind is pi (spawnKindLabel), so say what was actually
+	// requested rather than echoing an empty string back at the caller.
+	asked := req.Kind
+	if asked == "" {
+		asked = protocol.KindPi + " (the default when kind is omitted)"
+	}
+	return &control.ControllerError{
+		Code: protocol.ErrInvalidArgs,
+		Message: "spawn refused: the parent runs under an executor grant, and kind " + asked +
+			" ignores executors entirely — it would fork on the daemon's own host with the " +
+			"daemon's filesystem. Only kind \"fundi\" can honour an executor grant.",
+	}
+}
