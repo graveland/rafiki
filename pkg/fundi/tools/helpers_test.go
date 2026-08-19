@@ -31,3 +31,23 @@ func testWriteTool(t *testing.T, tr *FileTracker, cwd string) *writeTool {
 	}
 	return wt.(*writeTool)
 }
+
+// testGrepTool returns a materialized grep tool for tests.
+func testGrepTool(t *testing.T, cwd string) *grepTool {
+	t.Helper()
+	gt, err := (&GrepBlueprint{}).Materialize(ToolOpts{Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gt.(*grepTool)
+}
+
+// testGlobTool returns a materialized glob tool for tests.
+func testGlobTool(t *testing.T, cwd string) *globTool {
+	t.Helper()
+	gt, err := (&GlobBlueprint{}).Materialize(ToolOpts{Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gt.(*globTool)
+}
