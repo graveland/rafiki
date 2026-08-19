@@ -46,18 +46,55 @@ func TestWorkspaceTierMembership(t *testing.T) {
 	}
 }
 
-// ExecutorLocalTools and RoutedToExecutor must not change in this commit.
-// Their contents are what an executor process actually serves today; widening
-// either before the executor can run the new tool routes a call to a registry
-// that will answer "unknown tool".
-func TestRoutingListsAreUnchanged(t *testing.T) {
-	wantLocal := []string{"bash", "edit", "glob", "grep", "read", "write"}
+// ls is a workspace tool the executor can serve today: LsBlueprint.Materialize
+// needs only Cwd and OutputPolicy, both of which the executor's toolOptsFor
+// supplies. The lsp_* family is deliberately absent until the executor hosts
+// the LSP manager — forwarding them now would reach a registry that answers
+// "unknown tool".
+func TestRoutingLists(t *testing.T) {
+	wantLocal := []string{"bash", "edit", "glob", "grep", "ls", "read", "write"}
 	if got := ExecutorLocalTools(); !slices.Equal(got, wantLocal) {
 		t.Errorf("ExecutorLocalTools() = %v, want %v", got, wantLocal)
 	}
 
-	wantRouted := []string{"bash", "bash_kill", "bash_output", "bash_start", "edit", "glob", "grep", "read", "write"}
+	wantRouted := []string{"bash", "bash_kill", "bash_output", "bash_start", "edit", "glob", "grep", "ls", "read", "write"}
 	if got := RoutedToExecutor(); !slices.Equal(got, wantRouted) {
 		t.Errorf("RoutedToExecutor() = %v, want %v", got, wantRouted)
+	}
+
+	for _, name := range RoutedToExecutor() {
+		if len(name) > 4 && name[:4] == "lsp_" {
+			t.Errorf("%q is routed to the executor, which cannot serve it yet", name)
+		}
+	}
+}
+
+// registryNames reads the set of tool names a Registry advertises. Registry has
+// no lookup-by-name accessor; Definitions() is the supported way in, and is
+// what mcp_test.go already uses.
+func registryNames(r *Registry) map[string]bool {
+	names := map[string]bool{}
+	for _, def := range r.Definitions() {
+		if def.OfTool != nil {
+			names[def.OfTool.Name] = true
+		}
+	}
+	return names
+}
+
+// A tool named in ExecutorLocalTools must actually materialize under the opts
+// an executor process supplies, or routing a call to it reaches a registry
+// that answers "unknown tool". The executor's toolOptsFor sets Cwd, RTK,
+// FileTracker and OutputPolicy and nothing else — notably no LSP and no Tasks.
+func TestExecutorLocalToolsAllMaterializeUnderExecutorOpts(t *testing.T) {
+	opts := ToolOpts{
+		Cwd:         t.TempDir(),
+		FileTracker: NewFileTracker(),
+	}
+	got := registryNames(DefaultBlueprint.MaterializeOnly(opts, ExecutorLocalTools()))
+	for _, name := range ExecutorLocalTools() {
+		if !got[name] {
+			t.Errorf("%q is in ExecutorLocalTools but declined to materialize under an executor's ToolOpts", name)
+		}
 	}
 }

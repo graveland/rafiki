@@ -91,11 +91,6 @@ var tierByTool = map[string]Tier{
 // tools implemented as RPCs, so proxying them would dispatch bash_start into
 // the executor's registry, which does not contain it.
 //
-// `ls` is here only so that installing this classification changes no
-// behaviour; it is removed in the very next commit, which is the one that
-// actually fixes it. Keeping the two apart means a regression in the
-// classification and a regression in the routing bisect to different commits.
-//
 // The lsp_* family is a temporary member. Routing them requires the executor
 // to host the LSP manager (pkg/fundi/lsp), which is a later step; until then
 // they must not be forwarded to a registry that will answer "unknown tool".
@@ -105,7 +100,6 @@ var notRoutedYet = map[string]bool{
 	"bash_start":         true,
 	"bash_output":        true,
 	"bash_kill":          true,
-	"ls":                 true,
 	"lsp_call_hierarchy": true,
 	"lsp_definition":     true,
 	"lsp_diagnostics":    true,

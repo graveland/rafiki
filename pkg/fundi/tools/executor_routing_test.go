@@ -34,7 +34,7 @@ func TestRoutedToolsGoToTheExecutor(t *testing.T) {
 func TestOnlyMachineLocalToolsAreRouted(t *testing.T) {
 	want := map[string]bool{
 		"read": true, "write": true, "edit": true, "glob": true, "grep": true,
-		"bash": true, "bash_start": true, "bash_output": true, "bash_kill": true,
+		"ls": true, "bash": true, "bash_start": true, "bash_output": true, "bash_kill": true,
 	}
 	for _, name := range tools.RoutedToExecutor() {
 		if !want[name] {
