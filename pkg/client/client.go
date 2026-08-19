@@ -124,10 +124,11 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 		return nil, err
 	}
 
+	addr := dialAddr(u)
 	dialer := &tls.Dialer{Config: &tls.Config{MinVersion: tls.VersionTLS12}}
-	tlsConn, err := dialer.DialContext(ctx, "tcp", u.Host)
+	tlsConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("tls dial %s: %w", u.Host, err)
+		return nil, fmt.Errorf("tls dial %s: %w", addr, err)
 	}
 
 	// Bound the upgrade exchange. Without this a daemon that completes the TLS
@@ -225,6 +226,19 @@ func parseControlURL(raw string) (*url.URL, error) {
 		return nil, errors.New("RAFIKI_URL missing host")
 	}
 	return u, nil
+}
+
+// dialAddr returns the TCP dial target for u: its host:port if a port was
+// given, else its host with the https default (443) appended. url.URL leaves
+// an unspecified port out of u.Host entirely, and net.Dial requires one —
+// without this, any RAFIKI_URL of the documented "https://host" form (no
+// explicit :443) fails with "missing port in address" before TLS is even
+// attempted.
+func dialAddr(u *url.URL) string {
+	if u.Port() != "" {
+		return u.Host
+	}
+	return net.JoinHostPort(u.Hostname(), "443")
 }
 
 // Request sends a typed request and waits for the matching response.
