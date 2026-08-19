@@ -18,6 +18,16 @@ service ExecutorService {
   // Release tears a workspace down. Idempotent: a daemon restart that lost
   // track of a workspace must be able to release it again without error.
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  // ProjectContext returns the instruction files belonging to a workspace:
+  // CLAUDE.md and AGENTS.md at the git root and at the workdir, with @includes
+  // already expanded.
+  //
+  // It is a separate call rather than a field on ProvisionResponse because it
+  // returns CONTENT, and content is unbounded where a workspace handle is not:
+  // a large CLAUDE.md would make every provision pay for it. It is separate
+  // from Describe for a different reason — Describe is per-EXECUTOR and this is
+  // per-workspace, so Describe structurally cannot answer it.
+  rpc ProjectContext(ProjectContextRequest) returns (ProjectContextResponse);
 }
 
 message DescribeRequest {}
@@ -148,6 +158,22 @@ message ProvisionResponse {
 
 message ReleaseRequest  { string workspace_id = 1; }
 message ReleaseResponse {}
+
+message ProjectContextRequest {
+  // workspace_id from Provision. The executor resolves the workdir itself
+  // rather than taking a path, so a caller cannot ask for the contents of an
+  // arbitrary directory on the executor's filesystem.
+  string workspace_id = 1;
+}
+
+message ProjectContextResponse {
+  // Concatenated instruction-file content, includes already expanded. Empty is
+  // the ordinary answer for a directory with neither file, and is not an error.
+  //
+  // Expanded on THIS side deliberately: an @include names a path on the
+  // executor's filesystem, which the daemon cannot resolve.
+  string context_files = 1;
+}
 
 // JobOutput is the one-shot poll behind bash_output. Attach is a stream and
 // draining it to answer "what has this printed so far" means either blocking

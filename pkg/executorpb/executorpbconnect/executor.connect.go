@@ -52,6 +52,9 @@ const (
 	ExecutorServiceProvisionProcedure = "/rafiki.executor.v1.ExecutorService/Provision"
 	// ExecutorServiceReleaseProcedure is the fully-qualified name of the ExecutorService's Release RPC.
 	ExecutorServiceReleaseProcedure = "/rafiki.executor.v1.ExecutorService/Release"
+	// ExecutorServiceProjectContextProcedure is the fully-qualified name of the ExecutorService's
+	// ProjectContext RPC.
+	ExecutorServiceProjectContextProcedure = "/rafiki.executor.v1.ExecutorService/ProjectContext"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -69,6 +72,16 @@ type ExecutorServiceClient interface {
 	// Release tears a workspace down. Idempotent: a daemon restart that lost
 	// track of a workspace must be able to release it again without error.
 	Release(context.Context, *connect.Request[executorpb.ReleaseRequest]) (*connect.Response[executorpb.ReleaseResponse], error)
+	// ProjectContext returns the instruction files belonging to a workspace:
+	// CLAUDE.md and AGENTS.md at the git root and at the workdir, with @includes
+	// already expanded.
+	//
+	// It is a separate call rather than a field on ProvisionResponse because it
+	// returns CONTENT, and content is unbounded where a workspace handle is not:
+	// a large CLAUDE.md would make every provision pay for it. It is separate
+	// from Describe for a different reason — Describe is per-EXECUTOR and this is
+	// per-workspace, so Describe structurally cannot answer it.
+	ProjectContext(context.Context, *connect.Request[executorpb.ProjectContextRequest]) (*connect.Response[executorpb.ProjectContextResponse], error)
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -130,19 +143,26 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("Release")),
 			connect.WithClientOptions(opts...),
 		),
+		projectContext: connect.NewClient[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse](
+			httpClient,
+			baseURL+ExecutorServiceProjectContextProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("ProjectContext")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // executorServiceClient implements ExecutorServiceClient.
 type executorServiceClient struct {
-	describe  *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
-	health    *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
-	execute   *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
-	attach    *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
-	cancel    *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
-	jobOutput *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
-	provision *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
-	release   *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
+	describe       *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
+	health         *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
+	execute        *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
+	attach         *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
+	cancel         *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
+	jobOutput      *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
+	provision      *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
+	release        *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
+	projectContext *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -185,6 +205,11 @@ func (c *executorServiceClient) Release(ctx context.Context, req *connect.Reques
 	return c.release.CallUnary(ctx, req)
 }
 
+// ProjectContext calls rafiki.executor.v1.ExecutorService.ProjectContext.
+func (c *executorServiceClient) ProjectContext(ctx context.Context, req *connect.Request[executorpb.ProjectContextRequest]) (*connect.Response[executorpb.ProjectContextResponse], error) {
+	return c.projectContext.CallUnary(ctx, req)
+}
+
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
 type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
@@ -200,6 +225,16 @@ type ExecutorServiceHandler interface {
 	// Release tears a workspace down. Idempotent: a daemon restart that lost
 	// track of a workspace must be able to release it again without error.
 	Release(context.Context, *connect.Request[executorpb.ReleaseRequest]) (*connect.Response[executorpb.ReleaseResponse], error)
+	// ProjectContext returns the instruction files belonging to a workspace:
+	// CLAUDE.md and AGENTS.md at the git root and at the workdir, with @includes
+	// already expanded.
+	//
+	// It is a separate call rather than a field on ProvisionResponse because it
+	// returns CONTENT, and content is unbounded where a workspace handle is not:
+	// a large CLAUDE.md would make every provision pay for it. It is separate
+	// from Describe for a different reason — Describe is per-EXECUTOR and this is
+	// per-workspace, so Describe structurally cannot answer it.
+	ProjectContext(context.Context, *connect.Request[executorpb.ProjectContextRequest]) (*connect.Response[executorpb.ProjectContextResponse], error)
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -257,6 +292,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("Release")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceProjectContextHandler := connect.NewUnaryHandler(
+		ExecutorServiceProjectContextProcedure,
+		svc.ProjectContext,
+		connect.WithSchema(executorServiceMethods.ByName("ProjectContext")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -275,6 +316,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceProvisionHandler.ServeHTTP(w, r)
 		case ExecutorServiceReleaseProcedure:
 			executorServiceReleaseHandler.ServeHTTP(w, r)
+		case ExecutorServiceProjectContextProcedure:
+			executorServiceProjectContextHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -314,4 +357,8 @@ func (UnimplementedExecutorServiceHandler) Provision(context.Context, *connect.R
 
 func (UnimplementedExecutorServiceHandler) Release(context.Context, *connect.Request[executorpb.ReleaseRequest]) (*connect.Response[executorpb.ReleaseResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Release is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) ProjectContext(context.Context, *connect.Request[executorpb.ProjectContextRequest]) (*connect.Response[executorpb.ProjectContextResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.ProjectContext is not implemented"))
 }
