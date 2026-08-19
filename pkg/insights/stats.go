@@ -225,7 +225,7 @@ func (i *Insights) scalars(ctx context.Context, sc statsScope, s *Stats) error {
 	var failoverTurns int64
 	err := i.pool.QueryRow(ctx,
 		`SELECT count(DISTINCT t.conversation_id), count(t.id),
-		        count(DISTINCT coalesce(u.username,'')),
+		        count(DISTINCT coalesce(c.owner_user_id::text,'')),
 		        `+tokenSums+`,
 		        count(t.id) FILTER (WHERE t.status='error'),
 		        count(t.id) FILTER (WHERE t.upstream='openrouter'),
@@ -264,9 +264,15 @@ func (i *Insights) scalars(ctx context.Context, sc statsScope, s *Stats) error {
 
 func (i *Insights) perOwner(ctx context.Context, sc statsScope, s *Stats) error {
 	rows, err := i.pool.Query(ctx,
-		`SELECT coalesce(u.username,''), count(DISTINCT c.id), count(t.id) `+statsFrom+`
+		// Grouped by the immutable id, not the name, so `user rm` + recreate of
+		// the same username counts as two principals here exactly as it does in
+		// CrossUserPrefixes. max(username) is only a display label for the
+		// group — every row in a group shares one owner_user_id, so it is that
+		// user's name, and NULL (unattributed) coalesces to '' as before.
+		`SELECT coalesce(max(u.username),''), count(DISTINCT c.id), count(t.id) `+statsFrom+`
 		 WHERE `+sc.where+`
-		 GROUP BY u.username ORDER BY count(t.id) DESC, u.username LIMIT 100`, sc.args...)
+		 GROUP BY c.owner_user_id
+		 ORDER BY count(t.id) DESC, coalesce(max(u.username),'') LIMIT 100`, sc.args...)
 	if err != nil {
 		return fmt.Errorf("stats: per-owner: %w", err)
 	}

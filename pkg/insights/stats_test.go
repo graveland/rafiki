@@ -260,3 +260,45 @@ func TestGlobalStats_NullOwnerAndNullUpstream(t *testing.T) {
 		t.Errorf("failover rate = %v, want 0.5", s.Failures.FailoverRate)
 	}
 }
+
+// Adoption counts PRINCIPALS, not names. `user rm` tombstones and frees the
+// username, so the same name can belong to one active row plus any number of
+// tombstones — two genuinely different accounts. Grouping by name would merge
+// them, and would disagree with CrossUserPrefixes, which groups by id because
+// it is a cache-isolation signal where a name collision must never read as one
+// principal. Both facets group by owner_user_id so they agree.
+func TestGlobalStats_RecreatedUsernameIsTwoPrincipals(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	first := insertConversation(t, pool, "server", "zoe")
+	insertTurn(t, pool, first, seedTurn{ordinal: 0, model: "m", inTok: 100})
+
+	// `rafiki user rm zoe` — the row survives so history keeps resolving.
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.users SET deleted_at = now() WHERE username = 'zoe' AND deleted_at IS NULL`,
+	); err != nil {
+		t.Fatalf("tombstone zoe: %v", err)
+	}
+
+	// `rafiki user create zoe` — same name, different account.
+	second := insertConversation(t, pool, "server", "zoe")
+	insertTurn(t, pool, second, seedTurn{ordinal: 0, model: "m", inTok: 100})
+
+	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if s.Adoption.DistinctOwners != 2 {
+		t.Errorf("distinct owners = %d, want 2 (a recreated username is a second principal, not the same one)", s.Adoption.DistinctOwners)
+	}
+	var zoeRows int
+	for _, oc := range s.Adoption.PerOwner {
+		if oc.Owner == "zoe" {
+			zoeRows++
+		}
+	}
+	if zoeRows != 2 {
+		t.Errorf("per-owner rows for 'zoe' = %d, want 2; rows = %+v", zoeRows, s.Adoption.PerOwner)
+	}
+}
