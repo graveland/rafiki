@@ -48,3 +48,26 @@ func registryHas(r *tools.Registry, name string) bool {
 	}
 	return false
 }
+
+// Describe advertises servedTools(), which must be exactly what Execute can
+// run: the file tools, minus anything the executor does not host. Parent-side
+// RPCs are never in the registry, and lsp_* is absent with NoLSP set.
+func TestServedToolsReflectsTheRegistry(t *testing.T) {
+	s := NewServer(Options{Root: t.TempDir(), NoLSP: true})
+	defer func() { _ = s.Close() }()
+
+	got := map[string]bool{}
+	for _, name := range s.servedTools() {
+		got[name] = true
+	}
+	for _, name := range []string{"read", "write", "edit", "glob", "grep", "ls", "bash"} {
+		if !got[name] {
+			t.Errorf("servedTools omits %q, which the executor always serves", name)
+		}
+	}
+	for _, name := range []string{"lsp_definition", "lsp_diagnostics", "lsp_rename", "bash_start", "bash_output", "bash_kill"} {
+		if got[name] {
+			t.Errorf("servedTools claims %q, which the executor's registry does not contain", name)
+		}
+	}
+}
