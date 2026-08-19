@@ -87,6 +87,21 @@ func RuntimeDir() string {
 // SocketPath is the controller's unix socket.
 func SocketPath() string { return filepath.Join(RuntimeDir(), "controller.sock") }
 
+// ExecutorSocketPath is where the daemon accepts executor connections from the
+// same machine.
+//
+// A second socket rather than a second protocol on the control socket: the
+// control socket speaks raw framed JSON straight into handleConn with no HTTP
+// at all, and the executor link is an HTTP/1.1 Upgrade. Distinguishing them on
+// one socket means sniffing the first bytes, which is precisely the
+// demultiplexer the executor design rejected — and the cost of a second socket
+// in the same directory is one file.
+//
+// It lives beside the control socket in RuntimeDir, so a machine with no
+// XDG_RUNTIME_DIR gets both under StateDir together rather than split across
+// two lifetimes.
+func ExecutorSocketPath() string { return filepath.Join(RuntimeDir(), "executor.sock") }
+
 // RecordsDir holds persisted session records.
 func RecordsDir() string { return filepath.Join(DataDir(), "state") }
 
