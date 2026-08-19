@@ -253,6 +253,18 @@ go build -o bin/rafiki ./cmd/rafiki
 ./bin/rafiki executor serve --socket /tmp/exec.sock --root "$PWD"
 ```
 
+**On the daemon's own machine, prefer `--connect-socket`.** It reverse-dials rafikid's
+executor socket, enrolls, and receives a row — so the executor carries labels, an
+admission selector, and a workspace mode, and `rafiki create --executor-selector` can
+target it like any other:
+
+```bash
+rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
+  --enroll-token <token> --root "$PWD"
+```
+
+No certificate is involved: a single-machine install should not need one.
+
 **Flags:**
 - `--socket` — path to the unix socket (required)
 - `--root` — working directory root (defaults to current directory)
