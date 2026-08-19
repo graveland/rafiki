@@ -14,6 +14,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -50,6 +53,37 @@ type Store interface {
 	List(ctx context.Context, includeDeleted bool, limit int) ([]User, error)
 	Delete(ctx context.Context, username string) error
 	CountActive(ctx context.Context) (int, error)
+}
+
+// MaxUsernameLen bounds a username. Generous rather than opinionated: the
+// point is to stop absurd input reaching a TEXT column and an index, not to
+// decide what a name may look like.
+const MaxUsernameLen = 64
+
+// ErrInvalidUsername is returned by NormalizeUsername. It is a sentinel so a
+// caller can tell "you gave me a bad name" from "the store is unreachable" —
+// the same distinction ErrNotFound draws on the auth path.
+var ErrInvalidUsername = errors.New("users: invalid username")
+
+// NormalizeUsername trims surrounding whitespace and validates what is left.
+//
+// Deliberately NO charset rule. A username here may reasonably be a handle, a
+// dotted name, or an email address, and guessing a pattern now is how you end
+// up migrating out of one later. What it does reject is the input that is
+// certainly a mistake: empty or whitespace-only (which would otherwise create
+// an invisible, unaddressable user) and anything past MaxUsernameLen.
+//
+// Enforced in the store rather than the CLI so every caller — including a
+// future one that is not the CLI — gets it.
+func NormalizeUsername(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("%w: must not be empty or whitespace", ErrInvalidUsername)
+	}
+	if len(s) > MaxUsernameLen {
+		return "", fmt.Errorf("%w: longer than %d bytes", ErrInvalidUsername, MaxUsernameLen)
+	}
+	return s, nil
 }
 
 // TokenPrefix marks a rafiki user token in logs, config files and secret
