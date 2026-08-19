@@ -135,6 +135,105 @@ func TestResolveClaudeToken_NoneResolvesIsAnError(t *testing.T) {
 	}
 }
 
+// Regression test for the original Critical: a token resolved at
+// newClaudeCmd's construction time (a cobra flag default is computed once,
+// when the command tree is built) freezes in whatever the token file held at
+// THAT moment. If a future refactor moves the paths.TokenFromEnv() call from
+// resolveClaudeToken (called at RunE time) back into the flag's default, this
+// test still passes with a stale token silently baked in — UNLESS it proves
+// resolution reflects a file written AFTER construction, which is what this
+// asserts.
+//
+// Verified this test kills the mutation: baking
+// cmd.Flags().String("token", paths.TokenFromEnv(), ...) back into
+// newClaudeCmd made it fail (got "stale-token", want "fresh-token") — see
+// task-9-report.md for the transcript.
+func TestResolveClaudeToken_ReflectsFileWrittenAfterConstruction(t *testing.T) {
+	t.Setenv("RAFIKI_TOKEN", "")
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := writeTokenFile(paths.TokenFile(), "stale-token"); err != nil {
+		t.Fatalf("writeTokenFile (stale): %v", err)
+	}
+
+	// Construct the command while the STALE token is on disk. A correct
+	// implementation does nothing with the file here — the flag's default
+	// stays "".
+	cmd := newClaudeCmd()
+
+	// The token is minted (or rotated) AFTER the command was built — e.g. a
+	// developer runs `rafiki user create` in another shell while `rafiki
+	// claude` is being invoked for the first time in a fresh process.
+	if err := writeTokenFile(paths.TokenFile(), "fresh-token"); err != nil {
+		t.Fatalf("writeTokenFile (fresh): %v", err)
+	}
+
+	flagToken, err := cmd.Flags().GetString("token")
+	if err != nil {
+		t.Fatalf("--token not registered: %v", err)
+	}
+	got, err := resolveClaudeToken(flagToken)
+	if err != nil {
+		t.Fatalf("resolveClaudeToken: %v", err)
+	}
+	if got != "fresh-token" {
+		t.Errorf("token = %q, want %q (resolution must happen at RunE time, not command-construction time)", got, "fresh-token")
+	}
+}
+
+// The three sources can all be present and mutually conflicting at once; only
+// short-circuit control flow guarantees the precedence order in that case,
+// and nothing exercised it before now (each link was covered pairwise:
+// flag-vs-nothing, env-vs-nothing, file-as-last-resort).
+func TestResolveClaudeToken_Precedence(t *testing.T) {
+	tests := []struct {
+		name      string
+		flagToken string
+		envToken  string
+		fileToken string
+		want      string
+	}{
+		{
+			name:      "flag wins over env and file, all three set and distinct",
+			flagToken: "from-flag",
+			envToken:  "from-env",
+			fileToken: "from-file",
+			want:      "from-flag",
+		},
+		{
+			name:      "env wins over file when flag is empty",
+			flagToken: "",
+			envToken:  "from-env",
+			fileToken: "from-file",
+			want:      "from-env",
+		},
+		{
+			name:      "file is the last resort when flag and env are both empty",
+			flagToken: "",
+			envToken:  "",
+			fileToken: "from-file",
+			want:      "from-file",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RAFIKI_TOKEN", tt.envToken)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			if err := writeTokenFile(paths.TokenFile(), tt.fileToken); err != nil {
+				t.Fatalf("writeTokenFile: %v", err)
+			}
+
+			got, err := resolveClaudeToken(tt.flagToken)
+			if err != nil {
+				t.Fatalf("resolveClaudeToken: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("token = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // pflag treats a bare "--" as the flag/arg terminator (unlike stdlib flag,
 // which the old FlagSet also honored the same way), so everything after it
 // must reach RunE as positional args untouched. This is what lets
