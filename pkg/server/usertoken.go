@@ -94,8 +94,18 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 			// Never relay a rafiki credential to the upstream provider: a
 			// client that puts the same token in both headers would ship
 			// our secret to a third party and get an opaque 401 back.
-			if _, err := a.resolve(r.Context(), strings.TrimPrefix(cred, "Bearer ")); err == nil {
+			switch _, err := a.resolve(r.Context(), strings.TrimPrefix(cred, "Bearer ")); {
+			case err == nil:
 				http.Error(w, "Authorization carries a rafiki token, not an upstream credential; passthrough auth needs your provider credential there", http.StatusUnauthorized)
+				return
+			case errors.Is(err, errAuthUnavailable):
+				// Could not check — which is not the same as "checked, and it
+				// is not ours". This guard exists to stop rafiki's own
+				// credential being shipped to a third party, so an
+				// unanswerable check fails CLOSED. Letting it through would
+				// mean a database blip is all it takes to leak the daemon's
+				// token upstream, where it earns an opaque 401 and no log.
+				http.Error(w, "identity store unavailable", http.StatusServiceUnavailable)
 				return
 			}
 			ctx = WithPassthroughCredential(ctx, cred)
