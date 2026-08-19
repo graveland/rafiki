@@ -32,7 +32,7 @@ func TestGlobToolMatchesAndSortsByMtimeDescending(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.go","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestGlobToolMatchesAndSortsByMtimeDescending(t *testing.T) {
 
 func TestGlobToolNoMatches(t *testing.T) {
 	dir := t.TempDir()
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.nope","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestGlobToolCapsAt200(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.txt","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestGlobToolRecursivePattern(t *testing.T) {
 	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"**/*.go","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func TestGlobToolAbsolutePatternInsideBase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	res, err := tool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"pattern":%q,"path":%q}`, filepath.Join(dir, "**", "*.go"), dir)))
 	if err != nil {
@@ -141,7 +141,7 @@ func TestGlobToolAbsolutePatternOutsideBase(t *testing.T) {
 	dir := t.TempDir()
 	other := t.TempDir()
 
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	_, err := tool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"pattern":%q,"path":%q}`, filepath.Join(other, "*.go"), dir)))
 	if err == nil {
@@ -164,7 +164,7 @@ func TestGlobToolRespectsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	_, err := tool.Execute(ctx, ToolInput(fmt.Sprintf(`{"pattern":"*.go","path":%q}`, dir)))
 	if err == nil {
 		t.Fatal("expected an error for an already-canceled context")
@@ -188,7 +188,7 @@ func TestGlobToolExcludesGitignoredFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := &GlbTool{}
+	tool := testGlobTool(t, "")
 	res, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"pattern":"*.txt","path":%q}`, dir)))
 	if err != nil {
 		t.Fatal(err)
@@ -199,5 +199,25 @@ func TestGlobToolExcludesGitignoredFiles(t *testing.T) {
 	}
 	if strings.Contains(out, "ignored.txt") {
 		t.Fatalf("expected ignored.txt to be excluded by .gitignore, got %q", out)
+	}
+}
+
+// TestGlobToolResolvesRelativePathAgainstCwd pins the fix for resolving a
+// relative base against the agent's materialized working directory rather
+// than the daemon's process cwd, which filepath.Abs used to do — and which
+// is a different directory whenever fundi runs in-process in the daemon.
+func TestGlobToolResolvesRelativePathAgainstCwd(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := testGlobTool(t, dir)
+	res, err := tool.Execute(context.Background(), ToolInput(`{"pattern":"*.go","path":"."}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Text, filepath.Join(dir, "a.go")) {
+		t.Fatalf("relative path \".\" should resolve against cwd and find a.go, got %q", res.Text)
 	}
 }

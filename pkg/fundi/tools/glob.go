@@ -33,26 +33,38 @@ const (
 		"hidden files are included, but .git itself is not searched."
 )
 
-func init() { DefaultBlueprint.Register(&GlbTool{}) }
+func init() { DefaultBlueprint.Register(&GlobBlueprint{}) }
 
-// GlbTool implements Tool for the glob filesystem search tool.
-type GlbTool struct{}
+// GlobBlueprint is the static metadata for the glob tool.
+type GlobBlueprint struct{}
 
-func (GlbTool) Name() string        { return "glob" }
-func (GlbTool) Description() string { return globDescription }
-func (GlbTool) InputSchema() Schema {
+func (GlobBlueprint) Name() string        { return "glob" }
+func (GlobBlueprint) Description() string { return globDescription }
+func (GlobBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "pattern", Type: "string", Description: "Glob pattern (doublestar syntax, supports **) to match file paths against. Relative to path — use \"**/*.go\", not an absolute path."},
-			{Name: "path", Type: "string", Description: "Base directory to search from. Required; must not be the filesystem root (\"/\")."},
+			{Name: "path", Type: "string", Description: "Base directory to search from (absolute or relative to the working directory). Required; must not be the filesystem root (\"/\")."},
 		},
 		Required: []string{"pattern", "path"},
 	}
 }
+func (GlobBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
+	panic("blueprint: call Materialize first")
+}
+
+func (GlobBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	return &globTool{GlobBlueprint: GlobBlueprint{}, cwd: opts.Cwd}, nil
+}
+
+type globTool struct {
+	GlobBlueprint
+	cwd string
+}
 
 // Execute finds files matching a glob pattern rooted at the given path.
-func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+func (gt *globTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var in globInput
 	if err := input.Unmarshal(&in); err != nil {
 		return ToolResult{}, fmt.Errorf("glob: invalid input: %w", err)
@@ -67,7 +79,11 @@ func (GlbTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error)
 		return ToolResult{}, err
 	}
 
-	base, err := filepath.Abs(in.Path)
+	// resolveToolPath, not filepath.Abs: Abs joins a relative path against
+	// the *daemon's* process cwd, but the agent's cwd comes from the spawn
+	// request, so the two are routinely different directories. Every other
+	// file tool resolves through this helper.
+	base, err := resolveToolPath(in.Path, "", gt.cwd)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("glob: %w", err)
 	}

@@ -297,9 +297,8 @@ func ConversationIDFromContext(ctx context.Context) string {
 }
 
 // Materializer is an optional extension of Tool that a blueprint implements
-// when its concrete Execute needs runtime state. Blueprints without runtime
-// state (glob, grep) are their own concrete tools and do not implement
-// Materializer.
+// when its concrete Execute needs runtime state. A blueprint with no such
+// state is its own concrete tool and does not implement Materializer.
 //
 // Returning (nil, nil) declines the tool for these opts: MaterializeAll leaves
 // it out of the Registry entirely. Use that instead of returning a tool that

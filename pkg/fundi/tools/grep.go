@@ -21,28 +21,40 @@ const (
 		"by default."
 )
 
-func init() { DefaultBlueprint.Register(&GrepTool{}) }
+func init() { DefaultBlueprint.Register(&GrepBlueprint{}) }
 
-// GrepTool implements Tool for the grep file-content search tool.
-type GrepTool struct{}
+// GrepBlueprint is the static metadata for the grep tool.
+type GrepBlueprint struct{}
 
-func (GrepTool) Name() string        { return "grep" }
-func (GrepTool) Description() string { return grepDescription }
-func (GrepTool) InputSchema() Schema {
+func (GrepBlueprint) Name() string        { return "grep" }
+func (GrepBlueprint) Description() string { return grepDescription }
+func (GrepBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "pattern", Type: "string", Description: "Regular expression (RE2 syntax) to search for."},
-			{Name: "path", Type: "string", Description: "File or directory to search. Required; must not be the filesystem root (\"/\")."},
+			{Name: "path", Type: "string", Description: "File or directory to search (absolute or relative to the working directory). Required; must not be the filesystem root (\"/\")."},
 			{Name: "glob", Type: "string", Description: "Optional glob pattern to restrict which files are searched, matched against each file's path relative to path. A pattern with no / (e.g. \"*.go\") matches by file name at any depth, like ripgrep's -g."},
 			{Name: "max_matches", Type: "integer", Description: "Maximum number of matches to return. Defaults to 100."},
 		},
 		Required: []string{"pattern", "path"},
 	}
 }
+func (GrepBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
+	panic("blueprint: call Materialize first")
+}
+
+func (GrepBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	return &grepTool{GrepBlueprint: GrepBlueprint{}, cwd: opts.Cwd}, nil
+}
+
+type grepTool struct {
+	GrepBlueprint
+	cwd string
+}
 
 // Execute searches file contents for a regular expression.
-func (GrepTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+func (gt *grepTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var in grepInput
 	if err := input.Unmarshal(&in); err != nil {
 		return ToolResult{}, fmt.Errorf("grep: invalid input: %w", err)
@@ -54,7 +66,11 @@ func (GrepTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error
 	if in.Path == "" {
 		return ToolResult{}, fmt.Errorf("grep: path is required")
 	}
-	base, err := filepath.Abs(in.Path)
+	// resolveToolPath, not filepath.Abs: Abs joins a relative path against
+	// the *daemon's* process cwd, but the agent's cwd comes from the spawn
+	// request, so the two are routinely different directories. Every other
+	// file tool resolves through this helper.
+	base, err := resolveToolPath(in.Path, "", gt.cwd)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("grep: %w", err)
 	}
