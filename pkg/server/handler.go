@@ -19,6 +19,7 @@ func (h *Handler) Mount(mux *http.ServeMux, wrap func(http.Handler) http.Handler
 	}
 	if h.Messages != nil {
 		mux.Handle("/v1/messages", wrap(h.Messages))
+		mux.Handle("/v1/messages/count_tokens", wrap(http.HandlerFunc(h.Messages.ServeCountTokens)))
 	}
 	if h.Chat != nil {
 		mux.Handle("/v1/chat/completions", wrap(h.Chat))

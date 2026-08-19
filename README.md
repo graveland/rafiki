@@ -646,8 +646,14 @@ make run                       # rafikid in the foreground, proxy face on :8035
 `/v1/chat/completions` handlers the old standalone `rafiki serve` used to, on
 the same port, so anything already pointed at a local rafiki keeps working —
 and pi and claude children get capture, failover and model resolution without
-a second process anyone has to remember to start. The fundi kind never uses
-it: it reaches the library in-process.
+a second process anyone has to remember to start. It also proxies the two
+Anthropic-protocol endpoints Claude Code calls beyond `/v1/messages`:
+`POST /v1/messages/count_tokens` (token counting, with the same model
+resolution and upstream routing) and `HEAD /api/hello` (a connectivity
+preflight probe). Both are recorded in `conversations.raw_http_request` when
+`RAFIKI_RECORD_REQUESTS=1`, but neither opens a capture turn — a token count
+and a probe are metadata, not turns. The fundi kind never uses the face: it
+reaches the library in-process.
 
 The face binds **all interfaces** by default (`RAFIKI_PROXY_LISTEN`, default
 `:8035`), so other hosts on your network can use one capture store and one set

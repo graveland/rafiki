@@ -225,8 +225,8 @@ func (p *MessagesProxy) SetFallback(orKey, orURL string, b *routing.Breaker) {
 // caller's inbound auth) and the caller's anthropic-version/anthropic-beta
 // headers. bearer selects the auth scheme: Anthropic's API takes the key in
 // x-api-key, OpenRouter takes it in Authorization: Bearer.
-func (p *MessagesProxy) doUpstream(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request) (*http.Response, error) {
-	return p.buildAndDo(ctx, url, key, bearer, reqBody, r, false, "")
+func (p *MessagesProxy) doUpstream(ctx context.Context, url, key, path string, bearer bool, reqBody []byte, r *http.Request) (*http.Response, error) {
+	return p.buildAndDo(ctx, url, key, path, bearer, reqBody, r, false, "")
 }
 
 // upstreamRequest is the OpenRouter variant: additionally forwards
@@ -235,12 +235,12 @@ func (p *MessagesProxy) doUpstream(ctx context.Context, url, key string, bearer 
 // conversation id) is used, so OpenRouter-routed traffic that never sets the
 // header (Claude Code) still gets a stable, correlatable pin. The Anthropic
 // primary never sees this header at all.
-func (p *MessagesProxy) upstreamRequest(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
-	return p.buildAndDo(ctx, url, key, bearer, reqBody, r, true, convID)
+func (p *MessagesProxy) upstreamRequest(ctx context.Context, url, key, path string, bearer bool, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
+	return p.buildAndDo(ctx, url, key, path, bearer, reqBody, r, true, convID)
 }
 
-func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer bool, reqBody []byte, r *http.Request, forwardSession bool, convID string) (*http.Response, error) {
-	up, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/v1/messages", bytes.NewReader(reqBody))
+func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key, path string, bearer bool, reqBody []byte, r *http.Request, forwardSession bool, convID string) (*http.Response, error) {
+	up, err := http.NewRequestWithContext(ctx, http.MethodPost, url+path, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func (p *MessagesProxy) buildAndDo(ctx context.Context, url, key string, bearer 
 // direct path for user-requested slash (OpenRouter-native) models. OpenRouter
 // authenticates via Authorization: Bearer (its universal convention), not
 // Anthropic's x-api-key.
-func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
+func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, reqBody []byte, r *http.Request, convID string) (*http.Response, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(reqBody, &payload); err != nil {
 		return nil, err
@@ -327,7 +327,7 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, reqBody []byte, r *htt
 	if err != nil {
 		return nil, err
 	}
-	resp, err := p.upstreamRequest(ctx, p.orURL, p.orKey, true /* bearer */, rewritten, r, convID)
+	resp, err := p.upstreamRequest(ctx, p.orURL, p.orKey, path, true /* bearer */, rewritten, r, convID)
 	return resp, err
 }
 
@@ -439,7 +439,7 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Content-Type must be — see the guard in streamAndCapture.
 	stream := requestsStream(reqBody)
 
-	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, cr)
+	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, "/v1/messages", cr)
 	if handled {
 		return // selectUpstream already wrote the response and resolved the turn
 	}
@@ -455,7 +455,7 @@ func (p *MessagesProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// untouched, so the begun capture still describes this turn.
 	if resp.StatusCode == http.StatusBadRequest {
 		if retryBody, ok := p.effortRetry(resp, reqBody, model); ok {
-			resp, upstream, err, handled = p.selectUpstream(w, r, retryBody, model, cr)
+			resp, upstream, err, handled = p.selectUpstream(w, r, retryBody, model, "/v1/messages", cr)
 			if handled {
 				return
 			}
@@ -568,7 +568,7 @@ func (p *MessagesProxy) primaryOutOfCredit(resp *http.Response, status int) bool
 // directly when the breaker is open. handled=true means it already wrote the
 // response (a config error, not an upstream call) and resolved any begun
 // turn; the caller must just return.
-func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, reqBody []byte, model string, cr captureRef) (resp *http.Response, upstream string, err error, handled bool) {
+func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, reqBody []byte, model, path string, cr captureRef) (resp *http.Response, upstream string, err error, handled bool) {
 	passthrough := PassthroughCredential(r.Context()) != ""
 	if strings.Contains(model, "/") {
 		if passthrough {
@@ -588,19 +588,19 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			http.Error(w, "openrouter not configured for model "+model, http.StatusBadGateway)
 			return nil, "", nil, true
 		}
-		resp, err = p.doOpenRouter(r.Context(), reqBody, r, cr.convID)
+		resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
 		return resp, "openrouter", err, false
 	}
 	if passthrough {
 		// No breaker and no failover: every fallback path this function owns
 		// leads to OpenRouter on rafiki's key. An upstream error surfaces to
 		// the caller verbatim instead.
-		resp, err = p.doUpstream(r.Context(), p.upstreamURL, "" /*key unused; the credential comes from the context*/, false, reqBody, r)
+		resp, err = p.doUpstream(r.Context(), p.upstreamURL, "" /*key unused; the credential comes from the context*/, path, false, reqBody, r)
 		return resp, "anthropic", err, false
 	}
 	now := time.Now()
 	if p.breaker == nil || p.breaker.UsePrimary(now) {
-		resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, false /* x-api-key */, reqBody, r)
+		resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false /* x-api-key */, reqBody, r)
 		if p.breaker == nil {
 			return resp, "anthropic", err, false
 		}
@@ -627,7 +627,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			}
 			p.logger.Warn("proxy: primary failed, retrying before failover",
 				"attempt", i+1, "status", status, "error", err)
-			resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, false, reqBody, r)
+			resp, err = p.doUpstream(r.Context(), p.upstreamURL, p.apiKey, path, false, reqBody, r)
 			status = statusOf(resp)
 			primaryFailed = routing.ClassifyFailure(status, err)
 		}
@@ -644,7 +644,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		if resp != nil {
 			resp.Body.Close()
 		}
-		resp, err = p.doOpenRouter(r.Context(), reqBody, r, cr.convID)
+		resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
 		return resp, "openrouter", err, false
 	}
 	if p.orKey == "" {
@@ -652,7 +652,7 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 		http.Error(w, "no upstream available", http.StatusBadGateway)
 		return nil, "", nil, true
 	}
-	resp, err = p.doOpenRouter(r.Context(), reqBody, r, cr.convID)
+	resp, err = p.doOpenRouter(r.Context(), path, reqBody, r, cr.convID)
 	return resp, "openrouter", err, false
 }
 
@@ -1220,4 +1220,120 @@ func upstreamRespHeaders(resp *http.Response) json.RawMessage {
 	}
 	out, _ := json.Marshal(h)
 	return out
+}
+
+// maxPassthroughBody caps how much of a small passthrough response is buffered
+// for forwarding and raw-trace recording. count_tokens and the hello probe
+// return tiny JSON bodies; the cap only guards against a pathological upstream.
+const maxPassthroughBody = 1 << 20 // 1 MiB
+
+// shouldRecord reports whether raw request/response capture is on for this
+// request: either globally (RAFIKI_RECORD_REQUESTS=1) or per-session via the
+// X-Rafiki-Record-Requests header.
+func (p *MessagesProxy) shouldRecord(r *http.Request) bool {
+	return p.rawTrace != nil && (p.rawTraceAll || r.Header.Get("X-Rafiki-Record-Requests") == "1")
+}
+
+// ServeCountTokens proxies Anthropic's token-counting endpoint
+// (/v1/messages/count_tokens). It shares the /v1/messages model resolution and
+// upstream routing (primary + breaker + OpenRouter failover), but it does NOT
+// open a capture turn: a token count is metadata, not a conversation turn. The
+// response is streamed back verbatim and, when request recording is on, the
+// pair is written to the raw trace store.
+func (p *MessagesProxy) ServeCountTokens(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	reqBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+	reqBody, model, err := p.resolveAndAdapt(reqBody)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	const path = "/v1/messages/count_tokens"
+	resp, upstream, err, handled := p.selectUpstream(w, r, reqBody, model, path, captureRef{})
+	if handled {
+		return
+	}
+	if err != nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	p.forwardPassthrough(w, r, resp, upstream, model, path, reqBody, start)
+}
+
+// ServeHello proxies the Anthropic connectivity preflight probe Claude Code
+// sends as HEAD /api/hello. It forwards the request to the Anthropic primary
+// with no model resolution or failover — a probe that fails when the primary is
+// unreachable is the correct answer — and records the pair when request
+// recording is on.
+func (p *MessagesProxy) ServeHello(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	reqBody, _ := io.ReadAll(r.Body) // a probe carries no body; read anyway so recording sees any bytes
+	up, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstreamURL+r.URL.Path, bytes.NewReader(reqBody))
+	if err != nil {
+		http.Error(w, "build upstream request", http.StatusInternalServerError)
+		return
+	}
+	if v := r.Header.Get("anthropic-version"); v != "" {
+		up.Header.Set("anthropic-version", v)
+	}
+	if b := r.Header.Get("anthropic-beta"); b != "" {
+		up.Header.Set("anthropic-beta", b)
+	}
+	resp, err := p.httpClient.Do(up)
+	if err != nil {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	p.forwardPassthrough(w, r, resp, "anthropic", "", r.URL.Path, reqBody, start)
+}
+
+// forwardPassthrough copies a small, non-streamed upstream response back to the
+// client and, when request recording is on, captures the request/response pair
+// in the raw trace store. It deliberately does NOT open a capture turn: these
+// are metadata endpoints (token counting, connectivity probes), not
+// conversation turns. HEAD responses carry no body, so the body is written only
+// for other methods.
+func (p *MessagesProxy) forwardPassthrough(w http.ResponseWriter, r *http.Request, resp *http.Response, upstream, model, path string, reqBody []byte, start time.Time) {
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, maxPassthroughBody))
+	if rerr != nil {
+		p.logger.Warn("proxy: passthrough read failed", "path", path, "error", rerr)
+	}
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if r.Method != http.MethodHead {
+		if _, werr := w.Write(raw); werr != nil {
+			p.logger.Warn("proxy: passthrough write failed", "path", path, "error", werr)
+		}
+	}
+	if !p.shouldRecord(r) {
+		return
+	}
+	respStatus := resp.StatusCode
+	// Detached: recording must not fail with the request's context, and it is
+	// best-effort — a slow insert must not stall the probe.
+	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	_ = p.rawTrace.Insert(capCtx, rawtrace.RawHTTPRequest{
+		Source:      "proxy",
+		Model:       model,
+		Upstream:    upstream,
+		ReqMethod:   r.Method,
+		ReqPath:     path,
+		ReqHeaders:  upstreamReqHeaders(r),
+		ReqBody:     reqBody,
+		RespStatus:  &respStatus,
+		RespHeaders: upstreamRespHeaders(resp),
+		RespBody:    raw,
+		LatencyMS:   int(time.Since(start).Milliseconds()),
+	})
 }

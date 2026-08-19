@@ -41,7 +41,9 @@ func TestUnroutedRequestsAreLoggedOnceEach(t *testing.T) {
 	out := buf.String()
 	mu.Unlock()
 
-	if n := strings.Count(out, "count_tokens"); n != 1 {
+	// The dedup key is method+path; count the logged `path=` attribute rather than
+	// the bare substring, which now also appears in the "serves" list.
+	if n := strings.Count(out, "path=/v1/messages/count_tokens"); n != 1 {
 		t.Errorf("count_tokens logged %d times, want exactly 1 — a path hit every turn must not flood the log", n)
 	}
 	if !strings.Contains(out, "/api/hello") {
