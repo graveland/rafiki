@@ -18,6 +18,11 @@ import (
 // would pass even if one of those overwrites clobbered SkillsDirs/MCPConfig on
 // its way out.
 func TestResumeFromPiSessionRequest_ForwardsSkillsDirAndMCPConfig(t *testing.T) {
+	// Isolate from a real RAFIKI_URL in the ambient environment (e.g. a dev
+	// shell pointed at a remote daemon) — this test exercises the jsonl-cwd
+	// fallback, not the remote-requires-explicit-cwd guard.
+	t.Setenv("RAFIKI_URL", "")
+
 	dir := t.TempDir()
 	sessionPath := filepath.Join(dir, "session.jsonl")
 	content := `{"type":"session","id":"test-uuid-skills","cwd":"/some/project"}
