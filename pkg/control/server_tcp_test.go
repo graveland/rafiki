@@ -209,10 +209,30 @@ func writeJSONFrame(t *testing.T, conn net.Conn, v any) {
 	writeFrameTo(t, conn, v)
 }
 
+// testReaders keeps ONE FrameReader per connection for the whole test run.
+//
+// These helpers used to build a fresh reader on every call — inside the very
+// tests that exist to prove a second reader loses pipelined bytes. It happened
+// to work only because WriteFrame issues two Writes and a tls.Conn read never
+// spans two records, so a per-frame reader could not over-read into the next
+// response. That is an accident of the current write path, not a property: a
+// server that buffered its writes would strand the second response inside a
+// discarded reader's buffer and the test would hang rather than fail. One
+// reader per conn removes the dependency entirely.
+var testReaders sync.Map // net.Conn -> *protocol.FrameReader
+
+func readerFor(conn net.Conn) *protocol.FrameReader {
+	if r, ok := testReaders.Load(conn); ok {
+		return r.(*protocol.FrameReader)
+	}
+	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
+	actual, _ := testReaders.LoadOrStore(conn, r)
+	return actual.(*protocol.FrameReader)
+}
+
 func readFrameString(t *testing.T, conn net.Conn) string {
 	t.Helper()
-	fr := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
-	frame, err := fr.ReadFrame()
+	frame, err := readerFor(conn).ReadFrame()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
