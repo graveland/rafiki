@@ -508,6 +508,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
+| `RAFIKI_EXECUTOR_SELECTOR` | client-side: default label selector for `rafiki create --executor-selector`, choosing an executor from the daemon's enrolled pool (e.g. `owner=brent`). Wins over `RAFIKI_EXECUTOR_SOCKET` when both are set — the pool is the path the daemon can audit. Unset means no selector, and the child's filesystem and shell tools run in-process on the daemon's own host |
 
 **Web access (webfetch / websearch).** The fundi runtime includes two opt-in web
 tools: `webfetch` fetches a URL and returns its text, and `websearch` queries
