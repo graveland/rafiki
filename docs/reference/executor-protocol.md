@@ -2,7 +2,7 @@
 
 The daemon dispatches filesystem and shell tool calls to an executor process
 (`rafiki executor serve`) over Connect RPC. This document describes the wire
-protocol: the seven RPCs, their message shapes, the four failure codes, the
+protocol: the eight RPCs, their message shapes, the four failure codes, the
 background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 
 There are three transports for the same protocol, and they differ only in what
@@ -120,7 +120,7 @@ DSN, a hostname or a query; the real error goes to rafikid's log.
 
 ## RPCs
 
-All seven RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
+All eight RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
 
 ### Describe
 
@@ -220,6 +220,31 @@ track of a workspace must be able to release it again without error. A
 released workspace kills **its own** background jobs — a job in a released
 workspace is not a job, and reporting it as running is worse than reporting it
 gone. It must not touch any other workspace's jobs.
+
+### ProjectContext
+
+```
+ProjectContext(workspaceId) → { contextFiles }
+```
+
+Unary. Returns the instruction files belonging to a workspace: `CLAUDE.md` and
+`AGENTS.md` at the git root and at the workdir, concatenated with a blank line
+between sections. An `@include` reference in any of them is expanded **on the
+executor** — it names a path on that filesystem, which the daemon cannot
+resolve — so the returned text is fully inlined, never a dangling `@` line.
+
+It takes a `workspaceId`, not a path, for the same reason `Execute` does: a
+request naming a directory would let the daemon — or anything that reached the
+executor — read instruction files anywhere on the machine. The workspace handle
+already scopes it. An unknown handle is `CodeNotFound`, answered rather than
+resolved against the executor's root, or the handle is a formality.
+
+Empty `contextFiles` is the **ordinary** answer — most workspaces have neither
+file — and is not an error. It is a separate call rather than a field on
+`ProvisionResponse` because it returns content, and content is unbounded where
+a workspace handle is not: a large `CLAUDE.md` would make every provision pay
+for it. It is separate from `Describe` for a different reason — `Describe` is
+per-executor and this is per-workspace.
 
 ### Cancel
 
