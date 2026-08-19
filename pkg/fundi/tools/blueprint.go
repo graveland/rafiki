@@ -137,7 +137,7 @@ func (br *BlueprintRegistry) MaterializeOnly(opts ToolOpts, names []string) *Reg
 //
 // ExecutorLocalTools, NOT RoutedToExecutor: bash_start/bash_output/bash_kill
 // are already RPC-backed tools. Proxying them would dispatch bash_start to
-// the executor's own registry, which serves only the six local tools.
+// the executor's own registry, which does not contain it.
 func routedSet() map[string]bool {
 	s := make(map[string]bool, 6)
 	for _, name := range ExecutorLocalTools() {
