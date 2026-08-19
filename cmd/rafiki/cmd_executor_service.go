@@ -70,7 +70,8 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  runExecutorServiceInstall,
 	}
-	cmd.Flags().String("connect", "", "daemon executor endpoint to dial (host:port) — required")
+	cmd.Flags().String("connect", "", "daemon executor endpoint to dial (host:port)")
+	cmd.Flags().String("connect-socket", "", "rafikid executor socket on this machine (unix path)")
 	cmd.Flags().String("root", "", "working directory root the executor serves (default: current directory)")
 	cmd.Flags().String("enroll-token", "", "one-time enrollment token, for the first connect")
 	cmd.Flags().String("credential", "", "durable credential, for a machine that keeps no file")
@@ -88,8 +89,19 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 
 func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	connect, _ := cmd.Flags().GetString("connect")
-	if connect == "" {
-		return fmt.Errorf("--connect is required: an executor service has to know which daemon to dial")
+	connectSocket, _ := cmd.Flags().GetString("connect-socket")
+
+	modes := 0
+	for _, set := range []bool{connect != "", connectSocket != ""} {
+		if set {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return fmt.Errorf("--connect and --connect-socket are mutually exclusive")
+	}
+	if modes == 0 {
+		return fmt.Errorf("one of --connect or --connect-socket is required")
 	}
 	enrollToken, _ := cmd.Flags().GetString("enroll-token")
 	credential, _ := cmd.Flags().GetString("credential")
@@ -122,7 +134,12 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	args := []string{"executor", "serve", "--connect", connect, "--root", resolvedRoot}
+	args := []string{"executor", "serve", "--root", resolvedRoot}
+	if connectSocket != "" {
+		args = append(args, "--connect-socket", connectSocket)
+	} else {
+		args = append(args, "--connect", connect)
+	}
 
 	// The enrollment token is deliberately NOT baked into the unit. It is
 	// one-time and short-lived, so a unit carrying it is a file full of a secret
@@ -174,7 +191,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	// a consumed token and no credential — recoverable only by minting another.
 	if enrollToken != "" && !credFileExists(credentialFile) {
 		fmt.Println("Enrolling once before installing the service…")
-		if err := enrollOnce(connect, cmd, enrollToken, credentialFile, resolvedRoot); err != nil {
+		if err := enrollOnce(connect, connectSocket, cmd, enrollToken, credentialFile, resolvedRoot); err != nil {
 			return fmt.Errorf("enroll: %w", err)
 		}
 		fmt.Printf("Enrolled. Credential: %s\n", credentialFile)
@@ -194,7 +211,7 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 // the token is one-time, so if the service manager restarts the unit before
 // that run has written the credential file, the machine is left holding a
 // consumed token and no credential — recoverable only by minting another.
-func enrollOnce(connect string, cmd *cobra.Command, token, credentialFile, root string) error {
+func enrollOnce(connect, connectSocket string, cmd *cobra.Command, token, credentialFile, root string) error {
 	pinCert, _ := cmd.Flags().GetString("pin-cert")
 	serverName, _ := cmd.Flags().GetString("server-name")
 
@@ -210,8 +227,7 @@ func enrollOnce(connect string, cmd *cobra.Command, token, credentialFile, root 
 
 	connErr := make(chan error, 1)
 	go func() {
-		connErr <- execpool.Connect(ctx, execpool.ConnectOptions{
-			Addr:           connect,
+		opts := execpool.ConnectOptions{
 			PinCert:        pinCert,
 			ServerName:     serverName,
 			EnrollToken:    token,
@@ -220,7 +236,13 @@ func enrollOnce(connect string, cmd *cobra.Command, token, credentialFile, root 
 				"os": runtime.GOOS, "arch": runtime.GOARCH, "version": version.String(),
 			},
 			Handler: executorHandler(srv),
-		})
+		}
+		if connectSocket != "" {
+			opts.SocketPath = connectSocket
+		} else {
+			opts.Addr = connect
+		}
+		connErr <- execpool.Connect(ctx, opts)
 	}()
 
 	deadline := time.After(30 * time.Second)
