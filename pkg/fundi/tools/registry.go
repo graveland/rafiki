@@ -255,6 +255,14 @@ type ToolOpts struct {
 	// which is the default and preserves today's behaviour exactly.
 	Executor ExecutorClient
 
+	// ExecutorTools, when non-nil, is the exact set of tool names the configured
+	// executor serves (its Describe.tools). nil means the set is unknown — the
+	// legacy socket path, or a pool that has not reported Describe — and routing
+	// is left unfiltered. A routed tool absent from a non-nil set is omitted from
+	// the registry rather than proxied to an executor that will answer
+	// "unknown tool".
+	ExecutorTools map[string]bool
+
 	// Agents, when non-nil, lets this agent spawn and steer its own
 	// descendants. nil means the six agent_* tools decline to materialize —
 	// the SkillBlueprint rule, not the Tasks rule: an agent with no spawner

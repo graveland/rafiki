@@ -88,6 +88,14 @@ func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 		// — the model sees an identical surface — but Execute forwards to
 		// the executor process instead of running in-process.
 		if opts.Executor != nil && routeSet[t.Name()] {
+			// The daemon knows the chosen executor's served set (Describe.tools).
+			// A routed tool that set does not contain would be proxied to a
+			// registry that answers "unknown tool", so omit it from the child's
+			// envelope instead. nil means unknown (the socket path) and leaves
+			// routing unfiltered, preserving the pre-Describe behaviour.
+			if opts.ExecutorTools != nil && !opts.ExecutorTools[t.Name()] {
+				continue
+			}
 			t = &executorProxy{tool: t, client: opts.Executor}
 		}
 

@@ -162,9 +162,11 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	}
 
 	// Provision workspace when using a label-selected executor.
+	var execID string
 	if req.ExecutorSelector != "" && c.execPool != nil {
-		execID, _, selErr := c.selectExecutorID(req)
+		id, _, selErr := c.selectExecutorID(req)
 		if selErr == nil {
+			execID = id
 			wsID, wsInfo, wsExec, wsErr := c.provisionWorkspace(context.Background(), req, execID)
 			if wsErr != nil {
 				return fundi.RuntimeOptions{}, fmt.Errorf("workspace: %w", wsErr)
@@ -200,6 +202,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	}
 
 	ro.Executor = exec
+	ro.ExecutorTools = c.executorToolsFor(execID)
 	return ro, nil
 }
 
