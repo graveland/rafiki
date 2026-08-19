@@ -37,8 +37,7 @@ func TestDescribeReportsCapabilities(t *testing.T) {
 	if m.Platform != runtime.GOOS+"/"+runtime.GOARCH {
 		t.Errorf("Platform = %q; want %s/%s", m.Platform, runtime.GOOS, runtime.GOARCH)
 	}
-	want := []string{"read", "write", "edit", "glob", "grep", "bash",
-		"bash_start", "bash_output", "bash_kill"}
+	want := []string{"read", "write", "edit", "glob", "grep", "ls", "bash"}
 	got := map[string]bool{}
 	for _, tool := range m.Tools {
 		got[tool] = true
@@ -46,6 +45,13 @@ func TestDescribeReportsCapabilities(t *testing.T) {
 	for _, w := range want {
 		if !got[w] {
 			t.Errorf("Describe omits tool %q — the parent uses this list to decide what to route", w)
+		}
+	}
+	// Parent-side tools are RPCs the daemon implements itself; the executor's
+	// registry does not contain them, so Describe must not claim it does.
+	for _, p := range []string{"bash_start", "bash_output", "bash_kill", "task_add", "web_search"} {
+		if got[p] {
+			t.Errorf("Describe claims parent-side tool %q, which this registry does not serve", p)
 		}
 	}
 	if len(m.Roots) != 1 || m.Roots[0] != root {

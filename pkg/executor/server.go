@@ -189,10 +189,27 @@ func (s *Server) Describe(
 		Platform:           runtime.GOOS + "/" + runtime.GOARCH,
 		Roots:              []string{s.opts.Root},
 		Concurrency:        int32(s.opts.Concurrency),
-		Tools:              tools.RoutedToExecutor(),
+		Tools:              s.servedTools(),
 		Version:            s.opts.Version,
 		SelfReportedLabels: s.labels,
 	}), nil
+}
+
+// servedTools returns the tool names this executor's registry actually holds.
+//
+// This is the truth Describe advertises. The static RoutedToExecutor() includes
+// the parent-side background-job verbs (which this registry does not contain)
+// and the lsp_* family even when no language server is installed, so using it
+// here over-claimed both. The parent builds a child's tools[] from this list,
+// so it must be exactly what Execute can run.
+func (s *Server) servedTools() []string {
+	names := make([]string, 0, 16)
+	for _, def := range s.reg.Definitions() {
+		if def.OfTool != nil {
+			names = append(names, def.OfTool.Name)
+		}
+	}
+	return names
 }
 
 func (s *Server) Health(
