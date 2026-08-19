@@ -92,6 +92,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("max-depth", -1, "how many further levels of agents this child may spawn (0 = none; default 1). Bounded absolutely by the daemon's RAFIKI_MAX_DEPTH")
 	cmd.Flags().Float64("max-cost", -1, "USD budget for this child's whole subtree (unset = unlimited)")
 	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 4)")
+	cmd.Flags().String("executor-selector", paths.Get(paths.ExecutorSelector),
+		"label selector choosing an executor from the daemon's pool to run this agent's filesystem and shell tools on (e.g. owner=brent,env=home); also see RAFIKI_EXECUTOR_SELECTOR")
 	cmd.Flags().String("executor-socket", paths.Get(paths.ExecutorSocket),
 		"unix socket of a rafiki-executor to run this agent's filesystem and shell tools in")
 
@@ -248,6 +250,12 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		v, _ := cmd.Flags().GetInt("max-children")
 		req.MaxChildren = &v
 	}
+	// Read unconditionally rather than behind Flags().Changed(): the flag's
+	// default already carries RAFIKI_EXECUTOR_SELECTOR, and Changed() reports
+	// whether the user typed the flag, not whether the value is meaningful. The
+	// executor-socket block below has that bug and is fixed separately.
+	req.ExecutorSelector, _ = cmd.Flags().GetString("executor-selector")
+
 	if cmd.Flags().Changed("executor-socket") {
 		req.ExecutorSocket, _ = cmd.Flags().GetString("executor-socket")
 	}
