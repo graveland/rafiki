@@ -39,6 +39,10 @@ func TestProxyChildEnv_NeverRoutesAgent(t *testing.T) {
 }
 
 func TestProxyChildEnv_Claude(t *testing.T) {
+	// An ambient RAFIKI_URL (e.g. a dev shell pointed at a remote daemon)
+	// deliberately overrides ctl.proxyURL — isolate from it so this test's
+	// outcome doesn't depend on who is running it.
+	t.Setenv(paths.URL, "")
 	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
 	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}, "c_abc"))
@@ -70,6 +74,8 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 // pi has no ANTHROPIC_BASE_URL equivalent — it reads these in the rafiki-helpers
 // extension, where its provider override is registered.
 func TestProxyChildEnv_Pi(t *testing.T) {
+	// See TestProxyChildEnv_Claude: isolate from an ambient RAFIKI_URL.
+	t.Setenv(paths.URL, "")
 	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
 	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindPi}, "c_xyz"))
