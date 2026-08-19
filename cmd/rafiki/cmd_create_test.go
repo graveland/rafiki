@@ -499,3 +499,45 @@ func TestBuildSpawnRequest_ExecutorSelectorFlagBeatsEnv(t *testing.T) {
 		t.Errorf("ExecutorSelector = %q, want the flag value %q", req.ExecutorSelector, "env=ci")
 	}
 }
+
+// RAFIKI_EXECUTOR_SOCKET is documented in .env.example and pkg/paths as
+// applying when the flag is not given. Gating the read on Flags().Changed()
+// made that false: Changed() reports whether the user typed the flag, so the
+// computed default was unreachable and the variable did nothing, silently.
+//
+// t.Setenv MUST precede newTestCreateCmd — addSpawnFlags reads the environment
+// when it registers the flag.
+func TestBuildSpawnRequest_ExecutorSocketFromEnv(t *testing.T) {
+	t.Setenv(paths.ExecutorSocket, "/run/rafiki/exec.sock")
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ExecutorSocket != "/run/rafiki/exec.sock" {
+		t.Errorf("ExecutorSocket = %q, want the env default", req.ExecutorSocket)
+	}
+}
+
+// With neither flag nor environment, the field stays empty — no executor.
+func TestBuildSpawnRequest_ExecutorSocketUnsetIsEmpty(t *testing.T) {
+	t.Setenv(paths.ExecutorSocket, "")
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ExecutorSocket != "" {
+		t.Errorf("ExecutorSocket = %q, want empty", req.ExecutorSocket)
+	}
+}

@@ -250,15 +250,14 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		v, _ := cmd.Flags().GetInt("max-children")
 		req.MaxChildren = &v
 	}
-	// Read unconditionally rather than behind Flags().Changed(): the flag's
-	// default already carries RAFIKI_EXECUTOR_SELECTOR, and Changed() reports
-	// whether the user typed the flag, not whether the value is meaningful. The
-	// executor-socket block below has that bug and is fixed separately.
+	// Read unconditionally rather than behind Flags().Changed(): the flag
+	// defaults already carry RAFIKI_EXECUTOR_SELECTOR / RAFIKI_EXECUTOR_SOCKET,
+	// and Changed() reports whether the user typed the flag, not whether the
+	// value is meaningful — so gating on it makes a computed default
+	// unreachable.
 	req.ExecutorSelector, _ = cmd.Flags().GetString("executor-selector")
 
-	if cmd.Flags().Changed("executor-socket") {
-		req.ExecutorSocket, _ = cmd.Flags().GetString("executor-socket")
-	}
+	req.ExecutorSocket, _ = cmd.Flags().GetString("executor-socket")
 
 	return req, nil
 }
