@@ -44,6 +44,31 @@ func TestParseControlURLRequiresHTTPS(t *testing.T) {
 	}
 }
 
+// TestDialAddr covers the port defaulting DialURL relies on: url.URL leaves
+// an unspecified port out of u.Host, and net.Dial rejects a bare hostname
+// with "missing port in address" — the failure a plain
+// RAFIKI_URL=https://host (no :443) used to hit before dialAddr existed.
+func TestDialAddr(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{"https://host", "host:443"},
+		{"https://host:443", "host:443"},
+		{"https://host:8443", "host:8443"},
+		{"https://[::1]", "[::1]:443"},
+		{"https://[::1]:9443", "[::1]:9443"},
+	} {
+		u, err := parseControlURL(tc.raw)
+		if err != nil {
+			t.Fatalf("parseControlURL(%q): %v", tc.raw, err)
+		}
+		if got := dialAddr(u); got != tc.want {
+			t.Errorf("dialAddr(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
 // sendAuthFrame is the exact code DialURL calls once the TLS dial and
 // upgrade have succeeded — testing it directly here sidesteps the fact that
 // DialURL itself only ever trusts system root CAs, so a self-signed test
