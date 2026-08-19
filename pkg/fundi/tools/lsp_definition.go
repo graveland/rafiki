@@ -31,7 +31,7 @@ func (LSPDefinitionBlueprint) Execute(context.Context, ToolInput) (ToolResult, e
 }
 
 func (LSPDefinitionBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	if opts.LSP == nil {
+	if lspUnavailable(opts) {
 		return nil, nil
 	}
 	return &lspDefinitionTool{LSPDefinitionBlueprint: LSPDefinitionBlueprint{}, lsp: opts.LSP, cwd: opts.Cwd}, nil

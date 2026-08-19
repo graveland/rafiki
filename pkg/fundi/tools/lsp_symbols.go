@@ -31,7 +31,7 @@ func (LSPSymbolsBlueprint) Execute(context.Context, ToolInput) (ToolResult, erro
 }
 
 func (LSPSymbolsBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	if opts.LSP == nil {
+	if lspUnavailable(opts) {
 		return nil, nil
 	}
 	return &lspSymbolsTool{LSPSymbolsBlueprint: LSPSymbolsBlueprint{}, lsp: opts.LSP, cwd: opts.Cwd}, nil

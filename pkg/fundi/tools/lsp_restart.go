@@ -30,7 +30,7 @@ func (LSPRestartBlueprint) Execute(context.Context, ToolInput) (ToolResult, erro
 }
 
 func (LSPRestartBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	if opts.LSP == nil {
+	if lspUnavailable(opts) {
 		return nil, nil
 	}
 	return &lspRestartTool{LSPRestartBlueprint: LSPRestartBlueprint{}, lsp: opts.LSP, cwd: opts.Cwd}, nil

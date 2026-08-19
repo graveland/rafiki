@@ -40,7 +40,7 @@ func (LSPDiagnosticsBlueprint) Execute(context.Context, ToolInput) (ToolResult, 
 }
 
 func (LSPDiagnosticsBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	if opts.LSP == nil {
+	if lspUnavailable(opts) {
 		return nil, nil // decline: no language server configured
 	}
 	return &lspDiagnosticsTool{LSPDiagnosticsBlueprint: LSPDiagnosticsBlueprint{}, lsp: opts.LSP, cwd: opts.Cwd}, nil
