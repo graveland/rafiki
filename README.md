@@ -491,6 +491,14 @@ rafiki follows the XDG base directories:
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `presets.json`) | `$XDG_CONFIG_HOME` |
 
+**Instruction files come from two machines.** The user-global instructions file
+(`$RAFIKI_INSTRUCTIONS`, else `~/.config/rafiki/instructions.md`) belongs to
+whoever runs the agent loop, so the daemon reads it from its own disk. Project
+instructions — `CLAUDE.md` and `AGENTS.md` at the git root and at the working
+directory — belong to the *workspace*, so when the workspace lives on an
+executor the daemon asks that executor for them over the `ProjectContext` RPC
+rather than reading a path that does not exist there.
+
 Its launchd/systemd service identity is `dev.graveland.rafiki` / `rafiki`.
 
 The one thing rafiki writes outside its own directories is the `rafiki-helpers`
