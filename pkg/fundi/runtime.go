@@ -2,7 +2,6 @@ package fundi
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -236,7 +235,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 			return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
 		}
 		var err error
-		lspCfg, err = loadLSPConfig(opts.LSPConfig)
+		lspCfg, err = lsp.LoadConfig(opts.LSPConfig)
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
 		}
@@ -337,20 +336,4 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		mcpShutdown()
 		engShutdown()
 	}, nil
-}
-
-// loadLSPConfig reads and decodes an LSP server configuration file.
-func loadLSPConfig(path string) (lsp.Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return lsp.Config{}, err
-	}
-	var cfg lsp.Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return lsp.Config{}, fmt.Errorf("runtime: invalid lsp config: %w", err)
-	}
-	if cfg.Servers == nil {
-		cfg.Servers = make(map[string]lsp.ServerConfig)
-	}
-	return cfg, nil
 }
