@@ -19,6 +19,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/fundi/lsp"
+	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 )
 
@@ -44,6 +46,16 @@ type Options struct {
 	// JobOutputBudget is how many bytes of retained background-job output one
 	// workspace may hold. Zero means defaultJobBudget.
 	JobOutputBudget int64
+	// LSPConfig is the path to an lsp.json describing language servers this
+	// executor may start. Empty means auto-detect what is installed on PATH.
+	//
+	// The executor is the right place to decide this and the child is not: the
+	// child cannot know what toolchain is installed on a machine it has never
+	// seen, which is the same reasoning that made RTK an executor option.
+	LSPConfig string
+
+	// NoLSP disables language servers entirely on this executor.
+	NoLSP bool
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -56,6 +68,7 @@ type Server struct {
 	jobs   *jobRegistry
 	sem    chan struct{} // bounds concurrent Execute calls
 	wsReg  *workspaceRegistry
+	lsp    *lsp.Manager
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
@@ -71,8 +84,19 @@ func NewServer(opts Options) *Server {
 	}
 	// MaterializeOnly, not MaterializeAll: the full blueprint would give the
 	// executor the parent's credentialed tools and a nil task store.
-	reg := tools.DefaultBlueprint.MaterializeOnly(
-		toolOptsFor(opts, tools.NewFileTracker()), tools.ExecutorLocalTools())
+	tracker := tools.NewFileTracker()
+	opt := toolOptsFor(opts, tracker)
+
+	// Language servers run HERE because the files are here. A manager started
+	// in the daemon would index the daemon's filesystem and answer about files
+	// the agent is not editing — and lsp_rename would write to them.
+	lspMgr := newLSPManager(opts)
+	if lspMgr != nil {
+		opt.LSP = lspadapter.New(lspMgr, tracker)
+		opt.FileChanged = lspMgr
+	}
+
+	reg := tools.DefaultBlueprint.MaterializeOnly(opt, tools.ExecutorLocalTools())
 	return &Server{
 		id:   randomID(),
 		opts: opts,
@@ -83,7 +107,62 @@ func NewServer(opts Options) *Server {
 		jobs:  newJobRegistry(opts.SpillDir, opts.Root, opts.JobOutputBudget),
 		sem:   make(chan struct{}, opts.Concurrency),
 		wsReg: newWorkspaceRegistry(),
+		lsp:   lspMgr,
 	}
+}
+
+// newLSPManager builds the executor's language-server manager, or returns nil
+// when there is nothing to manage.
+//
+// nil is a real answer, not a failure: an executor on a machine with no
+// toolchain installed should serve no LSP tools at all rather than eight that
+// can only answer "executable file not found in $PATH", which costs the model a
+// turn to learn nothing.
+func newLSPManager(opts Options) *lsp.Manager {
+	if opts.NoLSP {
+		return nil
+	}
+
+	var cfg lsp.Config
+	if opts.LSPConfig != "" {
+		var err error
+		cfg, err = lsp.LoadConfig(opts.LSPConfig)
+		if err != nil {
+			slog.Warn("executor: lsp config unreadable; continuing without language servers",
+				"path", opts.LSPConfig, "error", err)
+			return nil
+		}
+	} else {
+		cfg = lsp.AutoDetect()
+	}
+	if len(cfg.Servers) == 0 {
+		return nil
+	}
+
+	mgr := lsp.NewManager(cfg, opts.Root)
+	if !mgr.HasInstalledServer() {
+		slog.Warn("executor: no configured language server found on PATH; lsp tools disabled",
+			"config", opts.LSPConfig)
+		return nil
+	}
+	return mgr
+}
+
+// Close stops everything the server owns.
+//
+// Language servers are subprocesses that index a whole tree; leaving one
+// running after the executor exits leaks a process holding significant memory,
+// and on a laptop executor that memory is the operator's.
+//
+// It exists only now because the executor previously owned nothing with a
+// lifetime — the tool registry is values, and jobs are bounded by the workspace
+// they belong to. A subprocess is the first thing that outlives the request
+// that made it.
+func (s *Server) Close() error {
+	if s.lsp != nil {
+		s.lsp.Shutdown(context.Background())
+	}
+	return nil
 }
 
 // toolOptsFor maps the executor's options onto the tool options its registry is

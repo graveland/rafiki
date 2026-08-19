@@ -203,6 +203,7 @@ func enrollOnce(connect string, cmd *cobra.Command, token, credentialFile, root 
 		Concurrency: 1,
 		Version:     version.String(),
 	})
+	defer func() { _ = srv.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
