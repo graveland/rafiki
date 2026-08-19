@@ -39,11 +39,19 @@ type RuntimeOptions struct {
 	Skills               string   // comma-separated allowlist; empty means all
 	NoSkills             bool
 	NoContextFiles       bool
-	MCPConfig            string // absolute path, or empty to skip MCP entirely
-	LSPConfig            string // absolute path, or empty to skip LSP entirely
-	FakeTurns            string
-	AnthropicAPIKey      string
-	OpenRouterAPIKey     string
+	// ProjectContext, when non-nil, is the project tier of instruction files
+	// (CLAUDE.md / AGENTS.md at the git root and at cwd, includes expanded)
+	// already fetched from the machine holding the workspace. The pointer is
+	// load-bearing: nil means "no executor — read the project tier from cwd on
+	// this machine"; a non-nil pointer, even one to "", means "the executor
+	// answered" and must be used verbatim, so an executor-backed child with an
+	// empty workspace never silently falls back to the daemon's files.
+	ProjectContext   *string
+	MCPConfig        string // absolute path, or empty to skip MCP entirely
+	LSPConfig        string // absolute path, or empty to skip LSP entirely
+	FakeTurns        string
+	AnthropicAPIKey  string
+	OpenRouterAPIKey string
 
 	// Pool is the shared database pool. A nil Pool means an in-memory
 	// conversation. BuildRuntime never opens a pool itself, so a unit test does
@@ -118,7 +126,7 @@ type RuntimeOptions struct {
 // because LoadContextFiles skips absent files silently rather than erroring.
 func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skills.SkillMeta, err error) {
 	if !opts.NoContextFiles {
-		contextFiles, err = LoadContextFiles(opts.Cwd)
+		contextFiles, err = loadContextFiles(opts.Cwd, opts.ProjectContext)
 		if err != nil {
 			return "", nil, fmt.Errorf("runtime: load context files: %w", err)
 		}

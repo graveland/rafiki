@@ -452,6 +452,20 @@ func (c *workspaceClient) StartJob(ctx context.Context, command string) (string,
 	return handle, nil
 }
 
+// ProjectContext returns the workspace's project instruction files, includes
+// already expanded. It belongs on the workspace client rather than the shared
+// executorClient because it needs a workspace id, and only a workspace-scoped
+// client carries one.
+func (c *workspaceClient) ProjectContext(ctx context.Context) (string, error) {
+	resp, err := c.inner.ProjectContext(ctx, connect.NewRequest(&executorpb.ProjectContextRequest{
+		WorkspaceId: c.workspaceID,
+	}))
+	if err != nil {
+		return "", fmt.Errorf("executor project context: %w", err)
+	}
+	return resp.Msg.ContextFiles, nil
+}
+
 func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 	ticker := time.NewTicker(p.healthInterval)
 	defer ticker.Stop()
