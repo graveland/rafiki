@@ -452,7 +452,27 @@ func runDaemon(opts runDaemonOpts) error {
 		execPool = execpool.New(execStore)
 		execPool.SetOnLost(ctrl.HandleExecutorLost)
 		ctrl.execPool = execPool
+		// One sweeper for the pool, regardless of how many listeners feed it.
+		// It used to start inside the TLS branch, which was correct only while
+		// that was the sole way in; the unix listener below is the second.
+		execPool.StartSweeper(ctx)
 	}
+
+	if execPool != nil {
+		execSock := paths.ExecutorSocketPath()
+		if ln, err := serveExecutorUDS(ctx, execPool, execSock); err != nil {
+			// Not fatal. A daemon whose TLS listener serves a whole fleet must
+			// not fail to start because a stale local socket is held by
+			// something else; local enrollment is a convenience and the remote
+			// path is unaffected.
+			slog.Warn("executor unix listener unavailable; local enrollment disabled",
+				"path", execSock, "error", err)
+		} else {
+			defer ln.Close()
+			slog.Info("rafiki daemon accepting executors (unix)", "path", execSock)
+		}
+	}
+
 	ctrl.loadOrphans(records)
 	ctrl.startSweeper(ctx)
 
@@ -526,7 +546,6 @@ func runDaemon(opts runDaemonOpts) error {
 			}))
 		if execPool != nil {
 			mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), execPool.UpgradeHandler())
-			execPool.StartSweeper(ctx)
 		}
 
 		// Everything else on this listener is the proxy face: /v1/messages,
