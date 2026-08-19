@@ -152,7 +152,7 @@ func unroutedHandler(logger *slog.Logger, seen *sync.Map) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, already := seen.LoadOrStore(r.Method+" "+r.URL.Path, struct{}{}); !already {
 			logger.Warn("proxy: unrouted request; this face serves /v1/messages, "+
-				"/v1/chat/completions, /healthz and /metrics",
+				"/v1/messages/count_tokens, /v1/chat/completions, /api/hello, /healthz and /metrics",
 				"method", r.Method, "path", r.URL.Path)
 		}
 		http.NotFound(w, r)
@@ -275,6 +275,13 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 
+	// /api/hello is Claude Code's connectivity preflight probe (HEAD). Like
+	// /healthz and /metrics it sits outside the token middleware: the real
+	// Anthropic endpoint is unauthenticated and the probe may not carry the
+	// child token. It forwards to the Anthropic primary so the check reflects
+	// whether the proxy can actually reach upstream.
+	mux.HandleFunc("/api/hello", messages.ServeHello)
+
 	// /metrics and /healthz sit deliberately OUTSIDE the token middleware:
 	// scrapers and probes do not carry client tokens. Only the LLM faces
 	// require authentication.
@@ -284,13 +291,12 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	// Everything unrouted lands here, and says so.
 	//
-	// The face serves four paths. Anything else — and a real client asks for
+	// The face serves six paths. Anything else — and a real client asks for
 	// more than /v1/messages — used to 404 out of the ServeMux with no trace at
 	// all, so "which endpoints does this client actually need?" was
-	// unanswerable without reading the client's binary. Claude Code alone is
-	// suspected of wanting /v1/messages/count_tokens (a 404 there pushes it onto
-	// local token estimation, which is a silent behaviour change, not an error)
-	// and some form of hello probe.
+	// unanswerable without reading the client's binary. Claude Code alone wants
+	// /v1/messages/count_tokens (token counting, proxied now rather than pushed
+	// onto local estimation by a 404) and a HEAD /api/hello connectivity probe.
 	//
 	// Logged once per method+path so an unhandled endpoint called every turn
 	// costs one line rather than a log flood, and at WARN because a client
