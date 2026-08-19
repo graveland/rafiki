@@ -28,8 +28,9 @@ type pgStore struct {
 const uniqueViolation = "23505"
 
 func (s *pgStore) Create(ctx context.Context, username string) (users.User, string, error) {
-	if username == "" {
-		return users.User{}, "", errors.New("users: username must not be empty")
+	username, err := users.NormalizeUsername(username)
+	if err != nil {
+		return users.User{}, "", err
 	}
 	token, err := users.NewToken()
 	if err != nil {
@@ -45,7 +46,12 @@ func (s *pgStore) Create(ctx context.Context, username string) (users.User, stri
 		// The partial unique index is the ONLY thing enforcing name
 		// uniqueness, and it covers active rows only — so this is also what
 		// makes a tombstoned name reusable rather than a special case here.
-		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+		// Only the USERNAME index means "taken". token_sha256 is UNIQUE too,
+		// and while a digest collision is unreachable (2^-256), reporting one
+		// as "username already taken" would be maximally confusing for the one
+		// person who ever saw it.
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation &&
+			pgErr.ConstraintName == "users_username_active" {
 			return users.User{}, "", users.ErrUsernameTaken
 		}
 		return users.User{}, "", fmt.Errorf("insert user: %w", err)
@@ -79,7 +85,10 @@ func (s *pgStore) List(ctx context.Context, includeDeleted bool, limit int) ([]u
 	if !includeDeleted {
 		q += ` WHERE deleted_at IS NULL`
 	}
-	q += ` ORDER BY created_at LIMIT $1`
+	// created_at alone is not a total order: it defaults to now(), which is
+	// TRANSACTION time, so rows created in one transaction tie and the page
+	// order becomes arbitrary. id breaks the tie.
+	q += ` ORDER BY created_at, id LIMIT $1`
 
 	rows, err := s.pool.Query(ctx, q, limit)
 	if err != nil {

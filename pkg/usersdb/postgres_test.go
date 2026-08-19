@@ -284,3 +284,28 @@ func TestDeleteAlreadyTombstonedUsernameIsErrNotFound(t *testing.T) {
 		t.Fatalf("second delete on an already-tombstoned user: err = %v, want ErrNotFound", err)
 	}
 }
+
+// The guard lives in the store so every caller gets it, not just the CLI.
+func TestCreateNormalizesAndRejectsBadUsernames(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+
+	// Padding is trimmed, not stored — otherwise "brent" and "brent " would be
+	// two different people and the partial unique index would allow both.
+	u, _, err := s.Create(ctx, "  brent\t")
+	if err != nil {
+		t.Fatalf("create with padding: %v", err)
+	}
+	if u.Username != "brent" {
+		t.Fatalf("username = %q, want %q (padding must be trimmed before insert)", u.Username, "brent")
+	}
+	if _, _, err := s.Create(ctx, "brent  "); !errors.Is(err, users.ErrUsernameTaken) {
+		t.Fatalf("a padded duplicate was accepted (err = %v); trimming must happen BEFORE the uniqueness check", err)
+	}
+
+	for _, bad := range []string{"", "   ", "\t\n"} {
+		if _, _, err := s.Create(ctx, bad); !errors.Is(err, users.ErrInvalidUsername) {
+			t.Errorf("Create(%q) error = %v, want ErrInvalidUsername", bad, err)
+		}
+	}
+}
