@@ -692,3 +692,45 @@ not `tsc`, not `make check`.
 - **Three gate blind spots, one shape.** The TUI, the daemon's import graph, and
   build-tagged files are all things `make check` cannot see. When adding a new
   kind of artifact, ask what compiles it before asking what tests it.
+
+## Users & unified auth — considered and deliberately NOT done (2026-08-18)
+
+Landed on `main` as 27 commits. These were found during review, weighed, and left
+alone on purpose. Recorded so the next person to trip over one knows it was a
+decision rather than an oversight.
+
+- **`usersdb.List` has no upper clamp on `limit`.** `ctrl_user_list` clamps at 500
+  in dispatch and is the only caller, so the store would only need its own clamp if
+  a second caller appeared. Add it then, not now.
+- **No test for `ctrl_user_list`'s zero/negative clamp branch.** One boolean OR
+  whose operands reach an identical branch; the oversized case is covered.
+- **`errBootstrapClosed` reuses `auth_required`** rather than a distinct code. A
+  client's action is the same either way — present a token — so a new code buys
+  precision nobody consumes.
+- **Passthrough makes a second, uncached store round trip per request** (the
+  anti-self-forward check hashes the caller's `Authorization`, which never hits the
+  cache). Only on passthrough requests, and the primary lookup is cached. Revisit
+  if passthrough ever becomes a hot path.
+- **`dispatcher.handle`'s `conn != nil` guard** means a future in-process caller of
+  `HandleFrame(nil, …)` silently loses the bootstrap gate. Needed by the existing
+  tests; no production path passes nil.
+- **The authenticated dispatch path's error text** was fixed (`mapErr` now forwards
+  only `ControllerError` messages) — but note the rule it rests on: a
+  `ControllerError` built from a DEPENDENCY's error re-opens the hole, because
+  `errors.As` finds it however deeply wrapped. `ControllerError`'s doc comment
+  carries the full statement.
+
+### A real finding, unfixed: `pkg/inproc`'s kill test is load-sensitive
+
+`TestKillReportsTheSameExitShapeAsASignalledSubprocess` failed once during a full
+`make check` and then passed 3/3 in isolation, 3/3 under `-race`, and on a repeat
+full gate. Cause is a hard `select { case <-time.After(5 * time.Second) }` budget —
+tight for a kill-and-reap when every package is running under `-race` on a saturated
+machine.
+
+Worth knowing because CLAUDE.md records that this repo's kill-path failures were
+misfiled as timing flakes for months while being a real deterministic bug (`Kill`
+not waiting for `cm.Remove`). This one is genuinely a wall-clock budget and not that
+bug — but the right fix is to make the wait deadline-based or widen it, so the two
+failure modes stay distinguishable. Until then, a kill-path failure under load
+deserves the isolation re-run before it is believed.
