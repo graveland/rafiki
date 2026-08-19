@@ -589,4 +589,27 @@ describe("upgradeAndServe", () => {
             await srv.close();
         }
     });
+
+    // A daemon that accepts the connection and then goes silent must not hang
+    // the dial — and with it the TUI launch — indefinitely. Nothing bounded
+    // this before: the server's own handshake timeout is no help when the
+    // server is the thing that is stuck.
+    it("gives up when the server accepts and then says nothing", async () => {
+        const server = net.createServer(() => {
+            // Accept, then deliberately never respond.
+        });
+        await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+        const port = (server.address() as net.AddressInfo).port;
+
+        const sock = net.createConnection({ port, host: "127.0.0.1" });
+        await new Promise((r) => sock.once("connect", r));
+
+        const started = Date.now();
+        await expect(
+            upgradeAndServe(sock, `127.0.0.1:${port}`, "", 150)
+        ).rejects.toThrow(/no response within 150ms/);
+        expect(Date.now() - started).toBeLessThan(3000);
+
+        await new Promise<void>((r) => server.close(() => r()));
+    });
 });

@@ -317,3 +317,54 @@ func TestServeConn_NoToken_OverTheShippedUpgradePath(t *testing.T) {
 		t.Errorf("data = %s, want it to show the connection arrived Restricted() (bootstrap-admitted)", resp.Data)
 	}
 }
+
+// DialURL's upgrade deadline rests on one assumption: that a deadline set on
+// the connection actually bounds upgradeconn.Dial's read of the response head.
+// If it did not, a daemon that accepts the connection and then goes silent
+// would hang the dial forever — the server's own handshake timeout is no help
+// when the server is the thing that is stuck.
+//
+// Exercised over plain TCP rather than through DialURL, which only ever trusts
+// system root CAs and so cannot be pointed at a test server.
+func TestUpgradeReadIsBoundedByTheConnDeadline(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- c // accept, then deliberately never respond
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	start := time.Now()
+	_, err = upgradeconn.Dial(conn, upgradeconn.Control, ln.Addr().String())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("upgrade against a silent server succeeded")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("upgrade took %v to give up; the deadline is not bounding the read", elapsed)
+	}
+	select {
+	case c := <-accepted:
+		c.Close()
+	default:
+	}
+}

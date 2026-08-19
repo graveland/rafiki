@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -88,6 +89,11 @@ func IsRemoteURL(raw string) bool {
 	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
+// upgradeTimeout bounds the HTTP upgrade exchange when the caller's context
+// carries no deadline of its own. Deliberately generous — it is a liveness
+// backstop against a silent server, not a latency budget.
+const upgradeTimeout = 15 * time.Second
+
 // DialURL opens a TLS connection to rawURL and, if token is non-empty,
 // authenticates via ctrl_auth. rawURL must be "https://host[:port]".
 //
@@ -124,6 +130,18 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 		return nil, fmt.Errorf("tls dial %s: %w", u.Host, err)
 	}
 
+	// Bound the upgrade exchange. Without this a daemon that completes the TLS
+	// handshake and then says nothing — wedged, or hostile — hangs the dial
+	// forever: upgradeconn.Dial blocks in ReadResponse, ctx has already done
+	// its job on the TCP/TLS dial above, and the server's own handshake
+	// timeout is no help when the server is the thing that is stuck. Cleared
+	// before the Client takes over so it never leaks into the request path.
+	if dl, ok := ctx.Deadline(); ok {
+		_ = tlsConn.SetDeadline(dl)
+	} else {
+		_ = tlsConn.SetDeadline(time.Now().Add(upgradeTimeout))
+	}
+
 	// The control plane is reached at a PATH on a shared TLS listener, upgraded
 	// out of HTTP/1.1. One port and one certificate serve it, the executor link
 	// and anything added later — and an Upgrade tunnel is something every HTTP
@@ -133,6 +151,10 @@ func DialURL(ctx context.Context, rawURL, token string) (*Client, error) {
 	if err != nil {
 		tlsConn.Close()
 		return nil, err
+	}
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		tlsConn.Close()
+		return nil, fmt.Errorf("clear upgrade deadline: %w", err)
 	}
 	// Everything from here reads through upConn: bytes the server pipelines
 	// behind its 101 would otherwise be stranded in the upgrade's own buffer.

@@ -491,10 +491,17 @@ export class Client {
  * skips ctrl_auth entirely, matching the Go client: the daemon's bootstrap mode
  * admits a connection only when its first frame is NOT ctrl_auth.
  */
+/**
+ * Bounds the HTTP upgrade exchange. A liveness backstop against a silent
+ * server, not a latency budget — matches the Go client's upgradeTimeout.
+ */
+const UPGRADE_TIMEOUT_MS = 15_000;
+
 export async function upgradeAndServe(
     sock: net.Socket,
     host: string,
     token: string,
+    timeoutMs: number = UPGRADE_TIMEOUT_MS,
 ): Promise<Client> {
     const head =
         `GET /control HTTP/1.1\r\n` +
@@ -529,7 +536,17 @@ export async function upgradeAndServe(
         };
         const onErr = (err: Error) => { cleanup(); sock.destroy(); reject(err); };
         const onEnd = () => { cleanup(); sock.destroy(); reject(new Error("upgrade: connection closed before response")); };
+        // A daemon that completes the TLS handshake and then says nothing —
+        // wedged, or hostile — would otherwise hang this promise forever, and
+        // with it the whole TUI launch, with no diagnostic. The server's own
+        // handshake timeout is no help when the server is what is stuck.
+        const timer = setTimeout(() => {
+            cleanup();
+            sock.destroy();
+            reject(new Error(`upgrade: no response within ${timeoutMs}ms`));
+        }, timeoutMs);
         const cleanup = () => {
+            clearTimeout(timer);
             sock.off("data", onData);
             sock.off("error", onErr);
             sock.off("end", onEnd);
