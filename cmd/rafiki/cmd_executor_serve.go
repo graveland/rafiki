@@ -69,6 +69,7 @@ func newExecutorServeCmd() *cobra.Command {
 	var (
 		socketPath        string
 		connectAddr       string
+		connectSocket     string
 		root              string
 		concurrency       int
 		enrollToken       string
@@ -90,19 +91,27 @@ func newExecutorServeCmd() *cobra.Command {
 
 Two transports, exactly one of which must be given:
 
-  --socket   listen on a local unix socket; the daemon connects to it.
-  --connect  reverse-dial the daemon and serve HTTP/2 on the dialled
-             connection. Required when the daemon cannot reach this host,
-             which is the usual case for a laptop behind NAT.`,
+  --socket          listen on a local unix socket; the daemon connects to it.
+  --connect         reverse-dial the daemon and serve HTTP/2 on the dialled
+                    connection. Required when the daemon cannot reach this host,
+                    which is the usual case for a laptop behind NAT.
+  --connect-socket  reverse-dial a rafikid on this machine over its executor
+                    unix socket, enrolling as a fully rowed pool member.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 
-			if socketPath != "" && connectAddr != "" {
-				return fmt.Errorf("--socket and --connect are mutually exclusive")
+			modes := 0
+			for _, set := range []bool{socketPath != "", connectAddr != "", connectSocket != ""} {
+				if set {
+					modes++
+				}
 			}
-			if socketPath == "" && connectAddr == "" {
-				return fmt.Errorf("one of --socket or --connect is required")
+			if modes > 1 {
+				return fmt.Errorf("--socket, --connect and --connect-socket are mutually exclusive")
+			}
+			if modes == 0 {
+				return fmt.Errorf("one of --socket, --connect or --connect-socket is required")
 			}
 
 			wd, err := resolveRoot(root)
@@ -123,8 +132,8 @@ Two transports, exactly one of which must be given:
 			defer func() { _ = srv.Close() }()
 			handler := executorHandler(srv)
 
-			if connectAddr != "" {
-				return serveReverseDial(connectAddr, pinnedFingerprint, serverName,
+			if connectAddr != "" || connectSocket != "" {
+				return serveReverseDial(connectAddr, connectSocket, pinnedFingerprint, serverName,
 					enrollToken, credential, credentialFile, handler)
 			}
 			return serveUnixSocket(socketPath, wd, handler)
@@ -133,6 +142,8 @@ Two transports, exactly one of which must be given:
 
 	cmd.Flags().StringVar(&socketPath, "socket", "", "path to the unix socket to listen on")
 	cmd.Flags().StringVar(&connectAddr, "connect", "", "daemon executor endpoint to dial (host:port)")
+	cmd.Flags().StringVar(&connectSocket, "connect-socket", "",
+		"unix socket of a rafikid on this machine to reverse-dial (mutually exclusive with --socket and --connect)")
 	cmd.Flags().StringVar(&root, "root", "",
 		"working directory for this executor's tools (defaults to the current directory). "+
 			"NOT a sandbox: an absolute path reaches outside it. What this executor may "+
@@ -165,7 +176,7 @@ Two transports, exactly one of which must be given:
 	return cmd
 }
 
-func serveReverseDial(addr, pinCert, serverName, enrollToken, credential, credentialFile string, handler http.Handler) error {
+func serveReverseDial(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile string, handler http.Handler) error {
 	// The default deliberately does NOT sit under --root. It used to
 	// (`<root>/.rafiki-executor-credential`), which put the executor's own
 	// credential inside the very directory tree its file tools operate on — and
@@ -181,6 +192,7 @@ func serveReverseDial(addr, pinCert, serverName, enrollToken, credential, creden
 	defer cancel()
 	if err := execpool.Connect(ctx, execpool.ConnectOptions{
 		Addr:           addr,
+		SocketPath:     socketPath,
 		PinCert:        pinCert,
 		ServerName:     serverName,
 		EnrollToken:    enrollToken,

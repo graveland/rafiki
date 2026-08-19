@@ -42,6 +42,17 @@ type ConnectOptions struct {
 	CredentialFile string
 	SelfReported   map[string]string
 	Handler        http.Handler
+
+	// SocketPath, when set, dials a unix socket instead of TLS over TCP, and
+	// Addr, ServerName and PinCert are ignored.
+	//
+	// It is for an executor on the daemon's own machine. The point is not to
+	// avoid TLS but to avoid the CERTIFICATE: a single-machine install should
+	// not need one, and requiring it would make the simplest deployment pay for
+	// the most complex. Everything downstream of the upgrade — enrollment, the
+	// credential, labels, admission — is identical, so a local executor is a
+	// fully rowed executor and not a special case.
+	SocketPath string
 }
 
 // ErrEnrollmentRejected stops the reconnect loop for good. It means rafikid
@@ -82,44 +93,18 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 }
 
 func connectOnce(ctx context.Context, o ConnectOptions) error {
-	host, _, err := net.SplitHostPort(o.Addr)
+	conn, host, err := dialDaemon(ctx, o)
 	if err != nil {
-		host = o.Addr
-	}
-	sni := o.ServerName
-	if sni == "" {
-		sni = host
-	}
-
-	tlsCfg := &tls.Config{
-		ServerName: sni,
-		// http/1.1, not h2: the outer connection is an ordinary HTTP/1.1
-		// request that gets UPGRADED, and net/http can only hijack an HTTP/1.1
-		// connection. The inverted HTTP/2 begins after the 101, directly on the
-		// byte stream, where ALPN plays no part.
-		NextProtos: ALPNProtocols,
-	}
-	if o.PinCert != "" {
-		tlsCfg.InsecureSkipVerify = true //nolint:gosec // pinned fingerprint
-		tlsCfg.VerifyPeerCertificate = pinVerify(o.PinCert)
-	}
-
-	conn, err := tls.DialWithDialer(&net.Dialer{}, "tcp", o.Addr, tlsCfg)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", o.Addr, err)
+		return err
 	}
 	defer conn.Close()
-
-	if err := conn.HandshakeContext(ctx); err != nil {
-		return fmt.Errorf("tls handshake: %w", err)
-	}
 
 	// Reach the executor endpoint by PATH on the shared listener, upgrading out
 	// of HTTP/1.1. This is what lets the control plane and the executor link
 	// share one port and one certificate; a wrong endpoint now fails with a
 	// readable HTTP status instead of as garbage in the first frame.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	upConn, err := upgradeconn.Dial(conn, upgradeconn.Executor, sni)
+	upConn, err := upgradeconn.Dial(conn, upgradeconn.Executor, host)
 	if err != nil {
 		return err
 	}
@@ -147,6 +132,58 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	}
 
 	return ServeInverted(upConn, o.Handler)
+}
+
+// dialDaemon opens the transport under the executor link and returns it with
+// the Host header value the upgrade request should carry.
+//
+// Two implementations, one protocol: everything above this function is
+// byte-identical on both, which is what keeps a local executor a fully rowed
+// executor rather than a second kind of thing.
+func dialDaemon(ctx context.Context, o ConnectOptions) (net.Conn, string, error) {
+	if o.SocketPath != "" {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "unix", o.SocketPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("dial %s: %w", o.SocketPath, err)
+		}
+		// A unix socket has no hostname, but HTTP/1.1 requires a Host header
+		// and the daemon's mux routes on path alone. "localhost" is the
+		// conventional filler and is never resolved by anything.
+		return conn, "localhost", nil
+	}
+
+	host, _, err := net.SplitHostPort(o.Addr)
+	if err != nil {
+		host = o.Addr
+	}
+	sni := o.ServerName
+	if sni == "" {
+		sni = host
+	}
+
+	tlsCfg := &tls.Config{
+		ServerName: sni,
+		// http/1.1, not h2: the outer connection is an ordinary HTTP/1.1
+		// request that gets UPGRADED, and net/http can only hijack an HTTP/1.1
+		// connection. The inverted HTTP/2 begins after the 101, directly on the
+		// byte stream, where ALPN plays no part.
+		NextProtos: ALPNProtocols,
+	}
+	if o.PinCert != "" {
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // pinned fingerprint
+		tlsCfg.VerifyPeerCertificate = pinVerify(o.PinCert)
+	}
+
+	conn, err := tls.DialWithDialer(&net.Dialer{}, "tcp", o.Addr, tlsCfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("dial %s: %w", o.Addr, err)
+	}
+	if err := conn.HandshakeContext(ctx); err != nil {
+		conn.Close()
+		return nil, "", fmt.Errorf("tls handshake: %w", err)
+	}
+	return conn, sni, nil
 }
 
 // credFileHas reports whether a readable, non-empty credential file exists.
