@@ -278,3 +278,31 @@ func TestNilStoreRejectsUserTokensButAcceptsChildToken(t *testing.T) {
 		t.Fatalf("child identity must not carry a UserID: %+v", id)
 	}
 }
+
+// The anti-self-forward guard must fail CLOSED when the store cannot answer.
+//
+// Reaching it requires a primary credential that resolves WITHOUT the store —
+// the per-boot child token — while the Authorization header being vetted goes
+// to a store that is down. Before this was fixed the guard's `err == nil` test
+// read "could not check" as "not ours" and forwarded the header upstream, so a
+// database blip was enough to ship rafiki's own token to a third-party
+// provider in exchange for an opaque 401.
+func TestPassthroughSelfForwardGuardFailsClosedOnStoreOutage(t *testing.T) {
+	st := &stubStore{err: errors.New("host=db.internal user=rafiki: connection refused")}
+	a := NewUserTokenAuth(st, "childsecret", time.Minute)
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("X-Rafiki-Token", "childsecret")     // primary: never hits the store
+	req.Header.Set("Authorization", "Bearer some-cred") // vetted against the down store
+	rec, _ := serve(a, req)
+
+	if rec.Code == 200 {
+		t.Fatal("request proceeded while the self-forward guard could not be evaluated; it must fail closed")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "db.internal") {
+		t.Fatalf("store error text leaked to the caller: %q", rec.Body.String())
+	}
+}
