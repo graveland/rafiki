@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -15,6 +16,28 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
+
+// projectContextFetcher is the one method the daemon needs from an executor
+// client beyond tools.ExecutorClient: the project instruction files for the
+// workspace that client is scoped to. Declared here, at the consumer, rather
+// than widening tools.ExecutorClient — only the workspace-scoped client can
+// answer it (it carries its own workspace id), and the tool layer has no use
+// for it.
+type projectContextFetcher interface {
+	ProjectContext(ctx context.Context) (string, error)
+}
+
+// fetchProjectContext asks an executor client for its workspace's project tier.
+// A client that cannot answer — nil, or one without a workspace (the legacy
+// socket path) — yields an empty string and no error: the empty string is still
+// a real answer, and the caller passes it down as a non-nil pointer so an
+// executor-backed child never falls back to reading the daemon's own cwd.
+func fetchProjectContext(ctx context.Context, exec any) (string, error) {
+	if pf, ok := exec.(projectContextFetcher); ok {
+		return pf.ProjectContext(ctx)
+	}
+	return "", nil
+}
 
 // appendDaemonRef appends the authoritative --ref last so it wins over
 // req.ExtraArgs under buildAgentArgv's last-flag-wins convention. A subprocess
@@ -172,6 +195,18 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 				return fundi.RuntimeOptions{}, fmt.Errorf("workspace: %w", wsErr)
 			}
 			exec = wsExec
+
+			// The project tier belongs to the workspace, which lives on this
+			// executor. Fetch it and hand it down. The pointer is set
+			// unconditionally for an executor-backed child — even to the empty
+			// string, the ordinary answer — so resolveContent never falls back to
+			// reading the daemon's cwd for a workspace that is not here.
+			project, pcErr := fetchProjectContext(context.Background(), exec)
+			if pcErr != nil {
+				slog.Warn("project context unavailable; agent gets global instructions only",
+					"child", childID, "error", pcErr)
+			}
+			ro.ProjectContext = &project
 
 			// The mode comes from the executor's ROW, carried here on wsInfo.
 			// It decides whether losing the executor fails this child or moves
