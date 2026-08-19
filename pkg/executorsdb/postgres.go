@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -183,8 +184,19 @@ func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (execu
 		&labelsJSON, &selfJSON, &annotationsJSON,
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
 		&enrolledAt, &lastSeenAt)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return executors.Executor{}, ErrNotFound
+	}
+	if err != nil {
+		// NOT ErrNotFound. "I could not check this credential" is not an
+		// answer, and IsTerminalAuthError classifies ErrNotFound as terminal —
+		// so collapsing a dead connection into it told every executor that
+		// reconnected during a database blip that its credential was
+		// permanently invalid, and they all exited. Across a fleet
+		// reconnecting together that is the whole fleet, which is exactly the
+		// failure CLAUDE.md documents as forbidden. Returning the wrapped
+		// error keeps IsTerminalAuthError false, so the executor retries.
+		return executors.Executor{}, fmt.Errorf("authenticate executor: %w", err)
 	}
 	if !e.Enabled {
 		return executors.Executor{}, ErrDisabled
