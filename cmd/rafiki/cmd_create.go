@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,6 +136,15 @@ func resolvePresetName(cmd *cobra.Command) string {
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
+		// Defaulting to THIS process's cwd only makes sense against the local
+		// daemon: it stats req.Cwd on its own filesystem (Controller.Spawn),
+		// which for a remote RAFIKI_URL is a different machine entirely. Left
+		// unchecked, this silently ships a path that exists on the client
+		// and fails server-side with a "no such file or directory" that gives
+		// no hint the path was ever local.
+		if remoteDialURL() != "" {
+			return protocol.SpawnRequest{}, errors.New("--cwd is required when RAFIKI_URL names a remote daemon (there is no local directory to default to on that machine)")
+		}
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {

@@ -35,7 +35,12 @@ func TestBuildSpawnRequest_ExplicitCwd(t *testing.T) {
 }
 
 func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
-	// When --cwd is omitted, buildSpawnRequest should use os.Getwd().
+	// When --cwd is omitted, buildSpawnRequest should use os.Getwd() — but
+	// only against the local daemon; isolate from a real RAFIKI_URL set in
+	// the ambient environment (e.g. a dev shell pointed at a remote daemon),
+	// or this test's outcome depends on who is running it.
+	t.Setenv("RAFIKI_URL", "")
+
 	wantCwd, err := os.Getwd()
 	if err != nil {
 		t.Skip("os.Getwd() failed — skipping:", err)
@@ -50,6 +55,34 @@ func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
 	}
 	if req.Cwd != wantCwd {
 		t.Errorf("Cwd = %q, want %q", req.Cwd, wantCwd)
+	}
+}
+
+func TestBuildSpawnRequest_RemoteRequiresExplicitCwd(t *testing.T) {
+	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev")
+
+	cmd := newTestCreateCmd()
+	// cwd left at its zero value ("") intentionally: there is no local
+	// directory to default to on a remote daemon's filesystem.
+
+	_, err := buildSpawnRequest(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error defaulting --cwd against a remote RAFIKI_URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "--cwd") {
+		t.Errorf("error = %q, want it to mention --cwd", err.Error())
+	}
+
+	// An explicit --cwd is still honored against a remote daemon.
+	if err := cmd.Flags().Set("cwd", "/remote/project"); err != nil {
+		t.Fatal(err)
+	}
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error with explicit --cwd: %v", err)
+	}
+	if req.Cwd != "/remote/project" {
+		t.Errorf("Cwd = %q, want /remote/project", req.Cwd)
 	}
 }
 
