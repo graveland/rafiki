@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
+	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
@@ -258,8 +259,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		// every time the model reaches for one.
 		if lspMgr.HasInstalledServer() {
 			lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
-			adapter := &lspClientAdapter{mgr: lspMgr, tracker: fileTracker}
-			lspClient = adapter
+			lspClient = lspadapter.New(lspMgr, fileTracker)
 			lspNotifier = lspMgr
 		} else {
 			slog.Warn("runtime: no configured language server found on PATH; lsp tools disabled",

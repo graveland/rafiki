@@ -1,4 +1,11 @@
-package fundi
+// Package lspadapter makes an *lsp.Manager satisfy tools.LSPClient.
+//
+// It is its own package rather than living in either neighbour because it
+// needs both, and making pkg/fundi/lsp import pkg/fundi/tools (or the reverse)
+// would couple the tool vocabulary to the LSP transport in one direction or
+// the other. It must also stay free of pgx: pkg/executor builds one of these
+// and is required to link no database driver at all.
+package lspadapter
 
 import (
 	"context"
@@ -20,6 +27,15 @@ type lspClientAdapter struct {
 	// tracker is shared with every other file tool so lsp_rename's writes
 	// take the same per-path locks as edit/write.
 	tracker *tools.FileTracker
+}
+
+// New returns a tools.LSPClient backed by mgr.
+//
+// tracker is shared with every other file tool so lsp_rename's writes take the
+// same per-path locks as edit and write. Passing a tracker that other tools do
+// not share reintroduces the interleaved-write race those locks exist for.
+func New(mgr *lsp.Manager, tracker *tools.FileTracker) tools.LSPClient {
+	return &lspClientAdapter{mgr: mgr, tracker: tracker}
 }
 
 func (a *lspClientAdapter) Diagnostics(ctx context.Context, path string) ([]tools.LSPDiagnostic, error) {

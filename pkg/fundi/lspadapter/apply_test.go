@@ -1,4 +1,4 @@
-package fundi
+package lspadapter
 
 import (
 	"os"
