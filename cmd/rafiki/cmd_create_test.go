@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -428,5 +429,73 @@ func TestBuildSpawnRequest_ParentFlagOmitted(t *testing.T) {
 	}
 	if req.ParentChildID != "" {
 		t.Errorf("ParentChildID = %q, want empty", req.ParentChildID)
+	}
+}
+
+// The flag is the only way a human can target an executor: the sole other
+// writer of SpawnRequest.ExecutorSelector in this repo is the in-process
+// agent_spawn tool.
+func TestBuildSpawnRequest_ExecutorSelectorFlag(t *testing.T) {
+	t.Setenv(paths.ExecutorSelector, "")
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("executor-selector", "owner=brent,env=home"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ExecutorSelector != "owner=brent,env=home" {
+		t.Errorf("ExecutorSelector = %q, want %q", req.ExecutorSelector, "owner=brent,env=home")
+	}
+}
+
+// The environment default must apply when the flag is NOT passed. This is the
+// half that --executor-socket got wrong: gating the read on Flags().Changed()
+// makes a computed flag default unreachable, because Changed() reports whether
+// the user typed the flag, not whether the value is non-zero.
+//
+// t.Setenv MUST precede newTestCreateCmd: addSpawnFlags evaluates
+// paths.Get(...) when it REGISTERS the flag, not when the flag is read.
+func TestBuildSpawnRequest_ExecutorSelectorFromEnv(t *testing.T) {
+	t.Setenv(paths.ExecutorSelector, "owner=brent")
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ExecutorSelector != "owner=brent" {
+		t.Errorf("ExecutorSelector = %q, want the env default %q", req.ExecutorSelector, "owner=brent")
+	}
+}
+
+// An explicit flag beats the environment.
+func TestBuildSpawnRequest_ExecutorSelectorFlagBeatsEnv(t *testing.T) {
+	t.Setenv(paths.ExecutorSelector, "owner=brent")
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("executor-selector", "env=ci"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ExecutorSelector != "env=ci" {
+		t.Errorf("ExecutorSelector = %q, want the flag value %q", req.ExecutorSelector, "env=ci")
 	}
 }
