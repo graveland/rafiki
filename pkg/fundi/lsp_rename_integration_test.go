@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
+	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 )
 
@@ -52,7 +53,7 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 	}, dir)
 	defer mgr.Shutdown(context.Background())
 
-	adapter := &lspClientAdapter{mgr: mgr, tracker: tools.NewFileTracker()}
+	adapter := lspadapter.New(mgr, tools.NewFileTracker())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -102,7 +103,7 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 	// line-count-and-column-preserving case that made this silent: querying
 	// DocumentSymbols at the same position gopls last indexed would still
 	// report the OLD name with no error at all if the didChange notify were
-	// missing. If this starts failing, check that Rename in lsp_adapter.go
+	// missing. If this starts failing, check that Rename in lspadapter/adapter.go
 	// still calls a.mgr.NotifyChange for every modified path.
 	syms, err := adapter.DocumentSymbols(ctx, mainPath)
 	if err != nil {
