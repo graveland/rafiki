@@ -79,6 +79,8 @@ func newExecutorServeCmd() *cobra.Command {
 		rtkMode           string
 		spillDir          string
 		jobBudgetMB       int64
+		lspConfig         string
+		noLSP             bool
 	)
 
 	cmd := &cobra.Command{
@@ -115,7 +117,10 @@ Two transports, exactly one of which must be given:
 				RTK:             tools.ParseRTKMode(rtkMode),
 				SpillDir:        spillDir,
 				JobOutputBudget: jobBudgetMB << 20,
+				LSPConfig:       lspConfig,
+				NoLSP:           noLSP,
 			})
+			defer func() { _ = srv.Close() }()
 			handler := executorHandler(srv)
 
 			if connectAddr != "" {
@@ -143,6 +148,9 @@ Two transports, exactly one of which must be given:
 	cmd.Flags().Int64Var(&jobBudgetMB, "job-output-budget-mb", 256,
 		"megabytes of background-job output retained per workspace, oldest finished job dropped "+
 			"first. Output is kept until the workspace is released; there is no time limit")
+	cmd.Flags().StringVar(&lspConfig, "lsp-config", "",
+		"path to an lsp.json describing language servers this executor may start (default: auto-detect what is on PATH)")
+	cmd.Flags().BoolVar(&noLSP, "no-lsp", false, "disable language servers on this executor entirely")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
