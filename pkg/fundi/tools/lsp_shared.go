@@ -2,12 +2,16 @@ package tools
 
 // lspUnavailable reports whether the LSP tools should decline to materialize.
 //
-// Two reasons, and they are different. No LSP client means nothing to talk to.
-// An executor means the workspace is on another machine: a language server
-// started in this process would index the daemon's filesystem and answer about
-// files the agent is not editing, and lsp_rename would write to them. Routing
-// the tools to the executor is the real fix and needs the executor to host the
-// LSP manager; until then, absent beats confidently wrong.
+// They need somewhere to run: either a local LSP client, or an executor that
+// will run the language servers against the files it holds and answer the
+// proxied call. With neither, the tools could only fail, and a tool that can
+// only fail costs the model a turn to learn nothing.
+//
+// The executor case does not need opts.LSP to be set. MaterializeAll wraps a
+// routed tool in an executorProxy, which replaces Execute entirely — the nil
+// client the blueprint materialized with is never dereferenced. Name,
+// Description and InputSchema, the only other methods the model sees, do not
+// touch it.
 func lspUnavailable(opts ToolOpts) bool {
-	return opts.LSP == nil || opts.Executor != nil
+	return opts.LSP == nil && opts.Executor == nil
 }

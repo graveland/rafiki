@@ -51,8 +51,7 @@ var tierByTool = map[string]Tier{
 	"bash_kill":   TierWorkspace,
 
 	// Workspace — language servers. Classified here because they read (and in
-	// lsp_rename's case write) the workspace's files. They are not yet routed:
-	// see notRoutedYet.
+	// lsp_rename's case write) the workspace's files.
 	"lsp_call_hierarchy": TierWorkspace,
 	"lsp_definition":     TierWorkspace,
 	"lsp_diagnostics":    TierWorkspace,
@@ -90,23 +89,10 @@ var tierByTool = map[string]Tier{
 // The three background-job verbs are permanent members: they are parent-side
 // tools implemented as RPCs, so proxying them would dispatch bash_start into
 // the executor's registry, which does not contain it.
-//
-// The lsp_* family is a temporary member. Routing them requires the executor
-// to host the LSP manager (pkg/fundi/lsp), which is a later step; until then
-// they must not be forwarded to a registry that will answer "unknown tool".
-// They are made to decline entirely when an executor is configured, so the
-// interim behaviour is "no LSP" rather than "LSP against the wrong machine".
 var notRoutedYet = map[string]bool{
-	"bash_start":         true,
-	"bash_output":        true,
-	"bash_kill":          true,
-	"lsp_call_hierarchy": true,
-	"lsp_definition":     true,
-	"lsp_diagnostics":    true,
-	"lsp_references":     true,
-	"lsp_rename":         true,
-	"lsp_restart":        true,
-	"lsp_symbols":        true,
+	"bash_start":  true,
+	"bash_output": true,
+	"bash_kill":   true,
 }
 
 // TierOf reports a tool's tier. ok is false for a name no blueprint registers.

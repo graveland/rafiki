@@ -48,26 +48,30 @@ func TestWorkspaceTierMembership(t *testing.T) {
 	}
 }
 
-// ls is a workspace tool the executor can serve today: LsBlueprint.Materialize
-// needs only Cwd and OutputPolicy, both of which the executor's toolOptsFor
-// supplies. The lsp_* family is deliberately absent until the executor hosts
-// the LSP manager — forwarding them now would reach a registry that answers
-// "unknown tool".
+// ls and the lsp_* family are workspace tools the executor can serve today:
+// LsBlueprint.Materialize needs only Cwd and OutputPolicy, and the LSP tools
+// need only the manager newLSPManager builds from the executor's own lsp.json
+// or PATH, both of which the executor's toolOptsFor supplies.
 func TestRoutingLists(t *testing.T) {
-	wantLocal := []string{"bash", "edit", "glob", "grep", "ls", "read", "write"}
+	wantLocal := []string{
+		"bash", "edit", "glob", "grep", "ls",
+		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
+		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
+		"read", "write",
+	}
 	if got := ExecutorLocalTools(); !slices.Equal(got, wantLocal) {
 		t.Errorf("ExecutorLocalTools() = %v, want %v", got, wantLocal)
 	}
 
-	wantRouted := []string{"bash", "bash_kill", "bash_output", "bash_start", "edit", "glob", "grep", "ls", "read", "write"}
+	wantRouted := []string{
+		"bash", "bash_kill", "bash_output", "bash_start",
+		"edit", "glob", "grep", "ls",
+		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
+		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
+		"read", "write",
+	}
 	if got := RoutedToExecutor(); !slices.Equal(got, wantRouted) {
 		t.Errorf("RoutedToExecutor() = %v, want %v", got, wantRouted)
-	}
-
-	for _, name := range RoutedToExecutor() {
-		if len(name) > 4 && name[:4] == "lsp_" {
-			t.Errorf("%q is routed to the executor, which cannot serve it yet", name)
-		}
 	}
 }
 
@@ -87,11 +91,13 @@ func registryNames(r *Registry) map[string]bool {
 // A tool named in ExecutorLocalTools must actually materialize under the opts
 // an executor process supplies, or routing a call to it reaches a registry
 // that answers "unknown tool". The executor's toolOptsFor sets Cwd, RTK,
-// FileTracker and OutputPolicy and nothing else — notably no LSP and no Tasks.
+// FileTracker and OutputPolicy, and NewServer adds the LSP client its manager
+// produced (and nothing else — notably no Tasks), so these opts carry one too.
 func TestExecutorLocalToolsAllMaterializeUnderExecutorOpts(t *testing.T) {
 	opts := ToolOpts{
 		Cwd:         t.TempDir(),
 		FileTracker: NewFileTracker(),
+		LSP:         &fakeLSPClient{},
 	}
 	got := registryNames(DefaultBlueprint.MaterializeOnly(opts, ExecutorLocalTools()))
 	for _, name := range ExecutorLocalTools() {
@@ -101,30 +107,28 @@ func TestExecutorLocalToolsAllMaterializeUnderExecutorOpts(t *testing.T) {
 	}
 }
 
-// With an executor configured the workspace lives on another machine, so a
-// language server started here would read — and lsp_rename would write — files
-// the agent is not working on. Declining is the honest interim: the tool is
-// absent from tools[] rather than answering confidently about the wrong host.
-func TestLSPToolsDeclineWhenAnExecutorIsConfigured(t *testing.T) {
+// With an executor configured the LSP tools must be PRESENT — they are proxied
+// to the executor, which runs the language servers against the files it holds.
+// They decline only when there is neither a local LSP client nor an executor.
+func TestLSPToolsMaterializeWithAnExecutor(t *testing.T) {
 	lspNames := []string{
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
 	}
 
-	withLSP := ToolOpts{Cwd: t.TempDir(), LSP: &fakeLSPClient{}}
-	got := registryNames(DefaultBlueprint.MaterializeOnly(withLSP, lspNames))
+	withExecutorOnly := ToolOpts{Cwd: t.TempDir(), Executor: stubExecutorClient{}}
+	got := registryNames(DefaultBlueprint.MaterializeOnly(withExecutorOnly, lspNames))
 	for _, name := range lspNames {
 		if !got[name] {
-			t.Fatalf("%q declined with an LSP client and no executor — this test's precondition is wrong", name)
+			t.Errorf("%q declined with an executor configured; it should be proxied to it", name)
 		}
 	}
 
-	withBoth := withLSP
-	withBoth.Executor = stubExecutorClient{}
-	got2 := registryNames(DefaultBlueprint.MaterializeOnly(withBoth, lspNames))
+	neither := ToolOpts{Cwd: t.TempDir()}
+	got2 := registryNames(DefaultBlueprint.MaterializeOnly(neither, lspNames))
 	for _, name := range lspNames {
 		if got2[name] {
-			t.Errorf("%q materialized with an executor configured — it would run against the daemon's filesystem", name)
+			t.Errorf("%q materialized with no LSP client and no executor", name)
 		}
 	}
 }
