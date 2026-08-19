@@ -23,6 +23,23 @@ import (
 // ControllerError carries a machine-readable protocol error code from a
 // Controller method, letting dispatch translate it to the correct
 // ctrl_response error body without inspecting error strings.
+//
+// A ControllerError's Message is a promise: this codebase wrote it, and mapErr
+// forwards it to the caller unexamined.
+//
+// Building one from another error's text is therefore fine when that error is
+// OURS — a domain sentinel or a message from our own machinery, whose wording
+// we control (translateInsightsErr on insights.ErrNotFound, the spawn-plan
+// errors). It is NOT fine for an error from a dependency, whose text we do not
+// control and cannot audit: `&ControllerError{Message: err.Error()}` over a
+// driver or network error re-opens exactly the hole mapErr's allowlist closes,
+// and errors.As finds it however deeply it is wrapped. That is what the
+// executor enroll/list paths used to do with pgx errors, which name the
+// database host, user and database on a connection failure.
+//
+// The test is not "did I write this line" but "do I control every string that
+// can reach it". If a dependency's error can flow into the Message, promote a
+// known sentinel instead, or let it through to be logged and generalised.
 type ControllerError struct {
 	Code    string
 	Message string
@@ -338,7 +355,22 @@ func mapErr(cmd, id string, err error, fallbackCode string) []byte {
 	if fallbackCode == "" {
 		fallbackCode = protocol.ErrInternal
 	}
-	return errResponse(cmd, id, fallbackCode, err.Error())
+	// Anything that is not a ControllerError is an error this codebase did not
+	// author, and its text is not ours to forward. A pgx connection failure,
+	// for instance, names the database host, user and database — infrastructure
+	// topology a caller has no business learning from a failed request. It goes
+	// to the log with its command, where an operator can correlate it by time.
+	//
+	// An allowlist rather than a blocklist on purpose: "redact the errors known
+	// to leak" fails open on every future error source, and pgx is unusually
+	// well-behaved (it even redacts passwords itself). The next one may not be.
+	//
+	// The cost is that a genuinely useful message must be promoted to a
+	// ControllerError at its source to survive — see translateInsightsErr and
+	// translateExecutorErr. That is deliberate: it makes forwarding a decision
+	// someone took rather than the default.
+	slog.Error("control: request failed", "command", cmd, "code", fallbackCode, "error", err)
+	return errResponse(cmd, id, fallbackCode, "internal error; see the daemon log")
 }
 
 // guardedErr answers an error to a peer that has NOT authenticated — today

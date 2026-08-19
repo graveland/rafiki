@@ -3287,6 +3287,32 @@ func (c *Controller) requireExecutorStore() error {
 }
 
 // ExecutorEnroll mints a one-time enrollment token.
+// translateExecutorErr promotes the executor store's domain sentinels into
+// ControllerErrors, so their text — which this codebase wrote and which tells
+// an operator something actionable ("enrollment token already consumed") —
+// survives mapErr's allowlist. Anything else is returned unchanged and is
+// therefore treated as internal: unexpected store failures carry the store's
+// own text, and a pgx connection failure names the database host, user and
+// database. That belongs in the daemon log, not in a response.
+func translateExecutorErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var code string
+	switch {
+	case errors.Is(err, executors.ErrNotFound), errors.Is(err, executors.ErrTokenUnknown):
+		code = protocol.ErrNotFound
+	case errors.Is(err, executors.ErrTokenConsumed),
+		errors.Is(err, executors.ErrTokenExpired),
+		errors.Is(err, executors.ErrDisabled):
+		// The argument is real but no longer usable — a client error, not ours.
+		code = protocol.ErrInvalidArgs
+	default:
+		return err
+	}
+	return &control.ControllerError{Code: code, Message: err.Error()}
+}
+
 func (c *Controller) ExecutorCreate(req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error) {
 	if err := c.requireExecutorStore(); err != nil {
 		return protocol.ExecutorCreateResponseData{}, err
@@ -3324,10 +3350,7 @@ func (c *Controller) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protoco
 		ExpiresAt:     time.Now().Add(ttl),
 	})
 	if err != nil {
-		return protocol.ExecutorEnrollResponseData{}, &control.ControllerError{
-			Code:    protocol.ErrInternal,
-			Message: "mint token: " + err.Error(),
-		}
+		return protocol.ExecutorEnrollResponseData{}, translateExecutorErr(fmt.Errorf("mint token: %w", err))
 	}
 	return protocol.ExecutorEnrollResponseData{Token: token}, nil
 }
@@ -3339,7 +3362,7 @@ func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors
 	}
 	execs, err := c.execStore.List(context.Background())
 	if err != nil {
-		return nil, &control.ControllerError{Code: protocol.ErrInternal, Message: err.Error()}
+		return nil, translateExecutorErr(err)
 	}
 	if req.Selector != "" {
 		sel, pErr := executors.ParseSelector(req.Selector)
@@ -3365,7 +3388,8 @@ func (c *Controller) ExecutorLabel(req protocol.ExecutorLabelRequest) (executors
 	if err := c.requireExecutorStore(); err != nil {
 		return executors.Executor{}, err
 	}
-	return c.execStore.SetLabels(context.Background(), req.ExecutorID, req.Set, req.Remove)
+	e, err := c.execStore.SetLabels(context.Background(), req.ExecutorID, req.Set, req.Remove)
+	return e, translateExecutorErr(err)
 }
 
 // ExecutorDisable disables an executor.
@@ -3373,7 +3397,7 @@ func (c *Controller) ExecutorDisable(req protocol.ExecutorDisableRequest) error 
 	if err := c.requireExecutorStore(); err != nil {
 		return err
 	}
-	return c.execStore.SetEnabled(context.Background(), req.ExecutorID, false)
+	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), req.ExecutorID, false))
 }
 
 // ExecutorEnable re-enables a disabled executor.
@@ -3381,7 +3405,7 @@ func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
 	if err := c.requireExecutorStore(); err != nil {
 		return err
 	}
-	return c.execStore.SetEnabled(context.Background(), req.ExecutorID, true)
+	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), req.ExecutorID, true))
 }
 
 // ─── Identity ──────────────────────────────────────────────────────────────
