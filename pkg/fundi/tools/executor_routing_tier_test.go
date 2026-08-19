@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -98,3 +100,46 @@ func TestExecutorLocalToolsAllMaterializeUnderExecutorOpts(t *testing.T) {
 		}
 	}
 }
+
+// With an executor configured the workspace lives on another machine, so a
+// language server started here would read — and lsp_rename would write — files
+// the agent is not working on. Declining is the honest interim: the tool is
+// absent from tools[] rather than answering confidently about the wrong host.
+func TestLSPToolsDeclineWhenAnExecutorIsConfigured(t *testing.T) {
+	lspNames := []string{
+		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
+		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
+	}
+
+	withLSP := ToolOpts{Cwd: t.TempDir(), LSP: &fakeLSPClient{}}
+	got := registryNames(DefaultBlueprint.MaterializeOnly(withLSP, lspNames))
+	for _, name := range lspNames {
+		if !got[name] {
+			t.Fatalf("%q declined with an LSP client and no executor — this test's precondition is wrong", name)
+		}
+	}
+
+	withBoth := withLSP
+	withBoth.Executor = stubExecutorClient{}
+	got2 := registryNames(DefaultBlueprint.MaterializeOnly(withBoth, lspNames))
+	for _, name := range lspNames {
+		if got2[name] {
+			t.Errorf("%q materialized with an executor configured — it would run against the daemon's filesystem", name)
+		}
+	}
+}
+
+// stubExecutorClient satisfies ExecutorClient so a ToolOpts can carry a
+// non-nil Executor. No method is ever called: these tests assert on which
+// tools materialize, never on what they do.
+type stubExecutorClient struct{}
+
+func (stubExecutorClient) Execute(context.Context, string, json.RawMessage) (string, error) {
+	return "", nil
+}
+func (stubExecutorClient) StartJob(context.Context, string) (string, error) { return "", nil }
+func (stubExecutorClient) JobOutput(context.Context, string, int64) (JobSnapshot, error) {
+	return JobSnapshot{}, nil
+}
+func (stubExecutorClient) KillJob(context.Context, string) error { return nil }
+func (stubExecutorClient) Ping(context.Context) error            { return nil }

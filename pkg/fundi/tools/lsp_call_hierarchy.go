@@ -33,7 +33,7 @@ func (LSPCallHierarchyBlueprint) Execute(context.Context, ToolInput) (ToolResult
 }
 
 func (LSPCallHierarchyBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	if opts.LSP == nil {
+	if lspUnavailable(opts) {
 		return nil, nil
 	}
 	return &lspCallHierarchyTool{LSPCallHierarchyBlueprint: LSPCallHierarchyBlueprint{}, lsp: opts.LSP, cwd: opts.Cwd}, nil

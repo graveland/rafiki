@@ -40,7 +40,7 @@ func (LSPRenameBlueprint) Execute(context.Context, ToolInput) (ToolResult, error
 }
 
 func (LSPRenameBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	if opts.LSP == nil {
+	if lspUnavailable(opts) {
 		return nil, nil
 	}
 	return &lspRenameTool{LSPRenameBlueprint: LSPRenameBlueprint{}, lsp: opts.LSP, tr: opts.FileTracker, cwd: opts.Cwd}, nil

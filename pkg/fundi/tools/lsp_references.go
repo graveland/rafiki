@@ -31,7 +31,7 @@ func (LSPReferencesBlueprint) Execute(context.Context, ToolInput) (ToolResult, e
 }
 
 func (LSPReferencesBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	if opts.LSP == nil {
+	if lspUnavailable(opts) {
 		return nil, nil
 	}
 	return &lspReferencesTool{LSPReferencesBlueprint: LSPReferencesBlueprint{}, lsp: opts.LSP, cwd: opts.Cwd}, nil
