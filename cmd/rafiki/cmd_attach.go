@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 
@@ -26,6 +27,8 @@ and choose explicitly.`,
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.Flags().IntP("tail", "n", 500, "Scrollback: replay the last N retained events into the TUI (-1 = all, 0 = none)")
+	cmd.Flags().Bool("no-local-executor", false,
+		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	// Attachable: any live state except spawning/shutting_down.
 	attachable := func(ch protocol.ChildSummary) bool {
@@ -63,6 +66,23 @@ func runAttach(cmd *cobra.Command, args []string) error {
 	if err := setActive(childID); err != nil {
 		// Best effort.
 		_ = err
+	}
+
+	// Offer this machine as a workspace for the attached session, unless the
+	// operator opted out. The selector is unused — a child's executor is fixed
+	// at spawn — so only the stop function is kept, to tear the executor down
+	// when the TUI exits.
+	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
+	if !noLocalExecutor {
+		root := childCwd(cmdCtx(cmd), c, childID)
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		_, stop, err := startSessionExecutor(cmdCtx(cmd), c, root)
+		if err != nil {
+			return fmt.Errorf("this machine could not join as a workspace: %w", err)
+		}
+		defer stop()
 	}
 
 	tailN, _ := cmd.Flags().GetInt("tail")

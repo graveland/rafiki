@@ -96,6 +96,8 @@ func addSpawnFlags(cmd *cobra.Command) {
 		"label selector choosing an executor from the daemon's pool to run this agent's filesystem and shell tools on (e.g. owner=brent,env=home); also see RAFIKI_EXECUTOR_SELECTOR")
 	cmd.Flags().String("executor-socket", paths.Get(paths.ExecutorSocket),
 		"unix socket of a rafiki-executor to run this agent's filesystem and shell tools in")
+	cmd.Flags().Bool("no-local-executor", false,
+		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
 
 	_ = cmd.RegisterFlagCompletionFunc("cwd", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveFilterDirs
@@ -343,6 +345,28 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
+	detached, _ := cmd.Flags().GetBool("detached")
+
+	// Only when the caller named no executor of their own. An explicit
+	// --executor-selector means "work over there", and standing up a local
+	// executor as well would offer this machine to a pool for a session that
+	// is not going to use it.
+	if req.ExecutorSelector == "" && !noLocalExecutor {
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd)
+		if err != nil {
+			return fmt.Errorf("this machine could not join as a workspace: %w", err)
+		}
+		req.ExecutorSelector = selector
+		// A detached spawn returns right after this, ending the process; a
+		// deferred stop would kill the executor before the child has used it.
+		// The executor dies with the process — a headless child has no client
+		// to serve it, and attach is the way that child acquires one later.
+		if !detached {
+			defer stop()
+		}
+	}
+
 	resp, err := c.Request(cmdCtx(cmd), req)
 	if err != nil {
 		return err
@@ -358,7 +382,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: could not update active marker:", err)
 	}
 
-	detached, _ := cmd.Flags().GetBool("detached")
 	if detached {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

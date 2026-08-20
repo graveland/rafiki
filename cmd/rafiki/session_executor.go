@@ -148,6 +148,21 @@ func executorLive(ctx context.Context, c *client.Client, selector string) (bool,
 	return false, nil
 }
 
+// childCwd returns the named child's working directory as the daemon reports
+// it, or "" when it cannot be resolved. Attach uses it as the workspace root so
+// the machine offers the directory the child is actually working in.
+func childCwd(ctx context.Context, c *client.Client, childID string) string {
+	resp, err := c.Request(ctx, protocol.GetRequest{Type: protocol.TypeCtrlGet, ChildID: childID})
+	if err != nil || !resp.Success {
+		return ""
+	}
+	var child protocol.ChildSummary
+	if err := json.Unmarshal(resp.Data, &child); err != nil {
+		return ""
+	}
+	return child.Cwd
+}
+
 // startSessionExecutor makes this machine available as a workspace.
 //
 // It returns the selector to put on spawns. That selector is returned even when
