@@ -251,8 +251,8 @@ type ToolOpts struct {
 	ChildID string
 
 	// Executor, when non-nil, runs the filesystem and shell tools in a
-	// separate process rather than in-process. nil keeps every tool local,
-	// which is the default and preserves today's behaviour exactly.
+	// separate process. nil means no workspace tier: the workspace tools are
+	// not registered at all.
 	Executor ExecutorClient
 
 	// ExecutorTools, when non-nil, is the exact set of tool names the configured

@@ -253,6 +253,10 @@ func runAgentWithFlags(f agentFlags) int {
 		RTK:                  bashRTKValue(f.bashRTK),
 		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),
 		NoLSP:                f.noLSP || paths.Get(paths.LSPDisable) == "1",
+		// The standalone CLI is its own workspace: no daemon, no pool, nobody
+		// else's children. It satisfies the executor rule with a real
+		// in-process client rather than an exemption, so there is one rule.
+		InProcessWorkspace: true,
 	}
 	if f.recordRequests {
 		// NewRawTraceStore(nil) is documented to return nil, so this is safe

@@ -91,14 +91,21 @@ type RuntimeOptions struct {
 	Agents tools.AgentSpawner
 
 	// Executor, when non-nil, runs the filesystem and shell tools in a
-	// separate process rather than in-process. nil keeps every tool local,
-	// which is the default and preserves today's behaviour exactly.
+	// separate process. nil means no workspace tier at all: the workspace
+	// tools are not registered, so the child reasons over the daemon tier
+	// only.
 	Executor tools.ExecutorClient
 
 	// ExecutorTools, when non-nil, is the exact set of tool names the chosen
-	// executor serves (from its Describe). nil means unknown — the legacy
-	// socket path — and leaves the child's routed set unfiltered.
+	// executor serves (from its Describe). nil means unknown and leaves the
+	// child's routed set unfiltered.
 	ExecutorTools []string
+
+	// InProcessWorkspace marks a process that is its own workspace — the
+	// standalone `rafikid fundi` mode. BuildRuntime satisfies the executor
+	// rule with an in-process ExecutorClient rather than an exemption, so
+	// there is one rule for every process.
+	InProcessWorkspace bool
 
 	// Workspace, when non-nil and Isolation != "none", appends a per-child
 	// machine block to the system prompt. Resolved by the daemon at spawn.
@@ -313,6 +320,15 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Agents:        opts.Agents,
 		Executor:      opts.Executor,
 		ExecutorTools: executorToolSet(opts.ExecutorTools),
+	}
+	// A process that is its own workspace satisfies the executor rule with a
+	// real in-process client rather than an exemption. Build it here, where the
+	// opts it materializes from are the same ones the main registry uses, so
+	// the two can never drift apart.
+	if opts.InProcessWorkspace && toolOpts.Executor == nil {
+		exec, served := tools.NewInProcessExecutor(toolOpts)
+		toolOpts.Executor = exec
+		toolOpts.ExecutorTools = served
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 
