@@ -260,15 +260,8 @@ dropped connection — a laptop sleeping mid-build does not lose the build.
 
 ```bash
 go build -o bin/rafiki ./cmd/rafiki
-./bin/rafiki executor serve --socket /tmp/exec.sock --root "$PWD"
-```
 
-**On the daemon's own machine, prefer `--connect-socket`.** It reverse-dials rafikid's
-executor socket, enrolls, and receives a row — so the executor carries labels, an
-admission selector, and a workspace mode, and `rafiki create --executor-selector` can
-target it like any other:
-
-```bash
+# On the daemon's own machine, reverse-dial the executor socket:
 rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
   --enroll-token <token> --root "$PWD"
 ```
@@ -276,7 +269,8 @@ rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
 No certificate is involved: a single-machine install should not need one.
 
 **Flags:**
-- `--socket` — path to the unix socket (required)
+- `--connect` — reverse-dial a daemon at host:port (for remote executors)
+- `--connect-socket` — reverse-dial a rafikid on this machine over its executor unix socket
 - `--root` — working directory root (defaults to current directory)
 - `--concurrency` — maximum concurrent tool calls (default 6)
 
@@ -290,8 +284,8 @@ New flags: `--lsp-config` (path to an `lsp.json`), `--no-lsp`.
 
 **Socket permissions are the only access control in this phase.** The socket
 is created under a `0177` umask, so it is `0600` from the moment it exists —
-no window in which another local user can connect. The executor refuses to
-start when the path is already served by a live executor, rather than
+no window in which another local user can connect. The daemon refuses to
+accept a second executor on a path already served by a live one, rather than
 silently stealing its future connections. Anyone who *can* open the socket
 gets arbitrary `bash` and filesystem access inside `--root`; there is no
 authentication beyond the filesystem.
@@ -547,7 +541,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
-| `RAFIKI_EXECUTOR_SELECTOR` | client-side: default label selector for `rafiki create --executor-selector`, choosing an executor from the daemon's enrolled pool (e.g. `owner=brent`). Wins over `RAFIKI_EXECUTOR_SOCKET` when both are set — the pool is the path the daemon can audit. Unset means `rafiki create` makes the client's own machine the workspace by default: it starts a session executor and points the spawn at it. Set it to send children somewhere else |
+| `RAFIKI_EXECUTOR_SELECTOR` | client-side: default label selector for `rafiki create --executor-selector`, choosing an executor from the daemon's enrolled pool (e.g. `owner=brent`). Unset means `rafiki create` makes the client's own machine the workspace by default: it starts a session executor and points the spawn at it. Set it to send children somewhere else |
 
 **Web access (webfetch / websearch).** The fundi runtime includes two opt-in web
 tools: `webfetch` fetches a URL and returns its text, and `websearch` queries
