@@ -24,6 +24,13 @@ func (discardConn) Deliver(_ []byte)         {}
 func (discardConn) Identity() users.Identity { return users.Identity{} }
 func (discardConn) Restricted() bool         { return false }
 
+// identityConn is a Connection stub that returns a preset identity.
+type identityConn struct{ id users.Identity }
+
+func (c identityConn) Deliver(_ []byte)         {}
+func (c identityConn) Identity() users.Identity { return c.id }
+func (c identityConn) Restricted() bool         { return false }
+
 // ─── fakeController ───────────────────────────────────────────────────────────
 
 type fakeController struct {
@@ -52,6 +59,7 @@ type fakeController struct {
 	executorLabelFn         func(protocol.ExecutorLabelRequest) (executors.Executor, error)
 	executorDisableFn       func(protocol.ExecutorDisableRequest) error
 	executorEnableFn        func(protocol.ExecutorEnableRequest) error
+	executorSessionFn       func(users.Identity, protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
 	contextWindowFn         func(string) (int, int, bool)
@@ -262,6 +270,13 @@ func (f *fakeController) ExecutorEnable(req protocol.ExecutorEnableRequest) erro
 		return f.executorEnableFn(req)
 	}
 	return nil
+}
+
+func (f *fakeController) ExecutorSession(id users.Identity, req protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error) {
+	if f.executorSessionFn != nil {
+		return f.executorSessionFn(id, req)
+	}
+	return protocol.ExecutorSessionResponseData{ExecutorID: "exec-session"}, nil
 }
 
 func (f *fakeController) UserCreate(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
@@ -1953,4 +1968,25 @@ func TestUserRmUnknownNameIsNotFound(t *testing.T) {
 	d := control.NewDispatch(&fakeController{})
 	req := []byte(`{"type":"ctrl_user_rm","id":"1","username":"ghost"}`)
 	mustError(t, d.HandleFrame(nil, req), protocol.ErrNotFound)
+}
+
+// The handler must take the identity from the CONNECTION, never from the frame.
+// A username in the payload would be a self-asserted gating fact: the owner
+// label decides which children may land on the machine.
+func TestDispatch_ExecutorSession_UsesConnectionIdentity(t *testing.T) {
+	var gotID users.Identity
+	c := &fakeController{
+		executorSessionFn: func(id users.Identity, _ protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error) {
+			gotID = id
+			return protocol.ExecutorSessionResponseData{ExecutorID: "e_x"}, nil
+		},
+	}
+	d := control.NewDispatch(c)
+
+	frame := []byte(`{"type":"ctrl_executor_session","id":"1","name":"laptop"}`)
+	mustSuccess(t, d.HandleFrame(identityConn{id: users.Identity{UserID: "u_1", Username: "brent"}}, frame))
+
+	if gotID.Username != "brent" {
+		t.Errorf("identity reached the controller as %+v, want username brent", gotID)
+	}
 }
