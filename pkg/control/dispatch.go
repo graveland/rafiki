@@ -184,6 +184,13 @@ type Controller interface {
 	// ExecutorEnable re-enables a disabled executor.
 	ExecutorEnable(req protocol.ExecutorEnableRequest) error
 
+	// ExecutorSession mints an executor row for the CALLER's own machine.
+	//
+	// The identity is passed separately rather than read from the request
+	// because it is the one thing the caller must not be able to state: the
+	// owner label decides which children may land on that machine.
+	ExecutorSession(id users.Identity, req protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
+
 	// ─── Identity ────────────────────────────────────────────────────────────
 
 	// UserCreate returns the plaintext token, which the daemon cannot
@@ -300,6 +307,8 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.executorDisable(frame, hdr.ID)
 	case protocol.TypeCtrlExecutorEnable:
 		return d.executorEnable(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorSession:
+		return d.executorSession(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUserCreate:
 		return d.userCreate(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUserList:
@@ -1042,6 +1051,24 @@ func (d *dispatcher) executorEnable(frame []byte, id string) []byte {
 		return mapErr(protocol.TypeCtrlExecutorEnable, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlExecutorEnable, id, nil)
+}
+
+func (d *dispatcher) executorSession(conn Connection, frame []byte, id string) []byte {
+	var req protocol.ExecutorSessionRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorSession, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	// conn is nil in some dispatch tests; a nil connection carries no identity,
+	// which the controller then resolves the same way it does for the UDS path.
+	var ident users.Identity
+	if conn != nil {
+		ident = conn.Identity()
+	}
+	result, err := d.c.ExecutorSession(ident, req)
+	if err != nil {
+		return mapErr(protocol.TypeCtrlExecutorSession, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorSession, id, result)
 }
 
 // ─── Identity ───────────────────────────────────────────────────────────────
