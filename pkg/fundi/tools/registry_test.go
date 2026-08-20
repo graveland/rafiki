@@ -79,7 +79,8 @@ func TestEditRequiresPriorRead(t *testing.T) {
 	if err := os.WriteFile(p, []byte("hello world"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := DefaultBlueprint.MaterializeAll(ToolOpts{FileTracker: NewFileTracker(), Cwd: dir})
+	r := DefaultBlueprint.MaterializeOnly(ToolOpts{FileTracker: NewFileTracker(), Cwd: dir},
+		[]string{"read", "edit"})
 	_, err := r.Execute(context.Background(), "edit",
 		json.RawMessage(`{"path":"`+p+`","old_string":"hello","new_string":"bye"}`))
 	if err == nil || !strings.Contains(err.Error(), "read") {
@@ -102,7 +103,7 @@ func TestEditRequiresPriorRead(t *testing.T) {
 }
 
 func TestDefinitionsSortedByName(t *testing.T) {
-	r := DefaultBlueprint.MaterializeAll(ToolOpts{FileTracker: NewFileTracker(), Cwd: t.TempDir()})
+	r := DefaultBlueprint.MaterializeAll(ToolOpts{FileTracker: NewFileTracker(), Cwd: t.TempDir(), Executor: stubExecutorClient{}})
 	defs := r.Definitions()
 	names := toolNames(defs)
 	if !sort.StringsAreSorted(names) {

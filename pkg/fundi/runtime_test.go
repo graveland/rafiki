@@ -113,6 +113,35 @@ func TestBuildRuntimeRejectsRelativeCwd(t *testing.T) {
 	}
 }
 
+// TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools pins the standalone
+// `rafikid fundi` guarantee: a process that is its own workspace gets the file
+// and shell tools via an in-process executor, so the executor rule has one
+// path rather than an exemption. Without this the standalone CLI would compile
+// and run while silently losing every filesystem tool.
+func TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools(t *testing.T) {
+	opts := fakeRuntimeOptions(t, t.TempDir())
+	opts.InProcessWorkspace = true
+
+	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+	if err != nil {
+		t.Fatalf("BuildRuntime: %v", err)
+	}
+	defer shutdown()
+
+	names := map[string]bool{}
+	for _, def := range eng.tools.Definitions() {
+		if def.OfTool != nil {
+			names[def.OfTool.Name] = true
+		}
+	}
+	for _, name := range []string{"read", "write", "edit", "glob", "grep", "ls", "bash"} {
+		if !names[name] {
+			t.Errorf("%q is missing; the standalone mode must keep its workspace tools", name)
+		}
+	}
+}
+
 // TestBuildRuntimeNilPoolIsInMemory pins the contract Task 5 depends on: no
 // pool means an in-memory conversation, and BuildRuntime must never open one.
 // A BuildRuntime that dialled a database here would make every unit test in
