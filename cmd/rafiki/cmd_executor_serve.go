@@ -3,18 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/unix"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executor"
@@ -67,7 +63,6 @@ func executorHandler(srv *executor.Server) http.Handler {
 
 func newExecutorServeCmd() *cobra.Command {
 	var (
-		socketPath        string
 		connectAddr       string
 		connectSocket     string
 		root              string
@@ -91,7 +86,6 @@ func newExecutorServeCmd() *cobra.Command {
 
 Two transports, exactly one of which must be given:
 
-  --socket          listen on a local unix socket; the daemon connects to it.
   --connect         reverse-dial the daemon and serve HTTP/2 on the dialled
                     connection. Required when the daemon cannot reach this host,
                     which is the usual case for a laptop behind NAT.
@@ -102,16 +96,16 @@ Two transports, exactly one of which must be given:
 			cmd.SilenceUsage = true
 
 			modes := 0
-			for _, set := range []bool{socketPath != "", connectAddr != "", connectSocket != ""} {
+			for _, set := range []bool{connectAddr != "", connectSocket != ""} {
 				if set {
 					modes++
 				}
 			}
 			if modes > 1 {
-				return fmt.Errorf("--socket, --connect and --connect-socket are mutually exclusive")
+				return fmt.Errorf("--connect and --connect-socket are mutually exclusive")
 			}
 			if modes == 0 {
-				return fmt.Errorf("one of --socket, --connect or --connect-socket is required")
+				return fmt.Errorf("one of --connect or --connect-socket is required")
 			}
 
 			wd, err := resolveRoot(root)
@@ -136,14 +130,13 @@ Two transports, exactly one of which must be given:
 				return serveReverseDial(connectAddr, connectSocket, pinnedFingerprint, serverName,
 					enrollToken, credential, credentialFile, handler)
 			}
-			return serveUnixSocket(socketPath, wd, handler)
+			return fmt.Errorf("one of --connect or --connect-socket is required")
 		},
 	}
 
-	cmd.Flags().StringVar(&socketPath, "socket", "", "path to the unix socket to listen on")
 	cmd.Flags().StringVar(&connectAddr, "connect", "", "daemon executor endpoint to dial (host:port)")
 	cmd.Flags().StringVar(&connectSocket, "connect-socket", "",
-		"unix socket of a rafikid on this machine to reverse-dial (mutually exclusive with --socket and --connect)")
+		"unix socket of a rafikid on this machine to reverse-dial (mutually exclusive with --connect)")
 	cmd.Flags().StringVar(&root, "root", "",
 		"working directory for this executor's tools (defaults to the current directory). "+
 			"NOT a sandbox: an absolute path reaches outside it. What this executor may "+
@@ -206,47 +199,6 @@ func serveReverseDial(addr, socketPath, pinCert, serverName, enrollToken, creden
 		Handler: handler,
 	}); err != nil {
 		return fmt.Errorf("connect: %w", err)
-	}
-	return nil
-}
-
-func serveUnixSocket(socketPath, wd string, handler http.Handler) error {
-	// Refuse rather than clobber: a live executor already on this path means
-	// two processes would serve one socket, and the second bind silently wins.
-	if conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond); err == nil {
-		conn.Close()
-		return fmt.Errorf("%s is already served by a live executor", socketPath)
-	}
-	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("cannot remove stale socket %s: %w", socketPath, err)
-	}
-
-	// Umask before bind, not chmod after: chmod leaves a window in which another
-	// local user can connect.
-	oldMask := unix.Umask(0o177)
-	ln, err := net.Listen("unix", socketPath)
-	unix.Umask(oldMask)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", socketPath, err)
-	}
-
-	protos := new(http.Protocols)
-	protos.SetUnencryptedHTTP2(true)
-	httpSrv := &http.Server{Handler: handler, Protocols: protos}
-	slog.Info("executor listening", "socket", socketPath, "root", wd, "version", version.String())
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	go func() {
-		<-ctx.Done()
-		slog.Info("executor shutting down")
-		if err := httpSrv.Shutdown(context.Background()); err != nil {
-			slog.Warn("executor shutdown", "error", err)
-		}
-	}()
-
-	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
 }
