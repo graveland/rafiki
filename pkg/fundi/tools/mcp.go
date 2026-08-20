@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
 
@@ -130,13 +131,7 @@ func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig) (*mcp.C
 	switch {
 	case sc.Command != "":
 		cmd := exec.Command(sc.Command, sc.Args...)
-		if len(sc.Env) > 0 {
-			env := os.Environ()
-			for k, v := range sc.Env {
-				env = append(env, k+"="+v)
-			}
-			cmd.Env = env
-		}
+		cmd.Env = mcpServerEnv(sc.Env)
 		transport = &mcp.CommandTransport{Command: cmd}
 	case sc.URL != "":
 		httpClient := http.DefaultClient
@@ -306,4 +301,39 @@ var anthropicToolNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // underscore (see nonTokenChars).
 func normalizeMCPName(s string) string {
 	return nonTokenChars.ReplaceAllString(s, "_")
+}
+
+// mcpServerEnv builds the environment for a stdio MCP server: the daemon's own,
+// minus everything rafiki owns, plus the server's configured values.
+//
+// An MCP server is a third-party program an operator named in a config file to
+// get one tool. Inheriting os.Environ() unfiltered handed it RAFIKI_DB — a
+// connection string with credentials — along with RAFIKI_TOKEN and both
+// provider API keys.
+//
+// cmd.Env is set UNCONDITIONALLY, and that is the point. A nil cmd.Env means
+// "inherit the parent's environment", which is the unfiltered case this exists
+// to prevent — and it was the original bug's exact shape, because the merge
+// only ran when the config happened to set a variable of its own.
+//
+// Configured values are appended last so they win: exec resolves duplicates to
+// the final occurrence, which lets an operator point one server at a different
+// account without touching the daemon's environment.
+func mcpServerEnv(extra map[string]string) []string {
+	base := os.Environ()
+	out := make([]string, 0, len(base)+len(extra))
+	for _, kv := range base {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		if paths.IsReservedEnvKey(kv[:eq]) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	for k, v := range extra {
+		out = append(out, k+"="+v)
+	}
+	return out
 }

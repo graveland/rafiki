@@ -264,17 +264,16 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 // daemon injects per-child — notably the socket and child id, which the child
 // trusts to identify itself and to call home.
 //
-// All three prefixes are stripped — RAFIKI_*, FUNDI_*, and PI_CONTROLLER_*,
-// the current and two prior spellings. paths.Get no longer falls back to any
-// of the old names, so none of this is load-bearing — but a caller's stale
-// export under any of the three names still has no business reaching a
-// spawned child. FUNDI_* is the spelling most likely to still be sitting in
-// a user's shell, so it belongs in this set as much as the other two do.
+// Which keys count as reserved is paths.IsReservedEnvKey — shared with the MCP
+// host, which strips the same set from the daemon's own environment before
+// exec'ing a third-party server. The reasons differ and the set does not, and a
+// second copy of the list here is exactly the drift this repo keeps finding.
 //
-// API-key variables (ANTHROPIC_API_KEY, OPENROUTER_API_KEY) are also stripped:
-// the daemon owns its own keys and the child inherits them through the daemon's
-// own os.Environ() — forwarding the caller's values would override the daemon's
-// and, for claude children, defeat the proxy's capture path.
+// For this caller the reasons are: a stale export under RAFIKI_*, FUNDI_* or
+// PI_CONTROLLER_* has no business reaching a spawned child even though paths.Get
+// no longer reads the retired spellings; and forwarding the caller's API keys
+// would override the daemon's own and, for claude children, defeat the proxy's
+// capture path.
 func collectCallerEnv() map[string]string {
 	environ := os.Environ()
 	out := make(map[string]string, len(environ))
@@ -283,15 +282,9 @@ func collectCallerEnv() map[string]string {
 		if eq <= 0 {
 			continue
 		}
-		k := kv[:eq]
-		if strings.HasPrefix(k, "RAFIKI_") || strings.HasPrefix(k, "FUNDI_") || strings.HasPrefix(k, "PI_CONTROLLER_") {
-			continue
+		if k := kv[:eq]; !paths.IsReservedEnvKey(k) {
+			out[k] = kv[eq+1:]
 		}
-		// Strip API keys: the daemon owns those credentials.
-		if k == "ANTHROPIC_API_KEY" || k == "OPENROUTER_API_KEY" {
-			continue
-		}
-		out[k] = kv[eq+1:]
 	}
 	return out
 }

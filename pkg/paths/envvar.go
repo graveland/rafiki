@@ -1,6 +1,9 @@
 package paths
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // This file names the environment variables rafiki owns.
 //
@@ -188,4 +191,36 @@ const (
 // renames deep is exactly the drift the rafiki consolidation removed.
 func Get(name string) string {
 	return os.Getenv(name)
+}
+
+// IsReservedEnvKey reports whether an environment variable belongs to rafiki
+// itself and must not be handed to a process outside the daemon's trust.
+//
+// Two callers, different reasons, same answer:
+//
+//   - collectCallerEnv (cmd/rafiki) strips these from a CALLER's environment
+//     before they reach a spawned child, so a stale export cannot override what
+//     the daemon injects per-child.
+//   - mcpServerEnv (pkg/fundi/tools) strips them from the DAEMON's environment
+//     before exec'ing a third-party MCP server, which would otherwise receive
+//     RAFIKI_DB — a connection string with credentials — plus RAFIKI_TOKEN and
+//     both provider API keys.
+//
+// Three prefixes: the current RAFIKI_ spelling and the two retired ones. Get no
+// longer falls back to either, so this is not load-bearing for resolution, but a
+// stale export under an old name has no business travelling either.
+//
+// It is a BLACKLIST of what rafiki owns, deliberately, and NOT a general secret
+// filter. A daemon environment holding AWS_SECRET_ACCESS_KEY or GITHUB_TOKEN
+// still passes those on. An allowlist would break every MCP server needing PATH,
+// HOME or a proxy variable, and deciding which of an operator's own variables
+// are secret is not something this can do correctly.
+func IsReservedEnvKey(k string) bool {
+	if strings.HasPrefix(k, "RAFIKI_") ||
+		strings.HasPrefix(k, "FUNDI_") ||
+		strings.HasPrefix(k, "PI_CONTROLLER_") {
+		return true
+	}
+	// The daemon owns its own provider credentials.
+	return k == "ANTHROPIC_API_KEY" || k == "OPENROUTER_API_KEY"
 }
