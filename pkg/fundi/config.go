@@ -5,15 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
-	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 )
 
@@ -55,13 +52,10 @@ func ThinkingBudgetFor(level string) (int64, error) {
 // cmd/rafikid builds the Registry and passes it in; see cmd/rafikid/agent.go.
 type Config struct {
 	// Model is the provider-qualified model id, e.g. "anthropic/sonnet-latest"
-	// or "deepseek/deepseek-chat". rafiki routes on this id alone: an
-	// "anthropic/" prefix resolves through the native Anthropic sender
-	// (prefix stripped, remainder resolved as an alias or concrete id);
-	// anything else routes to OpenRouter. cmd/rafikid requires --model to be
-	// provider-qualified (see parseAgentFlags) - BuildEngine itself does not
-	// re-validate that, so a bare id here (as some pre-redesign unit tests
-	// still use) is passed straight to rafiki uninterpreted.
+	// or "openrouter/deepseek/deepseek-chat". The first segment names the
+	// configured provider; the rest is the provider-local model id.
+	// cmd/rafikid requires --model to be provider-qualified (see
+	// parseAgentFlags) - BuildEngine validates it via Config.Validate.
 	Model string
 	// ThinkingBudget is the resolved extended-thinking token budget (0
 	// disables it) — see ThinkingBudgetFor.
@@ -110,12 +104,17 @@ type Config struct {
 	// network.
 	FakeTurns string
 
-	// AnthropicAPIKey / OpenRouterAPIKey are read from the environment by
-	// cmd/rafikid and passed in explicitly - rather than BuildEngine reading
-	// os.Getenv itself - so tests can exercise the missing-key error path
-	// without mutating the process environment.
-	AnthropicAPIKey  string
-	OpenRouterAPIKey string
+	// Providers is the resolved provider registry. cmd/rafikid loads it once
+	// (paths.ProvidersFile) and shares one *providers.Set across every child.
+	// Required: without it a model id cannot be resolved to a sender.
+	Providers *providers.Set
+
+	// APIKeyOverride, when non-empty, replaces the resolved credential for the
+	// provider this child's model names — and for no other. It carries a
+	// per-spawn key (SpawnRequest.APIKey) that the daemon's own environment
+	// does not have. The provider is identified by Model, so a forwarded key
+	// can never land on a provider the caller did not address.
+	APIKeyOverride string
 
 	// Tools is the assembled tool registry (file tools + bash + skills +
 	// MCP), built by cmd/rafikid before calling BuildEngine.
@@ -152,7 +151,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		return nil, nil, errors.New("agent: Config.Tools is required")
 	}
 
-	clientOpts, err := c.senderOptions()
+	clientOpts, err := c.clientOptions()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -167,6 +166,11 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	client, err := llm.NewClient(clientOpts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build llm client: %w", err)
+	}
+
+	p, modelID, err := c.Providers.Split(c.Model)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agent: %w", err)
 	}
 
 	convOpts := []llm.ConvOption{
@@ -191,20 +195,12 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	if c.MaxOutputTokens > 0 {
 		convOpts = append(convOpts, llm.MaxTokens(int64(c.MaxOutputTokens)))
 	}
-	// rafiki routes on the model id alone (an "anthropic/" prefix always
-	// wins native Anthropic; SendParams zeroes the fallback on its own for an
-	// OpenRouter-primary/slash model), so fundi needs no per-model branching
-	// here: whenever an OpenRouter key is configured, offer it as a fallback.
-	if c.OpenRouterAPIKey != "" && c.FakeTurns == "" {
-		convOpts = append(convOpts, llm.Fallback("openrouter"))
-	}
 
-	provider, modelID := splitModel(c.Model)
 	eng, err := NewEngine(EngineConfig{
 		Client:     client,
 		ConvOpts:   convOpts,
 		Tools:      c.Tools,
-		Provider:   provider,
+		Provider:   p.Name,
 		ModelID:    modelID,
 		Name:       c.Name,
 		BaseCtx:    ctx,
@@ -241,61 +237,52 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	return eng, shutdown, nil
 }
 
-// senderOptions builds the llm.ClientOptions wiring senders for the
-// configured upstream(s). rafiki's llm.NewClient unconditionally requires an
-// UpstreamAnthropic sender, so ANTHROPIC_API_KEY is always mandatory
-// regardless of which model is configured; OPENROUTER_API_KEY is only
-// mandatory when the model needs OpenRouter (i.e. isn't "anthropic/"
-// prefixed). Both checks run before any client/pool is constructed, so
-// BuildEngine fails fast at startup rather than on the first turn.
-func (c Config) senderOptions() ([]llm.ClientOption, error) {
-	needsOpenRouter := !strings.HasPrefix(c.Model, "anthropic/")
+// Validate checks everything that can fail before any client, pool or network
+// exists, so BuildEngine fails at startup rather than on the first turn.
+func (c Config) Validate() error {
+	if c.Providers == nil {
+		return errors.New("agent: no provider registry configured (providers.toml)")
+	}
+	if _, _, err := c.Providers.Split(c.Model); err != nil {
+		return fmt.Errorf("agent: %w", err)
+	}
+	return nil
+}
+
+// clientOptions builds the llm.ClientOptions for this config. The old version
+// of this required an ANTHROPIC_API_KEY unconditionally, because llm.NewClient
+// did; a keyless local-only child is constructible now.
+func (c Config) clientOptions() ([]llm.ClientOption, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	opts := []llm.ClientOption{llm.WithProviders(c.Providers)}
 
 	if c.FakeTurns != "" {
 		fake, err := LoadFakeSender(c.FakeTurns)
 		if err != nil {
 			return nil, err
 		}
-		opts := []llm.ClientOption{llm.WithProviderSender("anthropic", fake)}
-		if needsOpenRouter {
-			opts = append(opts, llm.WithProviderSender("openrouter", fake))
+		// Every provider gets the fake: --fake-turns must survive a failover
+		// as well as a direct send.
+		for _, name := range c.Providers.Names() {
+			opts = append(opts, llm.WithProviderSender(name, fake))
 		}
 		return opts, nil
 	}
 
-	if c.AnthropicAPIKey == "" {
-		return nil, errors.New("agent: ANTHROPIC_API_KEY is required (rafiki's llm.NewClient always needs an Anthropic sender)")
-	}
-	if needsOpenRouter && c.OpenRouterAPIKey == "" {
-		return nil, fmt.Errorf("agent: model %q requires OPENROUTER_API_KEY", c.Model)
-	}
-
-	anthro := anthropic.NewClient(option.WithAPIKey(c.AnthropicAPIKey))
-	opts := []llm.ClientOption{llm.WithProviderSender("anthropic", llm.FromSDK(anthro))}
-	if c.OpenRouterAPIKey != "" {
-		or := anthropic.NewClient(
-			option.WithBaseURL("https://openrouter.ai/api"),
-			option.WithAPIKey(c.OpenRouterAPIKey),
-			option.WithHeader("Referer", "https://github.com/graveland/rafiki"),
-			option.WithHeader("X-OpenRouter-Title", "rafiki"),
-			option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
-		)
-		opts = append(opts,
-			llm.WithProviderSender("openrouter", llm.FromSDK(or)),
-			llm.WithBreaker(15*time.Minute))
+	if c.APIKeyOverride != "" {
+		p, _, err := c.Providers.Split(c.Model)
+		if err != nil {
+			return nil, fmt.Errorf("agent: %w", err)
+		}
+		sender, err := llm.SenderForKey(p, c.APIKeyOverride, nil)
+		if err != nil {
+			return nil, fmt.Errorf("agent: %w", err)
+		}
+		opts = append(opts, llm.WithProviderSender(p.Name, sender))
 	}
 	return opts, nil
 }
 
-// splitModel splits a provider-qualified model id ("anthropic/sonnet-latest")
-// into the provider label and model id reported through get_state
-// (EngineConfig.Provider/ModelID) - a bare id with no slash reports an empty
-// provider, which only happens when a caller constructs Config directly
-// (e.g. pre-redesign unit tests) rather than through parseAgentFlags, which
-// requires --model to be provider-qualified.
-func splitModel(model string) (provider, id string) {
-	if i := strings.Index(model, "/"); i >= 0 {
-		return model[:i], model[i+1:]
-	}
-	return "", model
-}
+// shutdown := func() {} (no-op) kept for signature stability.

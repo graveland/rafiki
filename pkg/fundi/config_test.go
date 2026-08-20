@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
+	"go.graveland.dev/rafiki/pkg/providers"
 )
 
 func TestThinkingBudgetFor(t *testing.T) {
@@ -91,6 +92,7 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 		Name:      "w1",
 		FakeTurns: writeFakeTurns(t, sampleResp, sampleEndTurn),
 		Tools:     tools,
+		Providers: providers.Default(),
 	}
 
 	out := &syncBuffer{}
@@ -142,39 +144,70 @@ func TestBuildEngineRequiresTools(t *testing.T) {
 	}
 }
 
-// TestBuildEngineMissingAPIKey covers the always-mandatory ANTHROPIC_API_KEY
-// check: rafiki's llm.NewClient requires an Anthropic sender unconditionally,
-// so this errors regardless of which model is configured (see
-// TestBuildEngineMissingAPIKeyNonAnthropicModel for the non-anthropic case).
+// TestBuildEngineMissingAPIKey an agent's config with no Providers set fails validation
+// regardless of model (Providers is always required).
 func TestBuildEngineMissingAPIKey(t *testing.T) {
 	cfg := Config{Model: "anthropic/claude-x", Tools: fakeToolSet{}}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with no ANTHROPIC_API_KEY and no --fake-turns: want error, got nil")
+		t.Fatal("BuildEngine with no Providers: want error, got nil")
 	}
 }
 
-// TestBuildEngineMissingAPIKeyNonAnthropicModel confirms ANTHROPIC_API_KEY is
-// required even for a non-anthropic (OpenRouter-routed) model - rafiki's
-// llm.NewClient always needs an Anthropic sender, regardless of routing.
+// TestBuildEngineMissingAPIKeyNonAnthropicModel verifies that a config
+// with Providers but a model naming no configured provider fails validation.
 func TestBuildEngineMissingAPIKeyNonAnthropicModel(t *testing.T) {
-	cfg := Config{Model: "deepseek/deepseek-chat", Tools: fakeToolSet{}, OpenRouterAPIKey: "sk-or-not-relevant"}
+	cfg := Config{Model: "deepseek/deepseek-chat", Tools: fakeToolSet{}, Providers: providers.Default()}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with no ANTHROPIC_API_KEY (non-anthropic model): want error, got nil")
+		t.Fatal("BuildEngine with a model naming no configured provider: want error, got nil")
 	}
 }
 
-// TestBuildEngineNonAnthropicModelRequiresOpenRouterKey covers the other
-// mandatory-key check: a model with no "anthropic/" prefix routes to
-// OpenRouter, so OPENROUTER_API_KEY is required even though ANTHROPIC_API_KEY
-// is (always) also required.
+// TestBuildEngineNonAnthropicModelRequiresOpenRouterKey verifies a
+// provider-qualified model routed to OpenRouter works with the default config.
 func TestBuildEngineNonAnthropicModelRequiresOpenRouterKey(t *testing.T) {
-	cfg := Config{Model: "meta-llama/llama-3.1-70b", Tools: fakeToolSet{}, AnthropicAPIKey: "sk-anthropic-not-relevant"}
+	cfg := Config{Model: "openrouter/meta-llama/llama-3.1-70b", Tools: fakeToolSet{}, Providers: providers.Default()}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
-	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with a non-anthropic model and no OPENROUTER_API_KEY: want error, got nil")
+	if _, _, err := cfg.BuildEngine(context.Background(), fe); err != nil {
+		t.Fatalf("BuildEngine with a configured openrouter model: %v", err)
 	}
 }
 
 var _ agentloop.ToolSet = fakeToolSet{}
+
+func TestBuildEngineNeedsNoAnthropicKeyForLocalModel(t *testing.T) {
+	set, err := providers.Parse([]byte(`
+default_provider = "vmlx"
+
+[providers.vmlx]
+kind = "anthropic"
+base_url = "http://127.0.0.1:1"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	c := Config{Model: "vmlx/qwen3", Providers: set}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: a keyless local provider must need no ANTHROPIC_API_KEY: %v", err)
+	}
+}
+
+func TestValidateRejectsUnknownProvider(t *testing.T) {
+	set := providers.Default()
+	c := Config{Model: "deepseek/deepseek-chat", Providers: set}
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted a model naming no configured provider")
+	}
+	if !strings.Contains(err.Error(), "unknown provider") {
+		t.Errorf("error = %q, want \"unknown provider\"", err.Error())
+	}
+}
+
+func TestValidateRejectsMissingRegistry(t *testing.T) {
+	c := Config{Model: "anthropic/claude-sonnet-5"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate accepted a Config with no provider registry")
+	}
+}

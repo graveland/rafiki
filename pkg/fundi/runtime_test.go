@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/skills"
 )
 
@@ -29,6 +30,7 @@ func fakeRuntimeOptions(t *testing.T, cwd string) RuntimeOptions {
 		FakeTurns:      writeFakeTurns(t, sampleEndTurn),
 		NoSkills:       true,
 		NoContextFiles: true,
+		Providers:      providers.Default(),
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -54,12 +55,12 @@ type RuntimeOptions struct {
 	RemoteSkills []skills.SkillMeta
 	// RemoteSkillBody fetches a project skill's body from the child's executor.
 	// nil when the child has no executor, in which case no SkillMeta carries Remote.
-	RemoteSkillBody  func(ctx context.Context, name string) (body, dir string, err error)
-	MCPConfig        string // absolute path, or empty to skip MCP entirely
-	LSPConfig        string // absolute path, or empty to skip LSP entirely
-	FakeTurns        string
-	AnthropicAPIKey  string
-	OpenRouterAPIKey string
+	RemoteSkillBody func(ctx context.Context, name string) (body, dir string, err error)
+	MCPConfig       string // absolute path, or empty to skip MCP entirely
+	LSPConfig       string // absolute path, or empty to skip LSP entirely
+	FakeTurns       string
+	Providers       *providers.Set
+	APIKeyOverride  string
 
 	// Pool is the shared database pool. A nil Pool means an in-memory
 	// conversation. BuildRuntime never opens a pool itself, so a unit test does
@@ -426,8 +427,8 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Ref:                  opts.Ref,
 		Name:                 opts.Name,
 		FakeTurns:            opts.FakeTurns,
-		AnthropicAPIKey:      opts.AnthropicAPIKey,
-		OpenRouterAPIKey:     opts.OpenRouterAPIKey,
+		Providers:            opts.Providers,
+		APIKeyOverride:       opts.APIKeyOverride,
 		Pool:                 opts.Pool,
 		Tools:                registry,
 		AutoResume:           opts.AutoResume,
