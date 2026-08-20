@@ -94,8 +94,6 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 4)")
 	cmd.Flags().String("executor-selector", paths.Get(paths.ExecutorSelector),
 		"label selector choosing an executor from the daemon's pool to run this agent's filesystem and shell tools on (e.g. owner=brent,env=home); also see RAFIKI_EXECUTOR_SELECTOR")
-	cmd.Flags().String("executor-socket", paths.Get(paths.ExecutorSocket),
-		"unix socket of a rafiki-executor to run this agent's filesystem and shell tools in")
 	cmd.Flags().Bool("no-local-executor", false,
 		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
 
@@ -253,13 +251,10 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		req.MaxChildren = &v
 	}
 	// Read unconditionally rather than behind Flags().Changed(): the flag
-	// defaults already carry RAFIKI_EXECUTOR_SELECTOR / RAFIKI_EXECUTOR_SOCKET,
-	// and Changed() reports whether the user typed the flag, not whether the
-	// value is meaningful — so gating on it makes a computed default
-	// unreachable.
+	// default already carries RAFIKI_EXECUTOR_SELECTOR, and Changed() reports
+	// whether the user typed the flag, not whether the value is meaningful — so
+	// gating on it makes a computed default unreachable.
 	req.ExecutorSelector, _ = cmd.Flags().GetString("executor-selector")
-
-	req.ExecutorSocket, _ = cmd.Flags().GetString("executor-socket")
 
 	return req, nil
 }
