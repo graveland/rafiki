@@ -541,3 +541,26 @@ func TestBuildSpawnRequest_ExecutorSocketUnsetIsEmpty(t *testing.T) {
 		t.Errorf("ExecutorSocket = %q, want empty", req.ExecutorSocket)
 	}
 }
+
+// --no-local-executor is a session posture, not a spawn field. It must not
+// appear on the wire: the daemon has no opinion about whether the client
+// offered its own machine.
+func TestNoLocalExecutorIsNotASpawnField(t *testing.T) {
+	t.Setenv(paths.ExecutorSelector, "")
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("no-local-executor", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ExecutorSelector != "" {
+		t.Errorf("ExecutorSelector = %q, want empty", req.ExecutorSelector)
+	}
+}
