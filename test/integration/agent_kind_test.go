@@ -259,7 +259,15 @@ func assertNoRestartBetween(t *testing.T, sc *subConn, from, to int, childID str
 // wait instead of passing for the wrong reason.
 func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	t.Parallel()
-	d := bootDaemon(t)
+	// The scripted turn calls the real `bash` tool, which after the executor
+	// rule requires an enrolled executor. Boot the grant daemon (postgres) so
+	// the child can be placed on one; a fundi child with no executor has no
+	// bash to block on.
+	dsn := requireExecutorDB(t)
+	g := bootGrantDaemon(t, dsn)
+	d := g.daemon
+	g.enrollExecutor(t, map[string]string{"env": "home"})
+	g.waitForLiveExecutors(t, 1)
 
 	scriptDir := t.TempDir()
 	markerPath := filepath.Join(scriptDir, "tool-started")
@@ -294,8 +302,9 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		// --model is required by `rafikid fundi` (parseAgentFlags) since the
 		// provider/model redesign; --fake-turns replaces the sender, so the
 		// value itself is inert here beyond being provider-qualified.
-		Model:     "anthropic/claude-x",
-		ExtraArgs: []string{"--fake-turns", scriptPath},
+		Model:            "anthropic/claude-x",
+		ExecutorSelector: "env=home",
+		ExtraArgs:        []string{"--fake-turns", scriptPath},
 	}
 	spawnFrame, err := json.Marshal(spawnReq)
 	if err != nil {

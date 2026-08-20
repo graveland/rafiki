@@ -41,6 +41,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		"--no-session",
 		"--model", "fake/dummy",
 		"--no-extensions",
+		"--no-local-executor",
 		"--detached",
 	)
 	createCmd.Stderr = &createStderr
@@ -147,6 +148,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 		"--no-session",
 		"--no-extensions",
 		"--model", "fake/dummy",
+		"--no-local-executor",
 		"--detached",
 	)
 	var createStderr bytes.Buffer
@@ -254,6 +256,7 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 		"--no-session",
 		"--no-extensions",
 		"--model", "fake/dummy",
+		"--no-local-executor",
 		"--detached",
 	)
 	createCmd.Stderr = &createStderr
