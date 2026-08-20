@@ -96,7 +96,7 @@ func testAnalyzeClient(t *testing.T, sender llm.Sender) *llm.Client {
 	// Profile.Defaults() deliberately leaves DetectorModel/DraftModel unset, so
 	// a zero-value Profile resolves its model from this default.
 	c, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("haiku-latest"),
 	)
 	if err != nil {

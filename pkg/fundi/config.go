@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
@@ -194,7 +196,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	// OpenRouter-primary/slash model), so fundi needs no per-model branching
 	// here: whenever an OpenRouter key is configured, offer it as a fallback.
 	if c.OpenRouterAPIKey != "" && c.FakeTurns == "" {
-		convOpts = append(convOpts, llm.Fallback(llm.UpstreamOpenRouter))
+		convOpts = append(convOpts, llm.Fallback("openrouter"))
 	}
 
 	provider, modelID := splitModel(c.Model)
@@ -254,9 +256,9 @@ func (c Config) senderOptions() ([]llm.ClientOption, error) {
 		if err != nil {
 			return nil, err
 		}
-		opts := []llm.ClientOption{llm.WithUpstream(llm.UpstreamAnthropic, fake)}
+		opts := []llm.ClientOption{llm.WithProviderSender("anthropic", fake)}
 		if needsOpenRouter {
-			opts = append(opts, llm.WithUpstream(llm.UpstreamOpenRouter, fake))
+			opts = append(opts, llm.WithProviderSender("openrouter", fake))
 		}
 		return opts, nil
 	}
@@ -268,15 +270,18 @@ func (c Config) senderOptions() ([]llm.ClientOption, error) {
 		return nil, fmt.Errorf("agent: model %q requires OPENROUTER_API_KEY", c.Model)
 	}
 
-	opts := []llm.ClientOption{llm.WithUpstream(llm.UpstreamAnthropic, llm.Anthropic(c.AnthropicAPIKey))}
+	anthro := anthropic.NewClient(option.WithAPIKey(c.AnthropicAPIKey))
+	opts := []llm.ClientOption{llm.WithProviderSender("anthropic", llm.FromSDK(anthro))}
 	if c.OpenRouterAPIKey != "" {
-		// WithBreaker is what makes Fallback(UpstreamOpenRouter) actually
-		// live: llm.Client.callModel bypasses the whole fallback chain
-		// whenever the primary's breaker is nil, regardless of how many
-		// fallbacks are configured. Mirrors the daemon's own cmd/rafikid/proxy.go,
-		// which enables the breaker under the identical condition.
+		or := anthropic.NewClient(
+			option.WithBaseURL("https://openrouter.ai/api"),
+			option.WithAPIKey(c.OpenRouterAPIKey),
+			option.WithHeader("Referer", "https://github.com/graveland/rafiki"),
+			option.WithHeader("X-OpenRouter-Title", "rafiki"),
+			option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
+		)
 		opts = append(opts,
-			llm.WithUpstream(llm.UpstreamOpenRouter, llm.OpenRouter(c.OpenRouterAPIKey)),
+			llm.WithProviderSender("openrouter", llm.FromSDK(or)),
 			llm.WithBreaker(15*time.Minute))
 	}
 	return opts, nil

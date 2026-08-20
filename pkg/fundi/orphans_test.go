@@ -133,7 +133,7 @@ func assertToolResultFollowsToolUse(t *testing.T, msgs []anthropic.MessageParam,
 func testConversation(t *testing.T, bodies ...string) *llm.Conversation {
 	t.Helper()
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, scriptedSender(t, bodies...)),
+		llm.WithProviderSender("anthropic", scriptedSender(t, bodies...)),
 		llm.WithDefaultModel("claude-x"))
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
 func TestRepairOrphansRoundTrip(t *testing.T) {
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
 	if err != nil {
 		t.Fatal(err)

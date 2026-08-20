@@ -60,7 +60,7 @@ func convTestPool(t *testing.T) *pgxpool.Pool {
 func testClient(t *testing.T, pool *pgxpool.Pool, sender Sender) *Client {
 	t.Helper()
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, sender),
+		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("haiku-latest"), // conversations created without Model() intend this default
@@ -97,7 +97,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 		}},
 	})
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, sender),
+		WithProviderSender("anthropic", sender),
 		WithStore(pool),
 		WithCatalog(cat),
 		WithDefaultModel("haiku-latest"),
@@ -125,7 +125,7 @@ func TestConversationCostRollsUpCompletedTurnsPerModel(t *testing.T) {
 	}
 
 	// A store-less client reports 0 rather than a bogus figure.
-	bare, err := NewClient(WithUpstream(UpstreamAnthropic, sender), WithDefaultModel("haiku-latest"))
+	bare, err := NewClient(WithProviderSender("anthropic", sender), WithDefaultModel("haiku-latest"))
 	if err != nil {
 		t.Fatal(err)
 	}

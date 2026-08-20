@@ -50,24 +50,6 @@ func (s sdkSender) NewStreaming(ctx context.Context, params anthropic.MessageNew
 	return s.client.Messages.NewStreaming(ctx, params), nil
 }
 
-// Anthropic returns a Sender for the Anthropic API.
-func Anthropic(apiKey string) Sender {
-	return sdkSender{client: anthropic.NewClient(option.WithAPIKey(apiKey))}
-}
-
-// OpenRouter returns a Sender for OpenRouter's Anthropic-compatible endpoint.
-// Model ids are translated at failover time via the model catalog; a Sender
-// itself is id-agnostic.
-func OpenRouter(apiKey string) Sender {
-	return sdkSender{client: anthropic.NewClient(
-		option.WithBaseURL(openRouterBaseURL),
-		option.WithAPIKey(apiKey),
-		option.WithHeader("Referer", "https://github.com/graveland/rafiki"),
-		option.WithHeader("X-OpenRouter-Title", "rafiki"),
-		option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
-	)}
-}
-
 // FromSDK wraps a pre-built SDK client as a Sender — e.g. sc's forward-mode
 // diagnose client pointed at the central /v1/messages proxy.
 func FromSDK(client anthropic.Client) Sender {

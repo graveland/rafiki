@@ -132,10 +132,12 @@ func seededCatalog(t *testing.T) *routing.ModelCatalog {
 	return cat
 }
 
-func TestNewClientRequiresAnthropic(t *testing.T) {
-	if _, err := NewClient(); err == nil {
-		t.Fatal("NewClient without an Anthropic sender must error")
+func TestNewClientDefaultsToBuiltInProviders(t *testing.T) {
+	c, err := NewClient()
+	if err != nil {
+		t.Fatalf("NewClient with no options must use Default(): %v", err)
 	}
+	_ = c // healthy
 }
 
 func TestSendParamsFailsOverAndMapsModel(t *testing.T) {
@@ -146,8 +148,8 @@ func TestSendParamsFailsOverAndMapsModel(t *testing.T) {
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -158,7 +160,7 @@ func TestSendParamsFailsOverAndMapsModel(t *testing.T) {
 
 	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params)
+	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params)
 	if err != nil {
 		t.Fatalf("SendParams: %v", err)
 	}
@@ -168,12 +170,12 @@ func TestSendParamsFailsOverAndMapsModel(t *testing.T) {
 	if got := string(fallback.lastReq[0].Model); got != "anthropic/claude-haiku-4.5" {
 		t.Errorf("fallback model = %q, want catalog-mapped anthropic/claude-haiku-4.5", got)
 	}
-	if !c.Breaker(UpstreamAnthropic).Open() {
+	if !c.Breaker("anthropic").Open() {
 		t.Error("breaker must be open after a retryable primary failure")
 	}
 
 	// Breaker open → next call goes straight to the fallback (no probe yet).
-	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params); err != nil {
+	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params); err != nil {
 		t.Fatalf("SendParams (pinned): %v", err)
 	}
 	if primary.calls != 1 {
@@ -189,8 +191,8 @@ func TestSendParamsNonRetryableDoesNotFailOver(t *testing.T) {
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -200,13 +202,13 @@ func TestSendParamsNonRetryableDoesNotFailOver(t *testing.T) {
 	}
 	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params); err == nil {
+	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params); err == nil {
 		t.Fatal("401 must surface, not fail over")
 	}
 	if fallback.calls != 0 {
 		t.Errorf("fallback called %d times, want 0", fallback.calls)
 	}
-	if c.Breaker(UpstreamAnthropic).Open() {
+	if c.Breaker("anthropic").Open() {
 		t.Error("401 must not trip the breaker")
 	}
 }
@@ -222,8 +224,8 @@ func TestSendParamsFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -233,14 +235,14 @@ func TestSendParamsFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
 	}
 	params := anthropic.MessageNewParams{Model: "claude-haiku-4-5", MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params)
+	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params)
 	if err != nil {
 		t.Fatalf("SendParams: %v", err)
 	}
 	if resp.Content[0].Text != "from fallback" {
 		t.Errorf("response = %q, want fallback", resp.Content[0].Text)
 	}
-	if !c.Breaker(UpstreamAnthropic).Open() {
+	if !c.Breaker("anthropic").Open() {
 		t.Error("breaker must be open after an out-of-credit primary rejection")
 	}
 }
@@ -257,8 +259,8 @@ func TestSendParamsSlashModelRoutesToOpenRouter(t *testing.T) {
 		respondText("from openrouter"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", openrouter),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -266,9 +268,9 @@ func TestSendParamsSlashModelRoutesToOpenRouter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := anthropic.MessageNewParams{Model: "moonshotai/kimi-k3", MaxTokens: 16,
+	params := anthropic.MessageNewParams{Model: "openrouter/moonshotai/kimi-k3", MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params)
+	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params)
 	if err != nil {
 		t.Fatalf("SendParams: %v", err)
 	}
@@ -291,8 +293,8 @@ func TestSendParamsPinnedModelCarriesProviderPrefs(t *testing.T) {
 		respondText("ok"), respondText("ok"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, &scriptedSender{}),
-		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -307,8 +309,8 @@ func TestSendParamsPinnedModelCarriesProviderPrefs(t *testing.T) {
 			t.Fatalf("SendParams(%s): %v", model, err)
 		}
 	}
-	send("z-ai/glm-5.2")
-	send("moonshotai/kimi-k3")
+	send("openrouter/z-ai/glm-5.2")
+	send("openrouter/moonshotai/kimi-k3")
 
 	wire := func(i int) string {
 		t.Helper()
@@ -333,7 +335,7 @@ func TestSendParamsSlashModelWithoutOpenRouterErrors(t *testing.T) {
 		respondText("must not be reached"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
+		WithProviderSender("anthropic", primary),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -363,8 +365,8 @@ func TestSendParamsAnthropicPrefixRoutesNative(t *testing.T) {
 		respondText("from openrouter"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, anthropicSender),
-		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithProviderSender("anthropic", anthropicSender),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -390,7 +392,7 @@ func TestSendParamsAnthropicPrefixRoutesNative(t *testing.T) {
 	}
 
 	// A non-anthropic provider slash id still routes to OpenRouter, unchanged.
-	params2 := anthropic.MessageNewParams{Model: "deepseek/deepseek-chat", MaxTokens: 16,
+	params2 := anthropic.MessageNewParams{Model: "openrouter/deepseek/deepseek-chat", MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
 	resp2, err := c.SendParams(context.Background(), SendMeta{}, params2)
 	if err != nil {
@@ -419,8 +421,8 @@ func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 		respondText("openrouter"),
 	}}
 	c := newMemClient(t,
-		WithUpstream(UpstreamAnthropic, anthropicSender),
-		WithUpstream(UpstreamOpenRouter, openrouter),
+		WithProviderSender("anthropic", anthropicSender),
+		WithProviderSender("openrouter", openrouter),
 		WithCatalog(seededCatalog(t)),
 	)
 	conv, err := c.Conversation(context.Background(),
@@ -447,7 +449,7 @@ func TestConversationAnthropicPrefixResolvesNative(t *testing.T) {
 // loudly rather than silently selecting a model.
 func TestConversationNoModelNoDefaultErrors(t *testing.T) {
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, &scriptedSender{}),
+		WithProviderSender("anthropic", &scriptedSender{}),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -468,8 +470,8 @@ func TestSendParamsNoFallbackBypassesBreaker(t *testing.T) {
 		respondText("from fallback"),
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
@@ -481,16 +483,16 @@ func TestSendParamsNoFallbackBypassesBreaker(t *testing.T) {
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
 
 	// Trip the breaker via a fallback-configured send.
-	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []Upstream{UpstreamOpenRouter}}, params); err != nil {
+	if _, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{"openrouter"}}, params); err != nil {
 		t.Fatalf("tripping send: %v", err)
 	}
-	if !c.Breaker(UpstreamAnthropic).Open() {
+	if !c.Breaker("anthropic").Open() {
 		t.Fatal("breaker should be open")
 	}
 
 	// A send with NO fallback opts out of pinning: direct primary despite the
 	// open breaker (the per-conversation escape hatch from the design).
-	resp, err := c.SendParams(context.Background(), SendMeta{}, params)
+	resp, err := c.SendParams(context.Background(), SendMeta{Fallback: []string{}}, params)
 	if err != nil {
 		t.Fatalf("no-fallback send: %v", err)
 	}
@@ -509,7 +511,7 @@ func TestInMemoryConversation(t *testing.T) {
 	}}
 	// No WithStore: conversation degrades to in-memory history.
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, sender),
+		WithProviderSender("anthropic", sender),
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
@@ -766,11 +768,11 @@ func TestPrimaryOptionRoutesUpstream(t *testing.T) {
 		respondText("from openrouter"),
 	}}
 	c := newMemClient(t,
-		WithUpstream(UpstreamAnthropic, anthropicSender),
-		WithUpstream(UpstreamOpenRouter, openrouterSender),
+		WithProviderSender("anthropic", anthropicSender),
+		WithProviderSender("openrouter", openrouterSender),
 	)
 	conv, err := c.Conversation(context.Background(),
-		NewConversation("", "test"), Model("claude-test"), Primary(UpstreamOpenRouter))
+		NewConversation("", "test"), Model("claude-test"), Primary("openrouter"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,7 +791,7 @@ func TestThinkingBudgetSetsParam(t *testing.T) {
 	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"),
 	}}
-	c := newMemClient(t, WithUpstream(UpstreamAnthropic, sender))
+	c := newMemClient(t, WithProviderSender("anthropic", sender))
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-test"), ThinkingBudget(8192))
 	if err != nil {

@@ -5,12 +5,10 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -20,18 +18,20 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// Client is the long-lived library handle: configured upstreams, per-upstream
+// Client is the long-lived library handle: configured providers, per-provider
 // breakers, the capture/conversation store, the model catalog and tracing.
 // Conversation-level defaults live on Conversation; per-send overrides on
 // Send.
 type Client struct {
-	senders  map[Upstream]Sender
-	breakers map[Upstream]*routing.Breaker
+	senders  map[string]Sender
+	breakers map[string]*routing.Breaker
+	set      *providers.Set
 	pool     *pgxpool.Pool
 	capture  *capture.CaptureStore
 	messages *store.Messages
@@ -49,11 +49,17 @@ type Client struct {
 
 type ClientOption func(*Client)
 
-// WithUpstream configures a Sender for an upstream. UpstreamAnthropic is the
-// default primary; UpstreamOpenRouter enables failover when a conversation
-// requests it.
-func WithUpstream(u Upstream, s Sender) ClientOption {
-	return func(c *Client) { c.senders[u] = s }
+// WithProviders installs the provider registry. Required: without it there is
+// no way to resolve a model id to a sender.
+func WithProviders(s *providers.Set) ClientOption {
+	return func(c *Client) { c.set = s }
+}
+
+// WithProviderSender overrides the sender for one provider name. Callers that
+// want the registry to build its own senders do not use this; it exists for
+// tests and for the --fake-turns seam.
+func WithProviderSender(name string, s Sender) ClientOption {
+	return func(c *Client) { c.senders[name] = s }
 }
 
 // WithStore wires the Postgres pool for capture + DB-backed conversations.
@@ -103,14 +109,14 @@ func WithTracerProvider(tp trace.TracerProvider) ClientOption {
 
 func NewClient(opts ...ClientOption) (*Client, error) {
 	c := &Client{
-		senders:  map[Upstream]Sender{},
-		breakers: map[Upstream]*routing.Breaker{},
+		senders:  map[string]Sender{},
+		breakers: map[string]*routing.Breaker{},
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
-	if c.senders[UpstreamAnthropic] == nil {
-		return nil, errors.New("llm: an UpstreamAnthropic sender is required (WithUpstream)")
+	if c.set == nil {
+		c.set = providers.Default()
 	}
 	if c.logger == nil {
 		c.logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -120,6 +126,22 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	}
 	if c.catalog == nil {
 		c.catalog = routing.NewModelCatalog(http.DefaultClient, time.Hour, c.logger)
+	}
+	// Build a sender for every configured provider that does not already have
+	// one injected. A provider whose sender cannot be constructed (a reserved
+	// kind, say) is skipped rather than fatal: the process may never use it,
+	// and callModel's "provider not configured" error names it precisely if
+	// something does.
+	for _, name := range c.set.Names() {
+		if c.senders[name] != nil {
+			continue
+		}
+		s, err := SenderFor(c.set.Providers[name], nil)
+		if err != nil {
+			c.logger.Warn("llm: provider unavailable", "provider", name, "error", err)
+			continue
+		}
+		c.senders[name] = s
 	}
 	if c.breakerWindow > 0 {
 		for u := range c.senders {
@@ -134,10 +156,10 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	return c, nil
 }
 
-// Breaker exposes the breaker for an upstream so the embedded proxy face can
-// share it (one health signal per upstream per process). Nil when breakers
-// are disabled or the upstream isn't configured.
-func (c *Client) Breaker(u Upstream) *routing.Breaker { return c.breakers[u] }
+// Breaker exposes the breaker for a provider so the embedded proxy face can
+// share it (one health signal per provider per process). Nil when breakers
+// are disabled or the provider isn't configured.
+func (c *Client) Breaker(name string) *routing.Breaker { return c.breakers[name] }
 
 // Catalog exposes the model catalog (shared with the proxy face).
 func (c *Client) Catalog() *routing.ModelCatalog { return c.catalog }
@@ -200,61 +222,70 @@ type SendMeta struct {
 	AuthorKind       string
 	RateLimit        RateLimitPolicy
 
-	Primary  Upstream   // empty = UpstreamAnthropic
-	Fallback []Upstream // tried in order on retryable primary failure
+	Primary  string   // empty = the provider named by the model id
+	Fallback []string // nil = the provider's configured chain; empty non-nil = no failover
 }
 
 // prepareSend is the ONE place that decides how a request is routed. Every
-// send path (SendParams, sendStreaming) calls it first and MUST NOT
-// re-derive any of this itself — a second copy would silently drift (e.g.
-// streaming requests reaching a different upstream than non-streaming ones
-// for the same model id). It:
+// send path (SendParams, sendStreaming) calls it first and MUST NOT re-derive
+// any of this itself — a second copy would silently drift, e.g. streaming
+// requests reaching a different provider than non-streaming ones for the same
+// model id. It:
 //
-//  1. Strips a native "anthropic/<x>" prefix so it isn't caught by the slash
-//     rule below and so the native API receives a bare id.
-//  2. Forces primary/fallbacks to (UpstreamOpenRouter, nil) for any
-//     remaining slash id — an OpenRouter-native id must not default to
-//     upstream anthropic.
-//  3. Applies OpenRouter provider preferences when primary is OpenRouter,
-//     BEFORE capture so the recorded request matches the wire.
-//  4. Opens the "llm.send" tracing span (model/primary attributes) and
-//     records current breaker state.
+//  1. Resolves params.Model ("<provider>/<model>", or a bare id against
+//     default_provider) to a provider and a provider-local model id, and
+//     rewrites params.Model to the local id.
+//  2. Picks the fallback chain: the caller's when they supplied one (including
+//     an explicitly empty one, which means "no failover"), the provider's
+//     configured chain otherwise.
+//  3. Applies the kind's request mutation — for anthropic-openrouter that is
+//     the provider preferences and the cache guard's ejections — BEFORE
+//     capture, so the recorded request matches the wire.
+//  4. Opens the "llm.send" tracing span and records breaker state.
 //
-// Returns the span-carrying ctx, the span (caller must End it), the
-// resolved primary/fallbacks, and params with any routing-driven mutation
-// (prefix strip, provider prefs) applied.
-func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, Upstream, []Upstream, anthropic.MessageNewParams) {
-	primary := meta.Primary
-	if primary == "" {
-		primary = UpstreamAnthropic
+// The returned error is a resolution failure (unknown provider, empty model);
+// callers must abort the send on it.
+func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, string, []string, anthropic.MessageNewParams, error) {
+	requested := string(params.Model)
+	if requested == "" {
+		requested = c.defaultModel
 	}
-	fallbacks := meta.Fallback
-	// An "anthropic/<x>" id explicitly names the native Anthropic sender: strip
-	// the prefix so it isn't caught by the generic slash->OpenRouter rule below,
-	// and so the native API receives a bare id. This covers callers that build
-	// params directly (bypassing ResolveModel); it's idempotent for the resolved
-	// Conversation path, where the prefix is already gone.
-	if stripped, ok := routing.StripNativeAnthropicPrefix(string(params.Model)); ok {
-		params.Model = anthropic.Model(stripped)
+	p, modelID, err := c.set.Split(requested)
+	if err != nil {
+		return ctx, nil, "", nil, params, err
 	}
-	if strings.Contains(string(params.Model), "/") {
-		// A slash id is OpenRouter-native: route directly to OpenRouter rather
-		// than defaulting to upstream anthropic. Keeps things compatible with
-		// non anthropic models by using OpenRouter's logic.
-		primary, fallbacks = UpstreamOpenRouter, nil
+	params.Model = anthropic.Model(modelID)
+
+	primary := p.Name
+	fallbacks := p.Fallback
+	if meta.Fallback != nil {
+		fallbacks = meta.Fallback
 	}
-	if primary == UpstreamOpenRouter {
-		// Injected before capture so the recorded request matches the wire.
-		applyProviderPrefs(&params, c.guard)
+	if meta.Primary != "" {
+		primary = meta.Primary
 	}
+	c.mutateParams(p, &params)
+
 	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(
 		attribute.String("rafiki.model", string(params.Model)),
-		attribute.String("rafiki.primary", string(primary)),
+		attribute.String("rafiki.primary", primary),
 	))
 	if b := c.breakers[primary]; b != nil {
 		span.SetAttributes(attribute.Bool("rafiki.breaker.open", b.Open()))
 	}
-	return ctx, span, primary, fallbacks, params
+	return ctx, span, primary, fallbacks, params, nil
+}
+
+// mutateParams applies a kind's request-body mutation. Only
+// anthropic-openrouter has one: OpenRouter's non-standard top-level "provider"
+// field, carrying the pinned routing preferences plus whatever the cache guard
+// has ejected. providers.Validate refuses extras.provider, so the user cannot
+// clobber it.
+func (c *Client) mutateParams(p providers.Provider, params *anthropic.MessageNewParams) {
+	if p.Kind != providers.KindAnthropicOpenRouter {
+		return
+	}
+	applyProviderPrefs(params, c.guard, p.Extras)
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
@@ -274,7 +305,10 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 // best-effort: a broken store degrades to pass-through, never blocks the
 // call. Every invocation inserts its own turn row and always resolves it.
 func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	ctx, span, primary, fallbacks, params := c.prepareSend(ctx, meta, params)
+	ctx, span, primary, fallbacks, params, err := c.prepareSend(ctx, meta, params)
+	if err != nil {
+		return nil, err
+	}
 	defer span.End()
 
 	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
@@ -286,7 +320,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	start := time.Now()
 	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params)
 	latency := int(time.Since(start).Milliseconds())
-	span.SetAttributes(attribute.String("rafiki.upstream", string(servedBy)))
+	span.SetAttributes(attribute.String("rafiki.upstream", servedBy))
 
 	if err != nil {
 		span.RecordError(err)
@@ -302,7 +336,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		attribute.Int64("rafiki.tokens.cache_read", resp.Usage.CacheReadInputTokens),
 		attribute.Int64("rafiki.tokens.cache_creation", resp.Usage.CacheCreationInputTokens),
 	)
-	if servedBy == UpstreamOpenRouter {
+	if p, ok := c.set.Get(servedBy); ok && p.Kind == providers.KindAnthropicOpenRouter {
 		c.guard.Observe(time.Now(), routing.Observation{
 			Provider: ProviderOf(resp), Model: string(params.Model), Conversation: ref.convID,
 			PrefixHash: ref.prefixHash, InputTokens: resp.Usage.InputTokens,
@@ -348,7 +382,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 // Failover: unlike an earlier version of this method, sendStreaming DOES
 // engage even when a fallback chain and an active breaker are configured —
 // it no longer bails out of streaming entirely just because both are set.
-// A concrete consumer (fundi) enables Fallback(UpstreamOpenRouter) and
+// A concrete consumer (fundi) enables a fallback chain and
 // WithBreaker together whenever an OpenRouter key is configured, which is
 // the common case, not an edge case; bailing out of streaming there made
 // WithStreamHandler silently a no-op for exactly the deployment this was
@@ -442,7 +476,10 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 }
 
 func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
-	ctx, span, primary, fallbacks, params := c.prepareSend(ctx, meta, params)
+	ctx, span, primary, fallbacks, params, err := c.prepareSend(ctx, meta, params)
+	if err != nil {
+		return nil, false, false, err
+	}
 	defer span.End()
 
 	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
@@ -560,7 +597,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		attribute.Int64("rafiki.tokens.cache_read", acc.Usage.CacheReadInputTokens),
 		attribute.Int64("rafiki.tokens.cache_creation", acc.Usage.CacheCreationInputTokens),
 	)
-	if primary == UpstreamOpenRouter {
+	if p, ok := c.set.Get(primary); ok && p.Kind == providers.KindAnthropicOpenRouter {
 		// acc is the fully accumulated message at this point (the loop above
 		// has already run to completion) — this is a completed turn's final
 		// usage, not a partial mid-stream snapshot.
@@ -662,7 +699,7 @@ func backfillDeltaUsage(acc *anthropic.Message, ev anthropic.MessageStreamEventU
 // NOT whether a breaker merely exists — so an open breaker with no probe slot
 // available correctly says "don't use primary" rather than always issuing
 // because one is configured.
-func (c *Client) primaryGate(primary Upstream, fallbacks []Upstream, now time.Time) (usePrimary bool, breaker *routing.Breaker) {
+func (c *Client) primaryGate(primary string, fallbacks []string, now time.Time) (usePrimary bool, breaker *routing.Breaker) {
 	b := c.breakers[primary]
 	if len(fallbacks) == 0 || b == nil {
 		return true, nil
@@ -707,10 +744,10 @@ func (c *Client) recordModelResult(params anthropic.MessageNewParams, err error)
 // the breaker entirely (direct primary, mirroring the routing core's
 // fallback-less behavior) — per the design, an empty Fallback chain is how a
 // consumer opts out of being pinned.
-func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstream, fallbacks []Upstream, params anthropic.MessageNewParams) (*anthropic.Message, Upstream, error) {
+func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, params anthropic.MessageNewParams) (*anthropic.Message, string, error) {
 	sender := c.senders[primary]
 	if sender == nil {
-		return nil, primary, fmt.Errorf("llm: upstream %q not configured", primary)
+		return nil, primary, fmt.Errorf("llm: provider %q not configured", primary)
 	}
 	now := time.Now()
 	usePrimary, breaker := c.primaryGate(primary, fallbacks, now)
@@ -732,21 +769,29 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 			return nil, primary, err // not failover-worthy: don't fail over or trip
 		}
 		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", err.Error())))
-		c.logger.Warn("primary failed; failing over", "primary", string(primary), "error", err)
+		c.logger.Warn("primary failed; failing over", "primary", primary, "error", err)
 	}
 
 	var lastErr error
 	for _, fb := range fallbacks {
 		fbSender := c.senders[fb]
 		if fbSender == nil {
-			lastErr = fmt.Errorf("llm: fallback upstream %q not configured", fb)
+			lastErr = fmt.Errorf("llm: fallback provider %q not configured", fb)
+			continue
+		}
+		fbProvider, ok := c.set.Get(fb)
+		if !ok {
+			lastErr = fmt.Errorf("llm: fallback provider %q not in the registry", fb)
 			continue
 		}
 		fbParams := params
-		if fb == UpstreamOpenRouter {
+		// Model-id translation between a primary and its fallback is the
+		// RECEIVING kind's job: anthropic-openrouter maps an Anthropic id
+		// through the catalog; an anthropic -> anthropic fallback needs none.
+		if fbProvider.Kind == providers.KindAnthropicOpenRouter {
 			fbParams.Model = anthropic.Model(c.catalog.OpenRouterModel(string(params.Model)))
-			applyProviderPrefs(&fbParams, c.guard)
 		}
+		c.mutateParams(fbProvider, &fbParams)
 		resp, err := fbSender.New(ctx, fbParams)
 		if err == nil {
 			c.modelGate.recordSuccess(string(params.Model))
@@ -757,18 +802,30 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary Upstrea
 	return nil, primary, lastErr
 }
 
-// applyProviderPrefs injects OpenRouter provider-routing preferences for
-// pinned model lines (routing.ProviderPrefsFor) plus any providers the guard
-// has ejected, as the request body's "provider" field. Call only on params
-// bound for OpenRouter — the field is not part of the Anthropic API.
-func applyProviderPrefs(params *anthropic.MessageNewParams, g *routing.ProviderGuard) {
+// applyProviderPrefs injects OpenRouter provider-routing preferences for pinned
+// model lines (routing.ProviderPrefsFor) plus any providers the guard has
+// ejected, as the request body's "provider" field, and merges the provider's
+// configured extras alongside.
+//
+// SetExtraFields REPLACES the whole map, so everything that belongs in it must
+// be assembled here in one call. "provider" is a reserved extras key
+// (providers.Validate refuses it) precisely because a user-supplied one would
+// otherwise delete the guard's ejections with no error and no log line.
+func applyProviderPrefs(params *anthropic.MessageNewParams, g *routing.ProviderGuard, extras map[string]any) {
 	prefs, pinned := routing.ProviderPrefsFor(string(params.Model))
 	ignore := g.IgnoredFor(time.Now(), string(params.Model))
-	if !pinned && len(ignore) == 0 {
+	if !pinned && len(ignore) == 0 && len(extras) == 0 {
 		return
 	}
-	prefs.Ignore = append(prefs.Ignore, ignore...)
-	params.SetExtraFields(map[string]any{"provider": prefs})
+	fields := make(map[string]any, len(extras)+1)
+	for k, v := range extras {
+		fields[k] = v
+	}
+	if pinned || len(ignore) > 0 {
+		prefs.Ignore = append(prefs.Ignore, ignore...)
+		fields["provider"] = prefs
+	}
+	params.SetExtraFields(fields)
 }
 
 // ProviderOf extracts OpenRouter's non-standard top-level "provider" field
@@ -864,7 +921,7 @@ func (c *Client) beginTurn(ctx context.Context, meta SendMeta, params anthropic.
 
 // completeTurn records the response; on a completion/marshal failure the turn
 // is failed rather than stranded pending (mirrors the routing core).
-func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time.Time, resp *anthropic.Message, upstream Upstream, latencyMS int) {
+func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time.Time, resp *anthropic.Message, upstream string, latencyMS int) {
 	var cErr error
 	reason := "complete-turn failed: "
 	respJSON, mErr := json.Marshal(resp)
@@ -900,7 +957,7 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 // cmd/rafikid/main.go) already drains any insert still in flight, bounded by
 // that same timeout. Errors are logged, never surfaced. No-op when c.rawTrace
 // is nil.
-func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, params anthropic.MessageNewParams, resp *anthropic.Message, status int, upstream Upstream, latency int, err error) {
+func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, params anthropic.MessageNewParams, resp *anthropic.Message, status int, upstream string, latency int, err error) {
 	if c.rawTrace == nil {
 		return
 	}

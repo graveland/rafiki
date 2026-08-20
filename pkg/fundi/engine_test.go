@@ -140,7 +140,7 @@ func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*
 	t.Helper()
 	silenceSlog(t) // the engine logs turn lifecycle at info; keep test output pristine
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
 	if err != nil {
 		t.Fatal(err)
@@ -632,7 +632,7 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 	started := make(chan struct{})
 	ts := fakeToolSet{"bash": blockOnCtxTool(started)}
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, scriptedSender(t, sampleResp)),
+		llm.WithProviderSender("anthropic", scriptedSender(t, sampleResp)),
 		llm.WithDefaultModel("claude-x"))
 	if err != nil {
 		t.Fatal(err)

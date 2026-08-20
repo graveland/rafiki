@@ -413,7 +413,7 @@ func blockingBuildFunc(started chan struct{}, fakeTurnsPath string) BuildFunc {
 			return nil, nil, err
 		}
 		client, err := llm.NewClient(
-			llm.WithUpstream(llm.UpstreamAnthropic, ctxCheckingSender{inner: sender}),
+			llm.WithProviderSender("anthropic", ctxCheckingSender{inner: sender}),
 			llm.WithDefaultModel("claude-x"))
 		if err != nil {
 			return nil, nil, err
@@ -782,7 +782,7 @@ func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
 			return nil, nil, err
 		}
 		client, err := llm.NewClient(
-			llm.WithUpstream(llm.UpstreamAnthropic, sender),
+			llm.WithProviderSender("anthropic", sender),
 			llm.WithDefaultModel("claude-x"))
 		if err != nil {
 			return nil, nil, err
@@ -876,7 +876,7 @@ func (panickingSender) New(context.Context, anthropic.MessageNewParams) (*anthro
 func panickingTurnBuildFunc() BuildFunc {
 	return func(ctx context.Context, fe *fundi.Frontend, ro fundi.RuntimeOptions) (*fundi.Engine, func(), error) {
 		client, err := llm.NewClient(
-			llm.WithUpstream(llm.UpstreamAnthropic, panickingSender{}),
+			llm.WithProviderSender("anthropic", panickingSender{}),
 			llm.WithDefaultModel("claude-x"))
 		if err != nil {
 			return nil, nil, err

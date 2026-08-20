@@ -133,7 +133,7 @@ func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref strin
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
@@ -153,7 +153,7 @@ func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.Sender) *llm.Conversat
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
@@ -775,7 +775,7 @@ func newMemConv(t *testing.T, sender llm.Sender) *llm.Conversation {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
 	)

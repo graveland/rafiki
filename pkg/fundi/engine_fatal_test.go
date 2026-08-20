@@ -74,7 +74,7 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 	silenceSlog(t)
 	w := newStallWriter()
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, panickingSender{w: w}),
+		llm.WithProviderSender("anthropic", panickingSender{w: w}),
 		llm.WithDefaultModel("claude-x"))
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
 	silenceSlog(t)
 	out := &syncBuffer{}
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, panickingSender{w: newStallWriter()}),
+		llm.WithProviderSender("anthropic", panickingSender{w: newStallWriter()}),
 		llm.WithDefaultModel("claude-x"))
 	if err != nil {
 		t.Fatal(err)

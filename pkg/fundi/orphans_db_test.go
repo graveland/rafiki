@@ -129,7 +129,7 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	// the actual shape sent, not just that the call returned successfully.
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, sender),
+		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)

@@ -20,7 +20,7 @@ import (
 func newTestConversation(t *testing.T, sender Sender) *Conversation {
 	t.Helper()
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, sender),
+		WithProviderSender("anthropic", sender),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
@@ -42,8 +42,8 @@ func newTestConversation(t *testing.T, sender Sender) *Conversation {
 func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Conversation, *Client) {
 	t.Helper()
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -54,7 +54,7 @@ func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Co
 	}
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
-		Fallback(UpstreamOpenRouter))
+		Fallback("openrouter"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +68,8 @@ func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Co
 func newTestConversationWithOpenBreaker(t *testing.T, primary, fallback Sender) (*Conversation, *Client) {
 	t.Helper()
 	conv, c := newTestConversationWithBreaker(t, primary, fallback)
-	c.Breaker(UpstreamAnthropic).RecordResult(time.Now(), true)
-	if !c.Breaker(UpstreamAnthropic).Open() {
+	c.Breaker("anthropic").RecordResult(time.Now(), true)
+	if !c.Breaker("anthropic").Open() {
 		t.Fatal("test setup: breaker did not open")
 	}
 	return conv, c
@@ -556,8 +556,8 @@ func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
 	primary := newFakeStreamingSender(textStreamEvents("Hi", " there")...)
 	fallback := &nonStreamingFake{reply: "must not be used"}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -568,7 +568,7 @@ func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
 	}
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
-		Fallback(UpstreamOpenRouter))
+		Fallback("openrouter"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,8 +609,8 @@ func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
 	primary := &fakeStreamingSender{scripts: []streamScript{{openErr: overloadedErr()}}}
 	fallback := &nonStreamingFake{reply: "fallback done"}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -621,7 +621,7 @@ func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
 	}
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
-		Fallback(UpstreamOpenRouter))
+		Fallback("openrouter"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
 	if fallback.calls != 1 {
 		t.Errorf("fallback.calls = %d, want 1", fallback.calls)
 	}
-	if !c.Breaker(UpstreamAnthropic).Open() {
+	if !c.Breaker("anthropic").Open() {
 		t.Error("breaker must be open after the retryable primary failure")
 	}
 }
@@ -674,8 +674,8 @@ func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testin
 	}}}
 	fallback := &nonStreamingFake{reply: "recovered"}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, primary),
-		WithUpstream(UpstreamOpenRouter, fallback),
+		WithProviderSender("anthropic", primary),
+		WithProviderSender("openrouter", fallback),
 		WithBreaker(15*time.Minute),
 		WithCatalog(seededCatalog(t)),
 		WithDefaultModel("claude-haiku-4-5"),
@@ -686,7 +686,7 @@ func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testin
 	}
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
-		Fallback(UpstreamOpenRouter))
+		Fallback("openrouter"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,7 +778,7 @@ func TestSendStreaming_RecordsResultIntoBreaker(t *testing.T) {
 		t.Errorf("fallback called %d times, want 0 (no failover once content has delivered)", fallback.calls)
 	}
 
-	b := client.Breaker(UpstreamAnthropic)
+	b := client.Breaker("anthropic")
 	if b == nil {
 		t.Fatal("no breaker configured")
 	}
@@ -793,7 +793,7 @@ func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
 		{events: textStreamEvents("after retry")},
 	}}
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, sender),
+		WithProviderSender("anthropic", sender),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
@@ -883,7 +883,7 @@ func TestSend_StreamRespectsRateLimitPolicyMaxRetries(t *testing.T) {
 	}}
 
 	c, err := NewClient(
-		WithUpstream(UpstreamAnthropic, sender),
+		WithProviderSender("anthropic", sender),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)

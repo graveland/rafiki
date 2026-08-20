@@ -7,15 +7,6 @@
 // prefix_hash.
 package llm
 
-// Upstream identifies a configured model provider. Values match the
-// conversation_turn.upstream column.
-type Upstream string
-
-const (
-	UpstreamAnthropic  Upstream = "anthropic"
-	UpstreamOpenRouter Upstream = "openrouter"
-)
-
 // CacheTTL is a prompt-cache breakpoint lifetime.
 type CacheTTL string
 
