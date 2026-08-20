@@ -69,6 +69,30 @@ func TestDialAddr(t *testing.T) {
 	}
 }
 
+// The executor dials the same daemon the control connection reached, so it
+// needs the identical host:port. Exported rather than copied: url.URL omits an
+// unspecified port and net.Dial requires one, and a second implementation of
+// that rule is exactly the drift this repo keeps finding.
+func TestDialAddrExported(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://host", "host:443"},
+		{"https://host:8443", "host:8443"},
+		{"https://[::1]", "[::1]:443"},
+	} {
+		got, err := DialAddr(tc.raw)
+		if err != nil {
+			t.Fatalf("DialAddr(%q): %v", tc.raw, err)
+		}
+		if got != tc.want {
+			t.Errorf("DialAddr(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+
+	if _, err := DialAddr("http://host"); err == nil {
+		t.Error("DialAddr accepted an http:// URL; only https names a remote control plane")
+	}
+}
+
 // sendAuthFrame is the exact code DialURL calls once the TLS dial and
 // upgrade have succeeded — testing it directly here sidesteps the fact that
 // DialURL itself only ever trusts system root CAs, so a self-signed test
