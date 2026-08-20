@@ -280,7 +280,7 @@ func TestArgvRoundTripsIntoRuntimeOptions(t *testing.T) {
 		t.Fatalf("parseAgentFlags(%q): %v", argv[1:], err)
 	}
 
-	got, err := f.toRuntimeOptions(req.Cwd, nil)
+	got, err := f.toRuntimeOptions(req.Cwd, nil, false)
 	if err != nil {
 		t.Fatalf("toRuntimeOptions: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestExtraArgsOverrideEarlierFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
-	got, err := f.toRuntimeOptions(req.Cwd, nil)
+	got, err := f.toRuntimeOptions(req.Cwd, nil, false)
 	if err != nil {
 		t.Fatalf("toRuntimeOptions: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestAgentRefIsDaemonControlled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseAgentFlags: %v", err)
 	}
-	got, err := f.toRuntimeOptions(req.Cwd, nil)
+	got, err := f.toRuntimeOptions(req.Cwd, nil, false)
 	if err != nil {
 		t.Fatalf("toRuntimeOptions: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
 				toolsWeb:    tc.toolsWeb,
 				toolsWebSet: tc.toolsWebSet,
 			}
-			ro, err := f.toRuntimeOptions(tc.cwd, nil)
+			ro, err := f.toRuntimeOptions(tc.cwd, nil, false)
 			if err != nil {
 				t.Fatalf("toRuntimeOptions: %v", err)
 			}

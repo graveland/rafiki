@@ -113,6 +113,45 @@ func TestBuildRuntimeRejectsRelativeCwd(t *testing.T) {
 	}
 }
 
+// TestMergeSkillsProjectShadowsUser covers the three cases: a local-only skill
+// survives, a project-only skill appears, and a name collision resolves to the
+// project one and is marked Remote.
+func TestMergeSkillsProjectShadowsUser(t *testing.T) {
+	local := []skills.SkillMeta{
+		{Name: "builder", Description: "user builder", Dir: "/home/.rafiki/skills/builder"},
+		{Name: "deploy", Description: "user deploy", Dir: "/home/.rafiki/skills/deploy"},
+	}
+	project := []skills.SkillMeta{
+		{Name: "deploy", Description: "project deploy", Dir: "/work/.claude/skills/deploy", Remote: true},
+		{Name: "reviewer", Description: "project reviewer", Dir: "/work/.claude/skills/reviewer", Remote: true},
+	}
+
+	merged := MergeSkills(local, project)
+
+	byName := make(map[string]skills.SkillMeta, len(merged))
+	for _, s := range merged {
+		byName[s.Name] = s
+	}
+
+	// Local-only survives.
+	b, ok := byName["builder"]
+	if !ok || b.Description != "user builder" {
+		t.Errorf("builder = %+v, want user builder", b)
+	}
+
+	// Project-only appears.
+	r, ok := byName["reviewer"]
+	if !ok || !r.Remote {
+		t.Errorf("reviewer = %+v, want Remote project skill", r)
+	}
+
+	// Name collision: project wins.
+	d, ok := byName["deploy"]
+	if !ok || d.Description != "project deploy" || !d.Remote {
+		t.Errorf("deploy = %+v, want project deploy with Remote=true", d)
+	}
+}
+
 // TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools pins the standalone
 // `rafikid fundi` guarantee: a process that is its own workspace gets the file
 // and shell tools via an in-process executor, so the executor rule has one

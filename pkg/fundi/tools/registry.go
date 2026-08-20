@@ -275,6 +275,13 @@ type ToolOpts struct {
 	// LLM that can be prompt-injected into naming somebody else.
 	Agents AgentSpawner
 
+	// RemoteSkillBody fetches a skill body from the child's executor. nil when
+	// the child has no executor, in which case no SkillMeta carries Remote.
+	//
+	// A function rather than an interface: it is one call, and the tool layer
+	// has no business knowing what an executor is.
+	RemoteSkillBody func(ctx context.Context, name string) (body, dir string, err error)
+
 	// ExecutorAnnotator, when non-nil, enables the executor_annotate tool
 	// for agents running on a remote executor. nil means the tool declines
 	// to materialize (agent is running in-process, nothing to annotate).

@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/inproc"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/skills"
 )
 
 // projectContextFetcher is the one method the daemon needs from an executor
@@ -37,6 +38,24 @@ func fetchProjectContext(ctx context.Context, exec any) (string, error) {
 		return pf.ProjectContext(ctx)
 	}
 	return "", nil
+}
+
+// projectSkillsFetcher is the second optional capability the daemon wants from
+// a workspace-scoped executor client. Declared at the consumer, like
+// projectContextFetcher, rather than widening tools.ExecutorClient — only a
+// client carrying a workspace id can answer it.
+type projectSkillsFetcher interface {
+	ProjectSkills(ctx context.Context) ([]skills.SkillMeta, error)
+	SkillBody(ctx context.Context, name string) (body, dir string, err error)
+}
+
+// fetchProjectSkills asks an executor client for its workspace's project-tier
+// skills. A client that cannot answer yields nil.
+func fetchProjectSkills(ctx context.Context, exec any) ([]skills.SkillMeta, error) {
+	if pf, ok := exec.(projectSkillsFetcher); ok {
+		return pf.ProjectSkills(ctx)
+	}
+	return nil, nil
 }
 
 // appendDaemonRef appends the authoritative --ref last so it wins over
@@ -119,7 +138,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent flags: %w", err)
 	}
-	ro, err := f.toRuntimeOptions(req.Cwd, c.pool)
+	ro, err := f.toRuntimeOptions(req.Cwd, c.pool, req.ExecutorSelector != "")
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
@@ -208,6 +227,26 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			}
 			ro.ProjectContext = &project
 
+			// Fetch the project-tier skills from the same executor, and carry
+			// them pre-merged so BuildRuntime's resolveContent applies the
+			// --skills filter to the combined inventory rather than only to
+			// the local tier.
+			remote, psErr := fetchProjectSkills(context.Background(), exec)
+			if psErr != nil {
+				slog.Warn("project skills unavailable",
+					"child", childID, "error", psErr)
+			}
+			ro.RemoteSkills = remote
+
+			// Build a lazy fetcher bound to the same workspace client so the
+			// skill tool fetches bodies on the turn the model asks.
+			if pf, ok := exec.(projectSkillsFetcher); ok {
+				pf := pf // pin for the closure
+				ro.RemoteSkillBody = func(ctx context.Context, name string) (string, string, error) {
+					return pf.SkillBody(ctx, name)
+				}
+			}
+
 			// The mode comes from the executor's ROW, carried here on wsInfo.
 			// It decides whether losing the executor fails this child or moves
 			// it, so it cannot be a literal and it cannot be the executor's own
@@ -258,7 +297,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 // agentRuntimeOptions rejects an explicit --db in req.ExtraArgs before this is
 // ever reached, so a caller who deliberately asked for a different database
 // learns it was refused rather than discovering later their DSN was ignored.
-func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.RuntimeOptions, error) {
+func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor bool) (fundi.RuntimeOptions, error) {
 	thinkingBudget, err := fundi.ThinkingBudgetFor(f.thinking)
 	if err != nil {
 		return fundi.RuntimeOptions{}, err
@@ -285,7 +324,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool) (fundi.Runt
 		Ref:                  f.ref,
 		Name:                 f.name,
 		SpillDir:             f.spillDir,
-		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir),
+		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir, hasExecutor),
 		Skills:               f.skills,
 		NoSkills:             f.noSkills,
 		NoContextFiles:       f.noContextFiles,
