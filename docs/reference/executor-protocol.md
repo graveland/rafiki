@@ -28,6 +28,17 @@ third — `rafiki executor serve-stdio`, spoken over the stdio of a `docker exec
 does not start containers any more, so the container has whatever network the
 operator gave it in `docker run`, and the stdio transport had no callers left.
 
+A fourth transport is the **client-run executor**: `rafiki create` and `rafiki
+attach` start an executor in-process and reverse-dial the daemon, so the
+operator's own machine becomes the workspace by default. It is not a new wire
+path — it uses `--connect`'s TLS transport when `RAFIKI_URL` names a remote
+daemon, and `--connect-socket`'s unix path when the daemon is local. What
+makes it distinct is how its row is minted: not by an operator with
+`rafiki executor enroll`, but by the daemon from the control connection's
+identity via `ctrl_executor_session`. The row is labelled `kind=client`,
+`interactive=true`, `owner=<user>`, and the client connects with the credential
+that verb returns.
+
 ## Reaching the daemon
 
 The reverse-dial transports are reached at a **path** on the daemon's shared
