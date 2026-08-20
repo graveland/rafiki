@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -146,5 +147,30 @@ func TestExecutorListFiltersBySelector(t *testing.T) {
 	}
 	if len(execs) != 1 || execs[0].ID != "exec-work" {
 		t.Fatalf("selector filtered wrong: %+v", execs)
+	}
+}
+
+// Connected is a view over the live pool, not the store. A client waiting for
+// its own session executor to connect has no other signal; the row alone cannot
+// say whether it is up.
+func TestExecutorListMarksConnectedFromTheLivePool(t *testing.T) {
+	s := newFakeExecStore()
+	s.execs["exec-live"] = executors.Executor{ID: "exec-live", Enabled: true}
+	s.execs["exec-off"] = executors.Executor{ID: "exec-off", Enabled: true}
+	c := &Controller{execStore: s, execPool: &fakePool{live: []execpool.LiveExecutor{ex("exec-live", nil, "")}}}
+
+	execs, err := c.ExecutorList(protocol.ExecutorListRequest{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	connected := map[string]bool{}
+	for _, e := range execs {
+		connected[e.ID] = e.Connected
+	}
+	if !connected["exec-live"] {
+		t.Error("exec-live not marked connected though the pool has it live")
+	}
+	if connected["exec-off"] {
+		t.Error("exec-off marked connected though the pool does not have it")
 	}
 }

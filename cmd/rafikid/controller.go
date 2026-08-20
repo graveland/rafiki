@@ -3391,6 +3391,18 @@ func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors
 	if err != nil {
 		return nil, translateExecutorErr(err)
 	}
+	// Connected is a view over the live pool, not the store: the row cannot
+	// tell a client whether an executor is currently up, and a client waiting
+	// for its own session executor to connect has no other signal.
+	if c.execPool != nil {
+		live := make(map[string]bool, len(c.execPool.Live()))
+		for _, le := range c.execPool.Live() {
+			live[le.Executor.ID] = true
+		}
+		for i := range execs {
+			execs[i].Connected = live[execs[i].ID]
+		}
+	}
 	if req.Selector != "" {
 		sel, pErr := executors.ParseSelector(req.Selector)
 		if pErr != nil {
