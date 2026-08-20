@@ -163,6 +163,17 @@ func InstructionsFile() string {
 	return filepath.Join(ConfigDir(), "instructions.md")
 }
 
+// ProvidersFile is the LLM provider registry: $RAFIKI_PROVIDERS, else
+// <ConfigDir>/providers.toml. Its contents are by definition the contents of
+// the future rafikid.toml [llm] section, so the eventual merge is a lift with
+// no key renamed.
+func ProvidersFile() string {
+	if v := Get(Providers); v != "" {
+		return v
+	}
+	return filepath.Join(ConfigDir(), "providers.toml")
+}
+
 // SkillsDirs is the ordered skill search path: $RAFIKI_SKILLS_DIRS split on the
 // OS path-list separator, else [<ConfigDir>/skills]. Order is
 // lowest-to-highest precedence, matching skills.DiscoverSkills. Empty segments

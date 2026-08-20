@@ -297,3 +297,15 @@ func TestTokenFromEnv(t *testing.T) {
 		}
 	})
 }
+
+func TestProvidersFile(t *testing.T) {
+	t.Setenv(Providers, "")
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/xdg-config-test")
+	if got, want := ProvidersFile(), "/tmp/xdg-config-test/rafiki/providers.toml"; got != want {
+		t.Errorf("ProvidersFile() = %q, want %q", got, want)
+	}
+	t.Setenv(Providers, "/etc/rafiki/p.toml")
+	if got, want := ProvidersFile(), "/etc/rafiki/p.toml"; got != want {
+		t.Errorf("ProvidersFile() with RAFIKI_PROVIDERS = %q, want %q", got, want)
+	}
+}
