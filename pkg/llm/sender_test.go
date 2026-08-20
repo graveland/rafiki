@@ -9,14 +9,23 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/providers"
 )
 
 func TestSdkSenderImplementsStreamingSender(t *testing.T) {
-	if _, ok := llm.Anthropic("test-key").(llm.StreamingSender); !ok {
-		t.Fatal("llm.Anthropic's Sender must also satisfy StreamingSender")
+	s1, err := llm.SenderFor(providers.Provider{Name: "a", Kind: providers.KindAnthropic}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor(anthropic): %v", err)
 	}
-	if _, ok := llm.OpenRouter("test-key").(llm.StreamingSender); !ok {
-		t.Fatal("llm.OpenRouter's Sender must also satisfy StreamingSender")
+	if _, ok := s1.(llm.StreamingSender); !ok {
+		t.Fatal("SenderFor(anthropic) must also satisfy StreamingSender")
+	}
+	s2, err := llm.SenderFor(providers.Provider{Name: "a", Kind: providers.KindAnthropicOpenRouter}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor(openrouter): %v", err)
+	}
+	if _, ok := s2.(llm.StreamingSender); !ok {
+		t.Fatal("SenderFor(openrouter) must also satisfy StreamingSender")
 	}
 }
 

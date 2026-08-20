@@ -19,10 +19,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/ejection"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
@@ -182,7 +186,8 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	}
 
 	llmOpts := []llm.ClientOption{
-		llm.WithUpstream(llm.UpstreamAnthropic, llm.Anthropic(anthropicKey)),
+		llm.WithProviders(providers.Default()),
+		llm.WithProviderSender("anthropic", llm.FromSDK(anthropic.NewClient(option.WithAPIKey(anthropicKey)))),
 		llm.WithLogger(logger),
 	}
 	if defaultModel != "" {
@@ -196,7 +201,13 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	}
 	if openrouterKey != "" {
 		llmOpts = append(llmOpts,
-			llm.WithUpstream(llm.UpstreamOpenRouter, llm.OpenRouter(openrouterKey)),
+			llm.WithProviderSender("openrouter", llm.FromSDK(anthropic.NewClient(
+				option.WithBaseURL("https://openrouter.ai/api"),
+				option.WithAPIKey(openrouterKey),
+				option.WithHeader("Referer", "https://github.com/graveland/rafiki"),
+				option.WithHeader("X-OpenRouter-Title", "rafiki"),
+				option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
+			))),
 			llm.WithBreaker(15*time.Minute),
 		)
 	}
@@ -221,7 +232,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	messages := server.NewMessagesProxy(captureStore, auth, anthropicKey,
 		"https://api.anthropic.com", defaultModel, client.Catalog(), logger)
 	if openrouterKey != "" {
-		messages.SetFallback(openrouterKey, "https://openrouter.ai/api", client.Breaker(llm.UpstreamAnthropic))
+		messages.SetFallback(openrouterKey, "https://openrouter.ai/api", client.Breaker("anthropic"))
 	}
 	if opts.RawTrace != nil {
 		messages.SetRawTrace(opts.RawTrace, opts.RawTraceAll)
@@ -235,7 +246,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		)
 		metrics = server.NewMetrics(opts.Registry)
-		metrics.WatchBreaker(string(llm.UpstreamAnthropic), client.Breaker(llm.UpstreamAnthropic))
+		metrics.WatchBreaker("anthropic", client.Breaker("anthropic"))
 		metrics.WatchProviderGuard(guard)
 		messages.SetMetrics(metrics)
 	}

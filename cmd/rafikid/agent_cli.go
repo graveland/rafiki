@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -700,10 +701,10 @@ const cliDefaultModel = "haiku-latest"
 // resolveUpstream builds the llm.Client Analyze runs against, per the
 // brief's upstream rules: a rafiki proxy (--proxy-url/-token or
 // RAFIKI_URL/RAFIKI_TOKEN) wins when set, registered as BOTH
-// llm.UpstreamAnthropic and llm.UpstreamOpenRouter (the proxy does the
-// OpenRouter routing itself for slash ids); else ANTHROPIC_API_KEY direct to
-// Anthropic, registered as Anthropic only. Returns whether the resolved
-// upstream is proxied, for checkModelServable's slash/tilde preflight.
+// anthropic and openrouter (the proxy does the OpenRouter routing itself);
+// else ANTHROPIC_API_KEY direct to Anthropic, registered as Anthropic only.
+// Returns whether the resolved upstream is proxied, for checkModelServable's
+// slash/tilde preflight.
 func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 	if proxyURL != "" {
 		// anthropic.NewClient prepends option.DefaultClientOptions(), which — if
@@ -723,8 +724,9 @@ func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 		sdk := anthropic.NewClient(option.WithBaseURL(proxyURL), option.WithAuthToken(proxyToken), option.WithAPIKey(""))
 		sender := llm.FromSDK(sdk)
 		client, err := llm.NewClient(
-			llm.WithUpstream(llm.UpstreamAnthropic, sender),
-			llm.WithUpstream(llm.UpstreamOpenRouter, sender),
+			llm.WithProviders(providers.Default()),
+			llm.WithProviderSender("anthropic", sender),
+			llm.WithProviderSender("openrouter", sender),
 			llm.WithDefaultModel(cliDefaultModel),
 		)
 		return client, true, err
@@ -734,7 +736,8 @@ func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 		return nil, false, errors.New("agent analyze: no --proxy-url/RAFIKI_URL configured and ANTHROPIC_API_KEY unset")
 	}
 	client, err := llm.NewClient(
-		llm.WithUpstream(llm.UpstreamAnthropic, llm.Anthropic(key)),
+		llm.WithProviders(providers.Default()),
+		llm.WithProviderSender("anthropic", llm.FromSDK(anthropic.NewClient(option.WithAPIKey(key)))),
 		llm.WithDefaultModel(cliDefaultModel),
 	)
 	return client, false, err

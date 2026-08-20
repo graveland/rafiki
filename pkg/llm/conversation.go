@@ -50,9 +50,9 @@ type convConfig struct {
 
 	// send defaults
 	model          string // resolved to a concrete id at Conversation()
-	primary        Upstream
+	primary        string
 	thinkingBudget int64
-	fallback       []Upstream
+	fallback       []string
 	system         []anthropic.TextBlockParam
 	temperature    *float64
 	topK           *int64
@@ -96,13 +96,13 @@ func WithName(n string) ConvOption { return func(c *convConfig) { c.name = n } }
 // OpenRouter, with no failover.
 func Model(m string) ConvOption { return func(c *convConfig) { c.model = m } }
 
-// Fallback sets the upstream fallback chain consulted on retryable primary
+// Fallback sets the provider fallback chain consulted on retryable primary
 // failures.
-func Fallback(u ...Upstream) ConvOption { return func(c *convConfig) { c.fallback = u } }
+func Fallback(u ...string) ConvOption { return func(c *convConfig) { c.fallback = u } }
 
-// Primary selects the upstream used first for every send in this conversation
-// (empty = UpstreamAnthropic, the default). The Fallback chain still applies.
-func Primary(u Upstream) ConvOption { return func(c *convConfig) { c.primary = u } }
+// Primary selects the provider used first for every send in this conversation
+// (empty = the provider named by the model id). The Fallback chain still applies.
+func Primary(u string) ConvOption { return func(c *convConfig) { c.primary = u } }
 
 // ThinkingBudget enables extended thinking with the given token budget
 // (0 = disabled, the default).

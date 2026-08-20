@@ -70,7 +70,7 @@ func respondTextOnly(text string) func(anthropic.MessageNewParams) (*anthropic.M
 
 func testDetectClient(t *testing.T, sender llm.Sender) *llm.Client {
 	t.Helper()
-	c, err := llm.NewClient(llm.WithUpstream(llm.UpstreamAnthropic, sender))
+	c, err := llm.NewClient(llm.WithProviderSender("anthropic", sender))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
