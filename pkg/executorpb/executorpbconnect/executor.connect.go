@@ -55,6 +55,12 @@ const (
 	// ExecutorServiceProjectContextProcedure is the fully-qualified name of the ExecutorService's
 	// ProjectContext RPC.
 	ExecutorServiceProjectContextProcedure = "/rafiki.executor.v1.ExecutorService/ProjectContext"
+	// ExecutorServiceProjectSkillsProcedure is the fully-qualified name of the ExecutorService's
+	// ProjectSkills RPC.
+	ExecutorServiceProjectSkillsProcedure = "/rafiki.executor.v1.ExecutorService/ProjectSkills"
+	// ExecutorServiceSkillBodyProcedure is the fully-qualified name of the ExecutorService's SkillBody
+	// RPC.
+	ExecutorServiceSkillBodyProcedure = "/rafiki.executor.v1.ExecutorService/SkillBody"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -82,6 +88,22 @@ type ExecutorServiceClient interface {
 	// from Describe for a different reason — Describe is per-EXECUTOR and this is
 	// per-workspace, so Describe structurally cannot answer it.
 	ProjectContext(context.Context, *connect.Request[executorpb.ProjectContextRequest]) (*connect.Response[executorpb.ProjectContextResponse], error)
+	// ProjectSkills returns the skills discovered in a workspace — the project
+	// tier only. User and system skills belong to whoever runs the agent loop and
+	// are never reported here.
+	//
+	// Metadata only. Bodies are fetched by SkillBody on the turn a model actually
+	// asks for one: an inventory is a handful of lines per skill, while a body is
+	// a document, and returning every body at spawn would put the whole project's
+	// skill text into every child.
+	ProjectSkills(context.Context, *connect.Request[executorpb.ProjectSkillsRequest]) (*connect.Response[executorpb.ProjectSkillsResponse], error)
+	// SkillBody returns one project skill's body, resolved by NAME against the
+	// executor's own discovery.
+	//
+	// By name and not by path, for the same reason ProjectContext takes a
+	// workspace id: a path parameter would let anything that reaches this
+	// executor read an arbitrary file on it.
+	SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error)
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -149,6 +171,18 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("ProjectContext")),
 			connect.WithClientOptions(opts...),
 		),
+		projectSkills: connect.NewClient[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse](
+			httpClient,
+			baseURL+ExecutorServiceProjectSkillsProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("ProjectSkills")),
+			connect.WithClientOptions(opts...),
+		),
+		skillBody: connect.NewClient[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse](
+			httpClient,
+			baseURL+ExecutorServiceSkillBodyProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("SkillBody")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -163,6 +197,8 @@ type executorServiceClient struct {
 	provision      *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
 	release        *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
 	projectContext *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
+	projectSkills  *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
+	skillBody      *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -210,6 +246,16 @@ func (c *executorServiceClient) ProjectContext(ctx context.Context, req *connect
 	return c.projectContext.CallUnary(ctx, req)
 }
 
+// ProjectSkills calls rafiki.executor.v1.ExecutorService.ProjectSkills.
+func (c *executorServiceClient) ProjectSkills(ctx context.Context, req *connect.Request[executorpb.ProjectSkillsRequest]) (*connect.Response[executorpb.ProjectSkillsResponse], error) {
+	return c.projectSkills.CallUnary(ctx, req)
+}
+
+// SkillBody calls rafiki.executor.v1.ExecutorService.SkillBody.
+func (c *executorServiceClient) SkillBody(ctx context.Context, req *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error) {
+	return c.skillBody.CallUnary(ctx, req)
+}
+
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
 type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
@@ -235,6 +281,22 @@ type ExecutorServiceHandler interface {
 	// from Describe for a different reason — Describe is per-EXECUTOR and this is
 	// per-workspace, so Describe structurally cannot answer it.
 	ProjectContext(context.Context, *connect.Request[executorpb.ProjectContextRequest]) (*connect.Response[executorpb.ProjectContextResponse], error)
+	// ProjectSkills returns the skills discovered in a workspace — the project
+	// tier only. User and system skills belong to whoever runs the agent loop and
+	// are never reported here.
+	//
+	// Metadata only. Bodies are fetched by SkillBody on the turn a model actually
+	// asks for one: an inventory is a handful of lines per skill, while a body is
+	// a document, and returning every body at spawn would put the whole project's
+	// skill text into every child.
+	ProjectSkills(context.Context, *connect.Request[executorpb.ProjectSkillsRequest]) (*connect.Response[executorpb.ProjectSkillsResponse], error)
+	// SkillBody returns one project skill's body, resolved by NAME against the
+	// executor's own discovery.
+	//
+	// By name and not by path, for the same reason ProjectContext takes a
+	// workspace id: a path parameter would let anything that reaches this
+	// executor read an arbitrary file on it.
+	SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error)
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -298,6 +360,18 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("ProjectContext")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceProjectSkillsHandler := connect.NewUnaryHandler(
+		ExecutorServiceProjectSkillsProcedure,
+		svc.ProjectSkills,
+		connect.WithSchema(executorServiceMethods.ByName("ProjectSkills")),
+		connect.WithHandlerOptions(opts...),
+	)
+	executorServiceSkillBodyHandler := connect.NewUnaryHandler(
+		ExecutorServiceSkillBodyProcedure,
+		svc.SkillBody,
+		connect.WithSchema(executorServiceMethods.ByName("SkillBody")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -318,6 +392,10 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceReleaseHandler.ServeHTTP(w, r)
 		case ExecutorServiceProjectContextProcedure:
 			executorServiceProjectContextHandler.ServeHTTP(w, r)
+		case ExecutorServiceProjectSkillsProcedure:
+			executorServiceProjectSkillsHandler.ServeHTTP(w, r)
+		case ExecutorServiceSkillBodyProcedure:
+			executorServiceSkillBodyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -361,4 +439,12 @@ func (UnimplementedExecutorServiceHandler) Release(context.Context, *connect.Req
 
 func (UnimplementedExecutorServiceHandler) ProjectContext(context.Context, *connect.Request[executorpb.ProjectContextRequest]) (*connect.Response[executorpb.ProjectContextResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.ProjectContext is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) ProjectSkills(context.Context, *connect.Request[executorpb.ProjectSkillsRequest]) (*connect.Response[executorpb.ProjectSkillsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.ProjectSkills is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SkillBody is not implemented"))
 }
