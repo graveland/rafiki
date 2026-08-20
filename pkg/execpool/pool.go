@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
@@ -464,6 +465,46 @@ func (c *workspaceClient) ProjectContext(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("executor project context: %w", err)
 	}
 	return resp.Msg.ContextFiles, nil
+}
+
+// ProjectSkills returns the project-tier skills discovered in the workspace.
+// It belongs here for the same reason ProjectContext does: it needs a
+// workspace id, and only a workspace-scoped client carries one.
+func (c *workspaceClient) ProjectSkills(ctx context.Context) ([]skills.SkillMeta, error) {
+	resp, err := c.inner.ProjectSkills(ctx, connect.NewRequest(&executorpb.ProjectSkillsRequest{
+		WorkspaceId: c.workspaceID,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("executor project skills: %w", err)
+	}
+	out := make([]skills.SkillMeta, 0, len(resp.Msg.Skills))
+	for _, s := range resp.Msg.Skills {
+		out = append(out, skills.SkillMeta{
+			Name:        s.GetName(),
+			Description: s.GetDescription(),
+			Dir:         s.GetDir(),
+			// Path is deliberately EMPTY. It names a file on the executor, and
+			// nothing on the daemon may resolve it — leaving it empty makes a
+			// bug that falls through to the local skills.SkillBody(s.Path)
+			// fail loudly instead of quietly reading whatever the daemon has at
+			// that path.
+			Remote: true,
+		})
+	}
+	return out, nil
+}
+
+// SkillBody returns one project skill's body, resolved by NAME against the
+// executor's own discovery.
+func (c *workspaceClient) SkillBody(ctx context.Context, name string) (body, dir string, err error) {
+	resp, err := c.inner.SkillBody(ctx, connect.NewRequest(&executorpb.SkillBodyRequest{
+		WorkspaceId: c.workspaceID,
+		Name:        name,
+	}))
+	if err != nil {
+		return "", "", fmt.Errorf("executor skill body: %w", err)
+	}
+	return resp.Msg.Body, resp.Msg.Dir, nil
 }
 
 func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
