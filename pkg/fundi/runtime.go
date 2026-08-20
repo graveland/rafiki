@@ -205,6 +205,14 @@ func MergeSkills(local, project []skills.SkillMeta) []skills.SkillMeta {
 	return out
 }
 
+// wantsLSP reports whether BuildRuntime should construct a language-server
+// manager. Only a process that is its own workspace can reach the lsp_* tools
+// through opts.LSP; everywhere else they are proxied to the executor or not
+// registered at all.
+func wantsLSP(opts RuntimeOptions) bool {
+	return opts.InProcessWorkspace
+}
+
 // checkRipgrep verifies the ripgrep dependency. It does its own lookup
 // rather than consulting tools.RipgrepAvailable so the result is not
 // cached across a PATH change (which is what the test exercises).
@@ -313,41 +321,48 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	var lspClient tools.LSPClient
 	var lspNotifier tools.FileChangeNotifier
 
-	var lspCfg lsp.Config
-	lspCfg.Servers = make(map[string]lsp.ServerConfig)
-	if opts.LSPConfig != "" {
-		if _, err := os.Stat(opts.LSPConfig); err != nil {
-			return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
-		}
-		var err error
-		lspCfg, err = lsp.LoadConfig(opts.LSPConfig)
-		if err != nil {
-			return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
-		}
-	} else if !opts.NoLSP {
-		lspCfg = lsp.AutoDetect()
-		if len(lspCfg.Servers) > 0 {
-			names := make([]string, 0, len(lspCfg.Servers))
-			for n := range lspCfg.Servers {
-				names = append(names, n)
+	// Only a process that is its own workspace can reach these. With a remote
+	// executor the lsp_* tools are proxied and executorProxy.Execute never
+	// touches opts.LSP; with no executor they are not registered at all. The
+	// cost of building it anyway is an exec.LookPath per configured server, per
+	// child, for a manager nothing can call.
+	if wantsLSP(opts) {
+		var lspCfg lsp.Config
+		lspCfg.Servers = make(map[string]lsp.ServerConfig)
+		if opts.LSPConfig != "" {
+			if _, err := os.Stat(opts.LSPConfig); err != nil {
+				return nil, nil, fmt.Errorf("runtime: lsp config %s: %w", opts.LSPConfig, err)
 			}
-			slog.Info("runtime: auto-detected language servers on PATH", "servers", names)
+			var err error
+			lspCfg, err = lsp.LoadConfig(opts.LSPConfig)
+			if err != nil {
+				return nil, nil, fmt.Errorf("runtime: load lsp config %s: %w", opts.LSPConfig, err)
+			}
+		} else if !opts.NoLSP {
+			lspCfg = lsp.AutoDetect()
+			if len(lspCfg.Servers) > 0 {
+				names := make([]string, 0, len(lspCfg.Servers))
+				for n := range lspCfg.Servers {
+					names = append(names, n)
+				}
+				slog.Info("runtime: auto-detected language servers on PATH", "servers", names)
+			}
 		}
-	}
 
-	if len(lspCfg.Servers) > 0 {
-		lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
-		// A config naming a server that is not installed (or an empty
-		// {"servers":{}}) would otherwise put eight tools in tools[] that can
-		// only fail with `executable file not found in $PATH`, burning a turn
-		// every time the model reaches for one.
-		if lspMgr.HasInstalledServer() {
-			lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
-			lspClient = lspadapter.New(lspMgr, fileTracker)
-			lspNotifier = lspMgr
-		} else {
-			slog.Warn("runtime: no configured language server found on PATH; lsp tools disabled",
-				"config", opts.LSPConfig)
+		if len(lspCfg.Servers) > 0 {
+			lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
+			// A config naming a server that is not installed (or an empty
+			// {"servers":{}}) would otherwise put eight tools in tools[] that can
+			// only fail with `executable file not found in $PATH`, burning a turn
+			// every time the model reaches for one.
+			if lspMgr.HasInstalledServer() {
+				lspShutdown = func() { lspMgr.Shutdown(context.Background()) }
+				lspClient = lspadapter.New(lspMgr, fileTracker)
+				lspNotifier = lspMgr
+			} else {
+				slog.Warn("runtime: no configured language server found on PATH; lsp tools disabled",
+					"config", opts.LSPConfig)
+			}
 		}
 	}
 

@@ -260,6 +260,19 @@ func TestBuildRuntimeNoSkillsOmitsSkillTool(t *testing.T) {
 	}
 }
 
+// wantsLSP reports whether BuildRuntime should construct a language-server
+// manager. Only a process that is its own workspace can reach the lsp_* tools
+// through opts.LSP; everywhere else they are proxied to the executor or not
+// registered at all.
+func TestWantsLSPOnlyForInProcessWorkspace(t *testing.T) {
+	if !wantsLSP(RuntimeOptions{InProcessWorkspace: true}) {
+		t.Error("InProcessWorkspace=true must want LSP; the standalone mode would lose its language servers")
+	}
+	if wantsLSP(RuntimeOptions{}) {
+		t.Error("a plain RuntimeOptions must not want LSP; the daemon's manager is unreachable")
+	}
+}
+
 // TestBuildRuntimeRequiresRipgrep pins the startup dependency check: a
 // missing rg must fail loudly once in checkRipgrep rather than once per tool
 // call. rgPath (pkg/fundi/tools) is a cached sync.OnceValue and cannot be
