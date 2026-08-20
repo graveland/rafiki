@@ -868,6 +868,7 @@ const (
 	TypeCtrlExecutorLabel   = "ctrl_executor_label"
 	TypeCtrlExecutorDisable = "ctrl_executor_disable"
 	TypeCtrlExecutorEnable  = "ctrl_executor_enable"
+	TypeCtrlExecutorSession = "ctrl_executor_session"
 )
 
 // ─── ctrl_executor_enroll ──────────────────────────────────────────────────────
@@ -919,6 +920,71 @@ type ExecutorCreateRequest struct {
 type ExecutorCreateResponseData struct {
 	ExecutorID string `json:"executorId"`
 	Credential string `json:"credential"`
+}
+
+// ─── ctrl_executor_session ─────────────────────────────────────────────────────
+
+// ExecutorSessionRequest asks the daemon for an executor row belonging to the
+// caller's own machine, so the client can serve its operator's filesystem as a
+// workspace.
+//
+// It carries only fields that do NOT gate access. owner, isolation,
+// workspace_mode and admits are all decided by the daemon from the connection,
+// because a client that names them can grant itself anything — the same reason
+// ExecutorHelloRequest keeps SelfReported out of the trust labels.
+type ExecutorSessionRequest struct {
+	Type string `json:"type"` // "ctrl_executor_session"
+	ID   string `json:"id,omitempty"`
+
+	// Name is a freeform unique key. The daemon enforces uniqueness at hello
+	// time on the executor's SelfReported name; the request carries the same
+	// string so the daemon can check whether a persistent executor already
+	// owns it before minting.
+	Name string `json:"name,omitempty"`
+
+	// Roots describes the directories this machine offers, for humans and for
+	// selectors. Nothing enforces them and nothing may imply it does — a
+	// native executor has no path scoping by design.
+	Roots []string `json:"roots,omitempty"`
+
+	// HasCredential says the client already holds a credential from a previous
+	// run and needs no new row.
+	//
+	// Without it every invocation mints another row, and executors.Store has
+	// SetEnabled but no Delete — so every one of them is permanent. It is not a
+	// gating fact: claiming true when false only costs the liar a working
+	// executor, since the credential it does not have is what actually
+	// authenticates.
+	HasCredential bool `json:"hasCredential,omitempty"`
+}
+
+// ExecutorSessionResponseData answers it.
+//
+// Three outcomes, and Credential alone cannot express them — which is why
+// RunLocal is a separate field rather than inferred from an empty credential:
+//
+//	RunLocal=false             a durable executor already covers this name and
+//	                           owner. ExecutorID names it and the client starts
+//	                           nothing. That executor outlives the client, which
+//	                           is what keeps an agent working after the operator
+//	                           detaches.
+//	RunLocal=true, no cred     the client already holds a credential. Start an
+//	                           executor and connect with the one it has.
+//	RunLocal=true, with cred   a new row was minted. Persist the credential and
+//	                           connect.
+type ExecutorSessionResponseData struct {
+	// ExecutorID names the row — minted or existing — that represents this
+	// machine. The daemon uses it to route spawns from this client implicitly,
+	// so the client never needs a label selector for "myself".
+	ExecutorID string `json:"executorId"`
+
+	// RunLocal says whether the client should serve an executor at all.
+	RunLocal bool `json:"runLocal,omitempty"`
+
+	// Credential is set only when a NEW row was minted. The credential is
+	// shown ONCE; only its hash is stored, so a client that means to reconnect
+	// must persist it.
+	Credential string `json:"credential,omitempty"`
 }
 
 // ─── ctrl_executor_list ────────────────────────────────────────────────────────
