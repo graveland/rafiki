@@ -1551,6 +1551,59 @@ authentication on its next connection.
 
 **Response** (success) — `data` is omitted (null).
 
+### 15.5 `ctrl_executor_session`
+
+Let an authenticated client mint an executor row for its own machine, so the
+operator's filesystem can be the workspace. The daemon writes every field that
+gates access — owner, isolation, workspace\_mode, admits — from the connection;
+the request carries only non-gating fields.
+
+The verb first checks whether a persistent, non-`kind=client` executor already
+carries this `name` (matched against `SelfReported["name"]`) and `owner`
+(matched against trust `Labels["owner"]`). If one does, the response returns
+its `executorId` with `runLocal:false` and no credential — the client targets
+that executor and starts nothing of its own. That executor outlives the client,
+which is what keeps an agent working after the operator detaches.
+
+If no persistent executor covers this name, and the client already holds a
+credential (`hasCredential:true`), the response returns `runLocal:true` with
+no new credential — the client reuses the one it has.
+
+Otherwise a new row is minted with `kind=client`, `interactive=true`,
+`isolation=none`, `workspace_mode=pinned`, `admits=owner=<user>`, and the
+response returns the row's `executorId` and its credential (shown once).
+
+**Owner resolution.** On an authenticated TCP/TLS connection the owner is
+`conn.Identity().Username`. On a local UDS connection — which carries no
+authenticated identity — the owner is the daemon's own OS user
+(`os/user.Current().Username`). The control socket is created under a `0177`
+umask and owned by that user, so anyone who can open it already IS that user.
+The request has no username field and must never grow one.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_executor_session",
+  "name": "laptop",              // freeform unique key; matched against executor SelfReported
+  "roots": ["/home/brent/src"],   // descriptive only — nothing enforces them
+  "hasCredential": false          // true when the client already holds a credential
+}
+```
+
+**Response** (success)
+```jsonc
+{
+  "type": "ctrl_response",
+  "command": "ctrl_executor_session",
+  "success": true,
+  "data": {
+    "executorId": "abc123...",    // always populated — the row to target
+    "runLocal": true,             // false when a durable executor already covers this name
+    "credential": "rfk_..."       // plaintext credential, shown ONCE — empty when not minted
+  }
+}
+```
+
 ## 16. User management (ctrl_user_*)
 
 Commands for managing rafiki user identities. These are ordinary `ctrl_*`
