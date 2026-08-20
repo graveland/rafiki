@@ -665,7 +665,7 @@ func (c *Controller) ConversationExport(ctx context.Context, id string) (*insigh
 	return tr, nil
 }
 
-func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (control.SpawnResult, error) {
+func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {
 	// Validate cwd (dispatch already checks it's absolute; check it exists).
 	if _, err := os.Stat(req.Cwd); err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
@@ -775,6 +775,26 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest) (cont
 	initLabels := copyLabels(req.Labels)
 	if initLabels == nil {
 		initLabels = make(map[string]string)
+	}
+	// The owner is attested here, from the connection or an ancestor, never
+	// from the request: it is matched by executor admission selectors
+	// (admits: owner=<user>), so a client that could name it could claim to be
+	// any owner. The request cannot carry it — reservedLabelKeys rejects it.
+	ownerName := owner.Username
+	if req.ParentChildID != "" {
+		if snap, ok := c.st.Get(req.ParentChildID); ok && snap.Labels["owner"] != "" {
+			ownerName = snap.Labels["owner"]
+		}
+	} else if ownerName == "" {
+		// Local UDS: the connection is "locally trusted, not a user". Reuse the
+		// same fact sessionOwner reads — anyone who can open the socket already
+		// is the daemon's OS user.
+		if u, err := osUser(); err == nil {
+			ownerName = u
+		}
+	}
+	if ownerName != "" {
+		initLabels["owner"] = ownerName
 	}
 	initLabels["rafiki/cwd"] = req.Cwd
 	initLabels["rafiki/pid"] = strconv.Itoa(ch.PID())

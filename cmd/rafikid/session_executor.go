@@ -111,10 +111,24 @@ func sessionOwner(id users.Identity) (string, error) {
 	if id.Username != "" {
 		return id.Username, nil
 	}
+	u, err := osUser()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine an owner for this session executor: "+
+			"the connection is not authenticated and the daemon's own user is unknown: %w", err)
+	}
+	return u, nil
+}
+
+// osUser returns the daemon's own OS username. Shared by sessionOwner and the
+// spawn path so the UDS owner fallback — anyone who can open the control socket
+// already is this user — is derived in one place rather than duplicated.
+func osUser() (string, error) {
 	u, err := user.Current()
-	if err != nil || u.Username == "" {
-		return "", fmt.Errorf("cannot determine an owner for this session executor: " +
-			"the connection is not authenticated and the daemon's own user is unknown")
+	if err != nil {
+		return "", err
+	}
+	if u.Username == "" {
+		return "", fmt.Errorf("current OS user has no username")
 	}
 	return u.Username, nil
 }

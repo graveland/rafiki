@@ -20,6 +20,12 @@ var labelKeyRE = regexp.MustCompile(`^[a-zA-Z0-9_./-]+$`)
 // legacy spelling any more; nothing may.
 var reservedLabelPrefixes = []string{"rafiki/", "fundi/"}
 
+// reservedLabelKeys are labels only the daemon may write. "owner" is here for
+// the same reason the prefixes are: it is matched by executor admission
+// selectors (admits: owner=<user>), so a client that could set it could claim
+// to be any owner and land children on another user's machine.
+var reservedLabelKeys = []string{"owner"}
+
 func reservedLabelPrefix(k string) string {
 	for _, p := range reservedLabelPrefixes {
 		if strings.HasPrefix(k, p) {
@@ -27,6 +33,15 @@ func reservedLabelPrefix(k string) string {
 		}
 	}
 	return ""
+}
+
+func reservedLabelKey(k string) bool {
+	for _, r := range reservedLabelKeys {
+		if k == r {
+			return true
+		}
+	}
+	return false
 }
 
 // validateLabelKey returns an error if k is empty or contains disallowed characters.
@@ -55,6 +70,9 @@ func validateUserLabelKeys(m map[string]string) error {
 		if p := reservedLabelPrefix(k); p != "" {
 			return fmt.Errorf("labels with '%s' prefix are reserved (got: %s)", p, k)
 		}
+		if reservedLabelKey(k) {
+			return fmt.Errorf("label %q is reserved and written by the daemon", k)
+		}
 	}
 	return nil
 }
@@ -68,6 +86,9 @@ func validateUserRemoveKeys(keys []string) error {
 		}
 		if p := reservedLabelPrefix(k); p != "" {
 			return fmt.Errorf("labels with '%s' prefix are reserved (got: %s)", p, k)
+		}
+		if reservedLabelKey(k) {
+			return fmt.Errorf("label %q is reserved and written by the daemon", k)
 		}
 	}
 	return nil

@@ -10,6 +10,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // fakePiBin returns the path to fake-pi.sh for use in shutdown tests.
@@ -55,7 +56,7 @@ func spawnTestChild(t *testing.T, ctrl *Controller, env map[string]string) strin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	res, err := ctrl.Spawn(ctx, req)
+	res, err := ctrl.Spawn(ctx, req, users.Identity{})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

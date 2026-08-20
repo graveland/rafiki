@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // burstTurns is the number of complete idle→streaming→idle turns the fake pi
@@ -315,7 +316,7 @@ func TestSpawn_StalledChild_EmitsNoStatusTransition(t *testing.T) {
 		PiBinary:  fakePiBin(t),
 		NoSession: true,
 		Env:       map[string]string{"FAKE_PI_IGNORE_GET_STATE": "1"},
-	})
+	}, users.Identity{})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

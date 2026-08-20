@@ -177,3 +177,22 @@ func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
 		t.Fatalf("selection took %s — it must fail immediately, not wait for an executor", elapsed)
 	}
 }
+
+// The session executor's admits: owner=<user> must actually match a child — the
+// whole point of the daemon-attested owner label. Before it existed, every
+// spawn was refused because children carried no owner label at all.
+func TestAdmissionMatchesDaemonAttestedOwner(t *testing.T) {
+	c := selectFixture(t, "", ex("laptop", map[string]string{"kind": "client"}, "owner=brent"))
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_owned", Status: protocol.StatusIdle, StartedAt: time.Now(),
+		Kind:   protocol.KindFundi,
+		Labels: map[string]string{"owner": "brent", "rafiki/kind": "fundi"},
+	})
+	set, err := c.effectiveExecutorSet("c_owned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set) != 1 || set[0].ID != "laptop" {
+		t.Fatalf("owner=brent admitted the wrong set: %+v", set)
+	}
+}
