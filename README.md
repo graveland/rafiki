@@ -241,11 +241,21 @@ If a durable executor already covers this machine and user — one installed wit
 `rafiki executor service install` — the client uses that instead of starting its own. That
 one outlives your terminal, so an agent keeps working after you detach.
 
+**Without an executor, an agent has no workspace tools at all.** `read`, `write`, `edit`,
+`glob`, `grep`, `ls`, `bash` and the `lsp_*` verbs are not registered — not registered and
+failing, and above all not silently running against the daemon's own filesystem. What
+remains is the daemon tier: MCP, web fetch and search, the task ledger, skills, and the
+agent verbs. That is a useful agent, and it is the right one for a caller that only wants
+reasoning over tools the daemon legitimately owns.
+
+`rafiki create` gives you an executor automatically, so this is not something you normally
+arrange.
+
 `rafiki executor serve` moves the filesystem and shell tools (`read`, `write`,
 `edit`, `glob`, `grep`, `ls`, `bash`) and the language-server tools (`lsp_*`)
 behind a Connect RPC surface. The daemon becomes
 the RPC client: when an executor is configured, tool calls are dispatched to it;
-when absent, every tool runs in-process as before.
+when absent, no workspace tool is registered at all.
 
 It is a subcommand of `rafiki` rather than its own binary, so there are two
 artifacts to build and ship — one client, one server — not three. The
