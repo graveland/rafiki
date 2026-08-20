@@ -386,6 +386,13 @@ the client sees the response, the child is fully ready for `ctrl_send`.
                                             // can only ever narrow. A spawn matching
                                             // nothing is refused naming the excluding
                                             // predicate per candidate; it does not queue.
+                                            //
+                                            // nil means NO workspace tier: the child is
+                                            // registered with no read, write, edit, glob,
+                                            // grep, ls, bash or lsp_* tools at all. That
+                                            // is an answer, not an error — a caller that
+                                            // wants a pure reasoning agent over the
+                                            // daemon tier gets exactly that.
   "workspaceMode":       null,             // "ephemeral" or "pinned". Empty = pinned.
                                             // Decides whether the child can be rescheduled
                                             // when its executor goes away. The resolved
