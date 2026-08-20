@@ -28,6 +28,23 @@ service ExecutorService {
   // from Describe for a different reason — Describe is per-EXECUTOR and this is
   // per-workspace, so Describe structurally cannot answer it.
   rpc ProjectContext(ProjectContextRequest) returns (ProjectContextResponse);
+  // ProjectSkills returns the skills discovered in a workspace — the project
+  // tier only. User and system skills belong to whoever runs the agent loop and
+  // are never reported here.
+  //
+  // Metadata only. Bodies are fetched by SkillBody on the turn a model actually
+  // asks for one: an inventory is a handful of lines per skill, while a body is
+  // a document, and returning every body at spawn would put the whole project's
+  // skill text into every child.
+  rpc ProjectSkills(ProjectSkillsRequest) returns (ProjectSkillsResponse);
+
+  // SkillBody returns one project skill's body, resolved by NAME against the
+  // executor's own discovery.
+  //
+  // By name and not by path, for the same reason ProjectContext takes a
+  // workspace id: a path parameter would let anything that reaches this
+  // executor read an arbitrary file on it.
+  rpc SkillBody(SkillBodyRequest) returns (SkillBodyResponse);
 }
 
 message DescribeRequest {}
@@ -173,6 +190,34 @@ message ProjectContextResponse {
   // Expanded on THIS side deliberately: an @include names a path on the
   // executor's filesystem, which the daemon cannot resolve.
   string context_files = 1;
+}
+
+message ProjectSkillsRequest {
+  string workspace_id = 1;
+}
+
+message ProjectSkill {
+  string name = 1;
+  string description = 2;
+  // dir is the skill's own directory as the EXECUTOR sees it. The daemon does
+  // not resolve it — it is passed to the model as "Base directory for this
+  // skill", which is correct precisely because the model's file tools run on
+  // the executor too.
+  string dir = 3;
+}
+
+message ProjectSkillsResponse {
+  repeated ProjectSkill skills = 1;
+}
+
+message SkillBodyRequest {
+  string workspace_id = 1;
+  string name = 2;
+}
+
+message SkillBodyResponse {
+  string body = 1;
+  string dir = 2;
 }
 
 // JobOutput is the one-shot poll behind bash_output. Attach is a stream and
