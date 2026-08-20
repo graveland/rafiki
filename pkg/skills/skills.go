@@ -16,6 +16,11 @@ import (
 // directory, Path is the SKILL.md file itself).
 type SkillMeta struct {
 	Name, Description, Dir, Path string
+
+	// Remote marks a skill discovered on the child's EXECUTOR rather than on
+	// this machine. Its Path is empty and meaningless here; its body is
+	// fetched over the executor link when the model asks for it.
+	Remote bool
 }
 
 // skillFrontmatter is the YAML shape of a SKILL.md's frontmatter block.
