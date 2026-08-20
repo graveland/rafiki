@@ -241,6 +241,20 @@ func dialAddr(u *url.URL) string {
 	return net.JoinHostPort(u.Hostname(), "443")
 }
 
+// DialAddr returns the host:port an executor should dial to reach the same
+// daemon a control connection would.
+//
+// Exported because cmd/rafiki starts an executor pointed at the daemon named by
+// RAFIKI_URL, and a second derivation of "https with no port means 443" is the
+// kind of duplicate this repo has watched drift before.
+func DialAddr(rawURL string) (string, error) {
+	u, err := parseControlURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return dialAddr(u), nil
+}
+
 // Request sends a typed request and waits for the matching response.
 // req must marshal to a JSON object with a "type" field; if the
 // request has no ID, one is assigned automatically.
