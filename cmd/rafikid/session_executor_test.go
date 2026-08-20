@@ -160,3 +160,21 @@ func TestExecutorSessionDisablesAnUnusableClientRow(t *testing.T) {
 		t.Errorf("disabled %d rows; want the one unusable client row", len(store.disabled))
 	}
 }
+
+// The client cannot synthesise a selector for itself — it does not know the
+// owner, which the daemon derives from the connection — so the response must
+// carry one. Without it plan 07 has nothing to put on ExecutorSelector and the
+// spawn cannot find the row.
+func TestExecutorSessionReturnsAUsableSelector(t *testing.T) {
+	c := &Controller{execStore: newFakeExecStore()}
+	resp, err := c.ExecutorSession(users.Identity{Username: "brent"}, protocol.ExecutorSessionRequest{Name: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Selector == "" {
+		t.Fatal("Selector is empty; the client has nothing to target")
+	}
+	if resp.Selector != "owner=brent,kind=client" {
+		t.Errorf("Selector = %q, want the minted client row's unique selector", resp.Selector)
+	}
+}

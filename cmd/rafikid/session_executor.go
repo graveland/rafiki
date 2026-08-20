@@ -50,14 +50,14 @@ func (c *Controller) ExecutorSession(
 	if covered, existingID, err := c.nameAlreadyCovered(context.Background(), owner, name); err != nil {
 		logSessionWarning(err)
 	} else if covered {
-		return protocol.ExecutorSessionResponseData{ExecutorID: existingID}, nil
+		return protocol.ExecutorSessionResponseData{ExecutorID: existingID, Selector: "owner=" + owner}, nil
 	}
 
 	// The client already has a row and the secret that names it. Minting
 	// another would leave the first orphaned forever: the store has SetEnabled
 	// but no Delete.
 	if req.HasCredential {
-		return protocol.ExecutorSessionResponseData{RunLocal: true}, nil
+		return protocol.ExecutorSessionResponseData{RunLocal: true, Selector: "owner=" + owner + ",kind=client"}, nil
 	}
 
 	// Minting while an enabled kind=client row already exists for this owner
@@ -94,6 +94,7 @@ func (c *Controller) ExecutorSession(
 		RunLocal:   true,
 		ExecutorID: e.ID,
 		Credential: credential,
+		Selector:   "owner=" + owner + ",kind=client",
 	}, nil
 }
 

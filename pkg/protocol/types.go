@@ -985,6 +985,13 @@ type ExecutorSessionResponseData struct {
 	// shown ONCE; only its hash is stored, so a client that means to reconnect
 	// must persist it.
 	Credential string `json:"credential,omitempty"`
+
+	// Selector is the label selector the client should put on a spawn to land
+	// it on this row. The client cannot build it itself: it does not know the
+	// owner, which is derived here from the connection. For a client row it is
+	// owner=<owner>,kind=client (unique because only session minting writes
+	// kind=client); for a durable executor it is owner=<owner>.
+	Selector string `json:"selector,omitempty"`
 }
 
 // ─── ctrl_executor_list ────────────────────────────────────────────────────────
