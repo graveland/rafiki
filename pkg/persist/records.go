@@ -60,11 +60,6 @@ type Record struct {
 	// deserialises to false — the same as never having set it.
 	RecordRequests bool `json:"recordRequests,omitempty"`
 
-	// ExecutorSocket, when non-empty, is the unix socket of the executor
-	// this child runs on. Additive: records before its introduction
-	// lack the key and deserialise to empty.
-	ExecutorSocket string `json:"executorSocket,omitempty"`
-
 	// ExecutorSelector is the label selector this child was spawned with.
 	// Additive: records before its introduction deserialise to empty.
 	ExecutorSelector string `json:"executorSelector,omitempty"`

@@ -87,11 +87,6 @@ type Session struct {
 	// capturing after the daemon restarts or the session is respawned.
 	RecordRequests bool
 
-	// ExecutorSocket, when non-empty, is the unix socket of the rafiki-executor
-	// this child's filesystem and shell tools run in. Persisted so a resumed
-	// child rejoins the same executor.
-	ExecutorSocket string
-
 	// ExecutorSelector is the label selector this child was spawned with
 	// (or the empty string for "no selector"). Persisted so the narrowing
 	// property survives resume: a resumed child's effective set is still its
@@ -189,10 +184,6 @@ type Snapshot struct {
 
 	RecordRequests bool
 
-	// ExecutorSocket, when non-empty, is the unix socket of the rafiki-executor
-	// this child's filesystem and shell tools run in.
-	ExecutorSocket string
-
 	// ExecutorSelector is the label selector this child was spawned with.
 	ExecutorSelector string
 
@@ -267,8 +258,6 @@ func (s *Session) Snapshot() Snapshot {
 		ExtraArgs: copyStrings(s.ExtraArgs),
 
 		RecordRequests: s.RecordRequests,
-
-		ExecutorSocket: s.ExecutorSocket,
 
 		ExecutorSelector: s.ExecutorSelector,
 		WorkspaceMode:    s.WorkspaceMode,

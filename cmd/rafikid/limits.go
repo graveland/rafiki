@@ -312,8 +312,8 @@ func grantedChildren(req protocol.SpawnRequest) int {
 // executor grant.
 //
 // claude and pi are forked on the daemon's own host: agentRunner returns a nil
-// Runner for them, so resolveExecutor is never called and both
-// ExecutorSelector and ExecutorSocket are ignored outright. A confined parent
+// Runner for them, so resolveExecutor is never called and ExecutorSelector is
+// ignored outright. A confined parent
 // could therefore spawn an unconfined sibling simply by naming a kind — and
 // agent_spawn exposes `kind` to the model, so the escape is one prompt
 // injection away.
@@ -336,7 +336,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest) error {
 		// message; not finding one here is not this check's business.
 		return nil
 	}
-	if parent.ExecutorSelector == "" && parent.ExecutorSocket == "" {
+	if parent.ExecutorSelector == "" {
 		return nil // parent is already unconfined on this host
 	}
 
