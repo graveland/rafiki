@@ -9,6 +9,13 @@ import "slices"
 // the same wherever the agent runs; a workspace tool's effect is a file or a
 // process on one specific host, and running it on the wrong host is not a
 // degraded answer but a wrong one.
+//
+// The classification is BINARY and TestEveryDeclaredTierIsCarried keeps it
+// that way. A third tier for verbs needing the operator's own machine —
+// clipboard, editor, browser, file picker — was reserved and deleted unbuilt;
+// docs/reference/executor-protocol.md, "Not built: a presence tier", records
+// why, because the origin spec for it is persuasive and reads like an
+// oversight rather than a decision.
 type Tier int
 
 const (
@@ -20,11 +27,10 @@ const (
 	// executor and must execute there.
 	TierWorkspace
 
-	// TierPresence needs the operator's own machine and their presence —
-	// clipboard, editor, browser, file picker. No tool carries this tier yet;
-	// the constant exists so the classification has somewhere to put them
-	// rather than acquiring a fourth concept later.
-	TierPresence
+	// tierCount bounds the declared tiers so a tier nothing carries is a test
+	// failure rather than dead weight. It must stay LAST; a new tier goes
+	// above it.
+	tierCount
 )
 
 // tierByTool is the single classification of every registered tool.

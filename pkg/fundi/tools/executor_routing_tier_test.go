@@ -176,3 +176,30 @@ func (stubExecutorClient) JobOutput(context.Context, string, int64) (JobSnapshot
 }
 func (stubExecutorClient) KillJob(context.Context, string) error { return nil }
 func (stubExecutorClient) Ping(context.Context) error            { return nil }
+
+// A declared tier that no tool carries is dead weight, and dead weight in a
+// classification is worse than absent: the next reader treats the empty slot as
+// a design commitment and tries to fill it. TierPresence sat empty for months
+// and did exactly that — see docs/reference/executor-protocol.md, "Not built: a
+// presence tier".
+//
+// This is why tierCount must stay last in the const block. Without a bound
+// there is nothing to enumerate, and an unused tier is invisible.
+func TestEveryDeclaredTierIsCarried(t *testing.T) {
+	for tier := Tier(0); tier < tierCount; tier++ {
+		if len(namesInTier(tier)) == 0 {
+			t.Errorf("tier %d is declared but no tool carries it — classify a tool into it or delete it", tier)
+		}
+	}
+}
+
+// The two derived lists must exhaustively partition tierByTool. A third tier
+// with tools in it would leave WorkspaceTools() and the daemon list summing to
+// less than the map, and every caller that reasons in terms of "executor or
+// not" would be silently wrong about those tools.
+func TestTiersPartitionEveryTool(t *testing.T) {
+	got := len(namesInTier(TierDaemon)) + len(namesInTier(TierWorkspace))
+	if want := len(tierByTool); got != want {
+		t.Errorf("TierDaemon + TierWorkspace cover %d tools; tierByTool holds %d", got, want)
+	}
+}
