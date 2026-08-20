@@ -13,9 +13,12 @@ import (
 // real enforcement lives in the postgres store and is covered by its own
 // conformance suite.
 type fakeExecStore struct {
-	minted []executors.NewToken
-	execs  map[string]executors.Executor
-	seq    int
+	minted      []executors.NewToken
+	execs       map[string]executors.Executor
+	seq         int
+	createCalls int
+	lastCreate  executors.NewToken
+	disabled    []string
 }
 
 func newFakeExecStore() *fakeExecStore {
@@ -23,6 +26,8 @@ func newFakeExecStore() *fakeExecStore {
 }
 
 func (f *fakeExecStore) Create(_ context.Context, t executors.NewToken) (executors.Executor, string, error) {
+	f.createCalls++
+	f.lastCreate = t
 	e := executors.Executor{ID: "exec-created", Labels: t.Labels, Enabled: true}
 	f.execs[e.ID] = e
 	return e, "credential", nil
@@ -66,6 +71,9 @@ func (f *fakeExecStore) SetLabels(_ context.Context, id string, set map[string]s
 	return e, nil
 }
 func (f *fakeExecStore) SetEnabled(_ context.Context, id string, enabled bool) error {
+	if !enabled {
+		f.disabled = append(f.disabled, id)
+	}
 	return nil
 }
 func (f *fakeExecStore) Annotate(_ context.Context, id string, set map[string]string, remove []string) error {
