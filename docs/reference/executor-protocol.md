@@ -445,3 +445,64 @@ visible: if that process is in a container, the path it stats is the container's
 Parent-side checking alone would be a TOCTOU — the file can change between
 the parent's check and the executor's write. The executor-side check at the
 last possible moment closes that window.
+
+## Not built: a presence tier
+
+A third tool tier was reserved and deleted without ever carrying a tool. This
+section records why, because the design that proposed it is persuasive and its
+absence otherwise reads as an oversight.
+
+**What was proposed.** Verbs a deployed executor structurally cannot serve,
+because they need the operator's own machine *and their presence*: read the
+system clipboard, open a file in their editor, open a URL in their browser,
+resolve a path they just dragged in, pick a file interactively. A client-run
+executor (`kind=client`, `interactive=true`) would serve them, and a child would
+somehow hold two executors at once — a workspace one and a presence one.
+
+**Why it was rejected.** One test settles every verb on the list: **who
+initiates, and does the answer have to arrive inside the turn?**
+
+| Initiator | Correct home |
+|---|---|
+| The human | a message, not a tool |
+| The daemon, on a state change | a notification, not a tool |
+| The model, mid-turn, blocking on the result | a tool |
+
+- Clipboard read — the human can paste.
+- Clipboard write — a TUI keybinding does it better, and it is a capability an
+  injected prompt would enjoy having.
+- Browser open — print the URL; terminals make it clickable. Also
+  exfiltration-shaped: a URL with data in the query string, opened on the
+  operator's machine.
+- Editor open — print `file.go:42`, which is clickable, and which this repo's
+  own conventions already prefer.
+- File picker — "which file did you mean?" is a sentence.
+
+None of them is model-initiated-and-blocking. Claude Code, the most mature
+build of this architecture, ships none of them either; what it ships is one
+verb where the model does initiate and does need the answer, `AskUserQuestion`.
+
+**And that verb is not a presence tool.** The agent *emits* a question; whatever
+is subscribed to its event stream decides who is present and how to render it —
+a desktop notification, a phone push with the choices as buttons, a coordinating
+parent agent, or nobody. Presence is a property of **subscribers**, not a tier of
+tools. That is why no second executor binding, no `ToolOpts.PresenceExecutor`,
+and no child-to-attached-client link were needed: the problem the tier existed
+to solve dissolves once the question is an event rather than a routed call.
+
+**Two consequences, both load-bearing.**
+
+`tools[]` is **immutable** for a child's lifetime, not merely monotonic. The
+earlier rule allowed one growth, on first human attach, purely to admit this
+tier. Nothing else would ever have exercised it.
+
+The genuinely useful items on the list are **TUI-local affordances** — paste,
+drag-and-drop, `@file` completion over the executor's tree, clickable
+`file:line`. They need no tier and no wire protocol, and they are blocked on a
+real rafiki TUI existing rather than on anything here.
+
+**What is still open, and must not be smuggled back in under this name.** A
+child that needs its container for the checkout *and* its operator's laptop for
+browser-based auth or secrets is a second **workspace** binding — `read` and
+`bash` on two machines. That is a real, undesigned problem. It is not presence,
+and reviving `TierPresence` is not how to solve it.
