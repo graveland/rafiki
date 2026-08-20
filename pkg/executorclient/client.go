@@ -1,5 +1,12 @@
-// Package executorclient provides a Connect client that dials the executor's
-// unix socket and an in-memory fake for parent-side tests.
+// Package executorclient dials a rafiki executor over a unix socket.
+//
+// It has no production caller. The daemon reaches executors through
+// pkg/execpool, over the reverse-dialled link, because that path enrolls and
+// therefore has a database row; this package's direct dial was the unrowed
+// path and was removed. What remains is used by tests as a fake.
+//
+// Keep or delete deliberately — do not add a production caller without
+// re-reading why the direct dial went away.
 package executorclient
 
 import (
