@@ -8,6 +8,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // Driven through the TOOL, against a real controller and a fake pool. The
@@ -39,7 +40,7 @@ func TestForgedSelectorAtTheControllerIsRefused(t *testing.T) {
 		ParentChildID:    "c_parent",
 		Model:            "anthropic/sonnet-latest",
 		ExecutorSelector: "env=work",
-	})
+	}, users.Identity{})
 	if err == nil {
 		t.Fatal("a check that only ran in the tool would pass a test driven through the tool")
 	}

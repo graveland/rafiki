@@ -39,7 +39,7 @@ type fakeController struct {
 	getRecentFn             func(string, control.RecentQuery) (control.RecentResult, error)
 	searchFn                func(control.SearchQuery) control.SearchResult
 	statusFn                func() control.ControllerStatus
-	spawnFn                 func(context.Context, protocol.SpawnRequest) (control.SpawnResult, error)
+	spawnFn                 func(context.Context, protocol.SpawnRequest, users.Identity) (control.SpawnResult, error)
 	resumeFn                func(context.Context, string, string) (control.SpawnResult, error)
 	killFn                  func(context.Context, string, int64, int64) (control.KillResult, error)
 	forgetFn                func(string) error
@@ -147,9 +147,9 @@ func (f *fakeController) TaskList(ctx context.Context, req protocol.TaskListRequ
 	return nil, nil
 }
 
-func (f *fakeController) Spawn(ctx context.Context, req protocol.SpawnRequest) (control.SpawnResult, error) {
+func (f *fakeController) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {
 	if f.spawnFn != nil {
-		return f.spawnFn(ctx, req)
+		return f.spawnFn(ctx, req, owner)
 	}
 	return control.SpawnResult{}, nil
 }
@@ -1058,7 +1058,7 @@ func TestDispatch_ConversationExport_MissingConversationID(t *testing.T) {
 
 func TestDispatch_Spawn_Success(t *testing.T) {
 	c := &fakeController{
-		spawnFn: func(_ context.Context, req protocol.SpawnRequest) (control.SpawnResult, error) {
+		spawnFn: func(_ context.Context, req protocol.SpawnRequest, _ users.Identity) (control.SpawnResult, error) {
 			if req.Cwd != "/work" {
 				return control.SpawnResult{}, errors.New("unexpected cwd")
 			}
@@ -1090,6 +1090,25 @@ func TestDispatch_Spawn_Success(t *testing.T) {
 	}
 }
 
+// The owner reaches Spawn from the connection, never the request. It is the
+// label executor admission selectors match, so a client that could name it
+// could claim to be any owner.
+func TestDispatch_Spawn_UsesConnectionIdentity(t *testing.T) {
+	var got users.Identity
+	c := &fakeController{
+		spawnFn: func(_ context.Context, _ protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {
+			got = owner
+			return control.SpawnResult{ChildID: "c_new"}, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	_ = mustSuccess(t, d.HandleFrame(identityConn{id: users.Identity{Username: "brent"}},
+		[]byte(`{"type":"ctrl_spawn","id":"x","cwd":"/work"}`)))
+	if got.Username != "brent" {
+		t.Errorf("owner username = %q, want the connection's identity", got.Username)
+	}
+}
+
 func TestDispatch_Spawn_MissingCwd(t *testing.T) {
 	d := control.NewDispatch(&fakeController{})
 	resp := d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_spawn","id":"x"}`))
@@ -1104,7 +1123,7 @@ func TestDispatch_Spawn_RelativeCwd(t *testing.T) {
 
 func TestDispatch_Spawn_Failure(t *testing.T) {
 	c := &fakeController{
-		spawnFn: func(_ context.Context, _ protocol.SpawnRequest) (control.SpawnResult, error) {
+		spawnFn: func(_ context.Context, _ protocol.SpawnRequest, _ users.Identity) (control.SpawnResult, error) {
 			return control.SpawnResult{}, controllerErr(protocol.ErrSpawnFailed, "pi binary not found")
 		},
 	}

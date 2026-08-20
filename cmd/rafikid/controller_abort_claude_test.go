@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 func TestIsAbortFrame(t *testing.T) {
@@ -50,7 +51,7 @@ func newClaudeTestChild(t *testing.T, script string) (*Controller, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	res, err := ctrl.Spawn(ctx, req)
+	res, err := ctrl.Spawn(ctx, req, users.Identity{})
 	if err != nil {
 		t.Fatalf("spawn claude: %v", err)
 	}

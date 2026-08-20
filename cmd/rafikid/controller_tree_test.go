@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 func TestComputeLineageLabels(t *testing.T) {
@@ -80,7 +81,7 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 		Type: protocol.TypeCtrlSpawn,
 		Cwd:  os.TempDir(),
 		Kind: protocol.KindPi,
-	})
+	}, users.Identity{})
 	if err != nil {
 		t.Fatalf("spawn top-level: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 		Cwd:           os.TempDir(),
 		Kind:          protocol.KindPi,
 		ParentChildID: parentID,
-	})
+	}, users.Identity{})
 	if err != nil {
 		t.Fatalf("spawn child: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestSpawnRejectsUnknownParent(t *testing.T) {
 		Type:          protocol.TypeCtrlSpawn,
 		Cwd:           os.TempDir(),
 		ParentChildID: "c_does_not_exist",
-	})
+	}, users.Identity{})
 	if err == nil {
 		t.Fatal("expected an error for unknown parent, got nil")
 	}
@@ -198,7 +199,7 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	res, err := ctrl.Spawn(ctx, req)
+	res, err := ctrl.Spawn(ctx, req, users.Identity{})
 	if err != nil {
 		t.Fatalf("spawn child B: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 // across agents.
 func TestReservedLabelPrefixesRejectBothSpellings(t *testing.T) {
 	for _, key := range []string{
-		"rafiki/parent", "rafiki/root", "fundi/parent", "fundi/root", "fundi/anything",
+		"rafiki/parent", "rafiki/root", "fundi/parent", "fundi/root", "fundi/anything", "owner",
 	} {
 		if err := validateUserLabelKeys(map[string]string{key: "c_victim"}); err == nil {
 			t.Errorf("validateUserLabelKeys accepted %q; lineage must not be settable by a caller", key)

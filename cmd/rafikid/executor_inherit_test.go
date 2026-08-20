@@ -8,6 +8,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // THE confinement escape. A confined parent spawning a child that names no
@@ -62,7 +63,7 @@ func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
 		Cwd:           t.TempDir(),
 		ParentChildID: "c_parent",
 		// No ExecutorSelector.
-	})
+	}, users.Identity{})
 	if err == nil {
 		t.Fatal("the spawn was admitted despite no executor satisfying the parent's grant")
 	}

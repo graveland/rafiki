@@ -112,7 +112,7 @@ type Controller interface {
 	TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error)
 
 	// Lifecycle mutations.
-	Spawn(ctx context.Context, req protocol.SpawnRequest) (SpawnResult, error)
+	Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (SpawnResult, error)
 	Resume(ctx context.Context, childID string, apiKey string) (SpawnResult, error)
 	Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (KillResult, error)
 	Forget(childID string) error
@@ -252,7 +252,7 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 	case protocol.TypeCtrlGet:
 		return d.get(frame, hdr.ID)
 	case protocol.TypeCtrlSpawn:
-		return d.spawn(frame, hdr.ID)
+		return d.spawn(conn, frame, hdr.ID)
 	case protocol.TypeCtrlResume:
 		return d.resume(frame, hdr.ID)
 	case protocol.TypeCtrlKill:
@@ -684,7 +684,7 @@ func (d *dispatcher) conversationExport(frame []byte, id string) []byte {
 
 // ─── Lifecycle handlers ───────────────────────────────────────────────────────
 
-func (d *dispatcher) spawn(frame []byte, id string) []byte {
+func (d *dispatcher) spawn(conn Connection, frame []byte, id string) []byte {
 	var req protocol.SpawnRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlSpawn, id, protocol.ErrInvalidArgs, "malformed request")
@@ -695,7 +695,14 @@ func (d *dispatcher) spawn(frame []byte, id string) []byte {
 	if !filepath.IsAbs(req.Cwd) {
 		return errResponse(protocol.TypeCtrlSpawn, id, protocol.ErrInvalidArgs, "cwd must be an absolute path")
 	}
-	result, err := d.c.Spawn(context.Background(), req)
+	// The owner is read from the connection, never the request: it is matched
+	// by executor admission selectors, so a client that could name it could
+	// claim to be any owner. conn is nil in some dispatch tests.
+	var ident users.Identity
+	if conn != nil {
+		ident = conn.Identity()
+	}
+	result, err := d.c.Spawn(context.Background(), req, ident)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlSpawn, id, err, protocol.ErrSpawnFailed)
 	}

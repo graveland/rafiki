@@ -14,6 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // controllerSpawner implements tools.AgentSpawner for one child.
@@ -208,7 +209,7 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		ExecutorSelector:      spec.ExecutorSelector,
 		WorkspaceMode:         spec.WorkspaceMode,
 	}
-	res, err := s.c.Spawn(ctx, req)
+	res, err := s.c.Spawn(ctx, req, users.Identity{})
 	if err != nil {
 		return tools.AgentInfo{}, err
 	}
