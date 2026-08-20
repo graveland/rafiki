@@ -24,6 +24,13 @@ type Executor struct {
 	Enabled       bool
 	EnrolledAt    time.Time
 	LastSeenAt    time.Time
+
+	// Connected is a view field: true when the executor currently has a live
+	// connection in the pool. It is NOT persisted — the store leaves it false
+	// and the controller's ExecutorList marks it from execPool.Live(). It is
+	// what lets a client wait for its own session executor to come up before
+	// spawning, which is otherwise unobservable from the row alone.
+	Connected bool `json:"connected,omitempty"`
 }
 
 // NewToken carries everything the minter supplies to create an enrollment token.
