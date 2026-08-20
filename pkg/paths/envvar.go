@@ -90,6 +90,12 @@ const (
 	// Point it at a Claude profile explicitly if that is what you want.
 	Instructions = "RAFIKI_INSTRUCTIONS"
 
+	// Providers overrides the providers.toml location. The RAFIKI_* names in
+	// this file are duplicated by hand in attach/src/client.ts and
+	// cmd/rafiki/helpersembed/rafiki-helpers/index.ts — nothing enforces
+	// agreement, so grep for a name before changing it.
+	Providers = "RAFIKI_PROVIDERS"
+
 	// SkillsDirsEnv is an OS-path-list of skill directories ($PATH convention:
 	// ":" on unix). Ordered lowest-to-highest precedence, matching
 	// skills.DiscoverSkills, so a later entry overrides an earlier one on name
