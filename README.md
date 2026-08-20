@@ -248,6 +248,13 @@ remains is the daemon tier: MCP, web fetch and search, the task ledger, skills, 
 agent verbs. That is a useful agent, and it is the right one for a caller that only wants
 reasoning over tools the daemon legitimately owns.
 
+**Project skills come from the workspace's machine.** A skill found in
+`<cwd>/.rafiki/skills` or `<cwd>/.claude/skills` is a workspace skill — and the
+workspace lives on the executor. The daemon fetches the project-tier inventory at
+spawn, merges it with the operator's own skills (project shadows user on a name
+collision), and fetches bodies on the turn the model asks for one rather than
+eagerly at spawn.
+
 `rafiki create` gives you an executor automatically, so this is not something you normally
 arrange.
 

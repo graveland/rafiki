@@ -2,7 +2,7 @@
 
 The daemon dispatches filesystem and shell tool calls to an executor process
 (`rafiki executor serve`) over Connect RPC. This document describes the wire
-protocol: the eight RPCs, their message shapes, the four failure codes, the
+protocol: the ten RPCs, their message shapes, the four failure codes, the
 background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 
 There are two transports for the same protocol, and they differ only in what
@@ -129,7 +129,7 @@ DSN, a hostname or a query; the real error goes to rafikid's log.
 
 ## RPCs
 
-All eight RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
+All ten RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
 
 ### Describe
 
@@ -254,6 +254,32 @@ file — and is not an error. It is a separate call rather than a field on
 a workspace handle is not: a large `CLAUDE.md` would make every provision pay
 for it. It is separate from `Describe` for a different reason — `Describe` is
 per-executor and this is per-workspace.
+
+### ProjectSkills and SkillBody
+
+```
+ProjectSkills(workspaceId) → { skills: [{name, description, dir}] }
+SkillBody(workspaceId, name) → { body, dir }
+```
+
+Two calls rather than one, because an inventory is a handful of lines per skill
+while a body is a document — returning every body at spawn would put the whole
+project's skill text into every child. `ProjectSkills` is called at spawn;
+`SkillBody` on the turn the model actually asks for one.
+
+**Only the project tier is served.** `paths.SkillsDirs()` is the daemon operator's
+own skill library, not the workspace's; discovering it on the executor would give
+a child two copies of every operator skill and let an executor's local library
+shadow the operator's. The two directories scanned are `<cwd>/.claude/skills` and
+`<cwd>/.rafiki/skills`.
+
+**SkillBody resolves by name, not by path.** A path parameter would let anything
+reaching this executor read an arbitrary file — the same reason `ProjectContext`
+takes a `workspaceId` rather than a path. An unknown name is `NotFound`, not an
+empty body (which a model would read as a skill that exists and says nothing).
+
+An empty inventory is the ordinary answer for a workspace with no project skills,
+and is not an error.
 
 ### Cancel
 
