@@ -5,22 +5,20 @@ The daemon dispatches filesystem and shell tool calls to an executor process
 protocol: the eight RPCs, their message shapes, the four failure codes, the
 background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 
-There are three transports for the same protocol, and they differ only in what
+There are two transports for the same protocol, and they differ only in what
 carries the bytes:
 
 | Transport | Command | Used when |
 |---|---|---|
-| Unix socket | `rafiki executor serve --socket` | executor and daemon on one host |
 | Reverse-dialled TLS | `rafiki executor serve --connect` | the daemon cannot reach the executor's host (NAT, a laptop) |
-| Unix socket (reverse) | `rafiki executor serve --connect-socket` | executor and daemon on one host, and the executor should be a fully rowed member of the pool |
+| Unix socket (reverse) | `rafiki executor serve --connect-socket` | executor and daemon on one host, enrolling as a fully rowed member of the pool |
 
-The two unix-socket forms are not the same thing and the difference is the row.
-`--socket` has the executor listen and the daemon dial in with `--executor-socket`,
-which produces an executor with **no database row**: no labels, no `admits`, no
-`isolation`, no `workspace_mode`, invisible to selectors and never inherited by a child.
-`--connect-socket` reverses the direction, so the executor enrolls exactly as a remote one
-does and is a full member of the pool. Prefer it; `--executor-socket` remains only until
-the workspace path stops having an in-daemon fallback at all.
+There was once a third form: the executor listened on a unix socket and the daemon dialled
+it with `rafiki create --executor-socket`. It is gone. It produced an executor with **no
+database row** — no labels, no `admits`, no `isolation`, no `workspace_mode`, invisible to
+selectors and never inherited by a child — which made it the direct cause of two separate
+confinement defects. `--connect-socket` reverses the direction so the executor enrolls, and
+the row is again the only authority on what an executor is.
 
 A container executor uses one of those two like any other host. There was once a
 third — `rafiki executor serve-stdio`, spoken over the stdio of a `docker exec
