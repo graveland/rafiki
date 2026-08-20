@@ -306,6 +306,73 @@ One-shot poll of a background job. Never blocks.
 
 `Attach` remains the streaming path. Use `JobOutput` when you want a snapshot.
 
+## Not implemented: MCP servers on an executor
+
+MCP servers are defined **at the daemon** and run there. This section records a
+design that was worked through and deliberately not built, so the next person
+starts from the decisions rather than from the question.
+
+**Why it would be worth building.** A sidecar next to rafikid can serve a
+*service* MCP server — GitHub, Slack, Linear — perfectly well over
+`MCPServerConfig.URL`, and should. What it structurally cannot serve is a
+**workspace-local** server: a filesystem or git server pointed at the project.
+Those need to run where the checkout is, and the checkout is on the executor,
+possibly a laptop behind NAT that rafikid cannot reach at all. The axis is
+therefore **"does this server need to see the workspace"**, not "is it stdio or
+HTTP" — that is the sentence worth remembering.
+
+A second case only an executor can serve: an MCP endpoint reachable on the
+executor's network — a cluster-internal service, something behind its VPN —
+which rafikid has no route to.
+
+**The shape.** One **bidirectional streaming** RPC carrying opaque bytes, opened
+by the daemon on first use and reopened if it drops. rafikid stays the MCP
+client throughout; the executor either execs a server and pipes its stdio, or
+relays to a URL only it can reach. The stream-open message carries
+`{command, args, env}`.
+
+This does **not** violate §Transport's rule that *"rafikid is the RPC client;
+the executor is the server"*. That is about which side initiates calls, and the
+executor still never does. A bidi *stream* inside a call the daemon opened
+leaves the property intact — the design doc's "no bidirectional transport" means
+neither side is an RPC client to the other, not that a single RPC cannot stream
+both ways. The two were conflated once already, and the mistake cost a wrong
+"this is blocked" verdict.
+
+**Credentials.** stdio MCP is JSON-RPC over a pipe with no header channel, so a
+credential cannot ride the messages; it reaches the server through its process
+environment (`MCPServerConfig.Env`). On an executor that means the token is
+readable at `/proc/<pid>/environ` by any same-uid process — including the
+agent's own `bash`. That is **accepted**: an executor holding the workspace
+already holds the source, `.git/config`, `.env`, and on a laptop the operator's
+SSH keys, so a service-scoped MCP token is not a meaningful addition to the
+pile. `URL`-mode servers avoid the question entirely, because rafikid applies
+`Headers` before the bytes leave it.
+
+If that ever stops being acceptable, the escape hatch is an **MCP-only
+executor**, serving no workspace tools so no agent-controlled process shares its
+uid. Note that is not a label: a child gets exactly one executor
+(`resolveExecutor` returns a single client, `ToolOpts.Executor` is one field), so
+MCP-only means a child needs *two*, which is an architectural change.
+
+**A hazard to design for.** MCP discovers tools at `initialize`, but a child's
+`tools[]` is fixed at build because the tool block sits inside the prompt-cache
+breakpoint. A reconnect that returns a different tool list therefore cannot add
+to it. Pin to the first discovery: tools that vanished return `is_error`, tools
+that appeared are ignored until the child restarts.
+
+**Before building any of it**, spike Connect bidi streaming over
+`ServeInverted`'s inverted HTTP/2. That transport has never carried a bidi
+stream, it is the least conventional part of this system, and a subtle bug there
+presents as intermittent tool-call failures under load.
+
+**Related, already fixed:** a stdio MCP server used to inherit the daemon's
+entire environment — `RAFIKI_DB`, `RAFIKI_TOKEN`, and both provider API keys.
+`mcpServerEnv` now filters through `paths.IsReservedEnvKey`. If executor-hosted
+MCP is ever built, the stream-open message must carry **only** the configured
+`Env`, never the daemon's `os.Environ()`, or that leak returns with the whole
+executor fleet as its blast radius.
+
 ## Failure codes
 
 Failures are typed, never collapsed into a bare string. The parent makes a
