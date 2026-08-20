@@ -154,7 +154,7 @@ func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", "")
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
 
-	dirs := assembleSkillDirs("/work/repo", nil)
+	dirs := assembleSkillDirs("/work/repo", nil, false)
 
 	for _, d := range dirs {
 		if strings.HasPrefix(d, "/home/testuser") {
@@ -177,7 +177,7 @@ func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 
 func TestAssembleSkillDirs_FlagsWinLast(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", "/env/skills")
-	dirs := assembleSkillDirs("/work/repo", []string{"/flag/skills"})
+	dirs := assembleSkillDirs("/work/repo", []string{"/flag/skills"}, false)
 	if dirs[len(dirs)-1] != "/flag/skills" {
 		t.Errorf("--skills-dir must have highest precedence, got %v", dirs)
 	}
@@ -209,7 +209,7 @@ func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 
 	t.Setenv("RAFIKI_SKILLS_DIRS", "") // isolate from the invoking user's real config dir
 
-	dirs := assembleSkillDirs(repo, nil)
+	dirs := assembleSkillDirs(repo, nil, false)
 	skills, err := skillspkg.DiscoverSkills(dirs, nil)
 	if err != nil {
 		t.Fatalf("DiscoverSkills: %v", err)
@@ -226,6 +226,21 @@ func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 	}
 	if demo.Description != "from .rafiki" {
 		t.Errorf("demo.Description = %q, want %q (.rafiki/skills must win over .claude/skills on name collision)", demo.Description, "from .rafiki")
+	}
+}
+
+// When hasExecutor is true, the project-tier directories are omitted because
+// cwd names a path on the executor's machine. Finding them on the daemon
+// would return either nothing or a different project's skills.
+func TestAssembleSkillDirs_DropsProjectTierWithExecutor(t *testing.T) {
+	t.Setenv("RAFIKI_SKILLS_DIRS", "")
+
+	dirs := assembleSkillDirs("/work/repo", nil, true)
+
+	for _, d := range dirs {
+		if strings.Contains(d, ".claude/skills") || strings.Contains(d, ".rafiki/skills") {
+			t.Errorf("project-tier dir %q must not appear when hasExecutor is true", d)
+		}
 	}
 }
 

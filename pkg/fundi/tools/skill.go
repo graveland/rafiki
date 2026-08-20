@@ -52,13 +52,14 @@ func (SkillBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 		names = append(names, s.Name)
 	}
 	sort.Strings(names)
-	return &skillTool{SkillBlueprint: SkillBlueprint{}, byName: byName, names: names}, nil
+	return &skillTool{SkillBlueprint: SkillBlueprint{}, byName: byName, names: names, remoteBody: opts.RemoteSkillBody}, nil
 }
 
 type skillTool struct {
 	SkillBlueprint
-	byName map[string]skillspkg.SkillMeta
-	names  []string
+	byName     map[string]skillspkg.SkillMeta
+	names      []string
+	remoteBody func(ctx context.Context, name string) (body, dir string, err error)
 }
 
 func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -73,6 +74,17 @@ func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 	s, ok := st.byName[in.Skill]
 	if !ok {
 		return ToolResult{}, fmt.Errorf("skill: unknown skill %q; available skills: %s", in.Skill, strings.Join(st.names, ", "))
+	}
+
+	if s.Remote {
+		if st.remoteBody == nil {
+			return ToolResult{}, fmt.Errorf("skill: %q lives on this agent's executor, which is no longer reachable", in.Skill)
+		}
+		body, dir, err := st.remoteBody(ctx, in.Skill)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("skill: %w", err)
+		}
+		return NewTextResult(fmt.Sprintf("Base directory for this skill: %s\n\n%s", dir, body)), nil
 	}
 
 	body, err := skillspkg.SkillBody(s.Path)

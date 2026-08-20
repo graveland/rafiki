@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,7 +47,14 @@ type RuntimeOptions struct {
 	// this machine"; a non-nil pointer, even one to "", means "the executor
 	// answered" and must be used verbatim, so an executor-backed child with an
 	// empty workspace never silently falls back to the daemon's files.
-	ProjectContext   *string
+	ProjectContext *string
+	// RemoteSkills, when non-nil, is the project-tier skills already fetched
+	// from the child's executor. They are merged into the local discovery result
+	// with project shadowing user. nil means no executor — all skills are local.
+	RemoteSkills []skills.SkillMeta
+	// RemoteSkillBody fetches a project skill's body from the child's executor.
+	// nil when the child has no executor, in which case no SkillMeta carries Remote.
+	RemoteSkillBody  func(ctx context.Context, name string) (body, dir string, err error)
 	MCPConfig        string // absolute path, or empty to skip MCP entirely
 	LSPConfig        string // absolute path, or empty to skip LSP entirely
 	FakeTurns        string
@@ -150,9 +158,51 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 		if err != nil {
 			return "", nil, fmt.Errorf("runtime: discover skills: %w", err)
 		}
+		// The project tier was fetched from the executor and never went through
+		// DiscoverSkills, so the --skills filter must be applied here too.
+		if len(opts.RemoteSkills) > 0 {
+			filtered := make([]skills.SkillMeta, 0, len(opts.RemoteSkills))
+			for _, s := range opts.RemoteSkills {
+				if only == nil {
+					filtered = append(filtered, s)
+				} else {
+					for _, name := range only {
+						if s.Name == name {
+							filtered = append(filtered, s)
+							break
+						}
+					}
+				}
+			}
+			// MergeSkills puts project after local so project shadows user.
+			discovered = MergeSkills(discovered, filtered)
+		}
 	}
 
 	return contextFiles, discovered, nil
+}
+
+// MergeSkills combines the daemon's user and system skills with the project
+// skills discovered on the executor.
+//
+// Project shadows user on a name collision, matching DiscoverSkills' own
+// documented rule that later directories win — a project that ships a `deploy`
+// skill means its own, not the operator's.
+func MergeSkills(local, project []skills.SkillMeta) []skills.SkillMeta {
+	byName := make(map[string]skills.SkillMeta, len(local)+len(project))
+	order := make([]string, 0, len(local)+len(project))
+	for _, s := range append(append([]skills.SkillMeta{}, local...), project...) {
+		if _, seen := byName[s.Name]; !seen {
+			order = append(order, s.Name)
+		}
+		byName[s.Name] = s
+	}
+	sort.Strings(order)
+	out := make([]skills.SkillMeta, 0, len(order))
+	for _, n := range order {
+		out = append(out, byName[n])
+	}
+	return out
 }
 
 // checkRipgrep verifies the ripgrep dependency. It does its own lookup
@@ -307,19 +357,20 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	toolOpts := tools.ToolOpts{
-		Cwd:           opts.Cwd,
-		FileTracker:   fileTracker,
-		OutputPolicy:  outputPolicy,
-		Skills:        discovered,
-		RTK:           tools.ParseRTKMode(opts.RTK),
-		Web:           opts.ToolsWeb,
-		LSP:           lspClient,
-		FileChanged:   lspNotifier,
-		Tasks:         taskStore,
-		ChildID:       opts.Ref,
-		Agents:        opts.Agents,
-		Executor:      opts.Executor,
-		ExecutorTools: executorToolSet(opts.ExecutorTools),
+		Cwd:             opts.Cwd,
+		FileTracker:     fileTracker,
+		OutputPolicy:    outputPolicy,
+		Skills:          discovered,
+		RTK:             tools.ParseRTKMode(opts.RTK),
+		Web:             opts.ToolsWeb,
+		LSP:             lspClient,
+		FileChanged:     lspNotifier,
+		Tasks:           taskStore,
+		ChildID:         opts.Ref,
+		Agents:          opts.Agents,
+		Executor:        opts.Executor,
+		ExecutorTools:   executorToolSet(opts.ExecutorTools),
+		RemoteSkillBody: opts.RemoteSkillBody,
 	}
 	// A process that is its own workspace satisfies the executor rule with a
 	// real in-process client rather than an exemption. Build it here, where the

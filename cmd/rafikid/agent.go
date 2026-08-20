@@ -74,18 +74,19 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 	return f, nil
 }
 
-// assembleSkillDirs builds the skill search path, lowest precedence first:
-// the configured dirs (paths.SkillsDirs, which is rafiki's own config
-// location - see that function's doc comment for why it is not
-// ~/.claude/skills), then the project's existing <cwd>/.claude/skills (kept
-// so a repo that already has one doesn't silently lose its skills), then the
-// project's own <cwd>/.rafiki/skills (which wins on name collision with
-// .claude/skills - skills.DiscoverSkills lets later entries override
-// earlier ones), then any --skills-dir flags. Pure so it is testable.
-func assembleSkillDirs(cwd string, flagDirs []string) []string {
+// assembleSkillDirs builds the skill search path.
+//
+// hasExecutor drops the two project-tier directories: cwd names a path on the
+// EXECUTOR, so resolving it here finds either nothing or, on a daemon that
+// happens to have a directory at the same path, a different project's skills
+// presented as this one's. The project tier comes over the executor link
+// instead (fetchProjectSkills).
+func assembleSkillDirs(cwd string, flagDirs []string, hasExecutor bool) []string {
 	dirs := paths.SkillsDirs()
-	dirs = append(dirs, filepath.Join(cwd, ".claude", "skills"))
-	dirs = append(dirs, filepath.Join(cwd, ".rafiki", "skills"))
+	if !hasExecutor {
+		dirs = append(dirs, filepath.Join(cwd, ".claude", "skills"))
+		dirs = append(dirs, filepath.Join(cwd, ".rafiki", "skills"))
+	}
 	return append(dirs, flagDirs...)
 }
 
@@ -239,7 +240,7 @@ func runAgentWithFlags(f agentFlags) int {
 		Ref:                  f.ref,
 		Name:                 f.name,
 		SpillDir:             f.spillDir,
-		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir),
+		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir, false),
 		Skills:               f.skills,
 		NoSkills:             f.noSkills,
 		NoContextFiles:       f.noContextFiles,
