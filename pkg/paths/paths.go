@@ -102,6 +102,22 @@ func SocketPath() string { return filepath.Join(RuntimeDir(), "controller.sock")
 // two lifetimes.
 func ExecutorSocketPath() string { return filepath.Join(RuntimeDir(), "executor.sock") }
 
+// ClientExecutorCredential is where a rafiki CLIENT persists the credential for
+// the executor it runs on the operator's own machine.
+//
+// A DIFFERENT file from a standalone executor's: one machine may run both — a
+// long-lived `rafiki executor serve` and an interactive client — and they are
+// two rows. Sharing the path would have whichever started last overwrite the
+// other's identity, and the loser cannot re-enroll because its token was
+// consumed.
+//
+// In DataDir rather than RuntimeDir because it must survive a reboot. Losing it
+// means minting a new row, and executors.Store has no Delete — every orphan is
+// permanent.
+func ClientExecutorCredential() string {
+	return filepath.Join(DataDir(), "client-executor.cred")
+}
+
 // RecordsDir holds persisted session records.
 func RecordsDir() string { return filepath.Join(DataDir(), "state") }
 
