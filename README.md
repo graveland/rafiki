@@ -231,6 +231,16 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 
 ## Executor
 
+**By default, `rafiki create` makes your own machine the workspace.** The client asks the
+daemon for an executor row, starts an executor in-process, and points the spawn at it — so
+`read`, `write`, `bash` and the rest run where your files are, whether the daemon is on
+this machine or in a cluster. `--no-local-executor` turns it off; `--executor-selector`
+sends the child somewhere else instead.
+
+If a durable executor already covers this machine and user — one installed with
+`rafiki executor service install` — the client uses that instead of starting its own. That
+one outlives your terminal, so an agent keeps working after you detach.
+
 `rafiki executor serve` moves the filesystem and shell tools (`read`, `write`,
 `edit`, `glob`, `grep`, `ls`, `bash`) and the language-server tools (`lsp_*`)
 behind a Connect RPC surface. The daemon becomes
@@ -537,7 +547,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
-| `RAFIKI_EXECUTOR_SELECTOR` | client-side: default label selector for `rafiki create --executor-selector`, choosing an executor from the daemon's enrolled pool (e.g. `owner=brent`). Wins over `RAFIKI_EXECUTOR_SOCKET` when both are set — the pool is the path the daemon can audit. Unset means no selector, and the child's filesystem and shell tools run in-process on the daemon's own host |
+| `RAFIKI_EXECUTOR_SELECTOR` | client-side: default label selector for `rafiki create --executor-selector`, choosing an executor from the daemon's enrolled pool (e.g. `owner=brent`). Wins over `RAFIKI_EXECUTOR_SOCKET` when both are set — the pool is the path the daemon can audit. Unset means `rafiki create` makes the client's own machine the workspace by default: it starts a session executor and points the spawn at it. Set it to send children somewhere else |
 
 **Web access (webfetch / websearch).** The fundi runtime includes two opt-in web
 tools: `webfetch` fetches a URL and returns its text, and `websearch` queries
