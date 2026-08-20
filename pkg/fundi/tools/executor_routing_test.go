@@ -3,9 +3,6 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/executorclient"
@@ -50,21 +47,36 @@ func TestOnlyMachineLocalToolsAreRouted(t *testing.T) {
 	}
 }
 
-func TestNilExecutorKeepsEverythingLocal(t *testing.T) {
-	// With no executor configured, every tool runs in-process exactly as
-	// before. This is what lets phase 06 land without changing default
-	// behaviour for anyone who has not deployed an executor.
+// With no executor there is no workspace, so the tools that touch one are not
+// registered at all — not registered and failing, and above all not running
+// against the daemon's own filesystem. This is the rule the whole executor
+// architecture exists to establish; everything else is plumbing.
+func TestNoExecutorMeansNoWorkspaceTools(t *testing.T) {
 	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
 		Cwd:         t.TempDir(),
 		FileTracker: tools.NewFileTracker(),
 	})
-	p := filepath.Join(t.TempDir(), "f.txt")
-	_ = os.WriteFile(p, []byte("local"), 0o644)
-	out, err := reg.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"`+p+`"}`))
-	if err != nil {
-		t.Fatal(err)
+
+	names := map[string]bool{}
+	for _, def := range reg.Definitions() {
+		if def.OfTool != nil {
+			names[def.OfTool.Name] = true
+		}
 	}
-	if !strings.Contains(out, "local") {
-		t.Fatalf("got %q", out)
+
+	for _, name := range tools.WorkspaceTools() {
+		if names[name] {
+			t.Errorf("%q was registered with no executor; it would run on the daemon's own filesystem", name)
+		}
+	}
+
+	// The daemon tier is unaffected: an agent with no workspace is still an
+	// agent. The task ledger is the sentinel — it materializes with a bare
+	// ToolOpts, while agent_spawn would decline without an AgentSpawner and
+	// webfetch/websearch decline without ToolsWeb.
+	for _, name := range []string{"task_add", "task_list", "task_update", "task_drop"} {
+		if !names[name] {
+			t.Errorf("%q is missing; a workspace-less agent still has the daemon tier", name)
+		}
 	}
 }

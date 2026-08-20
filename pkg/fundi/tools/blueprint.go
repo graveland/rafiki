@@ -83,6 +83,19 @@ func (br *BlueprintRegistry) MaterializeAll(opts ToolOpts) *Registry {
 			t = bp
 		}
 
+		// No executor means no workspace, so a tool that touches one is not
+		// registered at all. It used to fall back to running in this process,
+		// which for a daemon serving somebody else's child means their agent's
+		// bash on our filesystem — the outcome the executor architecture
+		// exists to prevent.
+		//
+		// A tool with no tier is NOT a workspace tool. Test registries build
+		// their own blueprints, which are absent from tierByTool by
+		// construction, and they must keep working.
+		if tier, known := TierOf(t.Name()); known && tier == TierWorkspace && opts.Executor == nil {
+			continue
+		}
+
 		// When an executor is configured, route machine-local tools to it.
 		// The proxy keeps the original name, description, and input schema
 		// — the model sees an identical surface — but Execute forwards to
