@@ -152,11 +152,6 @@ const (
 	// of what any parent granted. Default 3; "0" disables spawning entirely.
 	MaxDepth = "RAFIKI_MAX_DEPTH"
 
-	// ExecutorSocket is the default unix socket of a rafiki-executor to run
-	// agent children's filesystem and shell tools in. Used by `rafiki create
-	// --executor-socket` when the flag is not given.
-	ExecutorSocket = "RAFIKI_EXECUTOR_SOCKET"
-
 	// ExecutorSelector is the default label selector for picking an executor
 	// from the daemon's enrolled pool. Used by `rafiki create
 	// --executor-selector` when the flag is not given.
@@ -164,9 +159,7 @@ const (
 	// It exists because an interactive operator has one answer to "which
 	// executor" for every session — their own machine — and typing it on every
 	// spawn is the kind of friction that ends with nobody using executors at
-	// all. The selector wins over ExecutorSocket when both are set: the pool is
-	// the path the daemon can audit, and a request carrying both is asking for
-	// the audited one.
+	// all.
 	ExecutorSelector = "RAFIKI_EXECUTOR_SELECTOR"
 
 	// ExecutorsEnabled turns on the executor endpoint. Any non-empty value
