@@ -103,6 +103,47 @@ func TestSpawnWithoutRunnerStillRequiresBinary(t *testing.T) {
 	}
 }
 
+// TestSpawnInjectedRunnerSkipsCwdExistenceCheck proves the other half of the
+// same seam TestSpawnUsesInjectedRunner covers: an injected Runner (the
+// in-process fundi engine) never forks a real process rooted at Cwd, so a Cwd
+// that does not exist on THIS machine must not refuse the spawn — its
+// filesystem access, if any, goes through whichever executor gets bound
+// later, not this one.
+func TestSpawnInjectedRunnerSkipsCwdExistenceCheck(t *testing.T) {
+	stub := &stubRunner{stdoutFrames: `{"type":"agent_end"}` + "\n"}
+	c, err := Spawn(t.Context(), SpawnSpec{
+		ChildID: "c_stub_bad_cwd",
+		Cwd:     "/definitely/not/a/directory",
+		Runner:  stub,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not finish within 5s")
+	}
+}
+
+// TestSpawnWithoutRunnerRejectsMissingCwd is the discriminator for the fix
+// above: the subprocess path (no injected Runner) DOES fork a real process
+// rooted at Cwd (newProcessRunner sets cmd.Dir = spec.Cwd), so a missing Cwd
+// must still be refused there.
+func TestSpawnWithoutRunnerRejectsMissingCwd(t *testing.T) {
+	_, err := Spawn(t.Context(), SpawnSpec{
+		ChildID:  "c_nocwd",
+		Cwd:      "/definitely/not/a/directory",
+		PiBinary: "/bin/true",
+	})
+	if err == nil {
+		t.Fatal("expected an error for a Cwd that does not exist on the subprocess path")
+	}
+	if !strings.Contains(err.Error(), "cwd") {
+		t.Errorf("error = %q, want it to mention cwd", err.Error())
+	}
+}
+
 // closeCounter wraps a stream and counts Close calls, so a test can assert on
 // the daemon's stream hygiene directly instead of inferring it from a process
 // file-descriptor count. An FD count cannot be the guard here: os.File

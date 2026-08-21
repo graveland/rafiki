@@ -229,8 +229,19 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	if !filepath.IsAbs(spec.Cwd) {
 		return nil, fmt.Errorf("cwd must be absolute: %q", spec.Cwd)
 	}
-	if _, err := os.Stat(spec.Cwd); err != nil {
-		return nil, fmt.Errorf("cwd: %w", err)
+	// Only a subprocess runner (spec.Runner == nil) actually forks a real OS
+	// process rooted at Cwd (newProcessRunner sets cmd.Dir = spec.Cwd below) —
+	// that is the only case where Cwd must exist on THIS machine. An injected
+	// Runner (the in-process fundi engine) never touches this filesystem for
+	// Cwd; its own filesystem access, if any, goes through whichever executor
+	// gets bound, which validates its own root independently. Stat-ing here
+	// unconditionally is the same daemon-local-fs assumption already fixed in
+	// Controller.Spawn — this is the second, previously-unreached instance of
+	// it, since every spawn (fundi included) still flows through this Spawn.
+	if spec.Runner == nil {
+		if _, err := os.Stat(spec.Cwd); err != nil {
+			return nil, fmt.Errorf("cwd: %w", err)
+		}
 	}
 
 	if err := ctx.Err(); err != nil {
