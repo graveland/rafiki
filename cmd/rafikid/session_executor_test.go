@@ -171,10 +171,17 @@ func TestExecutorSessionDisablesAnUnusableClientRow(t *testing.T) {
 // for this executor is already live" reconnect loop this test guards against.
 func TestExecutorSessionDefersToAnAlreadyLiveClientExecutor(t *testing.T) {
 	store := newFakeExecStore()
+	// A kind=client row's "name" lives in Labels, not SelfReported: Create
+	// (the path that mints one) writes self_reported empty and it is never
+	// updated on later connects — only Enroll's durable-executor token path
+	// populates SelfReported. Getting this fixture wrong the other way is
+	// exactly the bug this test exists to catch: it would pass against a
+	// SelfReported-keyed match too, just like a real client row's live entry
+	// always fails a SelfReported["name"] comparison.
 	pool := &fakePool{live: []execpool.LiveExecutor{
 		{Executor: fakeExecutor(
-			map[string]string{"owner": "brent", "kind": "client"},
-			map[string]string{"name": "laptop"},
+			map[string]string{"owner": "brent", "name": "laptop", "kind": "client"},
+			nil, // SelfReported: always empty for a client row, see above
 		)},
 	}}
 	c := &Controller{execStore: store, execPool: pool}

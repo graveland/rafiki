@@ -206,6 +206,13 @@ func (c *Controller) nameAlreadyCovered(ctx context.Context, owner, name string)
 // durable case and which a kind=client row can satisfy while sitting
 // disconnected between sessions. c.execPool is nil when executors are
 // disabled entirely.
+//
+// Matched on Labels["name"], NOT SelfReported["name"]: a kind=client row is
+// minted by Create (this file), which writes self_reported empty and never
+// updates it on later connects — only Enroll's token path (durable
+// executors) ever populates SelfReported, which is what nameAlreadyCovered
+// above correctly matches on for that case. name lives in Labels here
+// because Create is the one writing it, at mint time.
 func (c *Controller) liveClientExecutor(owner, name string) (string, bool) {
 	if c.execPool == nil {
 		return "", false
@@ -215,7 +222,7 @@ func (c *Controller) liveClientExecutor(owner, name string) (string, bool) {
 		if e.Labels["kind"] != "client" {
 			continue
 		}
-		if e.Labels["owner"] == owner && e.SelfReported["name"] == name {
+		if e.Labels["owner"] == owner && e.Labels["name"] == name {
 			return e.ID, true
 		}
 	}
