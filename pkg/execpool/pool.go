@@ -336,6 +336,7 @@ func (p *Pool) Live() []LiveExecutor {
 		out = append(out, LiveExecutor{
 			Executor: lc.executor,
 			Describe: lc.describe,
+			Proxies:  lc.describe.GetProxies(),
 		})
 	}
 	return out
@@ -345,6 +346,27 @@ func (p *Pool) Live() []LiveExecutor {
 type LiveExecutor struct {
 	Executor executors.Executor
 	Describe *executorpb.DescribeResponse
+	// Proxies are the LLM-endpoint names this executor self-reported at
+	// Describe time. Self-reporting is fine here — unlike isolation and
+	// workspace_mode, this only ever NARROWS what the executor will forward,
+	// and it is enforced on the executor's own side (pkg/executor's allowlist),
+	// not trusted on this one.
+	Proxies []string
+}
+
+// ExecutorsWithProxy returns the IDs of live executors that advertise
+// proxyName.
+func (p *Pool) ExecutorsWithProxy(proxyName string) []string {
+	var out []string
+	for _, le := range p.Live() { // Live() takes the lock itself; do not nest
+		for _, name := range le.Proxies {
+			if name == proxyName {
+				out = append(out, le.Executor.ID)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // ClientFor returns a tools.ExecutorClient for executorID, or an error if
@@ -368,6 +390,29 @@ func (p *Pool) ClientFor(executorID string) (tools.ExecutorClient, error) {
 		return nil, fmt.Errorf("executor %s: %w", executorID, ErrParked)
 	}
 	return nil, fmt.Errorf("executor %s: %w", executorID, ErrExecutorLost)
+}
+
+// connectClientFor returns the raw generated Connect client for executorID.
+// It exists alongside ClientFor for callers that need an RPC the
+// tools.ExecutorClient interface does not expose — currently just Proxy.
+// Same locking discipline as ClientFor: RLock, read, unlock. The returned
+// client is safe to use after the lock is released; callers must NOT invoke
+// Proxy (or any other long-lived stream) while holding p.mu, since the stream
+// is expected to outlive many health ticks.
+func (p *Pool) connectClientFor(executorID string) (executorpbconnect.ExecutorServiceClient, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	lc, ok := p.live[executorID]
+	if !ok {
+		if _, parked := p.parked[executorID]; parked {
+			return nil, fmt.Errorf("executor %s: %w", executorID, ErrParked)
+		}
+		return nil, fmt.Errorf("executor %s: %w", executorID, ErrExecutorLost)
+	}
+	if lc.draining {
+		return nil, fmt.Errorf("executor %s: %w", executorID, ErrDraining)
+	}
+	return lc.client.inner, nil
 }
 
 // ClientForWorkspace returns a tools.ExecutorClient for executorID whose
