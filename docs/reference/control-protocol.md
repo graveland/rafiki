@@ -1531,6 +1531,14 @@ two `*_list` verbs share a convention.
 Set or remove labels on an executor's database row. Changes take effect on the
 executor's next connection without requiring a restart.
 
+`executorId` may be the full row id or any unique trailing fragment of at
+least four characters. Fragments match by SUFFIX, not prefix: ids are UUIDv7s
+whose leading bits are a timestamp, so rows minted in the same window share
+their front and only the tail distinguishes them — this is what makes the
+short form `rafiki executor list` displays usable verbatim here. An exact id
+always wins. A fragment matching several rows fails with `ERR_INVALID_ARGS`,
+naming the rows it matched; one matching none fails with `ERR_NOT_FOUND`.
+
 **Request**
 ```jsonc
 {
@@ -1546,7 +1554,8 @@ executor's next connection without requiring a restart.
 ### 15.4 `ctrl_executor_disable` / `ctrl_executor_enable`
 
 Disable or re-enable an executor. A disabled executor's credential fails
-authentication on its next connection.
+authentication on its next connection. `executorId` follows the same
+exact-or-unique-trailing-fragment rule as `ctrl_executor_label` (§15.3).
 
 **Request**
 ```jsonc

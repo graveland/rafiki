@@ -3,10 +3,16 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
+	"github.com/charmbracelet/colorprofile"
+	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
@@ -124,7 +130,20 @@ func newExecutorListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List enrolled executors",
-		RunE:  runExecutorList,
+		Long: `List enrolled executors.
+
+The ID column shows the LAST twelve characters of each executor's id:
+ids are UUIDv7s, whose leading bits are a timestamp — every executor
+minted in the same window shares its front, and only the tail
+distinguishes them.
+
+That fragment is enough to act on a row:
+
+  rafiki executor disable <fragment>
+
+Any unique trailing fragment of four or more characters is accepted;
+an ambiguous one names the rows it matches instead of picking one.`,
+		RunE: runExecutorList,
 	}
 	cmd.Flags().String("selector", "", "Label selector to filter by")
 	cmd.Flags().Int("limit", 50, "Maximum number of executors to return")
@@ -161,47 +180,147 @@ func runExecutorList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("malformed response: %w", err)
 	}
 
-	mode, _ := outputOpts(cmd)
+	mode, useColor := outputOpts(cmd)
 	if mode == outputTable {
-		renderExecutorTable(wrapper.Executors)
-	} else {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(wrapper)
+		return renderExecutorTable(os.Stdout, wrapper.Executors, useColor)
 	}
-	return nil
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(wrapper)
 }
 
-func renderExecutorTable(execs []executors.Executor) {
+// Column indexes into an executor table row; StyleFunc styles by column.
+const (
+	colID = iota
+	colName
+	colStatus
+	colLabels
+	colAdmits
+	colLastSeen
+)
+
+// shortExecutorID returns the display form of an executor id: its trailing
+// twelve characters — the fragment the label/enable/disable verbs accept as an
+// argument.
+//
+// The TAIL, not the head: executor ids are UUIDv7s whose leading bits are a
+// millisecond timestamp, so rows minted close together share their front and
+// only the end distinguishes them. Truncating from the front displayed twelve
+// characters that were nearly identical across every recent row — and a form
+// no verb accepted.
+func shortExecutorID(id string) string {
+	if len(id) <= executorShortIDLen {
+		return id
+	}
+	return id[len(id)-executorShortIDLen:]
+}
+
+const executorShortIDLen = 12
+
+// renderExecutorTable writes the executor pool as a table.
+//
+// When useColor is false every style is left empty, so piped and redirected
+// output carries no ANSI escapes at all and stays byte-stable for scripts.
+// When it is true, output goes through colorprofile so codes degrade to what
+// the terminal actually supports (NO_COLOR never reaches here — colorEnabled
+// already answered false).
+func renderExecutorTable(w io.Writer, execs []executors.Executor, useColor bool) error {
 	if len(execs) == 0 {
-		fmt.Println("No enrolled executors.")
-		return
+		fmt.Fprintln(w, "No enrolled executors.")
+		return nil
 	}
-	fmt.Printf("%-14s %-20s %-10s %-30s %s\n", "ID", "NAME", "ENABLED", "LABELS", "ADMITS")
-	fmt.Println(strings.Repeat("-", 100))
-	for _, ex := range execs {
-		shortID := ex.ID
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
+
+	out := w
+	if useColor {
+		out = colorprofile.NewWriter(w, os.Environ())
+	}
+
+	rows := make([][]string, len(execs))
+	for i, ex := range execs {
+		lastSeen := "-"
+		if !ex.LastSeenAt.IsZero() {
+			lastSeen = humanize.Time(ex.LastSeenAt)
 		}
-		enabled := "yes"
-		if !ex.Enabled {
-			enabled = "no"
+		rows[i] = []string{
+			shortExecutorID(ex.ID),
+			defaultDash(ex.DisplayName),
+			executorStatus(ex),
+			executorFormatLabels(ex.Labels, 48),
+			defaultDash(ex.Admits),
+			lastSeen,
 		}
-		labelStr := executorFormatLabels(ex.Labels)
-		fmt.Printf("%-14s %-20s %-10s %-30s %s\n", shortID, ex.DisplayName, enabled, labelStr, ex.Admits)
+	}
+
+	t := table.New()
+	t.Headers("ID", "NAME", "STATUS", "LABELS", "ADMITS", "LAST SEEN")
+	t.Rows(rows...)
+	t.StyleFunc(func(row, col int) lipgloss.Style {
+		// Padding is layout, not color: it applies whether or not styling
+		// does, so plain output keeps its column gutters too.
+		s := lipgloss.NewStyle().Padding(0, 1)
+		if !useColor {
+			return s
+		}
+		if row == table.HeaderRow {
+			return s.Bold(true)
+		}
+		if col != colStatus {
+			return s
+		}
+		switch rows[row][colStatus] {
+		case "live":
+			return s.Foreground(lipgloss.Color("2")) // green: connected and enabled
+		case "offline":
+			return s.Foreground(lipgloss.Color("3")) // yellow: enabled but not connected
+		case "disabled":
+			return s.Foreground(lipgloss.Color("1")) // red: credential revoked
+		}
+		return s
+	})
+
+	_, err := fmt.Fprintln(out, t.Render())
+	return err
+}
+
+// executorStatus collapses the row's two booleans into one operational word:
+// whether the machine can take work right now (live), exists but is not
+// talking to us (offline), or has been switched off (disabled). Connected is a
+// view field from the daemon's live pool, not the row — see ExecutorList.
+func executorStatus(ex executors.Executor) string {
+	switch {
+	case !ex.Enabled:
+		return "disabled"
+	case ex.Connected:
+		return "live"
+	default:
+		return "offline"
 	}
 }
 
-func executorFormatLabels(labels map[string]string) string {
+// executorFormatLabels renders a label map as sorted k=v pairs joined with
+// commas, truncated to max runes. Map iteration order is randomized in Go, so
+// sorting is what keeps two invocations seconds apart identical; truncation is
+// what keeps one noisy label set from widening the whole table past the
+// terminal edge — JSON mode carries the full map.
+func executorFormatLabels(labels map[string]string, max int) string {
 	if len(labels) == 0 {
 		return ""
 	}
-	var parts []string
-	for k, v := range labels {
-		parts = append(parts, k+"="+v)
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
 	}
-	return strings.Join(parts, ",")
+	slices.Sort(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + labels[k]
+	}
+	s := strings.Join(parts, ",")
+	r := []rune(s)
+	if len(r) > max {
+		s = string(r[:max-1]) + "…"
+	}
+	return s
 }
 
 // ─── create ────────────────────────────────────────────────────────────────────
@@ -275,7 +394,10 @@ func newExecutorLabelCmd() *cobra.Command {
 		Long: `Set or remove labels on an executor's database row.
 
 Labels take effect on the executor's next connection — no restart or
-machine access is needed. The rafiki/ prefix is reserved.`,
+machine access is needed. The rafiki/ prefix is reserved.
+
+<executor-id> may be the full row id or any unique trailing fragment of
+four or more characters, such as the short form shown by 'executor list'.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runExecutorLabel,
 	}
@@ -335,8 +457,13 @@ func newExecutorDisableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "disable <executor-id>",
 		Short: "Disable an executor — its credential stops working",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runExecutorDisable,
+		Long: `Disable an executor — its credential stops working.
+
+Takes effect on a live connection within one health interval.
+<executor-id> may be the full row id or any unique trailing fragment of
+four or more characters, such as the short form shown by 'executor list'.`,
+		Args: cobra.ExactArgs(1),
+		RunE: runExecutorDisable,
 	}
 }
 
@@ -365,8 +492,12 @@ func newExecutorEnableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "enable <executor-id>",
 		Short: "Re-enable a disabled executor",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runExecutorEnable,
+		Long: `Re-enable a disabled executor.
+
+<executor-id> may be the full row id or any unique trailing fragment of
+four or more characters, such as the short form shown by 'executor list'.`,
+		Args: cobra.ExactArgs(1),
+		RunE: runExecutorEnable,
 	}
 }
 
