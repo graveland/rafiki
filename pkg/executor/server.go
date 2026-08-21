@@ -56,6 +56,11 @@ type Options struct {
 
 	// NoLSP disables language servers entirely on this executor.
 	NoLSP bool
+
+	// Proxies is the LLM-endpoint allowlist: name -> base URL, from repeated
+	// --proxy flags. Empty means this executor forwards nothing, which is the
+	// default and the right one — relaying is opt-in per machine.
+	Proxies map[string]string
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -192,6 +197,7 @@ func (s *Server) Describe(
 		Tools:              s.servedTools(),
 		Version:            s.opts.Version,
 		SelfReportedLabels: s.labels,
+		Proxies:            s.ProxyNames(),
 	}), nil
 }
 
