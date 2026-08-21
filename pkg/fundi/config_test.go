@@ -137,7 +137,7 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 }
 
 func TestBuildEngineRequiresTools(t *testing.T) {
-	cfg := Config{Model: "anthropic/claude-x", FakeTurns: writeFakeTurns(t, sampleEndTurn)}
+	cfg := Config{Model: "anthropic/claude-x", FakeTurns: writeFakeTurns(t, sampleEndTurn), Providers: providers.Default()}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
 		t.Fatal("BuildEngine with nil Tools: want error, got nil")

@@ -12,6 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/providers"
 )
 
 // TestResumeBootTimeOrphanRepair is Task 15's Requirement 1: a
@@ -96,6 +97,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 		Pool:      pool,
 		FakeTurns: writeFakeTurns(t, sampleEndTurn),
 		Tools:     fakeToolSet{},
+		Providers: providers.Default(),
 	}
 	eng2, shutdown2, err := cfg.BuildEngine(ctx, fe)
 	if err != nil {
@@ -183,6 +185,7 @@ func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
 		Pool:      pool,
 		FakeTurns: writeFakeTurns(t, sampleEndTurn),
 		Tools:     fakeToolSet{},
+		Providers: providers.Default(),
 	}
 	eng, shutdown, err := cfg.BuildEngine(ctx, fe)
 	if err != nil {
