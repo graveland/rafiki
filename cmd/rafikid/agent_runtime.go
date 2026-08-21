@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/inproc"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/skills"
 )
 
@@ -152,17 +153,16 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// caller's children, and the tools that spawn subprocesses (bash, MCP)
 	// inherit them from the daemon process environment.
 	//
-	// API keys are deliberately NOT forwarded through os.Setenv — they are
-	// extracted into the RuntimeOptions named fields below so the runtime
-	// reads them directly without exposing them to subprocesses. Daemon env <
-	// forwarded env < explicit key.
+	// API keys are deliberately NOT forwarded through os.Setenv — the
+	// per-spawn key is carried as APIKeyOverride and applied only to the
+	// provider the child's model names. Daemon env < forwarded env < explicit key.
 	ro.Env = make(map[string]string, len(req.Env))
 	for k, v := range req.Env {
 		switch k {
-		case "ANTHROPIC_API_KEY":
-			ro.AnthropicAPIKey = v
-		case "OPENROUTER_API_KEY":
-			ro.OpenRouterAPIKey = v
+		case "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY":
+			// Provider keys are NOT forwarded to the child's environment.
+			// They are resolved through the provider registry by the daemon,
+			// and a per-spawn override travels as req.APIKey below.
 		default:
 			ro.Env[k] = v
 		}
@@ -173,21 +173,11 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// ANTHROPIC_API_KEY/OPENROUTER_API_KEY injection - must be overlaid onto
 	// RuntimeOptions directly here, or it is silently dropped and the child
 	// either fails (no daemon-env key) or runs on the daemon's own key instead
-	// of the caller's. Same prefix rule buildEnv uses, but keyed off f.model
-	// (the flag as actually parsed, i.e. after any ExtraArgs --model override)
-	// rather than req.Model, so an override still routes the key to the right
-	// field. Only overlay when the caller actually supplied a key, so an unset
-	// req.APIKey leaves the value set above (forwarded env, or the daemon's
-	// own environment) in place, matching the subprocess path's behavior when
-	// buildEnv's req.APIKey != "" guard is false. This is deliberately the
-	// LAST overlay applied: an explicit key is the caller's most specific,
-	// most deliberate instruction and must win over a merely-forwarded one.
+	// of the caller's. The key lands on the provider the child's MODEL names
+	// (Config.APIKeyOverride is keyed off Model), so a forwarded credential
+	// can never reach a provider the caller did not address.
 	if req.APIKey != "" {
-		if strings.HasPrefix(f.model, "anthropic/") {
-			ro.AnthropicAPIKey = req.APIKey
-		} else {
-			ro.OpenRouterAPIKey = req.APIKey
-		}
+		ro.APIKeyOverride = req.APIKey
 	}
 	ro.AutoResume = autoResume
 	ro.RawTrace = c.rawTrace
@@ -331,8 +321,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		MCPConfig:            mcpPath,
 		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
-		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
-		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
+		Providers:            providers.Default(),
 		Pool:                 pool,
 		RTK:                  bashRTKValue(f.bashRTK),
 		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),

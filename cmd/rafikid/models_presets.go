@@ -10,6 +10,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
@@ -49,7 +50,7 @@ func (c *Controller) ModelInfo(model string) protocol.ModelInfoResponseData {
 // When provider is non-empty, only models whose Provider field matches are
 // returned.  Best-effort: missing or unreachable sources produce no entries.
 func (c *Controller) ListModels(ctx context.Context, provider string) ([]protocol.ModelInfo, error) {
-	list := models.List(ctx)
+	list := models.List(ctx, providers.Default())
 	out := make([]protocol.ModelInfo, 0, len(list))
 	for _, m := range list {
 		if provider != "" && m.Provider != provider {

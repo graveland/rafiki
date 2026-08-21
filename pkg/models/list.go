@@ -1,21 +1,10 @@
 // Package models enumerates available LLM models from all configured sources:
 // the user's models.json, a curated builtin list, the live OpenRouter catalog,
-// and live local inference servers (Ollama, LM Studio).
+// and live probes of any configured providers with explicit base_urls.
 //
 // All sources are best-effort: errors are swallowed and missing or unreachable
 // sources simply produce no entries.  The package is used both by the daemon
 // (ctrl_list_models RPC) and by the CLI (tab completion for --model).
-//
-// Each source contributes only the ids it is authoritative for, because fundi
-// routes on the model id alone: an "anthropic/" prefix goes to the native
-// Anthropic sender and everything else goes to OpenRouter (see
-// pkg/agent/config.go's needsOpenRouter). OpenRouter's catalog is therefore
-// authoritative for non-anthropic ids and NOT for anthropic ones — it spells
-// Anthropic versions with dots ("claude-opus-4.7") where the native API uses
-// dashes ("claude-opus-4-7"), so importing them wholesale would offer ids that
-// complete cleanly and then fail at call time. Anthropic coverage comes instead
-// from the curated list below plus the "<family>-latest" aliases, which resolve
-// live and so cannot go stale.
 package models
 
 import (
@@ -29,6 +18,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
@@ -39,8 +29,7 @@ const (
 	SourceUserConfig Source = "user-config" // ~/.pi/agent/models.json
 	SourceBuiltin    Source = "builtin"     // curated list + <family>-latest aliases
 	SourceOpenRouter Source = "openrouter"  // live OpenRouter catalog (non-anthropic ids)
-	SourceOllama     Source = "ollama"      // live Ollama server
-	SourceLMStudio   Source = "lmstudio"    // live LM Studio server
+	SourceLocal      Source = "local"       // live probe of a configured local provider
 )
 
 // openRouterCatalogTTL bounds how long the on-disk /models snapshot is trusted
@@ -82,23 +71,23 @@ var knownModels = []string{
 	"anthropic/claude-3-5-haiku-latest",
 
 	// OpenAI
-	"openai/gpt-4o",
-	"openai/gpt-4o-mini",
-	"openai/gpt-4.1",
-	"openai/gpt-4.1-mini",
-	"openai/o1",
-	"openai/o1-mini",
-	"openai/o3",
-	"openai/o3-mini",
+	"openrouter/openai/gpt-4o",
+	"openrouter/openai/gpt-4o-mini",
+	"openrouter/openai/gpt-4.1",
+	"openrouter/openai/gpt-4.1-mini",
+	"openrouter/openai/o1",
+	"openrouter/openai/o1-mini",
+	"openrouter/openai/o3",
+	"openrouter/openai/o3-mini",
 
 	// Google
-	"google/gemini-2.5-pro",
-	"google/gemini-2.5-flash",
-	"google/gemini-2.0-flash-exp",
+	"openrouter/google/gemini-2.5-pro",
+	"openrouter/google/gemini-2.5-flash",
+	"openrouter/google/gemini-2.0-flash-exp",
 
 	// xAI
-	"xai/grok-4",
-	"xai/grok-4-mini",
+	"openrouter/xai/grok-4",
+	"openrouter/xai/grok-4-mini",
 }
 
 // List returns the union of all sources, deduped on ID.  First occurrence wins
@@ -109,8 +98,8 @@ var knownModels = []string{
 //
 // ctx is used as the parent for per-source HTTP timeouts (200 ms each), so
 // callers can bound overall wall time by passing a context with a deadline.
-func List(ctx context.Context) []Model {
-	return ListSources(ctx, nil)
+func List(ctx context.Context, set *providers.Set) []Model {
+	return ListSources(ctx, set, nil)
 }
 
 // ListSources is List restricted to the given sources. A nil or empty set
@@ -118,11 +107,11 @@ func List(ctx context.Context) []Model {
 //
 // This is not merely a filter over List: a source the caller does not want is
 // never consulted at all. That matters because the sources have very different
-// costs — OpenRouter may fetch over the network, and Ollama and LM Studio are
+// costs — OpenRouter may fetch over the network, and local providers are
 // probed with a 200ms timeout each — and the caller usually knows it cannot use
 // most of them. Tab completion for a pi child has no use for OpenRouter ids and
 // should not pay a network round trip to discard them.
-func ListSources(ctx context.Context, want map[Source]bool) []Model {
+func ListSources(ctx context.Context, set *providers.Set, want map[Source]bool) []Model {
 	enabled := func(s Source) bool { return len(want) == 0 || want[s] }
 
 	var all []Model
@@ -135,11 +124,8 @@ func ListSources(ctx context.Context, want map[Source]bool) []Model {
 	if enabled(SourceOpenRouter) {
 		all = append(all, loadOpenRouter(ctx)...)
 	}
-	if enabled(SourceOllama) {
-		all = append(all, loadOllama(ctx)...)
-	}
-	if enabled(SourceLMStudio) {
-		all = append(all, loadLMStudio(ctx)...)
+	if enabled(SourceLocal) {
+		all = append(all, loadLocal(ctx, set)...)
 	}
 
 	// Deduplicate by ID, preserving first-seen order.
@@ -279,9 +265,9 @@ func loadOpenRouter(ctx context.Context) []Model {
 func openRouterModels(ids []string) []Model {
 	out := make([]Model, 0, len(ids))
 	for _, id := range ids {
-		// "anthropic/" would route to the native Anthropic sender, which
-		// spells versions with dashes where this catalog uses dots. See the
-		// package doc.
+		// Anthropic ids from the OpenRouter catalog spell versions with dots
+		// ("claude-opus-4.7") where the native API uses dashes, and they now
+		// need the openrouter/ prefix like every other non-Anthropic id.
 		if strings.HasPrefix(id, "anthropic/") {
 			continue
 		}
@@ -290,28 +276,62 @@ func openRouterModels(ids []string) []Model {
 			continue // fundi requires a provider-qualified id
 		}
 		out = append(out, Model{
-			ID:       id,
-			Provider: provider,
-			Model:    model,
+			ID:       "openrouter/" + id,
+			Provider: "openrouter",
+			Model:    id,
 			Source:   SourceOpenRouter,
 		})
 	}
 	return out
 }
 
-// loadOllama lists models from a local Ollama instance via its /api/tags
-// endpoint. Honours OLLAMA_HOST; defaults to http://localhost:11434.
-func loadOllama(ctx context.Context) []Model {
-	host := os.Getenv("OLLAMA_HOST")
-	if host == "" {
-		host = "http://localhost:11434"
-	} else if !strings.HasPrefix(host, "http") {
-		host = "http://" + host
+// loadLocal probes every configured provider that has an explicit base_url,
+// asking it what models it serves. Ids are emitted under the PROVIDER's name,
+// so what completion offers is exactly what --model accepts.
+//
+// Two list endpoints are tried because local servers disagree about which they
+// expose; both are listing endpoints and neither says anything about which
+// protocol the messages path speaks. A provider that answers neither
+// contributes nothing, which is the same best-effort contract every other
+// source here has.
+func loadLocal(ctx context.Context, set *providers.Set) []Model {
+	if set == nil {
+		return nil
 	}
+	var out []Model
+	for _, name := range set.Names() {
+		p := set.Providers[name]
+		if p.BaseURL == "" {
+			continue // a hosted provider; its catalog is not a local probe
+		}
+		for _, id := range probeLocal(ctx, p.BaseURL) {
+			out = append(out, Model{
+				ID:       name + "/" + id,
+				Provider: name,
+				Model:    id,
+				Source:   SourceLocal,
+			})
+		}
+	}
+	return out
+}
 
+// probeLocal tries Ollama's /api/tags then the OpenAI-shaped /v1/models,
+// returning the first non-empty answer. Each probe is bounded at 200ms:
+// completion runs on a TAB press and an unreachable host must not hang the
+// shell.
+func probeLocal(ctx context.Context, base string) []string {
+	if ids := probeOllamaTags(ctx, base); len(ids) > 0 {
+		return ids
+	}
+	return probeOpenAIModels(ctx, base)
+}
+
+// probeOllamaTags lists models from an Ollama-style /api/tags endpoint.
+func probeOllamaTags(ctx context.Context, base string) []string {
 	reqCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, host+"/api/tags", nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+"/api/tags", nil)
 	if err != nil {
 		return nil
 	}
@@ -323,7 +343,6 @@ func loadOllama(ctx context.Context) []Model {
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
-
 	var payload struct {
 		Models []struct {
 			Name string `json:"name"`
@@ -332,35 +351,20 @@ func loadOllama(ctx context.Context) []Model {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil
 	}
-
-	out := make([]Model, 0, len(payload.Models))
+	out := make([]string, 0, len(payload.Models))
 	for _, m := range payload.Models {
 		if m.Name != "" {
-			out = append(out, Model{
-				ID:       "ollama/" + m.Name,
-				Provider: "ollama",
-				Model:    m.Name,
-				Source:   SourceOllama,
-			})
+			out = append(out, m.Name)
 		}
 	}
 	return out
 }
 
-// loadLMStudio lists models from a local LM Studio instance via its
-// OpenAI-compatible /v1/models endpoint. Honours LM_STUDIO_HOST; defaults
-// to http://localhost:1234.
-func loadLMStudio(ctx context.Context) []Model {
-	host := os.Getenv("LM_STUDIO_HOST")
-	if host == "" {
-		host = "http://localhost:1234"
-	} else if !strings.HasPrefix(host, "http") {
-		host = "http://" + host
-	}
-
+// probeOpenAIModels lists models from an OpenAI-shaped /v1/models endpoint.
+func probeOpenAIModels(ctx context.Context, base string) []string {
 	reqCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, host+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
 		return nil
 	}
@@ -372,7 +376,6 @@ func loadLMStudio(ctx context.Context) []Model {
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
-
 	var payload struct {
 		Data []struct {
 			ID string `json:"id"`
@@ -381,16 +384,10 @@ func loadLMStudio(ctx context.Context) []Model {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil
 	}
-
-	out := make([]Model, 0, len(payload.Data))
+	out := make([]string, 0, len(payload.Data))
 	for _, m := range payload.Data {
 		if m.ID != "" {
-			out = append(out, Model{
-				ID:       "lmstudio/" + m.ID,
-				Provider: "lmstudio",
-				Model:    m.ID,
-				Source:   SourceLMStudio,
-			})
+			out = append(out, m.ID)
 		}
 	}
 	return out
