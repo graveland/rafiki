@@ -59,10 +59,17 @@ func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
 	}
 }
 
-func TestBuildSpawnRequest_RemoteRequiresExplicitCwd(t *testing.T) {
+// A pi/claude child is a literal subprocess of rafikid (cmd.Dir = req.Cwd,
+// pkg/child/runner.go) — its cwd genuinely must exist on the daemon's own
+// machine, so defaulting it from the CLIENT's cwd against a remote daemon
+// would silently ship a path valid only here.
+func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForPi(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev")
 
 	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("kind", protocol.KindPi); err != nil {
+		t.Fatal(err)
+	}
 	// cwd left at its zero value ("") intentionally: there is no local
 	// directory to default to on a remote daemon's filesystem.
 
@@ -84,6 +91,31 @@ func TestBuildSpawnRequest_RemoteRequiresExplicitCwd(t *testing.T) {
 	}
 	if req.Cwd != "/remote/project" {
 		t.Errorf("Cwd = %q, want /remote/project", req.Cwd)
+	}
+}
+
+// A fundi child never forks a daemon-local process: its filesystem access, if
+// any, goes through whichever executor gets bound — by default the session
+// executor `rafiki create` starts on the CLIENT's own machine, rooted at
+// exactly this cwd. So the client's own os.Getwd() is always a valid default,
+// remote daemon or not, and this must NOT error the way the pi/claude case does.
+func TestBuildSpawnRequest_RemoteDefaultsCwdForFundi(t *testing.T) {
+	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev")
+
+	wantCwd, err := os.Getwd()
+	if err != nil {
+		t.Skip("os.Getwd() failed — skipping:", err)
+	}
+
+	cmd := newTestCreateCmd()
+	// kind left at its default (fundi); cwd left at its zero value ("").
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error defaulting --cwd for a fundi child against a remote daemon: %v", err)
+	}
+	if req.Cwd != wantCwd {
+		t.Errorf("Cwd = %q, want %q", req.Cwd, wantCwd)
 	}
 }
 

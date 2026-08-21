@@ -111,8 +111,12 @@ func TestRefusedSpawnAssignsNothing(t *testing.T) {
 
 	sp := newControllerSpawner(c, "c_mine")
 	// A cwd that does not exist is refused by Controller.Spawn's first check,
-	// before anything is registered.
-	_, err := sp.Spawn(ctx, tools.SpawnSpec{Prompt: "x", Cwd: "/definitely/not/a/directory", Task: "1"})
+	// before anything is registered — but only for a kind the daemon itself
+	// forks a subprocess for (pi/claude). A fundi child's filesystem access
+	// goes through whichever executor gets bound, never the daemon's own
+	// disk, so its cwd is never stat-checked here; pin Kind explicitly so
+	// this test keeps exercising the refusal it names.
+	_, err := sp.Spawn(ctx, tools.SpawnSpec{Kind: protocol.KindPi, Prompt: "x", Cwd: "/definitely/not/a/directory", Task: "1"})
 	if err == nil {
 		t.Fatal("want a refusal")
 	}
