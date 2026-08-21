@@ -61,6 +61,8 @@ const (
 	// ExecutorServiceSkillBodyProcedure is the fully-qualified name of the ExecutorService's SkillBody
 	// RPC.
 	ExecutorServiceSkillBodyProcedure = "/rafiki.executor.v1.ExecutorService/SkillBody"
+	// ExecutorServiceProxyProcedure is the fully-qualified name of the ExecutorService's Proxy RPC.
+	ExecutorServiceProxyProcedure = "/rafiki.executor.v1.ExecutorService/Proxy"
 )
 
 // ExecutorServiceClient is a client for the rafiki.executor.v1.ExecutorService service.
@@ -104,6 +106,9 @@ type ExecutorServiceClient interface {
 	// workspace id: a path parameter would let anything that reaches this
 	// executor read an arbitrary file on it.
 	SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error)
+	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
+	// the response back. One stream per request/response cycle.
+	Proxy(context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
 // NewExecutorServiceClient constructs a client for the rafiki.executor.v1.ExecutorService service.
@@ -183,6 +188,12 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SkillBody")),
 			connect.WithClientOptions(opts...),
 		),
+		proxy: connect.NewClient[executorpb.ProxyRequest, executorpb.ProxyResponse](
+			httpClient,
+			baseURL+ExecutorServiceProxyProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("Proxy")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -199,6 +210,7 @@ type executorServiceClient struct {
 	projectContext *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
 	projectSkills  *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
 	skillBody      *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
+	proxy          *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -256,6 +268,11 @@ func (c *executorServiceClient) SkillBody(ctx context.Context, req *connect.Requ
 	return c.skillBody.CallUnary(ctx, req)
 }
 
+// Proxy calls rafiki.executor.v1.ExecutorService.Proxy.
+func (c *executorServiceClient) Proxy(ctx context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse] {
+	return c.proxy.CallBidiStream(ctx)
+}
+
 // ExecutorServiceHandler is an implementation of the rafiki.executor.v1.ExecutorService service.
 type ExecutorServiceHandler interface {
 	Describe(context.Context, *connect.Request[executorpb.DescribeRequest]) (*connect.Response[executorpb.DescribeResponse], error)
@@ -297,6 +314,9 @@ type ExecutorServiceHandler interface {
 	// workspace id: a path parameter would let anything that reaches this
 	// executor read an arbitrary file on it.
 	SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error)
+	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
+	// the response back. One stream per request/response cycle.
+	Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error
 }
 
 // NewExecutorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -372,6 +392,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SkillBody")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceProxyHandler := connect.NewBidiStreamHandler(
+		ExecutorServiceProxyProcedure,
+		svc.Proxy,
+		connect.WithSchema(executorServiceMethods.ByName("Proxy")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.executor.v1.ExecutorService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ExecutorServiceDescribeProcedure:
@@ -396,6 +422,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceProjectSkillsHandler.ServeHTTP(w, r)
 		case ExecutorServiceSkillBodyProcedure:
 			executorServiceSkillBodyHandler.ServeHTTP(w, r)
+		case ExecutorServiceProxyProcedure:
+			executorServiceProxyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -447,4 +475,8 @@ func (UnimplementedExecutorServiceHandler) ProjectSkills(context.Context, *conne
 
 func (UnimplementedExecutorServiceHandler) SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SkillBody is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.Proxy is not implemented"))
 }
