@@ -77,6 +77,7 @@ func newExecutorServeCmd() *cobra.Command {
 		jobBudgetMB       int64
 		lspConfig         string
 		noLSP             bool
+		proxyArgs         []string
 	)
 
 	cmd := &cobra.Command{
@@ -113,6 +114,11 @@ Two transports, exactly one of which must be given:
 				return err
 			}
 
+			proxies, err := executor.ParseProxyFlags(proxyArgs)
+			if err != nil {
+				return err
+			}
+
 			srv := executor.NewServer(executor.Options{
 				Root:            wd,
 				Concurrency:     concurrency,
@@ -122,6 +128,7 @@ Two transports, exactly one of which must be given:
 				JobOutputBudget: jobBudgetMB << 20,
 				LSPConfig:       lspConfig,
 				NoLSP:           noLSP,
+				Proxies:         proxies,
 			})
 			defer func() { _ = srv.Close() }()
 			handler := executorHandler(srv)
@@ -155,6 +162,7 @@ Two transports, exactly one of which must be given:
 	cmd.Flags().StringVar(&lspConfig, "lsp-config", "",
 		"path to an lsp.json describing language servers this executor may start (default: auto-detect what is on PATH)")
 	cmd.Flags().BoolVar(&noLSP, "no-lsp", false, "disable language servers on this executor entirely")
+	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
