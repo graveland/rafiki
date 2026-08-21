@@ -43,10 +43,12 @@ func newClaudeCmd() *cobra.Command {
 		Long: "Resolves the proxy URL and token, sets the environment Claude Code needs,\n" +
 			"and execs your own claude binary. Not a daemon child — this runs in your\n" +
 			"terminal and is not supervised, listed, or attachable.\n\n" +
-			"With --passthrough-auth, your own Claude subscription is billed instead\n" +
-			"of the daemon's API key: rafiki forwards your credential upstream and\n" +
-			"still captures the conversation. Anthropic models only — an OpenRouter\n" +
-			"slash id is rejected, because a subscription credential cannot buy one.\n\n" +
+			"--passthrough-auth controls who gets billed: auto (default) bills your\n" +
+			"own Claude subscription when --model resolves to an Anthropic id\n" +
+			"(including no --model at all) and the daemon's API key otherwise; on\n" +
+			"forces your subscription and rejects a non-Anthropic --model outright;\n" +
+			"off always bills the daemon's key. rafiki forwards your credential\n" +
+			"upstream and still captures the conversation.\n\n" +
 			"Everything after -- is passed to claude verbatim.\n\n" +
 			"Example:\n" +
 			"  rafiki claude --model glm-5.2 -- --permission-mode plan",
@@ -61,12 +63,14 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().String("token", "", "static bearer token for the proxy (or RAFIKI_TOKEN, else ~/.config/rafiki/token)")
 	cmd.Flags().String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
 	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
-	// "1" exactly, matching every other boolean env var in the repo
-	// (RAFIKI_RECORD_REQUESTS, RAFIKI_TOOLS_WEB, RAFIKI_LSP_DISABLE). Treating
-	// any non-empty value as true would make RAFIKI_CLAUDE_PASSTHROUGH=0 turn
-	// billing ON for someone trying to turn it off.
-	cmd.Flags().Bool("passthrough-auth", os.Getenv("RAFIKI_CLAUDE_PASSTHROUGH") == "1",
-		"bill your own Claude subscription upstream instead of the daemon's API key (or RAFIKI_CLAUDE_PASSTHROUGH=1)")
+	cmd.Flags().String("passthrough-auth", envOr("RAFIKI_CLAUDE_PASSTHROUGH", string(passthroughAuto)),
+		"who gets billed: auto|on|off (or RAFIKI_CLAUDE_PASSTHROUGH). auto bills your own\n"+
+			"Claude subscription when --model resolves to an Anthropic id (including no\n"+
+			"--model at all) and the daemon's API key otherwise; on/off force the choice")
+	// A bare --passthrough-auth (no "=value") keeps working as "on", matching
+	// the flag's old boolean form — true/1/false/0 remain accepted aliases too,
+	// see parsePassthroughMode.
+	cmd.Flags().Lookup("passthrough-auth").NoOptDefVal = string(passthroughOn)
 	return cmd
 }
 
@@ -131,7 +135,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	model, _ := cmd.Flags().GetString("model")
 	session, _ := cmd.Flags().GetString("session")
-	passthrough, _ := cmd.Flags().GetBool("passthrough-auth")
+	passthroughFlag, _ := cmd.Flags().GetString("passthrough-auth")
 
 	if url == "" {
 		return errors.New("--url (or RAFIKI_URL) is required")
@@ -140,14 +144,20 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	passthroughMode, err := parsePassthroughMode(passthroughFlag)
+	if err != nil {
+		return err
+	}
+	passthrough := passthroughAuthFor(passthroughMode, model)
 	// This guard runs before the TTY is handed over. The proxy enforces the
 	// same rule, but it can only do so on the session's first turn — by which
 	// point Claude Code owns the terminal and a clear error reads as a
 	// mysterious dead session. (The old "needs a token" half of this guard is
 	// gone: resolveClaudeToken above already guarantees a non-empty token or
-	// this function has already returned.)
+	// this function has already returned.) auto never trips this: it derives
+	// passthrough FROM proxyenv.AnthropicModel(model), so the two can't disagree.
 	if passthrough && !proxyenv.AnthropicModel(model) {
-		return fmt.Errorf("--passthrough-auth bills your Claude subscription, which can only buy Anthropic models, but --model %q resolves to another provider; drop --passthrough-auth to bill the daemon's key instead", model)
+		return fmt.Errorf("--passthrough-auth=on bills your Claude subscription, which can only buy Anthropic models, but --model %q resolves to another provider; use --passthrough-auth=off (or auto) to bill the daemon's key instead", model)
 	}
 	// Preflight so a dead proxy is a clear message here rather than an opaque
 	// connection error from inside Claude Code after it has taken the TTY.
@@ -180,6 +190,54 @@ func runClaude(cmd *cobra.Command, args []string) error {
 		},
 	})
 	return execClaude(claudeInvocation{Env: env, Args: append(modelArgs, args...)})
+}
+
+// passthroughMode is the parsed form of --passthrough-auth / RAFIKI_CLAUDE_PASSTHROUGH.
+// A tri-state rather than a bool because "unset" and "off" are genuinely
+// different requests here: unset means let --model decide, off means bill the
+// daemon's key no matter what --model is. Mirrors the RTKMode
+// (auto/on/off) convention already used for --rtk and --bash-rtk.
+type passthroughMode string
+
+const (
+	// passthroughAuto bills your own subscription when --model resolves to an
+	// Anthropic id (including no --model at all) and the daemon's key otherwise.
+	passthroughAuto passthroughMode = "auto"
+	// passthroughOn forces your subscription and rejects a non-Anthropic --model.
+	passthroughOn passthroughMode = "on"
+	// passthroughOff always bills the daemon's key.
+	passthroughOff passthroughMode = "off"
+)
+
+// parsePassthroughMode parses --passthrough-auth / RAFIKI_CLAUDE_PASSTHROUGH.
+// true/1 and false/0 remain accepted aliases for on/off, matching the flag's
+// old boolean form. Unlike RTKMode's ParseRTKMode, an unrecognised value is a
+// hard error rather than a silent fallback to auto: this switch decides who
+// gets billed, and a typo must not decide that quietly.
+func parsePassthroughMode(s string) (passthroughMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return passthroughAuto, nil
+	case "on", "true", "1":
+		return passthroughOn, nil
+	case "off", "false", "0", "no":
+		return passthroughOff, nil
+	default:
+		return "", fmt.Errorf("invalid --passthrough-auth %q: want auto, on, or off", s)
+	}
+}
+
+// passthroughAuthFor resolves a parsed passthroughMode against model into the
+// bool proxyenv.ClaudeOptions wants.
+func passthroughAuthFor(mode passthroughMode, model string) bool {
+	switch mode {
+	case passthroughOn:
+		return true
+	case passthroughOff:
+		return false
+	default: // passthroughAuto
+		return proxyenv.AnthropicModel(model)
+	}
 }
 
 func envOr(key, fallback string) string {
