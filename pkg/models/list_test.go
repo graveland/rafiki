@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
@@ -249,90 +250,61 @@ func TestLoadUserConfig_SkipsEmptyID(t *testing.T) {
 	}
 }
 
-// ─── loadOllama ───────────────────────────────────────────────────────────────
+// ─── loadLocal ─────────────────────────────────────────────────────────────────
 
-func TestLoadOllama_Success(t *testing.T) {
+func TestLoadLocal_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/tags" {
-			http.NotFound(w, r)
+		if r.URL.Path == "/api/tags" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"llama3.1:8b"}]}`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"models":[{"name":"llama3.1:8b"},{"name":"mistral:7b"}]}`))
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
-	t.Setenv("OLLAMA_HOST", srv.URL)
-	got := loadOllama(context.Background())
-	if len(got) != 2 {
-		t.Fatalf("expected 2 ollama models, got %d", len(got))
+	set, err := providers.Parse([]byte("default_provider = \"workstation\"\n\n[providers.workstation]\nkind = \"anthropic\"\nbase_url = \"" + srv.URL + "\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
 	}
-	if got[0].ID != "ollama/llama3.1:8b" {
+	got := loadLocal(context.Background(), set)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 local model, got %d", len(got))
+	}
+	if got[0].ID != "workstation/llama3.1:8b" {
 		t.Errorf("ID = %q", got[0].ID)
 	}
-	if got[0].Provider != "ollama" {
+	if got[0].Provider != "workstation" {
 		t.Errorf("Provider = %q", got[0].Provider)
 	}
-	if got[0].Source != SourceOllama {
+	if got[0].Source != SourceLocal {
 		t.Errorf("Source = %q", got[0].Source)
 	}
 }
 
-func TestLoadOllama_Unreachable(t *testing.T) {
-	// Point at a port that (almost certainly) has nothing listening.
-	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:19991")
-	got := loadOllama(context.Background())
+func TestLoadLocal_Unreachable(t *testing.T) {
+	set, err := providers.Parse([]byte("default_provider = \"dead\"\n\n[providers.dead]\nkind = \"anthropic\"\nbase_url = \"http://127.0.0.1:19999\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := loadLocal(context.Background(), set)
 	if got != nil {
 		t.Errorf("expected nil for unreachable server, got %v", got)
 	}
 }
 
-func TestLoadOllama_NonOKStatus(t *testing.T) {
+func TestLoadLocal_NonOKStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-	t.Setenv("OLLAMA_HOST", srv.URL)
-	got := loadOllama(context.Background())
+	set, err := providers.Parse([]byte("default_provider = \"bad\"\n\n[providers.bad]\nkind = \"anthropic\"\nbase_url = \"" + srv.URL + "\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := loadLocal(context.Background(), set)
 	if got != nil {
 		t.Errorf("expected nil for non-200 status, got %v", got)
-	}
-}
-
-// ─── loadLMStudio ─────────────────────────────────────────────────────────────
-
-func TestLoadLMStudio_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"llama-3.1-8b-instruct"},{"id":"gemma-2-9b"}]}`))
-	}))
-	defer srv.Close()
-
-	t.Setenv("LM_STUDIO_HOST", srv.URL)
-	got := loadLMStudio(context.Background())
-	if len(got) != 2 {
-		t.Fatalf("expected 2 lmstudio models, got %d", len(got))
-	}
-	if got[0].ID != "lmstudio/llama-3.1-8b-instruct" {
-		t.Errorf("ID = %q", got[0].ID)
-	}
-	if got[0].Provider != "lmstudio" {
-		t.Errorf("Provider = %q", got[0].Provider)
-	}
-	if got[0].Source != SourceLMStudio {
-		t.Errorf("Source = %q", got[0].Source)
-	}
-}
-
-func TestLoadLMStudio_Unreachable(t *testing.T) {
-	t.Setenv("LM_STUDIO_HOST", "http://127.0.0.1:19992")
-	got := loadLMStudio(context.Background())
-	if got != nil {
-		t.Errorf("expected nil for unreachable server, got %v", got)
 	}
 }
 
@@ -367,7 +339,7 @@ func TestList_DedupesByID(t *testing.T) {
 	t.Setenv("LM_STUDIO_HOST", "http://127.0.0.1:19994")
 	t.Setenv("HOME", dir)
 
-	got := List(context.Background())
+	got := List(context.Background(), providers.Default())
 
 	// Count how many times "anthropic/claude-sonnet-4-5" appears.
 	count := 0
@@ -436,7 +408,7 @@ func TestOpenRouterModels_Fields(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1", len(got))
 	}
-	want := Model{ID: "moonshotai/kimi-k3", Provider: "moonshotai", Model: "kimi-k3", Source: SourceOpenRouter}
+	want := Model{ID: "openrouter/moonshotai/kimi-k3", Provider: "openrouter", Model: "moonshotai/kimi-k3", Source: SourceOpenRouter}
 	if got[0] != want {
 		t.Errorf("got %+v, want %+v", got[0], want)
 	}
@@ -447,8 +419,8 @@ func TestOpenRouterModels_Fields(t *testing.T) {
 // in the catalog must not be offered as a completion.
 func TestOpenRouterModels_SkipsUnqualified(t *testing.T) {
 	got := openRouterModels([]string{"gpt-4o", "", "/leading", "trailing/", "openai/gpt-4o"})
-	if len(got) != 1 || got[0].ID != "openai/gpt-4o" {
-		t.Errorf("got %+v, want only openai/gpt-4o", got)
+	if len(got) != 1 || got[0].ID != "openrouter/openai/gpt-4o" {
+		t.Errorf("got %+v, want only openrouter/openai/gpt-4o", got)
 	}
 }
 
@@ -468,19 +440,22 @@ func TestLoadOpenRouter_RespectsCancelledContext(t *testing.T) {
 // never be consulted, or a pi-kind completion still pays OpenRouter's network
 // round trip and the local-server probes to discard them.
 func TestListSources_ConsultsOnlyRequestedSources(t *testing.T) {
-	// Point the local-server probes at a server that records whether it was
-	// contacted at all.
+	// Point a local provider at a server that records whether it was contacted.
 	var hit atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hit.Store(true)
 		_, _ = w.Write([]byte(`{"models":[]}`))
 	}))
 	defer srv.Close()
-	t.Setenv("OLLAMA_HOST", srv.URL)
 
-	got := ListSources(context.Background(), map[Source]bool{SourceBuiltin: true})
+	set, err := providers.Parse([]byte("default_provider = \"local\"\n\n[providers.local]\nkind = \"anthropic\"\nbase_url = \"" + srv.URL + "\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	got := ListSources(context.Background(), set, map[Source]bool{SourceBuiltin: true})
 	if hit.Load() {
-		t.Error("Ollama was probed despite not being requested")
+		t.Error("Local provider was probed despite not being requested")
 	}
 	for _, m := range got {
 		if m.Source != SourceBuiltin {
@@ -493,8 +468,8 @@ func TestListSources_ConsultsOnlyRequestedSources(t *testing.T) {
 }
 
 func TestListSources_NilMeansAll(t *testing.T) {
-	all := ListSources(context.Background(), nil)
-	viaList := List(context.Background())
+	all := ListSources(context.Background(), providers.Default(), nil)
+	viaList := List(context.Background(), providers.Default())
 	if len(all) != len(viaList) {
 		t.Errorf("ListSources(nil) returned %d, List returned %d — they must agree", len(all), len(viaList))
 	}

@@ -6,6 +6,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 )
 
 // modelSourcesForKind returns the model sources that a child of the given kind
@@ -35,8 +36,7 @@ func modelSourcesForKind(kind string) map[models.Source]bool {
 	case protocol.KindPi:
 		return map[models.Source]bool{
 			models.SourceUserConfig: true,
-			models.SourceOllama:     true,
-			models.SourceLMStudio:   true,
+			models.SourceLocal:      true,
 		}
 	case protocol.KindClaude:
 		// Claude Code resolves Anthropic ids itself; the curated list and the
@@ -57,7 +57,7 @@ func completeModel(kind, _ string) []string {
 	// ListSources, not List-then-filter: an unwanted source is never consulted,
 	// so a pi completion pays no OpenRouter round trip and a fundi completion
 	// pays no Ollama/LM Studio probe.
-	list := models.ListSources(context.Background(), modelSourcesForKind(kind))
+	list := models.ListSources(context.Background(), providers.Default(), modelSourcesForKind(kind))
 	out := make([]string, 0, len(list))
 	for _, m := range list {
 		out = append(out, m.ID)

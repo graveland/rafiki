@@ -60,18 +60,10 @@ func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 	}
 }
 
-// TestAgentRunnerAPIKeyOverlay proves req.APIKey reaches RuntimeOptions for an
-// in-process child. buildEnv is how the subprocess path delivers this (via
-// ANTHROPIC_API_KEY/OPENROUTER_API_KEY env injection), which an in-process
-// child never receives since child.Spawn skips spec.Env when spec.Runner !=
-// nil - so agentRuntimeOptions must overlay it directly onto RuntimeOptions,
-// or it is silently dropped.
+// TestAgentRunnerAPIKeyOverlay proves req.APIKey reaches RuntimeOptions
+// as APIKeyOverride for an in-process child, regardless of which provider
+// the model addresses.
 func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
-	// toRuntimeOptions seeds both key fields from os.Getenv, so the "other
-	// field is empty" assertions below are only meaningful with a controlled,
-	// empty ambient environment - on a dev machine whose shell/.env exports
-	// both ANTHROPIC_API_KEY and OPENROUTER_API_KEY this test fails without
-	// this, and in a clean CI it passes vacuously (on absence, not behavior).
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENROUTER_API_KEY", "")
 	c := newTestController(t)
@@ -86,36 +78,27 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
-	if ro.AnthropicAPIKey != anthropicReq.APIKey {
-		t.Errorf("AnthropicAPIKey = %q, want %q", ro.AnthropicAPIKey, anthropicReq.APIKey)
-	}
-	if ro.OpenRouterAPIKey != "" {
-		t.Errorf("OpenRouterAPIKey = %q, want empty for an anthropic/ model", ro.OpenRouterAPIKey)
+	if ro.APIKeyOverride != anthropicReq.APIKey {
+		t.Errorf("APIKeyOverride = %q, want %q", ro.APIKeyOverride, anthropicReq.APIKey)
 	}
 
 	openrouterReq := protocol.SpawnRequest{
 		Kind:   protocol.KindFundi,
 		Cwd:    t.TempDir(),
-		Model:  "deepseek/deepseek-chat",
+		Model:  "openrouter/deepseek/deepseek-chat",
 		APIKey: "sk-or-test-key",
 	}
 	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
-	if ro.OpenRouterAPIKey != openrouterReq.APIKey {
-		t.Errorf("OpenRouterAPIKey = %q, want %q", ro.OpenRouterAPIKey, openrouterReq.APIKey)
-	}
-	if ro.AnthropicAPIKey != "" {
-		t.Errorf("AnthropicAPIKey = %q, want empty for a non-anthropic model", ro.AnthropicAPIKey)
+	if ro.APIKeyOverride != openrouterReq.APIKey {
+		t.Errorf("APIKeyOverride = %q, want %q", ro.APIKeyOverride, openrouterReq.APIKey)
 	}
 }
 
-// TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel is the assertion that
-// actually exercises the Critical fix's "keyed off f.model, not req.Model"
-// requirement: without it (i.e. keying off req.Model instead), req.Model and
-// the ExtraArgs --model override agree in every other test in this file, so
-// reverting to req.Model would leave the rest of the suite green.
+// TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel verifies that the
+// per-spawn key is forwarded as APIKeyOverride regardless of ExtraArgs --model.
 func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENROUTER_API_KEY", "")
@@ -125,27 +108,22 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 		Kind:      protocol.KindFundi,
 		Cwd:       t.TempDir(),
 		Model:     "anthropic/x",
-		ExtraArgs: []string{"--model", "deepseek/y"},
+		ExtraArgs: []string{"--model", "openrouter/deepseek/y"},
 		APIKey:    "sk-test-key",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_model_override_key", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
-	if ro.OpenRouterAPIKey != req.APIKey {
-		t.Errorf("OpenRouterAPIKey = %q, want %q (the ExtraArgs --model override should route the key here, not AnthropicAPIKey)", ro.OpenRouterAPIKey, req.APIKey)
-	}
-	if ro.AnthropicAPIKey != "" {
-		t.Errorf("AnthropicAPIKey = %q, want empty: keying off req.Model instead of the parsed f.model would wrongly land the key here", ro.AnthropicAPIKey)
+	if ro.APIKeyOverride != req.APIKey {
+		t.Errorf("APIKeyOverride = %q, want %q (the per-spawn key should always be forwarded)", ro.APIKeyOverride, req.APIKey)
 	}
 }
 
 // TestAgentRunnerEnvOverlay proves that forwarded env vars reach
-// RuntimeOptions.Env and that API keys are extracted into the named fields
-// (AnthropicAPIKey/OpenRouterAPIKey) rather than landing in Env where
-// os.Setenv would expose them to subprocesses. Also proves that
-// req.APIKey wins over a forwarded req.Env value
-// (daemon env < forwarded env < explicit key).
+// RuntimeOptions.Env and that API keys are NOT placed in Env where os.Setenv
+// would expose them. APIKeyOverride is carried separately. Also proves that
+// req.APIKey wins over anything forwarded in env.
 func TestAgentRunnerEnvOverlay(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "ambient-anthropic")
 	t.Setenv("OPENROUTER_API_KEY", "ambient-openrouter")
@@ -164,13 +142,7 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
-	if ro.AnthropicAPIKey != "forwarded-anthropic" {
-		t.Errorf("AnthropicAPIKey = %q, want the forwarded req.Env value to win over the ambient daemon env", ro.AnthropicAPIKey)
-	}
-	if ro.OpenRouterAPIKey != "ambient-openrouter" {
-		t.Errorf("OpenRouterAPIKey = %q, want the ambient daemon env preserved (req.Env didn't touch this key)", ro.OpenRouterAPIKey)
-	}
-	// API keys must NOT land in Env where os.Setenv would expose them.
+	// API key env vars are NOT forwarded to Env
 	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} {
 		if _, ok := ro.Env[key]; ok {
 			t.Errorf("Env[%q] should be absent (API keys must not reach os.Setenv)", key)
@@ -181,14 +153,14 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 		t.Errorf("Env[http_proxy] = %q, want http://example.invalid:8080", got)
 	}
 
-	// An explicit req.APIKey must still win over a forwarded req.Env value.
+	// An explicit req.APIKey must be forwarded as APIKeyOverride.
 	req.APIKey = "explicit-key"
 	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins", false)
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
-	if ro.AnthropicAPIKey != "explicit-key" {
-		t.Errorf("AnthropicAPIKey = %q, want the explicit req.APIKey to win over both ambient and forwarded env", ro.AnthropicAPIKey)
+	if ro.APIKeyOverride != "explicit-key" {
+		t.Errorf("APIKeyOverride = %q, want the explicit req.APIKey to win", ro.APIKeyOverride)
 	}
 }
 

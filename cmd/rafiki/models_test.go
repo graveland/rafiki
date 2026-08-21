@@ -57,7 +57,7 @@ func TestModelSourcesForKind_Claude(t *testing.T) {
 	if !got[models.SourceBuiltin] {
 		t.Error("claude must offer the curated Anthropic ids")
 	}
-	for _, s := range []models.Source{models.SourceOpenRouter, models.SourceUserConfig, models.SourceOllama} {
+	for _, s := range []models.Source{models.SourceOpenRouter, models.SourceUserConfig, models.SourceLocal} {
 		if got[s] {
 			t.Errorf("claude must not offer %s: Claude Code only knows Anthropic ids", s)
 		}

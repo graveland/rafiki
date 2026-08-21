@@ -17,6 +17,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 )
 
@@ -247,8 +248,7 @@ func runAgentWithFlags(f agentFlags) int {
 		MCPConfig:            mcpPath,
 		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
-		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
-		OpenRouterAPIKey:     os.Getenv("OPENROUTER_API_KEY"),
+		Providers:            providers.Default(),
 		Pool:                 pool,
 		OnFatal:              onFatal,
 		RTK:                  bashRTKValue(f.bashRTK),
