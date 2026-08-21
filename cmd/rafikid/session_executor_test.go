@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -158,6 +159,63 @@ func TestExecutorSessionDisablesAnUnusableClientRow(t *testing.T) {
 	}
 	if len(store.disabled) != 1 {
 		t.Errorf("disabled %d rows; want the one unusable client row", len(store.disabled))
+	}
+}
+
+// Two concurrent local `rafiki` processes on the same machine (e.g. `create`
+// still attached in one terminal, `attach` from a second) share the one
+// per-machine credential file and both ask for a session. The SECOND must
+// defer to the first's already-live connection rather than being told
+// RunLocal and going on to lose the pool's one-connection-per-credential
+// admission race — which is what produced the endless "another connection
+// for this executor is already live" reconnect loop this test guards against.
+func TestExecutorSessionDefersToAnAlreadyLiveClientExecutor(t *testing.T) {
+	store := newFakeExecStore()
+	pool := &fakePool{live: []execpool.LiveExecutor{
+		{Executor: fakeExecutor(
+			map[string]string{"owner": "brent", "kind": "client"},
+			map[string]string{"name": "laptop"},
+		)},
+	}}
+	c := &Controller{execStore: store, execPool: pool}
+
+	resp, err := c.ExecutorSession(
+		users.Identity{UserID: "u_1", Username: "brent"},
+		protocol.ExecutorSessionRequest{Name: "laptop", HasCredential: true},
+	)
+	if err != nil {
+		t.Fatalf("ExecutorSession: %v", err)
+	}
+	if resp.RunLocal {
+		t.Error("RunLocal is true though this owner+name already has a live client executor")
+	}
+	if resp.ExecutorID != "e_existing" {
+		t.Errorf("ExecutorID = %q, want the already-live executor's id", resp.ExecutorID)
+	}
+	if store.createCalls != 0 {
+		t.Errorf("Create was called %d times; want 0", store.createCalls)
+	}
+}
+
+// A kind=client row that is enabled in the store but NOT currently connected
+// (the previous session ended) must not short-circuit RunLocal — nameAlreadyCovered
+// already excludes kind=client for the durable case, and liveClientExecutor must
+// only match the POOL's live set, not the store, or no session would ever
+// actually (re)connect.
+func TestExecutorSessionRunsLocalWhenNoClientExecutorIsLive(t *testing.T) {
+	store := newFakeExecStore()
+	pool := &fakePool{} // nothing live
+	c := &Controller{execStore: store, execPool: pool}
+
+	resp, err := c.ExecutorSession(
+		users.Identity{UserID: "u_1", Username: "brent"},
+		protocol.ExecutorSessionRequest{Name: "laptop", HasCredential: true},
+	)
+	if err != nil {
+		t.Fatalf("ExecutorSession: %v", err)
+	}
+	if !resp.RunLocal {
+		t.Error("RunLocal is false though no client executor is live for this owner+name")
 	}
 }
 
