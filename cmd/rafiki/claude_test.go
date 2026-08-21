@@ -277,16 +277,16 @@ func TestRunClaude_EmptyURLIsError(t *testing.T) {
 	}
 }
 
-func TestClaudeCmd_PassthroughFlagDefaultsOff(t *testing.T) {
+func TestClaudeCmd_PassthroughFlagDefaultsAuto(t *testing.T) {
 	t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", "")
 
 	cmd := newClaudeCmd()
-	got, err := cmd.Flags().GetBool("passthrough-auth")
+	got, err := cmd.Flags().GetString("passthrough-auth")
 	if err != nil {
 		t.Fatalf("--passthrough-auth not registered: %v", err)
 	}
-	if got {
-		t.Error("--passthrough-auth default = true, want false: billing must never change by accident")
+	if got != "auto" {
+		t.Errorf("--passthrough-auth default = %q, want %q", got, "auto")
 	}
 }
 
@@ -294,12 +294,16 @@ func TestClaudeCmd_PassthroughFlagFromEnv(t *testing.T) {
 	t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", "1")
 
 	cmd := newClaudeCmd()
-	got, err := cmd.Flags().GetBool("passthrough-auth")
+	got, err := cmd.Flags().GetString("passthrough-auth")
 	if err != nil {
 		t.Fatalf("--passthrough-auth not registered: %v", err)
 	}
-	if !got {
-		t.Error("--passthrough-auth default = false with RAFIKI_CLAUDE_PASSTHROUGH=1, want true")
+	mode, err := parsePassthroughMode(got)
+	if err != nil {
+		t.Fatalf("parsePassthroughMode(%q): %v", got, err)
+	}
+	if mode != passthroughOn {
+		t.Errorf("RAFIKI_CLAUDE_PASSTHROUGH=1 resolved to %q, want on", mode)
 	}
 }
 
@@ -310,14 +314,108 @@ func TestClaudeCmd_PassthroughFlagFalseyEnv(t *testing.T) {
 	for _, v := range []string{"0", "false", "no"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", v)
-			got, err := newClaudeCmd().Flags().GetBool("passthrough-auth")
+			got, err := newClaudeCmd().Flags().GetString("passthrough-auth")
 			if err != nil {
 				t.Fatalf("--passthrough-auth not registered: %v", err)
 			}
-			if got {
-				t.Errorf("RAFIKI_CLAUDE_PASSTHROUGH=%q enabled passthrough, want off", v)
+			mode, err := parsePassthroughMode(got)
+			if err != nil {
+				t.Fatalf("parsePassthroughMode(%q): %v", got, err)
+			}
+			if mode != passthroughOff {
+				t.Errorf("RAFIKI_CLAUDE_PASSTHROUGH=%q resolved to %q, want off", v, mode)
 			}
 		})
+	}
+}
+
+// A bare --passthrough-auth (no "=value") must keep meaning "on", matching the
+// flag's old boolean ergonomics and every existing example in README/Long.
+func TestClaudeCmd_PassthroughFlagBareMeansOn(t *testing.T) {
+	cmd := newClaudeCmd()
+	cmd.SetArgs([]string{"--passthrough-auth"})
+	if err := cmd.ParseFlags([]string{"--passthrough-auth"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	got, _ := cmd.Flags().GetString("passthrough-auth")
+	mode, err := parsePassthroughMode(got)
+	if err != nil {
+		t.Fatalf("parsePassthroughMode(%q): %v", got, err)
+	}
+	if mode != passthroughOn {
+		t.Errorf("bare --passthrough-auth resolved to %q, want on", mode)
+	}
+}
+
+func TestParsePassthroughMode(t *testing.T) {
+	tests := []struct {
+		in   string
+		want passthroughMode
+	}{
+		{"", passthroughAuto},
+		{"auto", passthroughAuto},
+		{"AUTO", passthroughAuto},
+		{"on", passthroughOn},
+		{"true", passthroughOn},
+		{"1", passthroughOn},
+		{"off", passthroughOff},
+		{"false", passthroughOff},
+		{"0", passthroughOff},
+		{"no", passthroughOff},
+	}
+	for _, tt := range tests {
+		got, err := parsePassthroughMode(tt.in)
+		if err != nil {
+			t.Fatalf("parsePassthroughMode(%q): %v", tt.in, err)
+		}
+		if got != tt.want {
+			t.Errorf("parsePassthroughMode(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// A typo must fail loudly rather than quietly falling back to auto: this
+// switch decides who gets billed.
+func TestParsePassthroughMode_InvalidIsError(t *testing.T) {
+	_, err := parsePassthroughMode("onn")
+	if err == nil {
+		t.Fatal("expected error for invalid --passthrough-auth value, got nil")
+	}
+	if !strings.Contains(err.Error(), "auto, on, or off") {
+		t.Errorf("error = %v, want it to list the valid values", err)
+	}
+}
+
+// With mode=auto, passthrough follows the model: on for an Anthropic id
+// (including no --model at all), off for an OpenRouter slash id.
+func TestPassthroughAuthFor_Auto(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  bool
+	}{
+		{"no model", "", true},
+		{"anthropic id", "claude-opus-5", true},
+		{"family-latest alias", "opus-latest", true},
+		{"openrouter slash id", "openai/gpt-4o", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := passthroughAuthFor(passthroughAuto, tt.model); got != tt.want {
+				t.Errorf("passthroughAuthFor(auto, %q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+// on/off force the choice regardless of model; the OpenRouter+on combination
+// is rejected later by runClaude's guard, not by passthroughAuthFor itself.
+func TestPassthroughAuthFor_OnOffForceRegardlessOfModel(t *testing.T) {
+	if got := passthroughAuthFor(passthroughOn, "openai/gpt-4o"); !got {
+		t.Error("passthroughAuthFor(on, openrouter-model) = false, want true")
+	}
+	if got := passthroughAuthFor(passthroughOff, "claude-opus-5"); got {
+		t.Error("passthroughAuthFor(off, anthropic-model) = true, want false")
 	}
 }
 
@@ -341,6 +439,26 @@ func TestRunClaude_PassthroughRejectsNonAnthropicModel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--passthrough-auth") {
 		t.Errorf("error = %v, want it to name the conflicting flag", err)
+	}
+}
+
+// An unrecognised --passthrough-auth value must fail before ever dialing the
+// proxy, same as the OpenRouter+on guard below — a typo here decides who gets
+// billed, so it must not resolve to auto silently.
+func TestRunClaude_InvalidPassthroughModeIsError(t *testing.T) {
+	cmd := newClaudeCmd()
+	for flag, val := range map[string]string{"url": "http://localhost:8035", "token": "dev", "passthrough-auth": "onn"} {
+		if err := cmd.Flags().Set(flag, val); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := runClaude(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid --passthrough-auth value, got nil")
+	}
+	if !strings.Contains(err.Error(), "auto, on, or off") {
+		t.Errorf("error = %v, want it to list the valid values", err)
 	}
 }
 
