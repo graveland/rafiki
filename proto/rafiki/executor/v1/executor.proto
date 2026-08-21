@@ -45,6 +45,10 @@ service ExecutorService {
   // workspace id: a path parameter would let anything that reaches this
   // executor read an arbitrary file on it.
   rpc SkillBody(SkillBodyRequest) returns (SkillBodyResponse);
+
+  // Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
+  // the response back. One stream per request/response cycle.
+  rpc Proxy(stream ProxyRequest) returns (stream ProxyResponse);
 }
 
 message DescribeRequest {}
@@ -58,6 +62,13 @@ message DescribeResponse {
   repeated string tools = 7;
   string version = 8;
   map<string, string> self_reported_labels = 9;
+  // proxies are the LLM-endpoint names this executor will forward to, declared
+  // by its operator with --proxy at startup. Unlike isolation and
+  // workspace_mode, this is safe to self-report: it only ever NARROWS what the
+  // executor will do, it is enforced on this side rather than trusted on the
+  // daemon's, and a missing or wrong entry costs a failed request rather than
+  // opening a machine.
+  repeated string proxies = 10;
 }
 
 message HealthRequest {}
@@ -238,4 +249,38 @@ message JobOutputResponse {
   // false when the handle is unknown — either never started, or reaped
   // after the retention window.
   bool  found = 5;
+}
+
+// ProxyStart opens one relayed HTTP request. The request is STRUCTURED rather
+// than raw HTTP bytes: the executor rebuilds it against the base URL it already
+// holds, so the target is constructed rather than parsed out of a byte stream
+// and then validated. That removes HTTP parsing — request smuggling,
+// absolute-form request lines, Host handling, pipelining — from in front of the
+// one check that matters.
+message ProxyStart {
+  string proxy_name = 1;
+  string method     = 2;
+  // path is path+query only, joined onto the declared base. It must be rooted
+  // and must not escape the base after cleaning.
+  string path       = 3;
+  map<string, string> headers = 4;
+}
+
+message ProxyRequest {
+  oneof msg {
+    ProxyStart start = 1;  // exactly once, first
+    bytes      body  = 2;  // request body chunks; half-close ends the body
+  }
+}
+
+message ProxyHead {
+  int32 status = 1;
+  map<string, string> headers = 2;
+}
+
+message ProxyResponse {
+  oneof msg {
+    ProxyHead head = 1;  // exactly once, first
+    bytes     body = 2;  // response body chunks, flushed as they arrive
+  }
 }

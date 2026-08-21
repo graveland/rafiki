@@ -123,8 +123,15 @@ type DescribeResponse struct {
 	Tools              []string               `protobuf:"bytes,7,rep,name=tools,proto3" json:"tools,omitempty"`
 	Version            string                 `protobuf:"bytes,8,opt,name=version,proto3" json:"version,omitempty"`
 	SelfReportedLabels map[string]string      `protobuf:"bytes,9,rep,name=self_reported_labels,json=selfReportedLabels,proto3" json:"self_reported_labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// proxies are the LLM-endpoint names this executor will forward to, declared
+	// by its operator with --proxy at startup. Unlike isolation and
+	// workspace_mode, this is safe to self-report: it only ever NARROWS what the
+	// executor will do, it is enforced on this side rather than trusted on the
+	// daemon's, and a missing or wrong entry costs a failed request rather than
+	// opening a machine.
+	Proxies       []string `protobuf:"bytes,10,rep,name=proxies,proto3" json:"proxies,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DescribeResponse) Reset() {
@@ -216,6 +223,13 @@ func (x *DescribeResponse) GetVersion() string {
 func (x *DescribeResponse) GetSelfReportedLabels() map[string]string {
 	if x != nil {
 		return x.SelfReportedLabels
+	}
+	return nil
+}
+
+func (x *DescribeResponse) GetProxies() []string {
+	if x != nil {
+		return x.Proxies
 	}
 	return nil
 }
@@ -1845,12 +1859,304 @@ func (x *JobOutputResponse) GetFound() bool {
 	return false
 }
 
+// ProxyStart opens one relayed HTTP request. The request is STRUCTURED rather
+// than raw HTTP bytes: the executor rebuilds it against the base URL it already
+// holds, so the target is constructed rather than parsed out of a byte stream
+// and then validated. That removes HTTP parsing — request smuggling,
+// absolute-form request lines, Host handling, pipelining — from in front of the
+// one check that matters.
+type ProxyStart struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ProxyName string                 `protobuf:"bytes,1,opt,name=proxy_name,json=proxyName,proto3" json:"proxy_name,omitempty"`
+	Method    string                 `protobuf:"bytes,2,opt,name=method,proto3" json:"method,omitempty"`
+	// path is path+query only, joined onto the declared base. It must be rooted
+	// and must not escape the base after cleaning.
+	Path          string            `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	Headers       map[string]string `protobuf:"bytes,4,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyStart) Reset() {
+	*x = ProxyStart{}
+	mi := &file_executor_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyStart) ProtoMessage() {}
+
+func (x *ProxyStart) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyStart.ProtoReflect.Descriptor instead.
+func (*ProxyStart) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ProxyStart) GetProxyName() string {
+	if x != nil {
+		return x.ProxyName
+	}
+	return ""
+}
+
+func (x *ProxyStart) GetMethod() string {
+	if x != nil {
+		return x.Method
+	}
+	return ""
+}
+
+func (x *ProxyStart) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ProxyStart) GetHeaders() map[string]string {
+	if x != nil {
+		return x.Headers
+	}
+	return nil
+}
+
+type ProxyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*ProxyRequest_Start
+	//	*ProxyRequest_Body
+	Msg           isProxyRequest_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyRequest) Reset() {
+	*x = ProxyRequest{}
+	mi := &file_executor_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyRequest) ProtoMessage() {}
+
+func (x *ProxyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyRequest.ProtoReflect.Descriptor instead.
+func (*ProxyRequest) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ProxyRequest) GetMsg() isProxyRequest_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *ProxyRequest) GetStart() *ProxyStart {
+	if x != nil {
+		if x, ok := x.Msg.(*ProxyRequest_Start); ok {
+			return x.Start
+		}
+	}
+	return nil
+}
+
+func (x *ProxyRequest) GetBody() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*ProxyRequest_Body); ok {
+			return x.Body
+		}
+	}
+	return nil
+}
+
+type isProxyRequest_Msg interface {
+	isProxyRequest_Msg()
+}
+
+type ProxyRequest_Start struct {
+	Start *ProxyStart `protobuf:"bytes,1,opt,name=start,proto3,oneof"` // exactly once, first
+}
+
+type ProxyRequest_Body struct {
+	Body []byte `protobuf:"bytes,2,opt,name=body,proto3,oneof"` // request body chunks; half-close ends the body
+}
+
+func (*ProxyRequest_Start) isProxyRequest_Msg() {}
+
+func (*ProxyRequest_Body) isProxyRequest_Msg() {}
+
+type ProxyHead struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        int32                  `protobuf:"varint,1,opt,name=status,proto3" json:"status,omitempty"`
+	Headers       map[string]string      `protobuf:"bytes,2,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyHead) Reset() {
+	*x = ProxyHead{}
+	mi := &file_executor_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyHead) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyHead) ProtoMessage() {}
+
+func (x *ProxyHead) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyHead.ProtoReflect.Descriptor instead.
+func (*ProxyHead) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ProxyHead) GetStatus() int32 {
+	if x != nil {
+		return x.Status
+	}
+	return 0
+}
+
+func (x *ProxyHead) GetHeaders() map[string]string {
+	if x != nil {
+		return x.Headers
+	}
+	return nil
+}
+
+type ProxyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*ProxyResponse_Head
+	//	*ProxyResponse_Body
+	Msg           isProxyResponse_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProxyResponse) Reset() {
+	*x = ProxyResponse{}
+	mi := &file_executor_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProxyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProxyResponse) ProtoMessage() {}
+
+func (x *ProxyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProxyResponse.ProtoReflect.Descriptor instead.
+func (*ProxyResponse) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *ProxyResponse) GetMsg() isProxyResponse_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *ProxyResponse) GetHead() *ProxyHead {
+	if x != nil {
+		if x, ok := x.Msg.(*ProxyResponse_Head); ok {
+			return x.Head
+		}
+	}
+	return nil
+}
+
+func (x *ProxyResponse) GetBody() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*ProxyResponse_Body); ok {
+			return x.Body
+		}
+	}
+	return nil
+}
+
+type isProxyResponse_Msg interface {
+	isProxyResponse_Msg()
+}
+
+type ProxyResponse_Head struct {
+	Head *ProxyHead `protobuf:"bytes,1,opt,name=head,proto3,oneof"` // exactly once, first
+}
+
+type ProxyResponse_Body struct {
+	Body []byte `protobuf:"bytes,2,opt,name=body,proto3,oneof"` // response body chunks, flushed as they arrive
+}
+
+func (*ProxyResponse_Head) isProxyResponse_Msg() {}
+
+func (*ProxyResponse_Body) isProxyResponse_Msg() {}
+
 var File_executor_proto protoreflect.FileDescriptor
 
 const file_executor_proto_rawDesc = "" +
 	"\n" +
 	"\x0eexecutor.proto\x12\x12rafiki.executor.v1\"\x11\n" +
-	"\x0fDescribeRequest\"\xb3\x03\n" +
+	"\x0fDescribeRequest\"\xcd\x03\n" +
 	"\x10DescribeResponse\x12\x1f\n" +
 	"\vexecutor_id\x18\x01 \x01(\tR\n" +
 	"executorId\x12\x1a\n" +
@@ -1861,7 +2167,9 @@ const file_executor_proto_rawDesc = "" +
 	"\x0eworkspace_mode\x18\x06 \x01(\tR\rworkspaceMode\x12\x14\n" +
 	"\x05tools\x18\a \x03(\tR\x05tools\x12\x18\n" +
 	"\aversion\x18\b \x01(\tR\aversion\x12n\n" +
-	"\x14self_reported_labels\x18\t \x03(\v2<.rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntryR\x12selfReportedLabels\x1aE\n" +
+	"\x14self_reported_labels\x18\t \x03(\v2<.rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntryR\x12selfReportedLabels\x12\x18\n" +
+	"\aproxies\x18\n" +
+	" \x03(\tR\aproxies\x1aE\n" +
 	"\x17SelfReportedLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x0f\n" +
@@ -1978,7 +2286,31 @@ const file_executor_proto_rawDesc = "" +
 	"\x05total\x18\x02 \x01(\x03R\x05total\x12\x16\n" +
 	"\x06exited\x18\x03 \x01(\bR\x06exited\x12\x1b\n" +
 	"\texit_code\x18\x04 \x01(\x05R\bexitCode\x12\x14\n" +
-	"\x05found\x18\x05 \x01(\bR\x05found2\xe4\a\n" +
+	"\x05found\x18\x05 \x01(\bR\x05found\"\xda\x01\n" +
+	"\n" +
+	"ProxyStart\x12\x1d\n" +
+	"\n" +
+	"proxy_name\x18\x01 \x01(\tR\tproxyName\x12\x16\n" +
+	"\x06method\x18\x02 \x01(\tR\x06method\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12E\n" +
+	"\aheaders\x18\x04 \x03(\v2+.rafiki.executor.v1.ProxyStart.HeadersEntryR\aheaders\x1a:\n" +
+	"\fHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"c\n" +
+	"\fProxyRequest\x126\n" +
+	"\x05start\x18\x01 \x01(\v2\x1e.rafiki.executor.v1.ProxyStartH\x00R\x05start\x12\x14\n" +
+	"\x04body\x18\x02 \x01(\fH\x00R\x04bodyB\x05\n" +
+	"\x03msg\"\xa5\x01\n" +
+	"\tProxyHead\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\x05R\x06status\x12D\n" +
+	"\aheaders\x18\x02 \x03(\v2*.rafiki.executor.v1.ProxyHead.HeadersEntryR\aheaders\x1a:\n" +
+	"\fHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"a\n" +
+	"\rProxyResponse\x123\n" +
+	"\x04head\x18\x01 \x01(\v2\x1d.rafiki.executor.v1.ProxyHeadH\x00R\x04head\x12\x14\n" +
+	"\x04body\x18\x02 \x01(\fH\x00R\x04bodyB\x05\n" +
+	"\x03msg2\xb6\b\n" +
 	"\x0fExecutorService\x12U\n" +
 	"\bDescribe\x12#.rafiki.executor.v1.DescribeRequest\x1a$.rafiki.executor.v1.DescribeResponse\x12O\n" +
 	"\x06Health\x12!.rafiki.executor.v1.HealthRequest\x1a\".rafiki.executor.v1.HealthResponse\x12T\n" +
@@ -1990,7 +2322,8 @@ const file_executor_proto_rawDesc = "" +
 	"\aRelease\x12\".rafiki.executor.v1.ReleaseRequest\x1a#.rafiki.executor.v1.ReleaseResponse\x12g\n" +
 	"\x0eProjectContext\x12).rafiki.executor.v1.ProjectContextRequest\x1a*.rafiki.executor.v1.ProjectContextResponse\x12d\n" +
 	"\rProjectSkills\x12(.rafiki.executor.v1.ProjectSkillsRequest\x1a).rafiki.executor.v1.ProjectSkillsResponse\x12X\n" +
-	"\tSkillBody\x12$.rafiki.executor.v1.SkillBodyRequest\x1a%.rafiki.executor.v1.SkillBodyResponseB3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
+	"\tSkillBody\x12$.rafiki.executor.v1.SkillBodyRequest\x1a%.rafiki.executor.v1.SkillBodyResponse\x12P\n" +
+	"\x05Proxy\x12 .rafiki.executor.v1.ProxyRequest\x1a!.rafiki.executor.v1.ProxyResponse(\x010\x01B3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
 
 var (
 	file_executor_proto_rawDescOnce sync.Once
@@ -2005,7 +2338,7 @@ func file_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_executor_proto_goTypes = []any{
 	(Failure_Code)(0),              // 0: rafiki.executor.v1.Failure.Code
 	(*DescribeRequest)(nil),        // 1: rafiki.executor.v1.DescribeRequest
@@ -2037,52 +2370,64 @@ var file_executor_proto_goTypes = []any{
 	(*SkillBodyResponse)(nil),      // 27: rafiki.executor.v1.SkillBodyResponse
 	(*JobOutputRequest)(nil),       // 28: rafiki.executor.v1.JobOutputRequest
 	(*JobOutputResponse)(nil),      // 29: rafiki.executor.v1.JobOutputResponse
-	nil,                            // 30: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
-	nil,                            // 31: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
-	nil,                            // 32: rafiki.executor.v1.Result.ObservedMtimeEntry
-	nil,                            // 33: rafiki.executor.v1.ProvisionRequest.EnvEntry
+	(*ProxyStart)(nil),             // 30: rafiki.executor.v1.ProxyStart
+	(*ProxyRequest)(nil),           // 31: rafiki.executor.v1.ProxyRequest
+	(*ProxyHead)(nil),              // 32: rafiki.executor.v1.ProxyHead
+	(*ProxyResponse)(nil),          // 33: rafiki.executor.v1.ProxyResponse
+	nil,                            // 34: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	nil,                            // 35: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	nil,                            // 36: rafiki.executor.v1.Result.ObservedMtimeEntry
+	nil,                            // 37: rafiki.executor.v1.ProvisionRequest.EnvEntry
+	nil,                            // 38: rafiki.executor.v1.ProxyStart.HeadersEntry
+	nil,                            // 39: rafiki.executor.v1.ProxyHead.HeadersEntry
 }
 var file_executor_proto_depIdxs = []int32{
-	30, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	34, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
 	6,  // 1: rafiki.executor.v1.ContentBlock.image:type_name -> rafiki.executor.v1.ImageBlock
-	31, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	35, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
 	9,  // 3: rafiki.executor.v1.ExecuteResponse.output:type_name -> rafiki.executor.v1.OutputChunk
 	10, // 4: rafiki.executor.v1.ExecuteResponse.result:type_name -> rafiki.executor.v1.Result
 	11, // 5: rafiki.executor.v1.ExecuteResponse.failed:type_name -> rafiki.executor.v1.Failure
 	5,  // 6: rafiki.executor.v1.Result.content:type_name -> rafiki.executor.v1.ContentBlock
-	32, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
+	36, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
 	0,  // 8: rafiki.executor.v1.Failure.code:type_name -> rafiki.executor.v1.Failure.Code
 	9,  // 9: rafiki.executor.v1.AttachResponse.output:type_name -> rafiki.executor.v1.OutputChunk
 	16, // 10: rafiki.executor.v1.ProvisionRequest.mounts:type_name -> rafiki.executor.v1.Mount
-	33, // 11: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
+	37, // 11: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
 	24, // 12: rafiki.executor.v1.ProjectSkillsResponse.skills:type_name -> rafiki.executor.v1.ProjectSkill
-	1,  // 13: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
-	3,  // 14: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
-	7,  // 15: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
-	12, // 16: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
-	14, // 17: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
-	28, // 18: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
-	17, // 19: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
-	19, // 20: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
-	21, // 21: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
-	23, // 22: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
-	26, // 23: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
-	2,  // 24: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
-	4,  // 25: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
-	8,  // 26: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
-	13, // 27: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
-	15, // 28: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
-	29, // 29: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
-	18, // 30: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
-	20, // 31: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
-	22, // 32: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
-	25, // 33: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
-	27, // 34: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
-	24, // [24:35] is the sub-list for method output_type
-	13, // [13:24] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	38, // 13: rafiki.executor.v1.ProxyStart.headers:type_name -> rafiki.executor.v1.ProxyStart.HeadersEntry
+	30, // 14: rafiki.executor.v1.ProxyRequest.start:type_name -> rafiki.executor.v1.ProxyStart
+	39, // 15: rafiki.executor.v1.ProxyHead.headers:type_name -> rafiki.executor.v1.ProxyHead.HeadersEntry
+	32, // 16: rafiki.executor.v1.ProxyResponse.head:type_name -> rafiki.executor.v1.ProxyHead
+	1,  // 17: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
+	3,  // 18: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
+	7,  // 19: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
+	12, // 20: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
+	14, // 21: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
+	28, // 22: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
+	17, // 23: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
+	19, // 24: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
+	21, // 25: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
+	23, // 26: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
+	26, // 27: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
+	31, // 28: rafiki.executor.v1.ExecutorService.Proxy:input_type -> rafiki.executor.v1.ProxyRequest
+	2,  // 29: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
+	4,  // 30: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
+	8,  // 31: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
+	13, // 32: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
+	15, // 33: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
+	29, // 34: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
+	18, // 35: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
+	20, // 36: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
+	22, // 37: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
+	25, // 38: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
+	27, // 39: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
+	33, // 40: rafiki.executor.v1.ExecutorService.Proxy:output_type -> rafiki.executor.v1.ProxyResponse
+	29, // [29:41] is the sub-list for method output_type
+	17, // [17:29] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_executor_proto_init() }
@@ -2104,13 +2449,21 @@ func file_executor_proto_init() {
 		(*AttachResponse_Output)(nil),
 		(*AttachResponse_ExitCode)(nil),
 	}
+	file_executor_proto_msgTypes[30].OneofWrappers = []any{
+		(*ProxyRequest_Start)(nil),
+		(*ProxyRequest_Body)(nil),
+	}
+	file_executor_proto_msgTypes[32].OneofWrappers = []any{
+		(*ProxyResponse_Head)(nil),
+		(*ProxyResponse_Body)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_executor_proto_rawDesc), len(file_executor_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   33,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
