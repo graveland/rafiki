@@ -8,7 +8,7 @@ import (
 
 func TestNoExecutorSelectorMeansNoExecutor(t *testing.T) {
 	c := &Controller{}
-	got, err := c.resolveExecutor(protocol.SpawnRequest{})
+	got, err := c.resolveExecutor(protocol.SpawnRequest{}, "")
 	if err != nil {
 		t.Fatalf("an unconfigured executor is the default, not an error: %v", err)
 	}

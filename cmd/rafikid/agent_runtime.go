@@ -105,11 +105,11 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 // Runner (and nil error) for every other kind, which leaves SpawnSpec on the
 // subprocess path unchanged. autoResume asks the engine to call
 // agentloop.Resume before accepting inbound prompts.
-func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool) (child.Runner, error) {
+func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName string) (child.Runner, error) {
 	if req.Kind != protocol.KindFundi {
 		return nil, nil
 	}
-	ro, err := c.agentRuntimeOptions(req, childID, autoResume)
+	ro, err := c.agentRuntimeOptions(req, childID, autoResume, ownerName)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 // source of per-child agent config) and then parsed back with parseAgentFlags
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool) (fundi.RuntimeOptions, error) {
+func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName string) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
 		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
 	}
@@ -193,7 +193,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// because the binding is what makes a self id unspoofable — a shared
 	// spawner would have to take one as an argument.
 	ro.Agents = newControllerSpawner(c, childID)
-	exec, err := c.resolveExecutor(req)
+	exec, err := c.resolveExecutor(req, ownerName)
 	if err != nil {
 		return fundi.RuntimeOptions{}, err
 	}
@@ -201,7 +201,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// Provision workspace when using a label-selected executor.
 	var execID string
 	if req.ExecutorSelector != "" && c.execPool != nil {
-		id, _, selErr := c.selectExecutorID(req)
+		id, _, selErr := c.selectExecutorID(req, ownerName)
 		if selErr == nil {
 			execID = id
 			wsID, wsInfo, wsExec, wsErr := c.provisionWorkspace(context.Background(), req, execID)
@@ -262,7 +262,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 				// comes from the resolved executor rather than from the row read
 				// during provisioning only because chooseExecutor already has the
 				// display name in hand.
-				if chosen, cErr := c.chooseExecutor(req); cErr == nil {
+				if chosen, cErr := c.chooseExecutor(req, ownerName); cErr == nil {
 					wsInfo.ExecutorName = chosen.DisplayName
 				}
 				ro.Workspace = wsInfo

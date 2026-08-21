@@ -74,7 +74,7 @@ func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
 	)
 	_, err := c.selectExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work",
-	})
+	}, "")
 	if err == nil {
 		t.Fatal("a child reached outside its parent's effective set")
 	}
@@ -148,7 +148,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 	)
 	_, err := c.selectExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work,os=linux",
-	})
+	}, "")
 	if err == nil {
 		t.Fatal("want a refusal")
 	}
@@ -170,7 +170,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
 	c := selectFixture(t, "")
 	start := time.Now()
-	if _, err := c.selectExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}); err == nil {
+	if _, err := c.selectExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, ""); err == nil {
 		t.Fatal("want a refusal")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -194,5 +194,33 @@ func TestAdmissionMatchesDaemonAttestedOwner(t *testing.T) {
 	}
 	if len(set) != 1 || set[0].ID != "laptop" {
 		t.Fatalf("owner=brent admitted the wrong set: %+v", set)
+	}
+}
+
+// The actual spawn path, not just an already-stored child: a TOP-LEVEL spawn
+// (no ParentChildID) has no childstore entry of its own to read an owner
+// label back from — Spawn only inserts one after selection succeeds — so
+// chooseExecutor must evaluate admission against the owner the caller
+// attests for the child about to be created, not an empty label set. Every
+// session executor is minted with exactly this admits selector (see
+// ExecutorSession), so getting this wrong means `rafiki create` can never
+// place a single top-level agent on the operator's own machine.
+func TestTopLevelSpawnIsAdmittedByItsAttestedOwner(t *testing.T) {
+	c := selectFixture(t, "", ex("laptop", map[string]string{"kind": "client", "owner": "brent"}, "owner=brent"))
+	req := protocol.SpawnRequest{ExecutorSelector: "owner=brent,kind=client"}
+
+	chosen, err := c.chooseExecutor(req, "brent")
+	if err != nil {
+		t.Fatalf("a top-level spawn with its owner attested must reach the laptop executor: %v", err)
+	}
+	if chosen.ID != "laptop" {
+		t.Fatalf("chose %s, want laptop", chosen.ID)
+	}
+
+	// And the failure mode this guards against: an unattested (or wrong)
+	// owner must still be refused, not silently admitted some other way —
+	// proving the fix checks the right thing rather than always succeeding.
+	if _, err := c.chooseExecutor(req, ""); err == nil {
+		t.Fatal("a top-level spawn with no attested owner reached an owner-scoped executor")
 	}
 }

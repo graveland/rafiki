@@ -737,7 +737,17 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
-	runner, err := c.agentRunner(req, childID, false)
+	// Computed here, before agentRunner, rather than alongside the rest of
+	// initLabels below: agentRunner resolves this child's OWN executor
+	// (resolveExecutor -> chooseExecutor), and for a top-level spawn that
+	// admission check runs against labels this child does not have a
+	// childstore entry to carry yet (see admissionLabels). The owner must
+	// already be in hand at that point or a session executor's
+	// "admits: owner=<user>" (every one — see ExecutorSession) refuses every
+	// top-level spawn outright.
+	ownerName := attestOwner(c.st, req, owner)
+
+	runner, err := c.agentRunner(req, childID, false, ownerName)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -786,23 +796,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	if initLabels == nil {
 		initLabels = make(map[string]string)
 	}
-	// The owner is attested here, from the connection or an ancestor, never
-	// from the request: it is matched by executor admission selectors
-	// (admits: owner=<user>), so a client that could name it could claim to be
-	// any owner. The request cannot carry it — reservedLabelKeys rejects it.
-	ownerName := owner.Username
-	if req.ParentChildID != "" {
-		if snap, ok := c.st.Get(req.ParentChildID); ok && snap.Labels["owner"] != "" {
-			ownerName = snap.Labels["owner"]
-		}
-	} else if ownerName == "" {
-		// Local UDS: the connection is "locally trusted, not a user". Reuse the
-		// same fact sessionOwner reads — anyone who can open the socket already
-		// is the daemon's OS user.
-		if u, err := osUser(); err == nil {
-			ownerName = u
-		}
-	}
+	// ownerName was attested above, before agentRunner ran.
 	if ownerName != "" {
 		initLabels["owner"] = ownerName
 	}
@@ -1396,7 +1390,12 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
-	runner, err := c.agentRunner(req, childID, autoResume)
+	// The owner was already attested at the child's original spawn (see
+	// Spawn's ownerName computation) and lives on in snap.Labels; a resume
+	// re-derives nothing, it reuses that value so chooseExecutor's admission
+	// check (for an ExecutorSelector carried over from snap) sees the same
+	// owner the executor's row was minted to admit.
+	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"])
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1510,7 +1509,9 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
-	runner, err := c.agentRunner(req, childID, false)
+	// See Resume's identical call: the owner was attested at the child's
+	// original spawn and lives on in snap.Labels.
+	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"])
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -3312,7 +3313,7 @@ func (c *Controller) requireExecutorStore() error {
 	if c.execStore == nil {
 		return &control.ControllerError{
 			Code:    protocol.ErrInternal,
-			Message: "no executor store configured (requires RAFIKI_DB and RAFIKI_EXECUTOR_LISTEN)",
+			Message: "no executor store configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)",
 		}
 	}
 	return nil

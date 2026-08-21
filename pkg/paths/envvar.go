@@ -171,14 +171,20 @@ const (
 	// all.
 	ExecutorSelector = "RAFIKI_EXECUTOR_SELECTOR"
 
-	// ExecutorsEnabled turns on the executor endpoint. Any non-empty value
-	// enables it; unset means executors are refused entirely.
+	// ExecutorsEnabled turns on the executor endpoint. "0" or "false" refuses
+	// executors outright; any other non-empty value forces them on; unset
+	// takes the default, which depends on RAFIKI_CONTROL_LISTEN (see
+	// cmd/rafikid/main.go's executorsEnabled).
 	//
 	// It is a flag rather than an address because the endpoint no longer has one
 	// of its own: executors are reached at a PATH on the control listener
 	// (RAFIKI_CONTROL_LISTEN), upgraded out of HTTP/1.1, so one port and one
-	// certificate serve both. It stays an explicit opt-in so that turning on a
-	// TCP control plane does not silently also open executor enrollment.
+	// certificate serve both. With no control listener, the only executor path
+	// is the local UDS socket — the same trust boundary as the daemon's own
+	// control socket — so an unset value there defaults ON. Once
+	// RAFIKI_CONTROL_LISTEN is set, a remote machine could reach that same
+	// path, so an unset value there defaults OFF: turning on a TCP control
+	// plane must not silently also open executor enrollment to it.
 	ExecutorsEnabled = "RAFIKI_EXECUTORS_ENABLED"
 )
 

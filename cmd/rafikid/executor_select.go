@@ -28,8 +28,13 @@ type executorPool interface {
 // Selection is two-sided: the child's selector narrows the PARENT's effective
 // executor set — never Live() directly. A child can never reach an executor
 // its parent could not.
-func (c *Controller) selectExecutor(req protocol.SpawnRequest) (tools.ExecutorClient, error) {
-	chosen, err := c.chooseExecutor(req)
+//
+// ownerName is the daemon-attested owner the NEW child will carry (see
+// Controller.Spawn) — needed here, not just at label-build time, because a
+// top-level spawn's own admission (chooseExecutor, below) is evaluated before
+// the child has a childstore entry to read it back from.
+func (c *Controller) selectExecutor(req protocol.SpawnRequest, ownerName string) (tools.ExecutorClient, error) {
+	chosen, err := c.chooseExecutor(req, ownerName)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +49,7 @@ func (c *Controller) selectExecutor(req protocol.SpawnRequest) (tools.ExecutorCl
 // by narrowing the parent's effective set. It is the single place the choice
 // is made, so selectExecutor (client) and selectExecutorID (provisioning,
 // prompt visibility) can never disagree about which executor won.
-func (c *Controller) chooseExecutor(req protocol.SpawnRequest) (executors.Executor, error) {
+func (c *Controller) chooseExecutor(req protocol.SpawnRequest, ownerName string) (executors.Executor, error) {
 	sel, err := executors.ParseSelector(req.ExecutorSelector)
 	if err != nil {
 		return executors.Executor{}, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
@@ -53,7 +58,8 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest) (executors.Execut
 	// The child does not exist yet, so evaluate the PARENT's set and narrow
 	// with the request's selector — which is exactly what
 	// effectiveExecutorSet will compute for the child once it is stored.
-	parentSet, err := c.effectiveExecutorSet(req.ParentChildID)
+	childLabels := c.admissionLabels(req, ownerName)
+	parentSet, err := c.effectiveExecutorSetFor(req.ParentChildID, childLabels)
 	if err != nil {
 		return executors.Executor{}, err
 	}
@@ -61,9 +67,38 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest) (executors.Execut
 	candidates := executors.Narrow(parentSet, sel)
 	candidates = narrowByWorkspaceMode(candidates, req.WorkspaceMode)
 	if len(candidates) == 0 {
-		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet)
+		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels)
 	}
 	return candidates[0], nil
+}
+
+// admissionLabels returns the labels an executor's Admits selector should be
+// evaluated against for req. For a non-top-level spawn this is the PARENT's
+// already-stored labels — a live session already carries its own daemon-
+// attested owner (see Spawn), so reading it back from the childstore is
+// exactly right there. A top-level spawn has no parent AND no childstore
+// entry of its own yet — Spawn mints childID and inserts the session only
+// after this selection succeeds — so its labels are built the same way Spawn
+// is about to build them: the request's own labels plus the owner the daemon
+// is attesting for it. Getting this wrong is not cosmetic: an executor
+// enrolled with Admits "owner=<name>" (every session executor — see
+// ExecutorSession) would refuse EVERY top-level spawn, since the fallback of
+// an empty label map can never match a non-empty Admits selector.
+func (c *Controller) admissionLabels(req protocol.SpawnRequest, ownerName string) map[string]string {
+	if req.ParentChildID != "" {
+		if snap, ok := c.st.Get(req.ParentChildID); ok {
+			return snap.Labels
+		}
+		return map[string]string{}
+	}
+	labels := copyLabels(req.Labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if ownerName != "" {
+		labels["owner"] = ownerName
+	}
+	return labels
 }
 
 // narrowByWorkspaceMode drops executors whose ROW does not offer the requested
@@ -109,18 +144,26 @@ func narrowByWorkspaceMode(candidates []executors.Executor, want string) []execu
 // executors; a cache here would be a second source of truth for an
 // authority decision.
 func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor, error) {
+	childLabels := map[string]string{}
+	if snap, ok := c.st.Get(childID); ok {
+		childLabels = snap.Labels
+	}
+	return c.effectiveExecutorSetFor(childID, childLabels)
+}
+
+// effectiveExecutorSetFor is effectiveExecutorSet with the admission labels
+// supplied by the caller instead of read from the childstore — the case
+// chooseExecutor needs for a top-level spawn, whose childstore entry does not
+// exist yet (see admissionLabels).
+func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[string]string) ([]executors.Executor, error) {
 	if c.execPool == nil {
-		return nil, errors.New("no executor listener is configured (set RAFIKI_EXECUTOR_LISTEN)")
+		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
 	}
 
 	// Start from every live executor that ADMITS the child. The executor-side
 	// selector is evaluated once, against the child's own labels, because an
 	// agent-side selector alone is permissive by default: it says what the
 	// agent wants, not what the executor will take.
-	childLabels := map[string]string{}
-	if snap, ok := c.st.Get(childID); ok {
-		childLabels = snap.Labels
-	}
 	var set []executors.Executor
 	for _, le := range c.execPool.Live() {
 		if !le.Executor.Enabled {
@@ -245,7 +288,13 @@ const maxLineageWalk = 64
 //     it).
 //   - The executor's admission selector refused the child.
 //   - The executor's row does not offer the requested workspace mode.
-func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor) error {
+//
+// childLabels is the same admission label set chooseExecutor computed via
+// admissionLabels — passed in rather than recomputed here so a top-level
+// spawn's refusal names the labels it was ACTUALLY evaluated against (its own
+// request labels plus the attested owner), not an empty childstore lookup
+// that no longer reflects what chooseExecutor used.
+func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor, childLabels map[string]string) error {
 	var sb strings.Builder
 	if req.WorkspaceMode != "" {
 		fmt.Fprintf(&sb, "spawn refused: no executor satisfies %q with workspace_mode=%s.\n",
@@ -265,10 +314,6 @@ func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executor
 		} else if admitsSel, err := executors.ParseSelector(e.Admits); err != nil {
 			reason = fmt.Sprintf("unparseable admission selector %q", e.Admits)
 		} else {
-			childLabels := map[string]string{}
-			if snap, ok := c.st.Get(req.ParentChildID); ok {
-				childLabels = snap.Labels
-			}
 			if !admitsSel.Matches(childLabels) {
 				reason = fmt.Sprintf("excluded by ITS admission selector %q: this child is %v", e.Admits, childLabels)
 			} else if req.WorkspaceMode != "" && workspaceModeOrPinned(e.WorkspaceMode) != req.WorkspaceMode {

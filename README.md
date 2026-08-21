@@ -610,6 +610,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
 | `RAFIKI_EXECUTOR_SELECTOR` | client-side: default label selector for `rafiki create --executor-selector`, choosing an executor from the daemon's enrolled pool (e.g. `owner=brent`). Unset means `rafiki create` makes the client's own machine the workspace by default: it starts a session executor and points the spawn at it. Set it to send children somewhere else |
+| `RAFIKI_EXECUTORS_ENABLED` | daemon-side: `0`/`false` refuses executors outright, any other value forces them on (needs `RAFIKI_DB`). Unset defaults ON when `RAFIKI_CONTROL_LISTEN` is unset (the only path in is the local unix socket, same trust boundary as the control socket) and OFF once it's set (that path becomes reachable over the TCP listener) |
 
 **Web access (webfetch / websearch).** The fundi runtime includes two opt-in web
 tools: `webfetch` fetches a URL and returns its text, and `websearch` queries
