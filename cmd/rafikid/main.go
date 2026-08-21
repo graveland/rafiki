@@ -431,8 +431,13 @@ func runDaemon(opts runDaemonOpts) error {
 	// The executor store backs both the control-plane verbs (enroll/list/
 	// label/disable) and the reverse-dial listener's authentication. Build it
 	// once, up front, when the listener is configured; both consumers share it.
+	//
+	// controlAddr is resolved here (rather than at its original call site
+	// further down) so executorsEnabled's default can depend on it; the TCP
+	// listener setup below reuses this same value instead of re-parsing it.
+	controlAddr := parseControlListenAddr()
 	var execStore executors.Store
-	if paths.Get(paths.ExecutorsEnabled) != "" && pool != nil {
+	if executorsEnabled(controlAddr, pool != nil) {
 		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
@@ -493,7 +498,7 @@ func runDaemon(opts runDaemonOpts) error {
 
 	// TCP control listener (optional — for remote attach, k8s deployment).
 	var tcpSrv *control.Server
-	if addr := parseControlListenAddr(); addr != "" {
+	if addr := controlAddr; addr != "" {
 		// Remote serving requires a database: user auth is row-backed and
 		// there is nothing to degrade to. Without this check the daemon
 		// comes up serving a TLS listener stuck in permanent bootstrap
@@ -739,6 +744,28 @@ func warnWhileUnclaimed(ctx context.Context, userStore users.Store, addr string,
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// executorsEnabled decides whether to build the executor store, per the
+// RAFIKI_EXECUTORS_ENABLED doc comment in pkg/paths/envvar.go: explicit "0"/
+// "false" always refuses, any other explicit value always enables (subject to
+// dbConfigured, since there is nothing to back the store with otherwise), and
+// an unset value defaults on when there is no TCP control listener (the only
+// executor path is then the local UDS socket, no new exposure to gate) and
+// off once one is configured (that path would otherwise be reachable
+// remotely the moment RAFIKI_CONTROL_LISTEN is turned on).
+func executorsEnabled(controlAddr string, dbConfigured bool) bool {
+	if !dbConfigured {
+		return false
+	}
+	switch paths.Get(paths.ExecutorsEnabled) {
+	case "0", "false":
+		return false
+	case "":
+		return controlAddr == ""
+	default:
+		return true
 	}
 }
 

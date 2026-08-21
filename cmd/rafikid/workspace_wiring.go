@@ -161,8 +161,8 @@ func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspace
 // chooseExecutor so the provisioning path enforces the same narrowing as the
 // tool path — a workspace provisioned outside the parent's set would be the
 // confidentiality boundary leaking through the side door.
-func (c *Controller) selectExecutorID(req protocol.SpawnRequest) (id string, cl tools.ExecutorClient, err error) {
-	chosen, err := c.chooseExecutor(req)
+func (c *Controller) selectExecutorID(req protocol.SpawnRequest, ownerName string) (id string, cl tools.ExecutorClient, err error) {
+	chosen, err := c.chooseExecutor(req, ownerName)
 	if err != nil {
 		return "", nil, err
 	}

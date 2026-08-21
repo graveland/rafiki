@@ -35,7 +35,7 @@ func TestOmittedSelectorInheritsTheParentsConfinement(t *testing.T) {
 	}
 
 	// And the inherited selector must actually CONFINE, not merely be stored.
-	chosen, err := c.chooseExecutor(req)
+	chosen, err := c.chooseExecutor(req, "")
 	if err != nil {
 		t.Fatalf("the child was not placed on an executor at all: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestTopLevelSpawnWithNoSelectorStaysLocal(t *testing.T) {
 		t.Fatalf("a top-level spawn has nothing to inherit; got %q", req.ExecutorSelector)
 	}
 
-	cl, err := c.resolveExecutor(req)
+	cl, err := c.resolveExecutor(req, "")
 	if err != nil {
 		t.Fatalf("a top-level spawn with no selector must be permitted: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestExplicitSelectorIsNotOverwrittenByInheritance(t *testing.T) {
 	)
 	if _, err := c2.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "gpu=yes",
-	}); err == nil {
+	}, ""); err == nil {
 		t.Fatal("naming a selector must not escape the parent's set")
 	}
 }
@@ -169,7 +169,7 @@ func TestInheritanceReadsTheStoreNotTheRequest(t *testing.T) {
 	if req.ExecutorSelector != "env=home" {
 		t.Fatalf("selector = %q, want the stored env=home", req.ExecutorSelector)
 	}
-	chosen, err := c.chooseExecutor(req)
+	chosen, err := c.chooseExecutor(req, "")
 	if err != nil {
 		t.Fatalf("chooseExecutor: %v", err)
 	}

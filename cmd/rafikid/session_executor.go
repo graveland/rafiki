@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os/user"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -131,6 +132,32 @@ func osUser() (string, error) {
 		return "", fmt.Errorf("current OS user has no username")
 	}
 	return u.Username, nil
+}
+
+// attestOwner is Controller.Spawn's owner attestation, extracted so it can
+// run before agentRunner (which needs it for a top-level child's own
+// admission check — see admissionLabels) rather than only afterward when
+// initLabels is built. From the connection or an ancestor, never from the
+// request: it is matched by executor admission selectors (admits:
+// owner=<user>), so a client that could name it could claim to be any owner —
+// the request cannot carry it, reservedLabelKeys rejects it.
+func attestOwner(st *childstore.Store, req protocol.SpawnRequest, owner users.Identity) string {
+	ownerName := owner.Username
+	if req.ParentChildID != "" {
+		if snap, ok := st.Get(req.ParentChildID); ok && snap.Labels["owner"] != "" {
+			ownerName = snap.Labels["owner"]
+		}
+		return ownerName
+	}
+	if ownerName == "" {
+		// Local UDS: the connection is "locally trusted, not a user". Reuse the
+		// same fact sessionOwner reads — anyone who can open the socket already
+		// is the daemon's OS user.
+		if u, err := osUser(); err == nil {
+			ownerName = u
+		}
+	}
+	return ownerName
 }
 
 // nameAlreadyCovered reports whether an enabled, non-kind=client executor
