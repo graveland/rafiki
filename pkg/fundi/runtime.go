@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
 	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
@@ -61,6 +62,16 @@ type RuntimeOptions struct {
 	FakeTurns       string
 	Providers       *providers.Set
 	APIKeyOverride  string
+
+	// ProviderSenders overrides the sender for specific providers, keyed by
+	// provider name. The daemon populates this for every provider with a
+	// via_executor table — it has already resolved the executor and built
+	// the relay transport (relayTransport, cmd/rafikid) by the time
+	// BuildRuntime runs, because doing that resolution here would require
+	// pkg/fundi to know about the executor pool and the label selector
+	// matcher. nil (the common case: no via_executor providers configured)
+	// changes nothing.
+	ProviderSenders map[string]llm.Sender
 
 	// Pool is the shared database pool. A nil Pool means an in-memory
 	// conversation. BuildRuntime never opens a pool itself, so a unit test does
@@ -429,6 +440,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		FakeTurns:            opts.FakeTurns,
 		Providers:            opts.Providers,
 		APIKeyOverride:       opts.APIKeyOverride,
+		ProviderSenders:      opts.ProviderSenders,
 		Pool:                 opts.Pool,
 		Tools:                registry,
 		AutoResume:           opts.AutoResume,

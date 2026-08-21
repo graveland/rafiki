@@ -109,6 +109,12 @@ type Config struct {
 	// Required: without it a model id cannot be resolved to a sender.
 	Providers *providers.Set
 
+	// ProviderSenders overrides the sender for specific providers by name —
+	// see RuntimeOptions.ProviderSenders, whose doc comment carries the full
+	// reasoning. nil means every provider dials as its providers.toml entry
+	// says.
+	ProviderSenders map[string]llm.Sender
+
 	// APIKeyOverride, when non-empty, replaces the resolved credential for the
 	// provider this child's model names — and for no other. It carries a
 	// per-spawn key (SpawnRequest.APIKey) that the daemon's own environment
@@ -281,6 +287,17 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 			return nil, fmt.Errorf("agent: %w", err)
 		}
 		opts = append(opts, llm.WithProviderSender(p.Name, sender))
+	}
+
+	// c.ProviderSenders wins last, and unconditionally, for the names it
+	// carries: cmd/rafikid only puts a provider in this map after resolving
+	// its via_executor relay, and that resolution — not the direct dial
+	// APIKeyOverride's SenderForKey(p, key, nil) would otherwise build — is
+	// the one allowed to reach that provider's base_url. A provider absent
+	// from this map (the common case: no via_executor configured) is
+	// unaffected.
+	for name, sender := range c.ProviderSenders {
+		opts = append(opts, llm.WithProviderSender(name, sender))
 	}
 	return opts, nil
 }

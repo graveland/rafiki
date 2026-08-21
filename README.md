@@ -290,6 +290,8 @@ No certificate is involved: a single-machine install should not need one.
 - `--connect-socket` — reverse-dial a rafikid on this machine over its executor unix socket
 - `--root` — working directory root (defaults to current directory)
 - `--concurrency` — maximum concurrent tool calls (default 6)
+- `--proxy name=base_url` — declare an LLM endpoint this executor will forward
+  to (repeatable). See "The executor relay" below.
 
 **Language servers run on the executor**, because that is where the files are. With no
 `--lsp-config`, the executor auto-detects what is installed on its own `PATH`; a config
@@ -331,6 +333,55 @@ per-workspace byte budget (`--job-output-budget-mb`, 256 MB), which evicts the
 oldest finished job first and never evicts a running one.
 
 See `docs/reference/executor-protocol.md` for the full wire protocol.
+
+### The executor relay
+
+A provider in `providers.toml` can be reached through an executor's own
+localhost instead of the daemon dialing it directly — the case for a local
+inference server (vmlx, Ollama, …) that only listens on one machine's
+loopback, which the daemon usually is not on:
+
+```toml
+[providers.vmlx]
+kind = "anthropic"
+base_url = "http://localhost:8005"
+
+[providers.vmlx.via_executor]
+selector = "role=workstation"   # which executor(s)
+proxy = "vmlx"                  # matches a --proxy name on that executor
+```
+
+The executor side is the allowlist: `rafiki executor serve --proxy
+vmlx=http://localhost:8005` declares the one name/base_url pair that machine
+is willing to forward to, and it is enforced there — a proxy request naming
+an undeclared name, or a path that would escape the declared base, never
+reaches the network. `base_url` still lives on the provider regardless of
+`via_executor`: it is the request's target URL either way, only the
+transport (direct dial vs. relayed through the executor's existing
+connection) changes.
+
+**No matching executor is a hard failure, on every spawn, for as long as the
+provider carries a `via_executor` table** — never a silent fall-through to a
+direct dial. A direct dial of a `via_executor` provider's `base_url` would
+have the daemon reach its OWN localhost, which either refuses outright or,
+worse, reaches something unrelated that happens to be listening on the same
+port — indistinguishable from success until the response comes back wrong.
+The relay is resolved once, when a child's `llm.Client` is built
+(`relayTransport`, `cmd/rafikid/provider_relay.go`); an executor that shows up
+afterward is not picked up until the next spawn.
+
+**A keyed provider's credential transits the executor process.** The relay
+carries the request (headers included) over the executor's own connection to
+rafikid, so an `api_key_env` credential attached to a `via_executor` provider
+is visible to whatever runs on that executor's machine for the length of the
+request. This is no different from any other tool call an executor already
+runs on the operator's behalf, but it is worth stating: `via_executor` is for
+endpoints the operator trusts with a credential, same as they already trust
+with `bash`.
+
+The relay is **not** subject to executor confinement — that machinery exists
+because tools run code on a machine, and the relay runs none. See the design
+doc's "Non-goals" section for the reasoning.
 
 ### Container executors
 

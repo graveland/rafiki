@@ -143,6 +143,11 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
+	senders, err := providerSenders(ro.Providers, c.execPoolConn)
+	if err != nil {
+		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
+	}
+	ro.ProviderSenders = senders
 
 	// req.Env is buildEnv's second payload for the subprocess path (alongside
 	// the API key handled below) - forwarded-caller-environment, default-on

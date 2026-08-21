@@ -452,6 +452,7 @@ func runDaemon(opts runDaemonOpts) error {
 		execPool = execpool.New(execStore)
 		execPool.SetOnLost(ctrl.HandleExecutorLost)
 		ctrl.execPool = execPool
+		ctrl.execPoolConn = execPool
 		// One sweeper for the pool, regardless of how many listeners feed it.
 		// It used to start inside the TLS branch, which was correct only while
 		// that was the sole way in; the unix listener below is the second.
