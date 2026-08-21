@@ -136,15 +136,25 @@ func resolvePresetName(cmd *cobra.Command) string {
 //   - RAFIKI_DEFAULT_MODEL: used when --model is not set
 //   - RAFIKI_DEFAULT_LABELS: comma-separated k=v pairs merged before --label flags
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
+	kind, _ := cmd.Flags().GetString("kind")
+
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
-		// Defaulting to THIS process's cwd only makes sense against the local
-		// daemon: it stats req.Cwd on its own filesystem (Controller.Spawn),
-		// which for a remote RAFIKI_URL is a different machine entirely. Left
-		// unchecked, this silently ships a path that exists on the client
-		// and fails server-side with a "no such file or directory" that gives
-		// no hint the path was ever local.
-		if remoteDialURL() != "" {
+		// For --kind pi/claude, cwd names a directory the DAEMON itself must
+		// fork a real subprocess in (cmd.Dir, pkg/child/runner.go) — defaulting
+		// to this process's cwd only makes sense against the local daemon; for
+		// a remote RAFIKI_URL that's a different machine entirely, and left
+		// unchecked this silently ships a path that exists on the client and
+		// fails server-side with a "no such file or directory" that gives no
+		// hint the path was ever local.
+		//
+		// --kind fundi never forks a daemon-local process: its filesystem
+		// access, if any, goes through whichever executor gets bound — by
+		// default the session executor this same command starts below,
+		// rooted at exactly this cwd on THIS machine. So the client's own
+		// os.Getwd() is always the right default for fundi, local daemon or
+		// remote.
+		if kind != protocol.KindFundi && remoteDialURL() != "" {
 			return protocol.SpawnRequest{}, errors.New("--cwd is required when RAFIKI_URL names a remote daemon (there is no local directory to default to on that machine)")
 		}
 		var err error
@@ -163,7 +173,6 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		model = paths.Get(paths.DefaultModel)
 	}
 
-	kind, _ := cmd.Flags().GetString("kind")
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	appendSysPrompt, _ := cmd.Flags().GetString("append-system-prompt")
 

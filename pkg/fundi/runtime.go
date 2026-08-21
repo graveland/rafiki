@@ -44,9 +44,11 @@ type RuntimeOptions struct {
 	NoContextFiles       bool
 	// ProjectContext, when non-nil, is the project tier of instruction files
 	// (CLAUDE.md / AGENTS.md at the git root and at cwd, includes expanded)
-	// already fetched from the machine holding the workspace. The pointer is
-	// load-bearing: nil means "no executor — read the project tier from cwd on
-	// this machine"; a non-nil pointer, even one to "", means "the executor
+	// already fetched from the machine holding the workspace. nil means "no
+	// executor is bound — there is no machine to answer this, and the
+	// daemon's own filesystem is not a stand-in for it" (resolveContent
+	// treats a nil pointer as an empty project tier, never as "read cwd on
+	// this machine"); a non-nil pointer, even one to "", means "the executor
 	// answered" and must be used verbatim, so an executor-backed child with an
 	// empty workspace never silently falls back to the daemon's files.
 	ProjectContext *string
@@ -153,7 +155,19 @@ type RuntimeOptions struct {
 // because LoadContextFiles skips absent files silently rather than erroring.
 func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skills.SkillMeta, err error) {
 	if !opts.NoContextFiles {
-		contextFiles, err = loadContextFiles(opts.Cwd, opts.ProjectContext)
+		// A nil ProjectContext means no executor is bound for this child —
+		// there is no machine to answer "what's the project tier", and the
+		// daemon's own filesystem is never a stand-in for it (see the field
+		// doc). Treat that as an empty project tier rather than falling back
+		// to loadContextFiles' own "read opts.Cwd on this machine" behavior,
+		// which is only correct for a caller that IS the workspace machine
+		// (e.g. the executor answering its own ProjectContext RPC).
+		projectTier := opts.ProjectContext
+		if projectTier == nil {
+			empty := ""
+			projectTier = &empty
+		}
+		contextFiles, err = loadContextFiles(opts.Cwd, projectTier)
 		if err != nil {
 			return "", nil, fmt.Errorf("runtime: load context files: %w", err)
 		}

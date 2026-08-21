@@ -36,11 +36,12 @@ func fakeRuntimeOptions(t *testing.T, cwd string) RuntimeOptions {
 
 // TestBuildRuntimeConstructsEngine is a construction smoke test: it only
 // proves BuildRuntime returns a working engine end to end (tool registry,
-// skills, MCP, Config, Engine all wired). It does NOT prove opts.Cwd (as
-// opposed to the process cwd) is what gets resolved — see
-// TestResolveContentUsesExplicitCwd for that regression guard, which is real
-// because it can observe the resolved content directly instead of going
-// through Config.ContextFiles into a system prompt no test can reach.
+// skills, MCP, Config, Engine all wired). It does NOT prove the project tier
+// is resolved correctly — see TestResolveContentUsesProjectContextOverride and
+// TestResolveContentNilProjectContextSkipsLocalRead for those regression
+// guards, which are real because they can observe the resolved content
+// directly instead of going through Config.ContextFiles into a system prompt
+// no test can reach.
 func TestBuildRuntimeConstructsEngine(t *testing.T) {
 	opts := fakeRuntimeOptions(t, t.TempDir())
 
@@ -55,19 +56,19 @@ func TestBuildRuntimeConstructsEngine(t *testing.T) {
 	}
 }
 
-// TestResolveContentUsesExplicitCwd is the regression guard this task exists
-// to install: it proves resolveContent (and therefore BuildRuntime) resolves
-// context files from opts.Cwd, not the process working directory. The daemon's
-// cwd is never the child's, so resolving from os.Getwd() would load the wrong
-// context files for every in-process child — and would do it silently, since
-// LoadContextFiles skips absent files rather than erroring.
+// TestResolveContentUsesProjectContextOverride is the regression guard this
+// task exists to install: it proves resolveContent (and therefore
+// BuildRuntime) resolves the project tier from opts.ProjectContext, never by
+// reading opts.Cwd or the process working directory off disk. The daemon's
+// own filesystem is irrelevant to a fundi child — the project tier, when
+// there is one, is always fetched from whichever machine holds the workspace
+// and handed down as the override.
 //
-// This is a two-sided discriminator: both the child and process cwds get
-// their own AGENTS.md with a distinct marker, so reading the wrong directory
-// doesn't just fail to find the right marker, it finds the WRONG one. A test
-// that only asserted "no error, non-nil result" (as this test's predecessor
-// did) would still pass if BuildRuntime were changed back to os.Getwd().
-func TestResolveContentUsesExplicitCwd(t *testing.T) {
+// This is a two-sided discriminator: opts.Cwd and the process cwd each get
+// their own AGENTS.md with a distinct marker, so a resolveContent that read
+// either of them instead of trusting the override would surface the WRONG
+// marker, not just fail to find the right one.
+func TestResolveContentUsesProjectContextOverride(t *testing.T) {
 	childCwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(childCwd, "AGENTS.md"), []byte("MARKER-CHILD-CWD"), 0o644); err != nil {
 		t.Fatalf("write child AGENTS.md: %v", err)
@@ -93,15 +94,37 @@ func TestResolveContentUsesExplicitCwd(t *testing.T) {
 		}
 	})
 
-	got, _, err := resolveContent(RuntimeOptions{Cwd: childCwd, NoSkills: true})
+	override := "MARKER-EXECUTOR-OVERRIDE"
+	got, _, err := resolveContent(RuntimeOptions{Cwd: childCwd, NoSkills: true, ProjectContext: &override})
 	if err != nil {
 		t.Fatalf("resolveContent: %v", err)
 	}
-	if !strings.Contains(got, "MARKER-CHILD-CWD") {
-		t.Errorf("context files missing the child-cwd marker; got %q", got)
+	if !strings.Contains(got, "MARKER-EXECUTOR-OVERRIDE") {
+		t.Errorf("context files missing the override marker; got %q", got)
 	}
-	if strings.Contains(got, "MARKER-PROCESS-CWD") {
-		t.Error("context files contain the PROCESS cwd marker: content was resolved from os.Getwd(), not opts.Cwd")
+	if strings.Contains(got, "MARKER-CHILD-CWD") || strings.Contains(got, "MARKER-PROCESS-CWD") {
+		t.Error("context files contain a cwd marker: content was resolved from disk instead of the ProjectContext override")
+	}
+}
+
+// TestResolveContentNilProjectContextSkipsLocalRead proves the other half of
+// the same fix directly: when no executor is bound (ProjectContext nil),
+// resolveContent must NOT fall back to reading opts.Cwd off the daemon's own
+// disk — even when real content sits right there. No executor means no
+// project tier, never "read it locally instead"; see the workspace-tier rule
+// that a fundi child with no executor gets no filesystem tools either.
+func TestResolveContentNilProjectContextSkipsLocalRead(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("MARKER-SHOULD-NOT-APPEAR"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	got, _, err := resolveContent(RuntimeOptions{Cwd: cwd, NoSkills: true})
+	if err != nil {
+		t.Fatalf("resolveContent: %v", err)
+	}
+	if strings.Contains(got, "MARKER-SHOULD-NOT-APPEAR") {
+		t.Error("resolveContent read opts.Cwd locally despite a nil ProjectContext (no executor bound)")
 	}
 }
 

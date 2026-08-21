@@ -676,11 +676,21 @@ func (c *Controller) ConversationExport(ctx context.Context, id string) (*insigh
 }
 
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {
-	// Validate cwd (dispatch already checks it's absolute; check it exists).
-	if _, err := os.Stat(req.Cwd); err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
-			Code:    protocol.ErrInvalidArgs,
-			Message: "cwd: " + err.Error(),
+	// Validate cwd exists on THIS machine (dispatch already checks it's
+	// absolute) — but only for kinds the daemon itself forks a subprocess
+	// for (pi, claude; cmd.Dir = req.Cwd in pkg/child/runner.go). A fundi
+	// child never touches the daemon's own filesystem: its tools, if any,
+	// run against whichever executor gets bound after this point, and that
+	// executor validates its own root independently. Stat-ing req.Cwd here
+	// for fundi checks the wrong machine — wrongly rejecting a valid path
+	// that exists only on a remote executor, or wrongly accepting a
+	// coincidentally-existing but unrelated path on the daemon host.
+	if req.Kind != protocol.KindFundi {
+		if _, err := os.Stat(req.Cwd); err != nil {
+			return control.SpawnResult{}, &control.ControllerError{
+				Code:    protocol.ErrInvalidArgs,
+				Message: "cwd: " + err.Error(),
+			}
 		}
 	}
 
