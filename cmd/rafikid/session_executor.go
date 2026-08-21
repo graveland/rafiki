@@ -54,6 +54,24 @@ func (c *Controller) ExecutorSession(
 		return protocol.ExecutorSessionResponseData{ExecutorID: existingID, Selector: "owner=" + owner}, nil
 	}
 
+	// Defer to a session (kind=client) executor for this owner+name that is
+	// ALREADY connected right now. Without this, two concurrent local `rafiki`
+	// processes (e.g. `create` still attached in one terminal, `attach` from a
+	// second) both read the one per-machine credential file, both get told
+	// RunLocal, and the second's connection is refused by the pool's
+	// one-live-connection-per-credential rule (execpool.Pool.admit) — visibly,
+	// as an endless "another connection for this executor is already live"
+	// reconnect loop, even though nothing is actually wrong: it's the same
+	// machine, twice. This request carries no credential to match against (by
+	// design — ExecutorSessionRequest gates on nothing secret), so owner+name
+	// is the best available identity; two machines that happen to share both
+	// would need to collide on hostname AND owner, which is what req.Name
+	// (the client's own hostname) already assumes is unique per the durable
+	// case above.
+	if liveID, ok := c.liveClientExecutor(owner, name); ok {
+		return protocol.ExecutorSessionResponseData{ExecutorID: liveID, Selector: "owner=" + owner + ",kind=client"}, nil
+	}
+
 	// The client already has a row and the secret that names it. Minting
 	// another would leave the first orphaned forever: the store has SetEnabled
 	// but no Delete.
@@ -180,6 +198,28 @@ func (c *Controller) nameAlreadyCovered(ctx context.Context, owner, name string)
 		}
 	}
 	return false, "", nil
+}
+
+// liveClientExecutor reports whether a kind=client executor for owner+name is
+// connected right now, i.e. present in the pool's live set — not merely
+// enabled in the store, which nameAlreadyCovered already checks for the
+// durable case and which a kind=client row can satisfy while sitting
+// disconnected between sessions. c.execPool is nil when executors are
+// disabled entirely.
+func (c *Controller) liveClientExecutor(owner, name string) (string, bool) {
+	if c.execPool == nil {
+		return "", false
+	}
+	for _, le := range c.execPool.Live() {
+		e := le.Executor
+		if e.Labels["kind"] != "client" {
+			continue
+		}
+		if e.Labels["owner"] == owner && e.SelfReported["name"] == name {
+			return e.ID, true
+		}
+	}
+	return "", false
 }
 
 // disableStaleClientExecutors disables enabled kind=client rows for the
