@@ -39,7 +39,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		"create", "smoke",
 		"--cwd", "/tmp",
 		"--no-session",
-		"--model", "fake/dummy",
+		"--model", "anthropic/claude-sonnet-4-5",
 		"--no-extensions",
 		"--no-local-executor",
 		"--detached",
@@ -147,7 +147,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 		"--cwd", "/tmp",
 		"--no-session",
 		"--no-extensions",
-		"--model", "fake/dummy",
+		"--model", "anthropic/claude-sonnet-4-5",
 		"--no-local-executor",
 		"--detached",
 	)
@@ -255,7 +255,7 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 		"--cwd", "/tmp",
 		"--no-session",
 		"--no-extensions",
-		"--model", "fake/dummy",
+		"--model", "anthropic/claude-sonnet-4-5",
 		"--no-local-executor",
 		"--detached",
 	)
