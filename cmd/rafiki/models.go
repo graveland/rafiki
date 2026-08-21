@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"go.graveland.dev/rafiki/pkg/models"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 )
@@ -57,7 +58,11 @@ func completeModel(kind, _ string) []string {
 	// ListSources, not List-then-filter: an unwanted source is never consulted,
 	// so a pi completion pays no OpenRouter round trip and a fundi completion
 	// pays no Ollama/LM Studio probe.
-	list := models.ListSources(context.Background(), providers.Default(), modelSourcesForKind(kind))
+	set, err := providers.Load(paths.ProvidersFile())
+	if err != nil {
+		return nil
+	}
+	list := models.ListSources(context.Background(), set, modelSourcesForKind(kind))
 	out := make([]string, 0, len(list))
 	for _, m := range list {
 		out = append(out, m.ID)

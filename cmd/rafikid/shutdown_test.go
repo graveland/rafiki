@@ -38,7 +38,7 @@ func newTestController(t *testing.T) *Controller {
 		}
 	}
 	st := childstore.New()
-	return NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, nil, t.Context(), nil, nil)
+	return NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, nil, t.Context(), nil, nil, nil)
 }
 
 // spawnTestChild spawns a fake-pi child through the controller and waits for

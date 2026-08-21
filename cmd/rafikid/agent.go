@@ -231,6 +231,14 @@ func runAgentWithFlags(f agentFlags) int {
 
 	onFatal, fatal := standaloneFatal(os.Stdin)
 
+	// The standalone CLI is a separate process and has no daemon to hand it
+	// a loaded provider registry; load the file itself.
+	prov, err := providers.Load(paths.ProvidersFile())
+	if err != nil {
+		slog.Error("agent: load providers", "error", err)
+		return 1
+	}
+
 	opts := fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
@@ -248,7 +256,7 @@ func runAgentWithFlags(f agentFlags) int {
 		MCPConfig:            mcpPath,
 		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
-		Providers:            providers.Default(),
+		Providers:            prov,
 		Pool:                 pool,
 		OnFatal:              onFatal,
 		RTK:                  bashRTKValue(f.bashRTK),
