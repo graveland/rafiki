@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -48,7 +51,13 @@ func (f *fakeExecStore) Authenticate(_ context.Context, _ string) (executors.Exe
 	return executors.Executor{}, nil
 }
 func (f *fakeExecStore) Get(_ context.Context, id string) (executors.Executor, error) {
-	return f.execs[id], nil
+	e, ok := f.execs[id]
+	if !ok {
+		// The postgres store answers a missing row with ErrNotFound, and
+		// resolveExecutorRef branches on exactly that sentinel.
+		return executors.Executor{}, executors.ErrNotFound
+	}
+	return e, nil
 }
 func (f *fakeExecStore) List(_ context.Context) ([]executors.Executor, error) {
 	var out []executors.Executor
@@ -172,5 +181,98 @@ func TestExecutorListMarksConnectedFromTheLivePool(t *testing.T) {
 	}
 	if connected["exec-off"] {
 		t.Error("exec-off marked connected though the pool does not have it")
+	}
+}
+
+// ─── partial-id resolution ──────────────────────────────────────────────────
+
+// Three rows: A and B minted in the same window (UUIDv7s share their leading
+// timestamp bits, so everything before the final group is identical), plus C —
+// minted long before A but sharing A's tail, which is what makes a fragment
+// ambiguous across time.
+const (
+	uuidPrefix = "0198e5f2-9c3a-7def-8a1b-"
+	uuidTailA  = "4c2d9e0f1a2b"
+	uuidTailB  = "998877665544"
+	uuidOlderC = "77f0aabb-1122-7333-9444-" // different front, A's tail
+)
+
+func seedSuffixFixture(t *testing.T) (*fakeExecStore, *Controller) {
+	t.Helper()
+	s := newFakeExecStore()
+	s.execs[uuidPrefix+uuidTailA] = executors.Executor{ID: uuidPrefix + uuidTailA}
+	s.execs[uuidPrefix+uuidTailB] = executors.Executor{ID: uuidPrefix + uuidTailB}
+	s.execs[uuidOlderC+uuidTailA] = executors.Executor{ID: uuidOlderC + uuidTailA}
+	return s, &Controller{execStore: s}
+}
+
+// A unique trailing fragment names the row. This is the contract that makes
+// the fragment `executor list` displays usable as an argument.
+func TestExecutorVerbsAcceptUniqueTrailingFragment(t *testing.T) {
+	s, c := seedSuffixFixture(t)
+
+	if err := c.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: uuidTailB}); err != nil {
+		t.Fatalf("disable by tail fragment: %v", err)
+	}
+	if len(s.disabled) != 1 || s.disabled[0] != uuidPrefix+uuidTailB {
+		t.Fatalf("disable resolved to %v, want %s", s.disabled, uuidPrefix+uuidTailB)
+	}
+
+	e, err := c.ExecutorLabel(protocol.ExecutorLabelRequest{
+		ExecutorID: "77665544", // a shorter fragment, still unique (tail of B)
+		Set:        map[string]string{"env": "work"},
+	})
+	if err != nil {
+		t.Fatalf("label by short fragment: %v", err)
+	}
+	if e.ID != uuidPrefix+uuidTailB || e.Labels["env"] != "work" {
+		t.Fatalf("label resolved to %+v", e)
+	}
+}
+
+// The full id keeps working.
+func TestExecutorDisableAcceptsTheFullID(t *testing.T) {
+	s, c := seedSuffixFixture(t)
+	idA := uuidPrefix + uuidTailA
+	if err := c.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: idA}); err != nil {
+		t.Fatalf("disable by full id: %v", err)
+	}
+	if len(s.disabled) != 1 || s.disabled[0] != idA {
+		t.Fatalf("disable resolved to %v, want %s", s.disabled, idA)
+	}
+}
+
+// A fragment matching several rows is an invalid-args error naming them —
+// never a silent pick of one.
+func TestAmbiguousFragmentFailsWithoutGuessing(t *testing.T) {
+	_, c := seedSuffixFixture(t)
+
+	err := c.ExecutorEnable(protocol.ExecutorEnableRequest{
+		ExecutorID: uuidTailA, // A and C both end in it
+	})
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected a ControllerError, got %T: %v", err, err)
+	}
+	if ce.Code != protocol.ErrInvalidArgs {
+		t.Fatalf("ambiguous fragment: got code %s, want ERR_INVALID_ARGS", ce.Code)
+	}
+	for _, want := range []string{uuidPrefix + uuidTailA, uuidOlderC} {
+		if !strings.Contains(ce.Message, want) {
+			t.Errorf("ambiguity message must name %s: %s", want, ce.Message)
+		}
+	}
+}
+
+// No match and too-short fragments both answer not-found rather than guessing.
+func TestUnknownAndShortFragmentsAreNotFound(t *testing.T) {
+	_, c := seedSuffixFixture(t)
+
+	for _, ref := range []string{"ffffffffffff", "a1b" /* shorter than executorRefMinLen */} {
+		err := c.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: ref})
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) || ce.Code != protocol.ErrNotFound {
+			t.Errorf("fragment %q: got %v, want ERR_NOT_FOUND", ref, err)
+		}
 	}
 }

@@ -34,6 +34,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/ring"
@@ -148,6 +149,11 @@ type Controller struct {
 	// pretending an empty user table.
 	users users.Store
 
+	// providers is the loaded provider registry, shared across every child
+	// spawn. Nil means providers.Default() — which is what a daemon without a
+	// providers.toml file (the historical case) uses.
+	providers *providers.Set
+
 	// wsLabels holds workspace IDs and executor IDs provisioned for children
 	// whose spawn is in flight. Keyed by childID; set by agentRunner before
 	// Spawn builds the store record, consumed by Spawn for label insertion
@@ -197,7 +203,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	}
 }
 
-func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store, userStore users.Store) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store, userStore users.Store, prov *providers.Set) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -222,6 +228,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		evbuf:       newEventBuffer(),
 		execStore:   execStore,
 		users:       userStore,
+		providers:   prov,
 	}
 	// Wire the coster only when there is a database: without one every
 	// budgeted spawn fails closed (which is what checkBudget does when
@@ -3443,7 +3450,11 @@ func (c *Controller) ExecutorLabel(req protocol.ExecutorLabelRequest) (executors
 	if err := c.requireExecutorStore(); err != nil {
 		return executors.Executor{}, err
 	}
-	e, err := c.execStore.SetLabels(context.Background(), req.ExecutorID, req.Set, req.Remove)
+	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
+	if err != nil {
+		return executors.Executor{}, err
+	}
+	e, err = c.execStore.SetLabels(context.Background(), e.ID, req.Set, req.Remove)
 	return e, translateExecutorErr(err)
 }
 
@@ -3452,7 +3463,11 @@ func (c *Controller) ExecutorDisable(req protocol.ExecutorDisableRequest) error 
 	if err := c.requireExecutorStore(); err != nil {
 		return err
 	}
-	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), req.ExecutorID, false))
+	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
+	if err != nil {
+		return err
+	}
+	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, false))
 }
 
 // ExecutorEnable re-enables a disabled executor.
@@ -3460,7 +3475,90 @@ func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
 	if err := c.requireExecutorStore(); err != nil {
 		return err
 	}
-	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), req.ExecutorID, true))
+	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
+	if err != nil {
+		return err
+	}
+	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, true))
+}
+
+// executorRefMinLen is the shortest trailing fragment resolveExecutorRef will
+// look for. Four characters is long enough that accidental suffix collisions
+// stay rare while still forgiving to type; anything shorter answers not-found
+// rather than guessing.
+const executorRefMinLen = 4
+
+// maxAmbiguousRefs caps how many matching ids an ambiguity error spells out.
+const maxAmbiguousRefs = 5
+
+// resolveExecutorRef maps a possibly-truncated executor id onto exactly one row.
+//
+// An exact row id always wins. Anything else is matched by SUFFIX, never by
+// prefix: executor ids are UUIDv7s whose leading bits are a millisecond
+// timestamp, so every row minted in the same window shares its front and only
+// the tail carries distinguishing entropy. Matching by suffix is what makes the
+// fragment the list command displays usable verbatim as the <executor-id>
+// argument of the label/enable/disable verbs.
+//
+// A fragment that matches no row is not-found; one that matches several rows is
+// an invalid-args error naming them, never a silent pick.
+func (c *Controller) resolveExecutorRef(ctx context.Context, ref string) (executors.Executor, error) {
+	notFound := &control.ControllerError{
+		Code:    protocol.ErrNotFound,
+		Message: fmt.Sprintf("executor %q: no such row", ref),
+	}
+	if ref == "" {
+		return executors.Executor{}, &control.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "executor id required",
+		}
+	}
+	e, exactErr := c.execStore.Get(ctx, ref)
+	switch {
+	case exactErr == nil:
+		return e, nil
+	case !errors.Is(exactErr, executors.ErrNotFound):
+		return executors.Executor{}, translateExecutorErr(exactErr)
+	}
+	if len(ref) < executorRefMinLen {
+		return executors.Executor{}, notFound
+	}
+	all, listErr := c.execStore.List(ctx)
+	if listErr != nil {
+		return executors.Executor{}, translateExecutorErr(listErr)
+	}
+	var matches []executors.Executor
+	for _, cand := range all {
+		if strings.HasSuffix(cand.ID, ref) {
+			matches = append(matches, cand)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return executors.Executor{}, notFound
+	case 1:
+		return matches[0], nil
+	}
+	slices.SortFunc(matches, func(a, b executors.Executor) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	listed, more := matches, 0
+	if len(listed) > maxAmbiguousRefs {
+		listed, more = listed[:maxAmbiguousRefs], len(listed)-maxAmbiguousRefs
+	}
+	ids := make([]string, len(listed))
+	for i, m := range listed {
+		ids[i] = m.ID
+	}
+	msg := fmt.Sprintf("executor id %q is ambiguous — it matches %d rows: %s",
+		ref, len(matches), strings.Join(ids, ", "))
+	if more > 0 {
+		msg += fmt.Sprintf(", and %d more", more)
+	}
+	return executors.Executor{}, &control.ControllerError{
+		Code:    protocol.ErrInvalidArgs,
+		Message: msg,
+	}
 }
 
 // ─── Identity ──────────────────────────────────────────────────────────────
