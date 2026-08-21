@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
+	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -128,6 +129,15 @@ type Controller struct {
 	// execPool is the live executor connection registry. Nil when the
 	// executor listener is not configured.
 	execPool executorPool
+
+	// execPoolConn is the SAME pool as execPool, at its concrete type.
+	// relayTransport needs execpool.NewProxyTransport, which only the
+	// concrete *execpool.Pool can build (it reaches a private method,
+	// connectClientFor, that the narrow executorPool interface does not
+	// expose); everything else in this file deliberately goes through the
+	// interface so selection stays testable without a listener. Nil under
+	// exactly the same condition as execPool.
+	execPoolConn *execpool.Pool
 
 	// execStore is the durable executor registry. Nil when the executor
 	// listener is not configured (require the pool to mint tokens).
