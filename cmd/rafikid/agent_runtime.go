@@ -139,7 +139,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent flags: %w", err)
 	}
-	ro, err := f.toRuntimeOptions(req.Cwd, c.pool, req.ExecutorSelector != "")
+	ro, err := f.toRuntimeOptions(req.Cwd, c.pool, req.ExecutorSelector != "", c.providers)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
@@ -292,7 +292,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 // agentRuntimeOptions rejects an explicit --db in req.ExtraArgs before this is
 // ever reached, so a caller who deliberately asked for a different database
 // learns it was refused rather than discovering later their DSN was ignored.
-func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor bool) (fundi.RuntimeOptions, error) {
+func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor bool, prov *providers.Set) (fundi.RuntimeOptions, error) {
 	thinkingBudget, err := fundi.ThinkingBudgetFor(f.thinking)
 	if err != nil {
 		return fundi.RuntimeOptions{}, err
@@ -326,7 +326,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		MCPConfig:            mcpPath,
 		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
-		Providers:            providers.Default(),
+		Providers:            providersOrDefault(prov),
 		Pool:                 pool,
 		RTK:                  bashRTKValue(f.bashRTK),
 		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),

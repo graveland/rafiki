@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -723,8 +724,12 @@ func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 		// position in anthropic.NewClient's own option list.
 		sdk := anthropic.NewClient(option.WithBaseURL(proxyURL), option.WithAuthToken(proxyToken), option.WithAPIKey(""))
 		sender := llm.FromSDK(sdk)
+		prov, err := providers.Load(paths.ProvidersFile())
+		if err != nil {
+			return nil, false, fmt.Errorf("load providers: %w", err)
+		}
 		client, err := llm.NewClient(
-			llm.WithProviders(providers.Default()),
+			llm.WithProviders(prov),
 			llm.WithProviderSender("anthropic", sender),
 			llm.WithProviderSender("openrouter", sender),
 			llm.WithDefaultModel(cliDefaultModel),
@@ -735,8 +740,12 @@ func resolveUpstream(proxyURL, proxyToken string) (*llm.Client, bool, error) {
 	if key == "" {
 		return nil, false, errors.New("agent analyze: no --proxy-url/RAFIKI_URL configured and ANTHROPIC_API_KEY unset")
 	}
+	prov, err := providers.Load(paths.ProvidersFile())
+	if err != nil {
+		return nil, false, fmt.Errorf("load providers: %w", err)
+	}
 	client, err := llm.NewClient(
-		llm.WithProviders(providers.Default()),
+		llm.WithProviders(prov),
 		llm.WithProviderSender("anthropic", llm.FromSDK(anthropic.NewClient(option.WithAPIKey(key)))),
 		llm.WithDefaultModel(cliDefaultModel),
 	)

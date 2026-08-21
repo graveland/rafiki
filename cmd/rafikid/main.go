@@ -32,6 +32,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -398,6 +399,16 @@ func runDaemon(opts runDaemonOpts) error {
 		userStore = usersdb.NewPostgresStore(pool)
 	}
 
+	// Load the provider registry once at startup. A missing file is not an
+	// error — it falls back to the shipped default (anthropic + openrouter).
+	prov, err := providers.Load(paths.ProvidersFile())
+	if err != nil {
+		slog.Error("could not load provider registry; continuing with defaults", "error", err)
+		prov = providers.Default()
+	} else {
+		slog.Info("provider registry loaded", "providers", prov.Names())
+	}
+
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:        pool,
 		Logger:      slog.Default(),
@@ -409,6 +420,7 @@ func runDaemon(opts runDaemonOpts) error {
 		RawTrace:    rawTrace,
 		RawTraceAll: rawTraceAll,
 		Users:       userStore,
+		Providers:   prov,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are
@@ -441,7 +453,7 @@ func runDaemon(opts runDaemonOpts) error {
 		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
-	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore, prov)
 	ctrl.wireEventBuffer() // a no-op until evbuf is populated (Task 4)
 	ctrl.SetCatalog(catalog)
 	if face != nil {

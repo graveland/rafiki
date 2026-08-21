@@ -738,13 +738,12 @@ func hasContent(m *anthropic.Message) bool {
 }
 
 // upstreamLabel maps a model prefix (from splitModel) to the upstream provider
-// name used in log lines: "anthropic" stays "anthropic"; everything else is
-// "openrouter" (the only two upstreams fundi's sender supports).
+// name used in log lines. The label is the provider name as-is: the old
+// hardcoded mapping (anthropic→anthropic, everything else→openrouter) predates
+// the provider registry and stopped being correct once any provider could be
+// configured.
 func upstreamLabel(modelPrefix string) string {
-	if modelPrefix == "anthropic" {
-		return "anthropic"
-	}
-	return "openrouter"
+	return modelPrefix
 }
 
 // fullModel reconstructs the provider-qualified model id from the split

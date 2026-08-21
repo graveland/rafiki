@@ -127,6 +127,7 @@ type faceOptions struct {
 	RawTrace    *rawtrace.RawTraceStore // nil when no pool configured
 	RawTraceAll bool                    // RAFIKI_RECORD_REQUESTS=1: record all sessions unconditionally
 	Users       users.Store             // nil = RAFIKI_DB unset; only the per-boot child token authenticates
+	Providers   *providers.Set          // loaded once from providers.toml; nil falls back to providers.Default()
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -186,7 +187,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	}
 
 	llmOpts := []llm.ClientOption{
-		llm.WithProviders(providers.Default()),
+		llm.WithProviders(providersOrDefault(opts.Providers)),
 		llm.WithProviderSender("anthropic", llm.FromSDK(anthropic.NewClient(option.WithAPIKey(anthropicKey)))),
 		llm.WithLogger(logger),
 	}
@@ -407,6 +408,14 @@ func resolveDefaultModel(cfg Config) string {
 		return cfg.DefaultModel
 	}
 	return paths.Get(paths.DefaultModel)
+}
+
+// providersOrDefault returns set when non-nil, otherwise providers.Default().
+func providersOrDefault(set *providers.Set) *providers.Set {
+	if set != nil {
+		return set
+	}
+	return providers.Default()
 }
 
 func randomToken() (string, error) {
