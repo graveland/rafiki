@@ -592,7 +592,6 @@ func (p *MessagesProxy) selectUpstream(w http.ResponseWriter, r *http.Request, r
 			http.Error(w, msg, http.StatusBadRequest)
 			return nil, "", nil, true
 		}
-		upstream = provider.Name
 		switch provider.Kind {
 		case providers.KindAnthropic:
 			if passthrough {

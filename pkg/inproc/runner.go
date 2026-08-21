@@ -23,6 +23,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
+	"go.graveland.dev/rafiki/pkg/providers"
 )
 
 // BuildFunc constructs the engine. Defaults to fundi.BuildRuntime; tests
@@ -99,6 +100,9 @@ type Runner struct {
 func New(opts Options) *Runner {
 	if opts.Build == nil {
 		opts.Build = fundi.BuildRuntime
+	}
+	if opts.Runtime.Providers == nil {
+		opts.Runtime.Providers = providers.Default()
 	}
 	if opts.Parent == nil {
 		opts.Parent = context.Background()
