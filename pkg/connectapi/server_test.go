@@ -59,6 +59,18 @@ func TestGetHistoryFiltersByAfterOrdinal(t *testing.T) {
 	}
 }
 
+func TestRoutesReturnsControlHandler(t *testing.T) {
+	s := connectapi.NewServer(fakeLoader{})
+
+	path, h := s.Routes()
+	if path == "" {
+		t.Fatal("empty path")
+	}
+	if h == nil {
+		t.Fatal("nil handler")
+	}
+}
+
 func TestGetHistoryRejectsEmptyChildID(t *testing.T) {
 	s := connectapi.NewServer(fakeLoader{msgs: nil})
 
