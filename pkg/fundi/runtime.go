@@ -181,7 +181,11 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 	// would shadow the imported package of the same name.
 	if !opts.NoSkills {
 		var only []string
-		if opts.Skills != "" {
+		// "*" is an explicit caller-forced "all", distinct from "" (today's
+		// default meaning of "all") — see resolveAllowlistOption (Task 8):
+		// it's what lets a caller override a restrictive model-declared
+		// default back to everything.
+		if opts.Skills != "" && opts.Skills != "*" {
 			only = strings.Split(opts.Skills, ",")
 		}
 		discovered, err = skills.DiscoverSkills(opts.SkillsDirs, only)
