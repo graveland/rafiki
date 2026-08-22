@@ -423,6 +423,34 @@ alias also shows up in `rafiki models list` and `--model` tab completion
 (`source: alias`), independent of whether the server is currently reachable —
 declaring it is enough, no live probe involved.
 
+Three more fields on the same `[providers.<name>.models.<alias>]` table tune
+what gets sent to a small-context model in the first place, since the
+biggest cost is usually fixed overhead — a large `CLAUDE.md`, a full tool
+inventory — not conversation growth:
+
+```toml
+[providers.vmlx.models.qwen]
+id                   = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
+context_window       = 61440
+context_files_tokens = 12288           # optional; overrides the auto formula (20% of context_window, clamped to [1024, 30000])
+skills                = ""              # "" = no skills; "*" or omitted = all; "a,b,c" = only those
+mcp_servers           = "codescan"      # same tri-state convention
+```
+
+`context_files_tokens` bounds how much of `CLAUDE.md`/`AGENTS.md` gets
+embedded in the system prompt — when the combined content exceeds the
+budget, it's truncated at the last newline boundary with a marker naming how
+much was dropped, never silently. `skills`/`mcp_servers` control which
+skills and MCP servers this model's agent even sees declared as tools at
+all, since tool schemas are as much of a fixed cost as context files.
+
+All three are optional and only take effect for a model reached through its
+declared alias (e.g. `vmlx/qwen`, not the raw
+`vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit` id) — the alias is what
+carries the metadata. An explicit `--skills`/`--no-skills`/`--mcp-servers`/
+`--no-mcp` on the spawn always overrides the model's declared default; the
+default only fills in when the caller specified neither.
+
 ### Container executors
 
 An executor serves the filesystem it can see. Whether that view is a container
