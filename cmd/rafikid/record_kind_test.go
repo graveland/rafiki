@@ -49,3 +49,28 @@ func TestRecordRoundTrip_RecordRequests(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordRoundTrip_MCPServersAndNoMCP is the on-disk half of the MCP
+// allowlist's resume story: the record is what a daemon restart rebuilds a
+// child from, so a field that survives snapshot-to-request but not
+// snapshot-to-record is still lost — just later, and only to the failure mode
+// nobody tests by hand.
+func TestRecordRoundTrip_MCPServersAndNoMCP(t *testing.T) {
+	snap := childstore.Snapshot{
+		ChildID:    "c1",
+		Cwd:        "/tmp",
+		Status:     "exited",
+		Kind:       protocol.KindFundi,
+		MCPConfig:  "/work/.mcp.json",
+		MCPServers: []string{"codescan"},
+		NoMCP:      true,
+	}
+	rec := recordFromSnapshot(snap)
+	if len(rec.MCPServers) != 1 || rec.MCPServers[0] != "codescan" || !rec.NoMCP {
+		t.Fatalf("record dropped fields: mcpServers=%v noMcp=%v", rec.MCPServers, rec.NoMCP)
+	}
+	got := sessionFromRecord(rec).Snapshot()
+	if len(got.MCPServers) != 1 || got.MCPServers[0] != "codescan" || !got.NoMCP {
+		t.Fatalf("session-from-record dropped fields: mcpServers=%v noMcp=%v", got.MCPServers, got.NoMCP)
+	}
+}

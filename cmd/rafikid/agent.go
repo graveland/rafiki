@@ -241,6 +241,17 @@ func runAgentWithFlags(f agentFlags) int {
 		return 1
 	}
 
+	// The model's declared alias supplies the context-files budget and the
+	// skills/MCP defaults, exactly as it does on the daemon's in-process path
+	// (toRuntimeOptions, agent_runtime.go). Resolved through the same two
+	// helpers so the two call sites cannot drift — a `rafikid fundi` child and
+	// a daemon-spawned one must see the same inventory for the same model.
+	// A model that names no declared alias resolves to the zero value: no
+	// context-files cap and no model default, i.e. the caller's flags alone.
+	defaults, _ := resolveModelDefaults(prov, f.model)
+	skillsVal, noSkills := resolveAllowlistOption(f.skills, f.noSkills, defaults.Skills)
+	mcpServersVal, noMCP := resolveAllowlistOption(f.mcpServers, f.noMCP, defaults.MCPServers)
+
 	opts := fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
@@ -252,10 +263,13 @@ func runAgentWithFlags(f agentFlags) int {
 		Name:                 f.name,
 		SpillDir:             f.spillDir,
 		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir, false),
-		Skills:               f.skills,
-		NoSkills:             f.noSkills,
+		Skills:               skillsVal,
+		NoSkills:             noSkills,
 		NoContextFiles:       f.noContextFiles,
+		ContextFilesBudget:   defaults.ContextFilesTokens,
 		MCPConfig:            mcpPath,
+		MCPServers:           mcpServersVal,
+		NoMCP:                noMCP,
 		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
 		Providers:            prov,

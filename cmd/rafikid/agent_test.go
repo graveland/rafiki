@@ -540,7 +540,16 @@ func TestEffectiveLSPConfigPrecedence(t *testing.T) {
 // call across lines, or on an added argument, none of which reintroduce the
 // duplication this is meant to catch.
 func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
-	wantCalls := []string{"effectiveLSPConfig", "toolsWebValue"}
+	// resolveModelDefaults/resolveAllowlistOption were added to this list after
+	// the same class of drift recurred: runAgentWithFlags shipped without the
+	// model-declared skills/MCP/context-files resolution that toRuntimeOptions
+	// had, so `rafikid fundi` silently ignored every one of those alias fields.
+	wantCalls := []string{
+		"effectiveLSPConfig",
+		"toolsWebValue",
+		"resolveModelDefaults",
+		"resolveAllowlistOption",
+	}
 
 	for file, fn := range map[string]string{
 		"agent.go":         "runAgentWithFlags",

@@ -48,6 +48,11 @@ mcp_servers    = "codescan"
 [providers.vmlx.models.noskillsoverride]
 id             = "models/Other"
 context_window = 65536
+
+[providers.vmlx.models.explicitbudget]
+id                   = "models/Explicit"
+context_window       = 61440
+context_files_tokens = 4096
 `
 
 func TestResolveModelDefaults_UsesAliasOverridesAndFormula(t *testing.T) {
@@ -85,6 +90,32 @@ func TestResolveModelDefaults_NoSkillsFieldLeavesNilOverride(t *testing.T) {
 	}
 	if got.ContextFilesTokens != 13107 {
 		t.Errorf("ContextFilesTokens = %d, want 13107 (65536/5)", got.ContextFilesTokens)
+	}
+}
+
+// TestResolveModelDefaults_ExplicitContextFilesTokensWins covers the half of
+// resolveModelDefaults' budget branch that the auto-formula cases cannot: an
+// alias that declares context_files_tokens must get that number verbatim, not
+// the formula's. This is the path the shipped configuration actually takes —
+// every alias tuned by hand sets the field — so leaving it unexercised means
+// the deployed behaviour is the untested one.
+func TestResolveModelDefaults_ExplicitContextFilesTokensWins(t *testing.T) {
+	set, err := providers.Parse([]byte(modelDefaultsTOML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, ok := resolveModelDefaults(set, "vmlx/explicitbudget")
+	if !ok {
+		t.Fatal("expected ok=true for a declared alias")
+	}
+	if got.ContextFilesTokens != 4096 {
+		t.Errorf("ContextFilesTokens = %d, want the declared 4096, not the formula's %d",
+			got.ContextFilesTokens, contextFilesBudget(61440))
+	}
+	// Sanity: the fixture is only meaningful if the formula would disagree —
+	// 61440/5 is 12288, so an accidental formula result cannot pass above.
+	if contextFilesBudget(61440) == 4096 {
+		t.Fatal("fixture is useless: the auto formula happens to equal the explicit value")
 	}
 }
 

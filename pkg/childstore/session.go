@@ -69,7 +69,14 @@ type Session struct {
 	SkillsDirs []string
 	// MCPConfig is the .mcp.json path for an agent-kind child, carried across
 	// resume for the same reason.
-	MCPConfig          string
+	MCPConfig string
+	// MCPServers is the allowlist of MCPConfig's mcpServers keys the child
+	// connects (empty means all), and NoMCP disables MCP outright. Carried
+	// across resume for the same reason as MCPConfig: a child whose tool
+	// inventory was narrowed to fit a small context window must not come back
+	// with the full .mcp.json connected.
+	MCPServers         []string
+	NoMCP              bool
 	PromptTemplates    []string
 	NoPromptTemplates  bool
 	Themes             []string
@@ -171,6 +178,8 @@ type Snapshot struct {
 	NoSkills           bool
 	SkillsDirs         []string
 	MCPConfig          string
+	MCPServers         []string
+	NoMCP              bool
 	PromptTemplates    []string
 	NoPromptTemplates  bool
 	Themes             []string
@@ -248,6 +257,8 @@ func (s *Session) Snapshot() Snapshot {
 		NoSkills:          s.NoSkills,
 		SkillsDirs:        copyStrings(s.SkillsDirs),
 		MCPConfig:         s.MCPConfig,
+		MCPServers:        copyStrings(s.MCPServers),
+		NoMCP:             s.NoMCP,
 		PromptTemplates:   copyStrings(s.PromptTemplates),
 		NoPromptTemplates: s.NoPromptTemplates,
 		Themes:            copyStrings(s.Themes),

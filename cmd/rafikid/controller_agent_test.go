@@ -211,6 +211,34 @@ func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
 	}
 }
 
+// TestResumeRequestFromSnapshotCarriesMCPServersAndNoMCP is the same guard for
+// the allowlist half of the MCP knobs. MCPConfig surviving resume is not
+// enough: a child spawned with a narrowed --mcp-servers (or --no-mcp) that
+// comes back with the full .mcp.json connected is strictly worse than one that
+// lost the config file, because the narrowing is usually there to keep a
+// small-context model's tool inventory inside its window.
+func TestResumeRequestFromSnapshotCarriesMCPServersAndNoMCP(t *testing.T) {
+	snap := childstore.Snapshot{
+		Kind:       protocol.KindFundi,
+		Model:      "anthropic/claude-sonnet-5",
+		MCPConfig:  "/work/.mcp.json",
+		MCPServers: []string{"codescan", "cachecache"},
+	}
+	req := resumeRequestFromSnapshot(snap, "")
+	if !reflect.DeepEqual(req.MCPServers, snap.MCPServers) {
+		t.Errorf("MCPServers = %v, want %v — a resumed child silently reconnects every MCP server", req.MCPServers, snap.MCPServers)
+	}
+
+	off := resumeRequestFromSnapshot(childstore.Snapshot{
+		Kind:      protocol.KindFundi,
+		MCPConfig: "/work/.mcp.json",
+		NoMCP:     true,
+	}, "")
+	if !off.NoMCP {
+		t.Error("NoMCP = false, want true — a resumed child silently regains MCP it was spawned without")
+	}
+}
+
 // TestBuildAgentArgv_NoSkillsAndDefaults confirms the no-skills / minimal
 // request path emits only --spill-dir plus whatever ExtraArgs were given, with
 // none of the optional flags present when the request leaves them empty.

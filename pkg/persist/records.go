@@ -42,8 +42,14 @@ type Record struct {
 	// SkillsDirs and MCPConfig are additive fields (Task C1). Records written
 	// before their introduction lack these keys, which deserialise to the zero
 	// value (nil slice / empty string) — the same as never having set them.
-	SkillsDirs         []string `json:"skillsDirs,omitempty"`
-	MCPConfig          string   `json:"mcpConfig,omitempty"`
+	SkillsDirs []string `json:"skillsDirs,omitempty"`
+	MCPConfig  string   `json:"mcpConfig,omitempty"`
+	// MCPServers and NoMCP are additive in the same sense: a record written
+	// before their introduction lacks the keys and deserialises to nil/false,
+	// which is exactly "connect every server in MCPConfig" — the behaviour
+	// those records were written under.
+	MCPServers         []string `json:"mcpServers,omitempty"`
+	NoMCP              bool     `json:"noMcp,omitempty"`
 	PromptTemplates    []string `json:"promptTemplates,omitempty"`
 	NoPromptTemplates  bool     `json:"noPromptTemplates,omitempty"`
 	Themes             []string `json:"themes,omitempty"`
