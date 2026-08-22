@@ -81,6 +81,51 @@ Two transports, identical framing and protocol.
   (0600 socket, 0700 directory) are the only trust mechanism. They are never
   bootstrap-restricted and carry no user identity.
 
+## 2.3 Connect control plane (HTTP)
+
+A second, additive control face served by Connect (`connectrpc.com/connect`) on
+the same HTTP listener as the proxy faces. The JSON-Lines frame protocol in the
+rest of this document is unchanged and remains the path `rafiki attach` and the
+existing CLI use.
+
+- **Path prefix:** `/rafiki.v1.Control/`
+- **Schema:** `proto/rafiki/v1/*.proto`; generated Go in `pkg/gen/rafiki/v1/`.
+- **Auth:** the same per-user bearer credential as the proxy faces
+  (`Authorization: Bearer`, `x-api-key`, or `X-Rafiki-Token`), resolved
+  against the users store by `server.UserTokenAuth` — the Connect plane is
+  mounted under the identical middleware that protects `/v1/messages` and
+  `/v1/chat/completions` (`server.Handler.Mount`), not a separate
+  control-plane-specific credential. There is deliberately no second auth
+  scheme here: CLAUDE.md documents one credential scheme for both users and
+  executors, and a parallel mechanism for this face would drift from it.
+- **Encoding:** protobuf or JSON. A unary call is an ordinary HTTP POST:
+
+```bash
+curl -H 'Content-Type: application/json' \
+     -H "Authorization: Bearer $RAFIKI_TOKEN" \
+     -d '{"childId":"c_01HX..."}' \
+     http://127.0.0.1:8035/rafiki.v1.Control/GetHistory
+```
+
+### Two event tiers
+
+| Tier | Contents | Cursor | Resumable |
+|---|---|---|---|
+| Durable | Persisted messages | `conversation_message.ordinal` | Yes, exactly |
+| Ephemeral | Live content deltas | `turn_id` only | No, by design |
+
+`GetHistory` and `StreamEvents` both accept `afterOrdinal`. Ordinal is used
+rather than a timestamp because postgres `now()` is transaction-start time, so
+every message written in one transaction shares a byte-identical `created_at` —
+making any timestamp cursor either re-deliver or drop.
+
+### Verbs
+
+| RPC | Kind | Purpose |
+|---|---|---|
+| `GetHistory` | unary | Durable events for one child, after an optional ordinal |
+| `StreamEvents` | server-streaming | Durable replay, then live follow |
+
 ## 3. Framing
 
 JSON Lines (`application/jsonl`).
