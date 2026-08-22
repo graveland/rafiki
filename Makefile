@@ -324,7 +324,16 @@ bin/protoc-gen-go:
 bin/protoc-gen-connect-go:
 	go build -o bin/protoc-gen-connect-go connectrpc.com/connect/cmd/protoc-gen-connect-go
 
-proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from proto/ into pkg/gen/.
+.PHONY: proto
+proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from proto/ definitions (executorpb + pkg/gen).
+	$(PROTOC) \
+		--proto_path=proto/rafiki/executor/v1 \
+		--go_out=pkg/executorpb \
+		--go_opt=paths=source_relative \
+		--connect-go_out=pkg/executorpb \
+		--connect-go_opt=paths=source_relative \
+		proto/rafiki/executor/v1/executor.proto
+	gofmt -w pkg/executorpb
 	rm -rf pkg/gen
 	mkdir -p pkg/gen
 	$(PROTOC) \
