@@ -143,6 +143,19 @@ func TestParseAgentFlagsNoSkillsAndNoContextFiles(t *testing.T) {
 	}
 }
 
+func TestParseAgentFlags_MCPServersAndNoMCP(t *testing.T) {
+	f, err := parseAgentFlags([]string{"--model", "anthropic/claude-sonnet-5", "--mcp-servers", "codescan,other", "--no-mcp"})
+	if err != nil {
+		t.Fatalf("parseAgentFlags: %v", err)
+	}
+	if f.mcpServers != "codescan,other" {
+		t.Errorf("mcpServers = %q, want %q", f.mcpServers, "codescan,other")
+	}
+	if !f.noMCP {
+		t.Error("noMCP = false, want true")
+	}
+}
+
 // TestAssembleSkillDirs_NoClaudeHomeDir locks down the config-ownership
 // invariant this task exists for: rafiki must never read skills out of the
 // user's home Claude profile (~/.claude/skills). It deliberately does NOT

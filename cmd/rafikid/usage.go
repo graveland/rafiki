@@ -61,6 +61,8 @@ func newAgentFlagSet(f *agentFlags) *pflag.FlagSet {
 	fs.StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")
 	fs.BoolVar(&f.noSkills, "no-skills", false, "disable skill discovery and the skill tool entirely")
 	fs.StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $RAFIKI_MCP_CONFIG or <ConfigDir>/mcp.json)")
+	fs.StringVar(&f.mcpServers, "mcp-servers", "", "comma-separated allowlist of .mcp.json server names to connect (empty or \"*\" means all)")
+	fs.BoolVar(&f.noMCP, "no-mcp", false, "disable MCP entirely, even when --mcp-config is set")
 	fs.StringVar(&f.lspConfig, "lsp-config", "", "path to lsp.json (default: <cwd>/.lsp.json if present, else $RAFIKI_LSP_CONFIG or <ConfigDir>/lsp.json)")
 	fs.BoolVar(&f.noLSP, "no-lsp", false, "disable LSP tools entirely (overrides $RAFIKI_LSP_DISABLE)")
 	fs.StringVar(&f.ref, "ref", paths.Get(paths.ChildID), "external ref correlating the conversation across restarts")

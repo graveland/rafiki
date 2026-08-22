@@ -37,6 +37,8 @@ type agentFlags struct {
 	skills             string
 	noSkills           bool
 	mcpConfig          string
+	mcpServers         string
+	noMCP              bool
 	lspConfig          string
 	noLSP              bool
 	ref                string
