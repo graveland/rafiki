@@ -38,7 +38,15 @@ func newTestController(t *testing.T) *Controller {
 		}
 	}
 	st := childstore.New()
-	return NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, nil, t.Context(), nil, nil, nil)
+	ctrl := NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, nil, t.Context(), nil, nil, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := ctrl.ShutdownAllChildren(ctx, time.Second, time.Second); err != nil {
+			t.Logf("newTestController cleanup: ShutdownAllChildren: %v", err)
+		}
+	})
+	return ctrl
 }
 
 // spawnTestChild spawns a fake-pi child through the controller and waits for
