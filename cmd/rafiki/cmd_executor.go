@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +47,7 @@ The administrative verbs output JSON.`,
 		newExecutorLabelCmd(),
 		newExecutorDisableCmd(),
 		newExecutorEnableCmd(),
+		newExecutorDeleteCmd(),
 		// serve is the executor ITSELF, not an operator verb against the
 		// daemon; see cmd_executor_serve.go. It sits under the same noun
 		// because "be an executor" and "administer executors" are the same
@@ -158,35 +161,44 @@ func runExecutorList(cmd *cobra.Command, _ []string) error {
 	selector, _ := cmd.Flags().GetString("selector")
 	limit, _ := cmd.Flags().GetInt("limit")
 
+	execs, err := fetchExecutors(ctx, c, selector, limit)
+	if err != nil {
+		return err
+	}
+
+	mode, useColor := outputOpts(cmd)
+	if mode == outputTable {
+		return renderExecutorTable(os.Stdout, execs, useColor)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(struct {
+		Executors []executors.Executor `json:"executors"`
+	}{execs})
+}
+
+// fetchExecutors issues ctrl_executor_list and decodes its {"executors": [...]}
+// wrapper. Shared by `list` and `delete --all-*`, which both need the raw rows.
+func fetchExecutors(ctx context.Context, c *client.Client, selector string, limit int) ([]executors.Executor, error) {
 	req := protocol.ExecutorListRequest{
 		Type:     protocol.TypeCtrlExecutorList,
 		Selector: selector,
 		Limit:    limit,
 	}
-
 	resp, err := c.Request(ctx, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !resp.Success {
-		return fmt.Errorf("ctrl_executor_list: %s", client.FormatError(resp))
+		return nil, fmt.Errorf("ctrl_executor_list: %s", client.FormatError(resp))
 	}
-
-	// Response is {"executors": [...]}
 	var wrapper struct {
 		Executors []executors.Executor `json:"executors"`
 	}
 	if err := json.Unmarshal(resp.Data, &wrapper); err != nil {
-		return fmt.Errorf("malformed response: %w", err)
+		return nil, fmt.Errorf("malformed response: %w", err)
 	}
-
-	mode, useColor := outputOpts(cmd)
-	if mode == outputTable {
-		return renderExecutorTable(os.Stdout, wrapper.Executors, useColor)
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(wrapper)
+	return wrapper.Executors, nil
 }
 
 // Column indexes into an executor table row; StyleFunc styles by column.
@@ -519,5 +531,144 @@ func runExecutorEnable(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ctrl_executor_enable: %s", client.FormatError(resp))
 	}
 	fmt.Printf("Executor %s enabled.\n", args[0])
+	return nil
+}
+
+// ─── delete ──────────────────────────────────────────────────────────────────
+
+func newExecutorDeleteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete [executor-id]",
+		Short: "Permanently remove an executor row",
+		Long: `Permanently remove an executor row. Unlike 'disable', this cannot be undone
+— there is no tombstone for executors.
+
+<executor-id> may be the full row id or any unique trailing fragment of
+four or more characters, such as the short form shown by 'executor list'.
+
+--all-disabled and --all-offline delete every matching row instead of one:
+--all-disabled selects rows with Enabled=false; --all-offline selects rows
+with no live connection right now (Connected=false), regardless of Enabled.
+Passing both deletes the UNION of the two sets, not their intersection. These
+list what they are about to delete and ask for confirmation unless -y/--yes
+is given, and are mutually exclusive with an <executor-id> argument.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runExecutorDelete,
+	}
+	cmd.Flags().Bool("all-disabled", false, "Delete every disabled executor")
+	cmd.Flags().Bool("all-offline", false, "Delete every executor with no live connection")
+	cmd.Flags().BoolP("yes", "y", false, "Skip the confirmation prompt")
+	return cmd
+}
+
+// filterExecutorsForDelete selects the rows --all-disabled/--all-offline
+// target, as the UNION of whichever criteria are on — not their intersection,
+// since intersecting would make --all-disabled and --all-offline together
+// behave almost exactly like --all-disabled alone (a disabled row goes
+// offline within one health interval anyway).
+func filterExecutorsForDelete(execs []executors.Executor, allDisabled, allOffline bool) []executors.Executor {
+	var out []executors.Executor
+	for _, e := range execs {
+		if (allDisabled && !e.Enabled) || (allOffline && !e.Connected) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func runExecutorDelete(cmd *cobra.Command, args []string) error {
+	allDisabled, _ := cmd.Flags().GetBool("all-disabled")
+	allOffline, _ := cmd.Flags().GetBool("all-offline")
+	yes, _ := cmd.Flags().GetBool("yes")
+	bulk := allDisabled || allOffline
+
+	if bulk && len(args) > 0 {
+		return fmt.Errorf("--all-disabled/--all-offline cannot be combined with an executor id")
+	}
+	if !bulk && len(args) != 1 {
+		return fmt.Errorf("requires an <executor-id>, or --all-disabled/--all-offline")
+	}
+
+	c := mustDial(cmd)
+	defer c.Close()
+	ctx := cmdCtx(cmd)
+
+	if !bulk {
+		return deleteOneExecutor(ctx, c, args[0])
+	}
+
+	// 500 is the ceiling ctrl_executor_list enforces; there is no "no limit".
+	all, err := fetchExecutors(ctx, c, "", 500)
+	if err != nil {
+		return err
+	}
+	matches := filterExecutorsForDelete(all, allDisabled, allOffline)
+	if len(matches) == 0 {
+		fmt.Println("No executors match.")
+		return nil
+	}
+
+	_, useColor := outputOpts(cmd)
+	if err := renderExecutorTable(os.Stdout, matches, useColor); err != nil {
+		return err
+	}
+	if !yes {
+		confirmed, err := confirmBulkDelete(len(matches))
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	var failed int
+	for _, e := range matches {
+		if err := deleteOneExecutor(ctx, c, e.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "executor %s: %v\n", shortExecutorID(e.ID), err)
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d deletes failed", failed, len(matches))
+	}
+	return nil
+}
+
+// confirmBulkDelete prompts before an irreversible bulk delete. Non-TTY stdin
+// refuses rather than silently proceeding OR silently doing nothing — a script
+// without -y gets a clear error instead of a surprise either way.
+func confirmBulkDelete(n int) (bool, error) {
+	if !isStdinTTY() {
+		return false, fmt.Errorf("refusing to delete %d executors without --yes (no interactive terminal)", n)
+	}
+	fmt.Printf("\nDelete %d executors? [y/N]: ", n)
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	ans := strings.TrimSpace(strings.ToLower(line))
+	confirmed, warned := parseKillAnswer(ans)
+	if warned {
+		fmt.Println("(treating as no)")
+	}
+	return confirmed, nil
+}
+
+func deleteOneExecutor(ctx context.Context, c *client.Client, executorID string) error {
+	req := protocol.ExecutorDeleteRequest{
+		Type:       protocol.TypeCtrlExecutorDelete,
+		ExecutorID: executorID,
+	}
+	resp, err := c.Request(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("ctrl_executor_delete: %s", client.FormatError(resp))
+	}
+	fmt.Printf("Executor %s deleted.\n", executorID)
 	return nil
 }

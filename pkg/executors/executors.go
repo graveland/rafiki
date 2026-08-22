@@ -67,6 +67,12 @@ type Store interface {
 	List(ctx context.Context) ([]Executor, error)
 	SetLabels(ctx context.Context, id string, set map[string]string, remove []string) (Executor, error)
 	SetEnabled(ctx context.Context, id string, enabled bool) error
+	// Delete permanently removes an executor row. Unlike SetEnabled, this
+	// cannot be undone — there is no tombstone. Safe because nothing else
+	// keys off an executor id for historical resolution: the enrollment
+	// token table's executor_id is ON DELETE SET NULL, and no conversation
+	// or child record carries a foreign key to this table.
+	Delete(ctx context.Context, id string) error
 	Annotate(ctx context.Context, id string, set map[string]string, remove []string) error
 	TouchSeen(ctx context.Context, id string) error
 }

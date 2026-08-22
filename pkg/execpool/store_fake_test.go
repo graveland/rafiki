@@ -17,6 +17,7 @@ type fakeStore struct {
 	// this — and -race would fail the suite rather than the assertion.
 	mu       sync.Mutex
 	executor executors.Executor
+	deleted  bool
 
 	// authErr, when non-nil, is what Authenticate returns.
 	authErr error
@@ -62,10 +63,21 @@ func (f *fakeStore) TouchSeen(context.Context, string) error { return nil }
 func (f *fakeStore) Get(_ context.Context, id string) (executors.Executor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deleted {
+		return executors.Executor{}, executors.ErrNotFound
+	}
 	if id != f.executor.ID {
 		return executors.Executor{}, errors.New("no such executor")
 	}
 	return f.executor, nil
+}
+
+// delete simulates the row having been hard-deleted from under a connected
+// executor: Get now answers ErrNotFound specifically, not a generic error.
+func (f *fakeStore) delete() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = true
 }
 
 // update mutates the stored row the way an operator would: `rafiki executor
@@ -92,6 +104,10 @@ func (f *fakeStore) SetLabels(context.Context, string, map[string]string, []stri
 
 func (f *fakeStore) SetEnabled(context.Context, string, bool) error {
 	return errors.New("fakeStore: SetEnabled not used by the pool")
+}
+
+func (f *fakeStore) Delete(context.Context, string) error {
+	return errors.New("fakeStore: Delete not used by the pool")
 }
 
 func (f *fakeStore) Annotate(context.Context, string, map[string]string, []string) error {

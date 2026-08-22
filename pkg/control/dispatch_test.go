@@ -59,6 +59,7 @@ type fakeController struct {
 	executorLabelFn         func(protocol.ExecutorLabelRequest) (executors.Executor, error)
 	executorDisableFn       func(protocol.ExecutorDisableRequest) error
 	executorEnableFn        func(protocol.ExecutorEnableRequest) error
+	executorDeleteFn        func(protocol.ExecutorDeleteRequest) error
 	executorSessionFn       func(users.Identity, protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
@@ -268,6 +269,13 @@ func (f *fakeController) ExecutorDisable(req protocol.ExecutorDisableRequest) er
 func (f *fakeController) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
 	if f.executorEnableFn != nil {
 		return f.executorEnableFn(req)
+	}
+	return nil
+}
+
+func (f *fakeController) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
+	if f.executorDeleteFn != nil {
+		return f.executorDeleteFn(req)
 	}
 	return nil
 }
@@ -1992,6 +2000,29 @@ func TestUserRmUnknownNameIsNotFound(t *testing.T) {
 // The handler must take the identity from the CONNECTION, never from the frame.
 // A username in the payload would be a self-asserted gating fact: the owner
 // label decides which children may land on the machine.
+func TestDispatch_ExecutorDelete_RequiresExecutorID(t *testing.T) {
+	d := control.NewDispatch(&fakeController{})
+	frame := []byte(`{"type":"ctrl_executor_delete","id":"1"}`)
+	mustError(t, d.HandleFrame(identityConn{}, frame), protocol.ErrInvalidArgs)
+}
+
+func TestDispatch_ExecutorDelete_CallsController(t *testing.T) {
+	var got protocol.ExecutorDeleteRequest
+	c := &fakeController{
+		executorDeleteFn: func(req protocol.ExecutorDeleteRequest) error {
+			got = req
+			return nil
+		},
+	}
+	d := control.NewDispatch(c)
+	frame := []byte(`{"type":"ctrl_executor_delete","id":"1","executorId":"exec-9"}`)
+	mustSuccess(t, d.HandleFrame(identityConn{}, frame))
+
+	if got.ExecutorID != "exec-9" {
+		t.Fatalf("controller saw executorId %q, want exec-9", got.ExecutorID)
+	}
+}
+
 func TestDispatch_ExecutorSession_UsesConnectionIdentity(t *testing.T) {
 	var gotID users.Identity
 	c := &fakeController{

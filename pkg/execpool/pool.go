@@ -575,8 +575,9 @@ func (p *Pool) healthLoop(ctx context.Context, id string, lc *liveConn) {
 	}
 }
 
-// ErrExecutorRevoked reports that an executor's row says it may no longer serve.
-var ErrExecutorRevoked = errors.New("execpool: executor is disabled")
+// ErrExecutorRevoked reports that an executor's row says it may no longer
+// serve — because it was disabled, or because the row is gone entirely.
+var ErrExecutorRevoked = errors.New("execpool: executor is disabled or deleted")
 
 // refreshRow re-reads the executor's row and applies it to the live connection.
 //
@@ -599,6 +600,14 @@ func (p *Pool) refreshRow(ctx context.Context, id string, lc *liveConn) error {
 	defer cancel()
 
 	e, err := p.store.Get(ctx, id)
+	if errors.Is(err, executors.ErrNotFound) {
+		// Unlike a generic read failure, this is an ANSWER: the row is gone,
+		// not merely unreachable. `rafiki executor delete` on a currently-
+		// connected executor depends on this — without it, a deleted row
+		// falls into the "could not read, keep going" branch below and the
+		// connection never notices its row disappeared.
+		return ErrExecutorRevoked
+	}
 	if err != nil {
 		slog.Warn("execpool: could not re-read the executor row; keeping the last known one",
 			"executorId", id, "error", err)

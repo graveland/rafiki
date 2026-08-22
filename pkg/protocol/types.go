@@ -856,6 +856,7 @@ const (
 	TypeCtrlExecutorLabel   = "ctrl_executor_label"
 	TypeCtrlExecutorDisable = "ctrl_executor_disable"
 	TypeCtrlExecutorEnable  = "ctrl_executor_enable"
+	TypeCtrlExecutorDelete  = "ctrl_executor_delete"
 	TypeCtrlExecutorSession = "ctrl_executor_session"
 )
 
@@ -1025,6 +1026,16 @@ type ExecutorDisableRequest struct {
 // ExecutorEnableRequest re-enables a disabled executor.
 type ExecutorEnableRequest struct {
 	Type       string `json:"type"` // "ctrl_executor_enable"
+	ID         string `json:"id,omitempty"`
+	ExecutorID string `json:"executorId"`
+}
+
+// ─── ctrl_executor_delete ───────────────────────────────────────────────────
+
+// ExecutorDeleteRequest permanently removes an executor row. Unlike disable,
+// this cannot be undone.
+type ExecutorDeleteRequest struct {
+	Type       string `json:"type"` // "ctrl_executor_delete"
 	ID         string `json:"id,omitempty"`
 	ExecutorID string `json:"executorId"`
 }

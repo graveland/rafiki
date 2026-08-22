@@ -240,6 +240,11 @@ sends the child somewhere else instead.
 If a durable executor already covers this machine and user — one installed with
 `rafiki executor service install` — the client uses that instead of starting its own. That
 one outlives your terminal, so an agent keeps working after you detach.
+`executor service install` accepts `--proxy name=base_url` (repeatable), the same
+flag as `executor serve` — see "The executor relay" below — which is usually
+the main reason to run one of these as a standing service in the first place:
+a laptop's local LLM endpoint (vmlx, Ollama, …) is only reachable while
+something on that laptop is up to relay it.
 
 **Without an executor, an agent has no workspace tools at all.** `read`, `write`, `edit`,
 `glob`, `grep`, `ls`, `bash` and the `lsp_*` verbs are not registered — not registered and
@@ -267,8 +272,10 @@ when absent, no workspace tool is registered at all.
 It is a subcommand of `rafiki` rather than its own binary, so there are two
 artifacts to build and ship — one client, one server — not three. The
 administrative verbs alongside it (`enroll`, `list`, `label`, `disable`,
-`enable`) act on the daemon's control socket, which an executor host does not
-have, so their presence on such a host grants nothing.
+`enable`, `delete`) act on the daemon's control socket, which an executor host
+does not have, so their presence on such a host grants nothing. `disable`
+revokes a credential but keeps the row; `delete` removes it permanently —
+there is no tombstone for executors, unlike `users`.
 
 **Background execution** is the immediate win: `bash` is synchronous with a
 600s ceiling in-process, so dev servers, log tails, and any test suite slower

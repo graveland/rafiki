@@ -121,6 +121,29 @@ func TestDisabledExecutorCannotAuthenticate(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesTheRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	tok, _ := s.MintToken(ctx, executors.NewToken{ExpiresAt: time.Now().Add(time.Hour)})
+	e, _, err := s.Enroll(ctx, tok, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, e.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.Get(ctx, e.ID); !errors.Is(err, executors.ErrNotFound) {
+		t.Fatalf("Get after delete: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestDeleteUnknownIDIsNotFound(t *testing.T) {
+	s := testStore(t)
+	if err := s.Delete(context.Background(), "00000000-0000-0000-0000-000000000000"); !errors.Is(err, executors.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
 func TestExpiredTokenIsRejected(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

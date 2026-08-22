@@ -196,6 +196,20 @@
   OPPOSITE of the control listener's (`pkg/control/server.go`), where the
   handshake reader must be reused or a pipelined first request is lost.
 
+- **`executors.Store.Delete` is a real hard delete, unlike `users` — verified
+  there is nothing else to tombstone for.** The only FK into
+  `conversations.executors` is `executor_enrollment_token.executor_id`, and
+  it's `ON DELETE SET NULL`; no conversation or child record resolves an
+  executor by id after the fact the way conversation authorship resolves a
+  tombstoned user by name. `pool.go`'s `refreshRow` distinguishes
+  `errors.Is(err, executors.ErrNotFound)` (terminal — the row is gone, evict
+  now, same as disabled) from any other `Get` error (transient — keep the last
+  known row, matching the "A3 lesson" a few entries below). Getting this
+  backwards either evicts a live connection over an ordinary DB blip, or — the
+  bug this shipped with before the distinction existed — lets a genuinely
+  deleted-but-still-connected executor keep serving forever, because a
+  not-found looked exactly like an unreadable row.
+
 - **`conversations.executors` is authoritative on every connection; the
   credential proves only binding to a row.** Nothing that gates access may be
   cached from enrollment time, and nothing self-reported by the executor may

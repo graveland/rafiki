@@ -3482,6 +3482,19 @@ func (c *Controller) ExecutorEnable(req protocol.ExecutorEnableRequest) error {
 	return translateExecutorErr(c.execStore.SetEnabled(context.Background(), e.ID, true))
 }
 
+// ExecutorDelete permanently removes an executor row. Unlike disable, this
+// cannot be undone — there is no tombstone for executors.
+func (c *Controller) ExecutorDelete(req protocol.ExecutorDeleteRequest) error {
+	if err := c.requireExecutorStore(); err != nil {
+		return err
+	}
+	e, err := c.resolveExecutorRef(context.Background(), req.ExecutorID)
+	if err != nil {
+		return err
+	}
+	return translateExecutorErr(c.execStore.Delete(context.Background(), e.ID))
+}
+
 // executorRefMinLen is the shortest trailing fragment resolveExecutorRef will
 // look for. Four characters is long enough that accidental suffix collisions
 // stay rare while still forgiving to type; anything shorter answers not-found

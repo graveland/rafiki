@@ -1567,7 +1567,28 @@ exact-or-unique-trailing-fragment rule as `ctrl_executor_label` (§15.3).
 
 **Response** (success) — `data` is omitted (null).
 
-### 15.5 `ctrl_executor_session`
+### 15.5 `ctrl_executor_delete`
+
+Permanently remove an executor row. Unlike disable, this cannot be undone —
+there is no tombstone for executors, because nothing else keys off an
+executor id for historical resolution (the enrollment token table's
+`executor_id` is `ON DELETE SET NULL`). `executorId` follows the same
+exact-or-unique-trailing-fragment rule as `ctrl_executor_label` (§15.3).
+
+Deleting a currently-connected executor's row evicts it from the live pool
+within one health interval, the same as disabling it.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_executor_delete",
+  "executorId": "abc123..."
+}
+```
+
+**Response** (success) — `data` is omitted (null).
+
+### 15.6 `ctrl_executor_session`
 
 Let an authenticated client mint an executor row for its own machine, so the
 operator's filesystem can be the workspace. The daemon writes every field that
