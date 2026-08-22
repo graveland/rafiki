@@ -380,6 +380,21 @@ func (c *Controller) Get(childID string) (childstore.Snapshot, bool) {
 	return c.st.Get(childID)
 }
 
+// ConversationID satisfies connectapi.ConversationResolver: it maps a child
+// id to the fundi conversation UUID that owns its persisted message history.
+// Only fundi children have a conversation as their session id (see
+// pkg/fundi/engine.go, which sets SessionID: conv.ID) — a pi or claude
+// child's SessionID means something else entirely (a session file path/id),
+// so this deliberately excludes non-fundi kinds rather than handing their
+// SessionID to a query expecting a UUID.
+func (c *Controller) ConversationID(childID string) (string, bool) {
+	snap, ok := c.st.Get(childID)
+	if !ok || snap.Kind != protocol.KindFundi || snap.SessionID == "" {
+		return "", false
+	}
+	return snap.SessionID, true
+}
+
 func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.RecentResult, error) {
 	snap, ok := c.st.Get(childID)
 	if !ok {

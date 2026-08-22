@@ -19,7 +19,7 @@ type EventSource interface {
 }
 
 // SetEventSource attaches the live-event source. Without one, StreamEvents
-// serves the durable replay and then blocks until the client disconnects.
+// serves the durable replay and then ends the stream.
 func (s *Server) SetEventSource(src EventSource) { s.events = src }
 
 // StreamEvents replays the durable tier from after_ordinal, then follows live
@@ -39,7 +39,11 @@ func (s *Server) StreamEvents(
 	}
 
 	for _, id := range ids {
-		msgs, err := s.history.Load(ctx, id)
+		conversationID, err := s.resolveConversation(id)
+		if err != nil {
+			return err
+		}
+		msgs, err := s.history.Load(ctx, conversationID)
 		if err != nil {
 			return connect.NewError(connect.CodeInternal, err)
 		}
@@ -60,8 +64,13 @@ func (s *Server) StreamEvents(
 		}
 	}
 
+	// No live-event source is wired yet in this phase (SetEventSource has no
+	// production caller — see docs/reference/control-protocol.md §2.3). Ending
+	// the stream after replay, rather than blocking on ctx.Done(), avoids
+	// leaking a goroutine per caller for a stream that will never deliver
+	// anything; a client wanting live events reconnects/polls instead of
+	// hanging with no signal that it's stuck rather than slow.
 	if s.events == nil {
-		<-ctx.Done()
 		return nil
 	}
 
