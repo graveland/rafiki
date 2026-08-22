@@ -2945,6 +2945,12 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 	if req.MCPConfig != "" {
 		argv = append(argv, "--mcp-config", req.MCPConfig)
 	}
+	if len(req.MCPServers) > 0 {
+		argv = append(argv, "--mcp-servers", strings.Join(req.MCPServers, ","))
+	}
+	if req.NoMCP {
+		argv = append(argv, "--no-mcp")
+	}
 	if req.RecordRequests {
 		argv = append(argv, "--record-requests")
 	}

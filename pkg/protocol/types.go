@@ -229,7 +229,13 @@ type SpawnRequest struct {
 	// appended after the configured and project dirs (highest precedence).
 	SkillsDirs []string `json:"skillsDirs,omitempty"`
 	// MCPConfig overrides the .mcp.json path for an agent-kind child.
-	MCPConfig         string   `json:"mcpConfig,omitempty"`
+	MCPConfig string `json:"mcpConfig,omitempty"`
+	// MCPServers is a comma-separated allowlist of MCPConfig's mcpServers
+	// keys to connect; empty means all. NoMCP disables MCP entirely, even
+	// when MCPConfig is set. Both are agent-kind (fundi) only, same as
+	// MCPConfig itself.
+	MCPServers        []string `json:"mcpServers,omitempty"`
+	NoMCP             bool     `json:"noMcp,omitempty"`
 	PromptTemplates   []string `json:"promptTemplates,omitempty"`
 	NoPromptTemplates bool     `json:"noPromptTemplates,omitempty"`
 	Themes            []string `json:"themes,omitempty"`
