@@ -42,6 +42,10 @@ type RuntimeOptions struct {
 	Skills               string   // comma-separated allowlist; empty means all
 	NoSkills             bool
 	NoContextFiles       bool
+	// ContextFilesBudget is the approximate token budget context files may
+	// occupy; 0 means no cap. Set from a model's declared alias — see
+	// cmd/rafikid's resolveModelDefaults — never computed here.
+	ContextFilesBudget int
 	// ProjectContext, when non-nil, is the project tier of instruction files
 	// (CLAUDE.md / AGENTS.md at the git root and at cwd, includes expanded)
 	// already fetched from the machine holding the workspace. nil means "no
@@ -167,7 +171,7 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 			empty := ""
 			projectTier = &empty
 		}
-		contextFiles, err = loadContextFiles(opts.Cwd, projectTier)
+		contextFiles, err = loadContextFiles(opts.Cwd, projectTier, opts.ContextFilesBudget)
 		if err != nil {
 			return "", nil, fmt.Errorf("runtime: load context files: %w", err)
 		}

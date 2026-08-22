@@ -281,3 +281,32 @@ func TestLoadContextFilesLogsNonNotExistIncludeStatError(t *testing.T) {
 		t.Fatalf("expected the stat error to be logged, got %q", logged.String())
 	}
 }
+
+func TestTruncateContextFiles_NoCapReturnsUnchanged(t *testing.T) {
+	content := strings.Repeat("x", 10000)
+	if got := truncateContextFiles(content, 0); got != content {
+		t.Error("budgetTokens=0 must return content unchanged")
+	}
+}
+
+func TestTruncateContextFiles_UnderBudgetReturnsUnchanged(t *testing.T) {
+	content := "short content\nsecond line"
+	if got := truncateContextFiles(content, 1000); got != content {
+		t.Errorf("content under budget must return unchanged, got %q", got)
+	}
+}
+
+func TestTruncateContextFiles_OverBudgetCutsAtNewlineAndMarks(t *testing.T) {
+	// estimatedCharsPerToken=4, so budget=10 tokens => 40 byte budget.
+	content := "0123456789\n0123456789\n0123456789\n0123456789\n"
+	got := truncateContextFiles(content, 10)
+	if strings.Contains(got, "0123456789\n0123456789\n0123456789\n0123456789") {
+		t.Errorf("expected truncation, but full content survived: %q", got)
+	}
+	if !strings.HasPrefix(got, "0123456789\n0123456789\n0123456789") {
+		t.Errorf("expected the kept prefix to end at a newline boundary within budget, got %q", got)
+	}
+	if !strings.Contains(got, "truncated to fit this model's context budget") {
+		t.Errorf("expected a truncation marker, got %q", got)
+	}
+}
