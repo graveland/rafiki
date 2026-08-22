@@ -6,6 +6,8 @@
 /pi-controller
 /pic
 /bin/
+/bin/protoc-gen-go
+/bin/protoc-gen-connect-go
 
 # Isolated worktrees for multi-task feature work
 /.worktrees/

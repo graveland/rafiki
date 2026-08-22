@@ -316,6 +316,26 @@ bootstrap: ## Fresh-clone setup — init submodules, build and install everythin
 
 ##@ Quality
 
+PROTOC ?= protoc
+
+bin/protoc-gen-go:
+	go build -o bin/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
+
+bin/protoc-gen-connect-go:
+	go build -o bin/protoc-gen-connect-go connectrpc.com/connect/cmd/protoc-gen-connect-go
+
+proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from proto/ into pkg/gen/.
+	rm -rf pkg/gen
+	mkdir -p pkg/gen
+	$(PROTOC) \
+		--plugin=protoc-gen-go=bin/protoc-gen-go \
+		--plugin=protoc-gen-connect-go=bin/protoc-gen-connect-go \
+		--proto_path=proto \
+		--go_out=pkg/gen --go_opt=module=go.graveland.dev/rafiki/pkg/gen \
+		--connect-go_out=pkg/gen --connect-go_opt=module=go.graveland.dev/rafiki/pkg/gen \
+		proto/rafiki/v1/*.proto
+	$(MAKE) fmt
+
 .PHONY: check
 check: vet lint test ## Run vet + lint + tests (the full local gate).
 
@@ -348,17 +368,6 @@ test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 .PHONY: test-nodb
 test-nodb: ## Run only the DSN-free tests (explicitly skips DB-backed ones).
 	RAFIKI_TEST_DSN= go test -race -count=1 ./...
-
-.PHONY: proto
-proto: ## Generate protobuf Go code from proto/ definitions.
-	protoc \
-		--proto_path=proto/rafiki/executor/v1 \
-		--go_out=pkg/executorpb \
-		--go_opt=paths=source_relative \
-		--connect-go_out=pkg/executorpb \
-		--connect-go_opt=paths=source_relative \
-		proto/rafiki/executor/v1/executor.proto
-	gofmt -w pkg/executorpb
 
 .PHONY: fmt
 fmt: ## gofmt all Go sources.
