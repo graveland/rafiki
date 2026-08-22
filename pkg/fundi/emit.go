@@ -12,6 +12,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
@@ -35,6 +36,7 @@ type Emitter struct {
 
 	messages []json.RawMessage
 	usage    child.PiUsage
+	native   NativeSink
 
 	// started guards StreamStart so it is idempotent within a turn. The
 	// caller invokes StreamStart on the first CONTENT event of a streamed
@@ -75,6 +77,7 @@ func (e *Emitter) UserMessage(text string) {
 	e.fe.Emit(child.PiUserMessageStart(msg))
 	e.fe.Emit(child.PiUserMessageEnd(msg))
 	e.accumulate(msg)
+	e.publishNative(&rafikiv1.UserMessage{Content: nativeText(text)})
 }
 
 // AssistantTurn maps resp into a PiAssistantMessage and emits
