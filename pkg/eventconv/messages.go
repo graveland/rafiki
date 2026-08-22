@@ -24,7 +24,11 @@ func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event 
 		blocks := BlocksFromParam(m.Param)
 		if m.Param.Role == "assistant" {
 			ev.Payload = &rafikiv1.Event_AssistantMessage{
-				AssistantMessage: &rafikiv1.AssistantMessage{Content: blocks},
+				AssistantMessage: &rafikiv1.AssistantMessage{
+					Content:       blocks,
+					StopReason:    StopReasonFromString(m.StopReason),
+					RawStopReason: m.StopReason,
+				},
 			}
 		} else {
 			ev.Payload = &rafikiv1.Event_UserMessage{
