@@ -725,3 +725,154 @@ func TestDarwinRestart_PollCapExpiryStillBootstraps(t *testing.T) {
 		t.Fatal("Restart never called launchctl bootstrap after the poll cap expired")
 	}
 }
+
+// --- Uninstall tests ---
+
+// Happy path: bootout succeeds, the poll confirms the job gone, and only
+// then does Uninstall remove the plist and report success.
+func TestDarwinUninstall_ConfirmsUnloadBeforeRemovingPlist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+
+	var printCalls int
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "", nil // succeeds: the job was loaded
+		case "print":
+			printCalls++
+			// Still loaded for the first two polls, gone on the third.
+			if printCalls <= 2 {
+				return "", nil
+			}
+			return "Could not find service", errors.New("exit status 3")
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	if err := b.Uninstall(); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if printCalls < 3 {
+		t.Errorf("expected Uninstall to poll until confirmed gone, got only %d print calls", printCalls)
+	}
+	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+		t.Errorf("expected the plist to be removed once unload was confirmed, stat err = %v", err)
+	}
+}
+
+// The fast path: bootout fails because the job was never loaded in the first
+// place. Uninstall must not poll at all, and must still remove the plist (a
+// stray plist with no loaded job is exactly the case Uninstall exists to clean
+// up).
+func TestDarwinUninstall_NeverLoadedSkipsPollAndRemovesPlist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origSleep := sleepFn
+	var sleeps int
+	sleepFn = func(time.Duration) { sleeps++ }
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		if args[0] == "bootout" {
+			return "Could not find service", errors.New("exit status 3")
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	if err := b.Uninstall(); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if sleeps != 0 {
+		t.Errorf("expected the never-loaded fast path to skip polling entirely, got %d sleeps", sleeps)
+	}
+	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+		t.Errorf("expected the plist to be removed, stat err = %v", err)
+	}
+}
+
+// The regression this task exists to fix: bootout reports success (a job WAS
+// loaded) but launchctl print never reports it gone, even after the legacy
+// unload fallback. Uninstall must return a real error instead of silently
+// reporting success while the process may still be running -- and it must
+// NOT delete the plist in that case, since a stray process with no plist at
+// all is strictly worse than one still nominally launchd-managed.
+func TestDarwinUninstall_UnconfirmedUnloadIsAnErrorAndKeepsThePlist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "bootout":
+			return "", nil // succeeds: a job WAS loaded
+		case "unload":
+			return "", nil // legacy fallback "succeeds" too, but print still lies below
+		case "print":
+			return "", nil // never reports gone, no matter how long we wait
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	err := b.Uninstall()
+	if err == nil {
+		t.Fatal("Uninstall: got nil error, want a real error -- unload was never confirmed")
+	}
+	if _, statErr := os.Stat(plistPath); statErr != nil {
+		t.Errorf("expected the plist to survive an unconfirmed uninstall, stat err = %v", statErr)
+	}
+}

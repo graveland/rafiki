@@ -286,16 +286,37 @@ func isServiceNotFoundOutput(out string) bool {
 		strings.Contains(outLower, "domain does not contain")
 }
 
+// Uninstall stops the service and removes its plist, but only once the job
+// is CONFIRMED gone — bootout returning is not the same as the process having
+// exited (it may be mid-shutdown, draining connections), and deleting the
+// plist while the process still runs orphans it entirely: launchd no longer
+// tracks it, so it survives with no way to manage it short of finding the PID
+// by hand. This is what made `rafiki executor service stop` followed by
+// `uninstall` both report success while the executor process outlived both by
+// several minutes. If unload can't be confirmed within the poll cap, Uninstall
+// returns an error and deliberately leaves the plist in place — a stray
+// process with no plist at all is strictly worse than one still nominally
+// launchd-managed.
 func (b *darwinBackend) Uninstall() error {
 	plistPath, err := b.plistPath()
 	if err != nil {
 		return err
 	}
 
-	// Modern bootout; fall back to legacy unload. Errors here are best-effort.
-	_, err = runOSCmd("launchctl", "bootout", b.serviceTarget())
-	if err != nil {
+	bootoutOut, bootoutErr := runOSCmd("launchctl", "bootout", b.serviceTarget())
+	unloadConfirmed := bootoutErr != nil && isServiceNotFoundOutput(bootoutOut) // fast path: never loaded
+	if !unloadConfirmed {
+		unloadConfirmed = b.waitForUnload()
+	}
+	if !unloadConfirmed {
+		// Legacy fallback, then give it one more chance to confirm — bootout
+		// can fail on older macOS while unload still works.
 		_, _ = runOSCmd("launchctl", "unload", plistPath)
+		unloadConfirmed = b.waitForUnload()
+	}
+	if !unloadConfirmed {
+		return fmt.Errorf("uninstall: could not confirm %s unloaded within %s — the process may still be running; leaving its plist in place so it stays launchd-managed. Check with `rafiki executor service status` (or `ps`) and retry",
+			b.serviceTarget(), installPollCap)
 	}
 
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
