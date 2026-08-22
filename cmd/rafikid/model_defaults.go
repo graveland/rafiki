@@ -85,3 +85,21 @@ func resolveModelDefaults(set *providers.Set, model string) (modelDefaults, bool
 		MCPServers:         alias.MCPServers,
 	}, true
 }
+
+// resolveAllowlistOption applies a model-declared tri-state default
+// (nil=no override, ""=none, "*"=all, "a,b,c"=allowlist) when the caller
+// supplied neither an explicit allowlist nor the "disable entirely" flag. An
+// explicit caller value — either one — always wins over the model's default.
+// Shared by Skills/NoSkills and MCPServers/NoMCP, which resolve identically.
+func resolveAllowlistOption(callerValue string, callerOff bool, modelDefault *string) (string, bool) {
+	if callerOff || callerValue != "" {
+		return callerValue, callerOff
+	}
+	if modelDefault == nil {
+		return callerValue, callerOff
+	}
+	if *modelDefault == "" {
+		return "", true
+	}
+	return *modelDefault, false
+}
