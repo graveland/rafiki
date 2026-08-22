@@ -390,6 +390,39 @@ The relay is **not** subject to executor confinement — that machinery exists
 because tools run code on a machine, and the relay runs none. See the design
 doc's "Non-goals" section for the reasoning.
 
+### Model aliases and declared context windows
+
+A local model's real id is often long, and its context window is never in the
+OpenRouter catalog — that catalog only knows OpenRouter-hosted models, so a
+model like vmlx's has no source `CLAUDE_CODE_AUTO_COMPACT_WINDOW` can be
+computed from, and Claude Code falls back to assuming 200K for it. Left alone,
+a long session against a small-context local model keeps growing past what
+the model can actually accept and the request fails outside rafiki with an
+opaque `prompt_too_long` from the inference server itself.
+
+A provider can declare short aliases for its models, each optionally carrying
+its real context window:
+
+```toml
+[providers.vmlx]
+kind     = "anthropic"
+base_url = "http://localhost:8005"
+
+[providers.vmlx.models.qwen]
+id             = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
+context_window = 16384
+```
+
+`rafiki claude --model vmlx/qwen` now sends the real id upstream (the
+substitution happens once, in `providers.Set.Split`, so every caller that
+resolves a model id gets it for free) and pins
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` to 16384 instead of leaving Claude Code's
+200K assumption in place. `context_window` is optional — an alias declared
+purely for the shorthand behaves exactly as before context-window-wise. The
+alias also shows up in `rafiki models list` and `--model` tab completion
+(`source: alias`), independent of whether the server is currently reachable —
+declaring it is enough, no live probe involved.
+
 ### Container executors
 
 An executor serves the filesystem it can see. Whether that view is a container

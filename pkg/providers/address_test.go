@@ -23,6 +23,10 @@ api_key_env = "OPENROUTER_API_KEY"
 [providers.vmlx]
 kind = "anthropic"
 base_url = "http://localhost:8005"
+
+[providers.vmlx.models.qwen]
+id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
+context_window = 16384
 `
 
 func TestSplit(t *testing.T) {
@@ -42,6 +46,8 @@ func TestSplit(t *testing.T) {
 		{"vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit", "vmlx", "models/Qwen3.8-27B-Abliterated-MLX-4bit"},
 		// A bare id resolves against default_provider.
 		{"claude-sonnet-5", "anthropic", "claude-sonnet-5"},
+		// An alias substitutes its declared real id.
+		{"vmlx/qwen", "vmlx", "models/Qwen3.8-27B-Abliterated-MLX-4bit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

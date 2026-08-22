@@ -24,6 +24,10 @@ api_key_env = "OPENROUTER_API_KEY"
 [providers.vmlx]
 kind = "anthropic"
 base_url = "http://localhost:8005"
+
+[providers.vmlx.models.qwen]
+id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
+context_window = 16384
 `
 
 func TestParseGood(t *testing.T) {
@@ -55,6 +59,16 @@ func TestParseGood(t *testing.T) {
 	}
 	if got := set.Providers["anthropic"].Fallback; len(got) != 1 || got[0] != "openrouter" {
 		t.Errorf("anthropic.Fallback = %v, want [openrouter]", got)
+	}
+	alias, ok := p.Models["qwen"]
+	if !ok {
+		t.Fatal("vmlx.models.qwen not found")
+	}
+	if alias.ID != "models/Qwen3.8-27B-Abliterated-MLX-4bit" {
+		t.Errorf("alias.ID = %q", alias.ID)
+	}
+	if alias.ContextWindow != 16384 {
+		t.Errorf("alias.ContextWindow = %d, want 16384", alias.ContextWindow)
 	}
 }
 
@@ -108,6 +122,11 @@ func TestParseRejects(t *testing.T) {
 			name: "unknown top-level key",
 			toml: "default_provider = \"x\"\nnonsense = 1\n[providers.x]\nkind = \"anthropic\"\n",
 			want: "unknown key",
+		},
+		{
+			name: "model alias with no id",
+			toml: "default_provider = \"x\"\n[providers.x]\nkind = \"anthropic\"\n[providers.x.models.qwen]\ncontext_window = 16384\n",
+			want: "models.qwen: id is required",
 		},
 	}
 	for _, tc := range cases {
