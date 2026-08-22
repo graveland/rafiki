@@ -52,13 +52,27 @@ type ViaExecutor struct {
 // Provider is one named endpoint.
 type Provider struct {
 	// Name is the map key, stamped in by Parse. It is not read from the file.
-	Name        string         `toml:"-"`
-	Kind        Kind           `toml:"kind"`
-	BaseURL     string         `toml:"base_url"`
-	APIKeyEnv   string         `toml:"api_key_env"`
-	Fallback    []string       `toml:"fallback"`
-	Extras      map[string]any `toml:"extras"`
-	ViaExecutor *ViaExecutor   `toml:"via_executor"`
+	Name        string                `toml:"-"`
+	Kind        Kind                  `toml:"kind"`
+	BaseURL     string                `toml:"base_url"`
+	APIKeyEnv   string                `toml:"api_key_env"`
+	Fallback    []string              `toml:"fallback"`
+	Extras      map[string]any        `toml:"extras"`
+	ViaExecutor *ViaExecutor          `toml:"via_executor"`
+	Models      map[string]ModelAlias `toml:"models"`
+}
+
+// ModelAlias names a short local id for a provider's real model id, and
+// optionally declares what the catalog can't know about a model this
+// provider isn't in — its context window. Split substitutes ID for the
+// alias key before a request is sent, so "vmlx/qwen" and
+// "vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit" address the same model; only
+// the alias key carries the declared metadata, since that's what makes the
+// alias worth using rather than typing the real id.
+type ModelAlias struct {
+	ID                  string `toml:"id"`
+	ContextWindow       int    `toml:"context_window"`
+	MaxCompletionTokens int    `toml:"max_completion_tokens"`
 }
 
 // Keyless reports whether this provider sends no credential at all.
@@ -214,6 +228,16 @@ func (s *Set) Validate() error {
 			}
 			if p.BaseURL == "" {
 				return fmt.Errorf("providers: provider %q: via_executor requires base_url (it is the request's target URL either way)", name)
+			}
+		}
+		aliases := make([]string, 0, len(p.Models))
+		for alias := range p.Models {
+			aliases = append(aliases, alias)
+		}
+		sort.Strings(aliases)
+		for _, alias := range aliases {
+			if p.Models[alias].ID == "" {
+				return fmt.Errorf("providers: provider %q: models.%s: id is required", name, alias)
 			}
 		}
 	}

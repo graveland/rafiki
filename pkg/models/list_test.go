@@ -250,6 +250,91 @@ func TestLoadUserConfig_SkipsEmptyID(t *testing.T) {
 	}
 }
 
+// ─── loadAliases ───────────────────────────────────────────────────────────────
+
+func TestLoadAliases_Fields(t *testing.T) {
+	set, err := providers.Parse([]byte(`
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[providers.vmlx]
+kind = "anthropic"
+base_url = "http://localhost:8005"
+
+[providers.vmlx.models.qwen]
+id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
+context_window = 16384
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	got := loadAliases(set)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 alias, got %d: %+v", len(got), got)
+	}
+	m := got[0]
+	if m.ID != "vmlx/qwen" {
+		t.Errorf("ID = %q, want vmlx/qwen", m.ID)
+	}
+	if m.Provider != "vmlx" {
+		t.Errorf("Provider = %q", m.Provider)
+	}
+	if m.Model != "models/Qwen3.8-27B-Abliterated-MLX-4bit" {
+		t.Errorf("Model = %q, want the alias's real id", m.Model)
+	}
+	if m.Source != SourceAlias {
+		t.Errorf("Source = %q, want alias", m.Source)
+	}
+}
+
+func TestLoadAliases_NoAliasesDeclared(t *testing.T) {
+	got := loadAliases(providers.Default())
+	if got != nil {
+		t.Errorf("expected nil with no aliases declared, got %v", got)
+	}
+}
+
+func TestLoadAliases_NilSet(t *testing.T) {
+	if got := loadAliases(nil); got != nil {
+		t.Errorf("expected nil for a nil set, got %v", got)
+	}
+}
+
+// A declared alias must reach both ctrl_list_models and --model completion —
+// List/ListSources is the single function that serves both. base_url is
+// deliberately omitted so loadLocal skips this provider entirely (it only
+// probes providers with an explicit base_url); the alias must still surface
+// without a reachable server, since it's config, not a live probe.
+func TestList_IncludesAliases(t *testing.T) {
+	set, err := providers.Parse([]byte(`
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+
+[providers.vmlx]
+kind = "anthropic"
+
+[providers.vmlx.models.qwen]
+id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
+context_window = 16384
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	got := List(context.Background(), set)
+	for _, m := range got {
+		if m.ID == "vmlx/qwen" && m.Source == SourceAlias {
+			return
+		}
+	}
+	t.Errorf("vmlx/qwen (source=alias) not found in List() output: %+v", got)
+}
+
 // ─── loadLocal ─────────────────────────────────────────────────────────────────
 
 func TestLoadLocal_Success(t *testing.T) {

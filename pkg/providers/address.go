@@ -27,6 +27,11 @@ func SplitRaw(model string) (name, modelID string) {
 // explicitly instead of the code inferring one from the id's shape, so
 // "deepseek/deepseek-chat" (an OpenRouter id before this change) must fail
 // loudly and be respelled "openrouter/deepseek/deepseek-chat".
+//
+// If the provider declares a models.<alias> table matching modelID, the
+// alias's real id is substituted before returning — every caller that builds
+// a request from the returned model id (pkg/llm's prepareSend chief among
+// them) gets the translation for free, with nothing alias-aware downstream.
 func (s *Set) Split(model string) (Provider, string, error) {
 	if model == "" {
 		return Provider{}, "", fmt.Errorf("providers: no model specified")
@@ -41,6 +46,9 @@ func (s *Set) Split(model string) (Provider, string, error) {
 	p, ok := s.Providers[name]
 	if !ok {
 		return Provider{}, "", fmt.Errorf("providers: model %q names unknown provider %q (configured: %s)", model, name, strings.Join(s.Names(), ", "))
+	}
+	if alias, ok := p.Models[modelID]; ok {
+		modelID = alias.ID
 	}
 	return p, modelID, nil
 }

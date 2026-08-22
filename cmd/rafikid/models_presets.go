@@ -10,26 +10,68 @@ import (
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
-// ContextWindow resolves model against the daemon's shared model catalog.
-// ok is false when the daemon has no catalog (c.catalog is nil — the proxy
-// face failed to start, or a build path that never wired one) or the model
-// isn't in the current snapshot.
+// ContextWindow resolves model against the provider registry's declared model
+// aliases first, then the daemon's shared OpenRouter catalog. The registry
+// takes priority because the catalog can never know a local/custom provider's
+// model — it only ever hears about OpenRouter ids. ok is false when neither
+// source knows model.
 func (c *Controller) ContextWindow(model string) (contextLen, maxCompletion int, ok bool) {
+	if ctxLen, maxComp, _, aliasOK := c.aliasContextWindow(model); aliasOK {
+		return ctxLen, maxComp, true
+	}
 	if c.catalog == nil {
 		return 0, 0, false
 	}
 	return c.catalog.ContextWindow(model)
 }
 
-// ModelInfo answers ctrl_model_info from the daemon's already-warm catalog.
-// Never returns an error: an unknown model and an unconfigured catalog are
-// both Known=false, which is what every caller degrades on.
+// aliasContextWindow looks up model against the provider registry's declared
+// models.<alias> table. ok is true only when the provider declares an alias
+// matching model's local id AND that alias declares a context window — an
+// alias declared purely for its shorthand (no context_window) is not "known"
+// context-wise, same as no alias at all, and falls through to the catalog.
+func (c *Controller) aliasContextWindow(model string) (contextLen, maxCompletion int, resolvedID string, ok bool) {
+	set := providersOrDefault(c.providers)
+	if set == nil {
+		return 0, 0, "", false
+	}
+	name, localID := providers.SplitRaw(model)
+	if name == "" {
+		name = set.DefaultProvider
+	}
+	p, found := set.Get(name)
+	if !found {
+		return 0, 0, "", false
+	}
+	alias, found := p.Models[localID]
+	if !found || alias.ContextWindow <= 0 {
+		return 0, 0, "", false
+	}
+	return alias.ContextWindow, alias.MaxCompletionTokens, name + "/" + alias.ID, true
+}
+
+// ModelInfo answers ctrl_model_info from the provider registry plus the
+// daemon's already-warm catalog. Never returns an error: an unknown model and
+// an unconfigured catalog are both Known=false, which is what every caller
+// degrades on.
 func (c *Controller) ModelInfo(model string) protocol.ModelInfoResponseData {
 	out := protocol.ModelInfoResponseData{Model: model}
-	ctxLen, maxComp, ok := c.ContextWindow(model)
+	if ctxLen, maxComp, resolvedID, ok := c.aliasContextWindow(model); ok {
+		out.Known = true
+		out.ContextWindow = ctxLen
+		out.MaxCompletionTokens = maxComp
+		out.AutoCompactWindow = routing.AutoCompactWindow(ctxLen, maxComp)
+		out.ResolvedID = resolvedID
+		return out
+	}
+	if c.catalog == nil {
+		return out
+	}
+	ctxLen, maxComp, ok := c.catalog.ContextWindow(model)
 	if !ok {
 		return out
 	}
@@ -37,10 +79,8 @@ func (c *Controller) ModelInfo(model string) protocol.ModelInfoResponseData {
 	out.ContextWindow = ctxLen
 	out.MaxCompletionTokens = maxComp
 	out.AutoCompactWindow = routing.AutoCompactWindow(ctxLen, maxComp)
-	if c.catalog != nil {
-		if id, ok := c.catalog.ResolveID(model); ok {
-			out.ResolvedID = id
-		}
+	if id, ok := c.catalog.ResolveID(model); ok {
+		out.ResolvedID = id
 	}
 	return out
 }

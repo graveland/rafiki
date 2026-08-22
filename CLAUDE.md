@@ -382,3 +382,17 @@
   `pkg/executors`, not `pkg/executorsdb`, because the executor links
   `pkg/execpool` and must not link pgx (`pkg/executor/no_postgres_test.go`). Never forward the store's error text to
   the peer: it has not proved who it is, and a pgx error carries the DSN.
+
+- **`ModelCatalog` (`pkg/routing/orcatalog.go`) only ever knows OpenRouter ids —
+  it has no source of truth for a local/custom provider's model at all.** A
+  provider can declare `[providers.<name>.models.<alias>]` (`providers.Provider.Models`)
+  to name a short alias for a real model id and, optionally, its
+  `context_window`/`max_completion_tokens` — the only way `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+  can ever be correct for such a model, since the catalog will never report one.
+  `Set.Split` substitutes the alias's real id transparently, so every sender
+  (`pkg/llm`'s `prepareSend`, `pkg/fundi/config.go`, `pkg/server/proxy.go`) gets
+  the translation for free. But `Controller.ContextWindow`/`ModelInfo`
+  (`cmd/rafikid/models_presets.go`) must look the alias up by the RAW,
+  pre-substitution local id (via `providers.SplitRaw`, not `Set.Split`) —
+  calling `Set.Split` first and then trying `p.Models[modelID]` finds nothing,
+  because by then `modelID` is already the resolved real id, not the alias key.
