@@ -143,7 +143,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
-	senders, err := providerSenders(ro.Providers, c.execPoolConn)
+	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
