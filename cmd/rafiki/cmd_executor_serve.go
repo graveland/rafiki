@@ -85,28 +85,22 @@ func newExecutorServeCmd() *cobra.Command {
 		Short: "Run an executor: serve filesystem and shell tools to a daemon",
 		Long: `Run an executor.
 
-Two transports, exactly one of which must be given:
+Two transports, exactly one of which is used:
 
   --connect         reverse-dial the daemon and serve HTTP/2 on the dialled
                     connection. Required when the daemon cannot reach this host,
-                    which is the usual case for a laptop behind NAT.
+                    which is the usual case for a laptop behind NAT. Defaults to
+                    the host:port derived from $RAFIKI_URL when neither flag is
+                    given.
   --connect-socket  reverse-dial a rafikid on this machine over its executor
                     unix socket, enrolling as a fully rowed pool member.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 
-			modes := 0
-			for _, set := range []bool{connectAddr != "", connectSocket != ""} {
-				if set {
-					modes++
-				}
-			}
-			if modes > 1 {
-				return fmt.Errorf("--connect and --connect-socket are mutually exclusive")
-			}
-			if modes == 0 {
-				return fmt.Errorf("one of --connect or --connect-socket is required")
+			resolvedConnect, resolvedSocket, err := resolveExecutorConnectFlags(connectAddr, connectSocket)
+			if err != nil {
+				return err
 			}
 
 			wd, err := resolveRoot(root)
@@ -133,15 +127,14 @@ Two transports, exactly one of which must be given:
 			defer func() { _ = srv.Close() }()
 			handler := executorHandler(srv)
 
-			if connectAddr != "" || connectSocket != "" {
-				return serveReverseDial(connectAddr, connectSocket, pinnedFingerprint, serverName,
-					enrollToken, credential, credentialFile, handler)
-			}
-			return fmt.Errorf("one of --connect or --connect-socket is required")
+			// resolveExecutorConnectFlags already guarantees exactly one of
+			// these is set, or returned an error above.
+			return serveReverseDial(resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
+				enrollToken, credential, credentialFile, handler)
 		},
 	}
 
-	cmd.Flags().StringVar(&connectAddr, "connect", "", "daemon executor endpoint to dial (host:port)")
+	cmd.Flags().StringVar(&connectAddr, "connect", "", "daemon executor endpoint to dial (host:port; default: derived from $RAFIKI_URL)")
 	cmd.Flags().StringVar(&connectSocket, "connect-socket", "",
 		"unix socket of a rafikid on this machine to reverse-dial (mutually exclusive with --connect)")
 	cmd.Flags().StringVar(&root, "root", "",

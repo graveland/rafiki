@@ -293,7 +293,7 @@ rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
 No certificate is involved: a single-machine install should not need one.
 
 **Flags:**
-- `--connect` — reverse-dial a daemon at host:port (for remote executors)
+- `--connect` — reverse-dial a daemon at host:port (for remote executors); defaults to the host:port derived from `$RAFIKI_URL` when neither this nor `--connect-socket` is given
 - `--connect-socket` — reverse-dial a rafikid on this machine over its executor unix socket
 - `--root` — working directory root (defaults to current directory)
 - `--concurrency` — maximum concurrent tool calls (default 6)
