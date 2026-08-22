@@ -64,15 +64,25 @@ type Provider struct {
 
 // ModelAlias names a short local id for a provider's real model id, and
 // optionally declares what the catalog can't know about a model this
-// provider isn't in — its context window. Split substitutes ID for the
-// alias key before a request is sent, so "vmlx/qwen" and
-// "vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit" address the same model; only
-// the alias key carries the declared metadata, since that's what makes the
-// alias worth using rather than typing the real id.
+// provider isn't in — its context window, how much of the prompt budget
+// context files may occupy, and which skills/MCP servers are even relevant
+// for it. Split substitutes ID for the alias key before a request is sent,
+// so "vmlx/qwen" and "vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit" address
+// the same model; only the alias key carries the declared metadata, since
+// that's what makes the alias worth using rather than typing the real id.
+//
+// Skills and MCPServers are *string, not string, because "key absent" (nil:
+// no override, today's unrestricted default applies) must be distinguishable
+// from "key present but empty" ("": none) — a plain string can't represent
+// that. Both share the same tri-state convention: nil=no override, ""=none,
+// "*"=explicitly all, "a,b,c"=allowlist.
 type ModelAlias struct {
-	ID                  string `toml:"id"`
-	ContextWindow       int    `toml:"context_window"`
-	MaxCompletionTokens int    `toml:"max_completion_tokens"`
+	ID                  string  `toml:"id"`
+	ContextWindow       int     `toml:"context_window"`
+	MaxCompletionTokens int     `toml:"max_completion_tokens"`
+	ContextFilesTokens  int     `toml:"context_files_tokens"`
+	Skills              *string `toml:"skills"`
+	MCPServers          *string `toml:"mcp_servers"`
 }
 
 // Keyless reports whether this provider sends no credential at all.
