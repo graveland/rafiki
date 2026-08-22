@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/executors"
 )
@@ -113,6 +114,28 @@ func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
 		if !strings.Contains(out, header) {
 			t.Errorf("missing header %q:\n%s", header, out)
 		}
+	}
+}
+
+// Connected is a live-pool view field distinct from Enabled/LastSeenAt — a
+// client wants to know how long the CURRENT connection has held, separate
+// from whether the row is enabled or when it was last seen at all.
+func TestRenderExecutorTableShowsConnectedSince(t *testing.T) {
+	connectedAt := time.Now().Add(-90 * time.Second)
+	execs := []executors.Executor{
+		{ID: fixtureTailA, Enabled: true, Connected: true, ConnectedAt: &connectedAt},
+		{ID: fixtureTailB, Enabled: true}, // not connected: ConnectedAt nil
+	}
+	var buf bytes.Buffer
+	if err := renderExecutorTable(&buf, execs, false); err != nil {
+		t.Fatalf("renderExecutorTable: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "CONNECTED") {
+		t.Errorf("output missing the CONNECTED column header:\n%s", out)
+	}
+	if !strings.Contains(out, "ago") {
+		t.Errorf("expected a relative connected-since time for the live executor:\n%s", out)
 	}
 }
 

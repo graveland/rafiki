@@ -208,6 +208,7 @@ const (
 	colStatus
 	colLabels
 	colAdmits
+	colConnected
 	colLastSeen
 )
 
@@ -253,18 +254,23 @@ func renderExecutorTable(w io.Writer, execs []executors.Executor, useColor bool)
 		if !ex.LastSeenAt.IsZero() {
 			lastSeen = humanize.Time(ex.LastSeenAt)
 		}
+		connectedSince := "-"
+		if ex.ConnectedAt != nil && !ex.ConnectedAt.IsZero() {
+			connectedSince = humanize.Time(*ex.ConnectedAt)
+		}
 		rows[i] = []string{
 			shortExecutorID(ex.ID),
 			defaultDash(ex.DisplayName),
 			executorStatus(ex),
 			executorFormatLabels(ex.Labels, 48),
 			defaultDash(ex.Admits),
+			connectedSince,
 			lastSeen,
 		}
 	}
 
 	t := table.New()
-	t.Headers("ID", "NAME", "STATUS", "LABELS", "ADMITS", "LAST SEEN")
+	t.Headers("ID", "NAME", "STATUS", "LABELS", "ADMITS", "CONNECTED", "LAST SEEN")
 	t.Rows(rows...)
 	t.StyleFunc(func(row, col int) lipgloss.Style {
 		// Padding is layout, not color: it applies whether or not styling

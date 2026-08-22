@@ -68,7 +68,12 @@ type liveConn struct {
 	// connection is refused: two different addresses for one credential is the
 	// shape of a credential on two machines.
 	remoteAddr string
-	done       chan struct{}
+	// connectedAt is when THIS connection joined the pool — not the
+	// executor's row-level EnrolledAt/LastSeenAt, which survive reconnects.
+	// A client watching `rafiki executor list` wants to know how long the
+	// CURRENT connection has held, distinct from when it was last seen at all.
+	connectedAt time.Time
+	done        chan struct{}
 	// closeOnce guards done. Teardown arrives from two independent
 	// directions — a health failure on this connection, and a reconnect that
 	// displaces it — and closing a channel twice panics the daemon rather
@@ -305,11 +310,12 @@ func (p *Pool) handleConn(conn net.Conn) {
 	p.reattach(e.ID)
 
 	lc := &liveConn{
-		executor:   e,
-		describe:   desc.Msg,
-		client:     &executorClient{inner: cl},
-		remoteAddr: remote,
-		done:       make(chan struct{}),
+		executor:    e,
+		describe:    desc.Msg,
+		client:      &executorClient{inner: cl},
+		remoteAddr:  remote,
+		connectedAt: time.Now(),
+		done:        make(chan struct{}),
 	}
 
 	p.installLive(e.ID, lc)
@@ -334,9 +340,10 @@ func (p *Pool) Live() []LiveExecutor {
 	var out []LiveExecutor
 	for _, lc := range p.live {
 		out = append(out, LiveExecutor{
-			Executor: lc.executor,
-			Describe: lc.describe,
-			Proxies:  lc.describe.GetProxies(),
+			Executor:    lc.executor,
+			Describe:    lc.describe,
+			Proxies:     lc.describe.GetProxies(),
+			ConnectedAt: lc.connectedAt,
 		})
 	}
 	return out
@@ -352,6 +359,9 @@ type LiveExecutor struct {
 	// and it is enforced on the executor's own side (pkg/executor's allowlist),
 	// not trusted on this one.
 	Proxies []string
+	// ConnectedAt is when this specific connection joined the pool — distinct
+	// from the executor row's LastSeenAt, which a reconnect does not reset.
+	ConnectedAt time.Time
 }
 
 // ExecutorsWithProxy returns the IDs of live executors that advertise
