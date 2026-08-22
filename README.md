@@ -432,9 +432,9 @@ inventory — not conversation growth:
 [providers.vmlx.models.qwen]
 id                   = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
 context_window       = 61440
-context_files_tokens = 12288           # optional; overrides the auto formula (20% of context_window, clamped to [1024, 30000])
-skills                = ""              # "" = no skills; "*" or omitted = all; "a,b,c" = only those
-mcp_servers           = "codescan"      # same tri-state convention
+context_files_tokens = 12288          # optional; overrides the auto formula (20% of context_window, clamped to [1024, 30000])
+skills               = ""             # "" = no skills; "*" or omitted = all; "a,b,c" = only those
+mcp_servers          = "codescan"     # same tri-state convention
 ```
 
 `context_files_tokens` bounds how much of `CLAUDE.md`/`AGENTS.md` gets
@@ -443,6 +443,12 @@ budget, it's truncated at the last newline boundary with a marker naming how
 much was dropped, never silently. `skills`/`mcp_servers` control which
 skills and MCP servers this model's agent even sees declared as tools at
 all, since tool schemas are as much of a fixed cost as context files.
+
+These three apply to rafiki's own agent children (`rafikid fundi` /
+`--kind fundi`), which build their own system prompt and tool inventory — a
+`rafiki claude` child assembles its own context files, skills and MCP servers
+inside the Claude Code binary, and only `context_window` reaches it (as
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, above).
 
 All three are optional and only take effect for a model reached through its
 declared alias (e.g. `vmlx/qwen`, not the raw

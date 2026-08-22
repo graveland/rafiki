@@ -346,7 +346,7 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   "noSkills":            false,
   "skillsDirs":          [],               // --skills-dir <dir> per entry; kind=fundi only
   "mcpConfig":           null,             // --mcp-config <path>; kind=fundi only
-  "mcpServers":          [],               // --mcp-servers <name> per entry; kind=fundi only
+  "mcpServers":          [],               // --mcp-servers <comma-joined>; kind=fundi only
   "noMcp":               false,            // --no-mcp; kind=fundi only
   "promptTemplates":     [],               // --prompt-template <path>
   "noPromptTemplates":   false,
