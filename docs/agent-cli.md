@@ -291,6 +291,8 @@ corresponding `RAFIKI_*` env var default; an explicit flag always wins.
 | `--skills-dir` | *(repeatable)* | additional skills directories |
 | `--skills` | — | comma-separated skill allowlist |
 | `--mcp-config` | `$RAFIKI_MCP_CONFIG` | path to .mcp.json |
+| `--mcp-servers` | — | comma-separated allowlist of .mcp.json server names to connect |
+| `--no-mcp` | — | disable MCP entirely, even when --mcp-config is set |
 | `--lsp-config` | `$RAFIKI_LSP_CONFIG` | path to lsp.json (language server config). When absent, scans PATH for well-known LSP servers (gopls, rust-analyzer, …) automatically. |
 | `--no-lsp` | `$RAFIKI_LSP_DISABLE` | disable LSP entirely, including auto-detection |
 | `--spill-dir` | *(derived)* | directory for clipped tool output |
