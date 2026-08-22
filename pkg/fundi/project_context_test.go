@@ -15,7 +15,7 @@ func TestLoadContextFilesProjectOverrideWins(t *testing.T) {
 	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "DAEMON_CWD_MARKER")
 
 	override := "EXECUTOR_MARKER"
-	got, err := loadContextFiles(cwd, &override)
+	got, err := loadContextFiles(cwd, &override, 0)
 	if err != nil {
 		t.Fatalf("loadContextFiles: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestLoadContextFilesEmptyProjectOverrideIsNotFallback(t *testing.T) {
 	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "DAEMON_CWD_MARKER")
 
 	empty := ""
-	got, err := loadContextFiles(cwd, &empty)
+	got, err := loadContextFiles(cwd, &empty, 0)
 	if err != nil {
 		t.Fatalf("loadContextFiles: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestLoadContextFilesNilOverrideReadsCwd(t *testing.T) {
 	cwd := t.TempDir()
 	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "CWD_MARKER")
 
-	got, err := loadContextFiles(cwd, nil)
+	got, err := loadContextFiles(cwd, nil, 0)
 	if err != nil {
 		t.Fatalf("loadContextFiles: %v", err)
 	}

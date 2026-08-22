@@ -377,3 +377,44 @@ func TestBuildRuntimeAlwaysSuppliesATaskStore(t *testing.T) {
 	}
 	// Engine constructed without panic — the task store is non-nil.
 }
+
+// TestResolveContentTruncatesContextFilesToBudget proves resolveContent
+// (and therefore BuildRuntime) applies opts.ContextFilesBudget to the
+// combined context-files content, the same way the earlier
+// TestResolveContentUsesProjectContextOverride proves the override source.
+func TestResolveContentTruncatesContextFilesToBudget(t *testing.T) {
+	override := strings.Repeat("A", 10000)
+	got, _, err := resolveContent(RuntimeOptions{
+		Cwd:                t.TempDir(),
+		NoSkills:           true,
+		ProjectContext:     &override,
+		ContextFilesBudget: 10, // 40 bytes at estimatedCharsPerToken=4
+	})
+	if err != nil {
+		t.Fatalf("resolveContent: %v", err)
+	}
+	if len(got) >= len(override) {
+		t.Errorf("expected truncated content shorter than the 10000-byte input, got %d bytes", len(got))
+	}
+	if !strings.Contains(got, "truncated to fit this model's context budget") {
+		t.Errorf("expected a truncation marker, got %q", got)
+	}
+}
+
+// TestResolveContentZeroBudgetIsUnlimited confirms the default
+// (ContextFilesBudget unset, the zero value) behaves exactly as before this
+// task — no truncation at all.
+func TestResolveContentZeroBudgetIsUnlimited(t *testing.T) {
+	override := strings.Repeat("A", 10000)
+	got, _, err := resolveContent(RuntimeOptions{
+		Cwd:            t.TempDir(),
+		NoSkills:       true,
+		ProjectContext: &override,
+	})
+	if err != nil {
+		t.Fatalf("resolveContent: %v", err)
+	}
+	if got != override {
+		t.Errorf("expected content unchanged with no budget set, got %d bytes (want %d)", len(got), len(override))
+	}
+}
