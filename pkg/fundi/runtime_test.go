@@ -128,6 +128,33 @@ func TestResolveContentNilProjectContextSkipsLocalRead(t *testing.T) {
 	}
 }
 
+// TestResolveContentSkillsStarMeansAll checks that Skills: "*" is treated as
+// an explicit "all", not a literal filter name that matches nothing.
+func TestResolveContentSkillsStarMeansAll(t *testing.T) {
+	skillsDir := t.TempDir()
+	skillDir := filepath.Join(skillsDir, "example")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillMD := "---\nname: example\ndescription: an example skill\n---\nbody\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, discovered, err := resolveContent(RuntimeOptions{
+		Cwd:            t.TempDir(),
+		NoContextFiles: true,
+		SkillsDirs:     []string{skillsDir},
+		Skills:         "*",
+	})
+	if err != nil {
+		t.Fatalf("resolveContent: %v", err)
+	}
+	if len(discovered) != 1 {
+		t.Fatalf("Skills=\"*\" must discover every skill (want 1, got %d): %+v", len(discovered), discovered)
+	}
+}
+
 // TestBuildRuntimeRejectsRelativeCwd guards the same failure from the other
 // side: a relative cwd would resolve against the daemon's directory.
 func TestBuildRuntimeRejectsRelativeCwd(t *testing.T) {
