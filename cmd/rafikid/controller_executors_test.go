@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -203,21 +204,30 @@ func TestExecutorListMarksConnectedFromTheLivePool(t *testing.T) {
 	s := newFakeExecStore()
 	s.execs["exec-live"] = executors.Executor{ID: "exec-live", Enabled: true}
 	s.execs["exec-off"] = executors.Executor{ID: "exec-off", Enabled: true}
-	c := &Controller{execStore: s, execPool: &fakePool{live: []execpool.LiveExecutor{ex("exec-live", nil, "")}}}
+	connectedAt := time.Now().Add(-90 * time.Second)
+	live := ex("exec-live", nil, "")
+	live.ConnectedAt = connectedAt
+	c := &Controller{execStore: s, execPool: &fakePool{live: []execpool.LiveExecutor{live}}}
 
 	execs, err := c.ExecutorList(protocol.ExecutorListRequest{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	connected := map[string]bool{}
+	byID := map[string]executors.Executor{}
 	for _, e := range execs {
-		connected[e.ID] = e.Connected
+		byID[e.ID] = e
 	}
-	if !connected["exec-live"] {
+	if !byID["exec-live"].Connected {
 		t.Error("exec-live not marked connected though the pool has it live")
 	}
-	if connected["exec-off"] {
+	if got := byID["exec-live"].ConnectedAt; got == nil || !got.Equal(connectedAt) {
+		t.Errorf("exec-live.ConnectedAt = %v, want %v", got, connectedAt)
+	}
+	if byID["exec-off"].Connected {
 		t.Error("exec-off marked connected though the pool does not have it")
+	}
+	if byID["exec-off"].ConnectedAt != nil {
+		t.Errorf("exec-off.ConnectedAt = %v, want nil: it has no live connection", byID["exec-off"].ConnectedAt)
 	}
 }
 

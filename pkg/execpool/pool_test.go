@@ -5,6 +5,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executors"
 )
 
 // The bug, reproduced: healthLoop holds p.mu and calls Park, which takes p.mu
@@ -219,5 +222,28 @@ func TestDrainingIsLearnedOnTheNextCall(t *testing.T) {
 	p.live["exec-1"] = lc
 	if _, err := p.ClientFor("exec-1"); !errors.Is(err, ErrDraining) {
 		t.Fatalf("a draining executor must report ErrDraining so the caller can pick another; got %v", err)
+	}
+}
+
+// Live() must report when a connection was established, not just that it
+// currently is one — a client watching `rafiki executor list` wants to know
+// how long a connection has held, not merely that it's up right now.
+func TestLiveReportsConnectedAt(t *testing.T) {
+	p := New(nil)
+	want := time.Now().Add(-5 * time.Minute)
+	lc := &liveConn{
+		done:        make(chan struct{}),
+		executor:    executors.Executor{ID: "exec-1"},
+		describe:    &executorpb.DescribeResponse{},
+		connectedAt: want,
+	}
+	p.live["exec-1"] = lc
+
+	live := p.Live()
+	if len(live) != 1 {
+		t.Fatalf("Live() = %d entries, want 1", len(live))
+	}
+	if !live[0].ConnectedAt.Equal(want) {
+		t.Errorf("ConnectedAt = %v, want %v", live[0].ConnectedAt, want)
 	}
 }

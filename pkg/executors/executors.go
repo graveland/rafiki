@@ -31,6 +31,12 @@ type Executor struct {
 	// what lets a client wait for its own session executor to come up before
 	// spawning, which is otherwise unobservable from the row alone.
 	Connected bool `json:"connected,omitempty"`
+	// ConnectedAt is when the CURRENT connection joined the pool — a second
+	// view field alongside Connected, populated the same way. Distinct from
+	// LastSeenAt: a reconnect resets this but not the persisted row's history.
+	// A pointer because the zero time.Time is not "empty" to encoding/json's
+	// omitempty, and a disconnected executor must not render one.
+	ConnectedAt *time.Time `json:"connectedAt,omitempty"`
 }
 
 // NewToken carries everything the minter supplies to create an enrollment token.
