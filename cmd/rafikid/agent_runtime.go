@@ -309,6 +309,12 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 	}
 
 	lspPath := effectiveLSPConfig(f.lspConfig, cwd)
+
+	effectiveProv := providersOrDefault(prov)
+	defaults, _ := resolveModelDefaults(effectiveProv, f.model)
+	skillsVal, noSkills := resolveAllowlistOption(f.skills, f.noSkills, defaults.Skills)
+	mcpServersVal, noMCP := resolveAllowlistOption(f.mcpServers, f.noMCP, defaults.MCPServers)
+
 	return fundi.RuntimeOptions{
 		Model:                f.model,
 		ThinkingBudget:       thinkingBudget,
@@ -320,13 +326,16 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		Name:                 f.name,
 		SpillDir:             f.spillDir,
 		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir, hasExecutor),
-		Skills:               f.skills,
-		NoSkills:             f.noSkills,
+		Skills:               skillsVal,
+		NoSkills:             noSkills,
 		NoContextFiles:       f.noContextFiles,
+		ContextFilesBudget:   defaults.ContextFilesTokens,
 		MCPConfig:            mcpPath,
+		MCPServers:           mcpServersVal,
+		NoMCP:                noMCP,
 		LSPConfig:            lspPath,
 		FakeTurns:            f.fakeTurns,
-		Providers:            providersOrDefault(prov),
+		Providers:            effectiveProv,
 		Pool:                 pool,
 		RTK:                  bashRTKValue(f.bashRTK),
 		ToolsWeb:             toolsWebValue(f.toolsWeb, f.toolsWebSet),

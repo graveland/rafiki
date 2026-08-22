@@ -8,6 +8,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 )
 
 // TestAgentRunnerKind proves agentRunner only builds an in-process Runner for
@@ -399,5 +400,62 @@ func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
 				t.Errorf("toRuntimeOptions ToolsWeb = %v, want %v (toolsWebValue directly)", ro.ToolsWeb, wantWeb)
 			}
 		})
+	}
+}
+
+func TestToRuntimeOptions_ModelDefaultAppliesWhenCallerSpecifiesNothing(t *testing.T) {
+	prov, err := providers.Parse([]byte(modelDefaultsTOML)) // reuses the fixture from Task 2's model_defaults_test.go
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	f := agentFlags{model: "vmlx/qwen"}
+	ro, err := f.toRuntimeOptions(t.TempDir(), nil, false, prov)
+	if err != nil {
+		t.Fatalf("toRuntimeOptions: %v", err)
+	}
+	if !ro.NoSkills {
+		t.Error("expected NoSkills=true: vmlx/qwen declares skills=\"\"")
+	}
+	if ro.MCPServers != "codescan" || ro.NoMCP {
+		t.Errorf("MCPServers=%q NoMCP=%v, want MCPServers=\"codescan\" NoMCP=false", ro.MCPServers, ro.NoMCP)
+	}
+	if ro.ContextFilesBudget != 3276 {
+		t.Errorf("ContextFilesBudget = %d, want 3276", ro.ContextFilesBudget)
+	}
+}
+
+func TestToRuntimeOptions_ExplicitCallerValueWinsOverModelDefault(t *testing.T) {
+	prov, err := providers.Parse([]byte(modelDefaultsTOML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	f := agentFlags{model: "vmlx/qwen", skills: "*", mcpServers: "other-only"}
+	ro, err := f.toRuntimeOptions(t.TempDir(), nil, false, prov)
+	if err != nil {
+		t.Fatalf("toRuntimeOptions: %v", err)
+	}
+	if ro.Skills != "*" || ro.NoSkills {
+		t.Errorf("Skills=%q NoSkills=%v, want Skills=\"*\" NoSkills=false (caller override must win over the model's skills=\"\" default)", ro.Skills, ro.NoSkills)
+	}
+	if ro.MCPServers != "other-only" {
+		t.Errorf("MCPServers = %q, want the caller's explicit \"other-only\"", ro.MCPServers)
+	}
+}
+
+func TestToRuntimeOptions_NoAliasLeavesEverythingAtCallerValue(t *testing.T) {
+	prov, err := providers.Parse([]byte(modelDefaultsTOML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	f := agentFlags{model: "anthropic/claude-sonnet-5"} // no alias declared for this model
+	ro, err := f.toRuntimeOptions(t.TempDir(), nil, false, prov)
+	if err != nil {
+		t.Fatalf("toRuntimeOptions: %v", err)
+	}
+	if ro.NoSkills || ro.Skills != "" {
+		t.Errorf("Skills=%q NoSkills=%v, want the untouched zero value", ro.Skills, ro.NoSkills)
+	}
+	if ro.ContextFilesBudget != 0 {
+		t.Errorf("ContextFilesBudget = %d, want 0 (no alias, no formula input)", ro.ContextFilesBudget)
 	}
 }
