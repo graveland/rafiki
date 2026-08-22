@@ -4,8 +4,146 @@ package rafiki.v1;
 
 option go_package = "go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1";
 
-// Ping exists only to prove the toolchain generates and compiles.
-// Task 2 replaces this file's contents entirely.
-message Ping {
-  string message = 1;
+// StopReason normalizes how a turn ended across providers. The provider's own
+// string is preserved in TurnEnd.raw_stop_reason: Anthropic says "end_turn",
+// OpenAI says "stop", and consumers must not have to know which.
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;
+  STOP_REASON_END_TURN = 1;
+  STOP_REASON_MAX_TOKENS = 2;
+  STOP_REASON_TOOL_USE = 3;
+  STOP_REASON_STOP_SEQUENCE = 4;
+  STOP_REASON_REFUSAL = 5;
+  STOP_REASON_ERROR = 6;
+}
+
+// Usage counts for one turn. Every field is optional because providers report
+// different subsets: OpenAI reports cached read tokens but has no cache-write
+// count. A zero must mean "reported as zero"; absence must mean "not reported".
+// Collapsing the two silently poisons cost math and ProviderGuard's evidence.
+message Usage {
+  optional int64 input_tokens = 1;
+  optional int64 output_tokens = 2;
+  optional int64 cache_read_tokens = 3;
+  optional int64 cache_write_tokens = 4;
+  optional int64 reasoning_tokens = 5;
+}
+
+message TextBlock {
+  string text = 1;
+}
+
+// ThinkingBlock.signature is an opaque provider token, not parsed by rafiki.
+// Anthropic returns a signature for multi-turn tool use; OpenAI reasoning
+// returns an encrypted blob with different rules. Treat it as bytes with a
+// meaning only the provider knows.
+message ThinkingBlock {
+  string thinking = 1;
+  string signature = 2;
+}
+
+// ToolUseBlock.input_json is the tool's arguments as a raw JSON string. It is
+// deliberately NOT modeled: the shape is whatever the model emitted for
+// whatever tool, and typing it would mean regenerating this schema every time
+// a tool changes.
+message ToolUseBlock {
+  string id = 1;
+  string name = 2;
+  string input_json = 3;
+}
+
+message ImageBlock {
+  string media_type = 1;
+  bytes data = 2;
+}
+
+// ToolResultBlock.content is repeated ContentBlock, not a string, so a tool
+// that returns an image (read on a PNG) is expressible. Flattening it to a
+// string would make multimodal tool output a breaking change later.
+message ToolResultBlock {
+  string tool_use_id = 1;
+  repeated ContentBlock content = 2;
+  bool is_error = 3;
+}
+
+// ContentBlock.index is assigned by rafiki and is monotonic within a turn. It
+// is NOT the provider's index: OpenAI puts tool_calls[].index in a separate
+// index space from content, and this field unifies them.
+message ContentBlock {
+  int32 index = 1;
+  oneof block {
+    TextBlock text = 2;
+    ThinkingBlock thinking = 3;
+    ToolUseBlock tool_use = 4;
+    ImageBlock image = 5;
+    ToolResultBlock tool_result = 6;
+  }
+}
+
+// UserMessage is a durable-tier event: a persisted user-role message.
+message UserMessage {
+  repeated ContentBlock content = 1;
+}
+
+// AssistantMessage is a durable-tier event: a persisted assistant-role message.
+message AssistantMessage {
+  repeated ContentBlock content = 1;
+}
+
+message TurnStart {
+  string turn_id = 1;
+  string model = 2;
+}
+
+message TurnEnd {
+  string turn_id = 1;
+  StopReason stop_reason = 2;
+  string raw_stop_reason = 3;
+  Usage usage = 4;
+  optional double cost_usd = 5;
+}
+
+// ContentBlockDelta is an ephemeral-tier event: an incremental fragment of an
+// in-flight turn. Ephemeral events carry no ordinal and are never replayed on
+// reconnect.
+message ContentBlockDelta {
+  string turn_id = 1;
+  int32 index = 2;
+  oneof delta {
+    string text = 3;
+    string thinking = 4;
+    string input_json = 5;
+  }
+}
+
+message AgentStatus {
+  string state = 1;
+}
+
+message ErrorEvent {
+  string code = 1;
+  string message = 2;
+}
+
+// Event is the stream envelope.
+//
+// ordinal is set ONLY on durable-tier events (UserMessage, AssistantMessage),
+// where it is the conversation_message.ordinal that already exists in postgres
+// and is already the append-idempotency key. Ephemeral events leave it unset.
+// A client resumes with StreamEventsRequest.after_ordinal; ephemeral events
+// are best-effort and intentionally not resumable.
+message Event {
+  string child_id = 1;
+  optional int32 ordinal = 2;
+  int64 ts_unix_ms = 3;
+
+  oneof payload {
+    UserMessage user_message = 10;
+    AssistantMessage assistant_message = 11;
+    TurnStart turn_start = 12;
+    ContentBlockDelta content_block_delta = 13;
+    TurnEnd turn_end = 14;
+    AgentStatus agent_status = 15;
+    ErrorEvent error = 16;
+  }
 }
