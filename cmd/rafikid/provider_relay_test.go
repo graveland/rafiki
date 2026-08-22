@@ -122,6 +122,61 @@ func TestRelayTransportSucceedsWhenExecutorAdvertisesProxy(t *testing.T) {
 	}
 }
 
+// providerSenders must resolve only the providers this spawn's MODEL can
+// actually reach — its own provider plus that provider's configured Fallback
+// chain — not every via_executor provider in the whole registry. A provider
+// outside that reachable set with no live executor must not fail a spawn for
+// an unrelated model.
+func TestProviderSendersSkipsUnreachableViaExecutorProvider(t *testing.T) {
+	set := &providers.Set{
+		DefaultProvider: "openrouter",
+		Providers: map[string]providers.Provider{
+			"openrouter": {Name: "openrouter", Kind: providers.KindAnthropicOpenRouter},
+			"vmlx": {
+				Name: "vmlx",
+				Kind: providers.KindAnthropic,
+				ViaExecutor: &providers.ViaExecutor{
+					Selector: "role=laptop",
+					Proxy:    "vmlx",
+				},
+			},
+		},
+	}
+	pool := execpool.New(relayFakeStore{}) // empty: vmlx advertises no live executor
+
+	senders, err := providerSenders(set, pool, "openrouter/deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("providerSenders: %v, want success (vmlx is unrelated to this model)", err)
+	}
+	if _, ok := senders["vmlx"]; ok {
+		t.Error(`senders contains "vmlx", want it omitted (no live executor, and unreachable by this model)`)
+	}
+}
+
+// A via_executor provider that IS in the reachable set (the model's own
+// provider) must still fail the spawn when it has no live executor — the
+// scoping change must not weaken that case.
+func TestProviderSendersFailsWhenModelsOwnProviderUnavailable(t *testing.T) {
+	set := &providers.Set{
+		DefaultProvider: "vmlx",
+		Providers: map[string]providers.Provider{
+			"vmlx": {
+				Name: "vmlx",
+				Kind: providers.KindAnthropic,
+				ViaExecutor: &providers.ViaExecutor{
+					Selector: "role=laptop",
+					Proxy:    "vmlx",
+				},
+			},
+		},
+	}
+	pool := execpool.New(relayFakeStore{})
+
+	if _, err := providerSenders(set, pool, "vmlx/qwen"); err == nil {
+		t.Fatal("providerSenders succeeded for a model whose own provider has no live executor")
+	}
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 // relayFakeStore is a minimal executors.Store. Nothing in these tests enrolls

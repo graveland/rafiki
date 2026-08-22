@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -69,20 +70,27 @@ func hasProxy(names []string, proxyName string) bool {
 }
 
 // providerSenders resolves relayTransport for every provider in set that
-// declares via_executor and builds each one's sender. It iterates the whole
-// registry rather than just the provider this child's Model names — see
-// RuntimeOptions.ProviderSenders' doc comment — so a via_executor provider
-// with no live executor fails every spawn while the registry carries it, not
-// only spawns naming it. That is the accepted trade for resolving the relay
-// once at client-construction time instead of on every send (recorded in the
-// design doc's Scope section).
+// declares via_executor and builds each one's sender. It still resolves the
+// relay once, at client-construction time, rather than per-send — an
+// executor arriving after the child's client is built stays invisible to
+// that child until it is rebuilt (recorded in the design doc's Scope
+// section) — but it is scoped to the providers THIS spawn's model can
+// actually reach: the model's own provider plus that provider's configured
+// Fallback chain (reachableProviders). A via_executor provider outside that
+// set with no live executor is unrelated to this spawn — it is logged and
+// skipped, not treated as a spawn-ending error. A provider inside the
+// reachable set behaves as before: no live executor fails the spawn.
 //
 // A registry with no via_executor providers at all — providers.Default(), and
 // every providers.toml until an operator opts in — returns a nil map: no
 // executor lookup, no error, no behaviour change.
-func providerSenders(set *providers.Set, pool *execpool.Pool) (map[string]llm.Sender, error) {
+func providerSenders(set *providers.Set, pool *execpool.Pool, model string) (map[string]llm.Sender, error) {
 	if set == nil {
 		return nil, nil
+	}
+	reachable, err := reachableProviders(set, model)
+	if err != nil {
+		return nil, err
 	}
 	var out map[string]llm.Sender
 	for _, name := range set.Names() {
@@ -92,6 +100,11 @@ func providerSenders(set *providers.Set, pool *execpool.Pool) (map[string]llm.Se
 		}
 		rt, err := relayTransport(p, pool)
 		if err != nil {
+			if !reachable[name] {
+				slog.Warn("via_executor provider has no live executor; skipping it (not reachable by this spawn's model)",
+					"provider", name, "model", model, "error", err)
+				continue
+			}
 			return nil, err
 		}
 		sender, err := llm.SenderFor(p, rt)
@@ -102,6 +115,23 @@ func providerSenders(set *providers.Set, pool *execpool.Pool) (map[string]llm.Se
 			out = make(map[string]llm.Sender, 1)
 		}
 		out[name] = sender
+	}
+	return out, nil
+}
+
+// reachableProviders returns the names of every provider model can send to:
+// its own provider (resolved via set.Split, which also validates the model
+// string) plus that provider's configured Fallback chain. Single level only —
+// llm.Client's callModel sends to p.Fallback directly and never recurses into
+// a fallback's own Fallback list, so neither does this.
+func reachableProviders(set *providers.Set, model string) (map[string]bool, error) {
+	p, _, err := set.Split(model)
+	if err != nil {
+		return nil, fmt.Errorf("model %q: %w", model, err)
+	}
+	out := map[string]bool{p.Name: true}
+	for _, fb := range p.Fallback {
+		out[fb] = true
 	}
 	return out, nil
 }
