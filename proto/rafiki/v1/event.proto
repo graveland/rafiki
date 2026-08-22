@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package rafiki.v1;
+
+option go_package = "go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1";
+
+// Ping exists only to prove the toolchain generates and compiles.
+// Task 2 replaces this file's contents entirely.
+message Ping {
+  string message = 1;
+}
