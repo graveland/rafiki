@@ -23,6 +23,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/ejection"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -30,6 +31,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -282,6 +284,9 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	mux := http.NewServeMux()
 	h := &server.Handler{Messages: messages, Chat: chat}
+	if pool != nil {
+		h.ControlPath, h.Control = connectapi.NewServer(store.NewMessages(pool)).Routes()
+	}
 	h.Mount(mux, func(next http.Handler) http.Handler {
 		return tokenAuth.Middleware(traceMiddleware(next))
 	})

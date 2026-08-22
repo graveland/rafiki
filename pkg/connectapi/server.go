@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -30,6 +32,13 @@ type Server struct {
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
+
+// Routes returns the mux path prefix and handler for the Control service.
+// Auth is the caller's responsibility — mount it under the same middleware
+// that already protects the other HTTP faces (see cmd/rafikid/proxy.go).
+func (s *Server) Routes() (string, http.Handler) {
+	return rafikiv1connect.NewControlHandler(s)
+}
 
 // GetHistory serves the durable tier: persisted messages converted to native
 // events, filtered to those after the caller's cursor. The cursor is the

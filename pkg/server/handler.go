@@ -10,6 +10,11 @@ import "net/http"
 type Handler struct {
 	Messages *MessagesProxy
 	Chat     *ChatCompletionsProxy // optional; nil when the OpenAI face is disabled
+
+	// ControlPath and Control mount the Connect control plane, protected by
+	// the same wrap as every other face — there is no separate auth path.
+	ControlPath string
+	Control     http.Handler
 }
 
 // Mount registers the faces on mux, each wrapped by wrap (identity when nil).
@@ -23,5 +28,8 @@ func (h *Handler) Mount(mux *http.ServeMux, wrap func(http.Handler) http.Handler
 	}
 	if h.Chat != nil {
 		mux.Handle("/v1/chat/completions", wrap(h.Chat))
+	}
+	if h.Control != nil && h.ControlPath != "" {
+		mux.Handle(h.ControlPath, wrap(h.Control))
 	}
 }
