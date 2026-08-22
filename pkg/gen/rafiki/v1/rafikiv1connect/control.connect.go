@@ -35,11 +35,14 @@ const (
 const (
 	// ControlGetHistoryProcedure is the fully-qualified name of the Control's GetHistory RPC.
 	ControlGetHistoryProcedure = "/rafiki.v1.Control/GetHistory"
+	// ControlStreamEventsProcedure is the fully-qualified name of the Control's StreamEvents RPC.
+	ControlStreamEventsProcedure = "/rafiki.v1.Control/StreamEvents"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
 type ControlClient interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
+	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.Event], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -59,12 +62,19 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("GetHistory")),
 			connect.WithClientOptions(opts...),
 		),
+		streamEvents: connect.NewClient[v1.StreamEventsRequest, v1.Event](
+			httpClient,
+			baseURL+ControlStreamEventsProcedure,
+			connect.WithSchema(controlMethods.ByName("StreamEvents")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // controlClient implements ControlClient.
 type controlClient struct {
-	getHistory *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
+	getHistory   *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
+	streamEvents *connect.Client[v1.StreamEventsRequest, v1.Event]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -72,9 +82,15 @@ func (c *controlClient) GetHistory(ctx context.Context, req *connect.Request[v1.
 	return c.getHistory.CallUnary(ctx, req)
 }
 
+// StreamEvents calls rafiki.v1.Control.StreamEvents.
+func (c *controlClient) StreamEvents(ctx context.Context, req *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.Event], error) {
+	return c.streamEvents.CallServerStream(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
+	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.Event]) error
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -90,10 +106,18 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("GetHistory")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlStreamEventsHandler := connect.NewServerStreamHandler(
+		ControlStreamEventsProcedure,
+		svc.StreamEvents,
+		connect.WithSchema(controlMethods.ByName("StreamEvents")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
 			controlGetHistoryHandler.ServeHTTP(w, r)
+		case ControlStreamEventsProcedure:
+			controlStreamEventsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -105,4 +129,8 @@ type UnimplementedControlHandler struct{}
 
 func (UnimplementedControlHandler) GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetHistory is not implemented"))
+}
+
+func (UnimplementedControlHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.Event]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.StreamEvents is not implemented"))
 }

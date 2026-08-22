@@ -17,6 +17,12 @@ message GetHistoryResponse {
   repeated Event events = 1;
 }
 
+message StreamEventsRequest {
+  repeated string child_ids = 1;
+  optional int32 after_ordinal = 2;
+}
+
 service Control {
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
+  rpc StreamEvents(StreamEventsRequest) returns (stream Event);
 }
