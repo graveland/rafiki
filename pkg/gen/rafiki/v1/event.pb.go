@@ -21,29 +21,99 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Ping exists only to prove the toolchain generates and compiles.
-// Task 2 replaces this file's contents entirely.
-type Ping struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Message       string                 `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+// StopReason normalizes how a turn ended across providers. The provider's own
+// string is preserved in TurnEnd.raw_stop_reason: Anthropic says "end_turn",
+// OpenAI says "stop", and consumers must not have to know which.
+type StopReason int32
+
+const (
+	StopReason_STOP_REASON_UNSPECIFIED   StopReason = 0
+	StopReason_STOP_REASON_END_TURN      StopReason = 1
+	StopReason_STOP_REASON_MAX_TOKENS    StopReason = 2
+	StopReason_STOP_REASON_TOOL_USE      StopReason = 3
+	StopReason_STOP_REASON_STOP_SEQUENCE StopReason = 4
+	StopReason_STOP_REASON_REFUSAL       StopReason = 5
+	StopReason_STOP_REASON_ERROR         StopReason = 6
+)
+
+// Enum value maps for StopReason.
+var (
+	StopReason_name = map[int32]string{
+		0: "STOP_REASON_UNSPECIFIED",
+		1: "STOP_REASON_END_TURN",
+		2: "STOP_REASON_MAX_TOKENS",
+		3: "STOP_REASON_TOOL_USE",
+		4: "STOP_REASON_STOP_SEQUENCE",
+		5: "STOP_REASON_REFUSAL",
+		6: "STOP_REASON_ERROR",
+	}
+	StopReason_value = map[string]int32{
+		"STOP_REASON_UNSPECIFIED":   0,
+		"STOP_REASON_END_TURN":      1,
+		"STOP_REASON_MAX_TOKENS":    2,
+		"STOP_REASON_TOOL_USE":      3,
+		"STOP_REASON_STOP_SEQUENCE": 4,
+		"STOP_REASON_REFUSAL":       5,
+		"STOP_REASON_ERROR":         6,
+	}
+)
+
+func (x StopReason) Enum() *StopReason {
+	p := new(StopReason)
+	*p = x
+	return p
 }
 
-func (x *Ping) Reset() {
-	*x = Ping{}
+func (x StopReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (StopReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_rafiki_v1_event_proto_enumTypes[0].Descriptor()
+}
+
+func (StopReason) Type() protoreflect.EnumType {
+	return &file_rafiki_v1_event_proto_enumTypes[0]
+}
+
+func (x StopReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use StopReason.Descriptor instead.
+func (StopReason) EnumDescriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{0}
+}
+
+// Usage counts for one turn. Every field is optional because providers report
+// different subsets: OpenAI reports cached read tokens but has no cache-write
+// count. A zero must mean "reported as zero"; absence must mean "not reported".
+// Collapsing the two silently poisons cost math and ProviderGuard's evidence.
+type Usage struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	InputTokens      *int64                 `protobuf:"varint,1,opt,name=input_tokens,json=inputTokens,proto3,oneof" json:"input_tokens,omitempty"`
+	OutputTokens     *int64                 `protobuf:"varint,2,opt,name=output_tokens,json=outputTokens,proto3,oneof" json:"output_tokens,omitempty"`
+	CacheReadTokens  *int64                 `protobuf:"varint,3,opt,name=cache_read_tokens,json=cacheReadTokens,proto3,oneof" json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens *int64                 `protobuf:"varint,4,opt,name=cache_write_tokens,json=cacheWriteTokens,proto3,oneof" json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  *int64                 `protobuf:"varint,5,opt,name=reasoning_tokens,json=reasoningTokens,proto3,oneof" json:"reasoning_tokens,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *Usage) Reset() {
+	*x = Usage{}
 	mi := &file_rafiki_v1_event_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Ping) String() string {
+func (x *Usage) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Ping) ProtoMessage() {}
+func (*Usage) ProtoMessage() {}
 
-func (x *Ping) ProtoReflect() protoreflect.Message {
+func (x *Usage) ProtoReflect() protoreflect.Message {
 	mi := &file_rafiki_v1_event_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -55,25 +125,1189 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Ping.ProtoReflect.Descriptor instead.
-func (*Ping) Descriptor() ([]byte, []int) {
+// Deprecated: Use Usage.ProtoReflect.Descriptor instead.
+func (*Usage) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *Ping) GetMessage() string {
+func (x *Usage) GetInputTokens() int64 {
+	if x != nil && x.InputTokens != nil {
+		return *x.InputTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetOutputTokens() int64 {
+	if x != nil && x.OutputTokens != nil {
+		return *x.OutputTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCacheReadTokens() int64 {
+	if x != nil && x.CacheReadTokens != nil {
+		return *x.CacheReadTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCacheWriteTokens() int64 {
+	if x != nil && x.CacheWriteTokens != nil {
+		return *x.CacheWriteTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetReasoningTokens() int64 {
+	if x != nil && x.ReasoningTokens != nil {
+		return *x.ReasoningTokens
+	}
+	return 0
+}
+
+type TextBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TextBlock) Reset() {
+	*x = TextBlock{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TextBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TextBlock) ProtoMessage() {}
+
+func (x *TextBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TextBlock.ProtoReflect.Descriptor instead.
+func (*TextBlock) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *TextBlock) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+// ThinkingBlock.signature is an opaque provider token, not parsed by rafiki.
+// Anthropic returns a signature for multi-turn tool use; OpenAI reasoning
+// returns an encrypted blob with different rules. Treat it as bytes with a
+// meaning only the provider knows.
+type ThinkingBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Thinking      string                 `protobuf:"bytes,1,opt,name=thinking,proto3" json:"thinking,omitempty"`
+	Signature     string                 `protobuf:"bytes,2,opt,name=signature,proto3" json:"signature,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ThinkingBlock) Reset() {
+	*x = ThinkingBlock{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ThinkingBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ThinkingBlock) ProtoMessage() {}
+
+func (x *ThinkingBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ThinkingBlock.ProtoReflect.Descriptor instead.
+func (*ThinkingBlock) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ThinkingBlock) GetThinking() string {
+	if x != nil {
+		return x.Thinking
+	}
+	return ""
+}
+
+func (x *ThinkingBlock) GetSignature() string {
+	if x != nil {
+		return x.Signature
+	}
+	return ""
+}
+
+// ToolUseBlock.input_json is the tool's arguments as a raw JSON string. It is
+// deliberately NOT modeled: the shape is whatever the model emitted for
+// whatever tool, and typing it would mean regenerating this schema every time
+// a tool changes.
+type ToolUseBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	InputJson     string                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolUseBlock) Reset() {
+	*x = ToolUseBlock{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolUseBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolUseBlock) ProtoMessage() {}
+
+func (x *ToolUseBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolUseBlock.ProtoReflect.Descriptor instead.
+func (*ToolUseBlock) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ToolUseBlock) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ToolUseBlock) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolUseBlock) GetInputJson() string {
+	if x != nil {
+		return x.InputJson
+	}
+	return ""
+}
+
+type ImageBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MediaType     string                 `protobuf:"bytes,1,opt,name=media_type,json=mediaType,proto3" json:"media_type,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ImageBlock) Reset() {
+	*x = ImageBlock{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ImageBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ImageBlock) ProtoMessage() {}
+
+func (x *ImageBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ImageBlock.ProtoReflect.Descriptor instead.
+func (*ImageBlock) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ImageBlock) GetMediaType() string {
+	if x != nil {
+		return x.MediaType
+	}
+	return ""
+}
+
+func (x *ImageBlock) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// ToolResultBlock.content is repeated ContentBlock, not a string, so a tool
+// that returns an image (read on a PNG) is expressible. Flattening it to a
+// string would make multimodal tool output a breaking change later.
+type ToolResultBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ToolUseId     string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
+	Content       []*ContentBlock        `protobuf:"bytes,2,rep,name=content,proto3" json:"content,omitempty"`
+	IsError       bool                   `protobuf:"varint,3,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolResultBlock) Reset() {
+	*x = ToolResultBlock{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolResultBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolResultBlock) ProtoMessage() {}
+
+func (x *ToolResultBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolResultBlock.ProtoReflect.Descriptor instead.
+func (*ToolResultBlock) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ToolResultBlock) GetToolUseId() string {
+	if x != nil {
+		return x.ToolUseId
+	}
+	return ""
+}
+
+func (x *ToolResultBlock) GetContent() []*ContentBlock {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *ToolResultBlock) GetIsError() bool {
+	if x != nil {
+		return x.IsError
+	}
+	return false
+}
+
+// ContentBlock.index is assigned by rafiki and is monotonic within a turn. It
+// is NOT the provider's index: OpenAI puts tool_calls[].index in a separate
+// index space from content, and this field unifies them.
+type ContentBlock struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Index int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	// Types that are valid to be assigned to Block:
+	//
+	//	*ContentBlock_Text
+	//	*ContentBlock_Thinking
+	//	*ContentBlock_ToolUse
+	//	*ContentBlock_Image
+	//	*ContentBlock_ToolResult
+	Block         isContentBlock_Block `protobuf_oneof:"block"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContentBlock) Reset() {
+	*x = ContentBlock{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContentBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContentBlock) ProtoMessage() {}
+
+func (x *ContentBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContentBlock.ProtoReflect.Descriptor instead.
+func (*ContentBlock) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ContentBlock) GetIndex() int32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *ContentBlock) GetBlock() isContentBlock_Block {
+	if x != nil {
+		return x.Block
+	}
+	return nil
+}
+
+func (x *ContentBlock) GetText() *TextBlock {
+	if x != nil {
+		if x, ok := x.Block.(*ContentBlock_Text); ok {
+			return x.Text
+		}
+	}
+	return nil
+}
+
+func (x *ContentBlock) GetThinking() *ThinkingBlock {
+	if x != nil {
+		if x, ok := x.Block.(*ContentBlock_Thinking); ok {
+			return x.Thinking
+		}
+	}
+	return nil
+}
+
+func (x *ContentBlock) GetToolUse() *ToolUseBlock {
+	if x != nil {
+		if x, ok := x.Block.(*ContentBlock_ToolUse); ok {
+			return x.ToolUse
+		}
+	}
+	return nil
+}
+
+func (x *ContentBlock) GetImage() *ImageBlock {
+	if x != nil {
+		if x, ok := x.Block.(*ContentBlock_Image); ok {
+			return x.Image
+		}
+	}
+	return nil
+}
+
+func (x *ContentBlock) GetToolResult() *ToolResultBlock {
+	if x != nil {
+		if x, ok := x.Block.(*ContentBlock_ToolResult); ok {
+			return x.ToolResult
+		}
+	}
+	return nil
+}
+
+type isContentBlock_Block interface {
+	isContentBlock_Block()
+}
+
+type ContentBlock_Text struct {
+	Text *TextBlock `protobuf:"bytes,2,opt,name=text,proto3,oneof"`
+}
+
+type ContentBlock_Thinking struct {
+	Thinking *ThinkingBlock `protobuf:"bytes,3,opt,name=thinking,proto3,oneof"`
+}
+
+type ContentBlock_ToolUse struct {
+	ToolUse *ToolUseBlock `protobuf:"bytes,4,opt,name=tool_use,json=toolUse,proto3,oneof"`
+}
+
+type ContentBlock_Image struct {
+	Image *ImageBlock `protobuf:"bytes,5,opt,name=image,proto3,oneof"`
+}
+
+type ContentBlock_ToolResult struct {
+	ToolResult *ToolResultBlock `protobuf:"bytes,6,opt,name=tool_result,json=toolResult,proto3,oneof"`
+}
+
+func (*ContentBlock_Text) isContentBlock_Block() {}
+
+func (*ContentBlock_Thinking) isContentBlock_Block() {}
+
+func (*ContentBlock_ToolUse) isContentBlock_Block() {}
+
+func (*ContentBlock_Image) isContentBlock_Block() {}
+
+func (*ContentBlock_ToolResult) isContentBlock_Block() {}
+
+// UserMessage is a durable-tier event: a persisted user-role message.
+type UserMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Content       []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UserMessage) Reset() {
+	*x = UserMessage{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UserMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UserMessage) ProtoMessage() {}
+
+func (x *UserMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UserMessage.ProtoReflect.Descriptor instead.
+func (*UserMessage) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *UserMessage) GetContent() []*ContentBlock {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+// AssistantMessage is a durable-tier event: a persisted assistant-role message.
+type AssistantMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Content       []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AssistantMessage) Reset() {
+	*x = AssistantMessage{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AssistantMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AssistantMessage) ProtoMessage() {}
+
+func (x *AssistantMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AssistantMessage.ProtoReflect.Descriptor instead.
+func (*AssistantMessage) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *AssistantMessage) GetContent() []*ContentBlock {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+type TurnStart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TurnId        string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	Model         string                 `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TurnStart) Reset() {
+	*x = TurnStart{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TurnStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TurnStart) ProtoMessage() {}
+
+func (x *TurnStart) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TurnStart.ProtoReflect.Descriptor instead.
+func (*TurnStart) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *TurnStart) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+func (x *TurnStart) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+type TurnEnd struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TurnId        string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	StopReason    StopReason             `protobuf:"varint,2,opt,name=stop_reason,json=stopReason,proto3,enum=rafiki.v1.StopReason" json:"stop_reason,omitempty"`
+	RawStopReason string                 `protobuf:"bytes,3,opt,name=raw_stop_reason,json=rawStopReason,proto3" json:"raw_stop_reason,omitempty"`
+	Usage         *Usage                 `protobuf:"bytes,4,opt,name=usage,proto3" json:"usage,omitempty"`
+	CostUsd       *float64               `protobuf:"fixed64,5,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TurnEnd) Reset() {
+	*x = TurnEnd{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TurnEnd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TurnEnd) ProtoMessage() {}
+
+func (x *TurnEnd) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TurnEnd.ProtoReflect.Descriptor instead.
+func (*TurnEnd) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *TurnEnd) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+func (x *TurnEnd) GetStopReason() StopReason {
+	if x != nil {
+		return x.StopReason
+	}
+	return StopReason_STOP_REASON_UNSPECIFIED
+}
+
+func (x *TurnEnd) GetRawStopReason() string {
+	if x != nil {
+		return x.RawStopReason
+	}
+	return ""
+}
+
+func (x *TurnEnd) GetUsage() *Usage {
+	if x != nil {
+		return x.Usage
+	}
+	return nil
+}
+
+func (x *TurnEnd) GetCostUsd() float64 {
+	if x != nil && x.CostUsd != nil {
+		return *x.CostUsd
+	}
+	return 0
+}
+
+// ContentBlockDelta is an ephemeral-tier event: an incremental fragment of an
+// in-flight turn. Ephemeral events carry no ordinal and are never replayed on
+// reconnect.
+type ContentBlockDelta struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	TurnId string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	Index  int32                  `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	// Types that are valid to be assigned to Delta:
+	//
+	//	*ContentBlockDelta_Text
+	//	*ContentBlockDelta_Thinking
+	//	*ContentBlockDelta_InputJson
+	Delta         isContentBlockDelta_Delta `protobuf_oneof:"delta"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContentBlockDelta) Reset() {
+	*x = ContentBlockDelta{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContentBlockDelta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContentBlockDelta) ProtoMessage() {}
+
+func (x *ContentBlockDelta) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContentBlockDelta.ProtoReflect.Descriptor instead.
+func (*ContentBlockDelta) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ContentBlockDelta) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+func (x *ContentBlockDelta) GetIndex() int32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *ContentBlockDelta) GetDelta() isContentBlockDelta_Delta {
+	if x != nil {
+		return x.Delta
+	}
+	return nil
+}
+
+func (x *ContentBlockDelta) GetText() string {
+	if x != nil {
+		if x, ok := x.Delta.(*ContentBlockDelta_Text); ok {
+			return x.Text
+		}
+	}
+	return ""
+}
+
+func (x *ContentBlockDelta) GetThinking() string {
+	if x != nil {
+		if x, ok := x.Delta.(*ContentBlockDelta_Thinking); ok {
+			return x.Thinking
+		}
+	}
+	return ""
+}
+
+func (x *ContentBlockDelta) GetInputJson() string {
+	if x != nil {
+		if x, ok := x.Delta.(*ContentBlockDelta_InputJson); ok {
+			return x.InputJson
+		}
+	}
+	return ""
+}
+
+type isContentBlockDelta_Delta interface {
+	isContentBlockDelta_Delta()
+}
+
+type ContentBlockDelta_Text struct {
+	Text string `protobuf:"bytes,3,opt,name=text,proto3,oneof"`
+}
+
+type ContentBlockDelta_Thinking struct {
+	Thinking string `protobuf:"bytes,4,opt,name=thinking,proto3,oneof"`
+}
+
+type ContentBlockDelta_InputJson struct {
+	InputJson string `protobuf:"bytes,5,opt,name=input_json,json=inputJson,proto3,oneof"`
+}
+
+func (*ContentBlockDelta_Text) isContentBlockDelta_Delta() {}
+
+func (*ContentBlockDelta_Thinking) isContentBlockDelta_Delta() {}
+
+func (*ContentBlockDelta_InputJson) isContentBlockDelta_Delta() {}
+
+type AgentStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         string                 `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentStatus) Reset() {
+	*x = AgentStatus{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentStatus) ProtoMessage() {}
+
+func (x *AgentStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentStatus.ProtoReflect.Descriptor instead.
+func (*AgentStatus) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *AgentStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+type ErrorEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ErrorEvent) Reset() {
+	*x = ErrorEvent{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ErrorEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ErrorEvent) ProtoMessage() {}
+
+func (x *ErrorEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ErrorEvent.ProtoReflect.Descriptor instead.
+func (*ErrorEvent) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ErrorEvent) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *ErrorEvent) GetMessage() string {
 	if x != nil {
 		return x.Message
 	}
 	return ""
 }
 
+// Event is the stream envelope.
+//
+// ordinal is set ONLY on durable-tier events (UserMessage, AssistantMessage),
+// where it is the conversation_message.ordinal that already exists in postgres
+// and is already the append-idempotency key. Ephemeral events leave it unset.
+// A client resumes with StreamEventsRequest.after_ordinal; ephemeral events
+// are best-effort and intentionally not resumable.
+type Event struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	ChildId  string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	Ordinal  *int32                 `protobuf:"varint,2,opt,name=ordinal,proto3,oneof" json:"ordinal,omitempty"`
+	TsUnixMs int64                  `protobuf:"varint,3,opt,name=ts_unix_ms,json=tsUnixMs,proto3" json:"ts_unix_ms,omitempty"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*Event_UserMessage
+	//	*Event_AssistantMessage
+	//	*Event_TurnStart
+	//	*Event_ContentBlockDelta
+	//	*Event_TurnEnd
+	//	*Event_AgentStatus
+	//	*Event_Error
+	Payload       isEvent_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Event) Reset() {
+	*x = Event{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Event) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Event) ProtoMessage() {}
+
+func (x *Event) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Event.ProtoReflect.Descriptor instead.
+func (*Event) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *Event) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+func (x *Event) GetOrdinal() int32 {
+	if x != nil && x.Ordinal != nil {
+		return *x.Ordinal
+	}
+	return 0
+}
+
+func (x *Event) GetTsUnixMs() int64 {
+	if x != nil {
+		return x.TsUnixMs
+	}
+	return 0
+}
+
+func (x *Event) GetPayload() isEvent_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *Event) GetUserMessage() *UserMessage {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_UserMessage); ok {
+			return x.UserMessage
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetAssistantMessage() *AssistantMessage {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_AssistantMessage); ok {
+			return x.AssistantMessage
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetTurnStart() *TurnStart {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_TurnStart); ok {
+			return x.TurnStart
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetContentBlockDelta() *ContentBlockDelta {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ContentBlockDelta); ok {
+			return x.ContentBlockDelta
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetTurnEnd() *TurnEnd {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_TurnEnd); ok {
+			return x.TurnEnd
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetAgentStatus() *AgentStatus {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_AgentStatus); ok {
+			return x.AgentStatus
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetError() *ErrorEvent {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_Error); ok {
+			return x.Error
+		}
+	}
+	return nil
+}
+
+type isEvent_Payload interface {
+	isEvent_Payload()
+}
+
+type Event_UserMessage struct {
+	UserMessage *UserMessage `protobuf:"bytes,10,opt,name=user_message,json=userMessage,proto3,oneof"`
+}
+
+type Event_AssistantMessage struct {
+	AssistantMessage *AssistantMessage `protobuf:"bytes,11,opt,name=assistant_message,json=assistantMessage,proto3,oneof"`
+}
+
+type Event_TurnStart struct {
+	TurnStart *TurnStart `protobuf:"bytes,12,opt,name=turn_start,json=turnStart,proto3,oneof"`
+}
+
+type Event_ContentBlockDelta struct {
+	ContentBlockDelta *ContentBlockDelta `protobuf:"bytes,13,opt,name=content_block_delta,json=contentBlockDelta,proto3,oneof"`
+}
+
+type Event_TurnEnd struct {
+	TurnEnd *TurnEnd `protobuf:"bytes,14,opt,name=turn_end,json=turnEnd,proto3,oneof"`
+}
+
+type Event_AgentStatus struct {
+	AgentStatus *AgentStatus `protobuf:"bytes,15,opt,name=agent_status,json=agentStatus,proto3,oneof"`
+}
+
+type Event_Error struct {
+	Error *ErrorEvent `protobuf:"bytes,16,opt,name=error,proto3,oneof"`
+}
+
+func (*Event_UserMessage) isEvent_Payload() {}
+
+func (*Event_AssistantMessage) isEvent_Payload() {}
+
+func (*Event_TurnStart) isEvent_Payload() {}
+
+func (*Event_ContentBlockDelta) isEvent_Payload() {}
+
+func (*Event_TurnEnd) isEvent_Payload() {}
+
+func (*Event_AgentStatus) isEvent_Payload() {}
+
+func (*Event_Error) isEvent_Payload() {}
+
 var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
 const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\n" +
-	"\x15rafiki/v1/event.proto\x12\trafiki.v1\" \n" +
-	"\x04Ping\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessageB4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
+	"\x15rafiki/v1/event.proto\x12\trafiki.v1\"\xd2\x02\n" +
+	"\x05Usage\x12&\n" +
+	"\finput_tokens\x18\x01 \x01(\x03H\x00R\vinputTokens\x88\x01\x01\x12(\n" +
+	"\routput_tokens\x18\x02 \x01(\x03H\x01R\foutputTokens\x88\x01\x01\x12/\n" +
+	"\x11cache_read_tokens\x18\x03 \x01(\x03H\x02R\x0fcacheReadTokens\x88\x01\x01\x121\n" +
+	"\x12cache_write_tokens\x18\x04 \x01(\x03H\x03R\x10cacheWriteTokens\x88\x01\x01\x12.\n" +
+	"\x10reasoning_tokens\x18\x05 \x01(\x03H\x04R\x0freasoningTokens\x88\x01\x01B\x0f\n" +
+	"\r_input_tokensB\x10\n" +
+	"\x0e_output_tokensB\x14\n" +
+	"\x12_cache_read_tokensB\x15\n" +
+	"\x13_cache_write_tokensB\x13\n" +
+	"\x11_reasoning_tokens\"\x1f\n" +
+	"\tTextBlock\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"I\n" +
+	"\rThinkingBlock\x12\x1a\n" +
+	"\bthinking\x18\x01 \x01(\tR\bthinking\x12\x1c\n" +
+	"\tsignature\x18\x02 \x01(\tR\tsignature\"Q\n" +
+	"\fToolUseBlock\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1d\n" +
+	"\n" +
+	"input_json\x18\x03 \x01(\tR\tinputJson\"?\n" +
+	"\n" +
+	"ImageBlock\x12\x1d\n" +
+	"\n" +
+	"media_type\x18\x01 \x01(\tR\tmediaType\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"\x7f\n" +
+	"\x0fToolResultBlock\x12\x1e\n" +
+	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x121\n" +
+	"\acontent\x18\x02 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\x12\x19\n" +
+	"\bis_error\x18\x03 \x01(\bR\aisError\"\xb5\x02\n" +
+	"\fContentBlock\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x05R\x05index\x12*\n" +
+	"\x04text\x18\x02 \x01(\v2\x14.rafiki.v1.TextBlockH\x00R\x04text\x126\n" +
+	"\bthinking\x18\x03 \x01(\v2\x18.rafiki.v1.ThinkingBlockH\x00R\bthinking\x124\n" +
+	"\btool_use\x18\x04 \x01(\v2\x17.rafiki.v1.ToolUseBlockH\x00R\atoolUse\x12-\n" +
+	"\x05image\x18\x05 \x01(\v2\x15.rafiki.v1.ImageBlockH\x00R\x05image\x12=\n" +
+	"\vtool_result\x18\x06 \x01(\v2\x1a.rafiki.v1.ToolResultBlockH\x00R\n" +
+	"toolResultB\a\n" +
+	"\x05block\"@\n" +
+	"\vUserMessage\x121\n" +
+	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"E\n" +
+	"\x10AssistantMessage\x121\n" +
+	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\":\n" +
+	"\tTurnStart\x12\x17\n" +
+	"\aturn_id\x18\x01 \x01(\tR\x06turnId\x12\x14\n" +
+	"\x05model\x18\x02 \x01(\tR\x05model\"\xd7\x01\n" +
+	"\aTurnEnd\x12\x17\n" +
+	"\aturn_id\x18\x01 \x01(\tR\x06turnId\x126\n" +
+	"\vstop_reason\x18\x02 \x01(\x0e2\x15.rafiki.v1.StopReasonR\n" +
+	"stopReason\x12&\n" +
+	"\x0fraw_stop_reason\x18\x03 \x01(\tR\rrawStopReason\x12&\n" +
+	"\x05usage\x18\x04 \x01(\v2\x10.rafiki.v1.UsageR\x05usage\x12\x1e\n" +
+	"\bcost_usd\x18\x05 \x01(\x01H\x00R\acostUsd\x88\x01\x01B\v\n" +
+	"\t_cost_usd\"\xa0\x01\n" +
+	"\x11ContentBlockDelta\x12\x17\n" +
+	"\aturn_id\x18\x01 \x01(\tR\x06turnId\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\x05R\x05index\x12\x14\n" +
+	"\x04text\x18\x03 \x01(\tH\x00R\x04text\x12\x1c\n" +
+	"\bthinking\x18\x04 \x01(\tH\x00R\bthinking\x12\x1f\n" +
+	"\n" +
+	"input_json\x18\x05 \x01(\tH\x00R\tinputJsonB\a\n" +
+	"\x05delta\"#\n" +
+	"\vAgentStatus\x12\x14\n" +
+	"\x05state\x18\x01 \x01(\tR\x05state\":\n" +
+	"\n" +
+	"ErrorEvent\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xa3\x04\n" +
+	"\x05Event\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
+	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12\x1c\n" +
+	"\n" +
+	"ts_unix_ms\x18\x03 \x01(\x03R\btsUnixMs\x12;\n" +
+	"\fuser_message\x18\n" +
+	" \x01(\v2\x16.rafiki.v1.UserMessageH\x00R\vuserMessage\x12J\n" +
+	"\x11assistant_message\x18\v \x01(\v2\x1b.rafiki.v1.AssistantMessageH\x00R\x10assistantMessage\x125\n" +
+	"\n" +
+	"turn_start\x18\f \x01(\v2\x14.rafiki.v1.TurnStartH\x00R\tturnStart\x12N\n" +
+	"\x13content_block_delta\x18\r \x01(\v2\x1c.rafiki.v1.ContentBlockDeltaH\x00R\x11contentBlockDelta\x12/\n" +
+	"\bturn_end\x18\x0e \x01(\v2\x12.rafiki.v1.TurnEndH\x00R\aturnEnd\x12;\n" +
+	"\fagent_status\x18\x0f \x01(\v2\x16.rafiki.v1.AgentStatusH\x00R\vagentStatus\x12-\n" +
+	"\x05error\x18\x10 \x01(\v2\x15.rafiki.v1.ErrorEventH\x00R\x05errorB\t\n" +
+	"\apayloadB\n" +
+	"\n" +
+	"\b_ordinal*\xc8\x01\n" +
+	"\n" +
+	"StopReason\x12\x1b\n" +
+	"\x17STOP_REASON_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14STOP_REASON_END_TURN\x10\x01\x12\x1a\n" +
+	"\x16STOP_REASON_MAX_TOKENS\x10\x02\x12\x18\n" +
+	"\x14STOP_REASON_TOOL_USE\x10\x03\x12\x1d\n" +
+	"\x19STOP_REASON_STOP_SEQUENCE\x10\x04\x12\x17\n" +
+	"\x13STOP_REASON_REFUSAL\x10\x05\x12\x15\n" +
+	"\x11STOP_REASON_ERROR\x10\x06B4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
 
 var (
 	file_rafiki_v1_event_proto_rawDescOnce sync.Once
@@ -87,16 +1321,49 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 	return file_rafiki_v1_event_proto_rawDescData
 }
 
-var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_rafiki_v1_event_proto_goTypes = []any{
-	(*Ping)(nil), // 0: rafiki.v1.Ping
+	(StopReason)(0),           // 0: rafiki.v1.StopReason
+	(*Usage)(nil),             // 1: rafiki.v1.Usage
+	(*TextBlock)(nil),         // 2: rafiki.v1.TextBlock
+	(*ThinkingBlock)(nil),     // 3: rafiki.v1.ThinkingBlock
+	(*ToolUseBlock)(nil),      // 4: rafiki.v1.ToolUseBlock
+	(*ImageBlock)(nil),        // 5: rafiki.v1.ImageBlock
+	(*ToolResultBlock)(nil),   // 6: rafiki.v1.ToolResultBlock
+	(*ContentBlock)(nil),      // 7: rafiki.v1.ContentBlock
+	(*UserMessage)(nil),       // 8: rafiki.v1.UserMessage
+	(*AssistantMessage)(nil),  // 9: rafiki.v1.AssistantMessage
+	(*TurnStart)(nil),         // 10: rafiki.v1.TurnStart
+	(*TurnEnd)(nil),           // 11: rafiki.v1.TurnEnd
+	(*ContentBlockDelta)(nil), // 12: rafiki.v1.ContentBlockDelta
+	(*AgentStatus)(nil),       // 13: rafiki.v1.AgentStatus
+	(*ErrorEvent)(nil),        // 14: rafiki.v1.ErrorEvent
+	(*Event)(nil),             // 15: rafiki.v1.Event
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
+	2,  // 1: rafiki.v1.ContentBlock.text:type_name -> rafiki.v1.TextBlock
+	3,  // 2: rafiki.v1.ContentBlock.thinking:type_name -> rafiki.v1.ThinkingBlock
+	4,  // 3: rafiki.v1.ContentBlock.tool_use:type_name -> rafiki.v1.ToolUseBlock
+	5,  // 4: rafiki.v1.ContentBlock.image:type_name -> rafiki.v1.ImageBlock
+	6,  // 5: rafiki.v1.ContentBlock.tool_result:type_name -> rafiki.v1.ToolResultBlock
+	7,  // 6: rafiki.v1.UserMessage.content:type_name -> rafiki.v1.ContentBlock
+	7,  // 7: rafiki.v1.AssistantMessage.content:type_name -> rafiki.v1.ContentBlock
+	0,  // 8: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
+	1,  // 9: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
+	8,  // 10: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
+	9,  // 11: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
+	10, // 12: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
+	12, // 13: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
+	11, // 14: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
+	13, // 15: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
+	14, // 16: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -104,18 +1371,42 @@ func file_rafiki_v1_event_proto_init() {
 	if File_rafiki_v1_event_proto != nil {
 		return
 	}
+	file_rafiki_v1_event_proto_msgTypes[0].OneofWrappers = []any{}
+	file_rafiki_v1_event_proto_msgTypes[6].OneofWrappers = []any{
+		(*ContentBlock_Text)(nil),
+		(*ContentBlock_Thinking)(nil),
+		(*ContentBlock_ToolUse)(nil),
+		(*ContentBlock_Image)(nil),
+		(*ContentBlock_ToolResult)(nil),
+	}
+	file_rafiki_v1_event_proto_msgTypes[10].OneofWrappers = []any{}
+	file_rafiki_v1_event_proto_msgTypes[11].OneofWrappers = []any{
+		(*ContentBlockDelta_Text)(nil),
+		(*ContentBlockDelta_Thinking)(nil),
+		(*ContentBlockDelta_InputJson)(nil),
+	}
+	file_rafiki_v1_event_proto_msgTypes[14].OneofWrappers = []any{
+		(*Event_UserMessage)(nil),
+		(*Event_AssistantMessage)(nil),
+		(*Event_TurnStart)(nil),
+		(*Event_ContentBlockDelta)(nil),
+		(*Event_TurnEnd)(nil),
+		(*Event_AgentStatus)(nil),
+		(*Event_Error)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_event_proto_rawDesc), len(file_rafiki_v1_event_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   1,
+			NumEnums:      1,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_rafiki_v1_event_proto_goTypes,
 		DependencyIndexes: file_rafiki_v1_event_proto_depIdxs,
+		EnumInfos:         file_rafiki_v1_event_proto_enumTypes,
 		MessageInfos:      file_rafiki_v1_event_proto_msgTypes,
 	}.Build()
 	File_rafiki_v1_event_proto = out.File
