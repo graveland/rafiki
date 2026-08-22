@@ -445,3 +445,60 @@ func TestResolveContentZeroBudgetIsUnlimited(t *testing.T) {
 		t.Errorf("expected content unchanged with no budget set, got %d bytes (want %d)", len(got), len(override))
 	}
 }
+
+func TestFilterMCPServers(t *testing.T) {
+	cfg := map[string]tools.MCPServerConfig{
+		"a": {Command: "cmd-a"},
+		"b": {Command: "cmd-b"},
+	}
+
+	cases := []struct {
+		name      string
+		allowlist string
+		wantKeys  []string
+	}{
+		{"empty means all", "", []string{"a", "b"}},
+		{"star means all", "*", []string{"a", "b"}},
+		{"one name", "a", []string{"a"}},
+		{"unknown name filters to nothing", "nonexistent", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterMCPServers(cfg, tc.allowlist)
+			if len(got) != len(tc.wantKeys) {
+				t.Fatalf("filterMCPServers(%q) = %v, want keys %v", tc.allowlist, got, tc.wantKeys)
+			}
+			for _, k := range tc.wantKeys {
+				if _, ok := got[k]; !ok {
+					t.Errorf("filterMCPServers(%q) missing key %q", tc.allowlist, k)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildRuntimeNoMCPSkipsConnection proves opts.NoMCP short-circuits the
+// whole MCP connect block even when MCPConfig points at a real file — no
+// attempt to dial anything.
+func TestBuildRuntimeNoMCPSkipsConnection(t *testing.T) {
+	mcpPath := filepath.Join(t.TempDir(), ".mcp.json")
+	// A server config that would fail to connect if ConnectMCP ever tried:
+	// "command-that-does-not-exist" is not on PATH.
+	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"x":{"command":"command-that-does-not-exist"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := fakeRuntimeOptions(t, t.TempDir())
+	opts.MCPConfig = mcpPath
+	opts.NoMCP = true
+
+	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+	if err != nil {
+		t.Fatalf("BuildRuntime: %v", err)
+	}
+	defer shutdown()
+	if eng == nil {
+		t.Fatal("BuildRuntime returned a nil engine")
+	}
+}

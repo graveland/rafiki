@@ -64,10 +64,17 @@ type RuntimeOptions struct {
 	// nil when the child has no executor, in which case no SkillMeta carries Remote.
 	RemoteSkillBody func(ctx context.Context, name string) (body, dir string, err error)
 	MCPConfig       string // absolute path, or empty to skip MCP entirely
-	LSPConfig       string // absolute path, or empty to skip LSP entirely
-	FakeTurns       string
-	Providers       *providers.Set
-	APIKeyOverride  string
+	// MCPServers is a comma-separated allowlist of MCPConfig's mcpServers
+	// keys to actually connect; empty or "*" means all (today's behavior).
+	// Set from a model's declared alias by default — see
+	// cmd/rafikid's resolveModelDefaults — or an explicit caller override.
+	MCPServers string
+	// NoMCP disables MCP entirely, overriding MCPConfig even when it is set.
+	NoMCP          bool
+	LSPConfig      string // absolute path, or empty to skip LSP entirely
+	FakeTurns      string
+	Providers      *providers.Set
+	APIKeyOverride string
 
 	// ProviderSenders overrides the sender for specific providers, keyed by
 	// provider name. The daemon populates this for every provider with a
@@ -301,6 +308,28 @@ func executorToolSet(served []string) map[string]bool {
 	return out
 }
 
+// filterMCPServers narrows cfg to the comma-separated allowlist. Empty or
+// "*" means all (no filtering, cfg returned as-is); any other value keeps
+// only the named servers, dropping the rest before ConnectMCP ever dials
+// them — so a restricted server is never even attempted, not merely hidden
+// after connecting.
+func filterMCPServers(cfg map[string]tools.MCPServerConfig, allowlist string) map[string]tools.MCPServerConfig {
+	if allowlist == "" || allowlist == "*" {
+		return cfg
+	}
+	allowed := make(map[string]bool, len(cfg))
+	for _, name := range strings.Split(allowlist, ",") {
+		allowed[name] = true
+	}
+	out := make(map[string]tools.MCPServerConfig, len(cfg))
+	for name, sc := range cfg {
+		if allowed[name] {
+			out[name] = sc
+		}
+	}
+	return out
+}
+
 // BuildRuntime assembles the tool registry, skills, MCP connections, and the
 // Engine. The returned shutdown func releases MCP connections and engine
 // resources; call it exactly once.
@@ -433,7 +462,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
 
 	mcpShutdown := func() {}
-	if opts.MCPConfig != "" {
+	if opts.MCPConfig != "" && !opts.NoMCP {
 		if _, err := os.Stat(opts.MCPConfig); err != nil {
 			return nil, nil, fmt.Errorf("runtime: mcp config %s: %w", opts.MCPConfig, err)
 		}
@@ -441,6 +470,9 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: load mcp config %s: %w", opts.MCPConfig, err)
 		}
+		// Filter before ConnectMCP dials anything, so a restricted server is
+		// never even attempted, not merely hidden after connecting.
+		mcpCfg.MCPServers = filterMCPServers(mcpCfg.MCPServers, opts.MCPServers)
 		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy)
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: connect mcp: %w", err)
