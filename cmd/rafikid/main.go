@@ -453,6 +453,9 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.SetCatalog(catalog)
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
+		if face.Control != nil {
+			face.Control.SetChildResolver(ctrl)
+		}
 	}
 	// The executor pool no longer owns a listener. It is reached at a PATH on
 	// the shared TLS listener below, upgraded out of HTTP/1.1, so the control

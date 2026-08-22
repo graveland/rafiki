@@ -27,6 +27,7 @@ func TestStreamEventsReplaysHistoryThenFollowsLive(t *testing.T) {
 	s := connectapi.NewServer(fakeLoader{msgs: []store.Message{
 		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("stored"))},
 	}})
+	s.SetChildResolver(fakeResolver{})
 	s.SetEventSource(src)
 
 	mux := http.NewServeMux()
@@ -68,8 +69,47 @@ func TestStreamEventsReplaysHistoryThenFollowsLive(t *testing.T) {
 	}
 }
 
+// With no live-event source wired, the stream must END after the durable
+// replay rather than parking on ctx.Done(): a stream that will never deliver
+// anything should not hold a goroutine per caller for the caller's lifetime.
+func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
+	s := connectapi.NewServer(fakeLoader{msgs: []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("stored"))},
+	}})
+	s.SetChildResolver(fakeResolver{})
+	// No SetEventSource call.
+
+	mux := http.NewServeMux()
+	path, h := s.Routes()
+	mux.Handle(path, h)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stream, err := client.StreamEvents(ctx,
+		connect.NewRequest(&rafikiv1.StreamEventsRequest{ChildIds: []string{"c_1"}}))
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("no replayed event: %v", stream.Err())
+	}
+	if stream.Receive() {
+		t.Fatal("stream kept going after replay; want it closed when no event source is wired")
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream ended with an error: %v", err)
+	}
+}
+
 func TestStreamEventsRejectsNoChildIDs(t *testing.T) {
 	s := connectapi.NewServer(fakeLoader{})
+	s.SetChildResolver(fakeResolver{})
 	s.SetEventSource(&fakeSource{ch: make(chan *rafikiv1.Event)})
 
 	err := s.StreamEvents(context.Background(),
@@ -90,7 +130,13 @@ func TestStreamEventsRejectsNoChildIDs(t *testing.T) {
 // handler with a deny-all stand-in and confirming the stream is blocked
 // exactly like a unary call would be.
 func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
-	s := connectapi.NewServer(fakeLoader{})
+	s := connectapi.NewServer(fakeLoader{msgs: []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("stored"))},
+	}})
+	// A resolver and history, so an unblocked handler would genuinely send
+	// something — otherwise this test could pass because the stream was empty
+	// rather than because the wrap denied it.
+	s.SetChildResolver(fakeResolver{})
 	s.SetEventSource(&fakeSource{ch: make(chan *rafikiv1.Event, 1)})
 
 	path, h := s.Routes()

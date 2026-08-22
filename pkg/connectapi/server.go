@@ -26,13 +26,51 @@ type HistoryLoader interface {
 	Load(ctx context.Context, conversationID string) ([]store.Message, error)
 }
 
+// ConversationResolver maps a daemon-assigned child id (a ULID, "c_...") to
+// the persisted conversation's UUID — the id store.Messages.Load actually
+// expects. These are different identifiers: the child id is runtime-only,
+// minted per spawn, while the conversation id is what conversation_message
+// rows are keyed by. false means the child is unknown, has exited and been
+// forgotten, or is not a fundi child (only fundi children have a conversation
+// UUID as their session id — see childstore.Snapshot.SessionID).
+type ConversationResolver interface {
+	ConversationID(childID string) (string, bool)
+}
+
 // Server implements the Control service.
 type Server struct {
-	history HistoryLoader
-	events  EventSource
+	history  HistoryLoader
+	events   EventSource
+	resolver ConversationResolver
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
+
+// SetChildResolver attaches the child-id-to-conversation-id resolver. It is a
+// post-construction setter, not a constructor argument, because the daemon's
+// Controller (the only thing that knows this mapping) is constructed AFTER
+// the proxy face that owns this Server — see cmd/rafikid/main.go, which wires
+// it the same way it wires ctrl.SetProxy(face.URL, face.Token). Until it is
+// set, every call that needs it fails closed (CodeUnavailable) rather than
+// passing the child id through as if it were already a conversation id — the
+// exact bug this resolver exists to close.
+func (s *Server) SetChildResolver(r ConversationResolver) { s.resolver = r }
+
+// resolveConversation turns a request's child_id into the conversation id
+// store.Messages.Load needs. Centralized here because GetHistory and
+// StreamEvents both need it with identical semantics.
+func (s *Server) resolveConversation(childID string) (string, error) {
+	if s.resolver == nil {
+		return "", connect.NewError(connect.CodeUnavailable,
+			errors.New("child resolver not yet wired"))
+	}
+	conversationID, ok := s.resolver.ConversationID(childID)
+	if !ok {
+		return "", connect.NewError(connect.CodeNotFound,
+			fmt.Errorf("no conversation for child %q", childID))
+	}
+	return conversationID, nil
+}
 
 // Routes returns the mux path prefix and handler for the Control service.
 // Auth is the caller's responsibility — mount it under the same middleware
@@ -56,7 +94,12 @@ func (s *Server) GetHistory(
 			errors.New("child_id is required"))
 	}
 
-	msgs, err := s.history.Load(ctx, childID)
+	conversationID, err := s.resolveConversation(childID)
+	if err != nil {
+		return nil, err
+	}
+
+	msgs, err := s.history.Load(ctx, conversationID)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
 			fmt.Errorf("load history: %w", err))

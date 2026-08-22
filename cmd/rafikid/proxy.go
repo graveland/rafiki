@@ -98,6 +98,13 @@ type proxyFace struct {
 	// /v1/messages on the public host alongside /control and
 	// /executor/connect — one hostname, one port, one certificate.
 	Handler http.Handler
+
+	// Control is the underlying Connect server, exposed so main.go can wire
+	// its ConversationResolver once the Controller exists — the proxy face is
+	// constructed before the Controller (see cmd/rafikid/main.go), so this
+	// can't be a constructor argument. Nil when there is no capture pool (no
+	// Connect plane mounted at all).
+	Control *connectapi.Server
 }
 
 // defaultProxyListen is where the face binds unless RAFIKI_PROXY_LISTEN says
@@ -284,8 +291,10 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	mux := http.NewServeMux()
 	h := &server.Handler{Messages: messages, Chat: chat}
+	var connectServer *connectapi.Server
 	if pool != nil {
-		h.ControlPath, h.Control = connectapi.NewServer(store.NewMessages(pool)).Routes()
+		connectServer = connectapi.NewServer(store.NewMessages(pool))
+		h.ControlPath, h.Control = connectServer.Routes()
 	}
 	h.Mount(mux, func(next http.Handler) http.Handler {
 		return tokenAuth.Middleware(traceMiddleware(next))
@@ -353,6 +362,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		Token:   token,
 		srv:     srv,
 		Handler: mux,
+		Control: connectServer,
 	}
 	logger.Info("proxy face listening",
 		"addr", ln.Addr().String(), "children_use", f.URL, "captured", pool != nil)
