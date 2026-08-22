@@ -26,8 +26,11 @@ kind = "anthropic"
 base_url = "http://localhost:8005"
 
 [providers.vmlx.models.qwen]
-id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
-context_window = 16384
+id                   = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
+context_window       = 16384
+context_files_tokens = 3277
+skills                = ""
+mcp_servers           = "codescan"
 `
 
 func TestParseGood(t *testing.T) {
@@ -69,6 +72,15 @@ func TestParseGood(t *testing.T) {
 	}
 	if alias.ContextWindow != 16384 {
 		t.Errorf("alias.ContextWindow = %d, want 16384", alias.ContextWindow)
+	}
+	if alias.ContextFilesTokens != 3277 {
+		t.Errorf("alias.ContextFilesTokens = %d, want 3277", alias.ContextFilesTokens)
+	}
+	if alias.Skills == nil || *alias.Skills != "" {
+		t.Errorf("alias.Skills = %v, want a pointer to \"\"", alias.Skills)
+	}
+	if alias.MCPServers == nil || *alias.MCPServers != "codescan" {
+		t.Errorf("alias.MCPServers = %v, want a pointer to \"codescan\"", alias.MCPServers)
 	}
 }
 
@@ -168,5 +180,35 @@ func TestLoadMissingFileReturnsDefault(t *testing.T) {
 	}
 	if _, ok := set.Get("anthropic"); !ok {
 		t.Error("Load of a missing file must return Default()")
+	}
+}
+
+func TestParseModelAliasSkillsUnsetVsEmpty(t *testing.T) {
+	const toml = `
+default_provider = "x"
+[providers.x]
+kind = "anthropic"
+[providers.x.models.unset]
+id = "m1"
+[providers.x.models.empty]
+id = "m2"
+skills = ""
+[providers.x.models.star]
+id = "m3"
+skills = "*"
+`
+	set, err := providers.Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	p, _ := set.Get("x")
+	if got := p.Models["unset"].Skills; got != nil {
+		t.Errorf("unset: Skills = %v, want nil (key absent)", got)
+	}
+	if got := p.Models["empty"].Skills; got == nil || *got != "" {
+		t.Errorf("empty: Skills = %v, want pointer to \"\"", got)
+	}
+	if got := p.Models["star"].Skills; got == nil || *got != "*" {
+		t.Errorf("star: Skills = %v, want pointer to \"*\"", got)
 	}
 }
