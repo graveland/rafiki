@@ -88,6 +88,12 @@ the same HTTP listener as the proxy faces. The JSON-Lines frame protocol in the
 rest of this document is unchanged and remains the path `rafiki attach` and the
 existing CLI use.
 
+In this phase, the Connect plane is reached over the **local proxy listener
+only** — the same base URL `/v1/messages` already uses — not the separate
+remote-daemon TLS control listener an `https://` `RAFIKI_URL` names. `rafiki
+history` detects that case and says so rather than failing with an opaque
+transport error.
+
 - **Path prefix:** `/rafiki.v1.Control/`
 - **Schema:** `proto/rafiki/v1/*.proto`; generated Go in `pkg/gen/rafiki/v1/`.
 - **Auth:** the same per-user bearer credential as the proxy faces

@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/client"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -59,7 +60,16 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	if base == "" {
 		base = defaultControlURL
 	}
-	client := rafikiv1connect.NewControlClient(http.DefaultClient, base)
+	// RAFIKI_URL may name a REMOTE daemon's TLS control listener, which is a
+	// different listener from the local proxy face where the Connect plane is
+	// mounted — dialing it here fails with an opaque transport error rather
+	// than saying what is wrong.
+	if client.IsRemoteURL(base) {
+		return fmt.Errorf("rafiki history does not support a remote control plane yet "+
+			"(RAFIKI_URL=%s names one); this phase serves the Connect control plane over "+
+			"the local proxy listener only", base)
+	}
+	controlClient := rafikiv1connect.NewControlClient(http.DefaultClient, base)
 
 	req := connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: args[0]})
 	// The Connect control plane is mounted under the same auth middleware as
@@ -69,7 +79,7 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		req.Header().Set("Authorization", "Bearer "+tok)
 	}
 
-	resp, err := client.GetHistory(cmd.Context(), req)
+	resp, err := controlClient.GetHistory(cmd.Context(), req)
 	if err != nil {
 		return fmt.Errorf("get history: %w", err)
 	}
