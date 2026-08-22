@@ -29,6 +29,7 @@ type HistoryLoader interface {
 // Server implements the Control service.
 type Server struct {
 	history HistoryLoader
+	events  EventSource
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
