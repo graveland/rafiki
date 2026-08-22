@@ -88,6 +88,12 @@ message UserMessage {
 // AssistantMessage is a durable-tier event: a persisted assistant-role message.
 message AssistantMessage {
   repeated ContentBlock content = 1;
+  // stop_reason/raw_stop_reason mirror TurnEnd's fields (same rationale:
+  // rafiki's normalized enum plus the provider's own string). Only
+  // meaningful for assistant rows — the store loads StopReason for those and
+  // leaves it empty for user rows.
+  StopReason stop_reason = 2;
+  string raw_stop_reason = 3;
 }
 
 message TurnStart {

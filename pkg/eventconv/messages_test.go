@@ -36,6 +36,12 @@ func TestEventsFromMessagesCarriesOrdinal(t *testing.T) {
 	if evs[1].GetAssistantMessage() == nil {
 		t.Fatal("event 1 is not an assistant message")
 	}
+	if evs[1].GetAssistantMessage().StopReason != rafikiv1.StopReason_STOP_REASON_END_TURN {
+		t.Fatalf("stop reason = %v, want STOP_REASON_END_TURN", evs[1].GetAssistantMessage().StopReason)
+	}
+	if evs[1].GetAssistantMessage().RawStopReason != "end_turn" {
+		t.Fatalf("raw stop reason = %q, want %q", evs[1].GetAssistantMessage().RawStopReason, "end_turn")
+	}
 }
 
 func TestBlocksFromParamPreservesToolUseInputAsRawJSON(t *testing.T) {

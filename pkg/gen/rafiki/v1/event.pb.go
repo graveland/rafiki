@@ -632,8 +632,14 @@ func (x *UserMessage) GetContent() []*ContentBlock {
 
 // AssistantMessage is a durable-tier event: a persisted assistant-role message.
 type AssistantMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Content       []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Content []*ContentBlock        `protobuf:"bytes,1,rep,name=content,proto3" json:"content,omitempty"`
+	// stop_reason/raw_stop_reason mirror TurnEnd's fields (same rationale:
+	// rafiki's normalized enum plus the provider's own string). Only
+	// meaningful for assistant rows — the store loads StopReason for those and
+	// leaves it empty for user rows.
+	StopReason    StopReason `protobuf:"varint,2,opt,name=stop_reason,json=stopReason,proto3,enum=rafiki.v1.StopReason" json:"stop_reason,omitempty"`
+	RawStopReason string     `protobuf:"bytes,3,opt,name=raw_stop_reason,json=rawStopReason,proto3" json:"raw_stop_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -673,6 +679,20 @@ func (x *AssistantMessage) GetContent() []*ContentBlock {
 		return x.Content
 	}
 	return nil
+}
+
+func (x *AssistantMessage) GetStopReason() StopReason {
+	if x != nil {
+		return x.StopReason
+	}
+	return StopReason_STOP_REASON_UNSPECIFIED
+}
+
+func (x *AssistantMessage) GetRawStopReason() string {
+	if x != nil {
+		return x.RawStopReason
+	}
+	return ""
 }
 
 type TurnStart struct {
@@ -1254,9 +1274,12 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"toolResultB\a\n" +
 	"\x05block\"@\n" +
 	"\vUserMessage\x121\n" +
-	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"E\n" +
+	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"\xa5\x01\n" +
 	"\x10AssistantMessage\x121\n" +
-	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\":\n" +
+	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\x126\n" +
+	"\vstop_reason\x18\x02 \x01(\x0e2\x15.rafiki.v1.StopReasonR\n" +
+	"stopReason\x12&\n" +
+	"\x0fraw_stop_reason\x18\x03 \x01(\tR\rrawStopReason\":\n" +
 	"\tTurnStart\x12\x17\n" +
 	"\aturn_id\x18\x01 \x01(\tR\x06turnId\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\"\xd7\x01\n" +
@@ -1350,20 +1373,21 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	6,  // 5: rafiki.v1.ContentBlock.tool_result:type_name -> rafiki.v1.ToolResultBlock
 	7,  // 6: rafiki.v1.UserMessage.content:type_name -> rafiki.v1.ContentBlock
 	7,  // 7: rafiki.v1.AssistantMessage.content:type_name -> rafiki.v1.ContentBlock
-	0,  // 8: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
-	1,  // 9: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
-	8,  // 10: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
-	9,  // 11: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
-	10, // 12: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
-	12, // 13: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
-	11, // 14: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
-	13, // 15: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
-	14, // 16: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	0,  // 8: rafiki.v1.AssistantMessage.stop_reason:type_name -> rafiki.v1.StopReason
+	0,  // 9: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
+	1,  // 10: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
+	8,  // 11: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
+	9,  // 12: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
+	10, // 13: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
+	12, // 14: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
+	11, // 15: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
+	13, // 16: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
+	14, // 17: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
