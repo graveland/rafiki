@@ -290,8 +290,28 @@ func TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig(t *testing.T) {
 func TestBuildAgentArgv_OmitsUnsetKnobs(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/claude-sonnet-5"}
 	joined := strings.Join(buildAgentArgv(req, "child-1", "/state"), " ")
-	if strings.Contains(joined, "--skills-dir") || strings.Contains(joined, "--mcp-config") {
+	if strings.Contains(joined, "--skills-dir") || strings.Contains(joined, "--mcp-config") || strings.Contains(joined, "--mcp-servers") {
 		t.Errorf("unset knobs must not appear: %s", joined)
+	}
+}
+
+// TestBuildAgentArgv_RendersMCPServersAndNoMCP confirms --mcp-servers and
+// --no-mcp are emitted from their SpawnRequest fields.
+func TestBuildAgentArgv_RendersMCPServersAndNoMCP(t *testing.T) {
+	req := protocol.SpawnRequest{
+		Kind:       protocol.KindFundi,
+		Model:      "anthropic/claude-sonnet-5",
+		MCPServers: []string{"codescan", "other"},
+	}
+	joined := strings.Join(buildAgentArgv(req, "child-1", "/state"), " ")
+	if !strings.Contains(joined, "--mcp-servers codescan,other") {
+		t.Errorf("mcp-servers missing from argv: %s", joined)
+	}
+
+	req2 := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/claude-sonnet-5", NoMCP: true}
+	joined2 := strings.Join(buildAgentArgv(req2, "child-1", "/state"), " ")
+	if !strings.Contains(joined2, "--no-mcp") {
+		t.Errorf("--no-mcp missing from argv: %s", joined2)
 	}
 }
 
