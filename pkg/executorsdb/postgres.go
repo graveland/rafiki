@@ -307,6 +307,17 @@ func (s *pgStore) SetEnabled(ctx context.Context, id string, enabled bool) error
 	return nil
 }
 
+func (s *pgStore) Delete(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM conversations.executors WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *pgStore) Annotate(ctx context.Context, id string, set map[string]string, remove []string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

@@ -93,6 +93,28 @@ func TestAnUnreadableRowDoesNotEvictAHealthyExecutor(t *testing.T) {
 	}
 }
 
+// A DELETED row is a terminal answer, not a read failure — the distinction
+// TestAnUnreadableRowDoesNotEvictAHealthyExecutor draws the other way. Both
+// look like "Get returned an error", but ErrNotFound specifically means
+// rafikid asked the question and got a definite answer: this row is gone.
+// Treating it the same as a database blip means `rafiki executor delete` on a
+// currently-connected executor never actually disconnects it.
+func TestADeletedRowEvictsALiveExecutor(t *testing.T) {
+	store := newFakeStore("exec-deleted")
+	p := New(store)
+	p.healthInterval = 20 * time.Millisecond
+	p.healthTimeout = 500 * time.Millisecond
+
+	go p.handleConn(invertedPair(t, &stubHandler{executorID: "exec-deleted"}))
+	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
+
+	store.delete()
+
+	waitFor(t, 5*time.Second, "the deleted executor to leave the live pool", func() bool {
+		return len(p.Live()) == 0
+	})
+}
+
 // One credential names one row, and the pool holds one connection per row. A
 // second connection while the first is ALIVE is either a credential on two
 // machines or an attacker with a stolen one; either way the incumbent — which

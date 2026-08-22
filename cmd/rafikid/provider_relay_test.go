@@ -147,6 +147,7 @@ func (relayFakeStore) SetLabels(context.Context, string, map[string]string, []st
 	return executors.Executor{}, nil
 }
 func (relayFakeStore) SetEnabled(context.Context, string, bool) error { return nil }
+func (relayFakeStore) Delete(context.Context, string) error           { return nil }
 func (relayFakeStore) Annotate(context.Context, string, map[string]string, []string) error {
 	return nil
 }

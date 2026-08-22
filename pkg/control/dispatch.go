@@ -183,6 +183,8 @@ type Controller interface {
 	ExecutorDisable(req protocol.ExecutorDisableRequest) error
 	// ExecutorEnable re-enables a disabled executor.
 	ExecutorEnable(req protocol.ExecutorEnableRequest) error
+	// ExecutorDelete permanently removes an executor row.
+	ExecutorDelete(req protocol.ExecutorDeleteRequest) error
 
 	// ExecutorSession mints an executor row for the CALLER's own machine.
 	//
@@ -307,6 +309,8 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.executorDisable(frame, hdr.ID)
 	case protocol.TypeCtrlExecutorEnable:
 		return d.executorEnable(frame, hdr.ID)
+	case protocol.TypeCtrlExecutorDelete:
+		return d.executorDelete(frame, hdr.ID)
 	case protocol.TypeCtrlExecutorSession:
 		return d.executorSession(conn, frame, hdr.ID)
 	case protocol.TypeCtrlUserCreate:
@@ -1058,6 +1062,20 @@ func (d *dispatcher) executorEnable(frame []byte, id string) []byte {
 		return mapErr(protocol.TypeCtrlExecutorEnable, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlExecutorEnable, id, nil)
+}
+
+func (d *dispatcher) executorDelete(frame []byte, id string) []byte {
+	var req protocol.ExecutorDeleteRequest
+	if err := json.Unmarshal(frame, &req); err != nil {
+		return errResponse(protocol.TypeCtrlExecutorDelete, id, protocol.ErrInvalidArgs, "malformed request")
+	}
+	if req.ExecutorID == "" {
+		return errResponse(protocol.TypeCtrlExecutorDelete, id, protocol.ErrInvalidArgs, "executorId required")
+	}
+	if err := d.c.ExecutorDelete(req); err != nil {
+		return mapErr(protocol.TypeCtrlExecutorDelete, id, err, protocol.ErrInternal)
+	}
+	return okResponse(protocol.TypeCtrlExecutorDelete, id, nil)
 }
 
 func (d *dispatcher) executorSession(conn Connection, frame []byte, id string) []byte {

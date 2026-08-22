@@ -82,6 +82,7 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 	cmd.Flags().String("rtk", "", "rewrite known commands through rtk: auto|on|off")
 	cmd.Flags().String("spill-dir", "", "where oversized results and background job output are written")
 	cmd.Flags().Int64("job-output-budget-mb", 0, "megabytes of background-job output retained per workspace")
+	cmd.Flags().StringArray("proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable) — the main reason to run an executor as a service")
 	cmd.Flags().String("binary", "", "path to the rafiki binary (default: this one)")
 	cmd.Flags().String("path-env", "", "PATH value for the service environment (default: auto-detect)")
 	return cmd
@@ -165,6 +166,11 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	if b, _ := cmd.Flags().GetInt64("job-output-budget-mb"); b > 0 {
 		args = append(args, "--job-output-budget-mb", fmt.Sprint(b))
+	}
+	proxyArgs, _ := cmd.Flags().GetStringArray("proxy")
+	args, err = appendProxyArgs(args, proxyArgs)
+	if err != nil {
+		return err
 	}
 
 	pathEnv, _ := cmd.Flags().GetString("path-env")
@@ -263,6 +269,23 @@ func enrollOnce(connect, connectSocket string, cmd *cobra.Command, token, creden
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+// appendProxyArgs validates --proxy flags (repeatable name=base_url pairs)
+// and appends them to args as repeated "--proxy value" pairs for the service
+// unit's argv. Validated at install time, before the unit is written, so a
+// malformed entry fails the install rather than the first supervised start.
+func appendProxyArgs(args []string, proxies []string) ([]string, error) {
+	if len(proxies) == 0 {
+		return args, nil
+	}
+	if _, err := executor.ParseProxyFlags(proxies); err != nil {
+		return nil, err
+	}
+	for _, p := range proxies {
+		args = append(args, "--proxy", p)
+	}
+	return args, nil
 }
 
 func credFileExists(path string) bool {

@@ -23,6 +23,7 @@ type fakeExecStore struct {
 	createCalls int
 	lastCreate  executors.NewToken
 	disabled    []string
+	deleted     []string
 }
 
 func newFakeExecStore() *fakeExecStore {
@@ -86,6 +87,15 @@ func (f *fakeExecStore) SetEnabled(_ context.Context, id string, enabled bool) e
 	}
 	return nil
 }
+func (f *fakeExecStore) Delete(_ context.Context, id string) error {
+	if _, ok := f.execs[id]; !ok {
+		return executors.ErrNotFound
+	}
+	delete(f.execs, id)
+	f.deleted = append(f.deleted, id)
+	return nil
+}
+
 func (f *fakeExecStore) Annotate(_ context.Context, id string, set map[string]string, remove []string) error {
 	return nil
 }
@@ -126,6 +136,33 @@ func TestExecutorVerbsRefuseWithoutAStore(t *testing.T) {
 	}
 	if err := c.ExecutorEnable(protocol.ExecutorEnableRequest{ExecutorID: "x"}); err == nil {
 		t.Fatal("enable must refuse without a store")
+	}
+	if err := c.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: "x"}); err == nil {
+		t.Fatal("delete must refuse without a store")
+	}
+}
+
+func TestExecutorDeleteRemovesTheRow(t *testing.T) {
+	s, c := seedSuffixFixture(t)
+	idB := uuidPrefix + uuidTailB
+
+	if err := c.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: idB}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(s.deleted) != 1 || s.deleted[0] != idB {
+		t.Fatalf("delete resolved to %v, want %s", s.deleted, idB)
+	}
+	if _, ok := s.execs[idB]; ok {
+		t.Fatalf("row %s still present after delete", idB)
+	}
+}
+
+func TestExecutorDeleteUnknownIsNotFound(t *testing.T) {
+	_, c := seedSuffixFixture(t)
+	err := c.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: "ffffffffffff"})
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) || ce.Code != protocol.ErrNotFound {
+		t.Fatalf("got %v, want ERR_NOT_FOUND", err)
 	}
 }
 

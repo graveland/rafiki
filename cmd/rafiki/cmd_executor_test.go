@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -28,6 +29,54 @@ func TestShortExecutorIDKeepsTheTail(t *testing.T) {
 	if got := shortExecutorID("exactly12ch"); got != "exactly12ch" {
 		t.Fatalf("ids of exactly %d chars must not be mangled, got %q", executorShortIDLen, got)
 	}
+}
+
+func TestFilterExecutorsForDelete(t *testing.T) {
+	execs := []executors.Executor{
+		{ID: "disabled-online", Enabled: false, Connected: true},
+		{ID: "enabled-offline", Enabled: true, Connected: false},
+		{ID: "enabled-online", Enabled: true, Connected: true},
+		{ID: "disabled-offline", Enabled: false, Connected: false},
+	}
+
+	ids := func(got []executors.Executor) []string {
+		out := make([]string, len(got))
+		for i, e := range got {
+			out[i] = e.ID
+		}
+		return out
+	}
+
+	t.Run("all-disabled selects Enabled==false regardless of connection", func(t *testing.T) {
+		got := ids(filterExecutorsForDelete(execs, true, false))
+		want := []string{"disabled-online", "disabled-offline"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("all-offline selects Connected==false regardless of enabled", func(t *testing.T) {
+		got := ids(filterExecutorsForDelete(execs, false, true))
+		want := []string{"enabled-offline", "disabled-offline"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("both flags union rather than intersect", func(t *testing.T) {
+		got := ids(filterExecutorsForDelete(execs, true, true))
+		want := []string{"disabled-online", "enabled-offline", "disabled-offline"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("neither flag selects nothing", func(t *testing.T) {
+		got := filterExecutorsForDelete(execs, false, false)
+		if len(got) != 0 {
+			t.Fatalf("got %v, want empty", got)
+		}
+	})
 }
 
 func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
