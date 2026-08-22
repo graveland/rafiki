@@ -1,0 +1,24 @@
+name: codescan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Scan into code_index
+        uses: https://git.graveland.dev/localbin/gitea-actions/scan@main
+        with:
+          repo: rafiki
+          resolve: "true"
+          registry-token: ${{ secrets.REGISTRY_TOKEN }}
+          codescan-db: ${{ secrets.CODESCAN_DB }}
+          go-module-token: ${{ secrets.GO_MODULE_TOKEN }}
