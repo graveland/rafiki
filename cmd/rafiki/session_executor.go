@@ -45,6 +45,45 @@ func sessionConnectTarget() (addr, socket string, err error) {
 	return "", paths.ExecutorSocketPath(), nil
 }
 
+// resolveExecutorConnectFlags applies the same "derive from RAFIKI_URL"
+// default sessionConnectTarget already gives the automatic in-process
+// executor to a durable executor's explicit --connect/--connect-socket
+// flags (`rafiki executor serve`, `rafiki executor service install`) — an
+// operator who already has RAFIKI_URL set everywhere else shouldn't have to
+// separately derive and pass host:port by hand, and getting that derivation
+// wrong by hand is exactly how a durable executor ends up pointed at the
+// wrong port.
+//
+// The default only applies when NEITHER flag was given: an explicit
+// --connect-socket already names the local-socket transport deliberately,
+// and must not be overridden by a RAFIKI_URL-derived --connect layered on
+// top of it. An explicit --connect likewise always wins verbatim.
+func resolveExecutorConnectFlags(connect, connectSocket string) (string, string, error) {
+	if connect == "" && connectSocket == "" {
+		if u := remoteDialURL(); u != "" {
+			addr, err := client.DialAddr(u)
+			if err != nil {
+				return "", "", fmt.Errorf("derive --connect from RAFIKI_URL: %w", err)
+			}
+			connect = addr
+		}
+	}
+
+	modes := 0
+	for _, set := range []bool{connect != "", connectSocket != ""} {
+		if set {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return "", "", fmt.Errorf("--connect and --connect-socket are mutually exclusive")
+	}
+	if modes == 0 {
+		return "", "", fmt.Errorf("one of --connect or --connect-socket is required (or set RAFIKI_URL)")
+	}
+	return connect, connectSocket, nil
+}
+
 // discardCredential removes a credential the daemon has rejected.
 //
 // Rejection is terminal — the row is gone or revoked — so keeping the file

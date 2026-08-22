@@ -70,7 +70,7 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  runExecutorServiceInstall,
 	}
-	cmd.Flags().String("connect", "", "daemon executor endpoint to dial (host:port)")
+	cmd.Flags().String("connect", "", "daemon executor endpoint to dial (host:port; default: derived from $RAFIKI_URL)")
 	cmd.Flags().String("connect-socket", "", "rafikid executor socket on this machine (unix path)")
 	cmd.Flags().String("root", "", "working directory root the executor serves (default: current directory)")
 	cmd.Flags().String("enroll-token", "", "one-time enrollment token, for the first connect")
@@ -91,18 +91,9 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	connect, _ := cmd.Flags().GetString("connect")
 	connectSocket, _ := cmd.Flags().GetString("connect-socket")
-
-	modes := 0
-	for _, set := range []bool{connect != "", connectSocket != ""} {
-		if set {
-			modes++
-		}
-	}
-	if modes > 1 {
-		return fmt.Errorf("--connect and --connect-socket are mutually exclusive")
-	}
-	if modes == 0 {
-		return fmt.Errorf("one of --connect or --connect-socket is required")
+	connect, connectSocket, err := resolveExecutorConnectFlags(connect, connectSocket)
+	if err != nil {
+		return err
 	}
 	enrollToken, _ := cmd.Flags().GetString("enroll-token")
 	credential, _ := cmd.Flags().GetString("credential")
