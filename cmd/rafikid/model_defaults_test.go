@@ -16,9 +16,9 @@ func TestContextFilesBudget(t *testing.T) {
 	}{
 		{"unknown window", 0, 0},
 		{"negative window", -1, 0},
-		{"below the floor", 4000, 1024},   // 4000/5=800, clamped up to 1024
-		{"mid-range", 16384, 3276},        // 16384/5=3276 (integer division)
-		{"above the cap", 200000, 30000},  // 200000/5=40000, clamped down to 30000
+		{"below the floor", 4000, 1024},  // 4000/5=800, clamped up to 1024
+		{"mid-range", 16384, 3276},       // 16384/5=3276 (integer division)
+		{"above the cap", 200000, 30000}, // 200000/5=40000, clamped down to 30000
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
