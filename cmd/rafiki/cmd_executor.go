@@ -131,8 +131,9 @@ func runExecutorEnroll(cmd *cobra.Command, _ []string) error {
 
 func newExecutorListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List enrolled executors",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List enrolled executors",
 		Long: `List enrolled executors.
 
 The ID column shows the LAST twelve characters of each executor's id:
@@ -149,7 +150,7 @@ an ambiguous one names the rows it matches instead of picking one.`,
 		RunE: runExecutorList,
 	}
 	cmd.Flags().String("selector", "", "Label selector to filter by")
-	cmd.Flags().Int("limit", 50, "Maximum number of executors to return")
+	cmd.Flags().IntP("limit", "l", 50, "Maximum number of executors to return")
 	return cmd
 }
 
@@ -407,8 +408,9 @@ func runExecutorCreate(cmd *cobra.Command, _ []string) error {
 
 func newExecutorLabelCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "label <executor-id> [k=v ...]",
-		Short: "Set or remove labels on an executor",
+		Use:     "label <executor-id> [k=v ...]",
+		Aliases: []string{"lab"},
+		Short:   "Set or remove labels on an executor",
 		Long: `Set or remove labels on an executor's database row.
 
 Labels take effect on the executor's next connection — no restart or
@@ -544,8 +546,9 @@ func runExecutorEnable(cmd *cobra.Command, args []string) error {
 
 func newExecutorDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "delete [executor-id]",
-		Short: "Permanently remove an executor row",
+		Use:     "delete [executor-id]",
+		Aliases: []string{"del"},
+		Short:   "Permanently remove an executor row",
 		Long: `Permanently remove an executor row. Unlike 'disable', this cannot be undone
 — there is no tombstone for executors.
 

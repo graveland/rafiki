@@ -42,7 +42,7 @@ unavailable — captured to disk on exit) and ignore the filter flags.`,
 	cmd.Flags().Bool("path", false, "Print just the log directory path")
 	cmd.Flags().IntP("tail", "n", -1, "Show the last N events (-1 = all, 0 = none)")
 	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new output after catching up (≡ rafiki tail)")
-	cmd.Flags().Bool("raw", false, "Emit raw stream bytes/JSONL instead of the rendered view")
+	cmd.Flags().BoolP("raw", "r", false, "Emit raw stream bytes/JSONL instead of the rendered view")
 	cmd.Flags().Bool("no-deltas", true, "Suppress token-by-token message_update deltas in the rendered view (default true)")
 	cmd.Flags().BoolP("verbose", "v", false, "Include internal RPC/lifecycle frames")
 
