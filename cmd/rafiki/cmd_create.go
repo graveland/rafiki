@@ -47,12 +47,12 @@ scripting / AFK workflows, use --detached.)`,
 		RunE: runCreate,
 	}
 	addSpawnFlags(cmd)
-	cmd.Flags().Bool("detached", false, "Spawn without attaching; the child runs in the background")
+	cmd.Flags().BoolP("detached", "d", false, "Spawn without attaching; the child runs in the background")
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the rafiki-helpers pi extension")
-	cmd.Flags().String("preset", "", "Apply a named preset from <config dir>/presets.json (also settable via RAFIKI_DEFAULT_PRESET)")
+	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from <config dir>/presets.json (also settable via RAFIKI_DEFAULT_PRESET)")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort: silently empty list when presets file is missing or malformed.
 		pf, err := loadPresets()
@@ -74,7 +74,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("kind", protocol.KindFundi, "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model), pi (a pi process in rpc mode), or claude (Claude Code)")
 	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi and --kind pi")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
-	cmd.Flags().String("model", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via RAFIKI_DEFAULT_MODEL")
+	cmd.Flags().StringP("model", "m", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via RAFIKI_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
 	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")

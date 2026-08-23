@@ -15,8 +15,9 @@ import (
 
 func newKillCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "kill [id|name...]",
-		Short: "Stop running children gracefully",
+		Use:     "kill [id|name...]",
+		Aliases: []string{"k"},
+		Short:   "Stop running children gracefully",
 		Long: `Stop one or more running children gracefully, escalating to SIGKILL only if necessary.
 
 On a clean exit (exit code 0, no signal, no timeout escalation), the child

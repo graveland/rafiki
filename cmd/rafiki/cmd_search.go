@@ -13,13 +13,14 @@ import (
 
 func newSearchCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "search <query>",
-		Short: "Search across live children's events",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runSearch,
+		Use:     "search <query>",
+		Aliases: []string{"find"},
+		Short:   "Search across live children's events",
+		Args:    cobra.ExactArgs(1),
+		RunE:    runSearch,
 	}
 	cmd.Flags().Bool("regex", false, "Treat query as a regular expression")
-	cmd.Flags().Int("limit", 50, "Maximum hits to return")
+	cmd.Flags().IntP("limit", "l", 50, "Maximum hits to return")
 	cmd.Flags().Int("context", 2, "Context lines around each hit")
 	cmd.Flags().String("cwd-contains", "", "Restrict to children whose cwd contains this")
 	cmd.Flags().String("name-contains", "", "Restrict to children whose name contains this")

@@ -14,13 +14,14 @@ import (
 
 func newTasksCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "tasks",
-		Short: "Query the task ledger",
-		RunE:  runTasks,
+		Use:     "tasks",
+		Aliases: []string{"task"},
+		Short:   "Query the task ledger",
+		RunE:    runTasks,
 	}
 	cmd.Flags().String("child", "", "Show tasks assigned to this child")
 	cmd.Flags().String("status", "", "Filter by status (pending, in_progress, blocked, completed, failed, orphaned, dropped)")
-	cmd.Flags().Int("limit", 0, "Maximum rows to return (0 = server default, max 2000)")
+	cmd.Flags().IntP("limit", "l", 0, "Maximum rows to return (0 = server default, max 2000)")
 	cmd.Flags().Bool("all", false, "Include dropped tasks")
 	return cmd
 }

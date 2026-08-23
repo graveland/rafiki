@@ -17,8 +17,9 @@ import (
 
 func newTailCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "tail [id|name]",
-		Short: "Stream events from a child",
+		Use:     "tail [id|name]",
+		Aliases: []string{"stream"},
+		Short:   "Stream events from a child",
 		Long: `Subscribe to a child's event stream and render events as they arrive.
 
 By default, token-by-token message_update deltas are suppressed (--no-deltas=true).
@@ -38,7 +39,7 @@ children and exits only on SIGINT/SIGTERM.`,
 	cmd.Flags().StringSlice("label", nil, "Subscribe to all children matching label k=v (repeatable; mutually exclusive with [id])")
 	cmd.Flags().StringSlice("has-label", nil, "Subscribe to all children that have label key k (repeatable)")
 	cmd.Flags().IntP("tail", "n", 20, "Backfill the last N events before following (-1 = all in buffer, 0 = none)")
-	cmd.Flags().Bool("raw", false, "Emit raw event frames (JSONL) instead of the rendered view")
+	cmd.Flags().BoolP("raw", "r", false, "Emit raw event frames (JSONL) instead of the rendered view")
 
 	_ = cmd.RegisterFlagCompletionFunc("profile", cobra.FixedCompletions(
 		[]string{"firehose", "results", "coarse", "lifecycle"},

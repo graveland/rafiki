@@ -63,13 +63,13 @@ Use --detached to skip attaching.`,
 	addSpawnFlags(cmd)
 
 	// Attach-mode flags (same semantics as rafiki create).
-	cmd.Flags().Bool("detached", false, "Spawn without attaching (--pi-session path only)")
+	cmd.Flags().BoolP("detached", "d", false, "Spawn without attaching (--pi-session path only)")
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 
 	// Preset support (same semantics as rafiki create).
-	cmd.Flags().String("preset", "", "Apply a named preset from <config dir>/presets.json")
+	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from <config dir>/presets.json")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		pf, err := loadPresets()
 		if err != nil || pf == nil {

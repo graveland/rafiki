@@ -14,8 +14,9 @@ import (
 
 func newSendCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "send [id|name] [frame-json]",
-		Short: "Send a raw pi-RPC frame to a child",
+		Use:     "send [id|name] [frame-json]",
+		Aliases: []string{"snd"},
+		Short:   "Send a raw pi-RPC frame to a child",
 		Long: `Send a raw pi-RPC frame (debugging or scripting).
 
 If id|name is omitted, uses the active marker. If frame-json is omitted, reads from stdin.

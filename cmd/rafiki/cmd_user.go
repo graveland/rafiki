@@ -17,8 +17,9 @@ import (
 
 func newUserCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "user",
-		Short: "Manage rafiki users",
+		Use:     "user",
+		Aliases: []string{"usr"},
+		Short:   "Manage rafiki users",
 		Long: `Manage the users a rafiki daemon authenticates.
 
 A user is an identity plus a bearer token. The token is the single credential

@@ -54,14 +54,14 @@ func newClaudeCmd() *cobra.Command {
 			"  rafiki claude --model glm-5.2 -- --permission-mode plan",
 		RunE: runClaude,
 	}
-	cmd.Flags().String("url", envOr("RAFIKI_URL", "http://localhost:8035"), "rafiki proxy base URL (or RAFIKI_URL)")
+	cmd.Flags().StringP("url", "u", envOr("RAFIKI_URL", "http://localhost:8035"), "rafiki proxy base URL (or RAFIKI_URL)")
 	// No default here: resolving paths.TokenFromEnv() (which falls back to
 	// ~/.config/rafiki/token) at flag-construction time would read the file
 	// once per process and bake in whatever existed then. Left empty and
 	// resolved in runClaude instead, so a token minted after the process
 	// started still works and an explicit --token still wins.
 	cmd.Flags().String("token", "", "static bearer token for the proxy (or RAFIKI_TOKEN, else ~/.config/rafiki/token)")
-	cmd.Flags().String("model", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
+	cmd.Flags().StringP("model", "m", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
 	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
 	cmd.Flags().String("passthrough-auth", envOr("RAFIKI_CLAUDE_PASSTHROUGH", string(passthroughAuto)),
 		"who gets billed: auto|on|off (or RAFIKI_CLAUDE_PASSTHROUGH). auto bills your own\n"+

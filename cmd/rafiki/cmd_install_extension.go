@@ -37,8 +37,9 @@ func helpersDestDir() (string, error) {
 
 func newInstallExtensionCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "install-extension",
-		Short: "Install (or update) the rafiki-helpers pi extension",
+		Use:     "install-extension",
+		Aliases: []string{"ie", "install-ext"},
+		Short:   "Install (or update) the rafiki-helpers pi extension",
 		Long: `Install or update the rafiki-helpers extension at
 ~/.pi/agent/extensions/rafiki-helpers/.
 

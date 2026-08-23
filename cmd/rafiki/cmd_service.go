@@ -279,11 +279,12 @@ func newServiceStatusCmd() *cobra.Command {
 
 func newServiceLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "logs",
-		Short: "Print the rafiki daemon log and exit",
-		Long:  "Print the rafiki daemon log and exit. Use --follow (or `rafiki service tail`) to keep streaming.",
-		Args:  cobra.NoArgs,
-		RunE:  runServiceLogs,
+		Use:     "logs",
+		Aliases: []string{"log"},
+		Short:   "Print the rafiki daemon log and exit",
+		Long:    "Print the rafiki daemon log and exit. Use --follow (or `rafiki service tail`) to keep streaming.",
+		Args:    cobra.NoArgs,
+		RunE:    runServiceLogs,
 	}
 	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new log output instead of exiting at EOF")
 	return cmd
