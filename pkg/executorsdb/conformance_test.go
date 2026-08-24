@@ -291,20 +291,18 @@ func TestTwoExecutorsCannotShareAnOwnerAndMachine(t *testing.T) {
 	// (not-null violation) BEFORE the unique index is ever consulted, so a
 	// bare err != nil would keep passing with the index dropped -- the exact
 	// false green a well-meaning tidy-up of the Roots argument would cause.
-	// Assert the code and the constraint by name: another unique index added
-	// to this table later must not be able to satisfy this test either.
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
-		t.Fatalf("want a *pgconn.PgError from the unique index, got %T: %v", err, err)
-	}
-	if pgErr.Code != "23505" {
-		t.Fatalf("want SQLSTATE 23505 (unique_violation), got %s: %v — the row "+
-			"was rejected by something other than the (owner, machine) index, "+
-			"so this test is no longer evidence that the index exists",
-			pgErr.Code, err)
-	}
-	if !strings.Contains(err.Error(), "executors_owner_machine_unique") {
-		t.Fatalf("the unique violation must name executors_owner_machine_unique, got %v", err)
+	//
+	// ErrMachineNameTaken is the assertion that pins it, and a stronger one
+	// than the SQLSTATE check it replaces: duplicateMachineName produces this
+	// sentinel ONLY for 23505 on executors_owner_machine_unique by name, so a
+	// not-null violation cannot satisfy it and neither can another unique
+	// index added to this table later. The store no longer returns the raw
+	// pgconn error here -- it must not, since this same translation travels to
+	// an unauthenticated peer on the enrollment path.
+	if !errors.Is(err, executors.ErrMachineNameTaken) {
+		t.Fatalf("want executors.ErrMachineNameTaken, got %T: %v — the row was "+
+			"rejected by something other than the (owner, machine) index, so "+
+			"this test is no longer evidence that the index exists", err, err)
 	}
 }
 
@@ -324,5 +322,79 @@ func TestExecutorsWithNoMachineLabelAreUnconstrained(t *testing.T) {
 		if err := createExecutor(t, s, map[string]string{"owner": "brent", "env": "prod"}); err != nil {
 			t.Fatalf("a fleet executor needs no machine name: %v", err)
 		}
+	}
+}
+
+// The (owner, machine) index does not fire when a token is MINTED -- a token
+// lives in executor_enrollment_token, not in executors -- so two tokens with
+// the same --name both mint successfully and the collision surfaces here, at
+// redemption, on the executor's own connection.
+//
+// That path never reaches translateExecutorErr. It reaches writeAuthFailure,
+// which asks IsTerminalAuthError; a raw 23505 matches no sentinel, falls
+// through to Retryable, and pkg/execpool's dial loop reconnects. The loser then
+// retries forever against a name it can never claim while the daemon logs
+// "could not verify an executor credential" every attempt, so the operator sees
+// an executor that simply never appears. The sentinel is what stops the loop.
+func TestEnrollRefusesATokenWhoseMachineNameIsTaken(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	machine := machineName(t)
+	labels := map[string]string{"owner": "brent", "machine": machine}
+
+	if err := createExecutor(t, s, labels); err != nil {
+		t.Fatalf("seed the executor that already holds the name: %v", err)
+	}
+
+	tok, err := s.MintToken(ctx, executors.NewToken{
+		Labels: labels,
+		// Roots explicitly empty for the same reason createExecutor does it:
+		// a nil slice inserts NULL into a NOT NULL column and the row is
+		// rejected with 23502 BEFORE the unique index is consulted, which
+		// would make this test pass on entirely the wrong error.
+		Roots:     []string{},
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("minting must still succeed -- the index does not cover tokens: %v", err)
+	}
+
+	e, _, err := s.Enroll(ctx, tok, nil)
+	if err == nil {
+		t.Cleanup(func() { _ = s.Delete(context.Background(), e.ID) })
+		t.Fatal("redeeming a token for an already-claimed (owner, machine) must fail")
+	}
+	if !errors.Is(err, executors.ErrMachineNameTaken) {
+		t.Fatalf("Enroll returned %#v (%v); want an error satisfying "+
+			"errors.Is(err, executors.ErrMachineNameTaken) -- anything else is "+
+			"classified retryable and loops the executor forever", err, err)
+	}
+	// The peer receives this text verbatim, so it must be the sentinel's own
+	// message and not a pgx one: a pgconn error carries the DSN to a peer that
+	// has not proved who it is.
+	if strings.Contains(err.Error(), "SQLSTATE") || strings.Contains(err.Error(), "23505") {
+		t.Fatalf("the store's raw text must not travel to the peer: %q", err.Error())
+	}
+}
+
+// Only THIS index is a name collision. Another unique index on the executors
+// table later -- on the credential hash, say -- must inherit neither the rename
+// advice nor, more importantly, the terminal classification that stops an
+// executor retrying.
+func TestOnlyTheOwnerMachineIndexMeansTheNameIsTaken(t *testing.T) {
+	other := &pgconn.PgError{Code: uniqueViolation, ConstraintName: "executors_credential_hash_key"}
+	if got := duplicateMachineName(other); got != nil {
+		t.Fatalf("an unrelated unique index reported %v, want nil", got)
+	}
+	notUnique := &pgconn.PgError{Code: "23502", ConstraintName: ownerMachineIndex}
+	if got := duplicateMachineName(notUnique); got != nil {
+		t.Fatalf("a not-null violation reported %v, want nil", got)
+	}
+	if got := duplicateMachineName(errors.New("dial tcp: connection refused")); got != nil {
+		t.Fatalf("a non-pg error reported %v, want nil", got)
+	}
+	match := &pgconn.PgError{Code: uniqueViolation, ConstraintName: ownerMachineIndex}
+	if !errors.Is(duplicateMachineName(match), executors.ErrMachineNameTaken) {
+		t.Fatal("the (owner, machine) index must translate to ErrMachineNameTaken")
 	}
 }

@@ -153,7 +153,7 @@ diagnosable one.
 
 | `retryable` | Meaning | Executor behaviour |
 |---|---|---|
-| absent / `false` | A decision about the credential — unknown, consumed, expired, disabled, or no such row. | Stop. Retrying cannot un-revoke a row. `Connect` returns `ErrEnrollmentRejected`. |
+| absent / `false` | A decision about the credential — unknown, consumed, expired, disabled, no such row, or a `machine` name already claimed by another executor of the same owner. | Stop. Retrying cannot un-revoke a row, nor free a taken name. `Connect` returns `ErrEnrollmentRejected`. |
 | `true` | The store could not be reached or read. | Keep reconnecting with backoff. |
 
 Absent means terminal, so an older daemon's responses behave as they always
@@ -168,6 +168,13 @@ take the entire fleet down.
 The `error` string for a retryable failure is deliberately generic. The peer
 has by definition not proved who it is, and a store error routinely carries a
 DSN, a hostname or a query; the real error goes to rafikid's log.
+
+A *terminal* failure does forward its text verbatim, so every terminal answer
+must be a sentinel whose own message is written for the operator reading the
+executor's log. The name collision is the one that carries real advice — the
+enrollment token was minted with a `--name` another executor already holds, and
+the fix is a token with a different name, or relabelling the existing row — and
+it must never be the store's own text for the same DSN reason.
 
 ## RPCs
 
