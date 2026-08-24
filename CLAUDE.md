@@ -416,3 +416,61 @@
   pre-substitution local id (via `providers.SplitRaw`, not `Set.Split`) —
   calling `Set.Split` first and then trying `p.Models[modelID]` finds nothing,
   because by then `modelID` is already the resolved real id, not the alias key.
+
+- **`NoteBinding` writes the CHILDSTORE; `c.wsLabels` is only a pre-spawn bridge.** `handleChildExit`
+  releases a workspace by `snap.Labels`, and `HandleExecutorLost` finds children
+  by them, so a binding that stops at `wsLabels` is invisible to both — the child
+  leaks its live workspace and releases a dead one. The map is consumed exactly
+  once, by `takeWorkspaceLabels` under `wsLabelsMu`; an unlocked read there is a
+  *fatal* concurrent map access now that tool goroutines write it.
+
+- **`ErrStreamBroken` means MAYBE RAN, and is the only liveness error that does.**
+  Every other sentinel is pre-dispatch: `ErrParked`/`ErrDraining`/`ErrExecutorLost`
+  come from `ClientFor`, `ErrRedialed` from the dial hook before the request is
+  sent, and `ErrExecutorGone` is the executor answering that the workspace does
+  not exist. Only a broken stream may have executed the command, and
+  re-provisioning does not give a fresh filesystem — same `--root`, mounts unset
+  — so it retries for idempotent verbs only. A new tool defaults to
+  non-idempotent by omission from `idempotentTools`, which is the safe direction.
+
+- **A pinned child never changes machines, on either path.** `HandleExecutorLost`
+  fails it after the park timeout and `boundExecutor.recover` refuses to
+  re-select for it; re-provisioning on the SAME executor is allowed for both
+  modes, because the executor's workspace registry is in memory and a restart
+  loses every id while the machine is fine.
+
+- **The executor's name is `labels["machine"]`, written by the operator, and
+  there is no derived machine id.** `display_name` was dropped in 0020 — no
+  enrollment path ever wrote it. The name is optional (a fleet executor
+
+  selected by `env=prod` needs none) and unique per owner
+  (`executors_owner_machine_unique`). The client resolves its own via
+  `paths.MachineName()`: `RAFIKI_EXECUTOR_NAME`, then
+  `<DataDir>/executor-name`, then an error naming both. Never a hostname
+  fallback — on darwin a hostname changes with the active network interface,
+  which is what the deleted id existed to escape.
+
+- **A top-level spawn whose selector matches nothing is REFUSED; a parented
+  spawn starts UNBOUND.** `agentRuntimeOptions` gates on `req.ParentChildID`,
+  returning `explainNoMatch`'s diagnostic for a human-operated spawn and letting
+  an agent-spawned child wait. An unbound child carries
+  `rafiki/executor-state=unbound` in its labels — visible to the operator via
+  `rafiki list`/`get` — and the key is removed by `NoteBinding` on the first
+  successful bind.
+
+- **`boundExecutor` is the only client for executor-bound work.** The old
+  `resolveExecutor`/`selectExecutor` path is deleted — dead code on a
+  confinement-critical path since `boundExecutor` landed. `chooseExecutor`
+  is now the single selection entry point.
+
+- **A transient executor must never touch the store — not `TouchSeen`, not
+  `reattach`, not `refreshRow`.** Its id is `sess-<ULID>` against a UUID
+  column (`conversations.executors.id`), and every such call is a silent
+  round trip the store rejects. `Evict` now records a tombstone so an
+  executor still in its join window is stopped, and `installTransient`
+  checks it before installing.
+
+- **One session executor per control connection.** `ExecutorSession` detects
+  a previous session on the same connection and releases it (revokes the
+  ticket, evicts the executor) before installing the new one. Without it,
+  the incumbent stayed in `Pool.live` for the daemon's lifetime.
