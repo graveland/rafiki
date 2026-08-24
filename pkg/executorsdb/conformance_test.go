@@ -23,9 +23,6 @@ func testStore(t *testing.T) executors.Store {
 	t.Helper()
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		dsn = os.Getenv("RAFIKI_DB")
-	}
-	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN is not set")
 	}
 	ctx := context.Background()

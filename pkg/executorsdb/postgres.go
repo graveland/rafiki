@@ -70,6 +70,20 @@ type pgStore struct {
 	pool *pgxpool.Pool
 }
 
+// checkWriteErr translates a Write error on conversations.executors through
+// duplicateMachineName. Every INSERT/UPDATE against that table must route its
+// error through this — not because any one path is special, but because a
+// fourth path that forgets is exactly how R15 shipped, and the unique index
+// is what made the forgetting invisible (the raw 23505 looked like success
+// until the operator followed the daemon's own relabel advice and got an
+// opaque 503). One helper, three call sites, no fourth to forget.
+func (s *pgStore) checkWriteErr(err error) error {
+	if dup := duplicateMachineName(err); dup != nil {
+		return dup
+	}
+	return err
+}
+
 func (s *pgStore) MintToken(ctx context.Context, t executors.NewToken) (string, error) {
 	plaintext, err := newToken()
 	if err != nil {
@@ -147,8 +161,8 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 		hashToken(credential), tr.labels, selfJSON, tr.roots,
 		isolation, wmode, tr.admits).Scan(&id)
 	if err != nil {
-		if dup := duplicateMachineName(err); dup != nil {
-			return executors.Executor{}, "", dup
+		if werr := s.checkWriteErr(err); werr != err {
+			return executors.Executor{}, "", werr
 		}
 		return executors.Executor{}, "", fmt.Errorf("insert executor: %w", err)
 	}
@@ -178,6 +192,10 @@ func (s *pgStore) Create(ctx context.Context, t executors.NewToken) (executors.E
 		return executors.Executor{}, "", err
 	}
 
+	roots := t.Roots
+	if roots == nil {
+		roots = []string{}
+	}
 	isolation := t.Isolation
 	if isolation == "" {
 		isolation = "none"
@@ -192,11 +210,11 @@ func (s *pgStore) Create(ctx context.Context, t executors.NewToken) (executors.E
 		`INSERT INTO conversations.executors
 		   (credential_hash, labels, self_reported, roots, isolation, workspace_mode, admits)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-		hashToken(credential), jsonMap(t.Labels), jsonMap(nil), t.Roots,
+		hashToken(credential), jsonMap(t.Labels), jsonMap(nil), roots,
 		isolation, wmode, t.Admits).Scan(&id)
 	if err != nil {
-		if dup := duplicateMachineName(err); dup != nil {
-			return executors.Executor{}, "", dup
+		if werr := s.checkWriteErr(err); werr != err {
+			return executors.Executor{}, "", werr
 		}
 		return executors.Executor{}, "", fmt.Errorf("insert executor: %w", err)
 	}
@@ -330,8 +348,8 @@ func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]strin
 		// it exactly as an insert would -- and this is the path the collision
 		// message RECOMMENDS, so leaving it untranslated answers "the daemon
 		// is broken" to an operator following the daemon's own advice.
-		if dup := duplicateMachineName(err); dup != nil {
-			return executors.Executor{}, dup
+		if werr := s.checkWriteErr(err); werr != err {
+			return executors.Executor{}, werr
 		}
 		return executors.Executor{}, err
 	}
