@@ -246,11 +246,11 @@ func applyMachineLabel(labels map[string]string) error {
 	if labels["machine"] != "" {
 		return nil
 	}
-	id, err := paths.MachineID()
+	name, _, err := paths.MachineName()
 	if err != nil {
-		return fmt.Errorf("resolve this machine's id: %w", err)
+		return fmt.Errorf("resolve this executor name: %w", err)
 	}
-	labels["machine"] = id
+	labels["machine"] = name
 	return nil
 }
 
