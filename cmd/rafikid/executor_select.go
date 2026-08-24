@@ -19,6 +19,12 @@ import (
 type executorPool interface {
 	Live() []execpool.LiveExecutor
 	ClientFor(executorID string) (tools.ExecutorClient, error)
+	// Tickets and Evict serve transient executors: mint a one-shot ticket,
+	// and take the executor down when the control connection that owns it
+	// closes. On the interface rather than reached by type assertion so the
+	// selection tests' fake pool can satisfy them.
+	Tickets() *execpool.TicketRegistry
+	Evict(executorID string)
 }
 
 // selectExecutor picks an executor from the live pool based on the request's

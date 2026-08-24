@@ -939,26 +939,18 @@ type ExecutorSessionRequest struct {
 	Type string `json:"type"` // "ctrl_executor_session"
 	ID   string `json:"id,omitempty"`
 
-	// Name is a freeform unique key. The daemon enforces uniqueness at hello
-	// time on the executor's SelfReported name; the request carries the same
-	// string so the daemon can check whether a persistent executor already
-	// owns it before minting.
-	Name string `json:"name,omitempty"`
+	// MachineID identifies the client's machine, so the daemon can find a
+	// durable executor that shares this filesystem.
+	//
+	// It does NOT gate access — owner and admits are still derived from the
+	// connection — so a client naming it can only ever narrow which of its
+	// OWN executors it reaches.
+	MachineID string `json:"machineId,omitempty"`
 
 	// Roots describes the directories this machine offers, for humans and for
 	// selectors. Nothing enforces them and nothing may imply it does — a
 	// native executor has no path scoping by design.
 	Roots []string `json:"roots,omitempty"`
-
-	// HasCredential says the client already holds a credential from a previous
-	// run and needs no new row.
-	//
-	// Without it every invocation mints another row, and executors.Store has
-	// SetEnabled but no Delete — so every one of them is permanent. It is not a
-	// gating fact: claiming true when false only costs the liar a working
-	// executor, since the credential it does not have is what actually
-	// authenticates.
-	HasCredential bool `json:"hasCredential,omitempty"`
 }
 
 // ExecutorSessionResponseData answers it.
@@ -984,10 +976,10 @@ type ExecutorSessionResponseData struct {
 	// RunLocal says whether the client should serve an executor at all.
 	RunLocal bool `json:"runLocal,omitempty"`
 
-	// Credential is set only when a NEW row was minted. The credential is
-	// shown ONCE; only its hash is stored, so a client that means to reconnect
-	// must persist it.
-	Credential string `json:"credential,omitempty"`
+	// Ticket authenticates the transient executor this client should now
+	// start. One-shot, and revoked when this control connection closes.
+	// Empty when RunLocal is false.
+	Ticket string `json:"ticket,omitempty"`
 
 	// Selector is the label selector the client should put on a spawn to land
 	// it on this row. The client cannot build it itself: it does not know the

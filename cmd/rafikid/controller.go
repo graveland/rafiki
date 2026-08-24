@@ -160,6 +160,9 @@ type Controller struct {
 	// and by handleChildExit for release.
 	wsLabels   map[string]workspaceLabels
 	wsLabelsMu sync.Mutex
+
+	sessionExecMu sync.Mutex
+	sessionExecs  map[control.Connection]sessionExecutor
 }
 
 type workspaceLabels struct {
@@ -2185,6 +2188,7 @@ func (c *Controller) SubscribeLabeled(conn control.Connection, labels map[string
 // This is a known limitation — per-child sub sets are bounded by the child
 // lifetime and the subscriber count is small in practice.
 func (c *Controller) OnConnectionClose(conn control.Connection) {
+	c.releaseSessionExecutor(conn)
 	c.cm.GlobalUnsubscribe(conn)
 	c.cm.RemoveLabeledSubsForConn(conn)
 }

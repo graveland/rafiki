@@ -60,7 +60,7 @@ type fakeController struct {
 	executorDisableFn       func(protocol.ExecutorDisableRequest) error
 	executorEnableFn        func(protocol.ExecutorEnableRequest) error
 	executorDeleteFn        func(protocol.ExecutorDeleteRequest) error
-	executorSessionFn       func(users.Identity, protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
+	executorSessionFn       func(control.Connection, users.Identity, protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
 	contextWindowFn         func(string) (int, int, bool)
@@ -280,9 +280,9 @@ func (f *fakeController) ExecutorDelete(req protocol.ExecutorDeleteRequest) erro
 	return nil
 }
 
-func (f *fakeController) ExecutorSession(id users.Identity, req protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error) {
+func (f *fakeController) ExecutorSession(conn control.Connection, id users.Identity, req protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error) {
 	if f.executorSessionFn != nil {
-		return f.executorSessionFn(id, req)
+		return f.executorSessionFn(conn, id, req)
 	}
 	return protocol.ExecutorSessionResponseData{ExecutorID: "exec-session"}, nil
 }
@@ -2026,7 +2026,7 @@ func TestDispatch_ExecutorDelete_CallsController(t *testing.T) {
 func TestDispatch_ExecutorSession_UsesConnectionIdentity(t *testing.T) {
 	var gotID users.Identity
 	c := &fakeController{
-		executorSessionFn: func(id users.Identity, _ protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error) {
+		executorSessionFn: func(conn control.Connection, id users.Identity, _ protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error) {
 			gotID = id
 			return protocol.ExecutorSessionResponseData{ExecutorID: "e_x"}, nil
 		},

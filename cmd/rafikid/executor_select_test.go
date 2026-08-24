@@ -16,12 +16,24 @@ import (
 
 // fakePool stands in for *execpool.Pool so selection is testable without a
 // listener, a database or a dialling executor.
-type fakePool struct{ live []execpool.LiveExecutor }
+type fakePool struct {
+	live    []execpool.LiveExecutor
+	tickets *execpool.TicketRegistry
+}
 
 func (f *fakePool) Live() []execpool.LiveExecutor { return f.live }
 func (f *fakePool) ClientFor(id string) (tools.ExecutorClient, error) {
 	return &stubExecutorClient{}, nil
 }
+
+func (f *fakePool) Tickets() *execpool.TicketRegistry {
+	if f.tickets == nil {
+		f.tickets = execpool.NewTicketRegistry()
+	}
+	return f.tickets
+}
+
+func (f *fakePool) Evict(string) {}
 
 // stubExecutorClient satisfies tools.ExecutorClient for selection tests, which
 // never dispatch a tool call.
