@@ -76,18 +76,33 @@ type fakeBinder struct {
 	order       []string // ChooseFor returns these in sequence
 	chooseErr   error    // when set, ChooseFor always fails
 	execs       map[string]*fakeExec
-	live        map[string]bool
+	liveByID    map[string]bool
 	provisions  int
 	releases    int
 	noted       []string
 	chooseCalls int
+	nextExecID  int
+
+	// mode/live back WorkspaceMode/IsLive for tests that care about the
+	// pinned/ephemeral policy rather than about wiring up fakeExecs by hand.
+	// live defaults true (see newFakeBinder) so the pre-existing per-id
+	// liveByID map keeps deciding liveness unless a test overrides it.
+	mode string
+	live bool
+
+	// migrations/lastSteer record NotifyMigrated calls.
+	migrations int
+	lastSteer  string
 }
 
 func newFakeBinder(execs ...*fakeExec) *fakeBinder {
-	fb := &fakeBinder{execs: map[string]*fakeExec{}, live: map[string]bool{}}
+	// mode defaults to "ephemeral" so the pre-existing rebind tests, which
+	// predate workspace_mode and never set it, keep exercising a migration.
+	// Tests that care about the pinned policy set f.mode explicitly.
+	fb := &fakeBinder{execs: map[string]*fakeExec{}, liveByID: map[string]bool{}, live: true, mode: "ephemeral"}
 	for _, e := range execs {
 		fb.execs[e.id] = e
-		fb.live[e.id] = true
+		fb.liveByID[e.id] = true
 		fb.order = append(fb.order, e.id)
 	}
 	return fb
@@ -101,7 +116,14 @@ func (f *fakeBinder) ChooseFor(string) (string, error) {
 		return "", f.chooseErr
 	}
 	if len(f.order) == 0 {
-		return "", errors.New("no executor")
+		// Nothing was explicitly configured: synthesize a fresh executor each
+		// time, so a policy test can tell a re-selection (a NEW id) apart from
+		// an in-place re-provision (the SAME id) without wiring up fakeExecs.
+		f.nextExecID++
+		id := fmt.Sprintf("exec-%d", f.nextExecID)
+		f.execs[id] = &fakeExec{id: id}
+		f.liveByID[id] = true
+		return id, nil
 	}
 	id := f.order[0]
 	if len(f.order) > 1 {
@@ -130,13 +152,29 @@ func (f *fakeBinder) ReleaseOn(_ context.Context, _, _ string) {
 func (f *fakeBinder) IsLive(id string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.live[id]
+	return f.live && f.liveByID[id]
 }
 
 func (f *fakeBinder) NoteBinding(_, execID, wsID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.noted = append(f.noted, execID+"/"+wsID)
+}
+
+// WorkspaceMode returns the scripted mode for every executor. A single value
+// is enough for these tests: they exercise the pinned/ephemeral decision, not
+// per-executor mode variation.
+func (f *fakeBinder) WorkspaceMode(string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mode
+}
+
+func (f *fakeBinder) NotifyMigrated(_, _, _ string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.migrations++
+	f.lastSteer = rescheduleSteer
 }
 
 func TestBoundExecutorBindsLazilyAndSticks(t *testing.T) {
@@ -182,7 +220,7 @@ func TestBoundExecutorRebindsWhenTheExecutorIsGone(t *testing.T) {
 	}
 	a.errs = []error{fmt.Errorf("wrapped: %w", execpool.ErrExecutorGone)}
 	fb.mu.Lock()
-	fb.live["a"] = false
+	fb.liveByID["a"] = false
 	fb.mu.Unlock()
 
 	got, err := b.Execute(context.Background(), "read", nil)
@@ -244,7 +282,7 @@ func TestBoundExecutorConcurrentFailuresProduceOneRebind(t *testing.T) {
 		t.Fatal(err)
 	}
 	fb.mu.Lock()
-	fb.live["a"] = false
+	fb.liveByID["a"] = false
 	fb.mu.Unlock()
 	a.mu.Lock()
 	for i := 0; i < 8; i++ {

@@ -177,7 +177,6 @@ func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspace
 func (c *Controller) HandleExecutorLost(lostID string) {
 	slog.Warn("executor lost — handling children", "executorId", lostID[:12])
 
-	live := c.execPool.Live()
 	children := c.st.List()
 
 	for _, snap := range children {
@@ -208,7 +207,7 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 		}
 
 		// Ephemeral: try to re-provision on another matching executor.
-		if !c.tryReschedule(snap, live) {
+		if !c.tryReschedule(snap) {
 			slog.Error("ephemeral child cannot be rescheduled — no matching executor",
 				"childId", snap.ChildID)
 			c.failChild(snap.ChildID, "executor lost — no matching executor available for reschedule")
@@ -221,15 +220,22 @@ func executorAcceptsReschedule(le execpool.LiveExecutor) bool {
 	return le.Executor.WorkspaceMode == "ephemeral"
 }
 
-// tryReschedule is retained only for children that predate boundExecutor
-// binding. A bound child re-binds itself on its next tool call, through
-// chooseExecutor, so it is confined by its own stored selector — which is
-// exactly what this function never did.
-func (c *Controller) tryReschedule(snap childstore.Snapshot, _ []execpool.LiveExecutor) bool {
+// tryReschedule is now a no-op that always succeeds: an ephemeral child re-binds
+// itself on its next tool call, through chooseExecutor, so it stays confined by
+// its own stored selector -- which is exactly what the old body never did. A
+// PINNED child never reaches here; HandleExecutorLost fails it above.
+func (c *Controller) tryReschedule(snap childstore.Snapshot) bool {
 	slog.Info("executor lost; the child will re-bind on its next tool call",
 		"childId", snap.ChildID)
 	return true
 }
+
+// rescheduleSteer is injected into a child whose workspace was rebuilt on a
+// different executor, so it re-checks the working tree before continuing
+// rather than reporting as done work that no longer exists there.
+const rescheduleSteer = `YOUR WORKSPACE WAS REBUILT on a different machine. The previous one is gone.
+Anything you had NOT committed is lost. Re-check the state of the working tree
+before continuing, and do not report as done anything you cannot now see.`
 
 // failChild sends a fatal steer to the child and transitions it to failed.
 func (c *Controller) failChild(childID, reason string) {

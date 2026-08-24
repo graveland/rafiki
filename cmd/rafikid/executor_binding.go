@@ -40,6 +40,17 @@ type executorBinder interface {
 	// NoteBinding records the child's current executor and workspace so the
 	// rest of the daemon (labels, prompt visibility, teardown) can see it.
 	NoteBinding(childID, executorID, workspaceID string)
+
+	// WorkspaceMode reports the workspace_mode of executorID, from the
+	// executor's ROW -- never from Describe: the value decides whether losing
+	// a machine fails a child or moves it, and a machine that wants children
+	// cannot be the one asserting it is interchangeable.
+	WorkspaceMode(executorID string) string
+
+	// NotifyMigrated tells childID its workspace was rebuilt on a different
+	// executor. Without this the child keeps believing its files are where it
+	// left them and reports work as done that no longer exists.
+	NotifyMigrated(childID, fromExec, toExec string)
 }
 
 // boundExecutor is a child's handle on "an executor", as opposed to a handle
@@ -76,6 +87,14 @@ func (b *boundExecutor) Current() (executorID, workspaceID string, bound bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.execID, b.wsID, b.cl != nil
+}
+
+// stale returns the current binding key, for tests that then simulate a failure
+// against it.
+func (b *boundExecutor) stale() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.execID + "/" + b.wsID
 }
 
 // bindLocked selects and provisions. Caller holds b.mu.
@@ -150,6 +169,14 @@ func (b *boundExecutor) recover(ctx context.Context, stale string, callErr error
 		}
 	}
 
+	// The executor itself is gone. Whether the child may follow is the ROW's
+	// call, not this code's: pinned fails where it stood.
+	if prevExec != "" && !mayMigrate(b.binder.WorkspaceMode(prevExec)) {
+		slog.Warn("pinned child lost its executor and will not be migrated",
+			"child", b.childID, "executor", shortID(prevExec))
+		return false
+	}
+
 	b.cl, b.execID, b.wsID = nil, "", ""
 	if err := b.bindLocked(ctx); err != nil {
 		slog.Warn("could not re-bind the child to any executor",
@@ -158,6 +185,13 @@ func (b *boundExecutor) recover(ctx context.Context, stale string, callErr error
 	}
 	slog.Info("re-bound child to a new executor",
 		"child", b.childID, "from", shortID(prevExec), "to", shortID(b.execID))
+
+	// A child whose workspace was rebuilt elsewhere must be TOLD. Otherwise it
+	// keeps believing its files are there and reports work as done that no
+	// longer exists.
+	if prevExec != "" && prevExec != b.execID {
+		b.binder.NotifyMigrated(b.childID, prevExec, b.execID)
+	}
 
 	// Best-effort, and deliberately after the new binding is installed: the
 	// old executor is usually unreachable, and the child must not wait on it.
