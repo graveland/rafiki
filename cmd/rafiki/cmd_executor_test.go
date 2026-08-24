@@ -157,3 +157,31 @@ func TestRenderExecutorTableEmptyAndLastSeen(t *testing.T) {
 		t.Fatalf("a zero last-seen must render as '-', not a relative time:\n%s", buf.String())
 	}
 }
+
+func TestApplyMachineLabelAddsIt(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	labels := map[string]string{"role": "laptop"}
+
+	if err := applyMachineLabel(labels); err != nil {
+		t.Fatal(err)
+	}
+	if labels["machine"] == "" {
+		t.Fatal("a durable executor on this box must carry machine=<id> " +
+			"or an interactive client can never find it")
+	}
+	if labels["role"] != "laptop" {
+		t.Fatal("existing labels must survive")
+	}
+}
+
+func TestApplyMachineLabelDoesNotOverrideAnExplicitOne(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	labels := map[string]string{"machine": "operator-chose-this"}
+
+	if err := applyMachineLabel(labels); err != nil {
+		t.Fatal(err)
+	}
+	if labels["machine"] != "operator-chose-this" {
+		t.Fatalf("an explicit --label machine= must win, got %q", labels["machine"])
+	}
+}
