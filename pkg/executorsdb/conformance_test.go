@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -276,11 +278,33 @@ func TestTwoExecutorsCannotShareAnOwnerAndMachine(t *testing.T) {
 	if err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine}); err != nil {
 		t.Fatal(err)
 	}
-	if err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine}); err == nil {
+	err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine})
+	if err == nil {
 		t.Fatal("a second executor claiming the same owner+machine must be " +
 			"refused: an interactive client picks the durable executor for its " +
 			"box by exactly that pair, and two matches is a coin flip over which " +
 			"filesystem a child lands on")
+	}
+
+	// WHICH failure matters as much as that there was one. This insert path
+	// also carries a live nil-Roots defect that rejects the row with 23502
+	// (not-null violation) BEFORE the unique index is ever consulted, so a
+	// bare err != nil would keep passing with the index dropped -- the exact
+	// false green a well-meaning tidy-up of the Roots argument would cause.
+	// Assert the code and the constraint by name: another unique index added
+	// to this table later must not be able to satisfy this test either.
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("want a *pgconn.PgError from the unique index, got %T: %v", err, err)
+	}
+	if pgErr.Code != "23505" {
+		t.Fatalf("want SQLSTATE 23505 (unique_violation), got %s: %v — the row "+
+			"was rejected by something other than the (owner, machine) index, "+
+			"so this test is no longer evidence that the index exists",
+			pgErr.Code, err)
+	}
+	if !strings.Contains(err.Error(), "executors_owner_machine_unique") {
+		t.Fatalf("the unique violation must name executors_owner_machine_unique, got %v", err)
 	}
 }
 
