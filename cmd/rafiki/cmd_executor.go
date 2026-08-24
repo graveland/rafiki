@@ -19,6 +19,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -230,6 +231,28 @@ func shortExecutorID(id string) string {
 }
 
 const executorShortIDLen = 12
+
+// applyMachineLabel stamps machine=<id> onto an enrollment token's labels
+// unless the operator named one explicitly.
+//
+// It is a TRUST label, written at mint time and living in the row, not a
+// self-reported fact: it participates in selection, deciding which executor an
+// interactive client on this box binds its children to. An executor that could
+// assert its own machine could attract another operator's work.
+func applyMachineLabel(labels map[string]string) error {
+	if labels == nil {
+		return fmt.Errorf("applyMachineLabel: nil label map")
+	}
+	if labels["machine"] != "" {
+		return nil
+	}
+	id, err := paths.MachineID()
+	if err != nil {
+		return fmt.Errorf("resolve this machine's id: %w", err)
+	}
+	labels["machine"] = id
+	return nil
+}
 
 // renderExecutorTable writes the executor pool as a table.
 //
