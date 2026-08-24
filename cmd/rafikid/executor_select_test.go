@@ -19,6 +19,9 @@ import (
 type fakePool struct {
 	live    []execpool.LiveExecutor
 	tickets *execpool.TicketRegistry
+	// evicted records each id Evict was called for, so a test can assert a
+	// second session request releases the first.
+	evicted map[string]bool
 }
 
 func (f *fakePool) Live() []execpool.LiveExecutor { return f.live }
@@ -33,7 +36,11 @@ func (f *fakePool) Tickets() *execpool.TicketRegistry {
 	return f.tickets
 }
 
-func (f *fakePool) Evict(string) {}
+func (f *fakePool) Evict(id string) {
+	if f.evicted != nil {
+		f.evicted[id] = true
+	}
+}
 
 // stubExecutorClient satisfies tools.ExecutorClient for selection tests, which
 // never dispatch a tool call.
@@ -84,7 +91,7 @@ func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
 		ex("exec-work", map[string]string{"env": "work"}, ""),
 		ex("exec-home", map[string]string{"env": "home"}, ""),
 	)
-	_, err := c.selectExecutor(protocol.SpawnRequest{
+	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work",
 	}, "")
 	if err == nil {
@@ -158,7 +165,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 		ex("exec-mac", map[string]string{"env": "work", "os": "darwin"}, ""),
 		ex("exec-picky", map[string]string{"env": "work", "os": "linux"}, "rafiki/kind=claude"),
 	)
-	_, err := c.selectExecutor(protocol.SpawnRequest{
+	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work,os=linux",
 	}, "")
 	if err == nil {
@@ -182,7 +189,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
 	c := selectFixture(t, "")
 	start := time.Now()
-	if _, err := c.selectExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, ""); err == nil {
+	if _, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, ""); err == nil {
 		t.Fatal("want a refusal")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {

@@ -102,11 +102,23 @@ func (c *Controller) ExecutorSession(
 	// still dies with the daemon.
 	if conn != nil {
 		c.sessionExecMu.Lock()
+		prev, had := c.sessionExecs[conn]
 		if c.sessionExecs == nil {
 			c.sessionExecs = make(map[control.Connection]sessionExecutor)
 		}
 		c.sessionExecs[conn] = sessionExecutor{executorID: execID, ticket: ticket}
 		c.sessionExecMu.Unlock()
+
+		// One per connection. Overwriting silently orphaned the incumbent:
+		// its ticket was never revoked and its executor never evicted, so it
+		// stayed in Pool.live for the daemon's lifetime. Released AFTER the
+		// map is updated and OUTSIDE the lock — Evict closes a connection.
+		if had {
+			slog.Warn("a second session executor was requested on one connection; "+
+				"releasing the first", "previous", prev.executorID, "current", execID)
+			c.execPool.Tickets().Revoke(prev.ticket)
+			c.execPool.Evict(prev.executorID)
+		}
 	}
 
 	return protocol.ExecutorSessionResponseData{
