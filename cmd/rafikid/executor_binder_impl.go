@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -65,11 +68,35 @@ func (b *controllerBinder) IsLive(executorID string) bool {
 	return false
 }
 
+// NoteBinding records where the child actually is.
+//
+// The childstore is the authority, not c.wsLabels: handleChildExit releases the
+// workspace by snap.Labels, and HandleExecutorLost finds affected children by
+// them. c.wsLabels is only a BRIDGE for the window before Spawn has inserted
+// the record -- an eager bind happens inside agentRuntimeOptions, which runs
+// before the session is stored -- and Spawn consumes it exactly once.
 func (b *controllerBinder) NoteBinding(childID, executorID, workspaceID string) {
 	mode := "pinned"
 	if row, ok := b.c.executorRow(executorID); ok {
 		mode = workspaceModeOrPinned(row.WorkspaceMode)
 	}
+
+	_, err := b.c.st.SetLabels(childID, map[string]string{
+		"rafiki/workspace":      workspaceID,
+		"rafiki/executor":       executorID,
+		"rafiki/workspace-mode": mode,
+	}, nil)
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, childstore.ErrNotFound) {
+		slog.Warn("could not record the child's executor binding; teardown will "+
+			"not release this workspace",
+			"child", childID, "executor", shortID(executorID), "error", err)
+		return
+	}
+
+	// The child record does not exist yet. Stash for Spawn.
 	b.c.wsLabelsMu.Lock()
 	if b.c.wsLabels == nil {
 		b.c.wsLabels = make(map[string]workspaceLabels)

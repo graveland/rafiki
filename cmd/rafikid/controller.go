@@ -833,14 +833,12 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		initLabels[childstore.LabelParent] = parentLabel
 		initLabels[childstore.LabelRoot] = rootLabel
 	}
-	// Merge workspace labels provisioned by agentRunner.
-	if c.wsLabels != nil {
-		if wl, ok := c.wsLabels[childID]; ok {
-			initLabels["rafiki/workspace"] = wl.workspaceID
-			initLabels["rafiki/executor"] = wl.executorID
-			initLabels["rafiki/workspace-mode"] = wl.mode
-			delete(c.wsLabels, childID)
-		}
+	// Merge the binding agentRuntimeOptions made before this record existed.
+	// A binding made AFTER it exists goes straight to the store — see NoteBinding.
+	if wl, ok := c.takeWorkspaceLabels(childID); ok {
+		initLabels["rafiki/workspace"] = wl.workspaceID
+		initLabels["rafiki/executor"] = wl.executorID
+		initLabels["rafiki/workspace-mode"] = wl.mode
 	}
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
