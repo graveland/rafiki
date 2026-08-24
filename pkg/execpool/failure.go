@@ -30,6 +30,13 @@ var (
 	// prefix check would be one wording change away from silently
 	// misclassifying, and pool liveness is a fact this package already holds.
 	ErrExecutorGone = errors.New("execpool: the executor or its workspace no longer exists")
+
+	// ErrStreamBroken means the RPC stream opened and then failed. Unlike the
+	// sentinels above, this does NOT say whether the tool ran: the executor may
+	// have executed the command and lost the connection while reporting it.
+	// Callers must treat it as "maybe ran" and refuse to re-dispatch anything
+	// with side effects.
+	ErrStreamBroken = errors.New("execpool: the executor stream broke mid-call")
 )
 
 // failureError converts an executor's Failure into an error carrying one of

@@ -134,13 +134,15 @@ func (b *boundExecutor) clientFor(ctx context.Context) (tools.ExecutorClient, st
 // no longer matches it, another goroutine already recovered and this caller
 // simply retries against the new binding — eight concurrent failures produce
 // one Provision, not eight.
-func (b *boundExecutor) recover(ctx context.Context, stale string, callErr error) bool {
-	// A tool that ran and failed is an ANSWER. Migrating a child because
-	// `bash` exited 1 would be the single worst behaviour this type could have.
-	if errors.Is(callErr, execpool.ErrToolFailed) {
-		return false
-	}
-	if !isLivenessFailure(callErr) {
+//
+// idempotent says whether the call that failed is safe to re-dispatch even
+// when the stream broke mid-call and the tool may already have run on the
+// executor -- see retryable and idempotentTools. A tool that ran and reported
+// failure is a different case entirely: that is an ANSWER, and migrating a
+// child because `bash` exited 1 would be the single worst behaviour this type
+// could have. retryable rejects both cases outright.
+func (b *boundExecutor) recover(ctx context.Context, stale string, callErr error, idempotent bool) bool {
+	if !retryable(callErr, idempotent) {
 		return false
 	}
 
@@ -222,7 +224,11 @@ func isLivenessFailure(err error) bool {
 // callBound runs fn against the current binding, recovering and retrying at
 // most once. A free function rather than a method because Go methods cannot
 // be generic.
-func callBound[T any](ctx context.Context, b *boundExecutor, fn func(tools.ExecutorClient) (T, error)) (T, error) {
+//
+// idempotent tells recover whether fn is safe to re-dispatch after a stream
+// broke mid-call, when the tool MAY have already run on the executor -- see
+// retryable and idempotentTools.
+func callBound[T any](ctx context.Context, b *boundExecutor, idempotent bool, fn func(tools.ExecutorClient) (T, error)) (T, error) {
 	var zero T
 	cl, stale, err := b.clientFor(ctx)
 	if err != nil {
@@ -232,7 +238,7 @@ func callBound[T any](ctx context.Context, b *boundExecutor, fn func(tools.Execu
 	if err == nil {
 		return out, nil
 	}
-	if !b.recover(ctx, stale, err) {
+	if !b.recover(ctx, stale, err, idempotent) {
 		return zero, err
 	}
 	cl2, _, err2 := b.clientFor(ctx)
@@ -243,32 +249,37 @@ func callBound[T any](ctx context.Context, b *boundExecutor, fn func(tools.Execu
 }
 
 func (b *boundExecutor) Execute(ctx context.Context, tool string, input json.RawMessage) (string, error) {
-	return callBound(ctx, b, func(cl tools.ExecutorClient) (string, error) {
+	return callBound(ctx, b, isIdempotentTool(tool), func(cl tools.ExecutorClient) (string, error) {
 		return cl.Execute(ctx, tool, input)
 	})
 }
 
+// StartJob is never retried after a stream break: retrying it launches the
+// job twice.
 func (b *boundExecutor) StartJob(ctx context.Context, command string) (string, error) {
-	return callBound(ctx, b, func(cl tools.ExecutorClient) (string, error) {
+	return callBound(ctx, b, false, func(cl tools.ExecutorClient) (string, error) {
 		return cl.StartJob(ctx, command)
 	})
 }
 
 func (b *boundExecutor) JobOutput(ctx context.Context, handle string, since int64) (tools.JobSnapshot, error) {
-	return callBound(ctx, b, func(cl tools.ExecutorClient) (tools.JobSnapshot, error) {
+	return callBound(ctx, b, true, func(cl tools.ExecutorClient) (tools.JobSnapshot, error) {
 		return cl.JobOutput(ctx, handle, since)
 	})
 }
 
+// KillJob is never retried after a stream break: the kill signal may already
+// have landed, and there is no way to tell that apart from the stream just
+// dying.
 func (b *boundExecutor) KillJob(ctx context.Context, handle string) error {
-	_, err := callBound(ctx, b, func(cl tools.ExecutorClient) (struct{}, error) {
+	_, err := callBound(ctx, b, false, func(cl tools.ExecutorClient) (struct{}, error) {
 		return struct{}{}, cl.KillJob(ctx, handle)
 	})
 	return err
 }
 
 func (b *boundExecutor) Ping(ctx context.Context) error {
-	_, err := callBound(ctx, b, func(cl tools.ExecutorClient) (struct{}, error) {
+	_, err := callBound(ctx, b, true, func(cl tools.ExecutorClient) (struct{}, error) {
 		return struct{}{}, cl.Ping(ctx)
 	})
 	return err
@@ -280,7 +291,7 @@ func (b *boundExecutor) Ping(ctx context.Context) error {
 // that cannot answer yields the zero value and no error, matching
 // fetchProjectContext's existing contract.
 func (b *boundExecutor) ProjectContext(ctx context.Context) (string, error) {
-	return callBound(ctx, b, func(cl tools.ExecutorClient) (string, error) {
+	return callBound(ctx, b, true, func(cl tools.ExecutorClient) (string, error) {
 		pf, ok := cl.(interface {
 			ProjectContext(context.Context) (string, error)
 		})
@@ -292,7 +303,7 @@ func (b *boundExecutor) ProjectContext(ctx context.Context) (string, error) {
 }
 
 func (b *boundExecutor) ProjectSkills(ctx context.Context) ([]skills.SkillMeta, error) {
-	return callBound(ctx, b, func(cl tools.ExecutorClient) ([]skills.SkillMeta, error) {
+	return callBound(ctx, b, true, func(cl tools.ExecutorClient) ([]skills.SkillMeta, error) {
 		pf, ok := cl.(interface {
 			ProjectSkills(context.Context) ([]skills.SkillMeta, error)
 		})
@@ -305,7 +316,7 @@ func (b *boundExecutor) ProjectSkills(ctx context.Context) ([]skills.SkillMeta, 
 
 func (b *boundExecutor) SkillBody(ctx context.Context, name string) (string, string, error) {
 	type pair struct{ body, dir string }
-	p, err := callBound(ctx, b, func(cl tools.ExecutorClient) (pair, error) {
+	p, err := callBound(ctx, b, true, func(cl tools.ExecutorClient) (pair, error) {
 		pf, ok := cl.(interface {
 			SkillBody(context.Context, string) (string, string, error)
 		})
