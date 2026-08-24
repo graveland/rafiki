@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/client"
@@ -84,34 +82,8 @@ func resolveExecutorConnectFlags(connect, connectSocket string) (string, string,
 	return connect, connectSocket, nil
 }
 
-// discardCredential removes a credential the daemon has rejected.
-//
-// Rejection is terminal — the row is gone or revoked — so keeping the file
-// means failing forever with a secret nothing recognises. Removing it lets the
-// next mint succeed.
-func discardCredential(path string) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		slog.Warn("could not remove the rejected executor credential", "path", path, "error", err)
-	}
-}
-
-// writeCredential persists a freshly minted credential, mode 0600 under a 0700
-// directory. The credential is shown once and only its hash is stored, so a
-// client that means to reconnect must keep it.
-func writeCredential(path, cred string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create credential directory: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(cred+"\n"), 0600); err != nil {
-		return fmt.Errorf("write credential: %w", err)
-	}
-	return nil
-}
-
-// requestSessionExecutor asks the daemon for this machine's session-executor
-// row. hasCredential tells the daemon the client already holds a credential, so
-// it must not mint another: every mint is permanent, because executors.Store
-// has SetEnabled but no Delete.
+// requestSessionExecutor asks the daemon how this client should reach an
+// executor that shares its filesystem.
 func requestSessionExecutor(ctx context.Context, c *client.Client, root string) (protocol.ExecutorSessionResponseData, error) {
 	machineID, err := paths.MachineID()
 	if err != nil {
@@ -207,8 +179,8 @@ func childCwd(ctx context.Context, c *client.Client, childID string) string {
 // startSessionExecutor makes this machine available as a workspace.
 //
 // It returns the selector to put on spawns. That selector is returned even when
-// no executor was started: the daemon answers with an empty credential when a
-// durable executor already covers this host and owner, and using it is the
+// no executor was started: the daemon answers with an empty ticket when a
+// durable executor already covers this machine and owner, and using it is the
 // point — that executor outlives this process, so an agent keeps working after
 // the operator closes the terminal.
 func startSessionExecutor(ctx context.Context, c *client.Client, root string) (string, func(), error) {
