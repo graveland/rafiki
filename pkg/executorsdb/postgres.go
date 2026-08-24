@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -26,7 +27,39 @@ var (
 	ErrTokenExpired  = executors.ErrTokenExpired
 	ErrDisabled      = executors.ErrDisabled
 	ErrNotFound      = executors.ErrNotFound
+
+	ErrMachineNameTaken = executors.ErrMachineNameTaken
 )
+
+// uniqueViolation is SQLSTATE 23505.
+const uniqueViolation = "23505"
+
+// ownerMachineIndex is the partial unique index over
+// (labels->>'owner', labels->>'machine') added by migration 0020.
+const ownerMachineIndex = "executors_owner_machine_unique"
+
+// duplicateMachineName translates a rejected INSERT into conversations.executors
+// when — and only when — the (owner, machine) unique index is what rejected it.
+//
+// It returns executors.ErrMachineNameTaken BARE, discarding the pgconn error
+// rather than wrapping it. That is not tidiness: this error travels to a peer
+// that has not yet proved who it is (writeAuthFailure forwards a terminal
+// error's text verbatim), and a pgx message carries the DSN.
+//
+// Matched by CONSTRAINT NAME as well as by SQLSTATE. Another unique index on
+// this table later — on the credential hash, say — must not inherit advice to
+// rename a machine over a collision that has nothing to do with names, nor
+// inherit the terminal classification that stops an executor from retrying.
+func duplicateMachineName(err error) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return nil
+	}
+	if pgErr.Code != uniqueViolation || pgErr.ConstraintName != ownerMachineIndex {
+		return nil
+	}
+	return executors.ErrMachineNameTaken
+}
 
 // NewPostgresStore creates an executor Store backed by pg.
 func NewPostgresStore(pool *pgxpool.Pool) executors.Store {
@@ -114,6 +147,9 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 		hashToken(credential), tr.labels, selfJSON, tr.roots,
 		isolation, wmode, tr.admits).Scan(&id)
 	if err != nil {
+		if dup := duplicateMachineName(err); dup != nil {
+			return executors.Executor{}, "", dup
+		}
 		return executors.Executor{}, "", fmt.Errorf("insert executor: %w", err)
 	}
 
@@ -159,6 +195,9 @@ func (s *pgStore) Create(ctx context.Context, t executors.NewToken) (executors.E
 		hashToken(credential), jsonMap(t.Labels), jsonMap(nil), t.Roots,
 		isolation, wmode, t.Admits).Scan(&id)
 	if err != nil {
+		if dup := duplicateMachineName(err); dup != nil {
+			return executors.Executor{}, "", dup
+		}
 		return executors.Executor{}, "", fmt.Errorf("insert executor: %w", err)
 	}
 

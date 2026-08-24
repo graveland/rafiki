@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -215,15 +213,11 @@ func TestExecutorEnrollRefusesANameASelectorCannotCarry(t *testing.T) {
 }
 
 // A collision on (owner, machine) is an operator naming two machines the same,
-// which the store answers with SQLSTATE 23505. Left untranslated it reaches the
-// client as ERR_INTERNAL / 503 -- "the daemon is broken" for a mistake only the
-// operator can fix.
+// which the store reports as executors.ErrMachineNameTaken. Left untranslated
+// it reaches the client as ERR_INTERNAL / 503 -- "the daemon is broken" for a
+// mistake only the operator can fix.
 func TestDuplicateMachineNameIsAClientError(t *testing.T) {
-	err := translateExecutorErr(fmt.Errorf("create executor: %w", &pgconn.PgError{
-		Code:           "23505",
-		ConstraintName: "executors_owner_machine_unique",
-		Message:        `duplicate key value violates unique constraint "executors_owner_machine_unique"`,
-	}))
+	err := translateExecutorErr(fmt.Errorf("create executor: %w", executors.ErrMachineNameTaken))
 	var ce *control.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
 		t.Fatalf("got %v, want ERR_INVALID_ARGS", err)
@@ -233,17 +227,15 @@ func TestDuplicateMachineNameIsAClientError(t *testing.T) {
 	}
 }
 
-// Any other unique violation keeps the old behaviour -- returned unchanged, so
+// An unclassified store error keeps the old behaviour -- returned unchanged, so
 // mapErr treats it as internal and the store's text (which carries the DSN)
 // stays in the daemon log.
-func TestOtherUniqueViolationsAreStillInternal(t *testing.T) {
-	err := translateExecutorErr(&pgconn.PgError{
-		Code:           "23505",
-		ConstraintName: "executors_credential_hash_key",
-	})
+func TestUnclassifiedStoreErrorsAreStillInternal(t *testing.T) {
+	err := translateExecutorErr(fmt.Errorf("insert executor: %w",
+		errors.New(`duplicate key value violates unique constraint "executors_credential_hash_key"`)))
 	var ce *control.ControllerError
 	if errors.As(err, &ce) {
-		t.Fatalf("an unrelated unique index must not inherit the rename advice: %+v", ce)
+		t.Fatalf("an unrelated failure must not inherit the rename advice: %+v", ce)
 	}
 }
 

@@ -1499,9 +1499,17 @@ overwritten, so a caller learns their selector will not mean what they wrote.
 `name` names the machine the executor will RUN on, which is **not** necessarily
 the one that minted the token: an enrollment token is routinely carried
 elsewhere and handed to the executor as `--enroll-token`. Run `rafiki executor
-name` on that box to see what to pass. `(owner, machine)` is unique among rows
-carrying a `machine`, so a second executor claiming a name already taken under
-the same owner is refused with `ERR_INVALID_ARGS`.
+name` on that box to see what to pass.
+
+`(owner, machine)` is unique among rows carrying a `machine`, but **this verb
+does not detect a collision** — a token lives in `executor_enrollment_token`,
+not in `executors`, so two tokens minted with the same `--name` both succeed
+here. The index fires later, when the executor REDEEMS its token and the row is
+actually written. That failure reaches the executor as a *terminal*
+`executor_hello` error (`retryable:false` — see the executor protocol
+reference), so it stops rather than reconnecting against a name it can never
+claim. `ctrl_executor_create` (§15.7), which writes the row immediately, does
+answer the collision inline with `ERR_INVALID_ARGS`.
 
 **Response** (success)
 ```jsonc

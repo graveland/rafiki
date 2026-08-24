@@ -19,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
@@ -3384,11 +3383,16 @@ func translateExecutorErr(err error) error {
 		errors.Is(err, executors.ErrDisabled):
 		// The argument is real but no longer usable — a client error, not ours.
 		code = protocol.ErrInvalidArgs
-	case isDuplicateMachineName(err):
+	case errors.Is(err, executors.ErrMachineNameTaken):
 		// A collision on (owner, machine) is the operator naming a machine
 		// twice, not a daemon fault. Left as the store's raw text it reaches
 		// the client as ERR_INTERNAL / 503, which reads as "the daemon is
 		// broken" for a mistake only the operator can fix.
+		//
+		// Its own message rather than err.Error(): the sentinel's text is
+		// written for the EXECUTOR, which learns of the collision when it
+		// redeems its token, and can only be told to get a different token.
+		// An operator holding a control connection has the row in reach.
 		return &control.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: "that executor name is already taken for this owner: choose " +
@@ -3400,25 +3404,6 @@ func translateExecutorErr(err error) error {
 	}
 	return &control.ControllerError{Code: code, Message: err.Error()}
 }
-
-// isDuplicateMachineName reports whether err is the (owner, machine) unique
-// index rejecting a second executor with the same name under the same owner.
-//
-// By CONSTRAINT NAME, not merely by SQLSTATE: another unique index on the
-// executors table later — on a credential hash, say — must not inherit this
-// message, which would tell an operator to rename a machine over a collision
-// that has nothing to do with names.
-func isDuplicateMachineName(err error) bool {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
-		return false
-	}
-	return pgErr.Code == uniqueViolation &&
-		pgErr.ConstraintName == "executors_owner_machine_unique"
-}
-
-// uniqueViolation is SQLSTATE 23505.
-const uniqueViolation = "23505"
 
 // executorTrustLabels merges the operator's own labels with the two the DAEMON
 // owns, and refuses a request that tries to write either itself.
