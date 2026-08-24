@@ -171,6 +171,14 @@ const (
 	// all.
 	ExecutorSelector = "RAFIKI_EXECUTOR_SELECTOR"
 
+	// ExecutorName names the machine this box's executor represents. It is the
+	// operator's own string, not a derived id: it is written into the executor
+	// row as the `machine` trust label at mint time, and read back here by an
+	// interactive client asking "is there a durable executor that shares my
+	// filesystem?". The env var exists for containers and pods, where the
+	// natural source is the downward API and the data dir is not durable.
+	ExecutorName = "RAFIKI_EXECUTOR_NAME"
+
 	// ExecutorsEnabled turns on the executor endpoint. "0" or "false" refuses
 	// executors outright; any other non-empty value forces them on; unset
 	// takes the default, which depends on RAFIKI_CONTROL_LISTEN (see

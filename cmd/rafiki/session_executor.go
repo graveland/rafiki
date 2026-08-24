@@ -85,9 +85,9 @@ func resolveExecutorConnectFlags(connect, connectSocket string) (string, string,
 // requestSessionExecutor asks the daemon how this client should reach an
 // executor that shares its filesystem.
 func requestSessionExecutor(ctx context.Context, c *client.Client, root string) (protocol.ExecutorSessionResponseData, error) {
-	machineID, err := paths.MachineID()
+	machineID, _, err := paths.MachineName()
 	if err != nil {
-		return protocol.ExecutorSessionResponseData{}, fmt.Errorf("resolve this machine's id: %w", err)
+		return protocol.ExecutorSessionResponseData{}, fmt.Errorf("resolve this executor name: %w", err)
 	}
 	req := protocol.ExecutorSessionRequest{
 		Type:      protocol.TypeCtrlExecutorSession,
