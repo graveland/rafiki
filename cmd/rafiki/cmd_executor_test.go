@@ -82,12 +82,12 @@ func TestFilterExecutorsForDelete(t *testing.T) {
 
 func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
 	execs := []executors.Executor{
-		{ID: fixturePrefix + fixtureTailA, DisplayName: "laptop",
+		{ID: fixturePrefix + fixtureTailA,
 			Enabled: true, Connected: true,
-			Labels: map[string]string{"b": "2", "a": "1"}},
-		{ID: fixturePrefix + fixtureTailB, DisplayName: "rack",
+			Labels: map[string]string{"b": "2", "a": "1", "machine": "laptop"}},
+		{ID: fixturePrefix + fixtureTailB,
 			Enabled: false,
-			Labels:  map[string]string{"env": "work"}},
+			Labels:  map[string]string{"env": "work", "machine": "rack"}},
 	}
 
 	var buf bytes.Buffer
@@ -110,7 +110,7 @@ func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
 	if !strings.Contains(out, "a=1,b=2") {
 		t.Errorf("labels must render sorted for stable output:\n%s", out)
 	}
-	for _, header := range []string{"ID", "NAME", "STATUS", "LABELS", "ADMITS", "LAST SEEN"} {
+	for _, header := range []string{"ID", "MACHINE", "STATUS", "LABELS", "ADMITS", "LAST SEEN"} {
 		if !strings.Contains(out, header) {
 			t.Errorf("missing header %q:\n%s", header, out)
 		}

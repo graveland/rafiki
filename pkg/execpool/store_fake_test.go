@@ -28,7 +28,7 @@ type fakeStore struct {
 
 func newFakeStore(id string) *fakeStore {
 	return &fakeStore{
-		executor:  executors.Executor{ID: id, DisplayName: id, Enabled: true},
+		executor:  executors.Executor{ID: id, Enabled: true},
 		authCalls: make(chan struct{}, 64),
 	}
 }

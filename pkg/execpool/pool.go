@@ -349,7 +349,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 
 	p.installLive(e.ID, lc)
 
-	slog.Info("execpool: executor joined", "id", e.ID, "displayName", e.DisplayName, "tools", desc.Msg.Tools)
+	slog.Info("execpool: executor joined", "id", e.ID, "machine", e.Labels["machine"], "tools", desc.Msg.Tools)
 
 	// Poll Health every 30s.
 	go p.healthLoop(ctx, e.ID, lc)

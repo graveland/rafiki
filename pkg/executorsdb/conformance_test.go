@@ -2,6 +2,8 @@ package executorsdb
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -231,5 +233,72 @@ func TestFindSelectorHonoursAnnotations(t *testing.T) {
 	}
 	if got.Annotations["sentinel"] != "built" {
 		t.Fatal("annotation was not stored")
+	}
+}
+
+// machineName returns a machine label unique to this test run. The conformance
+// tests share one long-lived database and never clean up their rows, so a
+// fixed name would collide with the previous run's row rather than with the
+// row the test itself created — passing for the wrong reason once and failing
+// forever after.
+func machineName(t *testing.T) string {
+	t.Helper()
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	return "laptop-" + hex.EncodeToString(b[:])
+}
+
+// createExecutor mints a row with the given labels and deletes it afterwards,
+// so a run does not leave a name claimed for the next one.
+func createExecutor(t *testing.T, s executors.Store, labels map[string]string) error {
+	t.Helper()
+	e, _, err := s.Create(context.Background(), executors.NewToken{
+		Labels: labels,
+		// Not decoration: Create passes Roots straight through to a NOT NULL
+		// TEXT[] column, so a nil slice inserts NULL and the row is rejected
+		// before the unique index is ever consulted -- which would make these
+		// tests "pass" on the wrong error.
+		Roots:     []string{},
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err == nil {
+		t.Cleanup(func() { _ = s.Delete(context.Background(), e.ID) })
+	}
+	return err
+}
+
+func TestTwoExecutorsCannotShareAnOwnerAndMachine(t *testing.T) {
+	s := testStore(t)
+	machine := machineName(t)
+
+	if err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine}); err != nil {
+		t.Fatal(err)
+	}
+	if err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine}); err == nil {
+		t.Fatal("a second executor claiming the same owner+machine must be " +
+			"refused: an interactive client picks the durable executor for its " +
+			"box by exactly that pair, and two matches is a coin flip over which " +
+			"filesystem a child lands on")
+	}
+}
+
+func TestTwoOwnersMayEachHaveALaptop(t *testing.T) {
+	s := testStore(t)
+	machine := machineName(t)
+	for _, owner := range []string{"brent", "sam"} {
+		if err := createExecutor(t, s, map[string]string{"owner": owner, "machine": machine}); err != nil {
+			t.Fatalf("owner %s: %v", owner, err)
+		}
+	}
+}
+
+func TestExecutorsWithNoMachineLabelAreUnconstrained(t *testing.T) {
+	s := testStore(t)
+	for range 3 {
+		if err := createExecutor(t, s, map[string]string{"owner": "brent", "env": "prod"}); err != nil {
+			t.Fatalf("a fleet executor needs no machine name: %v", err)
+		}
 	}
 }

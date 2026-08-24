@@ -20,7 +20,7 @@ import (
 // that needed it, with every test still green.
 func TestTheChildIsToldWhatTheRowSaysNotWhatTheExecutorClaims(t *testing.T) {
 	wi := workspaceInfoFromRow(executors.Executor{
-		ID: "exec-1", DisplayName: "ci-runner-2",
+		ID: "exec-1", Labels: map[string]string{"machine": "ci-runner-2"},
 		Isolation: "container", WorkspaceMode: "ephemeral",
 		Roots: []string{"/work", "/repo"},
 	})
@@ -34,6 +34,7 @@ func TestTheChildIsToldWhatTheRowSaysNotWhatTheExecutorClaims(t *testing.T) {
 
 	// The end-to-end property, not just the struct: the block must actually
 	// reach the prompt. This is the assertion that would have failed.
+	// The name is the `machine` label; agent_runtime reads it from the same row.
 	wi.ExecutorName = "ci-runner-2"
 	got := fundi.BuildSystemPrompt(fundi.SysPromptConfig{
 		Base: "base.", Cwd: "/work", ModelID: "m", Workspace: wi,

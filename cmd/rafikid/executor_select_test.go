@@ -51,7 +51,7 @@ func (stubExecutorClient) Ping(context.Context) error            { return nil }
 
 func ex(id string, labels map[string]string, admits string) execpool.LiveExecutor {
 	return execpool.LiveExecutor{Executor: executors.Executor{
-		ID: id, DisplayName: id, Labels: labels, Admits: admits, Enabled: true,
+		ID: id, Labels: labels, Admits: admits, Enabled: true,
 	}}
 }
 

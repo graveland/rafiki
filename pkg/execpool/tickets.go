@@ -20,18 +20,17 @@ import (
 // authority", it is "every access-gating fact is written by the daemon from
 // something it verified".
 type TicketGrant struct {
-	ExecutorID  string
-	Owner       string
-	MachineID   string
-	DisplayName string
-	Roots       []string
+	ExecutorID string
+	Owner      string
+	MachineID  string
+	Roots      []string
 }
 
 // Executor synthesises the in-memory row this grant stands for.
 func (g TicketGrant) Executor() executors.Executor {
 	return executors.Executor{
-		ID:          g.ExecutorID,
-		DisplayName: g.DisplayName,
+		ID: g.ExecutorID,
+		// The machine label IS the name; there is no separate display name.
 		Labels: map[string]string{
 			"owner":   g.Owner,
 			"machine": g.MachineID,
