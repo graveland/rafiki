@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/inproc"
@@ -211,13 +212,23 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		exec = be
 
 		// Bind eagerly: the project tier and skills below need a live
-		// workspace, and a child that CAN bind should start bound. A failure
-		// is not fatal — the child starts unbound and binds on its first tool
-		// call, which is what lets an executor that connects later serve it.
-		if _, _, err := be.clientFor(context.Background()); err != nil {
+		// workspace, and a child that CAN bind should start bound.
+		//
+		// A failure is fatal for a TOP-LEVEL spawn and tolerable for a
+		// parented one. A human typing --executor-selector gets
+		// explainNoMatch's per-candidate diagnostic now, rather than a
+		// running agent whose every tool errors; an agent-spawned child may
+		// wait, because an executor restart parks its connection for up to a
+		// full health tick and surviving that window is what lazy binding is
+		// for.
+		if _, _, bindErr := be.clientFor(context.Background()); bindErr != nil {
+			if req.ParentChildID == "" {
+				return fundi.RuntimeOptions{}, bindErr
+			}
 			slog.Warn("child starts with no executor bound; its workspace tools "+
 				"will fail until one matching its selector connects",
-				"child", childID, "selector", req.ExecutorSelector, "reason", err)
+				"child", childID, "selector", req.ExecutorSelector, "reason", bindErr)
+			c.markUnbound(childID)
 		}
 
 		// The project tier belongs to the workspace. The pointer is set
@@ -245,13 +256,25 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		}
 
 		// The system prompt's "Your machine" block comes from the executor's
-		// ROW, never from the executor's own account of itself.
+		// ROW, never from the executor's own account of itself. The block is
+		// built even when nothing is bound yet: the system prompt is fixed
+		// for the child's lifetime, so omitting it now means never. Prefer
+		// the row the child actually bound to; fall back to the first live
+		// candidate its selector admits, which is the machine it will land
+		// on if one connects.
+		//
+		// Never from Describe. Isolation and workspace_mode gate where other
+		// people's children run and cannot be the executor's own claim.
+		var row executors.Executor
 		if execID, _, bound := be.Current(); bound {
-			if row, ok := c.executorRow(execID); ok {
-				wsInfo := workspaceInfoFromRow(row)
-				wsInfo.ExecutorName = row.Labels["machine"]
-				ro.Workspace = wsInfo
-			}
+			row, _ = c.executorRow(execID)
+		} else if chosen, cErr := c.chooseExecutorCandidate(req, ownerName); cErr == nil {
+			row = chosen
+		}
+		if row.ID != "" {
+			wsInfo := workspaceInfoFromRow(row)
+			wsInfo.ExecutorName = row.Labels["machine"]
+			ro.Workspace = wsInfo
 		}
 	}
 

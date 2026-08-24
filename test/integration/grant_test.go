@@ -340,15 +340,32 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 	mustUnmarshal(t, coord.Data, &coordData)
 	coordID := coordData.ChildID
 
-	// A worker under the coordinator naming env=work must be refused, naming
-	// the executor it could not reach.
-	refused := g.grantSpawnRaw(t, coordID, "env=work", "anthropic/claude-x")
-	if refused.Success {
-		t.Fatal("a child escaped its parent's executor set")
+	// A worker under the coordinator naming env=work starts UNBOUND: a
+	// parented child whose selector matches no live executor in its
+	// effective set may wait for one to connect, because an executor
+	// restart parks its connection for a full health tick and surviving
+	// that window is what lazy binding exists for.
+	unbound := g.grantSpawnRaw(t, coordID, "env=work", "anthropic/claude-x")
+	if !unbound.Success {
+		t.Fatalf("a parented worker with no matching executor must "+
+			"start unbound, not be refused: %+v", unbound.Error)
 	}
-	msg := protocolErrorString(t, refused)
-	if !strings.Contains(msg, "exec-work") && !strings.Contains(msg, "env=work") {
-		t.Errorf("the refusal must name the excluded executor: %s", msg)
+	var unboundData protocol.SpawnResponseData
+	mustUnmarshal(t, unbound.Data, &unboundData)
+	getRaw := g.request(t, mustMarshal(t, map[string]any{
+		"type": "ctrl_get", "id": "g", "childId": unboundData.ChildID,
+	}))
+	var unboundGetR protocol.Response
+	mustUnmarshal(t, getRaw, &unboundGetR)
+	if !unboundGetR.Success {
+		t.Fatalf("ctrl_get failed: %+v", unboundGetR.Error)
+	}
+	var unboundSummary protocol.ChildSummary
+	mustUnmarshal(t, unboundGetR.Data, &unboundSummary)
+	if unboundSummary.Labels["rafiki/executor-state"] != "unbound" {
+		t.Fatalf("the worker outside its parent's set must carry "+
+			"rafiki/executor-state=unbound, got labels=%v",
+			unboundSummary.Labels)
 	}
 
 	// A worker naming env=home — inside the set — lands, and the child's
@@ -360,16 +377,16 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 	}
 	var okData protocol.SpawnResponseData
 	mustUnmarshal(t, ok.Data, &okData)
-	getRaw := g.request(t, mustMarshal(t, map[string]any{
+	okRaw := g.request(t, mustMarshal(t, map[string]any{
 		"type": "ctrl_get", "id": "g", "childId": okData.ChildID,
 	}))
-	var getR protocol.Response
-	mustUnmarshal(t, getRaw, &getR)
-	if !getR.Success {
-		t.Fatalf("ctrl_get failed: %+v", getR.Error)
+	var okR protocol.Response
+	mustUnmarshal(t, okRaw, &okR)
+	if !okR.Success {
+		t.Fatalf("ctrl_get failed: %+v", okR.Error)
 	}
 	var snap protocol.ChildSummary
-	mustUnmarshal(t, getR.Data, &snap)
+	mustUnmarshal(t, okR.Data, &snap)
 	landedID := snap.Labels["rafiki/executor"]
 	if landedID == "" {
 		t.Fatalf("worker did not record the executor it landed on (labels %v)", snap.Labels)

@@ -86,7 +86,7 @@ func (b *controllerBinder) NoteBinding(childID, executorID, workspaceID string) 
 		"rafiki/workspace":      workspaceID,
 		"rafiki/executor":       executorID,
 		"rafiki/workspace-mode": mode,
-	}, nil)
+	}, []string{"rafiki/executor-state"})
 	if err == nil {
 		return
 	}
