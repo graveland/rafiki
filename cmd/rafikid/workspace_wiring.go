@@ -136,6 +136,21 @@ func workspaceModeOrPinned(mode string) string {
 	return mode
 }
 
+// takeWorkspaceLabels consumes a child's pre-spawn binding stash.
+//
+// Locked, and it deletes: NoteBinding writes this map from tool-call goroutines
+// now that binding is lazy, so the bare read-and-delete Spawn used to do is a
+// concurrent map access -- a fatal error, not a data race the runtime survives.
+func (c *Controller) takeWorkspaceLabels(childID string) (workspaceLabels, bool) {
+	c.wsLabelsMu.Lock()
+	defer c.wsLabelsMu.Unlock()
+	wl, ok := c.wsLabels[childID]
+	if ok {
+		delete(c.wsLabels, childID)
+	}
+	return wl, ok
+}
+
 // releaseWorkspace tears down a workspace on an executor.
 // Idempotent and best-effort — it must not wedge teardown.
 func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspaceID string) {
