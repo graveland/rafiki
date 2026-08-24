@@ -285,7 +285,7 @@ func renderExecutorTable(w io.Writer, execs []executors.Executor, useColor bool)
 		}
 		rows[i] = []string{
 			shortExecutorID(ex.ID),
-			defaultDash(ex.DisplayName),
+			defaultDash(ex.Labels["machine"]),
 			executorStatus(ex),
 			executorFormatLabels(ex.Labels, 48),
 			defaultDash(ex.Admits),
@@ -295,7 +295,7 @@ func renderExecutorTable(w io.Writer, execs []executors.Executor, useColor bool)
 	}
 
 	t := table.New()
-	t.Headers("ID", "NAME", "STATUS", "LABELS", "ADMITS", "CONNECTED", "LAST SEEN")
+	t.Headers("ID", "MACHINE", "STATUS", "LABELS", "ADMITS", "CONNECTED", "LAST SEEN")
 	t.Rows(rows...)
 	t.StyleFunc(func(row, col int) lipgloss.Style {
 		// Padding is layout, not color: it applies whether or not styling

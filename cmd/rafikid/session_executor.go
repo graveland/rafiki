@@ -78,11 +78,10 @@ func (c *Controller) ExecutorSession(
 
 	execID := "sess-" + ulid.Make().String()
 	ticket, err := c.execPool.Tickets().Mint(execpool.TicketGrant{
-		ExecutorID:  execID,
-		Owner:       owner,
-		MachineID:   req.MachineID,
-		DisplayName: owner + "@" + req.MachineID[:min(8, len(req.MachineID))],
-		Roots:       req.Roots,
+		ExecutorID: execID,
+		Owner:      owner,
+		MachineID:  req.MachineID,
+		Roots:      req.Roots,
 	})
 	if err != nil {
 		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{

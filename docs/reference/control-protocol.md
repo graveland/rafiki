@@ -1521,8 +1521,10 @@ with `connected` and `connectedAt` filled in from the pool.
     "executors": [
       {
         "id": "abc123...",
-        "displayName": "my-laptop",
-        "labels": {"env": "work"},
+        // The executor's NAME is the `machine` label -- there is no separate
+        // display_name field (0020 dropped the column). `(owner, machine)` is
+        // unique, so the pair names exactly one executor.
+        "labels": {"env": "work", "owner": "brent", "machine": "my-laptop"},
         "enabled": true,
         "workspaceMode": "pinned",
         "admits": "",

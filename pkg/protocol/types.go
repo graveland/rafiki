@@ -1001,12 +1001,11 @@ type ExecutorListRequest struct {
 
 // ExecutorListEntry is one row from the executor list.
 type ExecutorListEntry struct {
-	ID          string            `json:"id"`
-	DisplayName string            `json:"displayName"`
-	Labels      map[string]string `json:"labels"`
-	Enabled     bool              `json:"enabled"`
-	Connected   bool              `json:"connected"`
-	LastSeenAt  string            `json:"lastSeenAt,omitempty"`
+	ID         string            `json:"id"`
+	Labels     map[string]string `json:"labels"`
+	Enabled    bool              `json:"enabled"`
+	Connected  bool              `json:"connected"`
+	LastSeenAt string            `json:"lastSeenAt,omitempty"`
 }
 
 // ─── ctrl_executor_label ───────────────────────────────────────────────────────

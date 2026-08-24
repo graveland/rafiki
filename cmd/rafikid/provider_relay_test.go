@@ -69,7 +69,7 @@ func TestRelayTransportNoMatchingExecutorErrors(t *testing.T) {
 // say so.
 func TestRelayTransportErrorNamesTheProxy(t *testing.T) {
 	pool := joinLiveRelayExecutor(t, executors.Executor{
-		ID: "exec-1", DisplayName: "exec-1", Enabled: true,
+		ID: "exec-1", Enabled: true,
 		Labels: map[string]string{"role": "workstation"},
 	}, nil /* no proxies advertised */)
 
@@ -100,7 +100,7 @@ func TestRelayTransportErrorNamesTheProxy(t *testing.T) {
 // network.
 func TestRelayTransportSucceedsWhenExecutorAdvertisesProxy(t *testing.T) {
 	pool := joinLiveRelayExecutor(t, executors.Executor{
-		ID: "exec-1", DisplayName: "exec-1", Enabled: true,
+		ID: "exec-1", Enabled: true,
 		Labels: map[string]string{"role": "workstation"},
 	}, []string{"vmlx"})
 

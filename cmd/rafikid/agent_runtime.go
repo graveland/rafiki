@@ -249,7 +249,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		if execID, _, bound := be.Current(); bound {
 			if row, ok := c.executorRow(execID); ok {
 				wsInfo := workspaceInfoFromRow(row)
-				wsInfo.ExecutorName = row.DisplayName
+				wsInfo.ExecutorName = row.Labels["machine"]
 				ro.Workspace = wsInfo
 			}
 		}

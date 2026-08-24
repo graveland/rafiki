@@ -175,12 +175,12 @@ func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (execu
 	var labelsJSON, selfJSON, annotationsJSON []byte
 	var enrolledAt, lastSeenAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, display_name, labels, self_reported, annotations,
+		`SELECT id, labels, self_reported, annotations,
 		        roots, isolation, workspace_mode, admits, enabled,
 		        enrolled_at, last_seen_at
 		   FROM conversations.executors WHERE credential_hash = $1`,
 		hashVal).Scan(
-		&e.ID, &e.DisplayName,
+		&e.ID,
 		&labelsJSON, &selfJSON, &annotationsJSON,
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
 		&enrolledAt, &lastSeenAt)
@@ -218,12 +218,12 @@ func (s *pgStore) Get(ctx context.Context, id string) (executors.Executor, error
 	var labelsJSON, selfJSON, annotationsJSON []byte
 	var enrolledAt, lastSeenAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, display_name, labels, self_reported, annotations,
+		`SELECT id, labels, self_reported, annotations,
 		        roots, isolation, workspace_mode, admits, enabled,
 		        enrolled_at, last_seen_at
 		   FROM conversations.executors WHERE id = $1`,
 		id).Scan(
-		&e.ID, &e.DisplayName,
+		&e.ID,
 		&labelsJSON, &selfJSON, &annotationsJSON,
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
 		&enrolledAt, &lastSeenAt)
@@ -244,7 +244,7 @@ func (s *pgStore) Get(ctx context.Context, id string) (executors.Executor, error
 
 func (s *pgStore) List(ctx context.Context) ([]executors.Executor, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, display_name, labels, self_reported, annotations,
+		`SELECT id, labels, self_reported, annotations,
 		        roots, isolation, workspace_mode, admits, enabled,
 		        enrolled_at, last_seen_at
 		   FROM conversations.executors ORDER BY enrolled_at DESC`)
@@ -400,7 +400,7 @@ func scanExecutors(rows pgx.Rows) ([]executors.Executor, error) {
 		var labelsJSON, selfJSON, annotationsJSON []byte
 		var enrolledAt, lastSeenAt *time.Time
 		if err := rows.Scan(
-			&e.ID, &e.DisplayName,
+			&e.ID,
 			&labelsJSON, &selfJSON, &annotationsJSON,
 			&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
 			&enrolledAt, &lastSeenAt); err != nil {

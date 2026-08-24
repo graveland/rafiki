@@ -13,7 +13,6 @@ import (
 // the row says.
 type Executor struct {
 	ID            string
-	DisplayName   string
 	Labels        map[string]string
 	SelfReported  map[string]string
 	Annotations   map[string]string
