@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -66,6 +67,7 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest, ownerName string)
 
 	candidates := executors.Narrow(parentSet, sel)
 	candidates = narrowByWorkspaceMode(candidates, req.WorkspaceMode)
+	sortCandidates(candidates)
 	if len(candidates) == 0 {
 		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels)
 	}
@@ -351,4 +353,27 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:12]
+}
+
+// sortCandidates imposes a deterministic winner on a candidate set.
+//
+// chooseExecutor returns candidates[0], and the set is built by ranging
+// Pool.Live(), a Go map — so without this the winner is randomized per call.
+// That was latent while selectors matched exactly one executor and becomes
+// load-bearing the moment a machine offers both a durable and a session
+// executor.
+//
+// Durable before session: a child outlives the terminal that started it, so it
+// should bind to something that also does. The session executor is a
+// zero-config fallback for a machine with no durable one, not the preferred
+// home.
+func sortCandidates(in []executors.Executor) {
+	sort.SliceStable(in, func(i, j int) bool {
+		si := in[i].Labels["kind"] == "session"
+		sj := in[j].Labels["kind"] == "session"
+		if si != sj {
+			return !si
+		}
+		return in[i].ID < in[j].ID
+	})
 }

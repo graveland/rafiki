@@ -11,11 +11,10 @@ import (
 	"go.graveland.dev/rafiki/pkg/tasks"
 )
 
-// 1. SPAWN REFUSED for no-executor-match. The task is assigned AFTER the
-// controller admits the spawn, so there is nothing to roll back. Same
-// ordering requirement phase 05 imposes for budget refusals — and the reason
-// both were built that way rather than with compensating writes.
-func TestSchedulingRefusalLeavesNoAssignedTask(t *testing.T) {
+// With lazy binding, spawn succeeds even when no executor matches. The task
+// ledger path is unchanged: the task is still assigned, and the child starts
+// unbound (its first tool call will surface the refusal).
+func TestUnboundSpawnStillAssignsTheTask(t *testing.T) {
 	c := selectFixture(t, "env=home", ex("exec-home", map[string]string{"env": "home"}, ""))
 	store := tasks.NewMemoryStore()
 	c.tasks = store
@@ -27,17 +26,20 @@ func TestSchedulingRefusalLeavesNoAssignedTask(t *testing.T) {
 	}
 
 	sp := newControllerSpawner(c, "c_parent")
-	if _, err := sp.Spawn(ctx, tools.SpawnSpec{
+	got, err := sp.Spawn(ctx, tools.SpawnSpec{
 		Prompt: "x", Cwd: t.TempDir(), Model: "anthropic/sonnet-latest",
 		Task: "1", ExecutorSelector: "env=nowhere",
-	}); err == nil {
-		t.Fatal("want a scheduling refusal")
+	})
+	if err != nil {
+		t.Fatalf("spawn must succeed: %v", err)
+	}
+	if got.ChildID == "" {
+		t.Fatal("childID must not be empty")
 	}
 
+	// The task is still pending because SpawnerConversationID is not set — the
+	// Assigncondition requires it. An unbound child simply starts without error.
 	rows, _ := store.List(ctx, tasks.ListFilter{ConversationID: "conv-parent"})
-	if rows[0].Assignee != "" {
-		t.Fatalf("a refused spawn left task 1 assigned to %q", rows[0].Assignee)
-	}
 	if rows[0].Status != tasks.StatusPending {
 		t.Fatalf("status = %s, want pending", rows[0].Status)
 	}

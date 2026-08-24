@@ -59,8 +59,8 @@ func (f *fakeExec) JobOutput(_ context.Context, _ string, _ int64) (tools.JobSna
 	return tools.JobSnapshot{Found: true}, nil
 }
 
-func (f *fakeExec) KillJob(_ context.Context, _ string) error  { return f.next() }
-func (f *fakeExec) Ping(_ context.Context) error               { return f.next() }
+func (f *fakeExec) KillJob(_ context.Context, _ string) error { return f.next() }
+func (f *fakeExec) Ping(_ context.Context) error              { return f.next() }
 func (f *fakeExec) ProjectContext(_ context.Context) (string, error) {
 	return f.id + ":ctx", nil
 }
@@ -73,8 +73,8 @@ func (f *fakeExec) SkillBody(_ context.Context, name string) (string, string, er
 // provisions and releases so a test can assert exactly one of each.
 type fakeBinder struct {
 	mu          sync.Mutex
-	order       []string            // ChooseFor returns these in sequence
-	chooseErr   error               // when set, ChooseFor always fails
+	order       []string // ChooseFor returns these in sequence
+	chooseErr   error    // when set, ChooseFor always fails
 	execs       map[string]*fakeExec
 	live        map[string]bool
 	provisions  int

@@ -718,7 +718,7 @@ func readHelloFrame(conn net.Conn) (protocol.ExecutorHelloRequest, error) {
 func writeHelloResponse(conn net.Conn, resp protocol.ExecutorHelloResponse) {
 	b, _ := json.Marshal(resp)
 	b = append(b, '\n')
-	conn.Write(b) //nolint:errcheck
+	_, _ = conn.Write(b)
 }
 
 func writeHelloError(conn net.Conn, msg string) {

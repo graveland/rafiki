@@ -156,23 +156,6 @@ func (c *Controller) releaseWorkspace(ctx context.Context, executorID, workspace
 	}
 }
 
-// selectExecutorID is like selectExecutor but returns the executor ID alongside
-// the client, so callers can provision workspaces. It routes through
-// chooseExecutor so the provisioning path enforces the same narrowing as the
-// tool path — a workspace provisioned outside the parent's set would be the
-// confidentiality boundary leaking through the side door.
-func (c *Controller) selectExecutorID(req protocol.SpawnRequest, ownerName string) (id string, cl tools.ExecutorClient, err error) {
-	chosen, err := c.chooseExecutor(req, ownerName)
-	if err != nil {
-		return "", nil, err
-	}
-	cl, err = c.execPool.ClientFor(chosen.ID)
-	if err != nil {
-		return "", nil, fmt.Errorf("executor %s selected but not reachable: %w", shortID(chosen.ID), err)
-	}
-	return chosen.ID, cl, nil
-}
-
 // HandleExecutorLost is called by the exec pool when a parked executor's
 // timeout expires and it is declared permanently lost. For each child on the
 // lost executor, it either re-provisions (ephemeral) or fails (pinned).

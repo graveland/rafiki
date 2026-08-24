@@ -178,6 +178,46 @@ func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
 	}
 }
 
+func TestSortCandidatesPrefersDurableThenID(t *testing.T) {
+	in := []executors.Executor{
+		{ID: "zzz-durable"},
+		{ID: "bbb-session", Labels: map[string]string{"kind": "session"}},
+		{ID: "aaa-durable"},
+		{ID: "aaa-session", Labels: map[string]string{"kind": "session"}},
+	}
+	sortCandidates(in)
+
+	want := []string{"aaa-durable", "zzz-durable", "aaa-session", "bbb-session"}
+	for i, w := range want {
+		if in[i].ID != w {
+			t.Fatalf("position %d: want %s, got %s (full order: %v)", i, w, in[i].ID, ids(in))
+		}
+	}
+}
+
+func TestSortCandidatesIsStableAcrossCalls(t *testing.T) {
+	// chooseExecutor returns candidates[0] and Live() ranges a Go map, so
+	// without an explicit sort a child lands on an arbitrary executor and a
+	// DIFFERENT arbitrary one after a restart.
+	first := []executors.Executor{{ID: "b"}, {ID: "a"}, {ID: "c"}}
+	second := []executors.Executor{{ID: "c"}, {ID: "b"}, {ID: "a"}}
+	sortCandidates(first)
+	sortCandidates(second)
+	for i := range first {
+		if first[i].ID != second[i].ID {
+			t.Fatalf("ordering is not deterministic: %v vs %v", ids(first), ids(second))
+		}
+	}
+}
+
+func ids(in []executors.Executor) []string {
+	out := make([]string, len(in))
+	for i, e := range in {
+		out[i] = e.ID
+	}
+	return out
+}
+
 // The session executor's admits: owner=<user> must actually match a child — the
 // whole point of the daemon-attested owner label. Before it existed, every
 // spawn was refused because children carried no owner label at all.

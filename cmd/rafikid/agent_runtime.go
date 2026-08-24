@@ -12,6 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/inproc"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -193,85 +194,73 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// because the binding is what makes a self id unspoofable — a shared
 	// spawner would have to take one as an argument.
 	ro.Agents = newControllerSpawner(c, childID)
-	exec, err := c.resolveExecutor(req, ownerName)
-	if err != nil {
-		return fundi.RuntimeOptions{}, err
-	}
-
-	// Provision workspace when using a label-selected executor.
-	var execID string
+	// A child with a selector gets a boundExecutor, ALWAYS non-nil.
+	//
+	// This bypasses MaterializeAll's `opts.Executor == nil` check, which is a
+	// security guard and not a capability check: it is what stops workspace
+	// tools running in the daemon process. That is safe only because
+	// boundExecutor errors when it cannot resolve and NEVER falls back to
+	// in-process execution — see TestBoundExecutorNeverRunsInProcess.
+	//
+	// Non-nil also means tools[] is identical whether or not an executor is
+	// live right now, so a child that starts unbound and acquires an executor
+	// later needs no tools[] change and no prompt-cache break.
+	var exec tools.ExecutorClient
 	if req.ExecutorSelector != "" && c.execPool != nil {
-		id, _, selErr := c.selectExecutorID(req, ownerName)
-		if selErr == nil {
-			execID = id
-			wsID, wsInfo, wsExec, wsErr := c.provisionWorkspace(context.Background(), req, execID)
-			if wsErr != nil {
-				return fundi.RuntimeOptions{}, fmt.Errorf("workspace: %w", wsErr)
-			}
-			exec = wsExec
+		be := newBoundExecutor(childID, c.binderFor(req, ownerName))
+		exec = be
 
-			// The project tier belongs to the workspace, which lives on this
-			// executor. Fetch it and hand it down. The pointer is set
-			// unconditionally for an executor-backed child — even to the empty
-			// string, the ordinary answer — so resolveContent never falls back to
-			// reading the daemon's cwd for a workspace that is not here.
-			project, pcErr := fetchProjectContext(context.Background(), exec)
-			if pcErr != nil {
-				slog.Warn("project context unavailable; agent gets global instructions only",
-					"child", childID, "error", pcErr)
-			}
-			ro.ProjectContext = &project
+		// Bind eagerly: the project tier and skills below need a live
+		// workspace, and a child that CAN bind should start bound. A failure
+		// is not fatal — the child starts unbound and binds on its first tool
+		// call, which is what lets an executor that connects later serve it.
+		if _, _, err := be.clientFor(context.Background()); err != nil {
+			slog.Warn("child starts with no executor bound; its workspace tools "+
+				"will fail until one matching its selector connects",
+				"child", childID, "selector", req.ExecutorSelector, "reason", err)
+		}
 
-			// Fetch the project-tier skills from the same executor, and carry
-			// them pre-merged so BuildRuntime's resolveContent applies the
-			// --skills filter to the combined inventory rather than only to
-			// the local tier.
-			remote, psErr := fetchProjectSkills(context.Background(), exec)
-			if psErr != nil {
-				slog.Warn("project skills unavailable",
-					"child", childID, "error", psErr)
-			}
-			ro.RemoteSkills = remote
+		// The project tier belongs to the workspace. The pointer is set
+		// UNCONDITIONALLY for any child with a selector — bound or not.
+		// pkg/fundi/runtime.go treats a nil pointer as "no executor is bound"
+		// and falls back to reading the DAEMON's own cwd, so leaving it nil
+		// for an unbound child would silently feed it the daemon's project
+		// instructions.
+		project, pcErr := fetchProjectContext(context.Background(), exec)
+		if pcErr != nil {
+			slog.Warn("project context unavailable; agent gets global instructions only",
+				"child", childID, "error", pcErr)
+			project = ""
+		}
+		ro.ProjectContext = &project
 
-			// Build a lazy fetcher bound to the same workspace client so the
-			// skill tool fetches bodies on the turn the model asks.
-			if pf, ok := exec.(projectSkillsFetcher); ok {
-				pf := pf // pin for the closure
-				ro.RemoteSkillBody = func(ctx context.Context, name string) (string, string, error) {
-					return pf.SkillBody(ctx, name)
-				}
-			}
+		remote, psErr := fetchProjectSkills(context.Background(), exec)
+		if psErr != nil {
+			slog.Warn("project skills unavailable", "child", childID, "error", psErr)
+		}
+		ro.RemoteSkills = remote
 
-			// The mode comes from the executor's ROW, carried here on wsInfo.
-			// It decides whether losing the executor fails this child or moves
-			// it, so it cannot be a literal and it cannot be the executor's own
-			// claim about itself.
-			mode := "pinned"
-			if wsInfo != nil {
-				mode = workspaceModeOrPinned(wsInfo.WorkspaceMode)
-			}
-			c.wsLabelsMu.Lock()
-			if c.wsLabels == nil {
-				c.wsLabels = make(map[string]workspaceLabels)
-			}
-			c.wsLabels[childID] = workspaceLabels{workspaceID: wsID, executorID: execID, mode: mode}
-			c.wsLabelsMu.Unlock()
+		ro.RemoteSkillBody = func(ctx context.Context, name string) (string, string, error) {
+			return be.SkillBody(ctx, name)
+		}
 
-			if wsInfo != nil {
-				// The worker's system prompt names where it landed. ExecutorName
-				// comes from the resolved executor rather than from the row read
-				// during provisioning only because chooseExecutor already has the
-				// display name in hand.
-				if chosen, cErr := c.chooseExecutor(req, ownerName); cErr == nil {
-					wsInfo.ExecutorName = chosen.DisplayName
-				}
+		// The system prompt's "Your machine" block comes from the executor's
+		// ROW, never from the executor's own account of itself.
+		if execID, _, bound := be.Current(); bound {
+			if row, ok := c.executorRow(execID); ok {
+				wsInfo := workspaceInfoFromRow(row)
+				wsInfo.ExecutorName = row.DisplayName
 				ro.Workspace = wsInfo
 			}
 		}
 	}
 
 	ro.Executor = exec
-	ro.ExecutorTools = c.executorToolsFor(execID)
+	if be, ok := exec.(*boundExecutor); ok {
+		if execID, _, bound := be.Current(); bound {
+			ro.ExecutorTools = c.executorToolsFor(execID)
+		}
+	}
 	return ro, nil
 }
 
