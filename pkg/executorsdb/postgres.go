@@ -325,6 +325,14 @@ func (s *pgStore) SetLabels(ctx context.Context, id string, set map[string]strin
 		`UPDATE conversations.executors SET labels = $1, updated_at = now() WHERE id = $2`,
 		newJSON, id)
 	if err != nil {
+		// Same index, third path. A relabel rewrites the whole map, so moving
+		// one executor onto a name another already holds for this owner trips
+		// it exactly as an insert would -- and this is the path the collision
+		// message RECOMMENDS, so leaving it untranslated answers "the daemon
+		// is broken" to an operator following the daemon's own advice.
+		if dup := duplicateMachineName(err); dup != nil {
+			return executors.Executor{}, dup
+		}
 		return executors.Executor{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

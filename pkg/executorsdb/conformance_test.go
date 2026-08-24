@@ -254,7 +254,11 @@ func machineName(t *testing.T) string {
 
 // createExecutor mints a row with the given labels and deletes it afterwards,
 // so a run does not leave a name claimed for the next one.
-func createExecutor(t *testing.T, s executors.Store, labels map[string]string) error {
+//
+// Returns the row as well as the error because the relabel test needs an id to
+// aim SetLabels at; callers that only care whether the insert was refused
+// discard it.
+func createExecutor(t *testing.T, s executors.Store, labels map[string]string) (executors.Executor, error) {
 	t.Helper()
 	e, _, err := s.Create(context.Background(), executors.NewToken{
 		Labels: labels,
@@ -268,17 +272,26 @@ func createExecutor(t *testing.T, s executors.Store, labels map[string]string) e
 	if err == nil {
 		t.Cleanup(func() { _ = s.Delete(context.Background(), e.ID) })
 	}
-	return err
+	return e, err
+}
+
+// mustCreateExecutor is createExecutor for the seeding steps, where a failure
+// is the fixture breaking rather than the thing under test.
+func mustCreateExecutor(t *testing.T, s executors.Store, labels map[string]string) executors.Executor {
+	t.Helper()
+	e, err := createExecutor(t, s, labels)
+	if err != nil {
+		t.Fatalf("seed executor %v: %v", labels, err)
+	}
+	return e
 }
 
 func TestTwoExecutorsCannotShareAnOwnerAndMachine(t *testing.T) {
 	s := testStore(t)
 	machine := machineName(t)
 
-	if err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine}); err != nil {
-		t.Fatal(err)
-	}
-	err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine})
+	mustCreateExecutor(t, s, map[string]string{"owner": "brent", "machine": machine})
+	_, err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine})
 	if err == nil {
 		t.Fatal("a second executor claiming the same owner+machine must be " +
 			"refused: an interactive client picks the durable executor for its " +
@@ -310,7 +323,7 @@ func TestTwoOwnersMayEachHaveALaptop(t *testing.T) {
 	s := testStore(t)
 	machine := machineName(t)
 	for _, owner := range []string{"brent", "sam"} {
-		if err := createExecutor(t, s, map[string]string{"owner": owner, "machine": machine}); err != nil {
+		if _, err := createExecutor(t, s, map[string]string{"owner": owner, "machine": machine}); err != nil {
 			t.Fatalf("owner %s: %v", owner, err)
 		}
 	}
@@ -319,7 +332,7 @@ func TestTwoOwnersMayEachHaveALaptop(t *testing.T) {
 func TestExecutorsWithNoMachineLabelAreUnconstrained(t *testing.T) {
 	s := testStore(t)
 	for range 3 {
-		if err := createExecutor(t, s, map[string]string{"owner": "brent", "env": "prod"}); err != nil {
+		if _, err := createExecutor(t, s, map[string]string{"owner": "brent", "env": "prod"}); err != nil {
 			t.Fatalf("a fleet executor needs no machine name: %v", err)
 		}
 	}
@@ -342,9 +355,7 @@ func TestEnrollRefusesATokenWhoseMachineNameIsTaken(t *testing.T) {
 	machine := machineName(t)
 	labels := map[string]string{"owner": "brent", "machine": machine}
 
-	if err := createExecutor(t, s, labels); err != nil {
-		t.Fatalf("seed the executor that already holds the name: %v", err)
-	}
+	mustCreateExecutor(t, s, labels)
 
 	tok, err := s.MintToken(ctx, executors.NewToken{
 		Labels: labels,
@@ -396,5 +407,65 @@ func TestOnlyTheOwnerMachineIndexMeansTheNameIsTaken(t *testing.T) {
 	match := &pgconn.PgError{Code: uniqueViolation, ConstraintName: ownerMachineIndex}
 	if !errors.Is(duplicateMachineName(match), executors.ErrMachineNameTaken) {
 		t.Fatal("the (owner, machine) index must translate to ErrMachineNameTaken")
+	}
+}
+
+// The remedy the collision message recommends must not itself collide opaquely.
+// SetLabels rewrites the whole labels map, so relabelling one executor onto a
+// name another already holds trips the same index -- and between the two
+// commits that introduced the sentinel this path lost its mapping and answered
+// ERR_INTERNAL ("the daemon is broken") to an operator following the advice the
+// daemon had just given them.
+func TestRelabellingOntoATakenMachineNameIsRefused(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	taken, mine := machineName(t), machineName(t)
+
+	mustCreateExecutor(t, s, map[string]string{"owner": "brent", "machine": taken})
+	other := mustCreateExecutor(t, s, map[string]string{"owner": "brent", "machine": mine})
+
+	_, err := s.SetLabels(ctx, other.ID, map[string]string{"machine": taken}, nil)
+	if err == nil {
+		t.Fatal("relabelling onto a name this owner already uses must be refused: " +
+			"an interactive client picks its durable executor by (owner, machine), " +
+			"and two matches is a coin flip over which filesystem a child lands on")
+	}
+	if !errors.Is(err, executors.ErrMachineNameTaken) {
+		t.Fatalf("SetLabels returned %T: %v; want an error satisfying "+
+			"errors.Is(err, executors.ErrMachineNameTaken) -- anything else "+
+			"reaches the operator as ERR_INTERNAL", err, err)
+	}
+	if strings.Contains(err.Error(), "SQLSTATE") || strings.Contains(err.Error(), "23505") {
+		t.Fatalf("the store's raw text must not travel: %q", err.Error())
+	}
+
+	// The refused UPDATE must leave the row alone -- a partially applied
+	// relabel would be worse than the refusal.
+	after, err := s.Get(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Labels["machine"] != mine {
+		t.Fatalf("machine = %q after a refused relabel, want %q unchanged",
+			after.Labels["machine"], mine)
+	}
+}
+
+// Relabelling onto a name a DIFFERENT owner holds is fine -- the key is the
+// pair, and two operators may each have a laptop.
+func TestRelabellingOntoAnotherOwnersMachineNameIsAllowed(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	shared, mine := machineName(t), machineName(t)
+
+	mustCreateExecutor(t, s, map[string]string{"owner": "sam", "machine": shared})
+	mine1 := mustCreateExecutor(t, s, map[string]string{"owner": "brent", "machine": mine})
+
+	e, err := s.SetLabels(ctx, mine1.ID, map[string]string{"machine": shared}, nil)
+	if err != nil {
+		t.Fatalf("sam holding %q must not stop brent using it: %v", shared, err)
+	}
+	if e.Labels["machine"] != shared {
+		t.Fatalf("machine = %q, want %q", e.Labels["machine"], shared)
 	}
 }

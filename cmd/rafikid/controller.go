@@ -3391,13 +3391,21 @@ func translateExecutorErr(err error) error {
 		//
 		// Its own message rather than err.Error(): the sentinel's text is
 		// written for the EXECUTOR, which learns of the collision when it
-		// redeems its token, and can only be told to get a different token.
-		// An operator holding a control connection has the row in reach.
+		// redeems its token and can only be told to get a different token. An
+		// operator holding a control connection has the row in reach instead.
+		//
+		// Phrased to be true on BOTH control paths. It reaches an operator
+		// naming a new executor (ctrl_executor_create) and one renaming an
+		// existing one (ctrl_executor_label), so it must not say "--name",
+		// which the label verb has no flag for, nor "relabel the existing
+		// executor", which on the label path is the thing they just tried.
+		// What both need is the same: which executor is holding the name.
 		return &control.ControllerError{
 			Code: protocol.ErrInvalidArgs,
-			Message: "that executor name is already taken for this owner: choose " +
-				"another --name, or relabel the existing executor with " +
-				"`rafiki executor label <id> machine=<new-name>`",
+			Message: "that executor name is already taken for this owner — (owner, " +
+				"machine) names exactly one executor. Choose a different name, or " +
+				"free this one by relabelling or deleting whichever executor holds " +
+				"it: `rafiki executor list --selector machine=<name>`",
 		}
 	default:
 		return err

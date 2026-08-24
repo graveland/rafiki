@@ -27,6 +27,10 @@ type fakeExecStore struct {
 	lastCreate  executors.NewToken
 	disabled    []string
 	deleted     []string
+
+	// setLabelsErr, when set, is what SetLabels answers -- so a store
+	// rejection can be exercised without a database.
+	setLabelsErr error
 }
 
 func newFakeExecStore() *fakeExecStore {
@@ -71,6 +75,9 @@ func (f *fakeExecStore) List(_ context.Context) ([]executors.Executor, error) {
 	return out, nil
 }
 func (f *fakeExecStore) SetLabels(_ context.Context, id string, set map[string]string, remove []string) (executors.Executor, error) {
+	if f.setLabelsErr != nil {
+		return executors.Executor{}, f.setLabelsErr
+	}
 	e := f.execs[id]
 	if e.Labels == nil {
 		e.Labels = map[string]string{}
@@ -224,6 +231,32 @@ func TestDuplicateMachineNameIsAClientError(t *testing.T) {
 	}
 	if !strings.Contains(ce.Message, "name") {
 		t.Fatalf("the message must tell the operator the NAME is taken: %q", ce.Message)
+	}
+}
+
+// The daemon half of the same rule. ctrl_executor_label is the verb the
+// collision message RECOMMENDS, and it lost this mapping once already -- the
+// detection moved into the store, SetLabels was not wired to it, and an
+// operator following the daemon's own advice onto a taken name was told the
+// daemon was broken.
+func TestExecutorLabelMapsATakenMachineName(t *testing.T) {
+	s := newFakeExecStore()
+	s.setLabelsErr = executors.ErrMachineNameTaken
+	e0, _, _ := s.Enroll(context.Background(), "tok", nil)
+	c := &Controller{execStore: s}
+
+	_, err := c.ExecutorLabel(protocol.ExecutorLabelRequest{
+		ExecutorID: e0.ID, Set: map[string]string{"machine": "taken"},
+	})
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
+		t.Fatalf("got %v, want ERR_INVALID_ARGS", err)
+	}
+	// The one message serves both control paths, so it must not name a flag
+	// only one of them has: `executor label` has no --name.
+	if strings.Contains(ce.Message, "--name") {
+		t.Fatalf("this message also reaches `executor label`, which has no "+
+			"--name flag: %q", ce.Message)
 	}
 }
 
