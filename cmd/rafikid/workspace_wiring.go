@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -149,6 +150,43 @@ func (c *Controller) takeWorkspaceLabels(childID string) (workspaceLabels, bool)
 		delete(c.wsLabels, childID)
 	}
 	return wl, ok
+}
+
+// markUnbound records that a child started without an executor, so rafiki
+// list/get can show why its tools are failing. Written through the same
+// store-then-stash path NoteBinding uses, because the child record may not
+// exist yet when the eager bind fails inside agentRuntimeOptions.
+func (c *Controller) markUnbound(childID string) {
+	_, err := c.st.SetLabels(childID, map[string]string{
+		"rafiki/executor-state": "unbound",
+	}, nil)
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, childstore.ErrNotFound) {
+		slog.Warn("could not mark child as unbound",
+			"child", childID, "error", err)
+		return
+	}
+	// The child record does not exist yet. Stash for Spawn.
+	c.wsLabelsMu.Lock()
+	if c.wsLabels == nil {
+		c.wsLabels = make(map[string]workspaceLabels)
+	}
+	wl := c.wsLabels[childID]
+	wl.executorState = "unbound"
+	c.wsLabels[childID] = wl
+	c.wsLabelsMu.Unlock()
+}
+
+// chooseExecutorCandidate returns the first executor whose ROW matches the
+// child's selector, from the live pool. It is a best-effort fallback for
+// the workspace block when the child is not yet bound: the system prompt is
+// fixed for its lifetime, so omitting the block now means never. A nil
+// block (no candidate found) is acceptable — naming the wrong machine is
+// worse than none.
+func (c *Controller) chooseExecutorCandidate(req protocol.SpawnRequest, ownerName string) (executors.Executor, error) {
+	return c.chooseExecutor(req, ownerName)
 }
 
 // releaseWorkspace tears down a workspace on an executor.

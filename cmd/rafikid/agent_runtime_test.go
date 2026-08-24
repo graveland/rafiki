@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -457,5 +460,131 @@ func TestToRuntimeOptions_NoAliasLeavesEverythingAtCallerValue(t *testing.T) {
 	}
 	if ro.ContextFilesBudget != 0 {
 		t.Errorf("ContextFilesBudget = %d, want 0 (no alias, no formula input)", ro.ContextFilesBudget)
+	}
+}
+
+func baseRequest() protocol.SpawnRequest {
+	return protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp",
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+}
+
+// A human typing --executor-selector gets explainNoMatch's per-candidate
+// diagnostic immediately. Downgrading this to a slog.Warn produced a running,
+// billing agent whose every workspace tool errored, with nothing surfaced.
+func TestTopLevelSpawnWithAnUnmatchedSelectorIsRefused(t *testing.T) {
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	req := baseRequest()
+	req.ExecutorSelector = "env=nowhere"
+	_, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	if err == nil {
+		t.Fatal("a top-level spawn whose selector matches nothing must be refused")
+	}
+	if !strings.Contains(err.Error(), "env=nowhere") {
+		t.Fatalf("the refusal must carry explainNoMatch's diagnostic, got: %v", err)
+	}
+}
+
+// A child spawned by an agent may start unbound: an executor restart parks its
+// connection for up to a full health tick, and surviving that window is what
+// lazy binding is for.
+func TestParentedSpawnWithNoLiveExecutorStartsUnbound(t *testing.T) {
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	seedChild(t, c)
+	req := baseRequest()
+	req.ParentChildID = "c_parent"
+	req.ExecutorSelector = "env=nowhere"
+	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	if err != nil {
+		t.Fatalf("a parented spawn must be allowed to start unbound: %v", err)
+	}
+	if ro.Executor == nil {
+		t.Fatal("Executor must still be non-nil, or MaterializeAll drops the " +
+			"whole workspace tier and the child silently runs tools in the daemon")
+	}
+}
+
+// markUnbound writes "unbound" through the store-then-stash path so Spawn
+// picks it up and stores it on initialization labels.
+func TestAnUnboundChildSaysSoInItsLabels(t *testing.T) {
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	seedChild(t, c)
+	req := baseRequest()
+	req.ParentChildID = "c_parent"
+	req.ExecutorSelector = "env=nowhere"
+	_, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wl, ok := c.takeWorkspaceLabels("c1")
+	if !ok {
+		t.Fatal("markUnbound must stash the 'unbound' state for Spawn to pick up")
+	}
+	if wl.executorState != "unbound" {
+		t.Fatalf("executorState = %q, want %q", wl.executorState, "unbound")
+	}
+}
+
+// When a live executor admits the child's selector, the workspace block is
+// built from the bound executor's row.
+func TestABoundChildGetsTheWorkspaceBlock(t *testing.T) {
+	c := newTestController(t)
+	c.execPool = &fakePool{
+		live: []execpool.LiveExecutor{{
+			Executor: executors.Executor{
+				ID:      "exec-1",
+				Enabled: true,
+				Labels:  map[string]string{"env": "home"},
+				Roots:   []string{"/tmp"},
+			},
+		}},
+	}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_parent", Status: protocol.StatusIdle,
+		Kind: protocol.KindFundi,
+	})
+	req := baseRequest()
+	req.ParentChildID = "c_parent"
+	req.ExecutorSelector = "env=home"
+	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro.Workspace == nil {
+		t.Fatal("a child that binds at spawn must get the workspace block; the " +
+			"system prompt is fixed for its lifetime")
+	}
+	if ro.Workspace.Roots == nil || ro.Workspace.Roots[0] != "/tmp" {
+		t.Fatalf("workspace block must carry the executor's roots, got %+v", ro.Workspace)
+	}
+}
+
+// When no executor matches (not even as a candidate), the workspace block
+// is nil. This is acceptable per the design: naming the wrong machine is
+// worse than none.
+func TestUnboundChildWithNoCandidatesGetsNilWorkspace(t *testing.T) {
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	seedChild(t, c)
+	req := baseRequest()
+	req.ParentChildID = "c_parent"
+	req.ExecutorSelector = "env=nowhere"
+	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro.Workspace != nil {
+		t.Fatal("with no live candidate, workspace block must be nil; a block " +
+			"naming the wrong machine is worse than none")
 	}
 }

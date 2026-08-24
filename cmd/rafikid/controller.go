@@ -166,9 +166,10 @@ type Controller struct {
 }
 
 type workspaceLabels struct {
-	workspaceID string
-	executorID  string
-	mode        string // "ephemeral" or "pinned"
+	workspaceID   string
+	executorID    string
+	mode          string // "ephemeral" or "pinned"
+	executorState string // "unbound" until the first successful NoteBinding
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -839,6 +840,9 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		initLabels["rafiki/workspace"] = wl.workspaceID
 		initLabels["rafiki/executor"] = wl.executorID
 		initLabels["rafiki/workspace-mode"] = wl.mode
+		if wl.executorState != "" {
+			initLabels["rafiki/executor-state"] = wl.executorState
+		}
 	}
 
 	// FIX 5: Insert a minimal record at StatusSpawning immediately after the
