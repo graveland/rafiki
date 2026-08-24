@@ -109,6 +109,11 @@ func (p *Pool) sweepParkedOnce(now time.Time) {
 			lost = append(lost, id)
 		}
 	}
+	for id, t := range p.evicted {
+		if now.Sub(t) > parkTimeout {
+			delete(p.evicted, id)
+		}
+	}
 	fn := p.onLost
 	p.mu.Unlock()
 
