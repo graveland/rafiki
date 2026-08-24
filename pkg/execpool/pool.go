@@ -51,6 +51,14 @@ type Pool struct {
 	parked map[string]*parkedEntry
 	onLost func(executorID string) // fired when a park expires; see SetOnLost
 
+	// evicted holds ids whose owning control connection closed while the
+	// executor's handleConn was still running. Between Redeem (early) and
+	// installLive/installTransient (late) sits the Describe join timeout, so
+	// Revoke is already a no-op when the control connection closes and Evict
+	// finds nothing live — the executor would install after that and, because
+	// refreshRow skips transients, never be reaped.
+	evicted map[string]time.Time
+
 	// Timeouts, fields rather than constants so the health path is testable
 	// in milliseconds instead of in half-minutes. Nothing outside tests
 	// changes them.
@@ -198,6 +206,7 @@ func New(store executors.Store) *Pool {
 		store:          store,
 		live:           make(map[string]*liveConn),
 		parked:         make(map[string]*parkedEntry),
+		evicted:        make(map[string]time.Time),
 		healthInterval: defaultHealthInterval,
 		healthTimeout:  defaultHealthTimeout,
 		joinTimeout:    defaultJoinTimeout,
@@ -334,8 +343,13 @@ func (p *Pool) handleConn(conn net.Conn) {
 		_ = p.store.TouchSeen(ctx, e.ID)
 	}
 
-	// If this executor was parked, reattach it.
-	p.reattach(e.ID)
+	// If this executor was parked, reattach it. A transient
+	// executor has no row and thus no parking/reconnection
+	// lifecycle — its ticket is one-shot, so there is nothing to
+	// reattach to.
+	if !transient {
+		p.reattach(e.ID)
+	}
 
 	lc := &liveConn{
 		executor:    e,
@@ -347,7 +361,15 @@ func (p *Pool) handleConn(conn net.Conn) {
 		transient:   transient,
 	}
 
-	p.installLive(e.ID, lc)
+	if transient {
+			if !p.installTransient(e.ID, lc) {
+				slog.Warn("execpool: transient executor evicted before join completed; "+
+					"its owning control connection closed", "executorId", e.ID)
+				return
+			}
+		} else {
+			p.installLive(e.ID, lc)
+		}
 
 	slog.Info("execpool: executor joined", "id", e.ID, "machine", e.Labels["machine"], "tools", desc.Msg.Tools)
 
@@ -488,11 +510,54 @@ func (p *Pool) Evict(executorID string) {
 	if ok {
 		delete(p.live, executorID)
 	}
+	delete(p.parked, executorID)
+	// Record the tombstone regardless of whether the executor was live.
+	// The control connection can close between Redeem and installTransient,
+	// and at that point the executor is not yet in p.live — the tombstone
+	// must still stop it from installing afterwards.
+	if isTransientID(executorID) {
+		p.evicted[executorID] = time.Now()
+	}
 	p.mu.Unlock()
 
 	if ok && lc != nil {
 		lc.shutdown()
 	}
+}
+
+// evictConn removes id's entry only if lc is still the connection mapped
+// there, and reports whether it did. For callers that hold the *liveConn,
+// this avoids the identity-hole: a reconnect installs a new liveConn under
+// the same id, and the stale one must not evict it.
+func (p *Pool) evictConn(id string, want *liveConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cur, ok := p.live[id]; ok && cur == want {
+		delete(p.live, id)
+		delete(p.parked, id)
+		if isTransientID(id) {
+			p.evicted[id] = time.Now()
+		}
+		want.shutdown()
+	}
+}
+
+// installTransient publishes a transient executor's liveConn, refusing if
+// its owning connection already closed while it was joining.
+func (p *Pool) installTransient(id string, lc *liveConn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, evicted := p.evicted[id]; evicted {
+		return false
+	}
+	p.live[id] = lc
+	return true
+}
+
+// isTransientID reports whether an id looks like a transient executor id
+// (sess-<ULID>), as opposed to a durable UUID.
+func isTransientID(id string) bool {
+	return len(id) >= 5 && id[:5] == "sess-"
 }
 
 // workspaceClient wraps an executorClient, adding a workspace id to every
@@ -737,7 +802,9 @@ func (p *Pool) healthCheck(ctx context.Context, id string, lc *liveConn) error {
 		lc.draining = true
 		p.mu.Unlock()
 	}
-	_ = p.store.TouchSeen(ctx, id)
+	if !lc.transient {
+		_ = p.store.TouchSeen(ctx, id)
+	}
 	return nil
 }
 
