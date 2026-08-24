@@ -3441,20 +3441,29 @@ func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors
 		return nil, translateExecutorErr(err)
 	}
 	// Connected/ConnectedAt are a view over the live pool, not the store: the
-	// row cannot tell a client whether an executor is currently up or since
-	// when, and a client waiting for its own session executor to connect has
-	// no other signal.
+	// row cannot tell a client whether an executor is currently up.
+	//
+	// The pool is also a SOURCE here, not only a decoration. A transient
+	// executor has no row at all, and `waitExecutorLive` polls this verb to
+	// learn its own session executor connected — a list built from the store
+	// alone can never answer, so the client times out and tears down a healthy
+	// executor.
 	if c.execPool != nil {
-		live := make(map[string]time.Time, len(c.execPool.Live()))
-		for _, le := range c.execPool.Live() {
-			live[le.Executor.ID] = le.ConnectedAt
-		}
+		seen := make(map[string]int, len(execs))
 		for i := range execs {
-			if t, ok := live[execs[i].ID]; ok {
+			seen[execs[i].ID] = i
+		}
+		for _, le := range c.execPool.Live() {
+			t := le.ConnectedAt
+			if i, ok := seen[le.Executor.ID]; ok {
 				execs[i].Connected = true
-				t := t
 				execs[i].ConnectedAt = &t
+				continue
 			}
+			e := le.Executor
+			e.Connected = true
+			e.ConnectedAt = &t
+			execs = append(execs, e)
 		}
 	}
 	if req.Selector != "" {

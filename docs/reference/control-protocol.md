@@ -1506,6 +1506,11 @@ Two branches, not one: `limit <= 0` defaults to 50 (not the ceiling); `limit >
 negative *and* oversized all collapse to the same 500 — so do not assume the
 two `*_list` verbs share a convention.
 
+The response is the union of the executor rows and the live pool, not the rows
+alone. A transient executor (`kind=session`) has no row, so it appears only
+from the pool; a durable executor that is currently connected appears once,
+with `connected` and `connectedAt` filled in from the pool.
+
 **Response** (success)
 ```jsonc
 {
