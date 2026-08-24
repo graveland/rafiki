@@ -55,7 +55,7 @@ one:
 | `isolation` | operator | `none` — it is the operator's own terminal |
 | `workspace_mode` | operator | `pinned` |
 | `roots` | operator claim | the cwd the client reported |
-| `machine` | trust label at mint | daemon-written from the client's machine-id file |
+| `machine` | trust label at mint | the operator-written name the client read back, validated |
 
 Nothing is self-reported, so `SelfReported`'s rule is not bent. The invariant
 generalises to: **every access-gating fact is written by the daemon from
@@ -73,7 +73,7 @@ Consequences:
 - Because the ticket is per-connection, two concurrent TUIs on one machine get
   two distinct executors rather than colliding on one per-machine credential.
 
-The selector returned by `ctrl_executor_session` is `owner=<user>,machine=<id>`
+The selector returned by `ctrl_executor_session` is `owner=<user>,machine=<name>`
 in BOTH the durable and transient cases, so a child can move between the two
 without its stored selector — the thing its whole subtree inherits — ever being
 rewritten. The durable executor is preferred (durable before session in

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -27,7 +28,7 @@ func TestExecutorSessionDefersToADurableExecutorOnThisMachine(t *testing.T) {
 	}))
 
 	got, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{MachineID: "m-abc", Roots: []string{"/src"}})
+		protocol.ExecutorSessionRequest{Name: "m-abc", Roots: []string{"/src"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,8 +36,28 @@ func TestExecutorSessionDefersToADurableExecutorOnThisMachine(t *testing.T) {
 		t.Fatal("a durable executor already covers this machine; starting a " +
 			"transient one as well offers a second executor nothing will prefer")
 	}
+	if got.ExecutorID != "durable-1" {
+		t.Fatalf("ExecutorID = %q, want durable-1", got.ExecutorID)
+	}
 	if got.Selector != "owner=brent,machine=m-abc" {
 		t.Fatalf("the selector must name the machine, not the hostname: %q", got.Selector)
+	}
+}
+
+func TestExecutorSessionIgnoresAnotherOwnersExecutorOnTheSameName(t *testing.T) {
+	c := newSessionTestController(t, liveExecutor("sams-laptop", map[string]string{
+		"owner":   "sam",
+		"machine": "laptop",
+	}))
+
+	got, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
+		protocol.ExecutorSessionRequest{Name: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.RunLocal {
+		t.Fatal("sam's laptop is not brent's; the durable match must be scoped " +
+			"to the owner or a client binds children onto another operator's box")
 	}
 }
 
@@ -44,7 +65,7 @@ func TestExecutorSessionMintsATicketWhenNoDurableExecutorExists(t *testing.T) {
 	c := newSessionTestController(t)
 
 	got, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{MachineID: "m-abc", Roots: []string{"/src"}})
+		protocol.ExecutorSessionRequest{Name: "m-abc", Roots: []string{"/src"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,12 +94,12 @@ func TestExecutorSessionSelectorIsIdenticalInBothCases(t *testing.T) {
 	without := newSessionTestController(t)
 
 	a, err := withDurable.ExecutorSession(nil, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{MachineID: "m-abc"})
+		protocol.ExecutorSessionRequest{Name: "m-abc"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, err := without.ExecutorSession(nil, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{MachineID: "m-abc"})
+		protocol.ExecutorSessionRequest{Name: "m-abc"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,12 +108,15 @@ func TestExecutorSessionSelectorIsIdenticalInBothCases(t *testing.T) {
 	}
 }
 
-func TestExecutorSessionRejectsAMissingMachineID(t *testing.T) {
+func TestExecutorSessionRequiresAName(t *testing.T) {
 	c := newSessionTestController(t)
 	_, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
 		protocol.ExecutorSessionRequest{})
 	if err == nil {
-		t.Fatal("without a machine id the daemon cannot tell which durable " +
-			"executor shares this filesystem, and must refuse rather than guess")
+		t.Fatal("without a name the daemon cannot tell which durable executor " +
+			"shares this client's filesystem")
+	}
+	if !strings.Contains(err.Error(), "rafiki executor name") {
+		t.Fatalf("the error must tell the operator how to fix it, got: %v", err)
 	}
 }

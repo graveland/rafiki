@@ -20,10 +20,10 @@ import (
 // authority", it is "every access-gating fact is written by the daemon from
 // something it verified".
 type TicketGrant struct {
-	ExecutorID string
-	Owner      string
-	MachineID  string
-	Roots      []string
+	ExecutorID  string
+	Owner       string
+	MachineName string
+	Roots       []string
 }
 
 // Executor synthesises the in-memory row this grant stands for.
@@ -33,7 +33,7 @@ func (g TicketGrant) Executor() executors.Executor {
 		// The machine label IS the name; there is no separate display name.
 		Labels: map[string]string{
 			"owner":   g.Owner,
-			"machine": g.MachineID,
+			"machine": g.MachineName,
 			"kind":    "session",
 		},
 		// Empty, and that is the point: nothing about a transient executor is
