@@ -1592,25 +1592,23 @@ within one health interval, the same as disabling it.
 
 ### 15.6 `ctrl_executor_session`
 
-Let an authenticated client mint an executor row for its own machine, so the
+Let an authenticated client get an executor for its own machine, so the
 operator's filesystem can be the workspace. The daemon writes every field that
-gates access — owner, isolation, workspace\_mode, admits — from the connection;
+gates access — owner, isolation, workspace_mode, admits — from the connection;
 the request carries only non-gating fields.
 
-The verb first checks whether a persistent, non-`kind=client` executor already
-carries this `name` (matched against `SelfReported["name"]`) and `owner`
-(matched against trust `Labels["owner"]`). If one does, the response returns
-its `executorId` with `runLocal:false` and no credential — the client targets
-that executor and starts nothing of its own. That executor outlives the client,
+Two answers, one selector. When a durable executor already covers this
+machine and owner (matched on Labels, not SelfReported), the response returns
+its `executorId` with `runLocal:false` and no ticket — the client targets that
+executor and starts nothing of its own. That executor outlives the client,
 which is what keeps an agent working after the operator detaches.
 
-If no persistent executor covers this name, and the client already holds a
-credential (`hasCredential:true`), the response returns `runLocal:true` with
-no new credential — the client reuses the one it has.
-
-Otherwise a new row is minted with `kind=client`, `interactive=true`,
-`isolation=none`, `workspace_mode=pinned`, `admits=owner=<user>`, and the
-response returns the row's `executorId` and its credential (shown once).
+Otherwise the daemon mints a one-shot session ticket. The client starts
+an executor, connects with the ticket, and the executor lives exactly as long
+as this control connection — no database row, no permanent credential. The
+selector is `owner=<user>,machine=<id>` in both cases, so a child can move
+between a durable executor and a transient one without its stored selector
+ever changing.
 
 **Owner resolution.** On an authenticated TCP/TLS connection the owner is
 `conn.Identity().Username`. On a local UDS connection — which carries no
@@ -1623,9 +1621,8 @@ The request has no username field and must never grow one.
 ```jsonc
 {
   "type": "ctrl_executor_session",
-  "name": "laptop",              // freeform unique key; matched against executor SelfReported
-  "roots": ["/home/brent/src"],   // descriptive only — nothing enforces them
-  "hasCredential": false          // true when the client already holds a credential
+  "machineId": "abc123...",        // stable per-machine id from the client's machine-id file
+  "roots": ["/home/brent/src"]      // descriptive only — nothing enforces them
 }
 ```
 
@@ -1636,9 +1633,10 @@ The request has no username field and must never grow one.
   "command": "ctrl_executor_session",
   "success": true,
   "data": {
-    "executorId": "abc123...",    // always populated — the row to target
-    "runLocal": true,             // false when a durable executor already covers this name
-    "credential": "rfk_..."       // plaintext credential, shown ONCE — empty when not minted
+    "executorId": "abc123...",     // always populated — the executor to target
+    "runLocal": true,              // false when a durable executor already covers this machine
+    "ticket": "...",               // one-shot session ticket — empty when runLocal is false
+    "selector": "owner=brent,machine=abc123..."  // spawn selector for both durable and transient
   }
 }
 ```

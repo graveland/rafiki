@@ -232,14 +232,27 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 ## Executor
 
 **By default, `rafiki create` makes your own machine the workspace.** The client asks the
-daemon for an executor row, starts an executor in-process, and points the spawn at it — so
+daemon for an executor, starts one in-process, and points the spawn at it — so
 `read`, `write`, `bash` and the rest run where your files are, whether the daemon is on
 this machine or in a cluster. `--no-local-executor` turns it off; `--executor-selector`
 sends the child somewhere else instead.
 
-If a durable executor already covers this machine and user — one installed with
-`rafiki executor service install` — the client uses that instead of starting its own. That
-one outlives your terminal, so an agent keeps working after you detach.
+There are two kinds of executor:
+
+- **Durable** — enrolled with `rafiki executor enroll` or `rafiki executor service install`.
+  Has a database row with operator-written labels, admission, isolation and workspace
+  mode. Lives until the operator deletes it. A `service install` stamps `machine=<id>`
+  as a trust label from the machine's stable identity file (`paths.MachineID()`),
+  so interactive clients on the same box can find it.
+- **Transient** — started automatically by `rafiki create` / `rafiki attach`. No
+  database row, no permanent credential. Authenticated by a one-shot ticket minted
+  over the already-authenticated control connection; dies when the connection closes.
+  Labeled `kind=session` with `owner` and `machine` written by the daemon from the
+  connection.
+
+If a durable executor already covers this machine and user, the client uses that
+instead of starting its own. That one outlives your terminal, so an agent keeps
+working after you detach.
 `executor service install` accepts `--proxy name=base_url` (repeatable), the same
 flag as `executor serve` — see "The executor relay" below — which is usually
 the main reason to run one of these as a standing service in the first place:

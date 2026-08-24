@@ -30,12 +30,54 @@ A fourth transport is the **client-run executor**: `rafiki create` and `rafiki
 attach` start an executor in-process and reverse-dial the daemon, so the
 operator's own machine becomes the workspace by default. It is not a new wire
 path — it uses `--connect`'s TLS transport when `RAFIKI_URL` names a remote
-daemon, and `--connect-socket`'s unix path when the daemon is local. What
-makes it distinct is how its row is minted: not by an operator with
-`rafiki executor enroll`, but by the daemon from the control connection's
-identity via `ctrl_executor_session`. The row is labelled `kind=client`,
-`interactive=true`, `owner=<user>`, and the client connects with the credential
-that verb returns.
+daemon, and `--connect-socket`'s unix path when the daemon is local.
+
+## Transient executors
+
+A client-run executor is **transient**: it has **no database row** at all. The
+daemon mints a one-shot session ticket over the already-authenticated control
+connection, the client connects with the ticket (`ExecutorHelloRequest.Ticket`),
+and the executor lives exactly as long as the control connection that asked for
+it. Closing the connection revokes the ticket and evicts the executor from the
+pool.
+
+This confronts a documented invariant — "the row is the only authority on what
+an executor is" — so the resolution is explicit rather than an exception. The
+row is authority because an operator wrote it and the machine it describes
+cannot assert it. For a transient executor, every such fact comes from the
+**authenticated control connection**, which is a stronger source, not a weaker
+one:
+
+| Fact | Durable | Transient |
+|---|---|---|
+| `owner` | operator label | authenticated user on the connection |
+| `admits` | operator | `owner=<that user>`, daemon-written |
+| `isolation` | operator | `none` — it is the operator's own terminal |
+| `workspace_mode` | operator | `pinned` |
+| `roots` | operator claim | the cwd the client reported |
+| `machine` | trust label at mint | daemon-written from the client's machine-id file |
+
+Nothing is self-reported, so `SelfReported`'s rule is not bent. The invariant
+generalises to: **every access-gating fact is written by the daemon from
+something it verified — a row an operator wrote, or a connection it
+authenticated.**
+
+Consequences:
+
+- `refreshRow` must skip transient executors: `store.Get` answers `ErrNotFound`
+  for a row that never existed, and `refreshRow` correctly treats that as
+  "this row was deleted, evict now", killing a healthy executor on its first
+  health tick.
+- `liveConn.transient` marks an executor with no row. `Live()` returns it like
+  any other; selection, admission and narrowing are unchanged.
+- Because the ticket is per-connection, two concurrent TUIs on one machine get
+  two distinct executors rather than colliding on one per-machine credential.
+
+The selector returned by `ctrl_executor_session` is `owner=<user>,machine=<id>`
+in BOTH the durable and transient cases, so a child can move between the two
+without its stored selector — the thing its whole subtree inherits — ever being
+rewritten. The durable executor is preferred (durable before session in
+`sortCandidates`), and the transient one is a zero-config fallback.
 
 ## Reaching the daemon
 
