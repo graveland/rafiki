@@ -19,7 +19,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/executors"
-	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -72,9 +71,21 @@ func newExecutorEnrollCmd() *cobra.Command {
 	Pass it to the executor binary as --enroll-token.
 
 	Labels bound to the token become trust labels on the executor row — the
-	executor cannot claim them and an operator can revoke them with a row update.`,
+	executor cannot claim them and an operator can revoke them with a row update.
+
+	--name is the name of the machine the executor will RUN on, which is not
+	necessarily this one: a token minted here is routinely carried elsewhere
+	with --enroll-token. Run ` + "`rafiki executor name`" + ` on the target box to see
+	what to pass.
+
+	owner and machine are written by the daemon — owner from this connection,
+	machine from --name — so neither can be given with --label.`,
 		RunE: runExecutorEnroll,
 	}
+	// No backquotes in this usage string: cobra's UnquoteUsage takes the first
+	// backquoted word as the flag's VALUE NAME, so a mention of the machine
+	// label renders as `--name machine` instead of `--name string`.
+	cmd.Flags().String("name", "", "Name of the machine this executor runs on; becomes its 'machine' trust label and must match 'rafiki executor name' on that box")
 	cmd.Flags().StringArray("label", nil, "Label to bind to the token (repeatable, k=v)")
 	cmd.Flags().StringArray("root", nil, "Root path the executor may access (repeatable)")
 	cmd.Flags().String("isolation", "none", "Isolation level: none|container|vm")
@@ -89,6 +100,7 @@ func runExecutorEnroll(cmd *cobra.Command, _ []string) error {
 	defer c.Close()
 	ctx := cmdCtx(cmd)
 
+	name, _ := cmd.Flags().GetString("name")
 	labelPairs, _ := cmd.Flags().GetStringArray("label")
 	labels, err := parseLabelPairs(labelPairs)
 	if err != nil {
@@ -102,6 +114,7 @@ func runExecutorEnroll(cmd *cobra.Command, _ []string) error {
 
 	req := protocol.ExecutorEnrollRequest{
 		Type:          protocol.TypeCtrlExecutorEnroll,
+		Name:          name,
 		Labels:        labels,
 		Roots:         roots,
 		Isolation:     isolation,
@@ -233,28 +246,6 @@ func shortExecutorID(id string) string {
 
 const executorShortIDLen = 12
 
-// applyMachineLabel stamps machine=<id> onto an enrollment token's labels
-// unless the operator named one explicitly.
-//
-// It is a TRUST label, written at mint time and living in the row, not a
-// self-reported fact: it participates in selection, deciding which executor an
-// interactive client on this box binds its children to. An executor that could
-// assert its own machine could attract another operator's work.
-func applyMachineLabel(labels map[string]string) error {
-	if labels == nil {
-		return fmt.Errorf("applyMachineLabel: nil label map")
-	}
-	if labels["machine"] != "" {
-		return nil
-	}
-	name, _, err := paths.MachineName()
-	if err != nil {
-		return fmt.Errorf("resolve this executor name: %w", err)
-	}
-	labels["machine"] = name
-	return nil
-}
-
 // renderExecutorTable writes the executor pool as a table.
 //
 // When useColor is false every style is left empty, so piped and redirected
@@ -384,9 +375,18 @@ func newExecutorCreateCmd() *cobra.Command {
 	theft announces itself — the thief consumes the token and the real executor
 	fails loudly. A credential from this command is long-lived and a theft of it
 	is silent. Revoke with ` + "`rafiki executor disable`" + `, which takes effect on a
-	live connection within one health interval.`,
+	live connection within one health interval.
+
+	--name is the name of the machine the executor will RUN on, which is not
+	necessarily this one — the credential is carried to it. Run ` + "`rafiki executor name`" + `
+	on the target box to see what to pass. owner and machine are written by the
+	daemon, so neither can be given with --label.`,
 		RunE: runExecutorCreate,
 	}
+	// No backquotes in this usage string: cobra's UnquoteUsage takes the first
+	// backquoted word as the flag's VALUE NAME, so a mention of the machine
+	// label renders as `--name machine` instead of `--name string`.
+	cmd.Flags().String("name", "", "Name of the machine this executor runs on; becomes its 'machine' trust label and must match 'rafiki executor name' on that box")
 	cmd.Flags().StringArray("label", nil, "Label to bind to the executor (repeatable, k=v)")
 	cmd.Flags().StringArray("root", nil, "Root path the executor may access (repeatable)")
 	cmd.Flags().String("isolation", "none", "Isolation level: none|container")
@@ -399,6 +399,7 @@ func runExecutorCreate(cmd *cobra.Command, _ []string) error {
 	c := mustDial(cmd)
 	defer c.Close()
 
+	name, _ := cmd.Flags().GetString("name")
 	labelPairs, _ := cmd.Flags().GetStringArray("label")
 	labels, err := parseLabelPairs(labelPairs)
 	if err != nil {
@@ -411,6 +412,7 @@ func runExecutorCreate(cmd *cobra.Command, _ []string) error {
 
 	resp, err := c.Request(cmdCtx(cmd), protocol.ExecutorCreateRequest{
 		Type:          protocol.TypeCtrlExecutorCreate,
+		Name:          name,
 		Labels:        labels,
 		Roots:         roots,
 		Isolation:     isolation,

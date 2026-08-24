@@ -53,8 +53,8 @@ type fakeController struct {
 	globalUnsubscribeFn     func(control.Connection) error
 	subscribeLabeledFn      func(control.Connection, map[string]string, []string, protocol.SubscribeFilter) error
 	onConnectionCloseFn     func(control.Connection)
-	executorEnrollFn        func(protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
-	executorCreateFn        func(protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error)
+	executorEnrollFn        func(users.Identity, protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
+	executorCreateFn        func(users.Identity, protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error)
 	executorListFn          func(protocol.ExecutorListRequest) ([]executors.Executor, error)
 	executorLabelFn         func(protocol.ExecutorLabelRequest) (executors.Executor, error)
 	executorDisableFn       func(protocol.ExecutorDisableRequest) error
@@ -231,16 +231,16 @@ func (f *fakeController) OnConnectionClose(conn control.Connection) {
 	}
 }
 
-func (f *fakeController) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
+func (f *fakeController) ExecutorEnroll(id users.Identity, req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
 	if f.executorEnrollFn != nil {
-		return f.executorEnrollFn(req)
+		return f.executorEnrollFn(id, req)
 	}
 	return protocol.ExecutorEnrollResponseData{}, nil
 }
 
-func (f *fakeController) ExecutorCreate(req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error) {
+func (f *fakeController) ExecutorCreate(id users.Identity, req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error) {
 	if f.executorCreateFn != nil {
-		return f.executorCreateFn(req)
+		return f.executorCreateFn(id, req)
 	}
 	return protocol.ExecutorCreateResponseData{ExecutorID: "exec-1", Credential: "cred"}, nil
 }

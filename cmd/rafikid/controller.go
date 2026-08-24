@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
@@ -3383,34 +3384,115 @@ func translateExecutorErr(err error) error {
 		errors.Is(err, executors.ErrDisabled):
 		// The argument is real but no longer usable — a client error, not ours.
 		code = protocol.ErrInvalidArgs
+	case isDuplicateMachineName(err):
+		// A collision on (owner, machine) is the operator naming a machine
+		// twice, not a daemon fault. Left as the store's raw text it reaches
+		// the client as ERR_INTERNAL / 503, which reads as "the daemon is
+		// broken" for a mistake only the operator can fix.
+		return &control.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: "that executor name is already taken for this owner: choose " +
+				"another --name, or relabel the existing executor with " +
+				"`rafiki executor label <id> machine=<new-name>`",
+		}
 	default:
 		return err
 	}
 	return &control.ControllerError{Code: code, Message: err.Error()}
 }
 
-func (c *Controller) ExecutorCreate(req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error) {
+// isDuplicateMachineName reports whether err is the (owner, machine) unique
+// index rejecting a second executor with the same name under the same owner.
+//
+// By CONSTRAINT NAME, not merely by SQLSTATE: another unique index on the
+// executors table later — on a credential hash, say — must not inherit this
+// message, which would tell an operator to rename a machine over a collision
+// that has nothing to do with names.
+func isDuplicateMachineName(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == uniqueViolation &&
+		pgErr.ConstraintName == "executors_owner_machine_unique"
+}
+
+// uniqueViolation is SQLSTATE 23505.
+const uniqueViolation = "23505"
+
+// executorTrustLabels merges the operator's own labels with the two the DAEMON
+// owns, and refuses a request that tries to write either itself.
+//
+// owner and machine are stamped HERE, from the connection and from a validated
+// --name — never from req.Labels. Both gate access: owner is what an executor's
+// admits selector matches, and machine decides which durable executor an
+// interactive client on that box binds its children to. A client that could
+// name either would be granting itself access to another operator's machine.
+//
+// Refusing is deliberate rather than silently overwriting: a caller who wrote
+// `--label owner=x` needs to learn that their selector will not mean what they
+// wrote.
+func executorTrustLabels(id users.Identity, name string, given map[string]string) (map[string]string, error) {
+	if _, ok := given["owner"]; ok {
+		return nil, &control.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "owner is derived from the connection and cannot be set with --label",
+		}
+	}
+	if _, ok := given["machine"]; ok {
+		return nil, &control.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "machine is set with --name, not with --label",
+		}
+	}
+	owner, err := sessionOwner(id)
+	if err != nil {
+		return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+	}
+	labels := make(map[string]string, len(given)+2)
+	for k, v := range given {
+		labels[k] = v
+	}
+	labels["owner"] = owner
+	if name != "" {
+		// Validated daemon-side as well as in the CLI: a name lands in a
+		// comma-separated selector, so a comma or an equals sign silently
+		// reparses into a different selector.
+		if err := paths.ValidateMachineName(name); err != nil {
+			return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		}
+		labels["machine"] = name
+	}
+	return labels, nil
+}
+
+func (c *Controller) ExecutorCreate(id users.Identity, req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error) {
 	if err := c.requireExecutorStore(); err != nil {
 		return protocol.ExecutorCreateResponseData{}, err
 	}
+	labels, err := executorTrustLabels(id, req.Name, req.Labels)
+	if err != nil {
+		return protocol.ExecutorCreateResponseData{}, err
+	}
 	e, credential, err := c.execStore.Create(context.Background(), executors.NewToken{
-		Labels:        req.Labels,
+		Labels:        labels,
 		Roots:         req.Roots,
 		Isolation:     req.Isolation,
 		WorkspaceMode: req.WorkspaceMode,
 		Admits:        req.Admits,
 	})
 	if err != nil {
-		return protocol.ExecutorCreateResponseData{}, &control.ControllerError{
-			Code:    protocol.ErrInternal,
-			Message: "create executor: " + err.Error(),
-		}
+		return protocol.ExecutorCreateResponseData{}, translateExecutorErr(fmt.Errorf("create executor: %w", err))
 	}
 	return protocol.ExecutorCreateResponseData{ExecutorID: e.ID, Credential: credential}, nil
 }
 
-func (c *Controller) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
+func (c *Controller) ExecutorEnroll(id users.Identity, req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error) {
 	if err := c.requireExecutorStore(); err != nil {
+		return protocol.ExecutorEnrollResponseData{}, err
+	}
+	labels, err := executorTrustLabels(id, req.Name, req.Labels)
+	if err != nil {
 		return protocol.ExecutorEnrollResponseData{}, err
 	}
 	ttl := time.Duration(req.TTLSeconds) * time.Second
@@ -3418,7 +3500,7 @@ func (c *Controller) ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protoco
 		ttl = 72 * time.Hour
 	}
 	token, err := c.execStore.MintToken(context.Background(), executors.NewToken{
-		Labels:        req.Labels,
+		Labels:        labels,
 		Roots:         req.Roots,
 		Isolation:     req.Isolation,
 		WorkspaceMode: req.WorkspaceMode,

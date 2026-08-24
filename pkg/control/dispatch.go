@@ -170,11 +170,17 @@ type Controller interface {
 	// ─── Executor management ────────────────────────────────────────────────
 
 	// ExecutorEnroll mints a one-time enrollment token for a new executor.
-	ExecutorEnroll(req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
+	//
+	// The identity is passed separately, for the same reason ExecutorSession
+	// takes one: the daemon stamps `owner` onto the row from the connection,
+	// and that label is what executor admission selectors match on. A caller
+	// able to state it could grant itself another operator's machines.
+	ExecutorEnroll(id users.Identity, req protocol.ExecutorEnrollRequest) (protocol.ExecutorEnrollResponseData, error)
 
 	// ExecutorCreate mints a row and its credential directly, for executors that
-	// cannot persist an enrollment.
-	ExecutorCreate(req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error)
+	// cannot persist an enrollment. Stamps `owner` from the connection, as
+	// ExecutorEnroll does.
+	ExecutorCreate(id users.Identity, req protocol.ExecutorCreateRequest) (protocol.ExecutorCreateResponseData, error)
 	// ExecutorList returns enrolled executors, optionally filtered.
 	ExecutorList(req protocol.ExecutorListRequest) ([]executors.Executor, error)
 	// ExecutorLabel sets or removes labels on an executor row.
@@ -298,9 +304,9 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 	case protocol.TypeCtrlGlobalUnsubscribe:
 		return d.globalUnsubscribe(conn, frame, hdr.ID)
 	case protocol.TypeCtrlExecutorEnroll:
-		return d.executorEnroll(frame, hdr.ID)
+		return d.executorEnroll(conn, frame, hdr.ID)
 	case protocol.TypeCtrlExecutorCreate:
-		return d.executorCreate(frame, hdr.ID)
+		return d.executorCreate(conn, frame, hdr.ID)
 	case protocol.TypeCtrlExecutorList:
 		return d.executorList(frame, hdr.ID)
 	case protocol.TypeCtrlExecutorLabel:
@@ -957,7 +963,7 @@ func (d *dispatcher) taskList(frame []byte, id string) []byte {
 
 // ─── Executor handlers ──────────────────────────────────────────────────────
 
-func (d *dispatcher) executorEnroll(frame []byte, id string) []byte {
+func (d *dispatcher) executorEnroll(conn Connection, frame []byte, id string) []byte {
 	var req protocol.ExecutorEnrollRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlExecutorEnroll, id, protocol.ErrInvalidArgs, "malformed request")
@@ -965,19 +971,19 @@ func (d *dispatcher) executorEnroll(frame []byte, id string) []byte {
 	if req.TTLSeconds <= 0 {
 		return errResponse(protocol.TypeCtrlExecutorEnroll, id, protocol.ErrInvalidArgs, "ttlSeconds must be positive")
 	}
-	result, err := d.c.ExecutorEnroll(req)
+	result, err := d.c.ExecutorEnroll(connIdentity(conn), req)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlExecutorEnroll, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlExecutorEnroll, id, result)
 }
 
-func (d *dispatcher) executorCreate(frame []byte, id string) []byte {
+func (d *dispatcher) executorCreate(conn Connection, frame []byte, id string) []byte {
 	var req protocol.ExecutorCreateRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlExecutorCreate, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	result, err := d.c.ExecutorCreate(req)
+	result, err := d.c.ExecutorCreate(connIdentity(conn), req)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlExecutorCreate, id, err, protocol.ErrInternal)
 	}
@@ -1078,18 +1084,23 @@ func (d *dispatcher) executorDelete(frame []byte, id string) []byte {
 	return okResponse(protocol.TypeCtrlExecutorDelete, id, nil)
 }
 
+// connIdentity reads a connection's identity, tolerating the nil connection
+// some dispatch tests pass. A nil connection carries no identity, which the
+// controller then resolves the same way it does for the UDS path — the owner
+// is the daemon's own OS user.
+func connIdentity(conn Connection) users.Identity {
+	if conn == nil {
+		return users.Identity{}
+	}
+	return conn.Identity()
+}
+
 func (d *dispatcher) executorSession(conn Connection, frame []byte, id string) []byte {
 	var req protocol.ExecutorSessionRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlExecutorSession, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	// conn is nil in some dispatch tests; a nil connection carries no identity,
-	// which the controller then resolves the same way it does for the UDS path.
-	var ident users.Identity
-	if conn != nil {
-		ident = conn.Identity()
-	}
-	result, err := d.c.ExecutorSession(conn, ident, req)
+	result, err := d.c.ExecutorSession(conn, connIdentity(conn), req)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlExecutorSession, id, err, protocol.ErrInternal)
 	}

@@ -239,11 +239,26 @@ sends the child somewhere else instead.
 
 There are two kinds of executor:
 
-- **Durable** — enrolled with `rafiki executor enroll` or `rafiki executor service install`.
-  Has a database row with operator-written labels, admission, isolation and workspace
-  mode. Lives until the operator deletes it. A `service install` stamps `machine=<id>`
-  as a trust label from the machine's stable identity file (`paths.MachineID()`),
-  so interactive clients on the same box can find it.
+- **Durable** — enrolled with `rafiki executor enroll` or created outright with
+  `rafiki executor create`. Has a database row with operator-written labels, admission,
+  isolation and workspace mode. Lives until the operator deletes it.
+
+  Two labels on that row, `owner` and `machine`, are what let an interactive client on
+  the same box find it — and **the daemon writes both**, `owner` from the control
+  connection and `machine` from `--name`. Neither can be given with `--label`; a request
+  that tries is refused. So naming a durable executor is two steps, on two different
+  machines:
+
+  ```sh
+  # on the box the executor will run on:
+  rafiki executor name laptop
+  # wherever the operator happens to be — the token is carried to that box:
+  rafiki executor enroll --name laptop
+  ```
+
+  `--name` names the machine the executor will RUN on, which is not necessarily the one
+  minting the token. `rafiki executor service install` consumes a token minted this way;
+  it stamps nothing of its own.
 - **Transient** — started automatically by `rafiki create` / `rafiki attach`. No
   database row, no permanent credential. Authenticated by a one-shot ticket minted
   over the already-authenticated control connection; dies when the connection closes.
