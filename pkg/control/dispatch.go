@@ -191,7 +191,7 @@ type Controller interface {
 	// The identity is passed separately rather than read from the request
 	// because it is the one thing the caller must not be able to state: the
 	// owner label decides which children may land on that machine.
-	ExecutorSession(id users.Identity, req protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
+	ExecutorSession(conn Connection, id users.Identity, req protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
 
 	// ─── Identity ────────────────────────────────────────────────────────────
 
@@ -1089,7 +1089,7 @@ func (d *dispatcher) executorSession(conn Connection, frame []byte, id string) [
 	if conn != nil {
 		ident = conn.Identity()
 	}
-	result, err := d.c.ExecutorSession(ident, req)
+	result, err := d.c.ExecutorSession(conn, ident, req)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlExecutorSession, id, err, protocol.ErrInternal)
 	}

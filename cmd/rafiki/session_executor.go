@@ -112,13 +112,15 @@ func writeCredential(path, cred string) error {
 // row. hasCredential tells the daemon the client already holds a credential, so
 // it must not mint another: every mint is permanent, because executors.Store
 // has SetEnabled but no Delete.
-func requestSessionExecutor(ctx context.Context, c *client.Client, root string, hasCred bool) (protocol.ExecutorSessionResponseData, error) {
-	name, _ := os.Hostname()
+func requestSessionExecutor(ctx context.Context, c *client.Client, root string) (protocol.ExecutorSessionResponseData, error) {
+	machineID, err := paths.MachineID()
+	if err != nil {
+		return protocol.ExecutorSessionResponseData{}, fmt.Errorf("resolve this machine's id: %w", err)
+	}
 	req := protocol.ExecutorSessionRequest{
-		Type:          protocol.TypeCtrlExecutorSession,
-		Name:          name,
-		Roots:         []string{root},
-		HasCredential: hasCred,
+		Type:      protocol.TypeCtrlExecutorSession,
+		MachineID: machineID,
+		Roots:     []string{root},
 	}
 	resp, err := c.Request(ctx, req)
 	if err != nil {
@@ -212,13 +214,7 @@ func childCwd(ctx context.Context, c *client.Client, childID string) string {
 func startSessionExecutor(ctx context.Context, c *client.Client, root string) (string, func(), error) {
 	noop := func() {}
 
-	credPath := paths.ClientExecutorCredential()
-
-	// Telling the daemon we already hold a credential is what stops it minting
-	// another row. Every mint is permanent — executors.Store has SetEnabled and
-	// no Delete — so omitting this grows the registry by one row per
-	// invocation, forever.
-	resp, err := requestSessionExecutor(ctx, c, root, credFileExists(credPath))
+	resp, err := requestSessionExecutor(ctx, c, root)
 	if err != nil {
 		return "", noop, err
 	}
@@ -226,11 +222,6 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string) (s
 		// A durable executor already covers this machine. Use it: it outlives
 		// this process, so an agent keeps working after the operator detaches.
 		return resp.Selector, noop, nil
-	}
-	if resp.Credential != "" {
-		if err := writeCredential(credPath, resp.Credential); err != nil {
-			return "", noop, err
-		}
 	}
 
 	addr, socket, err := sessionConnectTarget()
@@ -251,9 +242,9 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string) (s
 
 	go func() {
 		err := execpool.Connect(runCtx, execpool.ConnectOptions{
-			Addr:           addr,
-			SocketPath:     socket,
-			CredentialFile: credPath,
+			Addr:       addr,
+			SocketPath: socket,
+			Ticket:     resp.Ticket,
 			SelfReported: map[string]string{
 				"version": version.String(),
 			},
@@ -262,10 +253,11 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string) (s
 		switch {
 		case err == nil, errors.Is(err, context.Canceled):
 		case errors.Is(err, execpool.ErrEnrollmentRejected):
-			// Terminal: the row is gone or revoked. Drop the credential so the
-			// NEXT run mints a replacement rather than repeating this forever.
-			discardCredential(credPath)
-			slog.Warn("this machine's executor credential was rejected; it will re-enroll next run")
+			// A ticket is one-shot and tied to this control connection.
+			// Rejection means the connection is gone or the ticket was spent,
+			// and neither is recoverable by retrying.
+			slog.Warn("this session's executor ticket was refused; the machine " +
+				"is no longer offered as a workspace for this session")
 		default:
 			slog.Warn("this machine's executor stopped", "error", err)
 		}
