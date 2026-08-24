@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -109,14 +110,36 @@ func (b *controllerBinder) NoteBinding(childID, executorID, workspaceID string) 
 	b.c.wsLabelsMu.Unlock()
 }
 
-// WorkspaceMode reads the mode from the executor's ROW. Never from Describe:
-// the value decides whether losing a machine fails a child or moves it, and a
-// machine that wants children cannot be the one asserting it is interchangeable.
+// WorkspaceMode reads the mode from the executor's DURABLE row, never from the
+// live pool and never from Describe.
+//
+// This runs from recover()'s tool-call path specifically in the branch where
+// IsLive(executorID) already came back false -- pkg/execpool removes an
+// executor from the live set BEFORE parking it (pool.go's removeLive-then-Park
+// ordering), so by the time this is called the executor is already gone from
+// Live() and a lookup through executorRow (which only scans Live()) would
+// always miss, permanently disabling ephemeral migration on this path. The
+// executors.Store row exists independently of whether the executor is
+// currently connected, which is the whole point of asking it here.
+//
+// An absent store, a lookup error, or a not-found row all fall back to
+// "pinned": unknown mode is pinned, and moving a child onto a machine no
+// operator marked interchangeable is worse than failing it where it stood.
+// Never the executor's self-report either way -- a machine that wants
+// children must not be the one asserting it is interchangeable.
 func (b *controllerBinder) WorkspaceMode(executorID string) string {
-	if row, ok := b.c.executorRow(executorID); ok {
-		return workspaceModeOrPinned(row.WorkspaceMode)
+	if b.c.execStore == nil {
+		return "pinned"
 	}
-	return "pinned"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	row, err := b.c.execStore.Get(ctx, executorID)
+	if err != nil {
+		slog.Warn("could not read executor row for workspace_mode; treating as pinned",
+			"executor", shortID(executorID), "error", err)
+		return "pinned"
+	}
+	return workspaceModeOrPinned(row.WorkspaceMode)
 }
 
 func (b *controllerBinder) NotifyMigrated(childID, fromExec, toExec string) {
