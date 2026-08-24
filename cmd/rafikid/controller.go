@@ -2621,6 +2621,9 @@ func (c *Controller) writeRecord(childID string) error {
 	if !ok {
 		return nil
 	}
+	if c.records == nil {
+		return nil
+	}
 	rec := recordFromSnapshot(snap)
 	return c.records.Write(rec)
 }
@@ -2634,6 +2637,9 @@ func (c *Controller) writeRecord(childID string) error {
 func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
+		return nil
+	}
+	if c.records == nil {
 		return nil
 	}
 	rec := recordFromSnapshot(snap)

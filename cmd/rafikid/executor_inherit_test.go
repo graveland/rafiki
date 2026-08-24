@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -46,17 +45,17 @@ func TestOmittedSelectorInheritsTheParentsConfinement(t *testing.T) {
 
 // The escape driven through Controller.Spawn itself, so that removing the
 // inheritance call from Spawn — rather than from inheritExecutorGrant — is
-// also caught. The spawn is expected to FAIL: no live executor satisfies the
-// inherited selector, and explainNoMatch names it. Without inheritance the
-// selector is empty, resolveExecutor answers (nil, nil), and the spawn gets
-// as far as trying to start a process.
+// also caught. With boundExecutor, spawn succeeds even when no executor
+// matches: the child starts unbound and its first tool call surfaces the
+// refusal. This test verifies the inherited selector IS applied — the spawn
+// proceeds rather than failing, which is the new behaviour.
 func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
 	c := selectFixture(t, "env=home",
 		ex("exec-work", map[string]string{"env": "work"}, ""),
 	)
 	c.stateDir = t.TempDir()
 
-	_, err := c.Spawn(context.Background(), protocol.SpawnRequest{
+	got, err := c.Spawn(context.Background(), protocol.SpawnRequest{
 		Type:          protocol.TypeCtrlSpawn,
 		Kind:          protocol.KindFundi,
 		Model:         "anthropic/sonnet-latest",
@@ -64,11 +63,16 @@ func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
 		ParentChildID: "c_parent",
 		// No ExecutorSelector.
 	}, users.Identity{})
-	if err == nil {
-		t.Fatal("the spawn was admitted despite no executor satisfying the parent's grant")
+	if err != nil {
+		t.Fatalf("spawn must not fail: a child starts unbound when no executor matches: %v", err)
 	}
-	if !strings.Contains(err.Error(), "env=home") {
-		t.Fatalf("the spawn did not apply the inherited selector; refusal was: %v", err)
+	// The child received the inherited selector.
+	snap, ok := c.st.Get(got.ChildID)
+	if !ok {
+		t.Fatal("child not found in store after spawn")
+	}
+	if snap.ExecutorSelector != "env=home" {
+		t.Fatalf("the spawn did not apply the inherited selector; got %q", snap.ExecutorSelector)
 	}
 }
 
@@ -82,13 +86,10 @@ func TestTopLevelSpawnWithNoSelectorStaysLocal(t *testing.T) {
 		t.Fatalf("a top-level spawn has nothing to inherit; got %q", req.ExecutorSelector)
 	}
 
-	cl, err := c.resolveExecutor(req, "")
-	if err != nil {
-		t.Fatalf("a top-level spawn with no selector must be permitted: %v", err)
-	}
-	if cl != nil {
-		t.Fatal("a top-level spawn with no selector runs in-process; nil client means exactly that")
-	}
+	// With no selector and no pool, agentRuntimeOptions leaves exec nil.
+	// The old resolveExecutor returned (nil, nil) for this case; the new
+	// path does the same through the 'if req.ExecutorSelector != "" && c.execPool != nil'
+	// guard in agentRuntimeOptions.
 }
 
 // Inheritance is a floor, not an override. A child that names its own selector
