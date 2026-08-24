@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -122,13 +123,31 @@ type fakeBinder struct {
 	failTimes     int
 	executeCalls  int
 	startJobCalls int
+
+	// lastWorkspace is the workspace id returned by the most recent
+	// ProvisionOn call. released records which workspace ids ReleaseOn was
+	// called for.
+	lastWorkspace string
+	released      map[string]bool
+
+	// onProvision, when set, runs synchronously inside ProvisionOn -- with
+	// f.mu NOT held -- before it does anything else. It lets a test hold a
+	// Provision RPC open to prove a caller (recover) isn't holding
+	// boundExecutor's lock across it.
+	onProvision func()
 }
 
 func newFakeBinder(execs ...*fakeExec) *fakeBinder {
 	// mode defaults to "ephemeral" so the pre-existing rebind tests, which
 	// predate workspace_mode and never set it, keep exercising a migration.
 	// Tests that care about the pinned policy set f.mode explicitly.
-	fb := &fakeBinder{execs: map[string]*fakeExec{}, liveByID: map[string]bool{}, live: true, mode: "ephemeral"}
+	fb := &fakeBinder{
+		execs:    map[string]*fakeExec{},
+		liveByID: map[string]bool{},
+		live:     true,
+		mode:     "ephemeral",
+		released: map[string]bool{},
+	}
 	for _, e := range execs {
 		fb.execs[e.id] = e
 		fb.liveByID[e.id] = true
@@ -173,19 +192,34 @@ func (f *fakeBinder) ChooseFor(string) (string, error) {
 
 func (f *fakeBinder) ProvisionOn(_ context.Context, id string) (string, tools.ExecutorClient, error) {
 	f.mu.Lock()
+	hook := f.onProvision
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.provisions++
 	e, ok := f.execs[id]
 	if !ok {
 		return "", nil, fmt.Errorf("no such executor %q", id)
 	}
-	return "ws-" + id, e, nil
+	// Each call gets a DISTINCT workspace id, matching a real executor: it
+	// mints a fresh workspace every time, even for the same executor. A
+	// deterministic "ws-"+id here would make an in-place re-provision look
+	// like it returned the SAME workspace, hiding the old one never having
+	// been released.
+	ws := fmt.Sprintf("ws-%s-%d", id, f.provisions)
+	f.lastWorkspace = ws
+	return ws, e, nil
 }
 
-func (f *fakeBinder) ReleaseOn(_ context.Context, _, _ string) {
+func (f *fakeBinder) ReleaseOn(_ context.Context, _, workspaceID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releases++
+	f.released[workspaceID] = true
 }
 
 func (f *fakeBinder) IsLive(id string) bool {
@@ -379,6 +413,63 @@ func TestBoundExecutorNeverRunsInProcess(t *testing.T) {
 	if err := b.Ping(context.Background()); err == nil {
 		t.Fatal("Ping must refuse when unbound")
 	}
+}
+
+// Re-provisioning in place leaves the OLD workspace registered on a LIVE
+// executor. Unlike the migration branch below it, nothing released it -- so it
+// and its retained background-job output were stranded until the executor
+// process exited.
+func TestReprovisionInPlaceReleasesTheOldWorkspace(t *testing.T) {
+	f := newFakeBinder()
+	f.mode = "pinned"
+	f.live = true
+	b := newBoundExecutor("c1", f)
+	if _, _, err := b.clientFor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first := f.lastWorkspace
+
+	if !b.recover(context.Background(), b.stale(), execpool.ErrExecutorGone, true) {
+		t.Fatal("want a re-provision")
+	}
+	if !f.released[first] {
+		t.Fatalf("workspace %q was never released; it and its job output are "+
+			"stranded on a live executor", first)
+	}
+}
+
+// recover must not hold b.mu across a network call to an executor that is by
+// definition unwell, or every other tool call on that child blocks for the full
+// RPC timeout.
+func TestRecoverDoesNotHoldTheLockAcrossProvision(t *testing.T) {
+	f := newFakeBinder()
+	f.mode = "ephemeral"
+	f.live = false
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f.onProvision = func() {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+	}
+	b := newBoundExecutor("c1", f)
+
+	go func() { b.recover(context.Background(), "stale/ws", execpool.ErrExecutorLost, true) }()
+	<-entered
+
+	done := make(chan struct{})
+	go func() { defer close(done); b.Current() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("Current() blocked behind an in-flight Provision; a slow executor " +
+			"must not wedge every other caller on this child")
+	}
+	close(release)
 }
 
 func contains(haystack, needle string) bool {

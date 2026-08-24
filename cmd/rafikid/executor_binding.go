@@ -76,6 +76,20 @@ type boundExecutor struct {
 	execID string
 	wsID   string
 	cl     tools.ExecutorClient
+
+	// inflight is non-nil while a recover() is running its RPCs. A second
+	// caller that fails against the same stale binding waits on inflight.done
+	// instead of starting its own Provision -- this is what coalesces N
+	// concurrent failures into ONE re-provision, without holding b.mu across
+	// the RPCs that a rebind requires.
+	inflight *recovery
+}
+
+// recovery is one in-flight recover() call, shared by every goroutine that
+// fails against the same stale binding while it runs.
+type recovery struct {
+	done chan struct{}
+	ok   bool
 }
 
 func newBoundExecutor(childID string, b executorBinder) *boundExecutor {
@@ -97,18 +111,36 @@ func (b *boundExecutor) stale() string {
 	return b.execID + "/" + b.wsID
 }
 
+// chooseAndProvision selects an executor and provisions a workspace on it.
+// It touches no boundExecutor state and takes no lock, so it is safe to call
+// with b.mu released -- which recover does, since both calls are RPCs to a
+// daemon-external process and every other caller on this child must not wait
+// on them.
+func (b *boundExecutor) chooseAndProvision(ctx context.Context) (execID, wsID string, cl tools.ExecutorClient, err error) {
+	execID, err = b.binder.ChooseFor(b.childID)
+	if err != nil {
+		return "", "", nil, err
+	}
+	wsID, cl, err = b.binder.ProvisionOn(ctx, execID)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("workspace on executor %s: %w", shortID(execID), err)
+	}
+	return execID, wsID, cl, nil
+}
+
 // bindLocked selects and provisions. Caller holds b.mu.
+//
+// This runs under the lock only for the very first bind of a child: at that
+// point there is no existing binding to hold other callers away from, so
+// there is nothing to wedge. recover, which runs against an ALREADY bound
+// (and unwell) child, does not use this -- see chooseAndProvision.
 func (b *boundExecutor) bindLocked(ctx context.Context) error {
-	id, err := b.binder.ChooseFor(b.childID)
+	execID, wsID, cl, err := b.chooseAndProvision(ctx)
 	if err != nil {
 		return err
 	}
-	wsID, cl, err := b.binder.ProvisionOn(ctx, id)
-	if err != nil {
-		return fmt.Errorf("workspace on executor %s: %w", shortID(id), err)
-	}
-	b.execID, b.wsID, b.cl = id, wsID, cl
-	b.binder.NoteBinding(b.childID, id, wsID)
+	b.execID, b.wsID, b.cl = execID, wsID, cl
+	b.binder.NoteBinding(b.childID, execID, wsID)
 	return nil
 }
 
@@ -141,20 +173,53 @@ func (b *boundExecutor) clientFor(ctx context.Context) (tools.ExecutorClient, st
 // failure is a different case entirely: that is an ANSWER, and migrating a
 // child because `bash` exited 1 would be the single worst behaviour this type
 // could have. retryable rejects both cases outright.
+//
+// recover does its RPCs (ChooseFor/ProvisionOn/ReleaseOn) with b.mu RELEASED.
+// Those calls target an executor that is by definition unwell, and every
+// other caller on this child -- Current(), a concurrent Execute on a still-
+// working binding -- must not block behind them for the full RPC timeout.
+// The mutex covers only the state transition at each end; concurrent
+// recoveries against the SAME stale binding are coalesced through the
+// inflight *recovery, so eight concurrent failures still produce one
+// Provision, not eight.
 func (b *boundExecutor) recover(ctx context.Context, stale string, callErr error, idempotent bool) bool {
 	if !retryable(callErr, idempotent) {
 		return false
 	}
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	if b.cl != nil && b.execID+"/"+b.wsID != stale {
+		b.mu.Unlock()
 		return true // someone else already recovered; retry on theirs
 	}
+	if b.inflight != nil {
+		// A recovery for this exact binding is already running. Wait for its
+		// result rather than starting a second Provision.
+		r := b.inflight
+		b.mu.Unlock()
+		<-r.done
+		return r.ok
+	}
 
+	r := &recovery{done: make(chan struct{})}
+	b.inflight = r
 	prevExec, prevWS := b.execID, b.wsID
+	b.mu.Unlock()
 
+	ok := b.doRecover(ctx, prevExec, prevWS)
+
+	b.mu.Lock()
+	b.inflight = nil
+	b.mu.Unlock()
+	r.ok = ok
+	close(r.done)
+
+	return ok
+}
+
+// doRecover performs the actual re-provision or re-bind. Called with b.mu
+// released; it takes the lock only to install its result.
+func (b *boundExecutor) doRecover(ctx context.Context, prevExec, prevWS string) bool {
 	// An executor still in the live set means the WORKSPACE went, not the
 	// machine: pkg/executor keeps its workspace registry in memory, so a
 	// restart loses every id while the connection is fine. Re-provision in
@@ -165,8 +230,18 @@ func (b *boundExecutor) recover(ctx context.Context, stale string, callErr error
 			slog.Warn("re-provision on the same executor failed; re-selecting",
 				"child", b.childID, "executor", shortID(prevExec), "error", err)
 		} else {
+			b.mu.Lock()
 			b.wsID, b.cl = wsID, cl
+			b.mu.Unlock()
 			b.binder.NoteBinding(b.childID, prevExec, wsID)
+
+			// The old workspace is still registered on a LIVE executor, so
+			// unlike the migration path below this release will actually
+			// land -- do it now rather than stranding it and its retained
+			// job output until the executor process happens to exit.
+			if prevWS != "" && prevWS != wsID {
+				b.binder.ReleaseOn(ctx, prevExec, prevWS)
+			}
 			return true
 		}
 	}
@@ -179,20 +254,24 @@ func (b *boundExecutor) recover(ctx context.Context, stale string, callErr error
 		return false
 	}
 
-	b.cl, b.execID, b.wsID = nil, "", ""
-	if err := b.bindLocked(ctx); err != nil {
+	execID, wsID, cl, err := b.chooseAndProvision(ctx)
+	if err != nil {
 		slog.Warn("could not re-bind the child to any executor",
 			"child", b.childID, "error", err)
 		return false
 	}
+	b.mu.Lock()
+	b.execID, b.wsID, b.cl = execID, wsID, cl
+	b.mu.Unlock()
+	b.binder.NoteBinding(b.childID, execID, wsID)
 	slog.Info("re-bound child to a new executor",
-		"child", b.childID, "from", shortID(prevExec), "to", shortID(b.execID))
+		"child", b.childID, "from", shortID(prevExec), "to", shortID(execID))
 
 	// A child whose workspace was rebuilt elsewhere must be TOLD. Otherwise it
 	// keeps believing its files are there and reports work as done that no
 	// longer exists.
-	if prevExec != "" && prevExec != b.execID {
-		b.binder.NotifyMigrated(b.childID, prevExec, b.execID)
+	if prevExec != "" && prevExec != execID {
+		b.binder.NotifyMigrated(b.childID, prevExec, execID)
 	}
 
 	// Best-effort, and deliberately after the new binding is installed: the
