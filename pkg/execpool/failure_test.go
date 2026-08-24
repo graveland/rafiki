@@ -2,6 +2,7 @@ package execpool
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -51,5 +52,21 @@ func TestFailureErrorUnspecifiedIsNotADeparture(t *testing.T) {
 		t.Fatal("an unrecognized code must NOT trigger rebinding: " +
 			"failing toward 'stay put' costs one error, failing toward " +
 			"'move' churns workspaces on every unknown failure")
+	}
+}
+
+// A stream that opened and then broke is neither a tool failure nor a clean
+// departure -- the tool may have already run. It must carry its own sentinel,
+// distinct from both.
+func TestErrStreamBrokenIsDistinctFromToolFailed(t *testing.T) {
+	err := fmt.Errorf("read: %w", ErrStreamBroken)
+	if !errors.Is(err, ErrStreamBroken) {
+		t.Fatalf("want errors.Is match on ErrStreamBroken, got %v", err)
+	}
+	if errors.Is(err, ErrToolFailed) {
+		t.Fatal("a broken stream must not look like a tool that ran and failed")
+	}
+	if errors.Is(err, ErrExecutorGone) {
+		t.Fatal("a broken stream must not look like a clean departure either")
 	}
 }

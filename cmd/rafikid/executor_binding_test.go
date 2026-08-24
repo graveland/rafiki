@@ -15,8 +15,15 @@ import (
 
 // fakeExec is one executor's client. Each call returns the next queued error
 // (nil means success), so a test can script "fail once, then succeed".
+//
+// parent, when set, is the fakeBinder that synthesized this exec via
+// ChooseFor. Execute/StartJob then report their call counts on the binder,
+// so a test that never captures the exec directly (it only knows an id
+// ChooseFor made up on the fly) can still assert on call counts through
+// f.executeCalls / f.startJobCalls.
 type fakeExec struct {
 	id      string
+	parent  *fakeBinder
 	mu      sync.Mutex
 	errs    []error
 	calls   int
@@ -36,6 +43,11 @@ func (f *fakeExec) next() error {
 }
 
 func (f *fakeExec) Execute(_ context.Context, tool string, _ json.RawMessage) (string, error) {
+	if f.parent != nil {
+		f.parent.mu.Lock()
+		f.parent.executeCalls++
+		f.parent.mu.Unlock()
+	}
 	if err := f.next(); err != nil {
 		return "", err
 	}
@@ -43,6 +55,11 @@ func (f *fakeExec) Execute(_ context.Context, tool string, _ json.RawMessage) (s
 }
 
 func (f *fakeExec) StartJob(_ context.Context, command string) (string, error) {
+	if f.parent != nil {
+		f.parent.mu.Lock()
+		f.parent.startJobCalls++
+		f.parent.mu.Unlock()
+	}
 	if err := f.next(); err != nil {
 		return "", err
 	}
@@ -93,6 +110,18 @@ type fakeBinder struct {
 	// migrations/lastSteer record NotifyMigrated calls.
 	migrations int
 	lastSteer  string
+
+	// failWith/failTimes script a failure returned by a freshly synthesized
+	// executor's client (Execute/StartJob), for tests that want a scripted
+	// failure without wiring up a fakeExec by hand -- the id ChooseFor
+	// synthesizes is never captured by the test. failWith is returned for
+	// the first failTimes calls; if failTimes is zero, exactly one call
+	// fails. executeCalls/startJobCalls count those calls across every
+	// synthesized exec, again because the test never has an id to key on.
+	failWith      error
+	failTimes     int
+	executeCalls  int
+	startJobCalls int
 }
 
 func newFakeBinder(execs ...*fakeExec) *fakeBinder {
@@ -121,7 +150,17 @@ func (f *fakeBinder) ChooseFor(string) (string, error) {
 		// an in-place re-provision (the SAME id) without wiring up fakeExecs.
 		f.nextExecID++
 		id := fmt.Sprintf("exec-%d", f.nextExecID)
-		f.execs[id] = &fakeExec{id: id}
+		e := &fakeExec{id: id, parent: f}
+		if f.failWith != nil {
+			n := f.failTimes
+			if n == 0 {
+				n = 1
+			}
+			for i := 0; i < n; i++ {
+				e.errs = append(e.errs, f.failWith)
+			}
+		}
+		f.execs[id] = e
 		f.liveByID[id] = true
 		return id, nil
 	}

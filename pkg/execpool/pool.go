@@ -528,7 +528,7 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("executor stream: %w", err)
+		return "", fmt.Errorf("executor stream: %w: %w", err, ErrStreamBroken)
 	}
 	return resultText, nil
 }
@@ -841,7 +841,7 @@ func (c *executorClient) Execute(ctx context.Context, tool string, input json.Ra
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("executor stream: %w", err)
+		return "", fmt.Errorf("executor stream: %w: %w", err, ErrStreamBroken)
 	}
 	return resultText, nil
 }
