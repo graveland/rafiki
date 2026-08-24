@@ -14,11 +14,10 @@ import (
 
 func newRecentCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "recent [id|name]",
-		Aliases: []string{"history"},
-		Short:   "Show recent events from a child's ring buffer",
-		Args:    cobra.MaximumNArgs(1),
-		RunE:    runRecent,
+		Use:   "recent [id|name]",
+		Short: "Show recent events from a child's ring buffer",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runRecent,
 	}
 	cmd.Flags().IntP("limit", "l", 100, "Maximum number of events")
 	cmd.Flags().Duration("since", 0, "Only events newer than this (e.g. 5m)")
