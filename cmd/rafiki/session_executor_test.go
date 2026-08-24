@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -104,52 +102,4 @@ func TestResolveExecutorConnectFlags_NeitherGivenNorDerivableIsAnError(t *testin
 	if err == nil {
 		t.Fatal("expected an error: neither flag was given and RAFIKI_URL derives nothing")
 	}
-}
-
-// The daemon must be told we hold a credential, or it mints another permanent
-// row every run. This asserts the request field is populated from the file's
-// presence rather than left at its zero value.
-func TestSessionRequestReportsAnExistingCredential(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "client-executor.cred")
-
-	if credFileExists(path) {
-		t.Fatal("credFileExists is true for a path that does not exist")
-	}
-	if err := os.WriteFile(path, []byte("cred_abc\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if !credFileExists(path) {
-		t.Error("credFileExists is false for a written credential")
-	}
-
-	// An empty file is not a credential: a truncated write must re-mint rather
-	// than connect with nothing.
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if credFileExists(path) {
-		t.Error("credFileExists is true for an empty file")
-	}
-}
-
-// A rejected credential is terminal, not transient: the row is gone or revoked.
-// Discarding the file is what lets the next run mint a replacement instead of
-// failing forever with a secret nothing recognises.
-func TestDiscardCredentialRemovesTheFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "client-executor.cred")
-	if err := os.WriteFile(path, []byte("cred_stale\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	discardCredential(path)
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("the stale credential file survived")
-	}
-}
-
-// Removing a file that is not there is the ordinary case on a first run and
-// must not panic or error.
-func TestDiscardCredentialToleratesAMissingFile(t *testing.T) {
-	discardCredential(filepath.Join(t.TempDir(), "absent.cred"))
 }

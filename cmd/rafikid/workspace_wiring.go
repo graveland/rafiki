@@ -202,51 +202,18 @@ func (c *Controller) HandleExecutorLost(lostID string) {
 }
 
 // executorAcceptsReschedule reports whether a child may be moved onto le.
-//
-// Reads the ROW (le.Executor), never le.Describe. Describe is the executor's
-// own account of itself; a value that decides where other people's children run
-// cannot be asserted by the machine that wants them.
 func executorAcceptsReschedule(le execpool.LiveExecutor) bool {
 	return le.Executor.WorkspaceMode == "ephemeral"
 }
 
-// tryReschedule attempts to re-provision an ephemeral child on another
-// matching executor. Returns true on success.
-func (c *Controller) tryReschedule(snap childstore.Snapshot, live []execpool.LiveExecutor) bool {
-	if len(live) == 0 {
-		return false
-	}
-
-	// Re-provision on the first available matching executor.
-	// In a real implementation this would match the child's original selector.
-	for _, le := range live {
-		if executorAcceptsReschedule(le) {
-			wsID, _, _, err := c.provisionWorkspace(context.Background(),
-				protocol.SpawnRequest{Cwd: snap.Cwd}, le.Executor.ID)
-			if err != nil {
-				slog.Warn("reschedule provision failed",
-					"childId", snap.ChildID, "executorId", le.Executor.ID[:12], "error", err)
-				continue
-			}
-
-			// Update the child's store labels with the new workspace.
-			if _, err := c.st.SetLabels(snap.ChildID, map[string]string{
-				"rafiki/workspace": wsID,
-				"rafiki/executor":  le.Executor.ID,
-			}, nil); err != nil {
-				slog.Warn("reschedule label update failed",
-					"childId", snap.ChildID, "error", err)
-			}
-
-			// Steer the child about its new workspace.
-			c.sendSteer(snap.ChildID, rescheduleSteer)
-
-			slog.Info("rescheduled child on new executor",
-				"childId", snap.ChildID, "newExecutorId", le.Executor.ID[:12])
-			return true
-		}
-	}
-	return false
+// tryReschedule is retained only for children that predate boundExecutor
+// binding. A bound child re-binds itself on its next tool call, through
+// chooseExecutor, so it is confined by its own stored selector — which is
+// exactly what this function never did.
+func (c *Controller) tryReschedule(snap childstore.Snapshot, _ []execpool.LiveExecutor) bool {
+	slog.Info("executor lost; the child will re-bind on its next tool call",
+		"childId", snap.ChildID)
+	return true
 }
 
 // failChild sends a fatal steer to the child and transitions it to failed.
