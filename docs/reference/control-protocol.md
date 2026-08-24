@@ -1573,6 +1573,13 @@ with `connected` and `connectedAt` filled in from the pool.
 Set or remove labels on an executor's database row. Changes take effect on the
 executor's next connection without requiring a restart.
 
+This is how `owner` and `machine` are changed after the fact — they cannot be
+set through `ctrl_executor_enroll` or `ctrl_executor_create` (§15.1), which
+write them from the connection and from `name`, but they are ordinary labels on
+the row once written. Setting `machine` to a name this owner already uses is
+refused with `ERR_INVALID_ARGS` and the row is left untouched: `(owner,
+machine)` names exactly one executor.
+
 `executorId` may be the full row id or any unique trailing fragment of at
 least four characters. Fragments match by SUFFIX, not prefix: ids are UUIDv7s
 whose leading bits are a timestamp, so rows minted in the same window share
