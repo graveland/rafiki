@@ -200,12 +200,20 @@ func credFileHas(path string) bool {
 	return err == nil && cred != ""
 }
 
-func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse, string, error) {
-	var req protocol.ExecutorHelloRequest
+// buildHello chooses the credential this executor presents.
+//
+// The ticket case is FIRST and returns immediately: a ticket is mutually
+// exclusive with the durable paths, and an interactive client on a machine that
+// also runs `rafiki executor serve` will have that executor's credential file
+// on disk. Falling through to it would silently connect the session executor as
+// the durable one — two identities, one row, and whichever reconnects last wins.
+func buildHello(o ConnectOptions) (protocol.ExecutorHelloRequest, error) {
+	req := protocol.ExecutorHelloRequest{
+		Type:         "executor_hello",
+		SelfReported: o.SelfReported,
+	}
 	switch {
 	case o.Ticket != "":
-		// A transient executor with no row. Ticket is one-shot; nothing is
-		// written to disk.
 		req.Ticket = o.Ticket
 	case o.Credential != "":
 		// Supplied directly; no file is read and none will be written.
@@ -216,12 +224,19 @@ func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse
 	case o.EnrollToken != "":
 		req.Token = o.EnrollToken
 	default:
-		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf(
-			"nothing to authenticate with: no --credential, no credential file at %s, and no --enroll-token",
+		return protocol.ExecutorHelloRequest{}, fmt.Errorf(
+			"nothing to authenticate with: no session ticket, no --credential, "+
+				"no credential file at %s, and no --enroll-token",
 			o.CredentialFile)
 	}
-	req.Type = "executor_hello"
-	req.SelfReported = o.SelfReported
+	return req, nil
+}
+
+func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse, string, error) {
+	req, err := buildHello(o)
+	if err != nil {
+		return protocol.ExecutorHelloResponse{}, "", err
+	}
 
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(req); err != nil {
