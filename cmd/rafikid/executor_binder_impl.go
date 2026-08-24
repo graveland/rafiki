@@ -108,3 +108,19 @@ func (b *controllerBinder) NoteBinding(childID, executorID, workspaceID string) 
 	}
 	b.c.wsLabelsMu.Unlock()
 }
+
+// WorkspaceMode reads the mode from the executor's ROW. Never from Describe:
+// the value decides whether losing a machine fails a child or moves it, and a
+// machine that wants children cannot be the one asserting it is interchangeable.
+func (b *controllerBinder) WorkspaceMode(executorID string) string {
+	if row, ok := b.c.executorRow(executorID); ok {
+		return workspaceModeOrPinned(row.WorkspaceMode)
+	}
+	return "pinned"
+}
+
+func (b *controllerBinder) NotifyMigrated(childID, fromExec, toExec string) {
+	slog.Warn("child migrated to another executor",
+		"child", childID, "from", shortID(fromExec), "to", shortID(toExec))
+	b.c.sendSteer(childID, rescheduleSteer)
+}
