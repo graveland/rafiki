@@ -34,7 +34,7 @@ func newExecutorCmd() *cobra.Command {
   service               run it as a per-user system service (launchd/systemd).
   enroll, create, list,
   label, disable,
-  enable                administer the pool, via the daemon's control socket.
+  enable, name          administer the pool, via the daemon's control socket.
 
 The administrative verbs output JSON.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -49,6 +49,7 @@ The administrative verbs output JSON.`,
 		newExecutorDisableCmd(),
 		newExecutorEnableCmd(),
 		newExecutorDeleteCmd(),
+		newExecutorNameCmd(),
 		// serve is the executor ITSELF, not an operator verb against the
 		// daemon; see cmd_executor_serve.go. It sits under the same noun
 		// because "be an executor" and "administer executors" are the same
