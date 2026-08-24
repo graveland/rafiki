@@ -37,6 +37,11 @@ type ConnectOptions struct {
 	// re-issued by the operator rather than re-enrolled by the machine.
 	Credential string
 
+	// Ticket authenticates a transient, row-less executor. Mutually exclusive
+	// with EnrollToken and Credential; nothing is written to disk on this path
+	// because there is nothing durable to keep.
+	Ticket string
+
 	// CredentialFile is where an ENROLLED executor persists the credential it
 	// was issued, and where it reads it back on reconnect. Empty disables both.
 	CredentialFile string
@@ -198,6 +203,10 @@ func credFileHas(path string) bool {
 func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse, string, error) {
 	var req protocol.ExecutorHelloRequest
 	switch {
+	case o.Ticket != "":
+		// A transient executor with no row. Ticket is one-shot; nothing is
+		// written to disk.
+		req.Ticket = o.Ticket
 	case o.Credential != "":
 		// Supplied directly; no file is read and none will be written.
 		req.Credential = o.Credential

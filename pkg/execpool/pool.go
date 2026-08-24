@@ -57,6 +57,7 @@ type Pool struct {
 	healthInterval time.Duration
 	healthTimeout  time.Duration
 	joinTimeout    time.Duration
+	tickets        *TicketRegistry
 }
 
 type liveConn struct {
@@ -74,6 +75,12 @@ type liveConn struct {
 	// CURRENT connection has held, distinct from when it was last seen at all.
 	connectedAt time.Time
 	done        chan struct{}
+	// transient marks an executor with NO database row — one authenticated by
+	// a session ticket and owned by a control connection. refreshRow must skip
+	// it: store.Get would answer ErrNotFound, which refreshRow correctly
+	// treats as "this row was deleted, evict now", killing a healthy executor
+	// on its first health tick.
+	transient bool
 	// closeOnce guards done. Teardown arrives from two independent
 	// directions — a health failure on this connection, and a reconnect that
 	// displaces it — and closing a channel twice panics the daemon rather
@@ -194,6 +201,7 @@ func New(store executors.Store) *Pool {
 		healthInterval: defaultHealthInterval,
 		healthTimeout:  defaultHealthTimeout,
 		joinTimeout:    defaultJoinTimeout,
+		tickets:        NewTicketRegistry(),
 	}
 }
 
@@ -247,9 +255,27 @@ func (p *Pool) handleConn(conn net.Conn) {
 
 	var e executors.Executor
 	var credential string
+	var transient bool
 	ctx := context.Background()
 
 	switch {
+	case hello.Ticket != "":
+		// A transient executor: no row, no credential, no enrollment. The
+		// ticket was minted over an authenticated control connection, and
+		// redeeming it is what that connection's authentication buys.
+		grant, ok := p.tickets.Redeem(hello.Ticket)
+		if !ok {
+			writeHelloResponse(conn, protocol.ExecutorHelloResponse{
+				Type:  "executor_hello",
+				Error: "session ticket is unknown, already used, or revoked",
+				// Terminal. A ticket is one-shot and tied to a control
+				// connection; retrying cannot make a spent one valid, and a
+				// retry loop here would spin for the life of the process.
+				Retryable: false,
+			})
+			return
+		}
+		e, transient = grant.Executor(), true
 	case hello.Token != "":
 		// First enrollment.
 		e, credential, err = p.store.Enroll(ctx, hello.Token, hello.SelfReported)
@@ -304,7 +330,9 @@ func (p *Pool) handleConn(conn net.Conn) {
 		return
 	}
 
-	_ = p.store.TouchSeen(ctx, e.ID)
+	if !transient {
+		_ = p.store.TouchSeen(ctx, e.ID)
+	}
 
 	// If this executor was parked, reattach it.
 	p.reattach(e.ID)
@@ -316,6 +344,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 		remoteAddr:  remote,
 		connectedAt: time.Now(),
 		done:        make(chan struct{}),
+		transient:   transient,
 	}
 
 	p.installLive(e.ID, lc)
@@ -441,6 +470,29 @@ func (p *Pool) ClientForWorkspace(executorID, workspaceID string) (tools.Executo
 		return nil, fmt.Errorf("execpool: client is not an *executorClient")
 	}
 	return &workspaceClient{executorClient: ec, workspaceID: workspaceID}, nil
+}
+
+// Tickets is the registry of unredeemed session tickets for transient
+// executors.
+func (p *Pool) Tickets() *TicketRegistry { return p.tickets }
+
+// Evict force-closes an executor's live connection.
+//
+// This is how a closed control connection takes its transient executor down
+// immediately, rather than waiting for a health tick to notice. Idempotent:
+// teardown arrives from two directions and closing a connection twice must not
+// panic.
+func (p *Pool) Evict(executorID string) {
+	p.mu.Lock()
+	lc, ok := p.live[executorID]
+	if ok {
+		delete(p.live, executorID)
+	}
+	p.mu.Unlock()
+
+	if ok && lc != nil {
+		lc.shutdown()
+	}
 }
 
 // workspaceClient wraps an executorClient, adding a workspace id to every
@@ -606,6 +658,11 @@ var ErrExecutorRevoked = errors.New("execpool: executor is disabled or deleted")
 // unreadable row keeps the last known one and tries again on the next tick.
 // Only an answer ("this row says disabled") removes the executor.
 func (p *Pool) refreshRow(ctx context.Context, id string, lc *liveConn) error {
+	if lc.transient {
+		// No row exists to re-read. See liveConn.transient.
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, p.healthTimeout)
 	defer cancel()
 

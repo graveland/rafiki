@@ -830,6 +830,12 @@ type ExecutorHelloRequest struct {
 	Type       string `json:"type"`
 	Token      string `json:"token,omitempty"`
 	Credential string `json:"credential,omitempty"`
+	// Ticket authenticates a TRANSIENT executor — one with no database row,
+	// created by an interactive client and living only as long as the control
+	// connection that asked for it. Minted by the daemon over an already
+	// authenticated control connection, so redeeming it proves the connection
+	// vouched for this executor. One-shot.
+	Ticket string `json:"ticket,omitempty"`
 	// SelfReported carries capability facts (os, arch, version). It is NEVER
 	// merged into the trust labels — lying about arch only earns work the
 	// executor cannot run, but a label that gates access cannot be asserted
