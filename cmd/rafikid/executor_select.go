@@ -27,31 +27,6 @@ type executorPool interface {
 	Evict(executorID string)
 }
 
-// selectExecutor picks an executor from the live pool based on the request's
-// label selector. The refusal path is as important as the success path: a
-// spawn whose grant no live executor satisfies fails IMMEDIATELY, naming what
-// was required, what was live, and which predicate excluded each candidate.
-//
-// Selection is two-sided: the child's selector narrows the PARENT's effective
-// executor set — never Live() directly. A child can never reach an executor
-// its parent could not.
-//
-// ownerName is the daemon-attested owner the NEW child will carry (see
-// Controller.Spawn) — needed here, not just at label-build time, because a
-// top-level spawn's own admission (chooseExecutor, below) is evaluated before
-// the child has a childstore entry to read it back from.
-func (c *Controller) selectExecutor(req protocol.SpawnRequest, ownerName string) (tools.ExecutorClient, error) {
-	chosen, err := c.chooseExecutor(req, ownerName)
-	if err != nil {
-		return nil, err
-	}
-	cl, err := c.execPool.ClientFor(chosen.ID)
-	if err != nil {
-		return nil, fmt.Errorf("executor %s selected but not reachable: %w", shortID(chosen.ID), err)
-	}
-	return cl, nil
-}
-
 // chooseExecutor returns the executor the request's selector admits, computed
 // by narrowing the parent's effective set. It is the single place the choice
 // is made, so selectExecutor (client) and selectExecutorID (provisioning,

@@ -120,3 +120,43 @@ func TestExecutorSessionRequiresAName(t *testing.T) {
 		t.Fatalf("the error must tell the operator how to fix it, got: %v", err)
 	}
 }
+
+// fakeConn is a control.Connection stub for testing ExecutorSession
+type fakeConn struct{}
+
+func (fakeConn) Deliver([]byte)        {}
+func (fakeConn) Identity() users.Identity { return users.Identity{} }
+func (fakeConn) Restricted() bool         { return false }
+
+// TestASecondSessionRequestReleasesTheFirst verifies M5: a second
+// ctrl_executor_session on the same connection releases the first. Before
+// this fix, the map assignment overwrote silently: the incumbent's ticket
+// was never revoked and its executor never evicted.
+func TestASecondSessionRequestReleasesTheFirst(t *testing.T) {
+	pool := &fakePool{evicted: make(map[string]bool)}
+	c := &Controller{execPool: pool}
+	conn := &fakeConn{}
+
+	first, err := c.ExecutorSession(conn, users.Identity{Username: "brent"},
+		protocol.ExecutorSessionRequest{Name: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.ExecutorSession(conn, users.Identity{Username: "brent"},
+		protocol.ExecutorSessionRequest{Name: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ExecutorID == second.ExecutorID {
+		t.Fatal("each request mints a distinct executor")
+	}
+	if !pool.evicted[first.ExecutorID] {
+		t.Fatalf("the incumbent %s was orphaned: Evict was never called", first.ExecutorID)
+	}
+
+	// The ticket must be revoked too — verify through the registry.
+	if _, ok := pool.Tickets().Redeem(first.Ticket); ok {
+		t.Fatal("the incumbent's ticket was not revoked; it stays valid for " +
+			"the daemon's lifetime")
+	}
+}
