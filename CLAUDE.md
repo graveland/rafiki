@@ -266,11 +266,31 @@
   the self-report. When you touch this path, ask what row field the value came
   from.
 
+  **Transient executors are the explicit exception.** A client-run executor
+  (`rafiki create` / `rafiki attach`) has no database row. Its access-gating
+  facts are written by the daemon from the authenticated control connection.
+  The invariant generalises to: **every access-gating fact is written by the
+  daemon from something it verified — a row an operator wrote, or a connection
+  it authenticated.** `refreshRow` must skip transient executors (`liveConn.transient`):
+  `store.Get` answers `ErrNotFound` for a row that never existed, and `refreshRow`
+  correctly treats that as "this row was deleted, evict now", killing a healthy
+  executor on its first health tick.
+
 - **An unknown workspace mode is PINNED, never ephemeral** (`workspaceModeOrPinned`).
   Pinned means an executor loss fails the child where it stood; ephemeral means
   the daemon moves it onto another machine. Defaulting an absent value to
   ephemeral — which `HandleExecutorLost` did — reschedules children onto
   machines no operator ever marked interchangeable.
+
+- **`boundExecutor` must never, under any condition, fall back to in-process
+  execution.** The `opts.Executor == nil` check in `MaterializeAll` is a
+  **security** guard, not a capability check: it is what stops workspace tools
+  running in the daemon process. With `boundExecutor`, `opts.Executor` is always
+  non-nil for a child with a selector, bypassing that guard by construction.
+  It is safe **only** because an unresolvable `boundExecutor` errors rather than
+  falling back — see `TestBoundExecutorNeverRunsInProcess`. Any change that
+  makes `boundExecutor` return nil or delegate to in-process execution when it
+  cannot bind is a confinement escape.
 
 - **Native executors have NO path scoping, deliberately, and `--root` is a
   working directory rather than a sandbox.** The file tools could enforce a

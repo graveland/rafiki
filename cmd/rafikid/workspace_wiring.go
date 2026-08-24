@@ -234,7 +234,3 @@ func (c *Controller) sendSteer(childID, message string) {
 		c.evbuf.PushSteer(childID, "executor", message)
 	}
 }
-
-const rescheduleSteer = `YOUR WORKSPACE WAS REBUILT on a different machine. The previous one is gone.
-Anything you had NOT committed is lost. Re-check the state of the working tree
-before continuing, and do not report as done anything you cannot now see.`
