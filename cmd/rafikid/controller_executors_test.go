@@ -323,3 +323,41 @@ func TestUnknownAndShortFragmentsAreNotFound(t *testing.T) {
 		}
 	}
 }
+
+// A transient executor has no row by design. waitExecutorLive polls this verb
+// to learn its own session executor has connected, so a list built only from
+// the store can never answer — the client times out after 20s and tears down a
+// perfectly healthy executor.
+func TestExecutorListIncludesRowlessTransientExecutors(t *testing.T) {
+	live := ex("sess-01J0", map[string]string{"owner": "brent", "machine": "laptop", "kind": "session"}, "")
+	live.ConnectedAt = time.Now()
+	c := &Controller{execStore: newFakeExecStore(), execPool: &fakePool{live: []execpool.LiveExecutor{live}}}
+
+	got, err := c.ExecutorList(protocol.ExecutorListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want the transient executor listed, got %d rows: %+v", len(got), got)
+	}
+	if !got[0].Connected {
+		t.Fatal("a live transient executor must report Connected=true; that flag " +
+			"is the only signal waitExecutorLive has")
+	}
+}
+
+func TestExecutorListDoesNotDuplicateADurableExecutorThatIsAlsoLive(t *testing.T) {
+	row := executors.Executor{ID: "11111111-1111-1111-1111-111111111111", Enabled: true}
+	live := execpool.LiveExecutor{Executor: row, ConnectedAt: time.Now()}
+	s := newFakeExecStore()
+	s.execs[row.ID] = row
+	c := &Controller{execStore: s, execPool: &fakePool{live: []execpool.LiveExecutor{live}}}
+
+	got, err := c.ExecutorList(protocol.ExecutorListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("a durable executor that is also live must appear once, got %d", len(got))
+	}
+}
