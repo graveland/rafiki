@@ -472,7 +472,7 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 				}
 			}
 		case *executorpb.ExecuteResponse_Failed:
-			return "", fmt.Errorf("executor: %s", ev.Failed.Message)
+			return "", failureError(ev.Failed)
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -780,7 +780,7 @@ func (c *executorClient) Execute(ctx context.Context, tool string, input json.Ra
 				}
 			}
 		case *executorpb.ExecuteResponse_Failed:
-			return "", fmt.Errorf("executor: %s", ev.Failed.Message)
+			return "", failureError(ev.Failed)
 		}
 	}
 	if err := stream.Err(); err != nil {
