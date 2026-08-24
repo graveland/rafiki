@@ -28,7 +28,7 @@ func TestTransientAuthFailureIsRetriedRatherThanDowningTheFleet(t *testing.T) {
 	store := newFakeStore("exec-1")
 	store.authErr = errors.New("failed to connect to `host=db.internal user=rafiki`: connection refused")
 
-	addr, pin := servePool(t, store)
+	addr, pin, _ := servePool(t, store)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -50,7 +50,7 @@ func TestRevokedCredentialStillStopsTheExecutor(t *testing.T) {
 	store := newFakeStore("exec-1")
 	store.authErr = executors.ErrDisabled
 
-	addr, pin := servePool(t, store)
+	addr, pin, _ := servePool(t, store)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -122,8 +122,10 @@ func TestUnclassifiedAuthErrorsAreTreatedAsRetryable(t *testing.T) {
 // ─── helpers ───────────────────────────────────────────────────────────────
 
 // servePool stands up a real TLS listener running p.Serve and returns its
-// address plus the certificate fingerprint to pin.
-func servePool(t *testing.T, store executors.Store) (addr, pin string) {
+// address, the certificate fingerprint to pin, and the Pool itself — for
+// tests that need to reach into the pool (e.g. to mint a ticket) rather than
+// only dial it.
+func servePool(t *testing.T, store executors.Store) (addr, pin string, p *Pool) {
 	t.Helper()
 
 	// Fast reconnects so the retry loop is exercised in milliseconds.
@@ -143,10 +145,10 @@ func servePool(t *testing.T, store executors.Store) (addr, pin string) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	p := New(store)
+	p = New(store)
 	go func() { _ = p.Serve(ln) }()
 
-	return ln.Addr().String(), fmt.Sprintf("%x", sum[:])
+	return ln.Addr().String(), fmt.Sprintf("%x", sum[:]), p
 }
 
 func connectOpts(t *testing.T, addr, pin string) ConnectOptions {
@@ -187,4 +189,28 @@ func helloExchange(t *testing.T, store executors.Store, req protocol.ExecutorHel
 		t.Fatalf("parse hello response %q: %v", line, err)
 	}
 	return resp
+}
+
+// helloExchangeOn is helloExchange against a caller-supplied pool, for tests
+// that must mint into the same registry the connection will redeem from.
+func helloExchangeOn(t *testing.T, p *Pool, req protocol.ExecutorHelloRequest) protocol.ExecutorHelloResponse {
+	t.Helper()
+	ours, theirs := net.Pipe()
+	t.Cleanup(func() { _ = ours.Close(); _ = theirs.Close() })
+	go p.handleConn(theirs)
+	sendHelloFrame(t, ours, req)
+	_ = ours.SetReadDeadline(time.Now().Add(5 * time.Second))
+	line, err := readHelloResponseLine(ours)
+	if err != nil {
+		t.Fatalf("read hello response: %v", err)
+	}
+	var resp protocol.ExecutorHelloResponse
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("parse hello response %q: %v", line, err)
+	}
+	return resp
+}
+
+func protocolHello(ticket string) protocol.ExecutorHelloRequest {
+	return protocol.ExecutorHelloRequest{Type: "executor_hello", Ticket: ticket}
 }
