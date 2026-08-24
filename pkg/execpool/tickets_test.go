@@ -52,10 +52,10 @@ func TestTicketsAreDistinct(t *testing.T) {
 
 func TestGrantBuildsADaemonWrittenExecutorRow(t *testing.T) {
 	g := TicketGrant{
-		ExecutorID: "e1",
-		Owner:      "brent",
-		MachineID:  "abc123",
-		Roots:      []string{"/Users/brent/src"},
+		ExecutorID:  "e1",
+		Owner:       "brent",
+		MachineName: "abc123",
+		Roots:       []string{"/Users/brent/src"},
 	}
 	e := g.Executor()
 

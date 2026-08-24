@@ -951,13 +951,15 @@ type ExecutorSessionRequest struct {
 	Type string `json:"type"` // "ctrl_executor_session"
 	ID   string `json:"id,omitempty"`
 
-	// MachineID identifies the client's machine, so the daemon can find a
-	// durable executor that shares this filesystem.
+	// Name is the operator-chosen name of the client's machine, so the daemon
+	// can find a durable executor that shares this filesystem.
 	//
 	// It does NOT gate access — owner and admits are still derived from the
-	// connection — so a client naming it can only ever narrow which of its
-	// OWN executors it reaches.
-	MachineID string `json:"machineId,omitempty"`
+	// connection — so a client naming it can only ever narrow which of its OWN
+	// executors it reaches. Matched against the `machine` trust label, which an
+	// operator wrote at mint time; never against SelfReported, which is the
+	// executor's own account of itself.
+	Name string `json:"name,omitempty"`
 
 	// Roots describes the directories this machine offers, for humans and for
 	// selectors. Nothing enforces them and nothing may imply it does — a

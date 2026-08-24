@@ -1653,7 +1653,7 @@ which is what keeps an agent working after the operator detaches.
 Otherwise the daemon mints a one-shot session ticket. The client starts
 an executor, connects with the ticket, and the executor lives exactly as long
 as this control connection — no database row, no permanent credential. The
-selector is `owner=<user>,machine=<id>` in both cases, so a child can move
+selector is `owner=<user>,machine=<name>` in both cases, so a child can move
 between a durable executor and a transient one without its stored selector
 ever changing.
 
@@ -1668,10 +1668,19 @@ The request has no username field and must never grow one.
 ```jsonc
 {
   "type": "ctrl_executor_session",
-  "machineId": "abc123...",        // stable per-machine id from the client's machine-id file
+  "name": "my-laptop",              // this machine's operator-chosen executor name
   "roots": ["/home/brent/src"]      // descriptive only — nothing enforces them
 }
 ```
+
+`name` comes from `paths.MachineName()` on the client: `$RAFIKI_EXECUTOR_NAME`,
+then the name written by `rafiki executor name <name>`, and a request with
+neither is refused with `ERR_INVALID_ARGS`. It is matched against the
+`machine` trust label an operator wrote at mint time (§15.1) — never against
+`SelfReported`, which is only the executor's own account of itself and cannot
+gate anything. Like every other field on this request, `name` does not gate
+access on its own: `owner` still comes from the connection, so a client naming
+it can only ever narrow which of its OWN executors it reaches.
 
 **Response** (success)
 ```jsonc
@@ -1683,7 +1692,7 @@ The request has no username field and must never grow one.
     "executorId": "abc123...",     // always populated — the executor to target
     "runLocal": true,              // false when a durable executor already covers this machine
     "ticket": "...",               // one-shot session ticket — empty when runLocal is false
-    "selector": "owner=brent,machine=abc123..."  // spawn selector for both durable and transient
+    "selector": "owner=brent,machine=my-laptop"  // spawn selector for both durable and transient
   }
 }
 ```

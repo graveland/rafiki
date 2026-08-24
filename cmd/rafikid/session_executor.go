@@ -10,6 +10,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -43,11 +44,17 @@ func (c *Controller) ExecutorSession(
 			Message: err.Error(),
 		}
 	}
-	if req.MachineID == "" {
+	if req.Name == "" {
 		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{
 			Code: protocol.ErrInvalidArgs,
-			Message: "machineId is required: without it the daemon cannot tell " +
-				"which durable executor shares this client's filesystem",
+			Message: "this machine has no executor name, so the daemon cannot tell " +
+				"which durable executor shares its filesystem: run " +
+				"`rafiki executor name <name>` on it, or export " + paths.ExecutorName,
+		}
+	}
+	if err := paths.ValidateMachineName(req.Name); err != nil {
+		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{
+			Code: protocol.ErrInvalidArgs, Message: err.Error(),
 		}
 	}
 	if c.execPool == nil {
@@ -57,7 +64,7 @@ func (c *Controller) ExecutorSession(
 		}
 	}
 
-	selector := "owner=" + owner + ",machine=" + req.MachineID
+	selector := "owner=" + owner + ",machine=" + req.Name
 
 	// A live durable executor on this machine wins. Matched on LABELS, which
 	// the operator wrote at mint time -- never on SelfReported, which carries
@@ -68,7 +75,7 @@ func (c *Controller) ExecutorSession(
 		if !e.Enabled || e.Labels["kind"] == "session" {
 			continue
 		}
-		if e.Labels["owner"] == owner && e.Labels["machine"] == req.MachineID {
+		if e.Labels["owner"] == owner && e.Labels["machine"] == req.Name {
 			return protocol.ExecutorSessionResponseData{
 				ExecutorID: e.ID,
 				Selector:   selector,
@@ -78,10 +85,10 @@ func (c *Controller) ExecutorSession(
 
 	execID := "sess-" + ulid.Make().String()
 	ticket, err := c.execPool.Tickets().Mint(execpool.TicketGrant{
-		ExecutorID: execID,
-		Owner:      owner,
-		MachineID:  req.MachineID,
-		Roots:      req.Roots,
+		ExecutorID:  execID,
+		Owner:       owner,
+		MachineName: req.Name,
+		Roots:       req.Roots,
 	})
 	if err != nil {
 		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{

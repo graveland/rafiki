@@ -18,9 +18,9 @@ func TestTicketExecutorConnectsAndGoesLive(t *testing.T) {
 	// Mint BEFORE dialling — the ticket must already be in the registry when
 	// the hello arrives.
 	ticket, err := p.Tickets().Mint(TicketGrant{
-		ExecutorID: "sess-01J0",
-		Owner:      "brent",
-		MachineID:  "laptop",
+		ExecutorID:  "sess-01J0",
+		Owner:       "brent",
+		MachineName: "laptop",
 	})
 	if err != nil {
 		t.Fatal(err)
