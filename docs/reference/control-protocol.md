@@ -1469,6 +1469,7 @@ server-side in plaintext — only its hash is stored.
 ```jsonc
 {
   "type": "ctrl_executor_enroll",
+  "name": "my-laptop",                      // names the MACHINE the executor will run on
   "labels": {"rafiki/env": "work"},        // trust labels bound to the executor row
   "roots": ["/workspace"],                  // accessible root paths
   "isolation": "none",                      // none | container | vm
@@ -1477,6 +1478,30 @@ server-side in plaintext — only its hash is stored.
   "ttlSeconds": 3600                        // token lifetime, required
 }
 ```
+
+**`owner` and `machine` are written by the DAEMON, and a request carrying
+either as a label is REFUSED** with `ERR_INVALID_ARGS` — not silently
+overwritten, so a caller learns their selector will not mean what they wrote.
+
+- `owner` comes from the connection, by the same rule as `ctrl_executor_session`
+  (§15.6): `conn.Identity().Username` on an authenticated TCP/TLS connection,
+  and the daemon's own OS user on a local UDS connection. Both halves of
+  executor selection match on it — an executor's `admits` selector and a
+  client's own binding — so a caller able to state it could claim another
+  operator's machines.
+- `machine` comes from `name`, validated daemon-side (letters, digits, `-`, `_`,
+  `.`, at most 63 characters). A comma or an equals sign would silently reparse
+  the `owner=…,machine=…` selector into a different one, which for a value
+  deciding where a child lands is a confinement bug, not a formatting one.
+  `name` is optional; omitting it leaves the row without a `machine` label,
+  which is right for a fleet executor selected purely by `env=prod`.
+
+`name` names the machine the executor will RUN on, which is **not** necessarily
+the one that minted the token: an enrollment token is routinely carried
+elsewhere and handed to the executor as `--enroll-token`. Run `rafiki executor
+name` on that box to see what to pass. `(owner, machine)` is unique among rows
+carrying a `machine`, so a second executor claiming a name already taken under
+the same owner is refused with `ERR_INVALID_ARGS`.
 
 **Response** (success)
 ```jsonc
@@ -1644,6 +1669,48 @@ The request has no username field and must never grow one.
     "runLocal": true,              // false when a durable executor already covers this machine
     "ticket": "...",               // one-shot session ticket — empty when runLocal is false
     "selector": "owner=brent,machine=abc123..."  // spawn selector for both durable and transient
+  }
+}
+```
+
+### 15.7 `ctrl_executor_create`
+
+Mint an executor row and its durable credential in one step, with no enrollment
+handshake — the STATELESS path, for a deployment with no durable local storage.
+The credential is returned once and only its hash is stored.
+
+The trade runs the other way from enrollment (§15.1): the operator handles a
+long-lived secret, and a theft of it is silent, where a stolen one-time
+enrollment token announces itself by being consumed. Prefer `ctrl_executor_enroll`
+where the machine can keep a file.
+
+**Request**
+```jsonc
+{
+  "type": "ctrl_executor_create",
+  "name": "prod-runner-1",                  // names the MACHINE the executor will run on
+  "labels": {"env": "prod"},                // trust labels written onto the row
+  "roots": ["/workspace"],                  // accessible root paths
+  "isolation": "none",                      // none | container
+  "workspaceMode": "pinned",                // ephemeral | pinned
+  "admits": ""                              // executor-side admission selector
+}
+```
+
+`name`, `owner` and `machine` follow exactly the rules in §15.1: `owner` is
+written from the connection, `machine` from `name`, and a request carrying
+either as a label is refused with `ERR_INVALID_ARGS`. So is a `name` that
+collides with an existing executor of the same owner.
+
+**Response** (success)
+```jsonc
+{
+  "type": "ctrl_response",
+  "command": "ctrl_executor_create",
+  "success": true,
+  "data": {
+    "executorId": "abc123...",
+    "credential": "<long-lived credential — shown once>"
   }
 }
 ```

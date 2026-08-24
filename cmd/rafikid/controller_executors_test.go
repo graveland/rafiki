@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // fakeExecStore is an in-memory executors.Store for testing the control-plane
@@ -106,7 +110,7 @@ func TestExecutorEnrollMintsATokenWithTheGivenLabels(t *testing.T) {
 	s := newFakeExecStore()
 	c := &Controller{execStore: s}
 
-	resp, err := c.ExecutorEnroll(protocol.ExecutorEnrollRequest{
+	resp, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{
 		Labels:     map[string]string{"env": "work"},
 		TTLSeconds: 3600,
 	})
@@ -121,9 +125,131 @@ func TestExecutorEnrollMintsATokenWithTheGivenLabels(t *testing.T) {
 	}
 }
 
+// owner gates which children an executor admits and which durable executor an
+// interactive client binds to. It must come from the connection, never from the
+// request -- a client that could name its own owner would be granting itself
+// access. Nothing stamped it before, which is why ExecutorSession's durable
+// branch was unreachable and every client got a transient executor.
+func TestExecutorEnrollStampsOwnerFromTheConnection(t *testing.T) {
+	s := newFakeExecStore()
+	c := &Controller{execStore: s}
+
+	if _, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{
+		Name:       "laptop",
+		Labels:     map[string]string{"env": "dev"},
+		TTLSeconds: 3600,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.minted) != 1 {
+		t.Fatalf("want one minted token, got %d", len(s.minted))
+	}
+	got := s.minted[0].Labels
+	if got["owner"] != "brent" {
+		t.Fatalf(`labels["owner"] = %q, want "brent" from the connection`, got["owner"])
+	}
+	if got["machine"] != "laptop" {
+		t.Fatalf(`labels["machine"] = %q, want "laptop" from --name`, got["machine"])
+	}
+	if got["env"] != "dev" {
+		t.Fatal("operator labels must survive alongside the stamped ones")
+	}
+}
+
+// The same rule on the stateless path: create writes a row immediately, so an
+// unstamped owner there is a row no interactive client can ever match.
+func TestExecutorCreateStampsOwnerFromTheConnection(t *testing.T) {
+	s := newFakeExecStore()
+	c := &Controller{execStore: s}
+
+	if _, err := c.ExecutorCreate(users.Identity{Username: "brent"}, protocol.ExecutorCreateRequest{
+		Name:   "laptop",
+		Labels: map[string]string{"env": "dev"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.lastCreate.Labels
+	if got["owner"] != "brent" || got["machine"] != "laptop" || got["env"] != "dev" {
+		t.Fatalf("create labels = %+v, want owner=brent machine=laptop env=dev", got)
+	}
+}
+
+// The request must not carry the labels the daemon owns. Refusing rather than
+// silently overwriting is the point: a caller learns their selector will not
+// mean what they wrote.
+func TestExecutorEnrollRefusesAClientSuppliedOwner(t *testing.T) {
+	c := &Controller{execStore: newFakeExecStore()}
+	for _, key := range []string{"owner", "machine"} {
+		_, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{
+			Labels:     map[string]string{key: "someone-else"},
+			TTLSeconds: 3600,
+		})
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
+			t.Fatalf("--label %s=: got %v, want ERR_INVALID_ARGS -- %s is derived "+
+				"by the daemon and a request naming it must be refused rather "+
+				"than silently overwritten", key, err, key)
+		}
+	}
+}
+
+func TestExecutorCreateRefusesAClientSuppliedOwner(t *testing.T) {
+	s := newFakeExecStore()
+	c := &Controller{execStore: s}
+	if _, err := c.ExecutorCreate(users.Identity{Username: "brent"}, protocol.ExecutorCreateRequest{
+		Labels: map[string]string{"owner": "someone-else"},
+	}); err == nil {
+		t.Fatal("create must refuse a client-supplied owner")
+	}
+	if s.createCalls != 0 {
+		t.Fatal("the row must not be written before the label check")
+	}
+}
+
+func TestExecutorEnrollRefusesANameASelectorCannotCarry(t *testing.T) {
+	c := &Controller{execStore: newFakeExecStore()}
+	if _, err := c.ExecutorEnroll(users.Identity{Username: "brent"},
+		protocol.ExecutorEnrollRequest{Name: "my,laptop", TTLSeconds: 3600}); err == nil {
+		t.Fatal("a comma splits a selector; --name must be validated daemon-side too")
+	}
+}
+
+// A collision on (owner, machine) is an operator naming two machines the same,
+// which the store answers with SQLSTATE 23505. Left untranslated it reaches the
+// client as ERR_INTERNAL / 503 -- "the daemon is broken" for a mistake only the
+// operator can fix.
+func TestDuplicateMachineNameIsAClientError(t *testing.T) {
+	err := translateExecutorErr(fmt.Errorf("create executor: %w", &pgconn.PgError{
+		Code:           "23505",
+		ConstraintName: "executors_owner_machine_unique",
+		Message:        `duplicate key value violates unique constraint "executors_owner_machine_unique"`,
+	}))
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
+		t.Fatalf("got %v, want ERR_INVALID_ARGS", err)
+	}
+	if !strings.Contains(ce.Message, "name") {
+		t.Fatalf("the message must tell the operator the NAME is taken: %q", ce.Message)
+	}
+}
+
+// Any other unique violation keeps the old behaviour -- returned unchanged, so
+// mapErr treats it as internal and the store's text (which carries the DSN)
+// stays in the daemon log.
+func TestOtherUniqueViolationsAreStillInternal(t *testing.T) {
+	err := translateExecutorErr(&pgconn.PgError{
+		Code:           "23505",
+		ConstraintName: "executors_credential_hash_key",
+	})
+	var ce *control.ControllerError
+	if errors.As(err, &ce) {
+		t.Fatalf("an unrelated unique index must not inherit the rename advice: %+v", ce)
+	}
+}
+
 func TestExecutorVerbsRefuseWithoutAStore(t *testing.T) {
 	c := &Controller{} // execStore nil
-	if _, err := c.ExecutorEnroll(protocol.ExecutorEnrollRequest{TTLSeconds: 1}); err == nil {
+	if _, err := c.ExecutorEnroll(users.Identity{Username: "brent"}, protocol.ExecutorEnrollRequest{TTLSeconds: 1}); err == nil {
 		t.Fatal("enroll must refuse without a store")
 	}
 	if _, err := c.ExecutorList(protocol.ExecutorListRequest{}); err == nil {

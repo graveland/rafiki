@@ -878,8 +878,15 @@ const (
 
 // ExecutorEnrollRequest mints a one-time enrollment token.
 type ExecutorEnrollRequest struct {
-	Type          string            `json:"type"` // "ctrl_executor_enroll"
-	ID            string            `json:"id,omitempty"`
+	Type string `json:"type"` // "ctrl_executor_enroll"
+	ID   string `json:"id,omitempty"`
+	// Name is the name of the MACHINE the executor will run on, which is not
+	// necessarily the one that minted the token: the daemon writes it to the
+	// `machine` trust label. It cannot be sent as a label — see Labels.
+	Name string `json:"name,omitempty"`
+	// Labels are the operator's own trust labels. `owner` and `machine` are
+	// written by the daemon (from the connection and from Name); a request
+	// carrying either key is REFUSED rather than silently overwritten.
 	Labels        map[string]string `json:"labels,omitempty"`
 	Roots         []string          `json:"roots,omitempty"`
 	Isolation     string            `json:"isolation,omitempty"`
@@ -909,8 +916,13 @@ type ExecutorEnrollResponseData struct {
 // consuming a one-time token. Prefer enrollment where the machine can keep a
 // file.
 type ExecutorCreateRequest struct {
-	Type          string            `json:"type"` // "ctrl_executor_create"
-	ID            string            `json:"id,omitempty"`
+	Type string `json:"type"` // "ctrl_executor_create"
+	ID   string `json:"id,omitempty"`
+	// Name names the machine this executor runs on; the daemon writes it to
+	// the `machine` trust label. Same rule as ExecutorEnrollRequest.Name.
+	Name string `json:"name,omitempty"`
+	// Labels are the operator's own trust labels. `owner` and `machine` are
+	// daemon-written; a request carrying either key is REFUSED.
 	Labels        map[string]string `json:"labels,omitempty"`
 	Roots         []string          `json:"roots,omitempty"`
 	Isolation     string            `json:"isolation,omitempty"`
