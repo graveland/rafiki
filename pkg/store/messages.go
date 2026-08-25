@@ -11,15 +11,34 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Messages persists and loads message-granularity conversation state
 // (conversations.conversation_message). Turn-granularity capture stays in
 // pkg/capture CaptureStore; library-driven sends write both.
-type Messages struct{ pool *pgxpool.Pool }
+// ErrLeaseLost is returned by a guarded write whose conversation lease is no
+// longer held. It means another daemon has taken over the conversation; the
+// caller must stop writing AND stop acting — see the lease-lost path in
+// cmd/rafikid.
+var ErrLeaseLost = errors.New("store: conversation lease lost")
+
+type Messages struct {
+	pool  *pgxpool.Pool
+	lease Lease
+}
 
 func NewMessages(pool *pgxpool.Pool) *Messages { return &Messages{pool: pool} }
+
+// WithLease returns a copy of m whose writes are guarded by l. A zero Lease
+// means unfenced, which is the behaviour every caller had before fencing
+// existed.
+func (m *Messages) WithLease(l Lease) *Messages {
+	cp := *m
+	cp.lease = l
+	return &cp
+}
 
 // Message is one stored conversation message. Content round-trips through the
 // Anthropic SDK's MessageParam JSON form byte-identically (verified for text,
@@ -82,18 +101,41 @@ func (m *Messages) Append(ctx context.Context, conversationID string, ordinal in
 			stopReason = meta.StopReason
 		}
 	}
-	tag, err := m.pool.Exec(ctx, `
-		INSERT INTO conversations.conversation_message
-			(conversation_id, ordinal, role, content, tool_use_ids, input_tokens, output_tokens, stop_reason)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
-		conversationID, ordinal, string(param.Role), content, toolUseIDs(param), inTok, outTok, stopReason)
+
+	// Two statements rather than one with a conditional guard: an unfenced
+	// caller must behave exactly as it did before fencing existed, and a
+	// clever single query that tries to be both is where the subtle bugs live.
+	var tag pgconn.CommandTag
+	if m.lease.Held() {
+		tag, err = m.pool.Exec(ctx, appendFencedSQL,
+			conversationID, ordinal, string(param.Role), content, toolUseIDs(param),
+			inTok, outTok, stopReason, m.lease.Holder, m.lease.Token)
+	} else {
+		tag, err = m.pool.Exec(ctx, appendSQL,
+			conversationID, ordinal, string(param.Role), content, toolUseIDs(param),
+			inTok, outTok, stopReason)
+	}
 	if err != nil {
 		return fmt.Errorf("append message %d: %w", ordinal, err)
 	}
 	if tag.RowsAffected() == 1 {
 		return nil
 	}
+
+	// Zero rows has two causes once fencing is on: the ordinal already exists
+	// (a Resume replay), or the lease is gone. Check the lease first — a lost
+	// lease is the more serious answer and reporting it as a content conflict
+	// would send the caller down entirely the wrong path.
+	if m.lease.Held() {
+		valid, verr := NewLeases(m.pool).Valid(ctx, m.lease)
+		if verr != nil {
+			return fmt.Errorf("append message %d: lease check: %w", ordinal, verr)
+		}
+		if !valid {
+			return fmt.Errorf("append message %d: %w", ordinal, ErrLeaseLost)
+		}
+	}
+
 	// Conflict: verify the existing row carries the same content (a Resume
 	// replay), otherwise fail loudly rather than silently forking history.
 	var existing []byte
@@ -107,6 +149,26 @@ func (m *Messages) Append(ctx context.Context, conversationID string, ordinal in
 	}
 	return nil
 }
+
+const appendSQL = `
+INSERT INTO conversations.conversation_message
+	(conversation_id, ordinal, role, content, tool_use_ids, input_tokens, output_tokens, stop_reason)
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (conversation_id, ordinal) DO NOTHING`
+
+// appendFencedSQL is appendSQL with the lease guard. The EXISTS clause is
+// evaluated in the SAME statement as the insert, which is what makes a stalled
+// writer that wakes after takeover write nothing — and why a monotonic fencing
+// token is unnecessary here.
+const appendFencedSQL = `
+INSERT INTO conversations.conversation_message
+	(conversation_id, ordinal, role, content, tool_use_ids, input_tokens, output_tokens, stop_reason)
+SELECT $1::uuid, $2, $3, $4, $5, $6, $7, $8
+ WHERE EXISTS (
+   SELECT 1 FROM conversations.conversation_lease
+    WHERE conversation_id = $1::uuid AND holder = $9 AND token = $10::uuid
+      AND expires_at > now())
+ON CONFLICT (conversation_id, ordinal) DO NOTHING`
 
 // AssistantMeta carries per-message usage and the producing turn's stop
 // reason (assistant messages; resume consults StopReason to distinguish a
