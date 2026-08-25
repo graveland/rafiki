@@ -48,3 +48,17 @@ func TestAttachIsRegistered(t *testing.T) {
 		t.Fatal("attach is not registered on the root command")
 	}
 }
+// `tui` was a B2 placeholder. The verbs are create and attach; no alias.
+func TestTUIVerbIsGone(t *testing.T) {
+	root := newRootCmd()
+	for _, c := range root.Commands() {
+		if strings.HasPrefix(c.Use, "tui") {
+			t.Fatalf("the tui verb is still registered: %q", c.Use)
+		}
+		for _, a := range c.Aliases {
+			if a == "tui" {
+				t.Fatalf("%q still aliases tui", c.Use)
+			}
+		}
+	}
+}
