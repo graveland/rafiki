@@ -20,9 +20,78 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-type CaptureStore struct{ pool *pgxpool.Pool }
+type CaptureStore struct {
+	pool  *pgxpool.Pool
+	lease store.Lease
+}
 
 func NewCaptureStore(pool *pgxpool.Pool) *CaptureStore { return &CaptureStore{pool: pool} }
+
+// WithLease returns a copy of s whose message writes are guarded by l. A zero
+// Lease means unfenced — the client-driven proxy path, which no daemon resumes.
+func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
+	cp := *s
+	cp.lease = l
+	return &cp
+}
+
+// appendMessage is the single guarded insert both message write sites use.
+// inTok, outTok and stopReason are nil/nil-able for the request-decomposition
+// path, which has no usage to record.
+//
+// A returned ErrLeaseLost is deliberately NOT retryable: isRetryableDB only
+// classifies DeadlineExceeded, net.OpError and SQLSTATE 40P01/40001, so retryDB
+// surfaces it on the first attempt. Do not add it to the retryable set — a lost
+// lease is an answer, not a blip.
+func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason any) error {
+	var tag pgconn.CommandTag
+	var err error
+	if s.lease.Held() {
+		tag, err = s.pool.Exec(ctx, captureAppendFencedSQL,
+			convID, ordinal, role, content, inTok, outTok, stopReason,
+			s.lease.Holder, s.lease.Token)
+	} else {
+		tag, err = s.pool.Exec(ctx, captureAppendSQL,
+			convID, ordinal, role, content, inTok, outTok, stopReason)
+	}
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 && s.lease.Held() {
+		valid, verr := store.NewLeases(s.pool).Valid(ctx, s.lease)
+		if verr != nil {
+			return verr
+		}
+		if !valid {
+			return store.ErrLeaseLost
+		}
+	}
+	return nil
+}
+
+// appendMessageForTest exposes appendMessage to this package's tests.
+func (s *CaptureStore) appendMessageForTest(ctx context.Context, convID string, ordinal int, role string, content []byte) error {
+	return s.appendMessage(ctx, convID, ordinal, role, content, nil, nil, nil)
+}
+
+const captureAppendSQL = `
+INSERT INTO conversations.conversation_message
+	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (conversation_id, ordinal) DO NOTHING`
+
+// captureAppendFencedSQL is captureAppendSQL with the lease guard. The EXISTS
+// clause is evaluated in the SAME statement as the insert, which is what makes
+// a stalled writer that wakes after takeover write nothing.
+const captureAppendFencedSQL = `
+INSERT INTO conversations.conversation_message
+	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
+SELECT $1::uuid, $2, $3, $4, $5, $6, $7
+ WHERE EXISTS (
+   SELECT 1 FROM conversations.conversation_lease
+    WHERE conversation_id = $1::uuid AND holder = $8 AND token = $9::uuid
+      AND expires_at > now())
+ON CONFLICT (conversation_id, ordinal) DO NOTHING`
 
 type ConversationRef struct {
 	ID               string // empty → insert a new conversation and return its id
@@ -239,10 +308,7 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 			if len(content) == 0 {
 				content = json.RawMessage(`null`)
 			}
-			if _, err := s.pool.Exec(ctx,
-				`INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
-				 VALUES ($1,$2,$3,$4) ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
-				convID, i, m.Role, jsonbSafe(content)); err != nil {
+			if err := s.appendMessage(ctx, convID, i, m.Role, jsonbSafe(content), nil, nil, nil); err != nil {
 				return fmt.Errorf("decompose: insert message %d: %w", i, err)
 			}
 		}
@@ -440,12 +506,7 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 		content = json.RawMessage(`null`)
 	}
 	return retryDB(ctx, "appendResponse", func(ctx context.Context) error {
-		if _, err := s.pool.Exec(ctx,
-			`INSERT INTO conversations.conversation_message
-			   (conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
-			 VALUES ($1,$2,'assistant',$3,$4,$5,$6)
-			 ON CONFLICT (conversation_id, ordinal) DO NOTHING`,
-			convID, ordinal, jsonbSafe(content), in, out, nullify(stopReason)); err != nil {
+		if err := s.appendMessage(ctx, convID, ordinal, "assistant", jsonbSafe(content), &in, &out, nullify(stopReason)); err != nil {
 			return fmt.Errorf("append response: insert: %w", err)
 		}
 		if _, err := s.pool.Exec(ctx,
