@@ -119,9 +119,12 @@ func (c *Controller) loadChildren(ctx context.Context) {
 
 // recoverOne loads a single record into the store and decides whether to resume.
 func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord) {
-	// Signal a still-live orphan, but ONLY when this daemon wrote the pid. A
-	// pid from a different daemon names an unrelated process on another host.
-	if rec.PID > 0 && rec.DaemonID != "" && rec.DaemonID == c.daemonID {
+	// Signal a still-live orphan only when the recorded pid provably belongs to
+	// THIS PID namespace. daemon_id is not that proof — it is pinned across pod
+	// restarts, and a restarted pod has the same id with a fresh namespace.
+	// An unknown token never signals: a missed orphan is harmless, a wrong
+	// signal kills a live process.
+	if rec.PID > 0 && c.nsToken != "" && rec.NSToken == c.nsToken {
 		if err := syscall.Kill(rec.PID, 0); err == nil {
 			_ = syscall.Kill(rec.PID, syscall.SIGTERM)
 			slog.Info("sigterm orphan", "childId", rec.ChildID, "pid", rec.PID)

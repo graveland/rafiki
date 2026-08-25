@@ -76,6 +76,10 @@ type Controller struct {
 	// holder, and what says whose pid namespace the pid column belongs to.
 	daemonID string
 
+	// nsToken identifies this daemon's PID namespace so a recorded pid can
+	// be proven to belong to the same namespace before it is signalled.
+	nsToken string
+
 	// heldLeases maps childID to the conversation lease this daemon holds for
 	// it. Guarded by heldLeasesMu.
 	heldLeasesMu sync.Mutex
@@ -260,6 +264,12 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 	} else {
 		c.daemonID = id
 		slog.Info("daemon identity", "daemonId", id, "source", source)
+	}
+
+	if tok, ok := paths.PIDNamespaceToken(); ok {
+		c.nsToken = tok
+	} else {
+		slog.Info("pid namespace token unavailable; orphan pids will not be signalled")
 	}
 
 	// Wire the coster only when there is a database: without one every
@@ -2668,6 +2678,7 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 		rec := childstore.RecordFromSnapshot(snap)
 		rec.LastStatus = lastStatus
 		rec.DaemonID = c.daemonID
+		rec.NSToken = c.nsToken
 		if snap.Kind == protocol.KindFundi {
 			rec.ConversationID = snap.SessionID
 		}

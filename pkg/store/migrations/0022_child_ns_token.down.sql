@@ -1,0 +1,1 @@
+ALTER TABLE conversations.child DROP COLUMN IF EXISTS ns_token;

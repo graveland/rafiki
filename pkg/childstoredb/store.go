@@ -29,15 +29,15 @@ var _ childstore.ChildStore = (*Store)(nil)
 const upsertSQL = `
 INSERT INTO conversations.child
     (child_id, conversation_id, owner_user_id, kind, name, cwd, config_dir,
-     pid, daemon_id, provider, model, thinking, session_file, session_dir,
+     pid, daemon_id, ns_token, provider, model, thinking, session_file, session_dir,
      session_id, no_session, status, last_status, spawned_at, last_activity,
      exited_at, exit_code, exit_signal, executor_selector, workspace_mode,
      max_depth, max_cost, max_children, config, labels)
 VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7,
-        $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19, $20,
-        $21, $22, $23, $24, $25,
-        $26, $27, $28, $29, $30)
+        $8, $9, $10, $11, $12, $13, $14, $15,
+        $16, $17, $18, $19, $20, $21,
+        $22, $23, $24, $25, $26,
+        $27, $28, $29, $30, $31)
 ON CONFLICT (child_id) DO UPDATE SET
     status            = EXCLUDED.status,
     last_status       = COALESCE(EXCLUDED.last_status, conversations.child.last_status),
@@ -48,6 +48,7 @@ ON CONFLICT (child_id) DO UPDATE SET
     config_dir        = EXCLUDED.config_dir,
     pid               = EXCLUDED.pid,
     daemon_id         = EXCLUDED.daemon_id,
+    ns_token          = EXCLUDED.ns_token,
     provider          = EXCLUDED.provider,
     model             = EXCLUDED.model,
     thinking          = EXCLUDED.thinking,
@@ -92,7 +93,7 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 	_, err = s.pool.Exec(ctx, upsertSQL,
 		rec.ChildID, nullString(rec.ConversationID), nullString(rec.OwnerUserID),
 		rec.Kind, rec.Name, rec.Cwd, rec.ConfigDir,
-		nullInt(rec.PID), rec.DaemonID, rec.Provider, rec.Model, rec.Thinking,
+		nullInt(rec.PID), rec.DaemonID, rec.NSToken, rec.Provider, rec.Model, rec.Thinking,
 		rec.SessionFile, rec.SessionDir, rec.SessionID, rec.NoSession,
 		rec.Status, nullString(rec.LastStatus),
 		rec.SpawnedAt, nullTime(rec.LastActivity), nullTime(rec.ExitedAt),
@@ -118,7 +119,7 @@ func (s *Store) Delete(ctx context.Context, childID string) error {
 const listSQL = `
 SELECT child_id, COALESCE(conversation_id::text, ''), COALESCE(owner_user_id::text, ''),
        kind, COALESCE(name,''), COALESCE(cwd,''), COALESCE(config_dir,''),
-       COALESCE(pid, 0), COALESCE(daemon_id,''),
+       COALESCE(pid, 0), COALESCE(daemon_id,''), COALESCE(ns_token,''),
        COALESCE(provider,''), COALESCE(model,''), COALESCE(thinking,''),
        COALESCE(session_file,''), COALESCE(session_dir,''), COALESCE(session_id,''),
        no_session, status, COALESCE(last_status,''),
@@ -151,7 +152,7 @@ func (s *Store) List(ctx context.Context) ([]childstore.ChildRecord, error) {
 		if err := rows.Scan(
 			&rec.ChildID, &rec.ConversationID, &rec.OwnerUserID,
 			&rec.Kind, &rec.Name, &rec.Cwd, &rec.ConfigDir,
-			&rec.PID, &rec.DaemonID,
+			&rec.PID, &rec.DaemonID, &rec.NSToken,
 			&rec.Provider, &rec.Model, &rec.Thinking,
 			&rec.SessionFile, &rec.SessionDir, &rec.SessionID,
 			&rec.NoSession, &rec.Status, &rec.LastStatus,
