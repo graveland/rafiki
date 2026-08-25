@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -88,84 +87,22 @@ func stripStaleBindings(labels map[string]string) map[string]string {
 // loadChildren rebuilds the in-memory store from the database and resumes the
 // children this daemon wins a lease for.
 //
-// diskRecords is the one-shot import of §5.2: on the first startup after
-// upgrade the database has no rows for this daemon and the on-disk records are
-// imported. It is not a fallback — once this daemon has rows, the files are
-// ignored, so a Forget cannot be undone by a stale file.
-func (c *Controller) loadChildren(ctx context.Context, diskRecords []persist.Record) {
+// With no database pool, children live in memory only and do not survive a
+// restart — the store starts empty.
+func (c *Controller) loadChildren(ctx context.Context) {
 	if c.children == nil {
-		// No pool: children live in memory only. Fall back to the disk records
-		// so a database-less daemon keeps working during the dual-write window.
-		c.loadFromDisk(diskRecords)
 		return
 	}
 
 	recs, err := c.children.List(ctx)
 	if err != nil {
-		slog.Error("load children from database failed; falling back to disk records", "error", err)
-		c.loadFromDisk(diskRecords)
+		slog.Error("load children from database failed", "error", err)
 		return
-	}
-
-	if !c.hasOwnRows(recs) && len(diskRecords) > 0 {
-		slog.Info("importing on-disk child records", "count", len(diskRecords))
-		recs = c.importDiskRecords(ctx, diskRecords)
 	}
 
 	for _, rec := range recs {
 		c.recoverOne(ctx, rec)
 	}
-}
-
-// hasOwnRows reports whether any row was last written by this daemon. It is
-// what gates the one-shot import: a daemon that already has rows must never
-// re-import files.
-func (c *Controller) hasOwnRows(recs []childstore.ChildRecord) bool {
-	for _, r := range recs {
-		if r.DaemonID != "" && r.DaemonID == c.daemonID {
-			return true
-		}
-	}
-	return false
-}
-
-// importDiskRecords upserts every on-disk record and returns the resulting
-// records. conversation_id is recovered for fundi children from external_ref —
-// the correlation --ref established — so imported rows are immediately complete.
-func (c *Controller) importDiskRecords(ctx context.Context, diskRecords []persist.Record) []childstore.ChildRecord {
-	out := make([]childstore.ChildRecord, 0, len(diskRecords))
-	for _, dr := range diskRecords {
-		sess := sessionFromRecord(dr)
-		rec := childstore.RecordFromSnapshot(sess.Snapshot())
-		rec.LastStatus = dr.LastStatus
-		rec.DaemonID = c.daemonID
-		if dr.Kind == protocol.KindFundi {
-			rec.ConversationID = c.conversationIDForRef(ctx, dr.ChildID)
-		}
-		if err := c.children.Upsert(ctx, rec); err != nil {
-			slog.Warn("import child record", "childId", dr.ChildID, "error", err)
-			continue
-		}
-		out = append(out, rec)
-	}
-	return out
-}
-
-// conversationIDForRef resolves the conversation a legacy fundi child was
-// correlated to by --ref. Empty when there is none.
-func (c *Controller) conversationIDForRef(ctx context.Context, childID string) string {
-	if c.pool == nil {
-		return ""
-	}
-	var id string
-	err := c.pool.QueryRow(ctx, `
-		SELECT id::text FROM conversations.conversation
-		 WHERE external_ref = $1 AND driven_by = 'server'
-		 ORDER BY created_at DESC LIMIT 1`, childID).Scan(&id)
-	if err != nil {
-		return ""
-	}
-	return id
 }
 
 // recoverOne loads a single record into the store and decides whether to resume.
@@ -223,20 +160,4 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 			c.dropLease(id)
 		}
 	}(rec.ChildID)
-}
-
-// loadFromDisk is the no-pool path: the old loadOrphans behaviour, minus the
-// lease (a daemon with no database has no one to contend with).
-func (c *Controller) loadFromDisk(records []persist.Record) {
-	for _, rec := range records {
-		if rec.PID > 0 {
-			if err := syscall.Kill(rec.PID, 0); err == nil {
-				_ = syscall.Kill(rec.PID, syscall.SIGTERM)
-				slog.Info("sigterm orphan", "childId", rec.ChildID, "pid", rec.PID)
-			}
-		}
-		sess := sessionFromRecord(rec)
-		sess.Status = protocol.StatusExited
-		c.st.Insert(sess)
-	}
 }

@@ -1,3 +1,4 @@
+// Package persist provides crash-safe log dumps for child subprocess output.
 package persist
 
 import (

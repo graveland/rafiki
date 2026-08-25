@@ -51,7 +51,6 @@ import (
 type Controller struct {
 	st          *childstore.Store
 	cm          *ChildManager
-	records     *persist.RecordWriter
 	dumper      *persist.LogDumper
 	startedAt   time.Time
 	socketPath  string
@@ -235,7 +234,6 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 	c := &Controller{
 		st:          st,
 		cm:          newChildManager(),
-		records:     persist.NewRecordWriter(stateDir),
 		dumper:      dumper,
 		startedAt:   time.Now(),
 		socketPath:  socketPath,
@@ -1769,9 +1767,6 @@ func (c *Controller) Forget(childID string) error {
 		}
 		cancel()
 	}
-	if err := persist.DeleteRecord(c.stateDir, childID); err != nil {
-		slog.Warn("delete state record", "childId", childID, "error", err)
-	}
 	if err := c.deleteLogDump(childID); err != nil {
 		slog.Warn("delete log dump", "childId", childID, "error", err)
 	}
@@ -1823,9 +1818,6 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 			}
 		}
 		c.st.Delete(s.ChildID)
-		if err := persist.DeleteRecord(c.stateDir, s.ChildID); err != nil {
-			slog.Warn("delete state record", "childId", s.ChildID, "error", err)
-		}
 		if err := c.deleteLogDump(s.ChildID); err != nil {
 			slog.Warn("delete log dump", "childId", s.ChildID, "error", err)
 		}
@@ -2646,15 +2638,7 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 			slog.Warn("write child row", "childId", childID, "error", err)
 		}
 	}
-
-	if c.records == nil {
-		return nil
-	}
-	rec := recordFromSnapshot(snap)
-	if lastStatus != "" {
-		rec.LastStatus = lastStatus
-	}
-	return c.records.Write(rec)
+	return nil
 }
 
 // computeLineageLabels resolves the rafiki/parent and rafiki/root label
@@ -3225,117 +3209,6 @@ func parseEventType(frame []byte, hdr any) error {
 	return json.Unmarshal(frame, hdr)
 }
 
-// sessionFromRecord rebuilds a childstore.Session from a persisted Record.
-func sessionFromRecord(rec persist.Record) *childstore.Session {
-	return &childstore.Session{
-		ChildID:            rec.ChildID,
-		PID:                rec.PID,
-		Name:               rec.Name,
-		Cwd:                rec.Cwd,
-		Kind:               rec.Kind,
-		ConfigDir:          rec.ConfigDir,
-		Provider:           rec.Provider,
-		Model:              rec.Model,
-		Thinking:           rec.Thinking,
-		SessionID:          rec.SessionID,
-		SessionFile:        rec.SessionFile,
-		SessionDir:         rec.SessionDir,
-		NoSession:          rec.NoSession,
-		Tools:              rec.Tools,
-		NoTools:            rec.NoTools,
-		NoBuiltinTools:     rec.NoBuiltinTools,
-		Extensions:         rec.Extensions,
-		NoExtensions:       rec.NoExtensions,
-		Skills:             rec.Skills,
-		NoSkills:           rec.NoSkills,
-		SkillsDirs:         rec.SkillsDirs,
-		MCPConfig:          rec.MCPConfig,
-		MCPServers:         rec.MCPServers,
-		NoMCP:              rec.NoMCP,
-		PromptTemplates:    rec.PromptTemplates,
-		NoPromptTemplates:  rec.NoPromptTemplates,
-		Themes:             rec.Themes,
-		NoThemes:           rec.NoThemes,
-		NoContextFiles:     rec.NoContextFiles,
-		SystemPrompt:       rec.SystemPrompt,
-		AppendSystemPrompt: rec.AppendSystemPrompt,
-		Verbose:            rec.Verbose,
-		ExecutorSelector:   rec.ExecutorSelector,
-		WorkspaceMode:      rec.WorkspaceMode,
-		PiBinary:           rec.PiBinary,
-		ExtraArgs:          rec.ExtraArgs,
-		RecordRequests:     rec.RecordRequests,
-		MaxDepth:           rec.MaxDepth,
-		MaxCost:            rec.MaxCost,
-		MaxChildren:        rec.MaxChildren,
-		StartedAt:          time.UnixMilli(rec.SpawnedAt),
-		LastActivity:       time.UnixMilli(rec.LastSeenAlive),
-		ExitedAt:           time.UnixMilli(rec.ExitedAt),
-		ExitCode:           rec.ExitCode,
-		ExitSignal:         rec.ExitSignal,
-		Labels:             rec.Labels,
-	}
-}
-
-// recordFromSnapshot builds a persist.Record from a store Snapshot.
-func recordFromSnapshot(snap childstore.Snapshot) persist.Record {
-	return persist.Record{
-		ChildID:            snap.ChildID,
-		PID:                snap.PID,
-		Name:               snap.Name,
-		Cwd:                snap.Cwd,
-		Kind:               snap.Kind,
-		ConfigDir:          snap.ConfigDir,
-		Provider:           snap.Provider,
-		Model:              snap.Model,
-		Thinking:           snap.Thinking,
-		SessionID:          snap.SessionID,
-		SessionFile:        snap.SessionFile,
-		SessionDir:         snap.SessionDir,
-		NoSession:          snap.NoSession,
-		Tools:              snap.Tools,
-		NoTools:            snap.NoTools,
-		NoBuiltinTools:     snap.NoBuiltinTools,
-		Extensions:         snap.Extensions,
-		NoExtensions:       snap.NoExtensions,
-		Skills:             snap.Skills,
-		NoSkills:           snap.NoSkills,
-		SkillsDirs:         snap.SkillsDirs,
-		MCPConfig:          snap.MCPConfig,
-		MCPServers:         snap.MCPServers,
-		NoMCP:              snap.NoMCP,
-		PromptTemplates:    snap.PromptTemplates,
-		NoPromptTemplates:  snap.NoPromptTemplates,
-		Themes:             snap.Themes,
-		NoThemes:           snap.NoThemes,
-		NoContextFiles:     snap.NoContextFiles,
-		SystemPrompt:       snap.SystemPrompt,
-		AppendSystemPrompt: snap.AppendSystemPrompt,
-		Verbose:            snap.Verbose,
-		PiBinary:           snap.PiBinary,
-		ExtraArgs:          snap.ExtraArgs,
-		RecordRequests:     snap.RecordRequests,
-		ExecutorSelector:   snap.ExecutorSelector,
-		WorkspaceMode:      snap.WorkspaceMode,
-		MaxDepth:           snap.MaxDepth,
-		MaxCost:            snap.MaxCost,
-		MaxChildren:        snap.MaxChildren,
-		SpawnedAt:          snap.StartedAt.UnixMilli(),
-		LastSeenAlive:      snap.LastActivity.UnixMilli(),
-		LastStatus:         string(snap.Status),
-		ExitedAt:           snap.ExitedAt.UnixMilli(),
-		ExitCode:           snap.ExitCode,
-		ExitSignal:         snap.ExitSignal,
-		Labels:             snap.Labels,
-	}
-}
-
-// TaskList queries the task ledger for the ctrl_task_list verb.
-//
-// No conversation scope: this verb answers "what is every agent doing",
-// which is a cross-conversation question. The dispatcher clamps Limit before
-// calling, and the store applies it after sorting, which is what keeps the
-// response inside protocol.MaxFrameBytes.
 func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
 	if c.tasks == nil {
 		return nil, &control.ControllerError{
