@@ -309,3 +309,17 @@ func TestProvidersFile(t *testing.T) {
 		t.Errorf("ProvidersFile() with RAFIKI_PROVIDERS = %q, want %q", got, want)
 	}
 }
+
+func TestConnectSocketPathIsBesideTheControlSocket(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
+	got := ConnectSocketPath()
+	want := filepath.Join(dir, "rafiki", "connect.sock")
+	if got != want {
+		t.Fatalf("ConnectSocketPath() = %q, want %q", got, want)
+	}
+	if filepath.Dir(got) != filepath.Dir(SocketPath()) {
+		t.Fatalf("connect socket %q is not beside the control socket %q", got, SocketPath())
+	}
+}
