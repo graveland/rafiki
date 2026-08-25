@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"syscall"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -55,7 +56,8 @@ func resolveRoot(root string) (string, error) {
 
 func executorHandler(srv *executor.Server) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(executorpbconnect.NewExecutorServiceHandler(srv))
+	interceptor := executor.NewRPCInterceptor()
+	mux.Handle(executorpbconnect.NewExecutorServiceHandler(srv, connect.WithInterceptors(interceptor)))
 	return mux
 }
 
