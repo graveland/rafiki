@@ -315,41 +315,39 @@ func runDaemon(opts runDaemonOpts) error {
 
 	// The agent kind's in-process children share one pool across the whole
 	// daemon (fundi.RuntimeOptions.Pool); BuildEngine/BuildRuntime never open
-	// or close one themselves. A nil pool (RAFIKI_DB unset) means every
-	// agent conversation is in-memory, matching `rafikid agent --db` unset.
-	var pool *pgxpool.Pool
-	var err error
-	dsn := opts.DB
-	if dsn == "" {
-		dsn = paths.Get(paths.DB)
+	// or close one themselves.
+	//
+	// The database is REQUIRED as of 2026-08-25 (Phase C design 2.1). This
+	// used to be a warning and a nil pool; the comment here used to say "'The
+	// database is required' is a phase 2 decision that has not been made".
+	// It has been made.
+	dsn, err := requireDSN(opts.DB)
+	if err != nil {
+		slog.Error("cannot start", "error", err)
+		os.Exit(1)
 	}
-	if dsn != "" {
-		pool, err = pgxpool.New(baseCtx, dsn)
-		if err != nil {
-			// Deliberately NOT fatal. pgxpool.New only PARSES the DSN, it does
-			// not connect, so the only way to reach this branch is a malformed
-			// DSN — and killing the daemon over one takes pi and claude
-			// children down with it, for an operator who may never spawn an
-			// agent at all. "The database is required" is a phase 2 decision
-			// that has not been made; exiting here would make it silently, in
-			// a failure path, ahead of the design.
-			slog.Error("agent database DSN is invalid; starting without a pool. "+
-				"Agent conversations will be in-memory and no cost data will be recorded",
-				"env", paths.DB, "error", err)
-			pool = nil
-		} else {
-			slog.Info("agent database pool opened")
-			if opts.Dev {
-				if err := store.Migrate(baseCtx, pool); err != nil {
-					slog.Error("dev mode: migrate failed", "error", err)
-					os.Exit(1)
-				}
-				slog.Info("dev mode: store migrated")
-			}
+	pool, err := pgxpool.New(baseCtx, dsn)
+	if err != nil {
+		slog.Error("database DSN is invalid", "env", paths.DB, "error", err)
+		os.Exit(1)
+	}
+	// pgxpool.New only PARSES the DSN. Ping is what proves the database is
+	// reachable, and an unreachable database is a startup failure now rather
+	// than a daemon that runs with every persistent feature silently dead.
+	pingCtx, pingCancel := context.WithTimeout(baseCtx, 10*time.Second)
+	err = pool.Ping(pingCtx)
+	pingCancel()
+	if err != nil {
+		slog.Error("database is not reachable", "env", paths.DB, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("agent database pool opened")
+	if opts.Dev {
+		if err := store.Migrate(baseCtx, pool); err != nil {
+			slog.Error("dev mode: migrate failed", "error", err)
+			os.Exit(1)
 		}
-	} else {
-		slog.Warn("no agent database configured; agent conversations are in-memory and no cost data will be recorded",
-			"env", paths.DB)
+		slog.Info("dev mode: store migrated")
 	}
 
 	// The daemon's own proxy face. pi and claude children are separate
