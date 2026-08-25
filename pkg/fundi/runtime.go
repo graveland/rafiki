@@ -117,6 +117,11 @@ type RuntimeOptions struct {
 	// conversation becomes an ordinary child exit rather than a wedged child.
 	OnFatal func(error)
 
+	// NativeSink receives this child's rafiki-native events. Optional: a nil
+	// sink leaves the Emitter behaving exactly as before, which is what lets
+	// this be additive.
+	NativeSink NativeSink
+
 	// RawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
@@ -505,6 +510,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		AutoResume:             opts.AutoResume,
 		OnConversationResolved: opts.OnConversationResolved,
 		OnFatal:                opts.OnFatal,
+		NativeSink:             opts.NativeSink,
 		RawTrace:               opts.RawTrace,
 	}
 

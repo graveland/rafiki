@@ -83,6 +83,9 @@ type EngineConfig struct {
 	// path always supplies one, because a silently-stopped queue there is a
 	// wedged child that answers prompts forever and never runs one.
 	OnFatal func(error)
+
+	// NativeSink receives this engine's rafiki-native events. Optional.
+	NativeSink NativeSink
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -175,6 +178,9 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 			Provider:    cfg.Provider,
 		},
 		wake: make(chan struct{}, 1),
+	}
+	if cfg.NativeSink != nil {
+		e.em.SetNativeSink(cfg.NativeSink)
 	}
 	// fe's Handler is wired here rather than by the caller: Engine and
 	// Frontend are the same package, but BuildEngine (cmd/rafikid's entry
