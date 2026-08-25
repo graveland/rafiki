@@ -62,7 +62,12 @@ func (c *Controller) startLeaseRenewal(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				c.releaseAllLeases()
+				// Leases are NOT released here. main.go cancels this context
+				// BEFORE ShutdownAllChildren, and a final compaction or
+				// summarisation turn still writes for up to three minutes
+				// after. Releasing now would let a peer daemon acquire the
+				// conversation while this daemon's child is still writing to
+				// it. main.go calls ReleaseAllLeases after shutdown instead.
 				return
 			case <-ticker.C:
 				c.renewLeasesOnce(ctx)
@@ -131,10 +136,10 @@ func (c *Controller) onLeaseLost(childID string) {
 	}
 }
 
-// releaseAllLeases drops every held lease on clean shutdown, so a restarting
+// ReleaseAllLeases drops every held lease on clean shutdown, so a restarting
 // daemon's peers see the conversations as free immediately rather than after
 // the TTL.
-func (c *Controller) releaseAllLeases() {
+func (c *Controller) ReleaseAllLeases() {
 	c.heldLeasesMu.Lock()
 	snapshot := make([]store.Lease, 0, len(c.heldLeases))
 	for _, v := range c.heldLeases {
