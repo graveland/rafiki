@@ -3,6 +3,8 @@
 package connectapi
 
 import (
+	"context"
+
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -54,3 +56,44 @@ func toProtoChild(c protocol.ChildSummary) *rafikiv1.ChildSummary {
 	}
 	return out
 }
+
+// SpawnParams is the narrow set of spawn inputs a client controls. The three
+// budget fields are POINTERS and must stay pointers all the way to the daemon:
+// unset and zero mean different things, in opposite directions per field
+// (unset depth = 1, zero = may not spawn; unset cost = unlimited, zero = spend
+// nothing; unset children = 4). Flattening any of them to a value silently
+// converts one meaning into the other.
+type SpawnParams struct {
+	Cwd              string
+	Name             string
+	Model            string
+	Kind             string
+	ParentChildID    string
+	ExecutorSelector string
+	Labels           map[string]string
+	MaxDepth         *int
+	MaxCost          *float64
+	MaxChildren      *int
+}
+
+// ChildLifecycle is the narrow slice of the daemon's Controller needed to
+// create and end children.
+type ChildLifecycle interface {
+	// Spawn creates a child and returns its id.
+	Spawn(ctx context.Context, p SpawnParams) (string, error)
+	// Kill ends a child and reports how it ended.
+	Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (KillOutcome, error)
+}
+
+// KillOutcome mirrors protocol.KillResponseData, which is what the daemon's
+// Kill actually returns. There is deliberately no status string: that struct
+// has none, and a client wanting the settled status calls GetChild.
+type KillOutcome struct {
+	ExitCode   *int
+	Signal     string
+	DurationMs int64
+	Escalated  bool
+}
+
+// SetChildLifecycle attaches the spawn/kill source.
+func (s *Server) SetChildLifecycle(l ChildLifecycle) { s.lifecycle = l }
