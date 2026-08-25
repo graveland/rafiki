@@ -19,17 +19,12 @@ func newCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "create [name]",
 		Aliases: []string{"cr"},
-		Short:   "Spawn a new pi child and attach a local TUI to it",
-		Long: `Spawn a new pi child via the controller, then open the pi TUI driving it.
+		Short:   "Spawn a new child and attach the rafiki TUI to it",
+		Long: `Spawn a new child via the controller, then open the rafiki TUI driving it.
 
-The rafiki-helpers pi extension is auto-installed (or upgraded) into
-~/.pi/agent/extensions/rafiki-helpers/ before spawning, so slash commands
-like /reload work inside the TUI. Use --no-install-helpers or set
-RAFIKI_NO_AUTO_INSTALL_HELPERS=1 to skip.
-
-When the TUI quits (Ctrl+D, /quit), rafiki asks whether to terminate the session
-or leave it running. Use --kill-on-exit or --keep-on-exit to skip the prompt
-and choose explicitly.
+When the TUI quits (Ctrl+C, Ctrl+D), rafiki asks whether to terminate the
+session or leave it running. Use --kill-on-exit or --keep-on-exit to skip the
+prompt and choose explicitly.
 
 With --detached, rafiki create spawns the child and exits without attaching.
 The child runs in the background; reattach later with 'rafiki attach <name>'.
@@ -39,10 +34,8 @@ The child runs in the background; reattach later with 'rafiki attach <name>'.
 Environment variable defaults (applied before explicit flags; lowest priority):
   RAFIKI_DEFAULT_PRESET  preset name from <config dir>/presets.json (see 'rafiki presets')
   RAFIKI_DEFAULT_MODEL   fallback model string
-  RAFIKI_DEFAULT_LABELS  comma-separated k=v label defaults
+  RAFIKI_DEFAULT_LABELS  comma-separated k=v label defaults`,
 
-(Note: rafiki create replaces the earlier ` + "`rafiki spawn`" + ` subcommand. For
-scripting / AFK workflows, use --detached.)`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runCreate,
 	}
@@ -51,7 +44,6 @@ scripting / AFK workflows, use --detached.)`,
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.Flags().Bool("no-install-helpers", false, "Skip the auto-install of the rafiki-helpers pi extension")
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from <config dir>/presets.json (also settable via RAFIKI_DEFAULT_PRESET)")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort: silently empty list when presets file is missing or malformed.
@@ -301,18 +293,6 @@ func collectCallerEnv() map[string]string {
 func runCreate(cmd *cobra.Command, args []string) error {
 	c := mustDial(cmd)
 	defer c.Close()
-
-	// claude children have no pi extension system, so the rafiki-helpers pi
-	// extension is meaningless for them (the helper frame would just be
-	// dropped). Skip the auto-install entirely for --kind claude.
-	kind, _ := cmd.Flags().GetString("kind")
-	noInstall, _ := cmd.Flags().GetBool("no-install-helpers")
-	if !noInstall && kind != protocol.KindClaude {
-		if err := ensureHelpersInstalled(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: rafiki-helpers auto-install failed: %v\n", err)
-			// proceed anyway
-		}
-	}
 
 	req, err := buildSpawnRequest(cmd, args)
 	if err != nil {

@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -139,100 +137,27 @@ func socketFromCmd(cmd *cobra.Command) string {
 	return s
 }
 
-// resolvedSocket returns the concrete socket path this invocation talks to:
-// the --socket flag if given, else whatever Dial would have picked. Unlike
-// socketFromCmd it never returns "" — callers that must hand the path to
-// another process cannot pass along "resolve it yourself", because that other
-// process may resolve it differently.
-func resolvedSocket(cmd *cobra.Command) string {
-	if s := socketFromCmd(cmd); s != "" {
-		return s
-	}
-	return client.DefaultSocketPath()
-}
-
-// findRafikiAttach returns the absolute path to the rafiki-attach binary.
-// Looks first in the same directory as the running rafiki executable, then on PATH.
-func findRafikiAttach() (string, error) {
-	self, err := os.Executable()
-	if err == nil {
-		sibling := filepath.Join(filepath.Dir(self), "rafiki-attach")
-		if _, statErr := os.Stat(sibling); statErr == nil {
-			return sibling, nil
-		}
-	}
-	if path, lookErr := exec.LookPath("rafiki-attach"); lookErr == nil {
-		return path, nil
-	}
-	return "", fmt.Errorf("rafiki-attach binary not found (expected sibling of rafiki or on PATH); install bun and run 'make build-attach'")
-}
-
-// attachEnv is the environment rafiki-attach is spawned with: ours, plus an
-// explicit socket path so the TUI cannot resolve a different default than the
-// one this process is talking to.
-//
-// Appending is enough to win over an inherited value: os/exec deduplicates
-// Env and keeps the last entry for a repeated key.
-func attachEnv(socket string) []string {
-	return append(os.Environ(), paths.Socket+"="+socket)
-}
-
-// execRafikiAttach spawns rafiki-attach <childID> with stdio inherited and waits
-// for it to exit. Returns when rafiki-attach exits. If rafiki-attach exits with a
-// non-zero code, os.Exit is called directly so the exit code propagates
-// without extra error noise (rafiki-attach has already printed to stderr).
-//
-// socket is passed down explicitly in the environment. Letting rafiki-attach
-// resolve its own default was a live bug: the TypeScript and Go sides derive
-// the socket path independently (from APP_NAME, which is duplicated across
-// the boundary), and a mismatch means the TUI dials a path nothing is
-// listening on. It also means --socket now reaches the TUI, which it
-// previously did not.
-func execRafikiAttach(childID, socket string) error {
-	bin, err := findRafikiAttach()
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command(bin, childID)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = attachEnv(socket)
-	if runErr := cmd.Run(); runErr != nil {
-		// rafiki-attach already wrote to stderr; just propagate the exit code.
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		return fmt.Errorf("rafiki-attach: %w", runErr)
-	}
-	return nil
-}
-
-// attachAndDecide runs rafiki-attach and, after it exits normally, prompts the
-// user to keep or kill the session (unless overridden by flags or non-TTY
-// stdin). SIGINT/SIGTERM during the subprocess skip the prompt — the user
+// attachAndDecide runs the in-process TUI and, after it exits normally, prompts
+// the user to keep or kill the session (unless overridden by flags or non-TTY
+// stdin). SIGINT/SIGTERM during the TUI skip the prompt — the user
 // is forcibly exiting and the session should keep running (default keep).
 func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit bool) error {
-	// Install handler before spawning so we catch any signal that kills both
-	// rafiki and rafiki-attach. Buffer=1 so the send never blocks.
+	// Install handler before starting the TUI so we catch any signal that
+	// kills the process mid-render. Buffer=1 so the send never blocks.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	if err := execRafikiAttach(childID, resolvedSocket(cmd)); err != nil {
-		// Even on subprocess error, defensively reset the terminal — rafiki-attach
-		// may have crashed mid-render with raw mode / alt screen / kitty
-		// keyboard protocol active, and the user is about to see Go-side output.
+	// In-process now. This used to exec a `rafiki-attach` binary built from
+	// TypeScript; B4 deleted the source and the make target, so the exec path
+	// failed at runtime telling the user to run `make build-attach`.
+	if err := runTUIForChild(cmd, childID); err != nil {
+		// Defensively reset the terminal — bubbletea may have died mid-render
+		// with raw mode or the alt screen active, and the user is about to see
+		// Go-side output.
 		resetTerminal()
 		return err
 	}
-
-	// Defensively reset the terminal regardless of rafiki-attach's exit path.
-	// Pi-tui's own teardown should handle this, but races on hard exit paths
-	// (daemon broadcast, signal-driven shutdown, uncaught throws) have left
-	// the terminal in advanced modes (kitty keyboard, modifyOtherKeys, etc.)
-	// that the TS-side restoreTerminal missed.  This is a safety net.
 	resetTerminal()
 
 	// Stop delivery before the non-blocking drain so there's no race between
