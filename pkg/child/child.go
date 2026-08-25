@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/bus"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
 )
@@ -37,6 +38,11 @@ type SpawnSpec struct {
 	// built from PiBinary/Argv/Env. Injected rather than selected inside this
 	// package because internal/fundi imports it.
 	Runner Runner
+
+	// NativeSink, when non-nil, receives rafiki-native events translated from
+	// this child's stdout. Only the claude provider translates native events
+	// today; pi and fundi children use their own paths.
+	NativeSink func(*rafikiv1.Event)
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -187,8 +193,9 @@ type Child struct {
 	// production writer, and Shutdown its only reader.
 	abandonAfter time.Duration
 
-	sm       *StateMachine
-	provider ProtocolProvider
+	sm         *StateMachine
+	provider   ProtocolProvider
+	nativeSink func(*rafikiv1.Event)
 	// preShutdownStatus is the status before BeginShutdown was called, captured
 	// so handleChildExit can record the child's real pre-exit state (idle,
 	// streaming, etc.) rather than "shutting_down" which is an artifact of the
@@ -284,6 +291,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		ring:         ring.New(ring.Options{}),
 		sm:           NewStateMachine(),
 		provider:     prov,
+		nativeSink:   spec.NativeSink,
 		transitionCh: make(chan struct{}, 1),
 		idle:         make(chan struct{}),
 		abandonAfter: abandonTimeout,
@@ -520,6 +528,18 @@ func (c *Child) RenderStats() (events int, oldestTimestamp int64) {
 // source; when false, the raw ring is already renderable.
 func (c *Child) Normalizes() bool { return c.provider.Normalizes() }
 
+// busFramesNative translates one raw stdout line into native events via the
+// provider, when it supports native translation (claudeProvider).
+func (c *Child) busFramesNative(line []byte, ts int64) []*rafikiv1.Event {
+	type nativeTranslator interface {
+		BusFramesNative([]byte, int64) []*rafikiv1.Event
+	}
+	if nt, ok := c.provider.(nativeTranslator); ok {
+		return nt.BusFramesNative(line, ts)
+	}
+	return nil
+}
+
 // StderrSnapshot returns a copy of buffered stderr bytes. Safe to call at any
 // time: readStderr's writes and this read share errMu, because Done() being
 // closed no longer proves readStderr has finished (see abandon).
@@ -704,6 +724,12 @@ func (c *Child) readStdout() {
 		}
 		for _, f := range c.provider.BusFrames(line, ts) {
 			c.publishBus(f, ts)
+		}
+		if c.nativeSink != nil {
+			for _, ev := range c.busFramesNative(line, ts) {
+				ev.ChildId = c.ID
+				c.nativeSink(ev)
+			}
 		}
 		c.handleFrame(line)
 	}

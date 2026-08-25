@@ -30,6 +30,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -798,6 +799,13 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
+
+		spec.NativeSink = func(ev *rafikiv1.Event) {
+			if ev.GetChildId() == "" {
+				ev.ChildId = childID
+			}
+			c.native.Publish(childID, ev)
+		}
 		spec.PiBinary = ""
 		spec.Argv = nil
 	}
@@ -1451,6 +1459,13 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		Runner:      runner,
 	}
 	if runner != nil {
+
+		spec.NativeSink = func(ev *rafikiv1.Event) {
+			if ev.GetChildId() == "" {
+				ev.ChildId = childID
+			}
+			c.native.Publish(childID, ev)
+		}
 		spec.PiBinary = ""
 		spec.Argv = nil
 	}
@@ -1566,6 +1581,13 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		Runner:   runner,
 	}
 	if runner != nil {
+
+		spec.NativeSink = func(ev *rafikiv1.Event) {
+			if ev.GetChildId() == "" {
+				ev.ChildId = childID
+			}
+			c.native.Publish(childID, ev)
+		}
 		spec.PiBinary = ""
 		spec.Argv = nil
 	}

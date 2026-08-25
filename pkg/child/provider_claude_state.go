@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 // claudeProvider is the per-child stateful translator returned by
@@ -207,8 +209,8 @@ func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel, 
 		model = p.st.model
 	}
 
-	content := make([]PiContentBlock, 0, len(blocks))
 	var toolCalls []claudeContentBlock
+	content := make([]PiContentBlock, 0, len(blocks))
 	hasToolUse := false
 	for _, b := range blocks {
 		switch b.Type {
@@ -230,6 +232,7 @@ func (p *claudeProvider) emitAssistant(blocks []claudeContentBlock, frameModel, 
 		case "tool_use":
 			content = append(content, PiToolCallBlock(b.ID, b.Name, b.Input))
 			toolCalls = append(toolCalls, b)
+
 			hasToolUse = true
 		}
 	}
@@ -439,4 +442,237 @@ func mustFrame(v any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// BusFramesNative translates one claude stdout line into rafiki-native events.
+// It mirrors BusFrames's translation logic but emits protobuf events for the
+// Connect control plane's StreamEvents, so a claude child renders in the TUI
+// without going through the pi vocabulary.
+func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Event {
+	var f claudeStreamFrame
+	if err := json.Unmarshal(line, &f); err != nil {
+		return nil
+	}
+
+	switch f.Type {
+	case "system":
+		if f.Subtype == "init" && f.Model != "" {
+			p.st.model = f.Model
+			p.st.provider, p.st.api = claudeProviderAPI(f.Model)
+		}
+		return nil
+
+	case "assistant":
+		if f.Message == nil || len(f.Message.Content) == 0 {
+			return nil
+		}
+		return p.nativeAssistant(f.Message.Content, f.Message.Model, ts)
+
+	case "user":
+		if f.Message == nil {
+			return nil
+		}
+		return p.nativeUser(f.Message.Content, ts)
+
+	case "result":
+		return p.nativeResult(f, ts)
+
+	default:
+		return nil
+	}
+}
+
+func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel string, ts int64) []*rafikiv1.Event {
+	var out []*rafikiv1.Event
+
+	// TurnStart if not already active.
+	if !p.st.turnActive {
+		p.st.turnActive = true
+		out = append(out, &rafikiv1.Event{
+			TsUnixMs: ts,
+			Payload:  &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}},
+		})
+	}
+
+	// ContentBlockDeltas for text/thinking.
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if b.Text != "" {
+				out = append(out, &rafikiv1.Event{
+					TsUnixMs: ts,
+					Payload: &rafikiv1.Event_ContentBlockDelta{
+						ContentBlockDelta: &rafikiv1.ContentBlockDelta{
+							Delta: &rafikiv1.ContentBlockDelta_Text{Text: b.Text},
+						},
+					},
+				})
+			}
+		case "thinking":
+			if b.Thinking != "" {
+				out = append(out, &rafikiv1.Event{
+					TsUnixMs: ts,
+					Payload: &rafikiv1.Event_ContentBlockDelta{
+						ContentBlockDelta: &rafikiv1.ContentBlockDelta{
+							Delta: &rafikiv1.ContentBlockDelta_Thinking{Thinking: b.Thinking},
+						},
+					},
+				})
+			}
+		case "tool_use":
+
+			out = append(out, &rafikiv1.Event{
+				TsUnixMs: ts,
+				Payload: &rafikiv1.Event_ToolExecutionStart{
+					ToolExecutionStart: &rafikiv1.ToolExecutionStart{
+						ToolUseId: b.ID,
+						Name:      b.Name,
+					},
+				},
+			})
+		}
+	}
+
+	// ToolExecutionEnd for any tool results embedded in the assistant frame.
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			_ = toolResultText(b.Content)
+			out = append(out, &rafikiv1.Event{
+				TsUnixMs: ts,
+				Payload: &rafikiv1.Event_ToolExecutionEnd{
+					ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
+						ToolUseId: b.ToolUseID,
+						IsError:   b.IsError,
+					},
+				},
+			})
+		}
+	}
+
+	// Build the content blocks for the assistant message.
+	var content []*rafikiv1.ContentBlock
+	idx := int32(0)
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if b.Text != "" {
+				content = append(content, &rafikiv1.ContentBlock{
+					Index: idx,
+					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: b.Text}},
+				})
+				idx++
+			}
+		case "thinking":
+			if b.Thinking != "" {
+				content = append(content, &rafikiv1.ContentBlock{
+					Index: idx,
+					Block: &rafikiv1.ContentBlock_Thinking{Thinking: &rafikiv1.ThinkingBlock{Thinking: b.Thinking}},
+				})
+				idx++
+			}
+		case "tool_use":
+			content = append(content, &rafikiv1.ContentBlock{
+				Index: idx,
+				Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+					Id: b.ID, Name: b.Name, InputJson: toolInputJSON(b.Input),
+				}},
+			})
+			idx++
+		case "tool_result":
+			content = append(content, &rafikiv1.ContentBlock{
+				Index: idx,
+				Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+					ToolUseId: b.ToolUseID,
+					Content: []*rafikiv1.ContentBlock{{
+						Index: 0,
+						Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: toolResultText(b.Content)}},
+					}},
+					IsError: b.IsError,
+				}},
+			})
+			idx++
+		}
+	}
+
+	out = append(out, &rafikiv1.Event{
+		TsUnixMs: ts,
+		Payload: &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{
+				Content:    content,
+				StopReason: rafikiv1.StopReason_STOP_REASON_TOOL_USE,
+			},
+		},
+	})
+
+	return out
+}
+
+func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*rafikiv1.Event {
+	var out []*rafikiv1.Event
+
+	if !p.st.turnActive {
+		p.st.turnActive = true
+		out = append(out, &rafikiv1.Event{
+			TsUnixMs: ts,
+			Payload:  &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}},
+		})
+	}
+
+	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			continue
+		}
+		out = append(out, &rafikiv1.Event{
+			TsUnixMs: ts,
+			Payload: &rafikiv1.Event_ToolExecutionEnd{
+				ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
+					ToolUseId: b.ToolUseID,
+					IsError:   b.IsError,
+				},
+			},
+		})
+	}
+	return out
+}
+
+func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1.Event {
+	p.st.turnActive = false
+
+	var usage *rafikiv1.Usage
+	if f.Usage != nil {
+		usage = &rafikiv1.Usage{
+			InputTokens:      int64Ptr(int64(f.Usage.InputTokens)),
+			OutputTokens:     int64Ptr(int64(f.Usage.OutputTokens)),
+			CacheReadTokens:  int64Ptr(int64(f.Usage.CacheReadInputTokens)),
+			CacheWriteTokens: int64Ptr(int64(f.Usage.CacheCreationInputTokens)),
+		}
+	}
+	var costUSD *float64
+	if f.TotalCostUSD > 0 {
+		v := f.TotalCostUSD
+		costUSD = &v
+	}
+	return []*rafikiv1.Event{{
+		TsUnixMs: ts,
+		Payload: &rafikiv1.Event_TurnEnd{
+			TurnEnd: &rafikiv1.TurnEnd{
+				Usage:   usage,
+				CostUsd: costUSD,
+			},
+		},
+	}}
+}
+
+func int64Ptr(v int64) *int64 { return &v }
+
+// toolInputJSON converts a tool input map to a JSON string.
+func toolInputJSON(input map[string]any) string {
+	if input == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(input)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
