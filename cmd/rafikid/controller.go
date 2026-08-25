@@ -1726,6 +1726,24 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 	return errors.Join(errs...)
 }
 
+// ownsChildRow reports whether this daemon may destroy a child's durable state.
+//
+// Child rows are shared, so loadChildren inserts every daemon's children into
+// the local store as exited — including children that are alive on another
+// daemon right now. Hard-deleting one of those rows destroys the durable state
+// of a running child, and irrecoverably if its daemon crashes before its next
+// writeRecord.
+//
+// A row with no owner label is ours: it predates the label, and refusing to
+// forget it would strand it forever.
+func (c *Controller) ownsChildRow(snap childstore.Snapshot) bool {
+	if c.daemonID == "" {
+		return true
+	}
+	owner := snap.Labels["rafiki/daemon"]
+	return owner == "" || owner == c.daemonID
+}
+
 func (c *Controller) Forget(childID string) error {
 	// Wait for handleChildExit (running on monitorChild's goroutine) to finish
 	// before we touch on-disk state. Two races are possible when forget arrives
@@ -1760,7 +1778,7 @@ func (c *Controller) Forget(childID string) error {
 	}
 
 	c.st.Delete(childID)
-	if c.children != nil {
+	if c.children != nil && c.ownsChildRow(snap) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := c.children.Delete(ctx, childID); err != nil {
 			slog.Warn("delete child row", "childId", childID, "error", err)
@@ -1818,6 +1836,13 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 			}
 		}
 		c.st.Delete(s.ChildID)
+		if c.children != nil && c.ownsChildRow(s) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := c.children.Delete(ctx, s.ChildID); err != nil {
+				slog.Warn("delete child row", "childId", s.ChildID, "error", err)
+			}
+			cancel()
+		}
 		if err := c.deleteLogDump(s.ChildID); err != nil {
 			slog.Warn("delete log dump", "childId", s.ChildID, "error", err)
 		}
@@ -2625,6 +2650,21 @@ func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) er
 	}
 
 	if c.children != nil {
+		// Stamp the owning daemon label so Forgets can check ownership.
+		// Ordering matters: this must run before RecordFromSnapshot so
+		// the label reaches the row.
+		if c.daemonID != "" {
+			if err := c.st.Update(childID, func(s *childstore.Session) {
+				if s.Labels == nil {
+					s.Labels = map[string]string{}
+				}
+				s.Labels["rafiki/daemon"] = c.daemonID
+			}); err != nil {
+				slog.Warn("stamp owning daemon label", "childId", childID, "error", err)
+			}
+			snap, _ = c.st.Get(childID)
+		}
+
 		rec := childstore.RecordFromSnapshot(snap)
 		rec.LastStatus = lastStatus
 		rec.DaemonID = c.daemonID
