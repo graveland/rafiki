@@ -44,6 +44,7 @@ type Server struct {
 	events   EventSource
 	resolver ConversationResolver
 	inbox    inbox.Inbox
+	children ChildLister
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }

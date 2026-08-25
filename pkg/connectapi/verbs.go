@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -84,13 +85,47 @@ func textFromBlocks(blocks []*rafikiv1.ContentBlock) (string, error) {
 // The four verbs below are stubs so *Server keeps satisfying the generated
 // ControlHandler interface between plan tasks. Tasks 6-8 replace each one.
 
-func (s *Server) ListChildren(context.Context, *connect.Request[rafikiv1.ListChildrenRequest]) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("ListChildren not implemented"))
+// ListChildren returns the daemon's children, optionally filtered by status.
+func (s *Server) ListChildren(
+	_ context.Context,
+	req *connect.Request[rafikiv1.ListChildrenRequest],
+) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
+	if s.children == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("child lister not yet wired"))
+	}
+	summaries := s.children.ListChildren(req.Msg.GetStatuses())
+	out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
+	for _, c := range summaries {
+		out = append(out, toProtoChild(c))
+	}
+	return connect.NewResponse(&rafikiv1.ListChildrenResponse{Children: out}), nil
 }
 
-func (s *Server) GetChild(context.Context, *connect.Request[rafikiv1.GetChildRequest]) (*connect.Response[rafikiv1.GetChildResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("GetChild not implemented"))
+// GetChild returns one child by id.
+func (s *Server) GetChild(
+	_ context.Context,
+	req *connect.Request[rafikiv1.GetChildRequest],
+) (*connect.Response[rafikiv1.GetChildResponse], error) {
+	childID := req.Msg.GetChildId()
+	if childID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("child_id is required"))
+	}
+	if s.children == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("child lister not yet wired"))
+	}
+	summary, ok := s.children.GetChild(childID)
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound,
+			fmt.Errorf("no such child %q", childID))
+	}
+	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: toProtoChild(summary)}), nil
 }
+
+// The two verbs below are stubs so *Server keeps satisfying the generated
+// ControlHandler interface between plan tasks. Task 7 replaces each one.
 
 func (s *Server) Spawn(context.Context, *connect.Request[rafikiv1.SpawnRequest]) (*connect.Response[rafikiv1.SpawnResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Spawn not implemented"))
