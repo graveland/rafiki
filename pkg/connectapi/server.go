@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"connectrpc.com/connect"
 
@@ -39,16 +40,35 @@ type ConversationResolver interface {
 }
 
 // Server implements the Control service.
+//
+// Every dependency below is attached AFTER construction, because the daemon's
+// Controller — the only thing that can answer any of them — is built after the
+// proxy face that owns this Server. They are atomic.Pointer rather than plain
+// fields because the HTTP listener is already serving by the time main.go
+// wires them: a plain field write there is a data race by the Go memory model,
+// even though the lost-race outcome is a benign fail-closed.
 type Server struct {
-	history   HistoryLoader
-	events    EventSource
-	resolver  ConversationResolver
-	inbox     inbox.Inbox
-	children  ChildLister
-	lifecycle ChildLifecycle
+	history HistoryLoader
+
+	events    atomic.Pointer[EventSource]
+	resolver  atomic.Pointer[ConversationResolver]
+	inbox     atomic.Pointer[inbox.Inbox]
+	children  atomic.Pointer[ChildLister]
+	lifecycle atomic.Pointer[ChildLifecycle]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
+
+// SetEventSource attaches the live-event source. Without one, StreamEvents
+// serves the durable replay and then ends the stream.
+func (s *Server) SetEventSource(src EventSource) { s.events.Store(&src) }
+
+func (s *Server) eventSource() EventSource {
+	if p := s.events.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 // SetChildResolver attaches the child-id-to-conversation-id resolver. It is a
 // post-construction setter, not a constructor argument, because the daemon's
@@ -58,24 +78,22 @@ func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
 // set, every call that needs it fails closed (CodeUnavailable) rather than
 // passing the child id through as if it were already a conversation id — the
 // exact bug this resolver exists to close.
-func (s *Server) SetChildResolver(r ConversationResolver) { s.resolver = r }
+func (s *Server) SetChildResolver(r ConversationResolver) { s.resolver.Store(&r) }
 
-// SetInbox attaches the inbound-message sink. Like SetChildResolver this is a
-// post-construction setter, because the daemon's Controller — the thing that
-// can actually reach a child — is built after the proxy face that owns this
-// Server. Until it is set, Send fails closed with CodeUnavailable rather than
-// reporting success for a message that reached nothing.
-func (s *Server) SetInbox(in inbox.Inbox) { s.inbox = in }
+// SetInbox attaches the inbound-message sink. Until it is set, Send fails
+// closed rather than reporting success for a message that reached nothing.
+func (s *Server) SetInbox(in inbox.Inbox) { s.inbox.Store(&in) }
 
 // resolveConversation turns a request's child_id into the conversation id
 // store.Messages.Load needs. Centralized here because GetHistory and
 // StreamEvents both need it with identical semantics.
 func (s *Server) resolveConversation(childID string) (string, error) {
-	if s.resolver == nil {
+	p := s.resolver.Load()
+	if p == nil {
 		return "", connect.NewError(connect.CodeUnavailable,
 			errors.New("child resolver not yet wired"))
 	}
-	conversationID, ok := s.resolver.ConversationID(childID)
+	conversationID, ok := (*p).ConversationID(childID)
 	if !ok {
 		return "", connect.NewError(connect.CodeNotFound,
 			fmt.Errorf("no conversation for child %q", childID))

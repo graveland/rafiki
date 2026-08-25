@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"connectrpc.com/connect"
 
@@ -17,10 +18,6 @@ import (
 type EventSource interface {
 	Subscribe(childID string) (<-chan *rafikiv1.Event, func())
 }
-
-// SetEventSource attaches the live-event source. Without one, StreamEvents
-// serves the durable replay and then ends the stream.
-func (s *Server) SetEventSource(src EventSource) { s.events = src }
 
 // StreamEvents replays the durable tier from after_ordinal, then follows live
 // events. The two tiers are deliberately different: durable events carry an
@@ -64,24 +61,58 @@ func (s *Server) StreamEvents(
 		}
 	}
 
-	// No live-event source is wired yet in this phase (SetEventSource has no
-	// production caller — see docs/reference/control-protocol.md §2.3). Ending
-	// the stream after replay, rather than blocking on ctx.Done(), avoids
-	// leaking a goroutine per caller for a stream that will never deliver
-	// anything; a client wanting live events reconnects/polls instead of
-	// hanging with no signal that it's stuck rather than slow.
-	if s.events == nil {
+	src := s.eventSource()
+	// No live-event source wired: end the stream after replay rather than
+	// blocking on ctx.Done(), which would leak a goroutine per caller for a
+	// stream that can never deliver anything.
+	if src == nil {
 		return nil
 	}
 
-	ch, cancel := s.events.Subscribe(ids[0])
-	defer cancel()
+	// Subscribe to EVERY requested child, not just the first. Following only
+	// ids[0] silently drops the other children's events, which looks to the
+	// caller like those agents went quiet.
+	merged := make(chan *rafikiv1.Event)
+	var wg sync.WaitGroup
+	streamCtx, stopFanIn := context.WithCancel(ctx)
+	defer stopFanIn()
+
+	for _, id := range ids {
+		ch, cancel := src.Subscribe(id)
+		defer cancel()
+		wg.Add(1)
+		go func(ch <-chan *rafikiv1.Event) {
+			defer wg.Done()
+			for {
+				select {
+				case <-streamCtx.Done():
+					return
+				case ev, ok := <-ch:
+					if !ok {
+						return
+					}
+					select {
+					case merged <- ev:
+					case <-streamCtx.Done():
+						return
+					}
+				}
+			}
+		}(ch)
+	}
+
+	// Close merged once every fan-in goroutine has stopped, so the send loop
+	// below terminates instead of blocking forever on a dead stream.
+	go func() {
+		wg.Wait()
+		close(merged)
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case ev, ok := <-ch:
+		case ev, ok := <-merged:
 			if !ok {
 				return nil
 			}

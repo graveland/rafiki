@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -158,5 +159,104 @@ func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
 		connect.NewRequest(&rafikiv1.StreamEventsRequest{ChildIds: []string{"c_1"}}))
 	if err == nil && stream.Receive() {
 		t.Fatal("deny-all http.Handler wrap did not block StreamEvents; a plain http.Handler wrap must cover streaming RPCs exactly like unary ones")
+	}
+}
+
+// multiSource is an EventSource with an independent channel per child, so a
+// test can prove every requested child is actually followed.
+type multiSource struct {
+	mu         sync.Mutex
+	chans      map[string]chan *rafikiv1.Event
+	subscribed []string
+}
+
+func (m *multiSource) Subscribe(childID string) (<-chan *rafikiv1.Event, func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.subscribed = append(m.subscribed, childID)
+	ch, ok := m.chans[childID]
+	if !ok {
+		ch = make(chan *rafikiv1.Event)
+		m.chans[childID] = ch
+	}
+	return ch, func() {}
+}
+
+// fixedResolver maps every child id to a single conversation id, which is all
+// these streaming tests need — fakeLoader ignores the id anyway.
+type fixedResolver struct{}
+
+func (fixedResolver) ConversationID(string) (string, bool) { return "conv-1", true }
+
+// TestStreamEventsFollowsEveryChild guards the Phase A defect where only
+// child_ids[0] was live-followed. It becomes silent data loss as soon as a
+// real EventSource is wired, because the caller asked for N children and
+// received one child's events.
+func TestStreamEventsFollowsEveryChild(t *testing.T) {
+	src := &multiSource{chans: map[string]chan *rafikiv1.Event{
+		"c_1": make(chan *rafikiv1.Event, 1),
+		"c_2": make(chan *rafikiv1.Event, 1),
+	}}
+	s := connectapi.NewServer(&fakeLoader{})
+	s.SetChildResolver(fixedResolver{})
+	s.SetEventSource(src)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Run StreamEvents in a goroutine; it will block after replay waiting for
+	// the merged channel. Publish to c_2 and read from its dedicated channel
+	// to prove the subscription was created.
+	src.chans["c_2"] <- &rafikiv1.Event{
+		ChildId: "c_2",
+		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: "idle"}},
+	}
+
+	go func() {
+		_ = s.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+			ChildIds: []string{"c_1", "c_2"},
+		}), &connect.ServerStream[rafikiv1.Event]{})
+	}()
+
+	// Read from c_2's channel — if our source was subscribed, the event we
+	// published should still be there to read.
+	select {
+	case ev := <-src.chans["c_2"]:
+		if ev.GetAgentStatus().GetState() != "idle" {
+			t.Errorf("state = %q, want idle", ev.GetAgentStatus().GetState())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("never received the second child's event: StreamEvents is following only child_ids[0]")
+	}
+}
+
+// TestSubscribeCalledForEveryChild is the cheaper, more direct assertion: the
+// source must be subscribed once per requested child.
+func TestSubscribeCalledForEveryChild(t *testing.T) {
+	src := &multiSource{chans: map[string]chan *rafikiv1.Event{
+		"c_1": make(chan *rafikiv1.Event),
+		"c_2": make(chan *rafikiv1.Event),
+		"c_3": make(chan *rafikiv1.Event),
+	}}
+	s := connectapi.NewServer(&fakeLoader{})
+	s.SetChildResolver(fixedResolver{})
+	s.SetEventSource(src)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		_ = s.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+			ChildIds: []string{"c_1", "c_2", "c_3"},
+		}), &connect.ServerStream[rafikiv1.Event]{})
+	}()
+
+	// Give the replay+subscribe goroutines time to run.
+	time.Sleep(50 * time.Millisecond)
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if len(src.subscribed) != 3 {
+		t.Errorf("subscribed to %d children (%v), want 3", len(src.subscribed), src.subscribed)
 	}
 }
