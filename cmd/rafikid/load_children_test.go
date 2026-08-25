@@ -25,7 +25,7 @@ func TestShouldAutoResume(t *testing.T) {
 		{"spawning fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "spawning"}, true},
 		{"exited fundi does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "exited"}, false},
 		{"shutting_down fundi does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "shutting_down"}, false},
-		{"empty last_status does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: ""}, false},
+		{"row with neither status does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: ""}, false},
 		{"idle pi does not", childstore.ChildRecord{Kind: protocol.KindPi, LastStatus: "idle"}, false},
 		{"idle claude does not", childstore.ChildRecord{Kind: protocol.KindClaude, LastStatus: "idle"}, false},
 	}
@@ -61,6 +61,65 @@ func TestRecoveryActionWorkspaceMode(t *testing.T) {
 			}
 			if got := recoveryAction(rec); got != tc.want {
 				t.Errorf("recoveryAction = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShouldAutoResumeAfterDaemonCrash is the regression test for the defect
+// that broke the design's whole motivating scenario.
+//
+// last_status is written ONLY by handleChildExit. A daemon killed by SIGKILL,
+// OOM or a node eviction never runs it, so the column stays NULL — and NULL is
+// therefore the STRONGEST evidence the child was alive, not the weakest. The
+// original predicate read NULL as "do not resume", which is exactly backwards
+// and meant a crashed pod recovered nothing.
+func TestShouldAutoResumeAfterDaemonCrash(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  childstore.ChildRecord
+		want bool
+	}{
+		{
+			"crashed while idle resumes",
+			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle", LastStatus: ""},
+			true,
+		},
+		{
+			"crashed while streaming resumes",
+			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "streaming", LastStatus: ""},
+			true,
+		},
+		{
+			"crashed while running a tool resumes",
+			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "tool_running", LastStatus: ""},
+			true,
+		},
+		{
+			"cleanly exited does not resume",
+			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "exited", LastStatus: "exited"},
+			false,
+		},
+		{
+			"recorded exit wins over a stale status",
+			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle", LastStatus: "exited"},
+			false,
+		},
+		{
+			"row with neither status resumes nothing",
+			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "", LastStatus: ""},
+			false,
+		},
+		{
+			"a crashed pi child still does not resume",
+			childstore.ChildRecord{Kind: protocol.KindPi, Status: "idle", LastStatus: ""},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldAutoResume(tc.rec); got != tc.want {
+				t.Errorf("shouldAutoResume = %v, want %v", got, tc.want)
 			}
 		})
 	}
