@@ -1405,10 +1405,10 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 
 	kind := snap.Kind
 	if kind == "" {
-		kind = protocol.KindClaude
+		kind = protocol.KindFundi
 	}
 
-	// Verify the session file exists for pi children that have one. Claude does
+	// Verify the session file exists for children that track one (pi). Claude does
 	// not track a session file (it manages its own ~/.claude store keyed by
 	// session id), so there is nothing to stat.
 	if kind == protocol.KindPi && !snap.NoSession && snap.SessionFile != "" {
@@ -1545,7 +1545,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	kind := snap.Kind
 	if kind == "" {
-		kind = protocol.KindClaude
+		kind = protocol.KindFundi
 	}
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
@@ -2924,16 +2924,16 @@ func buildClaudeArgv(req protocol.SpawnRequest) []string {
 }
 
 // resolveSpawnPlan picks the binary, argv, and ProtocolProvider for a spawn
-// request based on its Kind. Empty Kind defaults to "pi". Shared by Spawn and
+// request based on its Kind. Empty Kind defaults to "fundi". Shared by Spawn and
 // Resume so the two paths can never diverge on protocol selection.
 //
 // childID and stateDir are only used by the "fundi" kind, which needs both to
 // pin --spill-dir to a location Forget can find deterministically later (see
-// buildAgentArgv/agentSpillDir). claude/pi ignore them.
+// buildAgentArgv/agentSpillDir). claude ignores them.
 func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin string, argv []string, prov child.ProtocolProvider, err error) {
 	kind := req.Kind
 	if kind == "" {
-		kind = protocol.KindClaude
+		kind = protocol.KindFundi
 	}
 	switch kind {
 	case protocol.KindPi:
@@ -3077,11 +3077,11 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 }
 
 // spawnKindLabel normalizes a SpawnRequest/snapshot Kind into the value used for
-// the rafiki/kind auto-label. Empty defaults to "pi" (the implicit default kind),
+// the rafiki/kind auto-label. Empty defaults to "fundi",
 // matching resolveSpawnPlan's kind handling.
 func spawnKindLabel(kind string) string {
 	if kind == "" {
-		return protocol.KindPi
+		return protocol.KindFundi
 	}
 	return kind
 }
