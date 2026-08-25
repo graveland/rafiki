@@ -493,6 +493,7 @@ func runDaemon(opts runDaemonOpts) error {
 
 	ctrl.loadChildren(baseCtx, records)
 	ctrl.startSweeper(ctx)
+	ctrl.startLeaseRenewal(ctx)
 
 	if pool != nil {
 		go syncPricingLoop(baseCtx, pool, catalog)
