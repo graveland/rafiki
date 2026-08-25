@@ -291,11 +291,13 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 
 	mux := http.NewServeMux()
 	h := &server.Handler{Messages: messages, Chat: chat}
-	var connectServer *connectapi.Server
-	if pool != nil {
-		connectServer = connectapi.NewServer(store.NewMessages(pool))
-		h.ControlPath, h.Control = connectServer.Routes()
-	}
+	// Unconditional. The pool is never nil now that the daemon requires a
+	// database (Phase C design 2.1), so the gate protected nothing — it only
+	// made "this daemon has no database" and "this daemon predates the Connect
+	// control plane" produce the same bodiless 404, which net/http answers and
+	// Connect reports as CodeUnimplemented.
+	connectServer := connectapi.NewServer(store.NewMessages(pool))
+	h.ControlPath, h.Control = connectServer.Routes()
 	h.Mount(mux, func(next http.Handler) http.Handler {
 		return tokenAuth.Middleware(traceMiddleware(next))
 	})

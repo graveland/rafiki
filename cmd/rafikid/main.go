@@ -491,6 +491,21 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
+	if face.Control != nil {
+		connectSock := paths.ConnectSocketPath()
+		if ln, err := serveConnectUDS(ctx, face.Control, connectSock); err != nil {
+			// Fatal. This socket is how `rafiki attach` reaches the daemon; a
+			// daemon serving no local control plane looks alive and answers
+			// nothing the TUI asks for.
+			slog.Error("cannot serve the local Connect control plane",
+				"path", connectSock, "error", err)
+			os.Exit(1)
+		} else {
+			defer ln.Close()
+			slog.Info("rafiki daemon serving Connect (unix)", "path", connectSock)
+		}
+	}
+
 	ctrl.loadChildren(baseCtx)
 	ctrl.startSweeper(ctx)
 	ctrl.startLeaseRenewal(ctx)
