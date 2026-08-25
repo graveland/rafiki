@@ -1405,7 +1405,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 
 	kind := snap.Kind
 	if kind == "" {
-		kind = protocol.KindPi
+		kind = protocol.KindClaude
 	}
 
 	// Verify the session file exists for pi children that have one. Claude does
@@ -1545,7 +1545,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	kind := snap.Kind
 	if kind == "" {
-		kind = protocol.KindPi
+		kind = protocol.KindClaude
 	}
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
@@ -2774,6 +2774,7 @@ func newChildID() string {
 	return "c_" + ulid.Make().String()
 }
 
+//nolint:unused
 func resolvePiBinary(override string) (string, error) {
 	if override != "" {
 		return override, nil
@@ -2786,6 +2787,8 @@ func resolvePiBinary(override string) (string, error) {
 
 // buildArgv converts a SpawnRequest into the pi CLI argument list (excluding
 // the binary itself). Always starts with --mode rpc.
+//
+//nolint:unused
 func buildArgv(req protocol.SpawnRequest) []string {
 	var argv []string
 	argv = append(argv, "--mode", "rpc")
@@ -2930,21 +2933,20 @@ func buildClaudeArgv(req protocol.SpawnRequest) []string {
 func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin string, argv []string, prov child.ProtocolProvider, err error) {
 	kind := req.Kind
 	if kind == "" {
-		kind = protocol.KindPi
+		kind = protocol.KindClaude
 	}
 	switch kind {
+	case protocol.KindPi:
+		bin, err = resolvePiBinary(req.PiBinary)
+		return bin, buildArgv(req), child.IdentityProvider{}, err
 	case protocol.KindClaude:
 		bin, err = resolveClaudeBinary(req.PiBinary)
 		return bin, buildClaudeArgv(req), child.ClaudeProvider{}, err
-	case protocol.KindPi:
-		bin, err = resolvePiBinary(req.PiBinary)
-		return bin, buildArgv(req), child.PiProvider{}, err
 	case protocol.KindFundi:
 		// The fundi runtime is `rafikid fundi ...`: the daemon re-execs itself
 		// rather than shelling out to a separate binary. It speaks pi's rpc
 		// protocol natively (pkg/fundi/frontend.go), so no translator is
-		// needed - child.PiProvider{} is the correct identity, same as the
-		// "pi" case above.
+		// needed — the identity provider is correct for fundi's stdout.
 		//
 		// --model is a required flag for `rafikid fundi` (parseAgentFlags):
 		// reject an unresolvable model here, at spawn time, rather than
@@ -2967,7 +2969,7 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		if selfErr != nil {
 			return "", nil, nil, fmt.Errorf("resolving own binary for fundi kind: %w", selfErr)
 		}
-		return self, buildAgentArgv(req, childID, stateDir), child.PiProvider{}, nil
+		return self, buildAgentArgv(req, childID, stateDir), child.IdentityProvider{}, nil
 	default:
 		return "", nil, nil, fmt.Errorf("unknown kind: %s", kind)
 	}

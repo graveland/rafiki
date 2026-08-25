@@ -84,7 +84,7 @@ func TestClaudeOutboundEchoIgnoresNonPromptFrames(t *testing.T) {
 func TestPiOutboundEchoIsNil(t *testing.T) {
 	// pi echoes the user message_start on its own stdout, so synthesizing one
 	// would double-render.
-	if got := (PiProvider{}).OutboundEcho([]byte(`{"type":"prompt","message":"hi"}`), 1); got != nil {
-		t.Fatalf("PiProvider.OutboundEcho = %v, want nil", got)
+	if got := (IdentityProvider{}).OutboundEcho([]byte(`{"type":"prompt","message":"hi"}`), 1); got != nil {
+		t.Fatalf("identityProvider.OutboundEcho = %v, want nil", got)
 	}
 }

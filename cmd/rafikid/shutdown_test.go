@@ -55,6 +55,7 @@ func spawnTestChild(t *testing.T, ctrl *Controller, env map[string]string) strin
 	t.Helper()
 
 	req := protocol.SpawnRequest{
+		Kind:      protocol.KindPi,
 		Cwd:       t.TempDir(),
 		PiBinary:  fakePiBin(t),
 		NoSession: true,

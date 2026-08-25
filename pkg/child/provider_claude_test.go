@@ -45,7 +45,7 @@ func TestClaudeProvider_ReadyOnSpawn(t *testing.T) {
 		t.Fatal("claude must be ReadyOnSpawn (no stdout readiness signal exists)")
 	}
 	// pi announces readiness via response.get_state, so it is NOT ready on spawn.
-	if (PiProvider{}).ReadyOnSpawn() {
+	if (IdentityProvider{}).ReadyOnSpawn() {
 		t.Fatal("pi must NOT be ReadyOnSpawn (it waits for response.get_state)")
 	}
 }

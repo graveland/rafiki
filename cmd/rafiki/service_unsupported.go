@@ -4,9 +4,9 @@ package main
 
 import (
 	"errors"
-	"go.graveland.dev/rafiki/pkg/paths"
 	"os"
-	"path/filepath"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 var errUnsupportedOS = errors.New("service management is not supported on this OS (only darwin and linux are implemented)")

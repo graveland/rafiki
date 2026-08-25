@@ -45,8 +45,8 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 		t.Fatalf("bin = %q, want self-exec %q", bin, self)
 	}
 
-	if _, ok := prov.(child.PiProvider); !ok {
-		t.Fatalf("provider = %T, want child.PiProvider (agent speaks pi protocol natively)", prov)
+	if _, ok := prov.(child.IdentityProvider); !ok {
+		t.Fatalf("provider = %T, want child.IdentityProvider (agent speaks pi protocol natively)", prov)
 	}
 
 	if len(argv) == 0 || argv[0] != protocol.KindFundi {

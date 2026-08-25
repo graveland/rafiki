@@ -34,8 +34,8 @@ func TestGetStateResponseSniffableByDaemon(t *testing.T) {
 	if !ok || md.SessionID != "conv-abc" || md.Model != "anthropic/m1" {
 		t.Fatalf("sniff failed: ok=%v md=%+v line=%s", ok, md, line)
 	}
-	// and PiProvider must see it as the readiness signal
-	if !(child.PiProvider{}).Parse([]byte(line)).FirstResponse {
+	// and identityProvider must see it as the readiness signal
+	if !(child.IdentityProvider{}).Parse([]byte(line)).FirstResponse {
 		t.Fatal("get_state response did not signal FirstResponse")
 	}
 }
