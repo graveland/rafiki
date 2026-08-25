@@ -27,6 +27,24 @@ func (c *Controller) dropLease(childID string) {
 	c.heldLeasesMu.Unlock()
 }
 
+// releaseLease drops and releases the lease held for a child so another daemon
+// can take the conversation immediately rather than after the TTL.
+func (c *Controller) releaseLease(childID string) {
+	c.heldLeasesMu.Lock()
+	lease, ok := c.heldLeases[childID]
+	delete(c.heldLeases, childID)
+	c.heldLeasesMu.Unlock()
+	if !ok || c.leases == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.leases.Release(ctx, lease); err != nil {
+		slog.Warn("release lease on child exit",
+			"childId", childID, "conversationId", lease.ConversationID, "error", err)
+	}
+}
+
 // startLeaseRenewal keeps every held lease alive until the daemon stops.
 //
 // Renewal runs on its own goroutine, independent of turn progress. A thinking
