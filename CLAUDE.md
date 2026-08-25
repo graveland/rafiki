@@ -487,6 +487,15 @@
   empty `last_status` for the same reason: an ordinary status write must never
   blank the only column recovery reads.
 
+- **`last_status` is written ONLY by `handleChildExit`, so NULL is the
+  strongest evidence a child was alive.** A child that was alive when the
+  daemon died has its exit path invoked by the recovery loop rather than by a
+  real exit, and the recovery loop does not call `handleChildExit` — so the
+  row stays NULL in `last_status`. That NULL is precisely the signal that says
+  "this child needs resuming", distinct from every deliberate shutdown that
+  `handleChildExit` records. Any other code path setting `last_status` would
+  silently mark a live child as dead and prevent its recovery.
+
 - **One writer per conversation, and the guard is in the INSERT statement.**
   Child state on local disk used to provide daemon isolation for free; a shared
   `conversations.child` removes it, and `conversations.conversation_lease`
@@ -507,6 +516,15 @@
   in the Deployment spec or the pod waits out the full TTL before recovering its
   own children.
 
+- **`RAFIKI_DAEMON_ID` cannot prove two rows are on the same machine —
+  `ns_token` does.** Two daemons inside the same shared-PID-namespace
+  container (a sidecar, a debug shell) see each other's PIDs, and PID alone
+  cannot tell them apart. `ns_token` is a random UUID written at daemon
+  startup; two processes that share every PID but disagree on `ns_token` are
+  not the same daemon, and `Forget` checks both columns before deciding the
+  row belongs to the caller. `RAFIKI_DAEMON_ID` alone would let a sidecar
+  `Forget` another process's children as its own.
+
 - **A pinned child never changes machines, and restart recovery is not an
   exception.** `recoveryAction` returns `planStayExited` for
   `workspace_mode` pinned *and* for an absent or unrecognised value, matching
@@ -514,3 +532,11 @@
   `rafiki/workspace`/`rafiki/executor` labels stripped and resumes unbound.
   Making recovery rebind a pinned child would be a backdoor around the rule
   `HandleExecutorLost` and `boundExecutor.recover` already enforce.
+
+- **Child rows are shared across every daemon, so `Forget` must check
+  `ownsChildRow` first.** Before the migration, forgetting a child was
+  idempotent: a daemon that did not own it had nothing to forget. Now a
+  daemon that skips the ownership check deletes rows belonging to a sibling
+  daemon that is still running — the opposite of idempotent. `ownsChildRow`
+  compares `daemon_id = c.daemonID AND ns_token = c.nsToken` and the
+  `RAFIKI_DAEMON_ID`/`ns_token` distinction above is why BOTH are checked.

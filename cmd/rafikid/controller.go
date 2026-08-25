@@ -342,10 +342,6 @@ func (c *Controller) sweepExpired() {
 	}
 }
 
-// loadOrphans inserts persisted records into the store as exited sessions,
-// SIGTERMs any process whose PID is still alive, and auto-resumes fundi
-// children whose LastStatus indicates they were alive at daemon shutdown
-// (idle, streaming, etc.) rather than deliberately killed or exited.
 // ─── control.Controller implementation ────────────────────────────────────────
 
 func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
@@ -2651,9 +2647,6 @@ func (c *Controller) writeRecord(childID string) error {
 // that path; the upsert COALESCEs an empty value so an ordinary status write
 // cannot blank the column the recovery predicate reads.
 //
-// Dual-write window: both the database and the on-disk record are written, so a
-// rollback during rollout still finds usable state files. The disk half is
-// removed in a later step.
 // noteConversationID records a child's resolved conversation id on its store
 // entry so the next writeRecord carries it to conversations.child.
 //
@@ -3279,6 +3272,12 @@ func parseEventType(frame []byte, hdr any) error {
 	return json.Unmarshal(frame, hdr)
 }
 
+// TaskList queries the task ledger for the ctrl_task_list verb.
+//
+// No conversation scope: this verb answers "what is every agent doing",
+// which is a cross-conversation question. The dispatcher clamps Limit before
+// calling, and the store applies it after sorting, which is what keeps the
+// response inside protocol.MaxFrameBytes.
 func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
 	if c.tasks == nil {
 		return nil, &control.ControllerError{
