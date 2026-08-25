@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -172,5 +174,116 @@ func TestRelease(t *testing.T) {
 	}
 	if _, ok, err := ls.Acquire(ctx, conv, "daemon-b", 5*time.Minute); err != nil || !ok {
 		t.Errorf("after Release, daemon-b could not acquire: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestFencedAppendSucceedsWithLiveLease is the baseline for the next test:
+// with a valid lease the guard is invisible.
+func TestFencedAppendSucceedsWithLiveLease(t *testing.T) {
+	pool := leasePool(t)
+	ls := NewLeases(pool)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+
+	lease, ok, err := ls.Acquire(ctx, conv, "daemon-a", 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+	}
+
+	msgs := NewMessages(pool).WithLease(lease)
+	if err := msgs.Append(ctx, conv, 0, userMessage("hello"), nil); err != nil {
+		t.Fatalf("Append with a live lease: %v", err)
+	}
+
+	loaded, err := NewMessages(pool).Load(ctx, conv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d messages, want 1", len(loaded))
+	}
+}
+
+// TestFencedAppendFailsAfterTakeover is the fencing test. A holder that stalled
+// past expiry and woke up after another daemon took over must write NOTHING —
+// this is what makes a TTL lease safe without a monotonic fencing token.
+func TestFencedAppendFailsAfterTakeover(t *testing.T) {
+	pool := leasePool(t)
+	ls := NewLeases(pool)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+
+	stale, ok, err := ls.Acquire(ctx, conv, "daemon-a", -time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("first Acquire: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := ls.Acquire(ctx, conv, "daemon-b", 5*time.Minute); err != nil || !ok {
+		t.Fatalf("takeover: ok=%v err=%v", ok, err)
+	}
+
+	msgs := NewMessages(pool).WithLease(stale)
+	err = msgs.Append(ctx, conv, 0, userMessage("should not land"), nil)
+	if !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("Append error = %v, want ErrLeaseLost", err)
+	}
+
+	loaded, lerr := NewMessages(pool).Load(ctx, conv)
+	if lerr != nil {
+		t.Fatalf("Load: %v", lerr)
+	}
+	if len(loaded) != 0 {
+		t.Errorf("a superseded holder wrote %d messages; want 0", len(loaded))
+	}
+}
+
+// TestUnfencedAppendStillWorks pins the escape hatch: a caller with no lease
+// (the proxy path, a client-driven conversation) writes exactly as before.
+func TestUnfencedAppendStillWorks(t *testing.T) {
+	pool := leasePool(t)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+
+	if err := NewMessages(pool).Append(ctx, conv, 0, userMessage("unfenced"), nil); err != nil {
+		t.Fatalf("unfenced Append: %v", err)
+	}
+}
+
+// TestFencedAppendConflictIsNotLeaseLost proves the zero-rows path still tells
+// an ordinal conflict (a Resume replay) apart from a lost lease. Collapsing the
+// two would make every resume look like a takeover.
+func TestFencedAppendConflictIsNotLeaseLost(t *testing.T) {
+	pool := leasePool(t)
+	ls := NewLeases(pool)
+	ctx := context.Background()
+	conv := newConversation(t, pool)
+
+	lease, ok, err := ls.Acquire(ctx, conv, "daemon-a", 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("Acquire: ok=%v err=%v", ok, err)
+	}
+	msgs := NewMessages(pool).WithLease(lease)
+
+	if err := msgs.Append(ctx, conv, 0, userMessage("same"), nil); err != nil {
+		t.Fatalf("first Append: %v", err)
+	}
+	// Re-appending identical content at the same ordinal is a replay, not a
+	// takeover, and must succeed.
+	if err := msgs.Append(ctx, conv, 0, userMessage("same"), nil); err != nil {
+		t.Errorf("replay Append: %v, want nil", err)
+	}
+	// Different content at the same ordinal is a diverged history.
+	err = msgs.Append(ctx, conv, 0, userMessage("different"), nil)
+	if err == nil {
+		t.Error("diverging content at an existing ordinal was accepted")
+	}
+	if errors.Is(err, ErrLeaseLost) {
+		t.Error("a content divergence was reported as a lost lease")
+	}
+}
+
+func userMessage(text string) anthropic.MessageParam {
+	return anthropic.MessageParam{
+		Role:    anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(text)},
 	}
 }
