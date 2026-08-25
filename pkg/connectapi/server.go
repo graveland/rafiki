@@ -40,11 +40,12 @@ type ConversationResolver interface {
 
 // Server implements the Control service.
 type Server struct {
-	history  HistoryLoader
-	events   EventSource
-	resolver ConversationResolver
-	inbox    inbox.Inbox
-	children ChildLister
+	history   HistoryLoader
+	events    EventSource
+	resolver  ConversationResolver
+	inbox     inbox.Inbox
+	children  ChildLister
+	lifecycle ChildLifecycle
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }

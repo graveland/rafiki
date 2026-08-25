@@ -127,10 +127,84 @@ func (s *Server) GetChild(
 // The two verbs below are stubs so *Server keeps satisfying the generated
 // ControlHandler interface between plan tasks. Task 7 replaces each one.
 
-func (s *Server) Spawn(context.Context, *connect.Request[rafikiv1.SpawnRequest]) (*connect.Response[rafikiv1.SpawnResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Spawn not implemented"))
+// Spawn creates a child. The budget pointers are copied as pointers, never
+// dereferenced into values, so "unset" survives the trip to the daemon.
+func (s *Server) Spawn(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.SpawnRequest],
+) (*connect.Response[rafikiv1.SpawnResponse], error) {
+	if req.Msg.GetCwd() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("cwd is required"))
+	}
+	if s.lifecycle == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("child lifecycle not yet wired"))
+	}
+
+	p := connectapiSpawnParams(req.Msg)
+	id, err := s.lifecycle.Spawn(ctx, p)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: id}), nil
 }
 
-func (s *Server) Kill(context.Context, *connect.Request[rafikiv1.KillRequest]) (*connect.Response[rafikiv1.KillResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Kill not implemented"))
+// connectapiSpawnParams maps the wire request onto SpawnParams, preserving
+// pointer-ness on the three budgets.
+func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
+	p := SpawnParams{
+		Cwd:              m.GetCwd(),
+		Name:             m.GetName(),
+		Model:            m.GetModel(),
+		Kind:             m.GetKind(),
+		ParentChildID:    m.GetParentChildId(),
+		ExecutorSelector: m.GetExecutorSelector(),
+		Labels:           m.GetLabels(),
+	}
+	if m.MaxDepth != nil {
+		v := int(*m.MaxDepth)
+		p.MaxDepth = &v
+	}
+	if m.MaxCost != nil {
+		v := *m.MaxCost
+		p.MaxCost = &v
+	}
+	if m.MaxChildren != nil {
+		v := int(*m.MaxChildren)
+		p.MaxChildren = &v
+	}
+	return p
+}
+
+// Kill ends a child and reports the status it settled on.
+func (s *Server) Kill(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.KillRequest],
+) (*connect.Response[rafikiv1.KillResponse], error) {
+	childID := req.Msg.GetChildId()
+	if childID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("child_id is required"))
+	}
+	if s.lifecycle == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("child lifecycle not yet wired"))
+	}
+	out, err := s.lifecycle.Kill(ctx, childID,
+		req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	resp := &rafikiv1.KillResponse{
+		ChildId:    childID,
+		Signal:     out.Signal,
+		DurationMs: out.DurationMs,
+		Escalated:  out.Escalated,
+	}
+	if out.ExitCode != nil {
+		code := int32(*out.ExitCode)
+		resp.ExitCode = &code
+	}
+	return connect.NewResponse(resp), nil
 }
