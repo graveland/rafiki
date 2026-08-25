@@ -491,7 +491,7 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
-	if face.Control != nil {
+	if face != nil && face.Control != nil {
 		connectSock := paths.ConnectSocketPath()
 		if ln, err := serveConnectUDS(ctx, face.Control, connectSock); err != nil {
 			// Fatal. This socket is how `rafiki attach` reaches the daemon; a

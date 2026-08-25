@@ -13,9 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"go.graveland.dev/rafiki/pkg/connectapi"
 )
 
@@ -60,8 +57,16 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, path string) (
 	// Empty token: the socket IS the credential.
 	mux.Handle(srv.Routes(connectapi.NewAuthInterceptor("")))
 
+	// Unencrypted HTTP/2 (h2c) via the standard library's Protocols field,
+	// rather than the deprecated x/net/http2/h2c wrapper. Connect's
+	// server-streaming (StreamEvents) wants HTTP/2; there is no TLS on a unix
+	// socket, so this is prior-knowledge h2c. The client half is in
+	// cmd/rafiki/connectclient.go and must match.
+	proto := &http.Protocols{}
+	proto.SetUnencryptedHTTP2(true)
 	httpSrv := &http.Server{
-		Handler:           h2c.NewHandler(mux, &http2.Server{}),
+		Handler:           mux,
+		Protocols:         proto,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

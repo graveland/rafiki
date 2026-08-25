@@ -23,6 +23,8 @@ func TestSubagentLineagePersistence(t *testing.T) {
 		"id":            "sp2",
 		"cwd":           "/tmp",
 		"noSession":     true,
+		"kind":          "fundi",
+		"model":         "anthropic/sonnet-latest",
 		"parentChildId": topA,
 	}))
 	var r protocol.Response

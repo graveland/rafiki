@@ -155,7 +155,6 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		"XDG_RUNTIME_DIR="+homeDir,
 		"XDG_STATE_HOME="+homeDir,
 		"XDG_DATA_HOME="+homeDir,
-		"RAFIKI_PI_BINARY="+fakePiPath,
 		"RAFIKI_DB="+dsn,
 		"RAFIKI_EXECUTORS_ENABLED=1",
 		"RAFIKI_CONTROL_LISTEN="+listenAddr,

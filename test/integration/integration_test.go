@@ -1,6 +1,7 @@
 // Package integration_test contains end-to-end tests that build and run the
-// pi-controller binary as a subprocess, communicate with it via UDS using
-// fake-pi.sh as the pi binary, and exercise the major protocol flows.
+// rafikid daemon binary as a subprocess, communicate with it via UDS, and
+// exercise the major control-protocol flows (spawn, list, get, kill, resume,
+// subscribe, forget).
 //
 // Profile filtering (ctrl_subscribe with profile="coarse") is not tested here
 // because profile→event-set expansion is not yet implemented (it is currently
@@ -31,7 +32,6 @@ import (
 var (
 	binaryPath string
 	cliPath    string
-	fakePiPath string
 	repoRoot   string
 )
 
@@ -41,8 +41,6 @@ func TestMain(m *testing.M) {
 		log.Fatalf("find module root: %v", err)
 	}
 	repoRoot = root
-
-	fakePiPath = filepath.Join(root, "test", "integration", "fake-pi.sh")
 
 	binDir, err := os.MkdirTemp("", "rafiki-build")
 	if err != nil {
@@ -105,8 +103,8 @@ type daemon struct {
 	logsDir string
 }
 
-// bootDaemon starts the binary with a fresh temp HOME and fake-pi.sh as the
-// pi binary. It waits for the socket to appear before returning.
+// bootDaemon starts the binary with a fresh temp HOME and a test DSN. It waits
+// for the socket to appear before returning.
 func bootDaemon(t *testing.T) *daemon {
 	t.Helper()
 
@@ -140,14 +138,6 @@ func bootDaemon(t *testing.T) *daemon {
 		"XDG_RUNTIME_DIR="+homeDir,
 		"XDG_STATE_HOME="+homeDir,
 		"XDG_DATA_HOME="+homeDir,
-		// The daemon resolves an unset per-request pi binary via
-		// paths.Get(paths.PiBinary) — RAFIKI_PI_BINARY. (It used to be the
-		// bare, pre-rename PI_BINARY, honoured only through the now-deleted
-		// deprecation fallback; that stopped working the moment the fallback
-		// did, silently sending spawnChild through exec.LookPath("pi") — a
-		// real pi binary if one happens to be on $PATH — instead of this
-		// fake stub.)
-		"RAFIKI_PI_BINARY="+fakePiPath,
 		// The daemon requires a database (Phase C0). The suite is designed
 		// around a disposable database, so use the RAFIKI_TEST_DSN the developer
 		// supplies — it must be present, or the daemon cannot start at all.
@@ -228,9 +218,14 @@ func (d *daemon) request(t *testing.T, frame string) []byte {
 
 // spawnChild sends ctrl_spawn with noSession:true (so resume works without a
 // real session file) and returns the assigned childId.
+// spawnChild sends ctrl_spawn with noSession:true (so resume works without a
+// real session file) and returns the assigned childId. The child is an
+// in-process fundi child, which requires a model; the throwaway model string
+// is never actually sent to a provider — these tests only exercise the
+// daemon's spawn/kill/subscribe lifecycle.
 func (d *daemon) spawnChild(t *testing.T) string {
 	t.Helper()
-	raw := d.request(t, `{"type":"ctrl_spawn","id":"spawn","cwd":"/tmp","noSession":true}`)
+	raw := d.request(t, `{"type":"ctrl_spawn","id":"spawn","cwd":"/tmp","noSession":true,"kind":"fundi","model":"anthropic/sonnet-latest"}`)
 	var r protocol.Response
 	mustUnmarshal(t, raw, &r)
 	if !r.Success {
@@ -255,7 +250,7 @@ type subConn struct {
 	br        *bufio.Reader
 	mu        sync.Mutex
 	responses []json.RawMessage // ctrl_response frames
-	events    []json.RawMessage // all other frames (pi events, lifecycle events)
+	events    []json.RawMessage // all other frames (child events, lifecycle events)
 }
 
 // dial opens a persistent connection to the daemon for subscription use.
@@ -368,17 +363,6 @@ func mustUnmarshal(t *testing.T, data []byte, v any) {
 	}
 }
 
-func frameType(t *testing.T, f json.RawMessage) string {
-	t.Helper()
-	var hdr struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(f, &hdr); err != nil {
-		t.Fatalf("unmarshal frame type: %v\ndata: %s", err, f)
-	}
-	return hdr.Type
-}
-
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 // TestIntegration_FullLifecycle exercises the canonical flow:
@@ -389,7 +373,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 
 	childID := d.spawnChild(t)
 
-	// Send a frame to the child. fake-pi.sh returns a generic success response.
+	// Send a frame to the child; the daemon's ctrl_send ack is what this asserts.
 	sendJSON := fmt.Sprintf(
 		`{"type":"ctrl_send","id":"s1","childId":%q,"frame":{"type":"get_state","id":"u1"}}`,
 		childID,
@@ -447,59 +431,8 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	}
 }
 
-// TestIntegration_SubscribeEvents exercises per-child subscriptions:
-// spawn → subscribe → cause pi events → verify subscriber receives them.
-func TestIntegration_SubscribeEvents(t *testing.T) {
-	t.Parallel()
-	d := bootDaemon(t)
-
-	childID := d.spawnChild(t)
-
-	// Persistent connection for subscription.
-	sc := d.dial(t)
-	sc.send(fmt.Sprintf(`{"type":"ctrl_subscribe","id":"sub1","childId":%q}`, childID))
-	subResp := sc.nextResponse(t, 5*time.Second)
-	if !subResp.Success {
-		t.Fatalf("ctrl_subscribe failed: %+v", subResp.Error)
-	}
-
-	// Trigger an agent_start event via the fake-pi test helper.
-	emitJSON := fmt.Sprintf(
-		`{"type":"ctrl_send","id":"ev1","childId":%q,"frame":{"type":"__ctrl_test_emit","eventType":"agent_start"}}`,
-		childID,
-	)
-	// Use a fresh connection so its ctrl_response does not land in sc.
-	raw := d.request(t, emitJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_send (__ctrl_test_emit) failed: %+v", r.Error)
-	}
-
-	// Subscriber must receive the agent_start event wrapped in a ctrl_event
-	// envelope (spec §7.1). The outer type is "ctrl_event" and the inner
-	// event.type is "agent_start".
-	sc.waitForEvent(t, func(f json.RawMessage) bool {
-		var env struct {
-			Type    string          `json:"type"`
-			ChildID string          `json:"childId"`
-			Event   json.RawMessage `json:"event"`
-		}
-		if json.Unmarshal(f, &env) != nil || env.Type != "ctrl_event" || env.ChildID != childID {
-			return false
-		}
-		var inner struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(env.Event, &inner); err != nil {
-			t.Fatalf("unmarshal ctrl_event inner event: %v\ndata: %s", err, env.Event)
-		}
-		return inner.Type == "agent_start"
-	}, 5*time.Second)
-}
-
 // TestIntegration_KillResume exercises kill+resume:
-// spawn → kill → confirm exited → resume → same childId, new process.
+// spawn → kill → confirm exited → resume → same childId.
 func TestIntegration_KillResume(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
@@ -550,7 +483,10 @@ func TestIntegration_KillResume(t *testing.T) {
 		t.Errorf("resume: want childId=%s, got %s", childID, resumeData.ChildID)
 	}
 
-	// The resumed child must be alive and have a different PID.
+	// The resumed child must be alive and, for a kind with a real OS process
+	// (claude), have a different PID. An in-process fundi child has PID 0 and
+	// never forks, so the "different PID" assertion is only meaningful when the
+	// original child had a real PID.
 	raw = d.request(t, getJSON)
 	mustUnmarshal(t, raw, &r)
 	var child2 protocol.ChildSummary
@@ -558,229 +494,9 @@ func TestIntegration_KillResume(t *testing.T) {
 	if child2.Status == string(protocol.StatusExited) {
 		t.Fatal("resumed child should be alive, not exited")
 	}
-	if child1.PID != nil && child2.PID != nil && *child1.PID == *child2.PID {
+	if child1.PID != nil && child2.PID != nil && *child1.PID != 0 && *child1.PID == *child2.PID {
 		t.Error("resumed child should have a different PID from the original")
 	}
-}
-
-// TestIntegration_InterceptionNewSession exercises the new_session interception
-// path: spawn → subscribe → ctrl_send {type:new_session} → verify the child
-// was transparently killed and re-spawned (same childId, new PID, fresh
-// sessionId+sessionFile), and that the subscriber receives the synthesized pi
-// response wrapped in a ctrl_event envelope.
-func TestIntegration_InterceptionNewSession(t *testing.T) {
-	t.Parallel()
-	d := bootDaemon(t)
-
-	// Spawn WITHOUT noSession:true so we get a real session file. This lets
-	// the test verify that new_session creates a fresh session (not the old one).
-	// fake-pi.sh returns a unique sessionId/sessionFile per invocation unless
-	// --session is passed, which is exactly what the buggy Resume path does.
-	raw := d.request(t, `{"type":"ctrl_spawn","id":"spawn1","cwd":"/tmp"}`)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_spawn failed: %+v", r.Error)
-	}
-	var spawnData protocol.SpawnResponseData
-	mustUnmarshal(t, r.Data, &spawnData)
-	childID := spawnData.ChildID
-
-	// Capture initial state including sessionId and sessionFile.
-	getJSON := fmt.Sprintf(`{"type":"ctrl_get","id":"g1","childId":%q}`, childID)
-	raw = d.request(t, getJSON)
-	mustUnmarshal(t, raw, &r)
-	var child1 protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &child1)
-
-	// Persistent subscriber — subscribes before the intercept fires so the
-	// preserved subscription receives the synthesized pi response.
-	sc := d.dial(t)
-	sc.send(fmt.Sprintf(`{"type":"ctrl_subscribe","id":"sub1","childId":%q}`, childID))
-	subResp := sc.nextResponse(t, 5*time.Second)
-	if !subResp.Success {
-		t.Fatalf("ctrl_subscribe failed: %+v", subResp.Error)
-	}
-
-	// Send new_session — the controller intercepts this and performs kill+respawn.
-	// RespawnChild must NOT pass --session so pi creates a fresh session.
-	interceptJSON := fmt.Sprintf(
-		`{"type":"ctrl_send","id":"int1","childId":%q,"frame":{"type":"new_session","id":"pi-req-1"}}`,
-		childID,
-	)
-	raw = d.request(t, interceptJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_send (new_session) failed: %+v", r.Error)
-	}
-
-	// After ctrl_send returns the child must be alive again with the same childId.
-	raw = d.request(t, getJSON)
-	mustUnmarshal(t, raw, &r)
-	var child2 protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &child2)
-
-	if child2.Status == string(protocol.StatusExited) {
-		t.Fatal("child should be alive after interception (re-spawned)")
-	}
-	if child2.ChildID != childID {
-		t.Errorf("childId changed after interception: want %s, got %s", childID, child2.ChildID)
-	}
-	if child1.PID != nil && child2.PID != nil && *child1.PID == *child2.PID {
-		t.Errorf("expected different PID after interception (new process): both are %d", *child1.PID)
-	}
-	// new_session must produce a fresh session (different file and id).
-	// fake-pi.sh returns a --session-path-derived id when --session is passed
-	// (old buggy Resume path), but a PID-based id when no --session is given
-	// (correct RespawnChild path), so these assertions catch the regression.
-	if child1.SessionFile != "" && child2.SessionFile == child1.SessionFile {
-		t.Errorf("new_session should create a fresh session file; still using %s", child1.SessionFile)
-	}
-	if child1.SessionID != "" && child2.SessionID == child1.SessionID {
-		t.Errorf("new_session should have a fresh sessionId; still using %s", child1.SessionID)
-	}
-
-	// The subscriber must receive the synthesized pi response for new_session,
-	// wrapped in a ctrl_event envelope (spec §7.1).
-	sc.waitForEvent(t, func(f json.RawMessage) bool {
-		var env struct {
-			Type    string          `json:"type"`
-			ChildID string          `json:"childId"`
-			Event   json.RawMessage `json:"event"`
-		}
-		if json.Unmarshal(f, &env) != nil || env.Type != "ctrl_event" || env.ChildID != childID {
-			return false
-		}
-		var inner struct {
-			Type    string `json:"type"`
-			Command string `json:"command"`
-		}
-		if err := json.Unmarshal(env.Event, &inner); err != nil {
-			t.Fatalf("unmarshal ctrl_event inner event: %v\ndata: %s", err, env.Event)
-		}
-		return inner.Type == "response" && inner.Command == "new_session"
-	}, 5*time.Second)
-}
-
-// TestIntegration_GetRecent verifies that ctrl_get_recent returns buffered
-// events and that the include filter selects only matching types.
-func TestIntegration_GetRecent(t *testing.T) {
-	t.Parallel()
-	d := bootDaemon(t)
-
-	childID := d.spawnChild(t)
-
-	// The bootstrap get_state response from fake-pi is already in the ring buffer.
-	recentJSON := fmt.Sprintf(`{"type":"ctrl_get_recent","id":"gr1","childId":%q}`, childID)
-	raw := d.request(t, recentJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_get_recent failed: %+v", r.Error)
-	}
-	var recentData protocol.GetRecentResponseData
-	mustUnmarshal(t, r.Data, &recentData)
-	if len(recentData.Events) == 0 {
-		t.Fatal("expected events in ring buffer immediately after spawn")
-	}
-
-	// The bootstrap get_state response must be present.
-	foundBootstrap := false
-	for _, ev := range recentData.Events {
-		var hdr struct {
-			Type    string `json:"type"`
-			Command string `json:"command"`
-		}
-		if err := json.Unmarshal(ev, &hdr); err != nil {
-			t.Fatalf("unmarshal ring buffer event: %v\ndata: %s", err, ev)
-		}
-		if hdr.Type == "response" && hdr.Command == "get_state" {
-			foundBootstrap = true
-		}
-	}
-	if !foundBootstrap {
-		t.Error("expected bootstrap get_state response in ring buffer")
-	}
-
-	// Push two typed events using the fake-pi test helper.
-	for i, evt := range []string{"agent_start", "agent_end"} {
-		emitJSON := fmt.Sprintf(
-			`{"type":"ctrl_send","id":"ev%d","childId":%q,"frame":{"type":"__ctrl_test_emit","eventType":%q}}`,
-			i, childID, evt,
-		)
-		d.request(t, emitJSON)
-	}
-
-	// Poll ctrl_get_recent with include:["agent_start"] until the event appears.
-	// The emit is async: fake-pi stdout is read in a separate goroutine.
-	filteredJSON := fmt.Sprintf(
-		`{"type":"ctrl_get_recent","id":"gr2","childId":%q,"include":["agent_start"]}`,
-		childID,
-	)
-	deadline := time.Now().Add(5 * time.Second)
-	found := false
-	for time.Now().Before(deadline) {
-		raw = d.request(t, filteredJSON)
-		mustUnmarshal(t, raw, &r)
-		var fd protocol.GetRecentResponseData
-		mustUnmarshal(t, r.Data, &fd)
-
-		// Any returned events must match the include filter.
-		for _, ev := range fd.Events {
-			if tp := frameType(t, ev); tp != "agent_start" {
-				t.Errorf("filtered get_recent returned unexpected type %q", tp)
-			}
-		}
-		if len(fd.Events) > 0 {
-			found = true
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !found {
-		t.Error("expected agent_start events in filtered ctrl_get_recent result")
-	}
-}
-
-// TestIntegration_PerChildStatusEvents verifies that ctrl_child_status events
-// are delivered to per-child subscribers (Fix 1 / spec §7.4).
-func TestIntegration_PerChildStatusEvents(t *testing.T) {
-	t.Parallel()
-	d := bootDaemon(t)
-
-	childID := d.spawnChild(t)
-
-	// Per-child subscriber.
-	sc := d.dial(t)
-	sc.send(fmt.Sprintf(`{"type":"ctrl_subscribe","id":"sub1","childId":%q}`, childID))
-	subResp := sc.nextResponse(t, 5*time.Second)
-	if !subResp.Success {
-		t.Fatalf("ctrl_subscribe failed: %+v", subResp.Error)
-	}
-
-	// Trigger agent_start → the controller should emit ctrl_child_status
-	// streaming→idle (via monitorChild) and deliver it to sc.
-	emitJSON := fmt.Sprintf(
-		`{"type":"ctrl_send","id":"ev1","childId":%q,"frame":{"type":"__ctrl_test_emit","eventType":"agent_start"}}`,
-		childID,
-	)
-	d.request(t, emitJSON)
-
-	// The per-child subscriber must receive ctrl_child_status with
-	// status="streaming" (delivered directly, not wrapped in ctrl_event).
-	sc.waitForEvent(t, func(f json.RawMessage) bool {
-		var ev struct {
-			Type    string `json:"type"`
-			ChildID string `json:"childId"`
-			Status  string `json:"status"`
-		}
-		if json.Unmarshal(f, &ev) != nil {
-			return false
-		}
-		return ev.Type == protocol.TypeCtrlChildStatus &&
-			ev.ChildID == childID &&
-			ev.Status == string(protocol.StatusStreaming)
-	}, 5*time.Second)
 }
 
 // TestIntegration_LogDumpOnExit verifies that all four log files are written
@@ -819,76 +535,6 @@ func TestIntegration_LogDumpOnExit(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("log file missing: %s (%v)", name, err)
 		}
-	}
-}
-
-// TestIntegration_GetRecentExited verifies that ctrl_get_recent returns events
-// for an exited child via the ring snapshot (Fix 4 / spec §11.4).
-func TestIntegration_GetRecentExited(t *testing.T) {
-	t.Parallel()
-	d := bootDaemon(t)
-
-	childID := d.spawnChild(t)
-
-	// Populate the ring with a known event.
-	emitJSON := fmt.Sprintf(
-		`{"type":"ctrl_send","id":"ev1","childId":%q,"frame":{"type":"__ctrl_test_emit","eventType":"agent_start"}}`,
-		childID,
-	)
-	d.request(t, emitJSON)
-
-	// Kill the child.
-	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
-	raw := d.request(t, killJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_kill failed: %+v", r.Error)
-	}
-
-	// Wait for the child to be exited in the store.
-	getJSON := fmt.Sprintf(`{"type":"ctrl_get","id":"g1","childId":%q}`, childID)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		raw = d.request(t, getJSON)
-		mustUnmarshal(t, raw, &r)
-		var cs protocol.ChildSummary
-		mustUnmarshal(t, r.Data, &cs)
-		if cs.Status == string(protocol.StatusExited) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	// ctrl_get_recent on an exited child must return events from the snapshot.
-	recentJSON := fmt.Sprintf(`{"type":"ctrl_get_recent","id":"gr1","childId":%q}`, childID)
-	raw = d.request(t, recentJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_get_recent failed: %+v", r.Error)
-	}
-	var recentData protocol.GetRecentResponseData
-	mustUnmarshal(t, r.Data, &recentData)
-	if len(recentData.Events) == 0 {
-		t.Error("expected events in ring snapshot for exited child; got none")
-	}
-
-	// Must contain the bootstrap get_state response at minimum.
-	foundBootstrap := false
-	for _, ev := range recentData.Events {
-		var hdr struct {
-			Type    string `json:"type"`
-			Command string `json:"command"`
-		}
-		if err := json.Unmarshal(ev, &hdr); err != nil {
-			t.Fatalf("unmarshal ring snapshot event: %v\ndata: %s", err, ev)
-		}
-		if hdr.Type == "response" && hdr.Command == "get_state" {
-			foundBootstrap = true
-		}
-	}
-	if !foundBootstrap {
-		t.Error("expected bootstrap get_state response in exited child ring snapshot")
 	}
 }
 
