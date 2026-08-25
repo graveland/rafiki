@@ -124,7 +124,7 @@ func TestExecutorSessionRequiresAName(t *testing.T) {
 // fakeConn is a control.Connection stub for testing ExecutorSession
 type fakeConn struct{}
 
-func (fakeConn) Deliver([]byte)        {}
+func (fakeConn) Deliver([]byte)           {}
 func (fakeConn) Identity() users.Identity { return users.Identity{} }
 func (fakeConn) Restricted() bool         { return false }
 

@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -333,54 +332,6 @@ func (c *Controller) sweepExpired() {
 // SIGTERMs any process whose PID is still alive, and auto-resumes fundi
 // children whose LastStatus indicates they were alive at daemon shutdown
 // (idle, streaming, etc.) rather than deliberately killed or exited.
-func (c *Controller) loadOrphans(records []persist.Record) {
-	var fundiCandidates []string
-
-	for _, rec := range records {
-		if rec.PID > 0 {
-			if err := syscall.Kill(rec.PID, 0); err == nil {
-				// Process is still alive — SIGTERM it.
-				_ = syscall.Kill(rec.PID, syscall.SIGTERM)
-				slog.Info("sigterm orphan", "childId", rec.ChildID, "pid", rec.PID)
-			}
-		}
-
-		sess := sessionFromRecord(rec)
-		sess.Status = protocol.StatusExited
-		c.st.Insert(sess)
-
-		// Fundi children whose LastStatus indicates they were alive when the
-		// daemon went down — not marked "exited" or "shutting_down" by a
-		// deliberate shutdown — are candidates for auto-recovery.
-		if rec.Kind == protocol.KindFundi &&
-			rec.LastStatus != "" &&
-			rec.LastStatus != string(protocol.StatusExited) &&
-			rec.LastStatus != string(protocol.StatusShuttingDown) {
-			fundiCandidates = append(fundiCandidates, rec.ChildID)
-		}
-	}
-
-	// Auto-resume fundi children. The daemon's environment holds the API
-	// keys; apiKey="" tells Resume to use the daemon's own credentials.
-	// Each resume deletes the old exited entry, spawns an in-process engine
-	// that reconnects to the same DB-backed conversation (same --ref), and
-	// registers it as a live child via activateLiveChild.
-	for _, childID := range fundiCandidates {
-		slog.Info("auto-resuming fundi child", "childId", childID)
-		go func(id string) {
-			// Use a fresh context with a generous timeout — the engine may
-			// need to call agentloop.Resume on startup, which can involve
-			// an API call if the last turn was interrupted mid-stream.
-			ctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
-			defer cancel()
-			if _, err := c.resumeWithAutoRecovery(ctx, id); err != nil {
-				slog.Warn("auto-resume failed; child stays exited",
-					"childId", id, "error", err)
-			}
-		}(childID)
-	}
-}
-
 // ─── control.Controller implementation ────────────────────────────────────────
 
 func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {

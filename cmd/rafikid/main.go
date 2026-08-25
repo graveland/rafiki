@@ -491,7 +491,7 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
-	ctrl.loadOrphans(records)
+	ctrl.loadChildren(baseCtx, records)
 	ctrl.startSweeper(ctx)
 
 	if pool != nil {
