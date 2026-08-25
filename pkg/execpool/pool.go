@@ -362,14 +362,14 @@ func (p *Pool) handleConn(conn net.Conn) {
 	}
 
 	if transient {
-			if !p.installTransient(e.ID, lc) {
-				slog.Warn("execpool: transient executor evicted before join completed; "+
-					"its owning control connection closed", "executorId", e.ID)
-				return
-			}
-		} else {
-			p.installLive(e.ID, lc)
+		if !p.installTransient(e.ID, lc) {
+			slog.Warn("execpool: transient executor evicted before join completed; "+
+				"its owning control connection closed", "executorId", e.ID)
+			return
 		}
+	} else {
+		p.installLive(e.ID, lc)
+	}
 
 	slog.Info("execpool: executor joined", "id", e.ID, "machine", e.Labels["machine"], "tools", desc.Msg.Tools)
 
