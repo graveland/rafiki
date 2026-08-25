@@ -940,6 +940,13 @@ func (*ContentBlockDelta_Thinking) isContentBlockDelta_Delta() {}
 
 func (*ContentBlockDelta_InputJson) isContentBlockDelta_Delta() {}
 
+// AgentStatus.state is one of protocol.Status's eight values, exactly:
+// "spawning", "idle", "streaming", "tool_running", "compacting",
+// "blocked_ui", "shutting_down", "exited". It is a string rather than an enum
+// so a new daemon status does not require regenerating every client, but the
+// set is CLOSED — do not invent values here. Note that pi's distinction
+// between "this run ended" and "truly idle" is expressed as a transition back
+// to "idle"; there is no separate settled event.
 type AgentStatus struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	State         string                 `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
@@ -1036,6 +1043,311 @@ func (x *ErrorEvent) GetMessage() string {
 	return ""
 }
 
+// ToolExecutionStart / ToolExecutionEnd are ephemeral-tier events carrying tool
+// TIMING. The durable record of a tool call remains the ToolUseBlock and
+// ToolResultBlock content blocks — these add only what a content block cannot
+// express: when execution began and how long it took, so a client can render
+// "bash running... 12s" rather than a frozen screen.
+type ToolExecutionStart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ToolUseId     string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolExecutionStart) Reset() {
+	*x = ToolExecutionStart{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolExecutionStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolExecutionStart) ProtoMessage() {}
+
+func (x *ToolExecutionStart) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolExecutionStart.ProtoReflect.Descriptor instead.
+func (*ToolExecutionStart) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ToolExecutionStart) GetToolUseId() string {
+	if x != nil {
+		return x.ToolUseId
+	}
+	return ""
+}
+
+func (x *ToolExecutionStart) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type ToolExecutionEnd struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ToolUseId     string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
+	DurationMs    int64                  `protobuf:"varint,2,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	IsError       bool                   `protobuf:"varint,3,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolExecutionEnd) Reset() {
+	*x = ToolExecutionEnd{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolExecutionEnd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolExecutionEnd) ProtoMessage() {}
+
+func (x *ToolExecutionEnd) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolExecutionEnd.ProtoReflect.Descriptor instead.
+func (*ToolExecutionEnd) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ToolExecutionEnd) GetToolUseId() string {
+	if x != nil {
+		return x.ToolUseId
+	}
+	return ""
+}
+
+func (x *ToolExecutionEnd) GetDurationMs() int64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+func (x *ToolExecutionEnd) GetIsError() bool {
+	if x != nil {
+		return x.IsError
+	}
+	return false
+}
+
+// Retry reports a turn-level retry attempt, so a supervisor can see an agent
+// looping rather than silently stalling.
+type Retry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Attempt       int32                  `protobuf:"varint,1,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	WillRetry     bool                   `protobuf:"varint,2,opt,name=will_retry,json=willRetry,proto3" json:"will_retry,omitempty"`
+	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Retry) Reset() {
+	*x = Retry{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Retry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Retry) ProtoMessage() {}
+
+func (x *Retry) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Retry.ProtoReflect.Descriptor instead.
+func (*Retry) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *Retry) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *Retry) GetWillRetry() bool {
+	if x != nil {
+		return x.WillRetry
+	}
+	return false
+}
+
+func (x *Retry) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// ChildSpawned / ChildExited carry the agent tree's edges. rafiki models a
+// sub-agent as a CHILD with its own child_id and its own conversation, not as
+// an in-conversation tool call, so these — not a parent_tool_use_id field on a
+// tool block — are how lineage reaches a client.
+type ChildSpawned struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	ParentId      string                 `protobuf:"bytes,2,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChildSpawned) Reset() {
+	*x = ChildSpawned{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChildSpawned) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChildSpawned) ProtoMessage() {}
+
+func (x *ChildSpawned) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChildSpawned.ProtoReflect.Descriptor instead.
+func (*ChildSpawned) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ChildSpawned) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+func (x *ChildSpawned) GetParentId() string {
+	if x != nil {
+		return x.ParentId
+	}
+	return ""
+}
+
+func (x *ChildSpawned) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type ChildExited struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChildId string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	// exit_code is optional because absence is meaningful: a signalled child has
+	// no exit code, and 0 means success. Collapsing them loses that.
+	ExitCode      *int32 `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
+	Signal        string `protobuf:"bytes,3,opt,name=signal,proto3" json:"signal,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChildExited) Reset() {
+	*x = ChildExited{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChildExited) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChildExited) ProtoMessage() {}
+
+func (x *ChildExited) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChildExited.ProtoReflect.Descriptor instead.
+func (*ChildExited) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ChildExited) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+func (x *ChildExited) GetExitCode() int32 {
+	if x != nil && x.ExitCode != nil {
+		return *x.ExitCode
+	}
+	return 0
+}
+
+func (x *ChildExited) GetSignal() string {
+	if x != nil {
+		return x.Signal
+	}
+	return ""
+}
+
 // Event is the stream envelope.
 //
 // ordinal is set ONLY on durable-tier events (UserMessage, AssistantMessage),
@@ -1057,6 +1369,11 @@ type Event struct {
 	//	*Event_TurnEnd
 	//	*Event_AgentStatus
 	//	*Event_Error
+	//	*Event_ToolExecutionStart
+	//	*Event_ToolExecutionEnd
+	//	*Event_Retry
+	//	*Event_ChildSpawned
+	//	*Event_ChildExited
 	Payload       isEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1064,7 +1381,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[14]
+	mi := &file_rafiki_v1_event_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1076,7 +1393,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[14]
+	mi := &file_rafiki_v1_event_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1089,7 +1406,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{14}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Event) GetChildId() string {
@@ -1183,6 +1500,51 @@ func (x *Event) GetError() *ErrorEvent {
 	return nil
 }
 
+func (x *Event) GetToolExecutionStart() *ToolExecutionStart {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ToolExecutionStart); ok {
+			return x.ToolExecutionStart
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetToolExecutionEnd() *ToolExecutionEnd {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ToolExecutionEnd); ok {
+			return x.ToolExecutionEnd
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetRetry() *Retry {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_Retry); ok {
+			return x.Retry
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetChildSpawned() *ChildSpawned {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ChildSpawned); ok {
+			return x.ChildSpawned
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetChildExited() *ChildExited {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ChildExited); ok {
+			return x.ChildExited
+		}
+	}
+	return nil
+}
+
 type isEvent_Payload interface {
 	isEvent_Payload()
 }
@@ -1215,6 +1577,26 @@ type Event_Error struct {
 	Error *ErrorEvent `protobuf:"bytes,16,opt,name=error,proto3,oneof"`
 }
 
+type Event_ToolExecutionStart struct {
+	ToolExecutionStart *ToolExecutionStart `protobuf:"bytes,17,opt,name=tool_execution_start,json=toolExecutionStart,proto3,oneof"`
+}
+
+type Event_ToolExecutionEnd struct {
+	ToolExecutionEnd *ToolExecutionEnd `protobuf:"bytes,18,opt,name=tool_execution_end,json=toolExecutionEnd,proto3,oneof"`
+}
+
+type Event_Retry struct {
+	Retry *Retry `protobuf:"bytes,19,opt,name=retry,proto3,oneof"`
+}
+
+type Event_ChildSpawned struct {
+	ChildSpawned *ChildSpawned `protobuf:"bytes,20,opt,name=child_spawned,json=childSpawned,proto3,oneof"`
+}
+
+type Event_ChildExited struct {
+	ChildExited *ChildExited `protobuf:"bytes,21,opt,name=child_exited,json=childExited,proto3,oneof"`
+}
+
 func (*Event_UserMessage) isEvent_Payload() {}
 
 func (*Event_AssistantMessage) isEvent_Payload() {}
@@ -1228,6 +1610,16 @@ func (*Event_TurnEnd) isEvent_Payload() {}
 func (*Event_AgentStatus) isEvent_Payload() {}
 
 func (*Event_Error) isEvent_Payload() {}
+
+func (*Event_ToolExecutionStart) isEvent_Payload() {}
+
+func (*Event_ToolExecutionEnd) isEvent_Payload() {}
+
+func (*Event_Retry) isEvent_Payload() {}
+
+func (*Event_ChildSpawned) isEvent_Payload() {}
+
+func (*Event_ChildExited) isEvent_Payload() {}
 
 var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
@@ -1304,7 +1696,30 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\n" +
 	"ErrorEvent\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xa3\x04\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"H\n" +
+	"\x12ToolExecutionStart\x12\x1e\n" +
+	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"n\n" +
+	"\x10ToolExecutionEnd\x12\x1e\n" +
+	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x1f\n" +
+	"\vduration_ms\x18\x02 \x01(\x03R\n" +
+	"durationMs\x12\x19\n" +
+	"\bis_error\x18\x03 \x01(\bR\aisError\"X\n" +
+	"\x05Retry\x12\x18\n" +
+	"\aattempt\x18\x01 \x01(\x05R\aattempt\x12\x1d\n" +
+	"\n" +
+	"will_retry\x18\x02 \x01(\bR\twillRetry\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"Z\n" +
+	"\fChildSpawned\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1b\n" +
+	"\tparent_id\x18\x02 \x01(\tR\bparentId\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\"p\n" +
+	"\vChildExited\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12 \n" +
+	"\texit_code\x18\x02 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x16\n" +
+	"\x06signal\x18\x03 \x01(\tR\x06signalB\f\n" +
+	"\n" +
+	"_exit_code\"\xea\x06\n" +
 	"\x05Event\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
 	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12\x1c\n" +
@@ -1318,7 +1733,12 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\x13content_block_delta\x18\r \x01(\v2\x1c.rafiki.v1.ContentBlockDeltaH\x00R\x11contentBlockDelta\x12/\n" +
 	"\bturn_end\x18\x0e \x01(\v2\x12.rafiki.v1.TurnEndH\x00R\aturnEnd\x12;\n" +
 	"\fagent_status\x18\x0f \x01(\v2\x16.rafiki.v1.AgentStatusH\x00R\vagentStatus\x12-\n" +
-	"\x05error\x18\x10 \x01(\v2\x15.rafiki.v1.ErrorEventH\x00R\x05errorB\t\n" +
+	"\x05error\x18\x10 \x01(\v2\x15.rafiki.v1.ErrorEventH\x00R\x05error\x12Q\n" +
+	"\x14tool_execution_start\x18\x11 \x01(\v2\x1d.rafiki.v1.ToolExecutionStartH\x00R\x12toolExecutionStart\x12K\n" +
+	"\x12tool_execution_end\x18\x12 \x01(\v2\x1b.rafiki.v1.ToolExecutionEndH\x00R\x10toolExecutionEnd\x12(\n" +
+	"\x05retry\x18\x13 \x01(\v2\x10.rafiki.v1.RetryH\x00R\x05retry\x12>\n" +
+	"\rchild_spawned\x18\x14 \x01(\v2\x17.rafiki.v1.ChildSpawnedH\x00R\fchildSpawned\x12;\n" +
+	"\fchild_exited\x18\x15 \x01(\v2\x16.rafiki.v1.ChildExitedH\x00R\vchildExitedB\t\n" +
 	"\apayloadB\n" +
 	"\n" +
 	"\b_ordinal*\xc8\x01\n" +
@@ -1345,24 +1765,29 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_rafiki_v1_event_proto_goTypes = []any{
-	(StopReason)(0),           // 0: rafiki.v1.StopReason
-	(*Usage)(nil),             // 1: rafiki.v1.Usage
-	(*TextBlock)(nil),         // 2: rafiki.v1.TextBlock
-	(*ThinkingBlock)(nil),     // 3: rafiki.v1.ThinkingBlock
-	(*ToolUseBlock)(nil),      // 4: rafiki.v1.ToolUseBlock
-	(*ImageBlock)(nil),        // 5: rafiki.v1.ImageBlock
-	(*ToolResultBlock)(nil),   // 6: rafiki.v1.ToolResultBlock
-	(*ContentBlock)(nil),      // 7: rafiki.v1.ContentBlock
-	(*UserMessage)(nil),       // 8: rafiki.v1.UserMessage
-	(*AssistantMessage)(nil),  // 9: rafiki.v1.AssistantMessage
-	(*TurnStart)(nil),         // 10: rafiki.v1.TurnStart
-	(*TurnEnd)(nil),           // 11: rafiki.v1.TurnEnd
-	(*ContentBlockDelta)(nil), // 12: rafiki.v1.ContentBlockDelta
-	(*AgentStatus)(nil),       // 13: rafiki.v1.AgentStatus
-	(*ErrorEvent)(nil),        // 14: rafiki.v1.ErrorEvent
-	(*Event)(nil),             // 15: rafiki.v1.Event
+	(StopReason)(0),            // 0: rafiki.v1.StopReason
+	(*Usage)(nil),              // 1: rafiki.v1.Usage
+	(*TextBlock)(nil),          // 2: rafiki.v1.TextBlock
+	(*ThinkingBlock)(nil),      // 3: rafiki.v1.ThinkingBlock
+	(*ToolUseBlock)(nil),       // 4: rafiki.v1.ToolUseBlock
+	(*ImageBlock)(nil),         // 5: rafiki.v1.ImageBlock
+	(*ToolResultBlock)(nil),    // 6: rafiki.v1.ToolResultBlock
+	(*ContentBlock)(nil),       // 7: rafiki.v1.ContentBlock
+	(*UserMessage)(nil),        // 8: rafiki.v1.UserMessage
+	(*AssistantMessage)(nil),   // 9: rafiki.v1.AssistantMessage
+	(*TurnStart)(nil),          // 10: rafiki.v1.TurnStart
+	(*TurnEnd)(nil),            // 11: rafiki.v1.TurnEnd
+	(*ContentBlockDelta)(nil),  // 12: rafiki.v1.ContentBlockDelta
+	(*AgentStatus)(nil),        // 13: rafiki.v1.AgentStatus
+	(*ErrorEvent)(nil),         // 14: rafiki.v1.ErrorEvent
+	(*ToolExecutionStart)(nil), // 15: rafiki.v1.ToolExecutionStart
+	(*ToolExecutionEnd)(nil),   // 16: rafiki.v1.ToolExecutionEnd
+	(*Retry)(nil),              // 17: rafiki.v1.Retry
+	(*ChildSpawned)(nil),       // 18: rafiki.v1.ChildSpawned
+	(*ChildExited)(nil),        // 19: rafiki.v1.ChildExited
+	(*Event)(nil),              // 20: rafiki.v1.Event
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
 	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
@@ -1383,11 +1808,16 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	11, // 15: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
 	13, // 16: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
 	14, // 17: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	15, // 18: rafiki.v1.Event.tool_execution_start:type_name -> rafiki.v1.ToolExecutionStart
+	16, // 19: rafiki.v1.Event.tool_execution_end:type_name -> rafiki.v1.ToolExecutionEnd
+	17, // 20: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
+	18, // 21: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
+	19, // 22: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -1409,7 +1839,8 @@ func file_rafiki_v1_event_proto_init() {
 		(*ContentBlockDelta_Thinking)(nil),
 		(*ContentBlockDelta_InputJson)(nil),
 	}
-	file_rafiki_v1_event_proto_msgTypes[14].OneofWrappers = []any{
+	file_rafiki_v1_event_proto_msgTypes[18].OneofWrappers = []any{}
+	file_rafiki_v1_event_proto_msgTypes[19].OneofWrappers = []any{
 		(*Event_UserMessage)(nil),
 		(*Event_AssistantMessage)(nil),
 		(*Event_TurnStart)(nil),
@@ -1417,6 +1848,11 @@ func file_rafiki_v1_event_proto_init() {
 		(*Event_TurnEnd)(nil),
 		(*Event_AgentStatus)(nil),
 		(*Event_Error)(nil),
+		(*Event_ToolExecutionStart)(nil),
+		(*Event_ToolExecutionEnd)(nil),
+		(*Event_Retry)(nil),
+		(*Event_ChildSpawned)(nil),
+		(*Event_ChildExited)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1424,7 +1860,7 @@ func file_rafiki_v1_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_event_proto_rawDesc), len(file_rafiki_v1_event_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

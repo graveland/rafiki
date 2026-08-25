@@ -122,6 +122,13 @@ message ContentBlockDelta {
   }
 }
 
+// AgentStatus.state is one of protocol.Status's eight values, exactly:
+// "spawning", "idle", "streaming", "tool_running", "compacting",
+// "blocked_ui", "shutting_down", "exited". It is a string rather than an enum
+// so a new daemon status does not require regenerating every client, but the
+// set is CLOSED — do not invent values here. Note that pi's distinction
+// between "this run ended" and "truly idle" is expressed as a transition back
+// to "idle"; there is no separate settled event.
 message AgentStatus {
   string state = 1;
 }
@@ -129,6 +136,48 @@ message AgentStatus {
 message ErrorEvent {
   string code = 1;
   string message = 2;
+}
+
+// ToolExecutionStart / ToolExecutionEnd are ephemeral-tier events carrying tool
+// TIMING. The durable record of a tool call remains the ToolUseBlock and
+// ToolResultBlock content blocks — these add only what a content block cannot
+// express: when execution began and how long it took, so a client can render
+// "bash running... 12s" rather than a frozen screen.
+message ToolExecutionStart {
+  string tool_use_id = 1;
+  string name = 2;
+}
+
+message ToolExecutionEnd {
+  string tool_use_id = 1;
+  int64 duration_ms = 2;
+  bool is_error = 3;
+}
+
+// Retry reports a turn-level retry attempt, so a supervisor can see an agent
+// looping rather than silently stalling.
+message Retry {
+  int32 attempt = 1;
+  bool will_retry = 2;
+  string reason = 3;
+}
+
+// ChildSpawned / ChildExited carry the agent tree's edges. rafiki models a
+// sub-agent as a CHILD with its own child_id and its own conversation, not as
+// an in-conversation tool call, so these — not a parent_tool_use_id field on a
+// tool block — are how lineage reaches a client.
+message ChildSpawned {
+  string child_id = 1;
+  string parent_id = 2;
+  string name = 3;
+}
+
+message ChildExited {
+  string child_id = 1;
+  // exit_code is optional because absence is meaningful: a signalled child has
+  // no exit code, and 0 means success. Collapsing them loses that.
+  optional int32 exit_code = 2;
+  string signal = 3;
 }
 
 // Event is the stream envelope.
@@ -151,5 +200,10 @@ message Event {
     TurnEnd turn_end = 14;
     AgentStatus agent_status = 15;
     ErrorEvent error = 16;
+    ToolExecutionStart tool_execution_start = 17;
+    ToolExecutionEnd tool_execution_end = 18;
+    Retry retry = 19;
+    ChildSpawned child_spawned = 20;
+    ChildExited child_exited = 21;
   }
 }
