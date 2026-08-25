@@ -26,6 +26,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -39,6 +40,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/tasksdb"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -63,6 +65,18 @@ type Controller struct {
 	// agent child (fundi.RuntimeOptions.Pool). Nil means every agent
 	// conversation is in-memory. Owned and closed by main.go, not here.
 	pool *pgxpool.Pool
+
+	// children is the durable child-state store. Nil when pool is nil, which
+	// means children live in memory only and do not survive a restart.
+	children childstore.ChildStore
+
+	// leases gates who may WRITE to a conversation. Nil under the same
+	// condition as children.
+	leases *store.LeaseStore
+
+	// daemonID is this daemon's stable identity: what a lease records as its
+	// holder, and what says whose pid namespace the pid column belongs to.
+	daemonID string
 
 	// rawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
@@ -234,11 +248,24 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		users:       userStore,
 		providers:   prov,
 	}
+
+	if id, source, err := paths.DaemonID(); err != nil {
+		// Not fatal: a daemon with no writable data dir and no env var can
+		// still run, it just cannot hold a lease, so it will not auto-resume
+		// anything. Failing to start would be worse.
+		slog.Warn("no daemon id; conversation leases disabled", "error", err)
+	} else {
+		c.daemonID = id
+		slog.Info("daemon identity", "daemonId", id, "source", source)
+	}
+
 	// Wire the coster only when there is a database: without one every
 	// budgeted spawn fails closed (which is what checkBudget does when
 	// coster is nil), while unbudgeted ones are unaffected.
 	if pool != nil {
 		c.coster = insights.New(pool)
+		c.children = childstoredb.New(pool)
+		c.leases = store.NewLeases(pool)
 	}
 	return c
 }
@@ -1778,6 +1805,13 @@ func (c *Controller) Forget(childID string) error {
 	}
 
 	c.st.Delete(childID)
+	if c.children != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.children.Delete(ctx, childID); err != nil {
+			slog.Warn("delete child row", "childId", childID, "error", err)
+		}
+		cancel()
+	}
 	if err := persist.DeleteRecord(c.stateDir, childID); err != nil {
 		slog.Warn("delete state record", "childId", childID, "error", err)
 	}
@@ -2623,33 +2657,46 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 // ─── persistence ─────────────────────────────────────────────────────────────
 
 func (c *Controller) writeRecord(childID string) error {
-	snap, ok := c.st.Get(childID)
-	if !ok {
-		return nil
-	}
-	if c.records == nil {
-		return nil
-	}
-	rec := recordFromSnapshot(snap)
-	return c.records.Write(rec)
+	return c.writeRecordLastStatus(childID, "")
 }
 
-// writeRecordLastStatus persists the child's record with the given lastStatus
-// (the pre-exit state recorded in handleChildExit) rather than the store's
-// current Status (which is already "exited" after MarkExited). Used by
-// handleChildExit so the on-disk record's LastStatus reflects the child's
-// actual last state, enabling loadOrphans to distinguish a clean exit from a
-// crash during auto-recovery.
+// writeRecordLastStatus persists the child's record. lastStatus, when non-empty,
+// is the pre-exit state recorded by handleChildExit rather than the store's
+// current Status (already "exited" after MarkExited). It is written only on
+// that path; the upsert COALESCEs an empty value so an ordinary status write
+// cannot blank the column the recovery predicate reads.
+//
+// Dual-write window: both the database and the on-disk record are written, so a
+// rollback during rollout still finds usable state files. The disk half is
+// removed in a later step.
 func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return nil
 	}
+
+	if c.children != nil {
+		rec := childstore.RecordFromSnapshot(snap)
+		rec.LastStatus = lastStatus
+		rec.DaemonID = c.daemonID
+		if snap.Kind == protocol.KindFundi {
+			rec.ConversationID = snap.SessionID
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := c.children.Upsert(ctx, rec)
+		cancel()
+		if err != nil {
+			slog.Warn("write child row", "childId", childID, "error", err)
+		}
+	}
+
 	if c.records == nil {
 		return nil
 	}
 	rec := recordFromSnapshot(snap)
-	rec.LastStatus = lastStatus
+	if lastStatus != "" {
+		rec.LastStatus = lastStatus
+	}
 	return c.records.Write(rec)
 }
 
