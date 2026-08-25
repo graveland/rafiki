@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -149,5 +150,20 @@ func TestDialDaemon_HTTPURLStaysOnTheLocalUDS(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no-such.sock") {
 		t.Errorf("expected the UDS dial failure to name the socket path, got: %v", err)
+	}
+}
+
+// B4 deleted the TypeScript TUI that rafiki-attach built. The helpers that
+// shelled out to it must go with it, or a non-detached `rafiki create` fails
+// at runtime telling the user to run a make target that no longer exists.
+func TestRafikiAttachSubprocessHelpersAreGone(t *testing.T) {
+	src, err := os.ReadFile("cli_helpers.go")
+	if err != nil {
+		t.Fatalf("read cli_helpers.go: %v", err)
+	}
+	for _, gone := range []string{"findRafikiAttach", "execRafikiAttach", "attachEnv"} {
+		if strings.Contains(string(src), gone) {
+			t.Errorf("%s still exists; it shells out to the deleted rafiki-attach binary", gone)
+		}
 	}
 }
