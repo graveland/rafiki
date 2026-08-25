@@ -297,12 +297,6 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
-	records, err := persist.ScanRecords(stateDir)
-	if err != nil {
-		slog.Error("scan state records", "error", err)
-		os.Exit(1)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -324,6 +318,7 @@ func runDaemon(opts runDaemonOpts) error {
 	// or close one themselves. A nil pool (RAFIKI_DB unset) means every
 	// agent conversation is in-memory, matching `rafikid agent --db` unset.
 	var pool *pgxpool.Pool
+	var err error
 	dsn := opts.DB
 	if dsn == "" {
 		dsn = paths.Get(paths.DB)
@@ -491,15 +486,13 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
-	ctrl.loadChildren(baseCtx, records)
+	ctrl.loadChildren(baseCtx)
 	ctrl.startSweeper(ctx)
 	ctrl.startLeaseRenewal(ctx)
 
 	if pool != nil {
 		go syncPricingLoop(baseCtx, pool, catalog)
 	}
-
-	slog.Info("loaded orphans", "count", len(records))
 
 	handler := control.NewDispatch(ctrl)
 	srv, err := control.Listen(socketPath, handler)
