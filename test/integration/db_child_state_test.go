@@ -271,3 +271,136 @@ func insertTestConversation(t *testing.T, pool *pgxpool.Pool) string {
 	}
 	return id
 }
+
+// ─── helpers for crash/recovery tests ─────────────────────────────────────────
+
+// sendTurn sends a ctrl_send with a get_state frame, which creates a conversation
+// for the child without needing a real model turn.
+func sendTurn(t *testing.T, d *daemon, childID string) {
+	t.Helper()
+	sendJSON := fmt.Sprintf(
+		`{"type":"ctrl_send","id":"s1","childId":%q,"frame":{"type":"get_state","id":"u1"}}`,
+		childID,
+	)
+	raw := d.request(t, sendJSON)
+	var r protocol.Response
+	mustUnmarshal(t, raw, &r)
+	if !r.Success {
+		t.Fatalf("ctrl_send failed: %+v", r.Error)
+	}
+}
+
+// waitForConversationID polls the child row until a conversation_id is written.
+func waitForConversationID(t *testing.T, pool *pgxpool.Pool, childID string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var id string
+		if err := pool.QueryRow(context.Background(),
+			`SELECT COALESCE(conversation_id::text, '') FROM conversations.child
+			  WHERE child_id = $1`, childID).Scan(&id); err == nil && id != "" {
+			return id
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("child %s never got a conversation_id", childID)
+	return ""
+}
+
+func openPool(t *testing.T, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	return pool
+}
+
+// ─── crash recovery test ────────────────────────────────────────────────────
+
+// TestDBChildState_ResumesAfterDaemonCrash is the regression test for the
+// defect that broke the design's motivating scenario.
+func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+
+	daemonID := "daemon-crash"
+
+	// Ensure migrations.
+	{
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		if err := store.Migrate(context.Background(), pool); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		pool.Close()
+	}
+
+	d1 := bootDaemonDB(t, daemonID)
+	childID := d1.spawnChild(t)
+	sendTurn(t, d1, childID)
+
+	// SIGKILL — handleChildExit never runs.
+	_ = d1.proc.Process.Signal(syscall.SIGKILL)
+	_ = d1.proc.Wait()
+
+	// Verify last_status is NULL (the test is exercising a crash).
+	pool := openPool(t, dsn)
+	defer pool.Close()
+	var lastStatus *string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT last_status FROM conversations.child WHERE child_id = $1`, childID).Scan(&lastStatus); err != nil {
+		t.Fatalf("read last_status: %v", err)
+	}
+	if lastStatus != nil && *lastStatus != "" {
+		t.Fatalf("last_status = %q; the test is not exercising a crash", *lastStatus)
+	}
+
+	// Restart with the same daemon id and home dir.
+	cmd := exec.Command(binaryPath)
+	cmd.Env = append(os.Environ(),
+		"HOME="+d1.homeDir,
+		"XDG_RUNTIME_DIR="+d1.homeDir,
+		"XDG_STATE_HOME="+d1.homeDir,
+		"XDG_DATA_HOME="+d1.homeDir,
+		"RAFIKI_PI_BINARY="+fakePiPath,
+		"RAFIKI_DB="+dsn,
+		"RAFIKI_DAEMON_ID="+daemonID,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start second daemon: %v", err)
+	}
+	d2 := &daemon{socketPath: d1.socketPath, proc: cmd, homeDir: d1.homeDir}
+	t.Cleanup(func() {
+		_ = d2.proc.Process.Signal(syscall.SIGTERM)
+		_ = d2.proc.Wait()
+		os.RemoveAll(d2.homeDir)
+	})
+
+	dl := time.Now().Add(10 * time.Second)
+	for time.Now().Before(dl) {
+		conn, err := net.Dial("unix", d2.socketPath)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Check the child is listed — that proves recovery ran.
+	raw := d2.request(t, `{"type":"ctrl_list","id":"l1"}`)
+	var r protocol.Response
+	mustUnmarshal(t, raw, &r)
+	var listData protocol.ListResponseData
+	mustUnmarshal(t, r.Data, &listData)
+	for _, c := range listData.Children {
+		if c.ChildID == childID {
+			return // found
+		}
+	}
+	t.Fatal("child not found after crash recovery")
+}
