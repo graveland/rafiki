@@ -128,7 +128,32 @@ making any timestamp cursor either re-deliver or drop.
 | RPC | Kind | Purpose |
 |---|---|---|
 | `GetHistory` | unary | Durable events for one child, after an optional ordinal |
-| `StreamEvents` | server-streaming | Durable replay, then live follow |
+| `StreamEvents` | server-streaming | Durable replay, then live follow of **every** requested child |
+| `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam |
+| `ListChildren` | unary | List children, optionally filtered by status |
+| `GetChild` | unary | Get one child's summary by id |
+| `Spawn` | unary | Create a child with budget, executor, and label options |
+| `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
+
+### Event vocabulary
+
+Rafiki-native events carry no ordinal and are best-effort live-only (ephemeral tier).
+They are not replayed on reconnect. The DURABLE record of a tool call remains the
+`ToolUseBlock`/`ToolResultBlock` content blocks inside `UserMessage`/`AssistantMessage`.
+
+| Event | Tier | Purpose |
+|---|---|---|
+| `ToolExecutionStart` | ephemeral | Tool began executing (name, tool_use_id) |
+| `ToolExecutionEnd` | ephemeral | Tool completed (duration_ms, is_error) |
+| `Retry` | ephemeral | Turn-level retry with attempt count and reason |
+| `ChildSpawned` | ephemeral | A sub-agent was created (child_id, parent_id, name) |
+| `ChildExited` | ephemeral | A sub-agent exited (optional exit_code, signal) |
+| `AgentStatus` | ephemeral | Status change from the daemon's closed vocabulary |
+
+`AgentStatus.state` is one of the eight `protocol.Status` values: `spawning`, `idle`,
+`streaming`, `tool_running`, `compacting`, `blocked_ui`, `shutting_down`, `exited`.
+It is a string rather than an enum so a new daemon status does not require
+regenerating every client.
 
 ## 3. Framing
 
