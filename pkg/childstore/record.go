@@ -27,6 +27,7 @@ type ChildRecord struct {
 	ConfigDir string
 	PID       int
 	DaemonID  string
+	NSToken   string
 
 	Provider string
 	Model    string
