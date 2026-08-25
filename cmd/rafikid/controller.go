@@ -31,6 +31,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -133,6 +134,10 @@ type Controller struct {
 	// budget warnings, executor loss) into debounced frames so N events
 	// cost one model turn instead of N. Nil means the buffer is disabled.
 	evbuf *eventbuf.Buffer
+
+	// native fans rafiki-native events out per child, for the Connect
+	// control plane's StreamEvents.
+	native *nativebus.Registry
 
 	// coster resolves what an agent subtree has spent. An interface rather
 	// than *insights.Insights so the admission logic is testable without a
@@ -254,6 +259,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		users:       userStore,
 		providers:   prov,
 		heldLeases:  make(map[string]store.Lease),
+		native:      nativebus.New(),
 	}
 
 	if id, source, err := paths.DaemonID(); err != nil {

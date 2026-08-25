@@ -14,6 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inproc"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -305,8 +306,22 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			ro.ExecutorTools = c.executorToolsFor(execID)
 		}
 	}
+	// Publish this child's native events onto its own bus. childID is the
+	// daemon-stamped id, captured here rather than passed as a parameter to
+	// anything the model can influence.
+	ro.NativeSink = nativeSinkFunc(func(ev *rafikiv1.Event) {
+		if ev.GetChildId() == "" {
+			ev.ChildId = childID
+		}
+		c.native.Publish(childID, ev)
+	})
 	return ro, nil
 }
+
+// nativeSinkFunc adapts a plain func to fundi.NativeSink.
+type nativeSinkFunc func(*rafikiv1.Event)
+
+func (f nativeSinkFunc) Publish(ev *rafikiv1.Event) { f(ev) }
 
 // toRuntimeOptions converts parsed agent flags into the options an in-process
 // engine needs. cwd is explicit because the daemon's working directory is never

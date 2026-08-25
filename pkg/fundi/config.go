@@ -132,6 +132,9 @@ type Config struct {
 	// legal (a standalone `rafikid fundi` process has nothing to hand back to).
 	OnFatal func(error)
 
+	// NativeSink receives this engine's rafiki-native events. Optional.
+	NativeSink NativeSink
+
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
@@ -227,6 +230,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		BaseCtx:    ctx,
 		AutoResume: c.AutoResume,
 		OnFatal:    c.OnFatal,
+		NativeSink: c.NativeSink,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)

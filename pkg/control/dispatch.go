@@ -411,9 +411,9 @@ func guardedErr(cmd, id string, err error) []byte {
 	return errResponse(cmd, id, protocol.ErrInternal, "identity store unavailable")
 }
 
-// ─── snapshotToSummary ────────────────────────────────────────────────────────
+// ─── SnapshotToSummary ────────────────────────────────────────────────────────
 
-// snapshotToSummary converts a childstore.Snapshot to the wire ChildSummary shape.
+// SnapshotToSummary converts a childstore.Snapshot to the wire ChildSummary shape.
 // PID is omitted (nil) when the child has exited. Model is formatted as
 // "provider/model" when both fields are present.
 //
@@ -422,7 +422,7 @@ func guardedErr(cmd, id string, err error) []byte {
 // so this package (and its tests) need not depend on pkg/routing; callers pass
 // Controller.ContextWindow bound to the real implementation. A nil func or a
 // false ok leaves both fields at their zero value (omitted on the wire).
-func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string) (contextLen, maxCompletion int, ok bool)) protocol.ChildSummary {
+func SnapshotToSummary(snap childstore.Snapshot, contextWindow func(model string) (contextLen, maxCompletion int, ok bool)) protocol.ChildSummary {
 	model := snap.Model
 	if snap.Provider != "" && snap.Model != "" {
 		model = snap.Provider + "/" + snap.Model
@@ -475,7 +475,7 @@ func (d *dispatcher) list(frame []byte, id string) []byte {
 	snaps := d.c.List(filter)
 	children := make([]protocol.ChildSummary, len(snaps))
 	for i, s := range snaps {
-		children[i] = snapshotToSummary(s, d.c.ContextWindow)
+		children[i] = SnapshotToSummary(s, d.c.ContextWindow)
 	}
 	return okResponse(protocol.TypeCtrlList, id, protocol.ListResponseData{Children: children})
 }
@@ -492,7 +492,7 @@ func (d *dispatcher) get(frame []byte, id string) []byte {
 	if !ok {
 		return errResponse(protocol.TypeCtrlGet, id, protocol.ErrChildNotFound, "child not found: "+req.ChildID)
 	}
-	return okResponse(protocol.TypeCtrlGet, id, snapshotToSummary(snap, d.c.ContextWindow))
+	return okResponse(protocol.TypeCtrlGet, id, SnapshotToSummary(snap, d.c.ContextWindow))
 }
 
 func (d *dispatcher) getRecent(frame []byte, id string) []byte {

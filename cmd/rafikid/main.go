@@ -455,6 +455,10 @@ func runDaemon(opts runDaemonOpts) error {
 		ctrl.SetProxy(face.URL, face.Token)
 		if face.Control != nil {
 			face.Control.SetChildResolver(ctrl)
+			face.Control.SetEventSource(ctrl.nativeEventSource())
+			face.Control.SetInbox(newConnectInbox(ctrl))
+			face.Control.SetChildLister(ctrl)
+			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 		}
 	}
 	// The executor pool no longer owns a listener. It is reached at a PATH on
