@@ -179,6 +179,15 @@ const (
 	// natural source is the downward API and the data dir is not durable.
 	ExecutorName = "RAFIKI_EXECUTOR_NAME"
 
+	// DaemonID identifies this daemon across restarts. It is what a
+	// conversation lease records as its holder, and it is what lets a
+	// restarted daemon reclaim its own leases without waiting out the TTL.
+	//
+	// It MUST be unique per running daemon. Two daemons sharing one value
+	// reclaim each other's leases on every acquire, which reproduces exactly
+	// the split-brain the lease exists to prevent.
+	DaemonIDVar = "RAFIKI_DAEMON_ID"
+
 	// ExecutorsEnabled turns on the executor endpoint. "0" or "false" refuses
 	// executors outright; any other non-empty value forces them on; unset
 	// takes the default, which depends on RAFIKI_CONTROL_LISTEN (see
