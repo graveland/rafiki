@@ -78,9 +78,10 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 
 	// Spawn a top-level child.
 	res, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
-		Type: protocol.TypeCtrlSpawn,
-		Cwd:  os.TempDir(),
-		Kind: protocol.KindPi,
+		Type:     protocol.TypeCtrlSpawn,
+		Cwd:      os.TempDir(),
+		Kind:     protocol.KindClaude,
+		PiBinary: fakePiBin(t),
 	}, users.Identity{})
 	if err != nil {
 		t.Fatalf("spawn top-level: %v", err)
@@ -114,7 +115,8 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 	res2, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
 		Type:          protocol.TypeCtrlSpawn,
 		Cwd:           os.TempDir(),
-		Kind:          protocol.KindPi,
+		Kind:          protocol.KindClaude,
+		PiBinary:      fakePiBin(t),
 		ParentChildID: parentID,
 	}, users.Identity{})
 	if err != nil {
@@ -192,7 +194,7 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 
 	// 2. Spawn child B with ParentChildID = A.
 	req := protocol.SpawnRequest{
-		Kind:          protocol.KindPi,
+		Kind:          protocol.KindClaude,
 		Cwd:           t.TempDir(),
 		PiBinary:      fakePiBin(t),
 		NoSession:     true,

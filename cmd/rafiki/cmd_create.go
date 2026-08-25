@@ -63,9 +63,9 @@ Environment variable defaults (applied before explicit flags; lowest priority):
 // addSpawnFlags registers the shared spawn-related flags on cmd.
 func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
-	cmd.Flags().String("kind", protocol.KindFundi, "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model), pi (a pi process in rpc mode), or claude (Claude Code)")
-	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi and --kind pi")
-	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to pi and claude)")
+	cmd.Flags().String("kind", protocol.KindFundi, "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model) or claude (Claude Code)")
+	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi")
+	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to claude)")
 	cmd.Flags().StringP("model", "m", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via RAFIKI_DEFAULT_MODEL")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
@@ -99,11 +99,11 @@ func addSpawnFlags(cmd *cobra.Command) {
 		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
 	})
 	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
-	// Scoped to --kind: a pi child cannot resolve an OpenRouter slash id, and
-	// an agent child cannot resolve one of pi's provider-local ids. Offering
+	// Scoped to --kind: a claude child cannot resolve an OpenRouter slash id, and
+	// the fundi child cannot resolve one of claude's provider-local ids. Offering
 	// the union produces a child that spawns and attaches and then never
 	// answers. cobra has already parsed any --kind appearing earlier on the
-	// line by the time this runs; an unset flag yields its default, "pi".
+	// line by the time this runs; an unset flag yields its default, "fundi".
 	_ = cmd.RegisterFlagCompletionFunc("model", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		kind, _ := c.Flags().GetString("kind")
 		return completeModel(kind, toComplete), cobra.ShellCompDirectiveNoFileComp
@@ -132,7 +132,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
-		// For --kind pi/claude, cwd names a directory the DAEMON itself must
+		// For --kind claude, cwd names a directory the DAEMON itself must
 		// fork a real subprocess in (cmd.Dir, pkg/child/runner.go) — defaulting
 		// to this process's cwd only makes sense against the local daemon; for
 		// a remote RAFIKI_URL that's a different machine entirely, and left

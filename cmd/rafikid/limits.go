@@ -311,8 +311,8 @@ func grantedChildren(req protocol.SpawnRequest) int {
 // checkKindNarrowing refuses a child whose kind would escape its parent's
 // executor grant.
 //
-// claude and pi are forked on the daemon's own host: agentRunner returns a nil
-// Runner for them, so resolveExecutor is never called and ExecutorSelector is
+// claude is forked on the daemon's own host: agentRunner returns a nil
+// Runner for it, so resolveExecutor is never called and ExecutorSelector is
 // ignored outright. A confined parent
 // could therefore spawn an unconfined sibling simply by naming a kind — and
 // agent_spawn exposes `kind` to the model, so the escape is one prompt
@@ -324,7 +324,14 @@ func grantedChildren(req protocol.SpawnRequest) int {
 // ctrl_resume and agent_spawn are all covered by the one check, with no route
 // left to enumerate.
 func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest) error {
-	if req.Kind == protocol.KindFundi {
+	// An omitted kind is fundi (spawnKindLabel), so normalize it the same way
+	// resolveSpawnPlan and spawnKindLabel do before testing against the one
+	// kind that honours an executor grant.
+	kind := req.Kind
+	if kind == "" {
+		kind = protocol.KindFundi
+	}
+	if kind == protocol.KindFundi {
 		return nil
 	}
 	if req.ParentChildID == "" {
@@ -340,15 +347,9 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest) error {
 		return nil // parent is already unconfined on this host
 	}
 
-	// An omitted kind is pi (spawnKindLabel), so say what was actually
-	// requested rather than echoing an empty string back at the caller.
-	asked := req.Kind
-	if asked == "" {
-		asked = protocol.KindPi + " (the default when kind is omitted)"
-	}
 	return &control.ControllerError{
 		Code: protocol.ErrInvalidArgs,
-		Message: "spawn refused: the parent runs under an executor grant, and kind " + asked +
+		Message: "spawn refused: the parent runs under an executor grant, and kind " + kind +
 			" ignores executors entirely — it would fork on the daemon's own host with the " +
 			"daemon's filesystem. Only kind \"fundi\" can honour an executor grant.",
 	}

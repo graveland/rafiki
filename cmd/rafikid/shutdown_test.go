@@ -49,13 +49,15 @@ func newTestController(t *testing.T) *Controller {
 	return ctrl
 }
 
-// spawnTestChild spawns a fake-pi child through the controller and waits for
-// it to reach idle. env entries are forwarded to the child process.
+// spawnTestChild spawns a claude child (fake-pi.sh as the binary — the fake is
+// ReadyOnSpawn so it reaches idle on process-up regardless of protocol) through
+// the controller and waits for it to reach idle. env entries are forwarded to
+// the child process.
 func spawnTestChild(t *testing.T, ctrl *Controller, env map[string]string) string {
 	t.Helper()
 
 	req := protocol.SpawnRequest{
-		Kind:      protocol.KindPi,
+		Kind:      protocol.KindClaude,
 		Cwd:       t.TempDir(),
 		PiBinary:  fakePiBin(t),
 		NoSession: true,

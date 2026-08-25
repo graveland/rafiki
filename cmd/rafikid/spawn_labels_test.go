@@ -9,7 +9,6 @@ import (
 func TestSpawnKindLabel(t *testing.T) {
 	cases := map[string]string{
 		"":                  protocol.KindFundi, // empty kind defaults to fundi
-		protocol.KindPi:     protocol.KindPi,
 		protocol.KindClaude: protocol.KindClaude,
 		protocol.KindFundi:  protocol.KindFundi,
 	}

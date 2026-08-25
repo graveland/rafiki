@@ -13,7 +13,7 @@ import (
 // modelSourcesForKind returns the model sources that a child of the given kind
 // can actually resolve.
 //
-// The three kinds have genuinely different model universes, and offering one
+// The two kinds have genuinely different model universes, and offering one
 // kind's ids to another produces a child that spawns, attaches, and then never
 // answers — no error, just a TUI that never becomes idle:
 //
@@ -21,12 +21,6 @@ import (
 //     module's llm/routing, so it takes exactly what rafiki resolves: the
 //     curated Anthropic ids and <family>-latest aliases, plus any OpenRouter
 //     slash id.
-//   - "pi" hands the id to a pi process, which resolves it against pi's own
-//     providers in ~/.pi/agent/models.json. Only what rafiki read out of that
-//     file, plus live local inference servers, can work here. Notably the
-//     curated builtin list cannot: it names providers ("anthropic", "openai",
-//     "google", "xai") that a given pi install has no reason to have
-//     configured.
 //   - "claude" shells out to Claude Code, which only knows Anthropic ids.
 //
 // When --kind has not been typed yet, cobra gives us the flag's default and we
@@ -34,11 +28,6 @@ import (
 // superset of what will actually work is how this went wrong before.
 func modelSourcesForKind(kind string) map[models.Source]bool {
 	switch kind {
-	case protocol.KindPi:
-		return map[models.Source]bool{
-			models.SourceUserConfig: true,
-			models.SourceLocal:      true,
-		}
 	case protocol.KindClaude:
 		// Claude Code resolves Anthropic ids itself; the curated list and the
 		// family aliases are the only entries that can apply.

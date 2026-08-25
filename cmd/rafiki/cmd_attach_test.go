@@ -48,6 +48,7 @@ func TestAttachIsRegistered(t *testing.T) {
 		t.Fatal("attach is not registered on the root command")
 	}
 }
+
 // `tui` was a B2 placeholder. The verbs are create and attach; no alias.
 func TestTUIVerbIsGone(t *testing.T) {
 	root := newRootCmd()

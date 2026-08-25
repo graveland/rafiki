@@ -22,7 +22,7 @@ func envKeys(env []string) map[string]string {
 func TestProxyChildEnv_NothingWhenNoFaceAndNoOverride(t *testing.T) {
 	t.Setenv(paths.URL, "")
 	ctl := &Controller{} // no face started
-	for _, kind := range []string{protocol.KindPi, protocol.KindClaude, protocol.KindFundi} {
+	for _, kind := range []string{protocol.KindClaude, protocol.KindFundi} {
 		if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1"); got != nil {
 			t.Errorf("kind %q with no proxy configured: got %v, want nothing", kind, got)
 		}
@@ -71,29 +71,9 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 	}
 }
 
-// pi has no ANTHROPIC_BASE_URL equivalent — it reads these in the rafiki-helpers
-// extension, where its provider override is registered.
-func TestProxyChildEnv_Pi(t *testing.T) {
-	// See TestProxyChildEnv_Claude: isolate from an ambient RAFIKI_URL.
-	t.Setenv(paths.URL, "")
-	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
-
-	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindPi}, "c_xyz"))
-	if env[paths.URL] != "http://localhost:8035" || env[paths.Token] != "tok" {
-		t.Errorf("proxy vars not passed to pi: %v", env)
-	}
-	if env["RAFIKI_SESSION_REF"] != "c_xyz" {
-		t.Errorf("RAFIKI_SESSION_REF = %q, want the child id", env["RAFIKI_SESSION_REF"])
-	}
-	// pi must not be handed Claude Code's variables.
-	if _, ok := env["ANTHROPIC_BASE_URL"]; ok {
-		t.Error("pi was given ANTHROPIC_BASE_URL, which means nothing to it")
-	}
-}
-
 func TestProxyRoutesKind(t *testing.T) {
 	t.Setenv(paths.ProxyKinds, "")
-	for _, k := range []string{protocol.KindPi, protocol.KindClaude} {
+	for _, k := range []string{protocol.KindClaude} {
 		if !proxyRoutesKind(k) {
 			t.Errorf("default must route %q", k)
 		}
@@ -101,8 +81,8 @@ func TestProxyRoutesKind(t *testing.T) {
 	// The escape hatch: narrowing the list makes "is it the proxy?" answerable
 	// with a restart instead of a rebuild.
 	t.Setenv(paths.ProxyKinds, protocol.KindClaude)
-	if proxyRoutesKind(protocol.KindPi) {
-		t.Error("pi routed despite being excluded by RAFIKI_PROXY_KINDS")
+	if proxyRoutesKind(protocol.KindFundi) {
+		t.Error("fundi routed despite being excluded by RAFIKI_PROXY_KINDS")
 	}
 	if !proxyRoutesKind(protocol.KindClaude) {
 		t.Error("claude not routed despite being listed")

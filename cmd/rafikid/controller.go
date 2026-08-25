@@ -1408,18 +1408,6 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		kind = protocol.KindFundi
 	}
 
-	// Verify the session file exists for children that track one (pi). Claude does
-	// not track a session file (it manages its own ~/.claude store keyed by
-	// session id), so there is nothing to stat.
-	if kind == protocol.KindPi && !snap.NoSession && snap.SessionFile != "" {
-		if _, err := os.Stat(snap.SessionFile); err != nil {
-			return control.SpawnResult{}, &control.ControllerError{
-				Code:    protocol.ErrSessionFileMissing,
-				Message: "session file not found: " + snap.SessionFile,
-			}
-		}
-	}
-
 	req := resumeRequestFromSnapshot(snap, apiKey)
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
@@ -2774,107 +2762,6 @@ func newChildID() string {
 	return "c_" + ulid.Make().String()
 }
 
-//nolint:unused
-func resolvePiBinary(override string) (string, error) {
-	if override != "" {
-		return override, nil
-	}
-	if env := paths.Get(paths.PiBinary); env != "" {
-		return env, nil
-	}
-	return exec.LookPath("pi")
-}
-
-// buildArgv converts a SpawnRequest into the pi CLI argument list (excluding
-// the binary itself). Always starts with --mode rpc.
-//
-//nolint:unused
-func buildArgv(req protocol.SpawnRequest) []string {
-	var argv []string
-	argv = append(argv, "--mode", "rpc")
-
-	if req.Model != "" {
-		argv = append(argv, "--model", req.Model)
-	}
-	if req.Provider != "" {
-		argv = append(argv, "--provider", req.Provider)
-	}
-	if req.Thinking != "" {
-		argv = append(argv, "--thinking", req.Thinking)
-	}
-	if req.APIKey != "" {
-		argv = append(argv, "--api-key", req.APIKey)
-	}
-
-	// Session flags.
-	if req.NoSession {
-		argv = append(argv, "--no-session")
-	}
-	if req.SessionDir != "" {
-		argv = append(argv, "--session-dir", req.SessionDir)
-	}
-	if req.ResumeSession != "" {
-		argv = append(argv, "--session", req.ResumeSession)
-	}
-	if req.ForkSession != "" {
-		argv = append(argv, "--fork", req.ForkSession)
-	}
-
-	// Tool / extension / skill scoping.
-	if req.Tools != "" {
-		argv = append(argv, "--tools", req.Tools)
-	}
-	if req.NoTools {
-		argv = append(argv, "--no-tools")
-	}
-	if req.NoBuiltinTools {
-		argv = append(argv, "--no-builtin-tools")
-	}
-	for _, ext := range req.Extensions {
-		argv = append(argv, "--extensions", ext)
-	}
-	if req.NoExtensions {
-		argv = append(argv, "--no-extensions")
-	}
-	for _, sk := range req.Skills {
-		argv = append(argv, "--skills", sk)
-	}
-	if req.NoSkills {
-		argv = append(argv, "--no-skills")
-	}
-	for _, pt := range req.PromptTemplates {
-		argv = append(argv, "--prompt-templates", pt)
-	}
-	if req.NoPromptTemplates {
-		argv = append(argv, "--no-prompt-templates")
-	}
-	for _, th := range req.Themes {
-		argv = append(argv, "--themes", th)
-	}
-	if req.NoThemes {
-		argv = append(argv, "--no-themes")
-	}
-	if req.NoContextFiles {
-		argv = append(argv, "--no-context-files")
-	}
-
-	// System prompt.
-	if req.SystemPrompt != "" {
-		argv = append(argv, "--system-prompt", req.SystemPrompt)
-	}
-	if req.AppendSystemPrompt != "" {
-		argv = append(argv, "--append-system-prompt", req.AppendSystemPrompt)
-	}
-
-	if req.Verbose {
-		argv = append(argv, "--verbose")
-	}
-
-	// Extra args are appended last (last-flag-wins override).
-	argv = append(argv, req.ExtraArgs...)
-	return argv
-}
-
 // resolveClaudeBinary resolves the Claude Code CLI binary path. Precedence:
 // explicit override → CLAUDE_BINARY env → ~/.local/bin/claude (the path the
 // user's claudew/claudep wrappers exec) → PATH lookup of "claude".
@@ -2936,9 +2823,6 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		kind = protocol.KindFundi
 	}
 	switch kind {
-	case protocol.KindPi:
-		bin, err = resolvePiBinary(req.PiBinary)
-		return bin, buildArgv(req), child.IdentityProvider{}, err
 	case protocol.KindClaude:
 		bin, err = resolveClaudeBinary(req.PiBinary)
 		return bin, buildClaudeArgv(req), child.ClaudeProvider{}, err
@@ -3194,23 +3078,18 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 		})
 		return additions
 	default:
-		// pi has no ANTHROPIC_BASE_URL equivalent. It reads these in the
-		// rafiki-helpers extension, which is where its provider override is
-		// registered.
-		return []string{
-			paths.URL + "=" + url,
-			paths.Token + "=" + token,
-			"RAFIKI_SESSION_REF=" + childID,
-		}
+		// Only claude is proxied. Fundi runs in-process (no HTTP face to point
+		// it at), and anything else is not a routeable kind.
+		return nil
 	}
 }
 
 // proxyRoutesKind reports whether kind is listed in RAFIKI_PROXY_KINDS, which
-// defaults to "pi,claude".
+// defaults to "claude".
 func proxyRoutesKind(kind string) bool {
 	kinds := splitComma(paths.Get(paths.ProxyKinds))
 	if len(kinds) == 0 {
-		kinds = []string{protocol.KindPi, protocol.KindClaude}
+		kinds = []string{protocol.KindClaude}
 	}
 	return slices.Contains(kinds, kind)
 }

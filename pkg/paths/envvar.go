@@ -25,14 +25,6 @@ const (
 	// GraceHours overrides how long an exited child's record is retained.
 	GraceHours = "RAFIKI_GRACE_HOURS"
 
-	// PiBinary overrides the path to the pi binary the daemon spawns for `pi`
-	// kind children. Namespaced because it is rafiki's knob, not pi's own.
-	PiBinary = "RAFIKI_PI_BINARY"
-
-	// NoAutoInstallHelpers, when non-empty, stops `rafiki create` from installing
-	// or updating the bundled rafiki-helpers pi extension.
-	NoAutoInstallHelpers = "RAFIKI_NO_AUTO_INSTALL_HELPERS"
-
 	// DefaultModel supplies the model when `rafiki create` gets no --model.
 	DefaultModel = "RAFIKI_DEFAULT_MODEL"
 
@@ -42,10 +34,6 @@ const (
 	// DefaultLabels is a comma-separated "k=v,k2=v2" set of label defaults,
 	// merged before any --label flags.
 	DefaultLabels = "RAFIKI_DEFAULT_LABELS"
-
-	// AttachTail bounds the scrollback rafiki-attach replays into the TUI. Set by
-	// `rafiki attach --tail` for the TUI process; read on the TypeScript side.
-	AttachTail = "RAFIKI_ATTACH_TAIL"
 
 	// DB is the conversations database. One DSN: the daemon opens a single
 	// pool and hands it to both the agent runtime and the proxy face, so
@@ -72,7 +60,7 @@ const (
 	Token = "RAFIKI_TOKEN"
 
 	// ProxyKinds limits which child kinds are routed, comma-separated. Default
-	// "pi,claude"; the agent kind is never listed because it reaches rafiki
+	// "claude"; the agent kind is never listed because it reaches rafiki
 	// in-process and has no proxy to point at.
 	//
 	// An escape hatch: it makes "is this regression the proxy?" answerable by

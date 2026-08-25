@@ -37,7 +37,7 @@ import (
 func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	ctrl := newTestController(t)
 
-	id := spawnTestChild(t, ctrl, map[string]string{"_kind": protocol.KindPi})
+	id := spawnTestChild(t, ctrl, nil)
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -123,7 +123,7 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	ctrl := newTestController(t)
 
-	id := spawnTestChild(t, ctrl, map[string]string{"_kind": protocol.KindPi})
+	id := spawnTestChild(t, ctrl, nil)
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -197,7 +197,7 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 	ctrl := newTestController(t)
 
-	id := spawnTestChild(t, ctrl, map[string]string{"_kind": protocol.KindPi})
+	id := spawnTestChild(t, ctrl, nil)
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -259,6 +259,20 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 }
 
 func readNonEmptyLines(t *testing.T, path string) []string {
+	t.Helper()
+	// Poll briefly: for a claude child (ReadyOnSpawn) the fork returns before the
+	// fake script has written its spawn log line, so an immediate read races it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		lines := readNonEmptyLinesNow(t, path)
+		if len(lines) > 0 || time.Now().After(deadline) {
+			return lines
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func readNonEmptyLinesNow(t *testing.T, path string) []string {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
