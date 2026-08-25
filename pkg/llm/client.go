@@ -35,6 +35,7 @@ type Client struct {
 	pool     *pgxpool.Pool
 	capture  *capture.CaptureStore
 	messages *store.Messages
+	lease    store.Lease
 	catalog  *routing.ModelCatalog
 	logger   *slog.Logger
 	tracer   trace.Tracer
@@ -154,6 +155,24 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	}
 	c.modelGate = NewModelGate(10*time.Second, 300*time.Second)
 	return c, nil
+}
+
+// SetLease installs the conversation write lease on this client's stores, so
+// every message append carries the guard clause.
+//
+// Called exactly once, at engine build, after the conversation is resolved and
+// before any turn can run. One Client is built per child (see BuildEngine), so
+// there is no concurrency here and nothing has written yet.
+//
+// A zero lease, or a client with no stores, is a no-op — that is the unfenced
+// behaviour the proxy face and every client-driven conversation rely on.
+func (c *Client) SetLease(l store.Lease) {
+	if !l.Held() || c.capture == nil || c.messages == nil {
+		return
+	}
+	c.lease = l
+	c.capture = c.capture.WithLease(l)
+	c.messages = c.messages.WithLease(l)
 }
 
 // Breaker exposes the breaker for a provider so the embedded proxy face can
