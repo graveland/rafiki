@@ -12,22 +12,6 @@ DESTDIR ?= $(HOME)/.local/bin
 
 DAEMON_BIN := rafikid
 CLI_BIN    := rafiki
-ATTACH_BIN := rafiki-attach
-
-# These must be defined ABOVE build-attach, not down in the pi section with the
-# rules that use them: make expands a prerequisite list when it parses the rule,
-# so `build-attach: $(PI_MODULES) $(PI_DIST)` against not-yet-defined variables
-# silently becomes a rule with no prerequisites — pi is never built first, and
-# attach bundles whatever stale dist happens to be on disk.
-PI_DIR  := pi
-PI_PKG  := $(PI_DIR)/packages/coding-agent
-PI_DIST := $(PI_PKG)/dist/cli.js
-PI_MODULES := $(PI_DIR)/node_modules
-
-# Every package's TypeScript source. $(PI_DIST) must depend on these: keying the
-# rebuild on package.json alone meant editing a .ts file never recompiled dist,
-# so `make`/`pi-install` shipped a stale bundle from previously-compiled JS.
-PI_SRC := $(shell find $(PI_DIR)/packages/*/src -type f \( -name '*.ts' -o -name '*.tsx' \) ! -name '*.test.ts' 2>/dev/null)
 
 ##@ General
 
@@ -72,11 +56,9 @@ run: ## Run rafikid in the foreground, serving the proxy face on :8035.
 	go run ./cmd/rafikid
 
 # NOTE (merge): fundi's `build` also depended on build-attach. It no longer
-# does. build-attach needs bun AND the pi submodule initialised, so folding it
-# into the default build meant `make build` hard-failed on a fresh clone that
-# had neither — for a TUI that most work on this repo never touches. The three
-# Go binaries build from a bare `git clone` with nothing but a Go toolchain;
-# attach stays one explicit target away.
+# does — the TUI is in-process Go (pkg/tui), built into `rafiki` itself, so
+# there is no separate attach artifact to build. The two Go binaries build from
+# a bare `git clone` with nothing but a Go toolchain.
 .PHONY: build
 build: build-daemon build-cli ## Build both Go binaries into bin/.
 
@@ -94,8 +76,7 @@ build-cli: ## Build the rafiki CLI client (bin/rafiki).
 
 # There is no CI on this repo, so nothing else exercises GOOS=linux — the
 # daemon and CLI silently bitrotted on Linux for an entire phase until this
-# target's absence was flagged in review. rafiki-attach is excluded: it ships a
-# native binary via bun, which does not cross-compile from here.
+# target's absence was flagged in review.
 .PHONY: build-linux
 build-linux: ## Cross-compile for linux/amd64 (catches Linux-only breaks; no CI runs this).
 	mkdir -p $(BIN_DIR)/linux
@@ -103,16 +84,6 @@ build-linux: ## Cross-compile for linux/amd64 (catches Linux-only breaks; no CI 
 	$(eval GO_VERSION := $(shell git describe --always --dirty))
 	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/linux/$(DAEMON_BIN) ./cmd/rafikid
 	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-s -w -X go.graveland.dev/rafiki/pkg/version.Version=$(GO_VERSION)" -o $(BIN_DIR)/linux/$(CLI_BIN) ./cmd/rafiki
-
-# rafiki-attach bundles pi (via attach/package.json -> file:../$(PI_PKG)), so pi
-# must be built first. Fail loudly if the submodule isn't initialised.
-.PHONY: build-attach
-build-attach: $(PI_MODULES) $(PI_DIST) ## Bundle the rafiki-attach TUI binary (recompiles pi dist first).
-	@if command -v bun >/dev/null 2>&1; then \
-	    cd attach && bun install --silent && bun run build; \
-	else \
-	    echo "skipping rafiki-attach build: bun not installed (install via 'brew install oven-sh/bun/bun')"; \
-	fi
 
 # The paths package (via rafikid -h) is the one authority for resolved config
 # paths — this used to hand-roll its own shell guesses and got all four of
@@ -126,7 +97,7 @@ build-attach: $(PI_MODULES) $(PI_DIST) ## Bundle the rafiki-attach TUI binary (r
 .PHONY: print-config
 print-config: build-daemon ## Show the resolved rafiki config paths (shells out to rafikid -h).
 	@$(BIN_DIR)/$(DAEMON_BIN) -h | awk '/^  socket /,/^  mcp /'
-	@printf "  %-12s %s\n" "agent db" "$${RAFIKI_DB:-<unset — NO COST DATA>}"
+	@printf "  %-12s %s\n" "agent db" "$${RAFIKI_DB:-<unset — rafikid will not start>}"
 
 # Interactive by default; pass extra flags via ARGS, e.g.:
 #   make claude ARGS='-p "what changed today"'
@@ -157,43 +128,14 @@ claude: ## Launch Claude Code against the local rafiki server (ARGS= for flags).
 # `pic`) on $PATH ahead of ~/.local/bin. Installing successfully and then
 # running a different binary than the one you just built is a genuinely
 # confusing failure, so say so at install time.
-#
-# rafiki-attach is copied only when it has been built — build-attach needs bun
-# and the pi submodule, and skips itself when bun is absent.
-#
-# It does not travel alone. bun compiles it to a static binary, and pi's
-# config.js then resolves package assets relative to dirname(process.execPath)
-# — so package.json, theme/*.json and assets/ must sit NEXT TO the binary
-# wherever it lands, not merely in bin/. Copying only the executable produces a
-# rafiki-attach that runs fine from bin/ and dies from $(DESTDIR) with
-# "ENOENT: .../theme/dark.json" followed by "Theme not initialized", which
-# reads like a TUI bug rather than a missing file. attach/scripts/copy-pi-assets.ts
-# is the authority for this list and documents the same contract.
 .PHONY: install
-install: build ## Install rafikid + rafiki (+ rafiki-attach if built) to $(DESTDIR).
+install: build ## Install rafikid + rafiki to $(DESTDIR).
 	@mkdir -p "$(DESTDIR)"
 	@for b in $(DAEMON_BIN) $(CLI_BIN); do \
 	    rm -f "$(DESTDIR)/$$b"; \
 	    cp "$(BIN_DIR)/$$b" "$(DESTDIR)/$$b" || exit 1; \
 	    echo "installed $(DESTDIR)/$$b"; \
 	done
-	@if [ -x "$(BIN_DIR)/$(ATTACH_BIN)" ]; then \
-	    rm -f "$(DESTDIR)/$(ATTACH_BIN)"; \
-	    cp "$(BIN_DIR)/$(ATTACH_BIN)" "$(DESTDIR)/$(ATTACH_BIN)" || exit 1; \
-	    echo "installed $(DESTDIR)/$(ATTACH_BIN)"; \
-	    for a in package.json theme assets; do \
-	        if [ -e "$(BIN_DIR)/$$a" ]; then \
-	            rm -rf "$(DESTDIR)/$$a"; \
-	            cp -R "$(BIN_DIR)/$$a" "$(DESTDIR)/$$a" || exit 1; \
-	            echo "installed $(DESTDIR)/$$a"; \
-	        else \
-	            echo "warning: $(BIN_DIR)/$$a missing — rafiki-attach will fail at startup;" >&2; \
-	            echo "         re-run 'make build-attach'" >&2; \
-	        fi; \
-	    done; \
-	else \
-	    echo "note: $(BIN_DIR)/$(ATTACH_BIN) not built — run 'make build-attach' (needs bun + the pi submodule)"; \
-	fi
 	@for b in $(DAEMON_BIN) $(CLI_BIN); do \
 	    found=$$(command -v "$$b" 2>/dev/null || true); \
 	    if [ -z "$$found" ]; then \
@@ -223,96 +165,13 @@ install: build ## Install rafikid + rafiki (+ rafiki-attach if built) to $(DESTD
 # cannot bounce the service with a different client's idea of where things
 # live — the same failure the warnings above exist to catch.
 #
-# build-attach runs before install (prerequisite order, not just listed for
-# documentation) so its output is on disk in time for install's `[ -x
-# $(BIN_DIR)/$(ATTACH_BIN) ]` check — otherwise redeploy silently ships
-# whatever rafiki-attach happened to be built last, or skips it entirely on a
-# machine that has never run build-attach. It degrades the same way
-# build-attach always has: no bun on PATH just skips with a warning, it does
-# not fail the daemon redeploy.
+# build-attach ran before install (prerequisite order, not just listed for
+# documentation). With the TUI in-process there is nothing extra to rebuild, so
+# redeploy is just install + restart.
 .PHONY: redeploy
-redeploy: build-attach install ## Rebuild (incl. rafiki-attach) + install, then restart the rafiki daemon.
+redeploy: install ## Rebuild + install, then restart the rafiki daemon.
 	@"$(DESTDIR)/$(CLI_BIN)" service restart
 	@"$(DESTDIR)/$(CLI_BIN)" service status
-
-##@ pi submodule lifecycle
-
-# rafiki-attach links against the bundled pi tree at $(PI_DIR), and the daemon
-# spawns the matching pi binary off PATH. `pi-install` keeps the global install
-# in lock-step with the submodule pin.
-#
-# NOTE (merge): the submodule points at a private host, so a public
-# `clone --recursive` breaks here. Replacing it with the published
-# @earendil-works/pi-* packages at 0.83.0 is a tracked follow-up; until it
-# lands this repo should not be pushed to its public remote.
-
-# Compile only — deliberately NOT `npm run build` at the pi root: packages/ai's
-# build script first re-fetches the model catalogs from live provider APIs,
-# which makes every build non-reproducible and leaves the submodule dirty with
-# synced drift. The generated catalogs are committed source (upstream's model
-# too); resync them deliberately with `make pi-refresh-catalogs` and commit the
-# result in the submodule.
-$(PI_DIST): $(PI_PKG)/package.json $(PI_SRC)
-	cd $(PI_DIR) && npm install
-	cd $(PI_DIR)/packages/tui && npm run build
-	cd $(PI_DIR)/packages/telemetry && npm run build
-	cd $(PI_DIR)/packages/ai && npx tsgo -p tsconfig.build.json
-	cd $(PI_DIR)/packages/agent && npm run build
-	cd $(PI_DIR)/packages/protocol && npm run build
-	cd $(PI_DIR)/packages/client && npm run build
-	cd $(PI_DIR)/packages/server && npm run build
-	cd $(PI_DIR)/packages/coding-agent && npm run build
-	cd $(PI_DIR)/packages/orchestrator && npm run build
-
-# pi's deps (yaml, chalk, typebox, ...) hoist to $(PI_MODULES) and are imported
-# by the bundled dist when attach is compiled, so node_modules must exist even
-# when dist/ is already built. This is kept separate from $(PI_DIST): the bundle
-# only needs node_modules + a present dist, whereas rebuilding dist runs the pi
-# toolchain (npm run build) which requires a newer Node than some hosts have.
-# Keyed on the lockfile so it reinstalls when deps change or node_modules is gone.
-$(PI_MODULES): $(PI_DIR)/package-lock.json
-	cd $(PI_DIR) && npm install
-	@touch $@
-
-$(PI_PKG)/package.json:
-	@$(MAKE) --no-print-directory pi-not-initialised
-
-# $(PI_MODULES) depends on the lockfile, which has no rule of its own — so an
-# uninitialised submodule died with make's raw "No rule to make target
-# 'pi/package-lock.json'" before ever reaching the friendly message above. Both
-# entry points now route to the same explanation.
-$(PI_DIR)/package-lock.json:
-	@$(MAKE) --no-print-directory pi-not-initialised
-
-.PHONY: pi-not-initialised
-pi-not-initialised:
-	@echo "The pi submodule at ./$(PI_DIR) is not initialised." >&2
-	@echo "Run 'make bootstrap' (fresh clone), or:" >&2
-	@echo "    git submodule update --init --recursive" >&2
-	@echo >&2
-	@echo "Only the rafiki-attach TUI needs it — 'make build' works without it." >&2
-	@exit 1
-
-.PHONY: pi-build
-pi-build: $(PI_DIST) ## Recompile the pi submodule's TypeScript to dist.
-
-.PHONY: pi-install
-pi-install: $(PI_DIST) ## Install the pi binary globally (the daemon-spawned backend).
-	npm install -g ./$(PI_PKG)
-
-.PHONY: pi-update
-pi-update: ## Bump the pi submodule to its remote tip, then rebuild + install.
-	git submodule update --remote $(PI_DIR)
-	$(MAKE) pi-build pi-install
-
-.PHONY: pi-refresh-catalogs
-pi-refresh-catalogs: $(PI_MODULES) ## Regenerate pi's model catalogs from live provider APIs.
-	cd $(PI_DIR)/packages/ai && npm run generate-models && npm run generate-image-models
-
-.PHONY: bootstrap
-bootstrap: ## Fresh-clone setup — init submodules, build and install everything.
-	git submodule update --init --recursive
-	$(MAKE) pi-build pi-install build
 
 ##@ Quality
 

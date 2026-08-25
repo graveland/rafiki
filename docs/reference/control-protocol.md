@@ -84,17 +84,39 @@ Two transports, identical framing and protocol.
 ## 2.3 Connect control plane (HTTP)
 
 A second, additive control face served by Connect (`connectrpc.com/connect`) on
-the same HTTP listener as the proxy faces. The JSON-Lines frame protocol in the
-rest of this document is unchanged and remains the path `rafiki attach` and the
-existing CLI use.
+the same HTTP listener as the proxy faces, **and on a dedicated local unix
+socket**. The JSON-Lines frame protocol in the rest of this document is
+unchanged and remains the path `rafiki attach` and the existing CLI use.
 
 Reachable at whatever `RAFIKI_URL` already names — the local loopback proxy
 face (`http://127.0.0.1:8035` by default) or a remote daemon's TLS listener
 (`https://...`), since `cmd/rafikid` mounts the same handler tree on both.
 
+The **local unix socket** is how `rafiki attach` reaches the daemon:
+
+- **Path:** `<RuntimeDir>/connect.sock` — `pkg/paths.ConnectSocketPath()`, the
+  same directory as the framed-JSON control socket (§2.1). A third socket
+  rather than a demultiplexer on the control socket, for the same reason
+  `ExecutorSocketPath` is a second one: the control socket speaks raw framed
+  JSON, the Connect plane is HTTP/2, and distinguishing them on one socket
+  means sniffing the first bytes — the demultiplexer this repo has rejected.
+- **Mode:** socket `0600` in a `0700` directory, same as the control socket.
+- **Transport:** h2c (HTTP/2 cleartext). There is no TLS on a unix socket, and
+  Connect's server-streaming (`StreamEvents`) wants HTTP/2.
+- **Auth:** an interceptor (`pkg/connectapi.NewAuthInterceptor`) performs a
+  constant-time bearer comparison on every call. An **empty configured token
+  disables the check** — that is the unix socket case, where the trust
+  mechanism is the 0600 socket in the 0700 directory, matching the framed-JSON
+  control socket. The TCP/TLS mount configures a real token via
+  `server.UserTokenAuth` (below).
+- **Mount is unconditional:** the Connect handler mounts regardless of whether
+  a database pool exists. The daemon requires a database (§2.1), so the old
+  `pool != nil` gate protected nothing and only turned "no database" and
+  "pre-Connect daemon" into the same bodiless 404.
+
 - **Path prefix:** `/rafiki.v1.Control/`
 - **Schema:** `proto/rafiki/v1/*.proto`; generated Go in `pkg/gen/rafiki/v1/`.
-- **Auth:** the same per-user bearer credential as the proxy faces
+- **Auth (TCP/TLS):** the same per-user bearer credential as the proxy faces
   (`Authorization: Bearer`, `x-api-key`, or `X-Rafiki-Token`), resolved
   against the users store by `server.UserTokenAuth` — the Connect plane is
   mounted under the identical middleware that protects `/v1/messages` and

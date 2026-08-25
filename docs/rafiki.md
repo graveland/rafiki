@@ -57,7 +57,7 @@ Prompt caching is a 90% discount on input tokens, and input tokens are 86-98% of
                            │    Multiple Clients        │
                            │                            │
                            │  Slack (Eon, savannah-admin)
-                           │  TUI (fundi-attach)        │
+                           │  TUI (rafiki create/attach)      │
                            │  Claude Code (via proxy)   │
                            │  Automated workflows       │
                            │  Rootly incident triggers  │
@@ -112,7 +112,7 @@ Prompt caching is a 90% discount on input tokens, and input tokens are 86-98% of
 1. Rootly alert fires → savannah-admin or Eon starts a conversation with the diagnose agent.
 2. The conversation is created in rafiki's DB. Every turn, tool call, and response is captured.
 3. An on-call engineer connects from Slack: `eon, join conversation <id>`.
-4. Another engineer connects from a TUI: `fundi attach <id>`.
+4. Another engineer connects from a TUI: `rafiki attach <id>`.
 5. Everyone sees the same state. Commands from any client route through the same conversation.
 6. When the incident resolves, the transcript is stored. A week later, `rafiki agent analyze` runs over it to find skill gaps or process improvements.
 

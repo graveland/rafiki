@@ -46,8 +46,8 @@ rm -rf "${XDG_RUNTIME_DIR:?}/fundi"   # only if XDG_RUNTIME_DIR is set
 Two more by hand:
 
 - Remove the orphaned `fundi-helpers` extension from your pi config directory.
-  The bundled extension is now installed as `rafiki-helpers`; the old copy will
-  otherwise sit there being loaded alongside it.
+  The pi extension system is retired entirely (Phase C0), so both the old
+  `fundi-helpers` and the former `rafiki-helpers` are inert and can be deleted.
 - Rename any per-repo `<repo>/.fundi/skills` to `<repo>/.rafiki/skills`.
 
 Your presets file moved leaf name but not location — it is still read from pi's
@@ -103,7 +103,7 @@ too. `paths.Get` reads exactly one name now.
 ## 4. Rebuild and reinstall
 
 ```sh
-make build && make build-attach
+make build
 rafikid migrate --db "$RAFIKI_DB"   # schema unchanged; a no-op on a current database
 rafiki service install
 ```
@@ -146,9 +146,9 @@ launchctl print "gui/$(id -u)/dev.graveland.rafiki" | grep -c RAFIKI_DB     # ex
 
 If the DSN's password was ever in a unit file, treat it as exposed and rotate it.
 
-**Clear stale binaries from `bin/`.** `rafiki attach` resolves its TUI binary as
-a sibling of whichever executable you ran, so a leftover `bin/fundi` will keep
-working and quietly mask the migration:
+**Clear stale binaries from `bin/`.** The TUI is built into `rafiki` itself now
+(no separate `rafiki-attach` artifact), but a leftover `bin/fundi` from before
+the rename will keep working and quietly mask the migration:
 
 ```sh
 rm -f bin/fundi bin/fundid bin/fundi-attach
@@ -168,7 +168,8 @@ rm -f bin/fundi bin/fundid bin/fundi-attach
 | `rafiki claude` | `rafiki claude` *(unchanged)* |
 | `fundid agent` | `rafikid fundi` |
 | `--kind agent` | `--kind fundi` |
-| `--kind pi`, `--kind claude` | unchanged |
+| `--kind claude` | unchanged |
+| `--kind pi` | *retired — zero pi children exist; a spawn naming it fails loudly* |
 
 There is no longer a standalone proxy binary. `rafikid` serves the face on
 `:8035` and gained everything `rafiki serve` could do that it previously could
@@ -197,9 +198,9 @@ than a discontinuity in history.
 ## Why `fundi` still appears
 
 The word survives, narrowly and on purpose. It names the **native agent
-runtime** — one of three child kinds — not the product:
+runtime** — one of two child kinds — not the product:
 
-- `rafiki create --kind fundi` (alongside `--kind pi` and `--kind claude`)
+- `rafiki create --kind fundi` (alongside `--kind claude`)
 - `pkg/fundi/`, the runtime package
 - `rafikid fundi`, the standalone one-child-on-stdio mode
 
@@ -212,5 +213,6 @@ your code is fundi.
 
 rafiki no longer looks for a `pic-helpers/` directory. If you previously ran
 pi-controller alongside rafiki, a stale copy may remain in your extensions
-directory; it is inert, and you can delete it. rafiki's own helpers install as
-`rafiki-helpers/`.
+directory; it is inert, and you can delete it. rafiki no longer installs a
+`rafiki-helpers/` extension at all — the pi extension system was retired with
+the pi kind (Phase C0).

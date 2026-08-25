@@ -1,3 +1,0 @@
-[submodule "pi"]
-	path = pi
-	url = git@git.graveland.dev:brent/pi.git
