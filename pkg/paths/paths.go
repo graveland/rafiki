@@ -102,6 +102,19 @@ func SocketPath() string { return filepath.Join(RuntimeDir(), "controller.sock")
 // two lifetimes.
 func ExecutorSocketPath() string { return filepath.Join(RuntimeDir(), "executor.sock") }
 
+// ConnectSocketPath is where the daemon serves the Connect control plane to
+// local clients.
+//
+// A third socket, for the same reason ExecutorSocketPath is a second one: the
+// control socket speaks raw framed JSON straight into handleConn with no HTTP
+// at all, and the Connect plane is HTTP/2. Serving both on one socket means
+// sniffing the first bytes, which is the demultiplexer this repo has already
+// rejected twice. The cost of another socket in the same directory is one file.
+//
+// It carries no token: like the control socket, the trust boundary is the 0600
+// socket inside the 0700 directory.
+func ConnectSocketPath() string { return filepath.Join(RuntimeDir(), "connect.sock") }
+
 // RecordsDir holds persisted session records.
 func RecordsDir() string { return filepath.Join(DataDir(), "state") }
 
