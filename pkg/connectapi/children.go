@@ -27,7 +27,7 @@ type ChildLister interface {
 
 // SetChildLister attaches the child source. Post-construction setter for the
 // same reason as SetChildResolver: the Controller is built after this Server.
-func (s *Server) SetChildLister(l ChildLister) { s.children = l }
+func (s *Server) SetChildLister(l ChildLister) { s.children.Store(&l) }
 
 // toProtoChild maps one summary onto the wire type. The two optional int
 // fields stay nil when the source is nil — an exited child has no pid, a live
@@ -96,4 +96,4 @@ type KillOutcome struct {
 }
 
 // SetChildLifecycle attaches the spawn/kill source.
-func (s *Server) SetChildLifecycle(l ChildLifecycle) { s.lifecycle = l }
+func (s *Server) SetChildLifecycle(l ChildLifecycle) { s.lifecycle.Store(&l) }

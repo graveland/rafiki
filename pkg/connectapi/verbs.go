@@ -27,7 +27,8 @@ func (s *Server) Send(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
-	if s.inbox == nil {
+	inboxP := s.inbox.Load()
+	if inboxP == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("inbox not yet wired"))
 	}
@@ -54,7 +55,7 @@ func (s *Server) Send(
 		}
 	}
 
-	id, err := s.inbox.Accept(ctx, inbox.Inbound{
+	id, err := (*inboxP).Accept(ctx, inbox.Inbound{
 		ChildID: childID,
 		Mode:    mode,
 		Text:    text,
@@ -82,19 +83,17 @@ func textFromBlocks(blocks []*rafikiv1.ContentBlock) (string, error) {
 	return sb.String(), nil
 }
 
-// The four verbs below are stubs so *Server keeps satisfying the generated
-// ControlHandler interface between plan tasks. Tasks 6-8 replace each one.
-
 // ListChildren returns the daemon's children, optionally filtered by status.
 func (s *Server) ListChildren(
 	_ context.Context,
 	req *connect.Request[rafikiv1.ListChildrenRequest],
 ) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
-	if s.children == nil {
+	p := s.children.Load()
+	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lister not yet wired"))
 	}
-	summaries := s.children.ListChildren(req.Msg.GetStatuses())
+	summaries := (*p).ListChildren(req.Msg.GetStatuses())
 	out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
 	for _, c := range summaries {
 		out = append(out, toProtoChild(c))
@@ -112,20 +111,18 @@ func (s *Server) GetChild(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
-	if s.children == nil {
+	p := s.children.Load()
+	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lister not yet wired"))
 	}
-	summary, ok := s.children.GetChild(childID)
+	summary, ok := (*p).GetChild(childID)
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound,
 			fmt.Errorf("no such child %q", childID))
 	}
 	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: toProtoChild(summary)}), nil
 }
-
-// The two verbs below are stubs so *Server keeps satisfying the generated
-// ControlHandler interface between plan tasks. Task 7 replaces each one.
 
 // Spawn creates a child. The budget pointers are copied as pointers, never
 // dereferenced into values, so "unset" survives the trip to the daemon.
@@ -137,13 +134,14 @@ func (s *Server) Spawn(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("cwd is required"))
 	}
-	if s.lifecycle == nil {
+	p := s.lifecycle.Load()
+	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lifecycle not yet wired"))
 	}
 
-	p := connectapiSpawnParams(req.Msg)
-	id, err := s.lifecycle.Spawn(ctx, p)
+	sp := connectapiSpawnParams(req.Msg)
+	id, err := (*p).Spawn(ctx, sp)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -187,11 +185,12 @@ func (s *Server) Kill(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
-	if s.lifecycle == nil {
+	p := s.lifecycle.Load()
+	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lifecycle not yet wired"))
 	}
-	out, err := s.lifecycle.Kill(ctx, childID,
+	out, err := (*p).Kill(ctx, childID,
 		req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
