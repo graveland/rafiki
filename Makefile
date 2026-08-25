@@ -333,6 +333,9 @@ lint: ## Run golangci-lint.
 # run, which is indistinguishable from a clean pass. The guard below makes that
 # state loud instead: an unset DSN is announced, not inferred from a test count
 # nobody checks. Use test-nodb when you deliberately want the short run.
+# -count=1 is not optional: test/integration builds the daemon binary in a
+# subprocess inside TestMain, so its import graph is only pkg/protocol and a
+# cached PASS survives any change to the daemon.
 .PHONY: test
 test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
@@ -340,11 +343,11 @@ test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 		echo "WARNING: RAFIKI_TEST_DSN unset (no .env?) — every DB-backed test will SKIP."; \
 		echo "         A green result here does NOT mean the store/insights code was exercised."; \
 	fi; \
-	go test -race ./...
+	go test -race -count=1 ./...
 
 .PHONY: test-nodb
 test-nodb: ## Run only the DSN-free tests (explicitly skips DB-backed ones).
-	RAFIKI_TEST_DSN= go test -race ./...
+	RAFIKI_TEST_DSN= go test -race -count=1 ./...
 
 .PHONY: proto
 proto: ## Generate protobuf Go code from proto/ definitions.
