@@ -33,22 +33,34 @@ const (
 )
 
 // shouldAutoResume reports whether a recovered record is a fundi child that was
-// ALIVE when the daemon went down.
+// ALIVE when this daemon stopped writing to it.
 //
-// The predicate reads LastStatus, not Status: Status is "exited" for every
-// recovered row by construction. A child was alive when its last state was
-// neither "exited" (a clean stop) nor "shutting_down" (a deliberate one).
-// Everything else — idle, streaming, tool_running, compacting, blocked_ui,
-// spawning — means the daemon died underneath it.
+// It reads last_status when there is one, and falls back to status when there
+// is not. The fallback is the whole point: last_status is written ONLY by
+// handleChildExit, so an empty value means the daemon never got to record an
+// exit — SIGKILL, OOM, a node eviction. That is the strongest possible evidence
+// the child was alive, and it is the case a pod restart actually hits, so
+// reading it as "do not resume" broke recovery for the scenario this design
+// exists for.
+//
+// A child was alive when its effective status is neither "exited" (it stopped
+// on its own) nor "shutting_down" (the daemon stopped it deliberately). Note
+// handleChildExit substitutes PreShutdownStatus for "shutting_down", so a child
+// the daemon gracefully stopped still records "idle"/"streaming" and still
+// resumes — stopping the daemon is not the same as stopping the child.
 func shouldAutoResume(rec childstore.ChildRecord) bool {
 	if rec.Kind != protocol.KindFundi {
 		return false
 	}
-	if rec.LastStatus == "" {
+	effective := rec.LastStatus
+	if effective == "" {
+		effective = rec.Status
+	}
+	if effective == "" {
 		return false
 	}
-	return rec.LastStatus != string(protocol.StatusExited) &&
-		rec.LastStatus != string(protocol.StatusShuttingDown)
+	return effective != string(protocol.StatusExited) &&
+		effective != string(protocol.StatusShuttingDown)
 }
 
 // recoveryAction decides what to do with a resumable child whose executor
