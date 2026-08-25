@@ -27,14 +27,6 @@ func (c *Controller) dropLease(childID string) {
 	c.heldLeasesMu.Unlock()
 }
 
-// leaseFor returns the lease held for a child, if any.
-func (c *Controller) leaseFor(childID string) (store.Lease, bool) {
-	c.heldLeasesMu.Lock()
-	defer c.heldLeasesMu.Unlock()
-	l, ok := c.heldLeases[childID]
-	return l, ok
-}
-
 // startLeaseRenewal keeps every held lease alive until the daemon stops.
 //
 // Renewal runs on its own goroutine, independent of turn progress. A thinking

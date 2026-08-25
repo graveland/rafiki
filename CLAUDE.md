@@ -474,3 +474,43 @@
   a previous session on the same connection and releases it (revokes the
   ticket, evicts the executor) before installing the new one. Without it,
   the incumbent stayed in `Pool.live` for the daemon's lifetime.
+
+- **`status` and `last_status` on `conversations.child` are different
+  questions, and the recovery predicate reads the second one.** `status` is
+  "exited" for every recovered row by construction; `last_status` — written
+  only by the exit path — is what says whether the child was ALIVE when the
+  daemon died. A child resumes when `last_status` is neither `exited` nor
+  `shutting_down`. There is no `running` status (`pkg/protocol/types.go`), and
+  `shutting_down` means a deliberate stop, so a filter written as
+  `status IN ('running','shutting_down')` selects the one state that means
+  "don't resume" and drops every state that means "do". The upsert COALESCEs an
+  empty `last_status` for the same reason: an ordinary status write must never
+  blank the only column recovery reads.
+
+- **One writer per conversation, and the guard is in the INSERT statement.**
+  Child state on local disk used to provide daemon isolation for free; a shared
+  `conversations.child` removes it, and `conversations.conversation_lease`
+  restores it. Reads are never gated. Message appends carry an `EXISTS` clause
+  checking the lease **in the same statement as the write**, which is why a
+  monotonic fencing token is unnecessary — Postgres can answer "is it still me",
+  and a stalled holder that wakes after takeover writes nothing. `conversation_turn`
+  writes are deliberately NOT fenced: they are append-only analytics, and a lease
+  join on every request buys no correctness.
+
+- **`RAFIKI_DAEMON_ID` must be unique per running daemon, and is required in
+  k8s.** `LeaseStore.Acquire`'s `OR holder = EXCLUDED.holder` clause lets a
+  restarted daemon reclaim its own leases instantly, which is what makes a
+  5-minute TTL cost nothing on crash-restart. The same clause means two daemons
+  sharing one id reclaim each other's leases on every acquire and reproduce
+  exactly the split-brain the lease exists to prevent. A pod filesystem is
+  ephemeral, so `<DataDir>/daemon-id` does not survive there — set the env var
+  in the Deployment spec or the pod waits out the full TTL before recovering its
+  own children.
+
+- **A pinned child never changes machines, and restart recovery is not an
+  exception.** `recoveryAction` returns `planStayExited` for
+  `workspace_mode` pinned *and* for an absent or unrecognised value, matching
+  `workspaceModeOrPinned`. Only an ephemeral child has its
+  `rafiki/workspace`/`rafiki/executor` labels stripped and resumes unbound.
+  Making recovery rebind a pinned child would be a backdoor around the rule
+  `HandleExecutorLost` and `boundExecutor.recover` already enforce.

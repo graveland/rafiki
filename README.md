@@ -702,7 +702,8 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
-| `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
+| `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password. **A daemon with no `RAFIKI_DB` keeps its children in memory only.** They do not survive a restart. Child state lives in `conversations.child`, and there is no file-backed fallback. |
+| `RAFIKI_DAEMON_ID` | stable identity for this daemon — what a conversation lease records as its holder. Optional on a laptop (generated to `$XDG_DATA_HOME/rafiki/daemon-id` on first run). **Required in Kubernetes**, where the pod filesystem is ephemeral. Two daemons sharing one value reproduce exactly the split-brain the lease exists to prevent. |
 | `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only. **Requires `RAFIKI_DB`** — control-plane identity is row-backed, and a listener without a user table is fatal at startup |
 | `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
