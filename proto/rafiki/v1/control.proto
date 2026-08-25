@@ -22,7 +22,119 @@ message StreamEventsRequest {
   optional int32 after_ordinal = 2;
 }
 
+// SendMode is how a submitted message reaches the agent. PROMPT queues work;
+// STEER injects into the turn already running; ABORT cancels it. Steer and
+// abort are first-class verbs rather than escape hatches — supervising a busy
+// agent is the primary use, not the exception.
+enum SendMode {
+  SEND_MODE_UNSPECIFIED = 0;
+  SEND_MODE_PROMPT = 1;
+  SEND_MODE_STEER = 2;
+  SEND_MODE_ABORT = 3;
+}
+
+// SendRequest carries content BLOCKS rather than a string so a pasted image
+// needs no breaking change later. For ABORT, blocks is ignored.
+message SendRequest {
+  string child_id = 1;
+  SendMode mode = 2;
+  repeated ContentBlock blocks = 3;
+}
+
+message SendResponse {
+  // Server-assigned id for the accepted message.
+  string message_id = 1;
+}
+
+// ChildSummary mirrors protocol.ChildSummary. Only the fields a client renders
+// are carried; this is deliberately not a field-for-field mirror, because a
+// mirrored type nobody enforces drifts.
+message ChildSummary {
+  string child_id = 1;
+  string name = 2;
+  string kind = 3;
+  string status = 4;
+  string model = 5;
+  string cwd = 6;
+  // pid is optional: an exited child has none, and 0 is a legal pid.
+  optional int32 pid = 7;
+  int64 started_at = 8;
+  int64 last_activity = 9;
+  // exit_code is optional: unset while alive, and 0 means clean exit.
+  optional int32 exit_code = 10;
+  map<string, string> labels = 11;
+  string session_id = 12;
+  int32 context_window = 13;
+}
+
+message ListChildrenRequest {
+  // Empty means every child. Otherwise only children whose status matches one
+  // of these values (protocol.Status strings).
+  repeated string statuses = 1;
+}
+
+message ListChildrenResponse {
+  repeated ChildSummary children = 1;
+}
+
+message GetChildRequest {
+  string child_id = 1;
+}
+
+message GetChildResponse {
+  ChildSummary child = 1;
+}
+
+// SpawnRequest is a deliberately NARROW slice of protocol.SpawnRequest — the
+// fields a TUI sets. Everything else keeps its daemon-side default. Do not
+// grow this into a full mirror without a consumer for each field.
+message SpawnRequest {
+  string cwd = 1;
+  string name = 2;
+  string model = 3;
+  string kind = 4;
+  map<string, string> labels = 5;
+  string parent_child_id = 6;
+  string executor_selector = 7;
+
+  // The three budgets are optional because zero and unset differ, in OPPOSITE
+  // directions per field: unset max_depth means 1 and zero means "may not
+  // spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
+  // unset max_children means 4. Collapsing any of them to a plain value
+  // silently converts one meaning into the other.
+  optional int32 max_depth = 8;
+  optional double max_cost = 9;
+  optional int32 max_children = 10;
+}
+
+message SpawnResponse {
+  string child_id = 1;
+}
+
+message KillRequest {
+  string child_id = 1;
+  int64 shutdown_timeout_ms = 2;
+  int64 kill_timeout_ms = 3;
+}
+
+// KillResponse mirrors protocol.KillResponseData, which is what
+// Controller.Kill actually returns. Note it carries NO status field — the
+// child's status is read separately via GetChild if a client wants it.
+message KillResponse {
+  string child_id = 1;
+  // exit_code is optional: a signalled child has none, and 0 means clean exit.
+  optional int32 exit_code = 2;
+  string signal = 3;
+  int64 duration_ms = 4;
+  bool escalated = 5;
+}
+
 service Control {
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc ListChildren(ListChildrenRequest) returns (ListChildrenResponse);
+  rpc GetChild(GetChildRequest) returns (GetChildResponse);
+  rpc Spawn(SpawnRequest) returns (SpawnResponse);
+  rpc Kill(KillRequest) returns (KillResponse);
 }

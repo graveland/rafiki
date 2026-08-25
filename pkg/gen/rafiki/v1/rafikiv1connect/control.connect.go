@@ -37,12 +37,27 @@ const (
 	ControlGetHistoryProcedure = "/rafiki.v1.Control/GetHistory"
 	// ControlStreamEventsProcedure is the fully-qualified name of the Control's StreamEvents RPC.
 	ControlStreamEventsProcedure = "/rafiki.v1.Control/StreamEvents"
+	// ControlSendProcedure is the fully-qualified name of the Control's Send RPC.
+	ControlSendProcedure = "/rafiki.v1.Control/Send"
+	// ControlListChildrenProcedure is the fully-qualified name of the Control's ListChildren RPC.
+	ControlListChildrenProcedure = "/rafiki.v1.Control/ListChildren"
+	// ControlGetChildProcedure is the fully-qualified name of the Control's GetChild RPC.
+	ControlGetChildProcedure = "/rafiki.v1.Control/GetChild"
+	// ControlSpawnProcedure is the fully-qualified name of the Control's Spawn RPC.
+	ControlSpawnProcedure = "/rafiki.v1.Control/Spawn"
+	// ControlKillProcedure is the fully-qualified name of the Control's Kill RPC.
+	ControlKillProcedure = "/rafiki.v1.Control/Kill"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
 type ControlClient interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest]) (*connect.ServerStreamForClient[v1.Event], error)
+	Send(context.Context, *connect.Request[v1.SendRequest]) (*connect.Response[v1.SendResponse], error)
+	ListChildren(context.Context, *connect.Request[v1.ListChildrenRequest]) (*connect.Response[v1.ListChildrenResponse], error)
+	GetChild(context.Context, *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error)
+	Spawn(context.Context, *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error)
+	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -68,6 +83,36 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("StreamEvents")),
 			connect.WithClientOptions(opts...),
 		),
+		send: connect.NewClient[v1.SendRequest, v1.SendResponse](
+			httpClient,
+			baseURL+ControlSendProcedure,
+			connect.WithSchema(controlMethods.ByName("Send")),
+			connect.WithClientOptions(opts...),
+		),
+		listChildren: connect.NewClient[v1.ListChildrenRequest, v1.ListChildrenResponse](
+			httpClient,
+			baseURL+ControlListChildrenProcedure,
+			connect.WithSchema(controlMethods.ByName("ListChildren")),
+			connect.WithClientOptions(opts...),
+		),
+		getChild: connect.NewClient[v1.GetChildRequest, v1.GetChildResponse](
+			httpClient,
+			baseURL+ControlGetChildProcedure,
+			connect.WithSchema(controlMethods.ByName("GetChild")),
+			connect.WithClientOptions(opts...),
+		),
+		spawn: connect.NewClient[v1.SpawnRequest, v1.SpawnResponse](
+			httpClient,
+			baseURL+ControlSpawnProcedure,
+			connect.WithSchema(controlMethods.ByName("Spawn")),
+			connect.WithClientOptions(opts...),
+		),
+		kill: connect.NewClient[v1.KillRequest, v1.KillResponse](
+			httpClient,
+			baseURL+ControlKillProcedure,
+			connect.WithSchema(controlMethods.ByName("Kill")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -75,6 +120,11 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 type controlClient struct {
 	getHistory   *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
 	streamEvents *connect.Client[v1.StreamEventsRequest, v1.Event]
+	send         *connect.Client[v1.SendRequest, v1.SendResponse]
+	listChildren *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
+	getChild     *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
+	spawn        *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
+	kill         *connect.Client[v1.KillRequest, v1.KillResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -87,10 +137,40 @@ func (c *controlClient) StreamEvents(ctx context.Context, req *connect.Request[v
 	return c.streamEvents.CallServerStream(ctx, req)
 }
 
+// Send calls rafiki.v1.Control.Send.
+func (c *controlClient) Send(ctx context.Context, req *connect.Request[v1.SendRequest]) (*connect.Response[v1.SendResponse], error) {
+	return c.send.CallUnary(ctx, req)
+}
+
+// ListChildren calls rafiki.v1.Control.ListChildren.
+func (c *controlClient) ListChildren(ctx context.Context, req *connect.Request[v1.ListChildrenRequest]) (*connect.Response[v1.ListChildrenResponse], error) {
+	return c.listChildren.CallUnary(ctx, req)
+}
+
+// GetChild calls rafiki.v1.Control.GetChild.
+func (c *controlClient) GetChild(ctx context.Context, req *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error) {
+	return c.getChild.CallUnary(ctx, req)
+}
+
+// Spawn calls rafiki.v1.Control.Spawn.
+func (c *controlClient) Spawn(ctx context.Context, req *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error) {
+	return c.spawn.CallUnary(ctx, req)
+}
+
+// Kill calls rafiki.v1.Control.Kill.
+func (c *controlClient) Kill(ctx context.Context, req *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error) {
+	return c.kill.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
 	StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.Event]) error
+	Send(context.Context, *connect.Request[v1.SendRequest]) (*connect.Response[v1.SendResponse], error)
+	ListChildren(context.Context, *connect.Request[v1.ListChildrenRequest]) (*connect.Response[v1.ListChildrenResponse], error)
+	GetChild(context.Context, *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error)
+	Spawn(context.Context, *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error)
+	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -112,12 +192,52 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("StreamEvents")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlSendHandler := connect.NewUnaryHandler(
+		ControlSendProcedure,
+		svc.Send,
+		connect.WithSchema(controlMethods.ByName("Send")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlListChildrenHandler := connect.NewUnaryHandler(
+		ControlListChildrenProcedure,
+		svc.ListChildren,
+		connect.WithSchema(controlMethods.ByName("ListChildren")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlGetChildHandler := connect.NewUnaryHandler(
+		ControlGetChildProcedure,
+		svc.GetChild,
+		connect.WithSchema(controlMethods.ByName("GetChild")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSpawnHandler := connect.NewUnaryHandler(
+		ControlSpawnProcedure,
+		svc.Spawn,
+		connect.WithSchema(controlMethods.ByName("Spawn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlKillHandler := connect.NewUnaryHandler(
+		ControlKillProcedure,
+		svc.Kill,
+		connect.WithSchema(controlMethods.ByName("Kill")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
 			controlGetHistoryHandler.ServeHTTP(w, r)
 		case ControlStreamEventsProcedure:
 			controlStreamEventsHandler.ServeHTTP(w, r)
+		case ControlSendProcedure:
+			controlSendHandler.ServeHTTP(w, r)
+		case ControlListChildrenProcedure:
+			controlListChildrenHandler.ServeHTTP(w, r)
+		case ControlGetChildProcedure:
+			controlGetChildHandler.ServeHTTP(w, r)
+		case ControlSpawnProcedure:
+			controlSpawnHandler.ServeHTTP(w, r)
+		case ControlKillProcedure:
+			controlKillHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -133,4 +253,24 @@ func (UnimplementedControlHandler) GetHistory(context.Context, *connect.Request[
 
 func (UnimplementedControlHandler) StreamEvents(context.Context, *connect.Request[v1.StreamEventsRequest], *connect.ServerStream[v1.Event]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.StreamEvents is not implemented"))
+}
+
+func (UnimplementedControlHandler) Send(context.Context, *connect.Request[v1.SendRequest]) (*connect.Response[v1.SendResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Send is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListChildren(context.Context, *connect.Request[v1.ListChildrenRequest]) (*connect.Response[v1.ListChildrenResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListChildren is not implemented"))
+}
+
+func (UnimplementedControlHandler) GetChild(context.Context, *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetChild is not implemented"))
+}
+
+func (UnimplementedControlHandler) Spawn(context.Context, *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Spawn is not implemented"))
+}
+
+func (UnimplementedControlHandler) Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Kill is not implemented"))
 }
