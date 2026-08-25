@@ -192,6 +192,7 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 
 	// 2. Spawn child B with ParentChildID = A.
 	req := protocol.SpawnRequest{
+		Kind:          protocol.KindPi,
 		Cwd:           t.TempDir(),
 		PiBinary:      fakePiBin(t),
 		NoSession:     true,

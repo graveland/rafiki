@@ -164,6 +164,8 @@ func executorLive(ctx context.Context, c *client.Client, selector string) (bool,
 // childCwd returns the named child's working directory as the daemon reports
 // it, or "" when it cannot be resolved. Attach uses it as the workspace root so
 // the machine offers the directory the child is actually working in.
+//
+//nolint:unused
 func childCwd(ctx context.Context, c *client.Client, childID string) string {
 	resp, err := c.Request(ctx, protocol.GetRequest{Type: protocol.TypeCtrlGet, ChildID: childID})
 	if err != nil || !resp.Success {

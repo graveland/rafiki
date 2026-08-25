@@ -27,12 +27,12 @@ func TestResolveSpawnPlan_Claude(t *testing.T) {
 }
 
 func TestResolveSpawnPlan_PiDefault(t *testing.T) {
-	_, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "", PiBinary: "/x/pi"}, "", "")
+	_, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "", PiBinary: "/x/claude"}, "", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if _, ok := prov.(child.PiProvider); !ok {
-		t.Fatalf("empty kind should default to PiProvider, got %T", prov)
+	if _, ok := prov.(child.ClaudeProvider); !ok {
+		t.Fatalf("empty kind should default to ClaudeProvider, got %T", prov)
 	}
 }
 

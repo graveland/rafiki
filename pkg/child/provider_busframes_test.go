@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// TestPiProvider_BusFrames_Identity asserts the pi provider is a pass-through on
+// TestIdentityProvider_BusFrames_Identity asserts the pi provider is a pass-through on
 // the bus: pi's stdout already IS the AgentSessionEvent stream, so BusFrames
 // returns the raw line unchanged.
-func TestPiProvider_BusFrames_Identity(t *testing.T) {
+func TestIdentityProvider_BusFrames_Identity(t *testing.T) {
 	line := []byte(`{"type":"message_end","message":{"role":"assistant"}}`)
-	frames := PiProvider{}.BusFrames(line, 100)
+	frames := IdentityProvider{}.BusFrames(line, 100)
 	if len(frames) != 1 {
 		t.Fatalf("pi BusFrames should return exactly 1 frame, got %d", len(frames))
 	}
@@ -24,8 +24,8 @@ func TestPiProvider_BusFrames_Identity(t *testing.T) {
 // state must not leak across spawns). pi is stateless so Fresh may return an
 // equivalent value; the contract is only that Fresh returns a usable provider.
 func TestProviderFresh_PerChildInstance(t *testing.T) {
-	if p := (PiProvider{}).Fresh(); p == nil {
-		t.Fatal("PiProvider.Fresh returned nil")
+	if p := (IdentityProvider{}).Fresh(); p == nil {
+		t.Fatal("identityProvider.Fresh returned nil")
 	}
 	if p := (ClaudeProvider{}).Fresh(); p == nil {
 		t.Fatal("ClaudeProvider.Fresh returned nil")
@@ -40,8 +40,8 @@ func TestProviderFresh_PerChildInstance(t *testing.T) {
 }
 
 func TestProviderNormalizes(t *testing.T) {
-	if (PiProvider{}).Normalizes() {
-		t.Fatal("PiProvider.Normalizes() = true, want false (stdout is already pi-vocabulary)")
+	if (IdentityProvider{}).Normalizes() {
+		t.Fatal("identityProvider.Normalizes() = true, want false (stdout is already pi-vocabulary)")
 	}
 	if !(ClaudeProvider{}.Normalizes()) {
 		t.Fatal("ClaudeProvider.Normalizes() = false, want true (translates claude→pi)")

@@ -52,7 +52,6 @@ func newRootCmd() *cobra.Command {
 		newHistoryCmd(),
 		newTUICmd(),
 		newCreateCmd(),
-		newAttachCmd(),
 		newResumeCmd(),
 		newKillCmd(),
 		newForgetCmd(),

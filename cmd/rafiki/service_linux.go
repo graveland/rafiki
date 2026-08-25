@@ -5,13 +5,14 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"go.graveland.dev/rafiki/pkg/paths"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // systemdUnitName is the service identity: it names the unit file, and

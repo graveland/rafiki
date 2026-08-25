@@ -15,7 +15,7 @@ package child
 // never share state across children.
 type ProtocolProvider interface {
 	// Fresh returns a per-child instance of this provider. Stateless providers
-	// (PiProvider) may return an equivalent value; stateful translators
+	// (identityProvider) may return an equivalent value; stateful translators
 	// (ClaudeProvider) MUST return a distinct instance so per-child accumulation
 	// (messages, pending tool calls, turn flag) is isolated.
 	Fresh() ProtocolProvider
@@ -40,7 +40,7 @@ type ProtocolProvider interface {
 	// BusFrames translates one raw stdout line into zero or more pi
 	// AgentSessionEvent frames to publish on the bus, in order. ts is the frame
 	// arrival time in unix milliseconds (used for synthesized message
-	// timestamps). Identity providers (PiProvider) return the raw line; stateful
+	// timestamps). Identity providers (identityProvider) return the raw line; stateful
 	// translators (ClaudeProvider) accumulate state and emit the pi event
 	// sequence. The RAW line is what the ring stores; BusFrames output is what
 	// the bus carries.
@@ -59,7 +59,7 @@ type ProtocolProvider interface {
 	// user frames only for tool results): without it the user's typed message
 	// never reaches the bus, so the TUI — which renders a user bubble solely from
 	// a message_start(role:user) event — shows nothing. Identity providers whose
-	// child echoes user input natively (PiProvider) return nil to avoid a double
+	// child echoes user input natively (identityProvider) return nil to avoid a double
 	// render. ts is the send time in unix milliseconds. Called from the supervise
 	// goroutine; see the concurrency note above re: state shared with BusFrames.
 	OutboundEcho(frame []byte, ts int64) [][]byte

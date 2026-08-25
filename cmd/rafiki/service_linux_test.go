@@ -3,10 +3,11 @@
 package main
 
 import (
-	"go.graveland.dev/rafiki/pkg/paths"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // testSpec returns a minimal serviceSpec for template rendering tests.

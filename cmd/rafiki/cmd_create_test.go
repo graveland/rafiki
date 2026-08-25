@@ -236,32 +236,6 @@ func TestCreateCmd_KeepOnExitAlone_OK(t *testing.T) {
 	}
 }
 
-func TestAttachCmd_KillAndKeepAreMutuallyExclusive(t *testing.T) {
-	cmd := newAttachCmd()
-	err := executeWithFlags(cmd, "--kill-on-exit", "--keep-on-exit")
-	if err == nil {
-		t.Fatal("expected error when both --kill-on-exit and --keep-on-exit are set, got nil")
-	}
-	// Cobra's message contains "if any flags in the group" when mutual exclusion fires.
-	if !strings.Contains(err.Error(), "kill-on-exit") || !strings.Contains(err.Error(), "keep-on-exit") {
-		t.Errorf("expected flag names in error, got: %v", err)
-	}
-}
-
-func TestAttachCmd_KillOnExitAlone_OK(t *testing.T) {
-	cmd := newAttachCmd()
-	if err := executeWithFlags(cmd, "--kill-on-exit"); err != nil {
-		t.Errorf("unexpected error with only --kill-on-exit: %v", err)
-	}
-}
-
-func TestAttachCmd_KeepOnExitAlone_OK(t *testing.T) {
-	cmd := newAttachCmd()
-	if err := executeWithFlags(cmd, "--keep-on-exit"); err != nil {
-		t.Errorf("unexpected error with only --keep-on-exit: %v", err)
-	}
-}
-
 // ─── Label flag tests ─────────────────────────────────────────────────────────
 
 func TestBuildSpawnRequest_LabelFlag(t *testing.T) {

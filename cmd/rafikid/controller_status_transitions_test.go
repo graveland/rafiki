@@ -312,6 +312,7 @@ func TestSpawn_StalledChild_EmitsNoStatusTransition(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	res, err := ctrl.Spawn(ctx, protocol.SpawnRequest{
+		Kind:      protocol.KindPi,
 		Cwd:       t.TempDir(),
 		PiBinary:  fakePiBin(t),
 		NoSession: true,

@@ -69,7 +69,6 @@ func TestCommandAliases(t *testing.T) {
 		{[]string{"get"}, []string{"show", "info"}},
 		{[]string{"status"}, []string{"st"}},
 		{[]string{"create"}, []string{"cr"}},
-		{[]string{"attach"}, []string{"a"}},
 		{[]string{"resume"}, []string{"res"}},
 		{[]string{"kill"}, []string{"k"}},
 		{[]string{"forget"}, []string{"rm"}},

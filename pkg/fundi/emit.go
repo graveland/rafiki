@@ -18,10 +18,10 @@ import (
 
 // Emitter converts Anthropic SDK messages and tool-execution events into pi
 // AgentSessionEvent frames and writes them through a Frontend, so the daemon
-// (identity PiProvider) and pi's TUI render fundi's native agent turns
+// (identity provider) and pi's TUI render fundi's native agent turns
 // indistinguishably from a real pi child.
 //
-// A pi child echoes user messages itself (PiProvider.OutboundEcho returns
+// A pi child echoes user messages itself (identityProvider.OutboundEcho returns
 // nil), so Emitter.UserMessage must be called for every accepted
 // prompt/steer or the TUI never renders the user bubble.
 //

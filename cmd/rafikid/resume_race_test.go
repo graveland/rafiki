@@ -37,7 +37,7 @@ import (
 func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	ctrl := newTestController(t)
 
-	id := spawnTestChild(t, ctrl, nil)
+	id := spawnTestChild(t, ctrl, map[string]string{"_kind": protocol.KindPi})
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -123,7 +123,7 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	ctrl := newTestController(t)
 
-	id := spawnTestChild(t, ctrl, nil)
+	id := spawnTestChild(t, ctrl, map[string]string{"_kind": protocol.KindPi})
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -197,7 +197,7 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 	ctrl := newTestController(t)
 
-	id := spawnTestChild(t, ctrl, nil)
+	id := spawnTestChild(t, ctrl, map[string]string{"_kind": protocol.KindPi})
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

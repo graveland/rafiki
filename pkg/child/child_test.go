@@ -363,7 +363,7 @@ func TestRingSkipsMessageUpdateButKeepsEverythingElse(t *testing.T) {
 		t.Fatalf("write script: %v", err)
 	}
 
-	// No Provider set: defaults to PiProvider{}, the identity provider, so the
+	// No Provider set: defaults to IdentityProvider, the identity provider, so the
 	// raw stdout lines above land in the ring exactly as printed.
 	c, err := child.Spawn(context.Background(), child.SpawnSpec{
 		ChildID:  "c_ring_filter",

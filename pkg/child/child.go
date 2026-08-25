@@ -30,7 +30,7 @@ type SpawnSpec struct {
 	Env         []string // env vars for the child process; see EnvOverride
 	EnvOverride bool     // if true, Env replaces the parent env entirely; if false, Env is appended to os.Environ()
 
-	// Provider selects the wire protocol. When nil, PiProvider{} is used so
+	// Provider selects the wire protocol. When nil, IdentityProvider is used so
 	// existing callers and tests keep pi behavior unchanged.
 	Provider ProtocolProvider
 
@@ -164,10 +164,9 @@ type Child struct {
 
 	exit ShutdownResult
 
-	bus        *bus.Bus[[]byte]
-	ring       *ring.Ring
-	renderRing *ring.Ring // bus-frame capture for normalizing providers (claude); nil otherwise
-	in         inBuffer   // bounded stdin frame capture for log dumps
+	bus  *bus.Bus[[]byte]
+	ring *ring.Ring
+	in   inBuffer // bounded stdin frame capture for log dumps
 
 	// errMu guards errBuf. readStderr is its only writer and StderrSnapshot
 	// its only reader, and before the abandon path existed "call it after
@@ -270,7 +269,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 
 	prov := spec.Provider
 	if prov == nil {
-		prov = PiProvider{}
+		prov = IdentityProvider{}
 	}
 	// Each Child gets its own provider instance so a stateful translator
 	// (ClaudeProvider) never shares accumulation state across children.
@@ -295,10 +294,6 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		transitionCh: make(chan struct{}, 1),
 		idle:         make(chan struct{}),
 		abandonAfter: abandonTimeout,
-	}
-
-	if c.provider.Normalizes() {
-		c.renderRing = ring.New(ring.Options{})
 	}
 
 	go c.supervise()
@@ -479,48 +474,12 @@ func (c *Child) RingSnapshot() [][]byte {
 // normalizes) and publishes it. The render-ring captures the exact
 // pi-vocabulary stream the bus carries — assistant turns and synthesized user
 // turns — so backfill can render claude children. Safe for concurrent use: the
-// c.renderRing != nil read is unsynchronized but safe because renderRing is set
 // once in Spawn before the readStdout and supervise goroutines start (write
 // once, before publish), and ring.Ring's own mutex covers the concurrent
 // Append from those two goroutines.
+// publishBus publishes a bus frame. Safe for concurrent use.
 func (c *Child) publishBus(f []byte, ts int64) {
-	if c.renderRing != nil {
-		c.renderRing.Append(f, ts)
-	}
 	c.bus.Publish(f)
-}
-
-// RenderRingSnapshot returns a copy of all frames in the render-ring, or nil
-// when the provider does not normalize (no render-ring).
-func (c *Child) RenderRingSnapshot() [][]byte {
-	if c.renderRing == nil {
-		return nil
-	}
-	events := c.renderRing.Recent(ring.Query{})
-	out := make([][]byte, len(events))
-	for i, e := range events {
-		out[i] = e.Bytes
-	}
-	return out
-}
-
-// RenderRecent returns render-ring events matching q, or nil when there is no
-// render-ring.
-func (c *Child) RenderRecent(q ring.Query) []ring.Event {
-	if c.renderRing == nil {
-		return nil
-	}
-	return c.renderRing.Recent(q)
-}
-
-// RenderStats returns the render-ring's event count and oldest timestamp, or
-// (0,0) when there is no render-ring.
-func (c *Child) RenderStats() (events int, oldestTimestamp int64) {
-	if c.renderRing == nil {
-		return 0, 0
-	}
-	n, _, oldest := c.renderRing.Stats()
-	return n, oldest
 }
 
 // Normalizes reports whether this child's provider translates stdout into a
@@ -1009,3 +968,9 @@ func (c *Child) Interrupt() error {
 	}
 	return c.runner.Interrupt()
 }
+
+// RenderRecent returns nil; the render-ring was removed in B4.
+func (c *Child) RenderRecent(q ring.Query) []ring.Event { return nil }
+
+// RenderStats returns (0, 0); the render-ring was removed in B4.
+func (c *Child) RenderStats() (events int, oldestTimestamp int64) { return 0, 0 }
