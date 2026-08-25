@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -76,8 +77,8 @@ func (c *Controller) startLeaseRenewal(ctx context.Context) {
 	}()
 }
 
-// renewLeasesOnce renews every held lease, stopping any child whose lease is
-// gone.
+// renewLeasesOnce renews every held lease, then stops the children whose leases
+// are gone.
 func (c *Controller) renewLeasesOnce(ctx context.Context) {
 	c.heldLeasesMu.Lock()
 	snapshot := make(map[string]store.Lease, len(c.heldLeases))
@@ -86,21 +87,50 @@ func (c *Controller) renewLeasesOnce(ctx context.Context) {
 	}
 	c.heldLeasesMu.Unlock()
 
-	for childID, lease := range snapshot {
+	renew := func(childID string) (bool, error) {
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		ok, err := c.leases.Renew(rctx, lease, leaseTTL)
-		cancel()
+		defer cancel()
+		return c.leases.Renew(rctx, snapshot[childID], leaseTTL)
+	}
+	renewThenKill(snapshot, renew, c.onLeaseLost)
+}
+
+// renewThenKill renews every lease FIRST, then stops the lost children
+// concurrently.
+//
+// Both halves matter. onLeaseLost blocks on Kill, which waits for the process
+// to be reaped and then for handleChildExit to finish; a takeover invalidates
+// leases in bulk, so killing inline while still iterating lets the unrenewed
+// remainder expire behind the kills, turning a partial takeover into a total one.
+func renewThenKill(
+	held map[string]store.Lease,
+	renew func(childID string) (bool, error),
+	lost func(childID string),
+) {
+	var doomed []string
+	for childID := range held {
+		ok, err := renew(childID)
 		if err != nil {
 			// A transient database error is not an answer. Keep the lease and
-			// try again on the next tick — there are five attempts inside one
-			// TTL precisely so a single failure costs nothing.
+			// retry next tick — five attempts fit inside one TTL precisely so a
+			// single failure costs nothing.
 			slog.Warn("lease renewal failed; will retry", "childId", childID, "error", err)
 			continue
 		}
 		if !ok {
-			c.onLeaseLost(childID)
+			doomed = append(doomed, childID)
 		}
 	}
+
+	var wg sync.WaitGroup
+	for _, childID := range doomed {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			lost(id)
+		}(childID)
+	}
+	wg.Wait()
 }
 
 // onLeaseLost stops a child whose conversation was taken over.
