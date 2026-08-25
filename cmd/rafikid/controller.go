@@ -77,6 +77,11 @@ type Controller struct {
 	// holder, and what says whose pid namespace the pid column belongs to.
 	daemonID string
 
+	// heldLeases maps childID to the conversation lease this daemon holds for
+	// it. Guarded by heldLeasesMu.
+	heldLeasesMu sync.Mutex
+	heldLeases   map[string]store.Lease
+
 	// rawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Handed to agent children via
@@ -246,6 +251,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		execStore:   execStore,
 		users:       userStore,
 		providers:   prov,
+		heldLeases:  make(map[string]store.Lease),
 	}
 
 	if id, source, err := paths.DaemonID(); err != nil {

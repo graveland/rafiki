@@ -11,7 +11,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // leaseTTL and leaseRenewInterval: five renewal attempts inside one TTL, so a
@@ -241,7 +240,3 @@ func (c *Controller) loadFromDisk(records []persist.Record) {
 		c.st.Insert(sess)
 	}
 }
-
-// Stubs replaced in Task 10.
-func (c *Controller) trackLease(childID string, l store.Lease) {}
-func (c *Controller) dropLease(childID string)                 {}
