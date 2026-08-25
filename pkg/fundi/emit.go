@@ -38,6 +38,12 @@ type Emitter struct {
 	usage    child.PiUsage
 	native   NativeSink
 
+	// toolStarts records when each tool call began, keyed by tool_use id, so
+	// ToolEnd can report a duration. Entries are deleted on ToolEnd. No mutex:
+	// Emitter is documented as not safe for concurrent use and the Engine
+	// drives it from one goroutine per turn.
+	toolStarts map[string]time.Time
+
 	// started guards StreamStart so it is idempotent within a turn. The
 	// caller invokes StreamStart on the first CONTENT event of a streamed
 	// response, not on the API's own message_start, so that a retry (e.g.
@@ -60,7 +66,7 @@ type Pricer func(model string) (routing.ModelPricing, bool)
 // assistant messages with provider and pricing each turn's usage via pricer
 // (nil = report tokens with zero cost).
 func NewEmitter(fe *Frontend, provider string, pricer Pricer) *Emitter {
-	return &Emitter{fe: fe, provider: provider, pricer: pricer}
+	return &Emitter{fe: fe, provider: provider, pricer: pricer, toolStarts: make(map[string]time.Time)}
 }
 
 // AgentStart emits {"type":"agent_start"}.
@@ -159,6 +165,9 @@ func (e *Emitter) ToolStart(id, name string, input json.RawMessage) {
 		args = map[string]any{"_raw": string(input)}
 	}
 	e.fe.Emit(child.PiToolExecutionStart(id, name, args, ""))
+
+	e.toolStarts[id] = time.Now()
+	e.publishNative(&rafikiv1.ToolExecutionStart{ToolUseId: id, Name: name})
 }
 
 // ToolEnd emits tool_execution_end for a completed tool call and accumulates
@@ -174,6 +183,20 @@ func (e *Emitter) ToolEnd(id, name, result string, isErr bool) {
 		Timestamp:  time.Now().UnixMilli(),
 	}
 	e.accumulate(msg)
+
+	// A missing start means this Emitter never saw ToolStart for this id — a
+	// turn resumed mid-tool, for instance. Report the end with a zero duration
+	// rather than dropping it: the client needs to stop rendering a spinner.
+	var durationMs int64
+	if started, ok := e.toolStarts[id]; ok {
+		durationMs = time.Since(started).Milliseconds()
+		delete(e.toolStarts, id)
+	}
+	e.publishNative(&rafikiv1.ToolExecutionEnd{
+		ToolUseId:  id,
+		DurationMs: durationMs,
+		IsError:    isErr,
+	})
 }
 
 // AgentEnd emits the terminal agent_end frame (carrying every accumulated

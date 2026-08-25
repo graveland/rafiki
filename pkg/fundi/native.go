@@ -34,6 +34,10 @@ func (e *Emitter) publishNative(payload any) {
 		ev.Payload = &rafikiv1.Event_TurnEnd{TurnEnd: p}
 	case *rafikiv1.ContentBlockDelta:
 		ev.Payload = &rafikiv1.Event_ContentBlockDelta{ContentBlockDelta: p}
+	case *rafikiv1.ToolExecutionStart:
+		ev.Payload = &rafikiv1.Event_ToolExecutionStart{ToolExecutionStart: p}
+	case *rafikiv1.ToolExecutionEnd:
+		ev.Payload = &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: p}
 	default:
 		return
 	}
