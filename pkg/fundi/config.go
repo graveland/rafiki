@@ -12,6 +12,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // thinkingBudgets maps the --thinking flag's named levels to the Anthropic
@@ -138,6 +139,20 @@ type Config struct {
 	// RawTrace, when non-nil, enables raw LLM API request/response capture.
 	// Nil disables capture; passed directly to llm.WithRecordRequests.
 	RawTrace *rawtrace.RawTraceStore
+
+	// OnConversationResolved is called once, after the engine resolves its
+	// conversation and before any turn can run, and returns the write lease for
+	// that conversation.
+	//
+	// This is the ONLY lease-acquisition site. The conversation id does not
+	// exist until NewEngine resolves it, so the daemon cannot acquire one
+	// beforehand; and every path that runs an agent — spawn, resume, startup
+	// recovery — reaches BuildEngine, so one hook here covers all three.
+	//
+	// An error refuses the engine: another daemon drives this conversation, and
+	// starting anyway is the double-write the lease exists to prevent. Nil
+	// means unfenced.
+	OnConversationResolved func(ctx context.Context, conversationID string) (store.Lease, error)
 }
 
 // BuildEngine constructs the llm.Client (wiring c.Pool via llm.WithStore when
@@ -215,6 +230,18 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)
+	}
+
+	// Acquire the write lease now: the conversation is resolved (eng.conv.ID is
+	// set) and nothing has written yet. Ordering is load-bearing in both
+	// directions — it must follow NewEngine, which resolves the id, and precede
+	// RepairOrphans below, which WRITES.
+	if c.OnConversationResolved != nil && pool != nil {
+		lease, lerr := c.OnConversationResolved(ctx, eng.conv.ID)
+		if lerr != nil {
+			return nil, nil, fmt.Errorf("agent: conversation lease: %w", lerr)
+		}
+		client.SetLease(lease)
 	}
 
 	// Boot-time orphan repair: distinct from runTurn's abort-path repair

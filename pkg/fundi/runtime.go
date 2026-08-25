@@ -20,6 +20,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/skills"
+	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/tasksdb"
 )
@@ -94,6 +95,10 @@ type RuntimeOptions struct {
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
+
+	// OnConversationResolved is passed through to Config; see its doc comment
+	// there for why it is the only acquisition site.
+	OnConversationResolved func(ctx context.Context, conversationID string) (store.Lease, error)
 
 	// Env carries per-child environment variables forwarded from the caller's
 	// shell (via `rafiki create --forward-env` / SpawnRequest.Env). BuildRuntime
@@ -480,26 +485,27 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	cfg := Config{
-		Model:                opts.Model,
-		ThinkingBudget:       opts.ThinkingBudget,
-		MaxOutputTokens:      opts.MaxOutputTokens,
-		SystemPromptOverride: opts.SystemPromptOverride,
-		AppendSystemPrompt:   opts.AppendSystemPrompt,
-		ContextFiles:         contextFiles,
-		SkillsInventory:      skills.SkillsInventory(discovered),
-		Cwd:                  opts.Cwd,
-		Workspace:            opts.Workspace,
-		Ref:                  opts.Ref,
-		Name:                 opts.Name,
-		FakeTurns:            opts.FakeTurns,
-		Providers:            opts.Providers,
-		APIKeyOverride:       opts.APIKeyOverride,
-		ProviderSenders:      opts.ProviderSenders,
-		Pool:                 opts.Pool,
-		Tools:                registry,
-		AutoResume:           opts.AutoResume,
-		OnFatal:              opts.OnFatal,
-		RawTrace:             opts.RawTrace,
+		Model:                  opts.Model,
+		ThinkingBudget:         opts.ThinkingBudget,
+		MaxOutputTokens:        opts.MaxOutputTokens,
+		SystemPromptOverride:   opts.SystemPromptOverride,
+		AppendSystemPrompt:     opts.AppendSystemPrompt,
+		ContextFiles:           contextFiles,
+		SkillsInventory:        skills.SkillsInventory(discovered),
+		Cwd:                    opts.Cwd,
+		Workspace:              opts.Workspace,
+		Ref:                    opts.Ref,
+		Name:                   opts.Name,
+		FakeTurns:              opts.FakeTurns,
+		Providers:              opts.Providers,
+		APIKeyOverride:         opts.APIKeyOverride,
+		ProviderSenders:        opts.ProviderSenders,
+		Pool:                   opts.Pool,
+		Tools:                  registry,
+		AutoResume:             opts.AutoResume,
+		OnConversationResolved: opts.OnConversationResolved,
+		OnFatal:                opts.OnFatal,
+		RawTrace:               opts.RawTrace,
 	}
 
 	eng, engShutdown, err := cfg.BuildEngine(ctx, fe)
