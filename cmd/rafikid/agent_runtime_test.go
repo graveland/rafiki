@@ -19,7 +19,7 @@ import (
 // Runner, nil error) unchanged.
 func TestAgentRunnerKind(t *testing.T) {
 	c := newTestController(t)
-	for _, kind := range []string{protocol.KindPi, protocol.KindClaude} {
+	for _, kind := range []string{protocol.KindClaude} {
 		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
 		runner, err := c.agentRunner(req, "c_"+kind, false, "")
 		if err != nil {

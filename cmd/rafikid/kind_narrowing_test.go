@@ -23,8 +23,7 @@ func TestKindNarrowing(t *testing.T) {
 		wantRefused bool
 	}{
 		{name: "confined parent, claude child", parentSel: "env=ci", kind: protocol.KindClaude, wantRefused: true},
-		{name: "confined parent, pi child", parentSel: "env=ci", kind: protocol.KindPi, wantRefused: true},
-		{name: "confined parent, omitted kind means pi", parentSel: "env=ci", kind: "", wantRefused: true},
+		{name: "confined parent, omitted kind means fundi", parentSel: "env=ci", kind: "", wantRefused: false},
 		{name: "confined parent, fundi child", parentSel: "env=ci", kind: protocol.KindFundi, wantRefused: false},
 		{name: "unconfined parent, claude child", kind: protocol.KindClaude, wantRefused: false},
 		{name: "unconfined parent, omitted kind", kind: "", wantRefused: false},

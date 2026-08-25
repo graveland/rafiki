@@ -488,11 +488,9 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 
 // TestSend_AllowsSessionSwitchForNonAgentKinds pins the negative half: the
 // rejection above must be scoped to the agent kind and not quietly break
-// new_session for pi or claude children. A pi child with no live process
-// fails later in the respawn ceremony, which is fine — what matters is that it
-// is NOT refused up front with the agent-kind error.
+// new_session for claude children.
 func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
-	for _, kind := range []string{"", protocol.KindPi, protocol.KindClaude} {
+	for _, kind := range []string{"", protocol.KindClaude} {
 		t.Run("kind="+kind, func(t *testing.T) {
 			ctrl := newTestController(t)
 			const childID = "c_nonagent_session_switch"

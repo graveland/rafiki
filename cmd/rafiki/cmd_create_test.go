@@ -59,15 +59,15 @@ func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
 	}
 }
 
-// A pi/claude child is a literal subprocess of rafikid (cmd.Dir = req.Cwd,
+// A claude child is a literal subprocess of rafikid (cmd.Dir = req.Cwd,
 // pkg/child/runner.go) — its cwd genuinely must exist on the daemon's own
 // machine, so defaulting it from the CLIENT's cwd against a remote daemon
 // would silently ship a path valid only here.
-func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForPi(t *testing.T) {
+func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForClaude(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev")
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("kind", protocol.KindPi); err != nil {
+	if err := cmd.Flags().Set("kind", protocol.KindClaude); err != nil {
 		t.Fatal(err)
 	}
 	// cwd left at its zero value ("") intentionally: there is no local
@@ -98,7 +98,7 @@ func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForPi(t *testing.T) {
 // any, goes through whichever executor gets bound — by default the session
 // executor `rafiki create` starts on the CLIENT's own machine, rooted at
 // exactly this cwd. So the client's own os.Getwd() is always a valid default,
-// remote daemon or not, and this must NOT error the way the pi/claude case does.
+// remote daemon or not, and this must NOT error the way the claude case does.
 func TestBuildSpawnRequest_RemoteDefaultsCwdForFundi(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev")
 
@@ -381,7 +381,7 @@ func TestBuildSpawnRequest_KindDefaultsAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// The default is the native runtime, not a pi subprocess: it is the kind
+	// The default is the native runtime, not a foreign subprocess: it is the kind
 	// with in-band abort and per-turn cost accounting, and the only one whose
 	// model ids this repo can resolve. --model completion keys off the same
 	// default (see modelSourcesForKind).

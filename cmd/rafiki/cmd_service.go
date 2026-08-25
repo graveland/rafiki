@@ -69,9 +69,6 @@ type serviceSpec struct {
 //   - paths.ChildID — the daemon sets it per child and `rafikid agent` uses it
 //     as the default --ref, so pinning it service-wide would collide every
 //     child onto one conversation.
-//   - paths.AttachTail, paths.NoAutoInstallHelpers — read by the TUI and by
-//     `rafiki create` respectively, i.e. client-side. They reach those from the
-//     user's own shell and have no business in the daemon's unit.
 //
 // paths.URL, paths.ProxyKinds and paths.ProxyListen ARE captured here: a URL,
 // a list of kinds and a bind address are not secrets, and having them in the
@@ -93,7 +90,6 @@ var unitEnvVars = []string{
 	paths.DefaultPreset,
 	paths.DefaultLabels,
 	paths.GraceHours,
-	paths.PiBinary,
 	paths.URL,
 	paths.ProxyKinds,
 	paths.ProxyListen,

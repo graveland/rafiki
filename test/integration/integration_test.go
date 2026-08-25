@@ -148,16 +148,12 @@ func bootDaemon(t *testing.T) *daemon {
 		// real pi binary if one happens to be on $PATH — instead of this
 		// fake stub.)
 		"RAFIKI_PI_BINARY="+fakePiPath,
-		// This suite is designed around an in-memory conversation store —
-		// nothing here asserts against a real database, and everything it
-		// spawns must stay disposable. RAFIKI_DB used to be a different name
-		// (FUNDI_AGENT_DB) than the one developers set in .env for `make
-		// test`'s RAFIKI_DB-gated DB tests, so the two could never collide.
-		// The rename merged them: one real name now serves both purposes,
-		// so a developer's ambient RAFIKI_DB (inherited via os.Environ()
-		// above) would otherwise silently point this throwaway daemon at
-		// their real conversations database. Clear it explicitly.
-		"RAFIKI_DB=",
+		// The daemon requires a database (Phase C0). The suite is designed
+		// around a disposable database, so use the RAFIKI_TEST_DSN the developer
+		// supplies — it must be present, or the daemon cannot start at all.
+		// A developer's ambient RAFIKI_DB would otherwise point this throwaway
+		// daemon at their real conversations database.
+		"RAFIKI_DB="+os.Getenv("RAFIKI_TEST_DSN"),
 	)
 	// Uncomment to stream daemon logs during debugging:
 	// cmd.Stderr = os.Stderr

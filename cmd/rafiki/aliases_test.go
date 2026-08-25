@@ -83,7 +83,6 @@ func TestCommandAliases(t *testing.T) {
 		{[]string{"models"}, []string{"model"}},
 		{[]string{"presets"}, []string{"preset"}},
 		{[]string{"service"}, []string{"svc"}},
-		{[]string{"install-extension"}, []string{"ie", "install-ext"}},
 		{[]string{"completion"}, []string{"comp"}},
 		{[]string{"claude"}, []string{"cl"}},
 		{[]string{"executor"}, []string{"exec", "ex"}},
@@ -145,9 +144,6 @@ func TestShortFlags(t *testing.T) {
 		{[]string{"create"}, "model", "m"},
 		{[]string{"create"}, "detached", "d"},
 		{[]string{"create"}, "preset", "p"},
-		{[]string{"resume"}, "model", "m"},
-		{[]string{"resume"}, "detached", "d"},
-		{[]string{"resume"}, "preset", "p"},
 		// -l limits, -r raw, and the pre-existing -n/-f/-v/-y.
 		{[]string{"search"}, "limit", "l"},
 		{[]string{"recent"}, "limit", "l"},
