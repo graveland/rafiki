@@ -51,7 +51,8 @@ pkg/version/    build-derived version string
 cmd/rafikid/    the rafiki daemon: proxy face, standalone `rafikid fundi` stdio
                 mode, the DSN-backed `rafikid agent` insights CLI, and `migrate`
 cmd/rafiki/     the rafiki CLI client, plus `rafiki claude` (the launcher)
-attach/         rafiki-attach, the TUI (TypeScript, built with bun)
+pkg/tui/        the rafiki TUI (bubbletea, in-process — driven by
+                `rafiki create` and `rafiki attach`)
 ```
 
 Everything importable lives under `pkg/`; `cmd/` is binaries. There is no
@@ -225,9 +226,8 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 
 | Binary | Role |
 |---|---|
-| `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself; `pi` and `claude` children remain subprocesses. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
+| `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself; `claude` children remain subprocesses. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
-| `rafiki-attach` | the TUI, spawned by `rafiki create` / `rafiki attach` |
 
 ## Executor
 
@@ -696,10 +696,6 @@ rather than reading a path that does not exist there.
 
 Its launchd/systemd service identity is `dev.graveland.rafiki` / `rafiki`.
 
-The one thing rafiki writes outside its own directories is the `rafiki-helpers`
-pi extension, into `~/.pi/agent/extensions/` — that is pi's contract, and how
-pi discovers extensions.
-
 ## Environment
 
 rafiki's variables are `RAFIKI_`-prefixed. Older spellings (`FUNDI_*`, and
@@ -714,21 +710,17 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_DEFAULT_MODEL` | model used when `rafiki create` gets no `--model` |
 | `RAFIKI_DEFAULT_PRESET` | preset used when `--preset` is not given |
 | `RAFIKI_DEFAULT_LABELS` | comma-separated `k=v` label defaults |
-| `RAFIKI_NO_AUTO_INSTALL_HELPERS` | skip the `rafiki-helpers` auto-install |
-| `RAFIKI_ATTACH_TAIL` | scrollback the TUI replays (`-1` all, `0` none) |
-| `RAFIKI_ATTACH_DEBUG` | `1` logs every event the TUI receives to stderr |
-| `RAFIKI_KILL_ON_EXIT` | `1` terminates the child when a directly-invoked TUI quits |
 | `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/rafiki/instructions.md`) |
 | `RAFIKI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/rafiki/skills`). Entries may be symlinks (e.g. into `~/.claude/skills` or a plugin cache); discovery follows them |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
-| `RAFIKI_DB` | postgres URL for conversation persistence; **required for cost accounting**. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password. **A daemon with no `RAFIKI_DB` keeps its children in memory only.** They do not survive a restart. Child state lives in `conversations.child`, and there is no file-backed fallback. |
+| `RAFIKI_DB` | postgres URL for conversation persistence; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it. The documented local setup: `docker run -d -p 5433:5432 -e POSTGRES_PASSWORD=postgres timescale/timescaledb:2.28.2-pg18`. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
 | `RAFIKI_DAEMON_ID` | stable identity for this daemon — what a conversation lease records as its holder. Optional on a laptop (generated to `$XDG_DATA_HOME/rafiki/daemon-id` on first run). **Required in Kubernetes**, where the pod filesystem is ephemeral. Two daemons sharing one value reproduce exactly the split-brain the lease exists to prevent. |
 | `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only. **Requires `RAFIKI_DB`** — control-plane identity is row-backed, and a listener without a user table is fatal at startup |
 | `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
-| `RAFIKI_URL` | client-side: the one dial target, `https://host[:port]` (port defaults to 443 when omitted). Reaches the LLM proxy and, over TLS, the control plane's `/control` upgrade (`client.IsRemoteURL` — `https://` only). Unset or `http://` means local: the loopback proxy face and, for control-plane commands, the UDS. Wins over `RAFIKI_SOCKET` when it names a remote control plane. `tls://` is retired — always spell a remote daemon as `https://`. `rafiki create --kind pi`/`--kind claude` (and `rafiki resume --pi-session`, which resumes a `pi` session) require an explicit `--cwd` against a remote `RAFIKI_URL`: those kinds are literal subprocesses of `rafikid` itself (`cmd.Dir = cwd`), so the default (this process's own working directory) names a path on the CLIENT that almost certainly doesn't exist on the remote daemon's filesystem — `Controller.Spawn` stats `cwd` server-side for these kinds only. `--kind fundi` (the default) has no such requirement: its filesystem access, if any, always goes through whichever executor gets bound — by default the session executor `rafiki create` starts on the CLIENT's own machine, rooted at `--cwd` (or the client's `os.Getwd()` when omitted) — so `cwd` is never checked against the daemon's own disk. |
+| `RAFIKI_URL` | client-side: the one dial target, `https://host[:port]` (port defaults to 443 when omitted). Reaches the LLM proxy and, over TLS, the control plane's `/control` upgrade (`client.IsRemoteURL` — `https://` only). Unset or `http://` means local: the loopback proxy face and, for control-plane commands, the UDS. Wins over `RAFIKI_SOCKET` when it names a remote control plane. `tls://` is retired — always spell a remote daemon as `https://`. `rafiki create --kind claude` requires an explicit `--cwd` against a remote `RAFIKI_URL`: claude is a literal subprocess of `rafikid` itself (`cmd.Dir = cwd`), so the default (this process's own working directory) names a path on the CLIENT that almost certainly doesn't exist on the remote daemon's filesystem — `Controller.Spawn` stats `cwd` server-side for that kind only. `--kind fundi` (the default) has no such requirement: its filesystem access, if any, always goes through whichever executor gets bound — by default the session executor `rafiki create` starts on the CLIENT's own machine, rooted at `--cwd` (or the client's `os.Getwd()` when omitted) — so `cwd` is never checked against the daemon's own disk. |
 | `RAFIKI_TOKEN` | client-side: the one bearer credential, presented as the proxy's `Authorization`/`X-Rafiki-Token` and the control plane's `ctrl_auth` token. Unset falls back to `~/.config/rafiki/token` (0600), written by `rafiki user create` |
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
@@ -997,19 +989,13 @@ if a future upstream does support them.
 
 ## The rafiki TUI
 
-`rafiki-attach` is TypeScript, bundled with bun, and links against the `pi`
-git submodule:
+The TUI is a bubbletea program living in `pkg/tui/`, built into the `rafiki`
+binary itself — there is no separate `rafiki-attach` artifact. `rafiki create`
+spawns a child and attaches the TUI to it; `rafiki attach <id|name>` attaches to
+a child that is already running. Both speak Connect over the daemon's local unix
+socket (`<RuntimeDir>/connect.sock`), so no bun, submodule, or separate build
+step is involved.
 
 ```bash
-make bootstrap      # fresh clone: init the submodule, build and install everything
-make build-attach   # just the TUI (needs bun + an initialised submodule)
+make build          # builds rafikid + rafiki, including the in-process TUI
 ```
-
-`make build` deliberately does **not** build the TUI: it needs bun and the
-submodule, and the three Go binaries should build from a bare clone with
-nothing but a Go toolchain.
-
-> **Note:** the `pi` submodule points at a private host, so
-> `git clone --recursive` does not work for outside contributors yet.
-> Replacing it with the published `@earendil-works/pi-*` packages is tracked
-> work.
