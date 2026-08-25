@@ -16,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -42,6 +43,7 @@ type Server struct {
 	history  HistoryLoader
 	events   EventSource
 	resolver ConversationResolver
+	inbox    inbox.Inbox
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
@@ -55,6 +57,13 @@ func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
 // passing the child id through as if it were already a conversation id — the
 // exact bug this resolver exists to close.
 func (s *Server) SetChildResolver(r ConversationResolver) { s.resolver = r }
+
+// SetInbox attaches the inbound-message sink. Like SetChildResolver this is a
+// post-construction setter, because the daemon's Controller — the thing that
+// can actually reach a child — is built after the proxy face that owns this
+// Server. Until it is set, Send fails closed with CodeUnavailable rather than
+// reporting success for a message that reached nothing.
+func (s *Server) SetInbox(in inbox.Inbox) { s.inbox = in }
 
 // resolveConversation turns a request's child_id into the conversation id
 // store.Messages.Load needs. Centralized here because GetHistory and
