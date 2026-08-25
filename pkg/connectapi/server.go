@@ -101,11 +101,11 @@ func (s *Server) resolveConversation(childID string) (string, error) {
 	return conversationID, nil
 }
 
-// Routes returns the mux path prefix and handler for the Control service.
-// Auth is the caller's responsibility — mount it under the same middleware
-// that already protects the other HTTP faces (see cmd/rafikid/proxy.go).
-func (s *Server) Routes() (string, http.Handler) {
-	return rafikiv1connect.NewControlHandler(s)
+// Routes returns the mux path prefix and handler for the Control service,
+// with the given interceptors applied. An empty-token interceptor admits
+// everything — see NewAuthInterceptor.
+func (s *Server) Routes(interceptors ...connect.Interceptor) (string, http.Handler) {
+	return rafikiv1connect.NewControlHandler(s, connect.WithInterceptors(interceptors...))
 }
 
 // GetHistory serves the durable tier: persisted messages converted to native
