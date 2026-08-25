@@ -148,24 +148,11 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 		return
 	}
 
-	if c.leases == nil || c.daemonID == "" || rec.ConversationID == "" {
-		slog.Info("child not auto-resumed: no lease available",
-			"childId", rec.ChildID, "conversationId", rec.ConversationID)
-		return
-	}
-
-	lease, ok, err := c.leases.Acquire(ctx, rec.ConversationID, c.daemonID, leaseTTL)
-	if err != nil {
-		slog.Warn("lease acquire failed; child stays exited", "childId", rec.ChildID, "error", err)
-		return
-	}
-	if !ok {
-		slog.Info("another daemon holds this conversation; child stays exited",
-			"childId", rec.ChildID, "conversationId", rec.ConversationID)
-		return
-	}
-
-	c.trackLease(rec.ChildID, lease)
+	// The lease is acquired at engine build, not here. Two acquisition sites
+	// would mint two tokens for one conversation and the second would silently
+	// invalidate the first, leaving the tracked lease holding a token no write
+	// carries. resumeWithAutoRecovery surfaces the refusal when another daemon
+	// holds it, and the child stays exited.
 	slog.Info("auto-resuming fundi child", "childId", rec.ChildID)
 	go func(id string) {
 		rctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)

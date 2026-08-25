@@ -2635,6 +2635,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		}
 	}
 
+	c.releaseLease(childID)
 	c.cm.Remove(childID)
 }
 
@@ -2653,6 +2654,24 @@ func (c *Controller) writeRecord(childID string) error {
 // Dual-write window: both the database and the on-disk record are written, so a
 // rollback during rollout still finds usable state files. The disk half is
 // removed in a later step.
+// noteConversationID records a child's resolved conversation id on its store
+// entry so the next writeRecord carries it to conversations.child.
+//
+// This is the first moment the daemon knows the id. Before it, conversation_id
+// was filled only from a snapshot's SessionID, which for a fundi child is not
+// set until its first turn completes.
+func (c *Controller) noteConversationID(childID, conversationID string) {
+	if err := c.st.Update(childID, func(s *childstore.Session) {
+		s.SessionID = conversationID
+	}); err != nil {
+		slog.Warn("record conversation id", "childId", childID, "error", err)
+		return
+	}
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write child row after conversation id", "childId", childID, "error", err)
+	}
+}
+
 func (c *Controller) writeRecordLastStatus(childID string, lastStatus string) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {

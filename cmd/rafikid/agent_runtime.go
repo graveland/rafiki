@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/skills"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // projectContextFetcher is the one method the daemon needs from an executor
@@ -150,6 +151,28 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
 	ro.ProviderSenders = senders
+
+	// The single lease-acquisition site. Every agent path — spawn, resume,
+	// startup recovery — reaches BuildEngine, so hooking here is what makes the
+	// guard cover all of them. Acquiring in loadChildren alone left every
+	// spawned and resumed child unfenced.
+	ro.OnConversationResolved = func(lctx context.Context, conversationID string) (store.Lease, error) {
+		if c.leases == nil || c.daemonID == "" || conversationID == "" {
+			return store.Lease{}, nil
+		}
+		lease, ok, err := c.leases.Acquire(lctx, conversationID, c.daemonID, leaseTTL)
+		if err != nil {
+			return store.Lease{}, fmt.Errorf("acquire lease for conversation %s: %w", conversationID, err)
+		}
+		if !ok {
+			return store.Lease{}, fmt.Errorf(
+				"conversation %s is driven by another daemon; refusing to start a second engine",
+				conversationID)
+		}
+		c.trackLease(childID, lease)
+		c.noteConversationID(childID, conversationID)
+		return lease, nil
+	}
 
 	// req.Env is buildEnv's second payload for the subprocess path (alongside
 	// the API key handled below) - forwarded-caller-environment, default-on
