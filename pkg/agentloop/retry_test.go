@@ -60,6 +60,12 @@ func TestIsRetryable(t *testing.T) {
 		// with mid-iteration; without recognition it killed the whole turn.
 		{"sse timeout_error", streamSSErr(`{"type":"error","error":{"type":"timeout_error","message":"The operation was aborted","error_type":"timeout"}}`), liveCtx, true},
 		{"sse overloaded_error", streamSSErr(`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`), liveCtx, true},
+		// The exact payload a live OpenRouter gemini turn aborted with at
+		// iteration 41 — a provider rate limit relayed in-band. False for the
+		// same reason the typed 429 above is: sendStreaming's rate-limit loop
+		// owns it (ModelGate backpressure); this loop must not stack a second
+		// backoff on top.
+		{"sse rate_limit_error", streamSSErr(`{"type":"error","error":{"type":"rate_limit_error","message":"Provider returned error","error_type":"rate_limit_exceeded"}}`), liveCtx, false},
 		{"sse invalid_request_error", streamSSErr(`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`), liveCtx, false},
 
 		// String fallback.

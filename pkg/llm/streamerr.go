@@ -44,10 +44,35 @@ type StreamError struct {
 // not_found_error, request_too_large, billing...) describes OUR request, not
 // the upstream's health, so it must fail fast rather than burn backoff
 // retries against an answer that will be identical every time.
+//
+// rate_limit_error is deliberately NOT here even though it is transient:
+// a rate limit needs backPRESSURE, not generic per-turn backoff. It is
+// classified separately below so consumers can route it to the ModelGate.
 var transientStreamErrorTypes = map[string]bool{
 	"timeout_error":    true,
 	"overloaded_error": true,
 	"api_error":        true,
+}
+
+// rateLimitStreamErrorTypes are the error.type values that mean "HTTP 429
+// arrived after the connection was already up". Anthropic's protocol spells
+// this rate_limit_error; OpenRouter relays upstream failures loosely, so its
+// native spelling rate_limit_exceeded is accepted too — the live payload that
+// motivated this carried both:
+//
+//	received error while streaming: {"type":"error","error":{"type":
+//	"rate_limit_error","message":"Provider returned error","error_type":
+//	"rate_limit_exceeded"}}
+//
+// Like IsTransientStreamError this is consumed by sendStreaming's rate-limit
+// loop: record429 blocks every send for that model — across ALL
+// conversations — while backing off, which is what a shared provider limit
+// actually wants. The two classifiers stay disjoint on purpose; the split
+// mirrors agentloop.isRetryable's handling of TYPED errors (429 → "already
+// handled by sendStreaming", everything else 5xx → its generic retry loop).
+var rateLimitStreamErrorTypes = map[string]bool{
+	"rate_limit_error":    true,
+	"rate_limit_exceeded": true,
 }
 
 // ParseStreamError extracts the SSE error payload carried by the opaque
@@ -112,6 +137,11 @@ func ParseStreamError(err error) (StreamError, bool) {
 // completed stream — so re-issuing Continue is safe. A mid-stream failure can
 // have delivered partial content to a stream handler; that concern belongs to
 // the caller, whose own delivery guard decides whether a retry is safe at all.
+//
+// Rate limits are transient too but are NOT reported here: they belong on
+// IsRateLimitStreamError, so each rejection takes exactly one retry path —
+// sendStreaming's ModelGate loop, never agentloop's generic backoff stacked
+// on top of it.
 func IsTransientStreamError(err error) bool {
 	se, ok := ParseStreamError(err)
 	if !ok {
@@ -121,4 +151,14 @@ func IsTransientStreamError(err error) bool {
 		return true
 	}
 	return transientStreamErrorTypes[se.ErrType]
+}
+
+// IsRateLimitStreamError reports whether err is an in-band SSE "error" event
+// carrying a rate-limit rejection — the same "no more budget upstream"
+// answer a typed 429 carries, arriving after connection setup instead of as
+// a response status. There is no Retry-After header recoverable from an
+// in-band payload, so consumers fall back to exponential backoff.
+func IsRateLimitStreamError(err error) bool {
+	se, ok := ParseStreamError(err)
+	return ok && rateLimitStreamErrorTypes[se.ErrType]
 }

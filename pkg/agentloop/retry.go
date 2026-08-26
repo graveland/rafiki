@@ -51,6 +51,16 @@ func isRetryable(err error, ctx context.Context) bool {
 		return code >= 500 && code < 600
 	}
 
+	// An in-band SSE rate_limit_error mirrors the typed 429 above exactly —
+	// it is the same rejection arriving inside the stream instead of as a
+	// response status — and stays false here for the same reason: sendStreaming's
+	// own rate-limit loop owns it (its ModelGate blocks every conversation's
+	// sends for that model while backing off), and stacking this loop's generic
+	// backoff on top would multiply the wait without adding anything.
+	if llm.IsRateLimitStreamError(err) {
+		return false
+	}
+
 	// An in-band SSE "error" event reaches here stripped of all type info:
 	// the SDK wraps the raw JSON body in a plain fmt.Errorf (see
 	// llm.sseStreamErrPrefix), so the anthropic.Error check above and the

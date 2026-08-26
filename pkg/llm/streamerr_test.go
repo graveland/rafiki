@@ -30,7 +30,35 @@ func TestParseStreamError_IsTransient(t *testing.T) {
 		wantParse bool
 		want      StreamError
 		wantTrans bool
+		wantRL    bool
 	}{
+		{
+			name: "openrouter upstream rate limit (live payload)",
+			err: sdkStreamErr(`{"type":"error","error":{"type":"rate_limit_error",` +
+				`"message":"Provider returned error","error_type":"rate_limit_exceeded"}}`),
+			wantParse: true,
+			want:      StreamError{Type: "error", ErrType: "rate_limit_error", Message: "Provider returned error"},
+			// Transient too, but deliberately classified as a RATE LIMIT so it
+			// takes the ModelGate path instead of agentloop's generic backoff.
+			wantTrans: false,
+			wantRL:    true,
+		},
+		{
+			name:      "openrouter-native rate_limit_exceeded spelling",
+			err:       sdkStreamErr(`{"type":"error","error":{"type":"rate_limit_exceeded","message":"slow down"}}`),
+			wantParse: true,
+			want:      StreamError{Type: "error", ErrType: "rate_limit_exceeded", Message: "slow down"},
+			wantTrans: false,
+			wantRL:    true,
+		},
+		{
+			name:      "bare inner rate-limit envelope",
+			err:       sdkStreamErr(`{"type":"rate_limit_error","message":"quota exhausted"}`),
+			wantParse: true,
+			want:      StreamError{Type: "rate_limit_error", ErrType: "rate_limit_error", Message: "quota exhausted"},
+			wantTrans: false,
+			wantRL:    true,
+		},
 		{
 			name: "openrouter upstream timeout (live payload)",
 			err: sdkStreamErr(`{"type":"error","error":{"type":"timeout_error",` +
@@ -117,6 +145,9 @@ func TestParseStreamError_IsTransient(t *testing.T) {
 			if got := IsTransientStreamError(tt.err); got != tt.wantTrans {
 				t.Errorf("IsTransientStreamError = %v, want %v", got, tt.wantTrans)
 			}
+			if got := IsRateLimitStreamError(tt.err); got != tt.wantRL {
+				t.Errorf("IsRateLimitStreamError = %v, want %v", got, tt.wantRL)
+			}
 		})
 	}
 }
@@ -137,6 +168,7 @@ func TestIsTransientStreamError_OtherErrors(t *testing.T) {
 		{"nil", nil},
 		{"plain error", errors.New("something broke")},
 		{"typed 502 without wrapper", apiErr},
+		{"typed 429 without wrapper", rateLimitErr()},
 		{"net-style error", errors.New("read tcp: connection reset by peer")},
 		{"wrapper with non-JSON body", sdkStreamErr(`<html>502 Bad Gateway</html>`)},
 		{"wrapper with empty body", sdkStreamErr("")},
@@ -149,6 +181,9 @@ func TestIsTransientStreamError_OtherErrors(t *testing.T) {
 			}
 			if IsTransientStreamError(tt.err) {
 				t.Errorf("IsTransientStreamError(%v) = true, want false", tt.err)
+			}
+			if IsRateLimitStreamError(tt.err) {
+				t.Errorf("IsRateLimitStreamError(%v) = true, want false", tt.err)
 			}
 		})
 	}
