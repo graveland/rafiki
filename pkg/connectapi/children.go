@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 
+	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -32,7 +33,7 @@ func (s *Server) SetChildLister(l ChildLister) { s.children.Store(&l) }
 // toProtoChild maps one summary onto the wire type. The two optional int
 // fields stay nil when the source is nil — an exited child has no pid, a live
 // one has no exit code, and 0 is a legal value for both.
-func toProtoChild(c protocol.ChildSummary) *rafikiv1.ChildSummary {
+func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Context) *rafikiv1.ChildSummary {
 	out := &rafikiv1.ChildSummary{
 		ChildId:       c.ChildID,
 		Name:          c.Name,
@@ -53,6 +54,11 @@ func toProtoChild(c protocol.ChildSummary) *rafikiv1.ChildSummary {
 	if c.ExitCode != nil {
 		code := int32(*c.ExitCode)
 		out.ExitCode = &code
+	}
+	if elog != nil && ctx != nil {
+		if latest, err := elog.Latest(ctx, c.ChildID); err == nil {
+			out.LatestOrdinal = &latest
+		}
 	}
 	return out
 }
