@@ -177,6 +177,17 @@ func TestServiceEnvFile_HonoursOverride(t *testing.T) {
 	}
 }
 
+func TestExecutorEnvFile_HonoursOverride(t *testing.T) {
+	t.Setenv(ExecutorEnvFileEnv, "/tmp/executor-custom.env")
+	if got := ExecutorEnvFile(); got != "/tmp/executor-custom.env" {
+		t.Errorf("ExecutorEnvFile() = %q, want the override", got)
+	}
+	t.Setenv(ExecutorEnvFileEnv, "")
+	if got := ExecutorEnvFile(); filepath.Base(got) != "executor.env" {
+		t.Errorf("ExecutorEnvFile() = %q, want it to end in executor.env", got)
+	}
+}
+
 // parseEnvFile is the pure half of LoadEnvFile: it must report what a file
 // says without touching the process environment. MergeEnvFile depends on
 // that, because it has to learn a file's keys during an install without

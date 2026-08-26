@@ -272,7 +272,28 @@ working after you detach.
 flag as `executor serve` — see "The executor relay" below — which is usually
 the main reason to run one of these as a standing service in the first place:
 a laptop's local LLM endpoint (vmlx, Ollama, …) is only reachable while
-something on that laptop is up to relay it.
+something on that laptop is up to relay it. Proxies, like every other flag,
+are baked into the unit at install time: to change them, re-run
+`executor service install` with the full set you want (the credential file is
+reused; no new token needed). Row-level facts — labels, enabled/disabled — are
+different: those live in the database and change live via `rafiki executor label`.
+
+**The executor's environment.** launchd and systemd --user do not inherit a
+login shell, so a supervised executor would otherwise run with nothing but
+HOME and PATH. Install therefore captures the installing shell's environment
+into `<config dir>/executor.env` (0600) — deliberately broad, because bash,
+git, ssh agent access and language servers on the executor inherit it — and
+`rafiki executor serve` applies it at startup. Precedence matches the daemon's
+`service.env`: what the unit bakes in wins; the file fills gaps. Three classes
+are skipped: rafiki's own variables (`RAFIKI_*`, provider API keys — otherwise
+every bash tool child on the executor would inherit a credentialed DSN), what
+the unit already owns (`PATH` travels verbatim in the unit; override with
+`--path-env`), and session/GUI residue that is stale on arrival (`PWD`,
+`SHLVL`, `GPG_TTY`, `DIRENV_*`, iTerm/starship/macOS login-session ids,
+`TERM*`, `DISPLAY`, `TMPDIR`). Re-running install merges new variables and
+reports conflicts; it never rewrites what the file already has.
+Point `RAFIKI_EXECUTOR_ENV_FILE` somewhere custom (or edit the file by hand) to
+manage it directly — see `.env.example`.
 
 **Without an executor, an agent has no workspace tools at all.** `read`, `write`, `edit`,
 `glob`, `grep`, `ls`, `bash` and the `lsp_*` verbs are not registered — not registered and

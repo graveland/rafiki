@@ -39,6 +39,30 @@ func ServiceEnvFile() string {
 	return filepath.Join(ConfigDir(), "service.env")
 }
 
+// ExecutorEnvFile is the EXECUTOR's environment file: $RAFIKI_EXECUTOR_ENV_FILE
+// if set, else <config dir>/executor.env.
+//
+// The executor's service unit has the same constraints the daemon's does — a
+// world-readable plist, a line-based systemd Environment=, and no login shell
+// to inherit — plus one more: the executor runs the operator's local toolchain
+// directly (bash, git, language servers), so what it needs from launchd is not
+// just rafiki's own configuration but the operator's ordinary working
+// environment. Baking all of that into a world-readable unit is out of the
+// question, and there is no way to classify an arbitrary variable as secret,
+// so the whole captured environment goes into this 0600 file instead and
+// `rafiki executor serve` applies it at startup.
+//
+// It is deliberately a separate file from ServiceEnvFile even though both may
+// exist on one machine: the daemon's file holds RAFIKI_DB and provider API
+// keys, and nothing on the executor side reads postgres or resolves API keys
+// — merging the two would hand every bash tool child a DSN it has no use for.
+func ExecutorEnvFile() string {
+	if v := os.Getenv(ExecutorEnvFileEnv); v != "" {
+		return v
+	}
+	return filepath.Join(ConfigDir(), "executor.env")
+}
+
 // envAssignment is one KEY=VALUE parsed out of an environment file, in file
 // order.
 type envAssignment struct{ Key, Value string }
