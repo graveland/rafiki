@@ -85,7 +85,7 @@ func textFromBlocks(blocks []*rafikiv1.ContentBlock) (string, error) {
 
 // ListChildren returns the daemon's children, optionally filtered by status.
 func (s *Server) ListChildren(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[rafikiv1.ListChildrenRequest],
 ) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
 	p := s.children.Load()
@@ -93,17 +93,18 @@ func (s *Server) ListChildren(
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lister not yet wired"))
 	}
+	elog := s.eventLog()
 	summaries := (*p).ListChildren(req.Msg.GetStatuses())
 	out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
 	for _, c := range summaries {
-		out = append(out, toProtoChild(c))
+		out = append(out, toProtoChild(c, elog, ctx))
 	}
 	return connect.NewResponse(&rafikiv1.ListChildrenResponse{Children: out}), nil
 }
 
 // GetChild returns one child by id.
 func (s *Server) GetChild(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[rafikiv1.GetChildRequest],
 ) (*connect.Response[rafikiv1.GetChildResponse], error) {
 	childID := req.Msg.GetChildId()
@@ -121,7 +122,8 @@ func (s *Server) GetChild(
 		return nil, connect.NewError(connect.CodeNotFound,
 			fmt.Errorf("no such child %q", childID))
 	}
-	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: toProtoChild(summary)}), nil
+	elog := s.eventLog()
+	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: toProtoChild(summary, elog, ctx)}), nil
 }
 
 // Spawn creates a child. The budget pointers are copied as pointers, never
