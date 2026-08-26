@@ -21,6 +21,56 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// EventTier is the guarantee a subscriber asks for, not a storage detail.
+type EventTier int32
+
+const (
+	EventTier_EVENT_TIER_UNSPECIFIED EventTier = 0 // treated as DURABLE
+	EventTier_EVENT_TIER_DURABLE     EventTier = 1 // replayable, ordinal-carrying
+	EventTier_EVENT_TIER_ALL         EventTier = 2 // durable + ephemeral deltas
+)
+
+// Enum value maps for EventTier.
+var (
+	EventTier_name = map[int32]string{
+		0: "EVENT_TIER_UNSPECIFIED",
+		1: "EVENT_TIER_DURABLE",
+		2: "EVENT_TIER_ALL",
+	}
+	EventTier_value = map[string]int32{
+		"EVENT_TIER_UNSPECIFIED": 0,
+		"EVENT_TIER_DURABLE":     1,
+		"EVENT_TIER_ALL":         2,
+	}
+)
+
+func (x EventTier) Enum() *EventTier {
+	p := new(EventTier)
+	*p = x
+	return p
+}
+
+func (x EventTier) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EventTier) Descriptor() protoreflect.EnumDescriptor {
+	return file_rafiki_v1_control_proto_enumTypes[0].Descriptor()
+}
+
+func (EventTier) Type() protoreflect.EnumType {
+	return &file_rafiki_v1_control_proto_enumTypes[0]
+}
+
+func (x EventTier) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EventTier.Descriptor instead.
+func (EventTier) EnumDescriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{0}
+}
+
 // SendMode is how a submitted message reaches the agent. PROMPT queues work;
 // STEER injects into the turn already running; ABORT cancels it. Steer and
 // abort are first-class verbs rather than escape hatches — supervising a busy
@@ -61,11 +111,11 @@ func (x SendMode) String() string {
 }
 
 func (SendMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_rafiki_v1_control_proto_enumTypes[0].Descriptor()
+	return file_rafiki_v1_control_proto_enumTypes[1].Descriptor()
 }
 
 func (SendMode) Type() protoreflect.EnumType {
-	return &file_rafiki_v1_control_proto_enumTypes[0]
+	return &file_rafiki_v1_control_proto_enumTypes[1]
 }
 
 func (x SendMode) Number() protoreflect.EnumNumber {
@@ -74,7 +124,7 @@ func (x SendMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SendMode.Descriptor instead.
 func (SendMode) EnumDescriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{0}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{1}
 }
 
 type GetHistoryRequest struct {
@@ -175,17 +225,197 @@ func (x *GetHistoryResponse) GetEvents() []*Event {
 	return nil
 }
 
+// EventSubject names which children a subscription covers. It is a PREDICATE
+// evaluated per event, never a set resolved when the stream opens -- that is
+// what lets a child spawned later appear with no reopening and no poll.
+type EventSubject struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Scope:
+	//
+	//	*EventSubject_Child
+	//	*EventSubject_Subtree
+	//	*EventSubject_All
+	Scope isEventSubject_Scope `protobuf_oneof:"scope"`
+	// Narrows only. Never widens, and never the authority -- authority is
+	// evaluated server-side and intersected. A malformed selector EXCLUDES.
+	LabelSelector string `protobuf:"bytes,4,opt,name=label_selector,json=labelSelector,proto3" json:"label_selector,omitempty"`
+	// Hops below `subtree`. UNSET or 0 means UNLIMITED; 1 means direct children
+	// only. Ignored for `child` and `all`. Unlimited is the default because a
+	// watcher wants a complete model; the agent path sets 1 explicitly.
+	MaxDepth      int32 `protobuf:"varint,5,opt,name=max_depth,json=maxDepth,proto3" json:"max_depth,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EventSubject) Reset() {
+	*x = EventSubject{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventSubject) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventSubject) ProtoMessage() {}
+
+func (x *EventSubject) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventSubject.ProtoReflect.Descriptor instead.
+func (*EventSubject) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *EventSubject) GetScope() isEventSubject_Scope {
+	if x != nil {
+		return x.Scope
+	}
+	return nil
+}
+
+func (x *EventSubject) GetChild() string {
+	if x != nil {
+		if x, ok := x.Scope.(*EventSubject_Child); ok {
+			return x.Child
+		}
+	}
+	return ""
+}
+
+func (x *EventSubject) GetSubtree() string {
+	if x != nil {
+		if x, ok := x.Scope.(*EventSubject_Subtree); ok {
+			return x.Subtree
+		}
+	}
+	return ""
+}
+
+func (x *EventSubject) GetAll() bool {
+	if x != nil {
+		if x, ok := x.Scope.(*EventSubject_All); ok {
+			return x.All
+		}
+	}
+	return false
+}
+
+func (x *EventSubject) GetLabelSelector() string {
+	if x != nil {
+		return x.LabelSelector
+	}
+	return ""
+}
+
+func (x *EventSubject) GetMaxDepth() int32 {
+	if x != nil {
+		return x.MaxDepth
+	}
+	return 0
+}
+
+type isEventSubject_Scope interface {
+	isEventSubject_Scope()
+}
+
+type EventSubject_Child struct {
+	Child string `protobuf:"bytes,1,opt,name=child,proto3,oneof"` // one child, itself
+}
+
+type EventSubject_Subtree struct {
+	Subtree string `protobuf:"bytes,2,opt,name=subtree,proto3,oneof"` // descendants of this child, bounded by max_depth
+}
+
+type EventSubject_All struct {
+	All bool `protobuf:"varint,3,opt,name=all,proto3,oneof"` // everything the caller is entitled to
+}
+
+func (*EventSubject_Child) isEventSubject_Scope() {}
+
+func (*EventSubject_Subtree) isEventSubject_Scope() {}
+
+func (*EventSubject_All) isEventSubject_Scope() {}
+
+// EventCursor resumes a subscription.
+type EventCursor struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// child_id -> last ordinal seen. A child absent from this map replays from
+	// floor_unix_ms. Without the floor, a child that spawned and exited entirely
+	// during a disconnect is indistinguishable from a brand new one.
+	Ordinals      map[string]int32 `protobuf:"bytes,1,rep,name=ordinals,proto3" json:"ordinals,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	FloorUnixMs   int64            `protobuf:"varint,2,opt,name=floor_unix_ms,json=floorUnixMs,proto3" json:"floor_unix_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EventCursor) Reset() {
+	*x = EventCursor{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventCursor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventCursor) ProtoMessage() {}
+
+func (x *EventCursor) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventCursor.ProtoReflect.Descriptor instead.
+func (*EventCursor) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *EventCursor) GetOrdinals() map[string]int32 {
+	if x != nil {
+		return x.Ordinals
+	}
+	return nil
+}
+
+func (x *EventCursor) GetFloorUnixMs() int64 {
+	if x != nil {
+		return x.FloorUnixMs
+	}
+	return 0
+}
+
 type StreamEventsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChildIds      []string               `protobuf:"bytes,1,rep,name=child_ids,json=childIds,proto3" json:"child_ids,omitempty"`
-	AfterOrdinal  *int32                 `protobuf:"varint,2,opt,name=after_ordinal,json=afterOrdinal,proto3,oneof" json:"after_ordinal,omitempty"`
+	Subject       *EventSubject          `protobuf:"bytes,4,opt,name=subject,proto3" json:"subject,omitempty"`
+	Tier          EventTier              `protobuf:"varint,5,opt,name=tier,proto3,enum=rafiki.v1.EventTier" json:"tier,omitempty"`
+	Types         []string               `protobuf:"bytes,6,rep,name=types,proto3" json:"types,omitempty"`         // empty = every type in the tier
+	Cursor        *EventCursor           `protobuf:"bytes,7,opt,name=cursor,proto3,oneof" json:"cursor,omitempty"` // absent = from now, no replay
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StreamEventsRequest) Reset() {
 	*x = StreamEventsRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[2]
+	mi := &file_rafiki_v1_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -197,7 +427,7 @@ func (x *StreamEventsRequest) String() string {
 func (*StreamEventsRequest) ProtoMessage() {}
 
 func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[2]
+	mi := &file_rafiki_v1_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -210,21 +440,35 @@ func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{2}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *StreamEventsRequest) GetChildIds() []string {
+func (x *StreamEventsRequest) GetSubject() *EventSubject {
 	if x != nil {
-		return x.ChildIds
+		return x.Subject
 	}
 	return nil
 }
 
-func (x *StreamEventsRequest) GetAfterOrdinal() int32 {
-	if x != nil && x.AfterOrdinal != nil {
-		return *x.AfterOrdinal
+func (x *StreamEventsRequest) GetTier() EventTier {
+	if x != nil {
+		return x.Tier
 	}
-	return 0
+	return EventTier_EVENT_TIER_UNSPECIFIED
+}
+
+func (x *StreamEventsRequest) GetTypes() []string {
+	if x != nil {
+		return x.Types
+	}
+	return nil
+}
+
+func (x *StreamEventsRequest) GetCursor() *EventCursor {
+	if x != nil {
+		return x.Cursor
+	}
+	return nil
 }
 
 // SendRequest carries content BLOCKS rather than a string so a pasted image
@@ -240,7 +484,7 @@ type SendRequest struct {
 
 func (x *SendRequest) Reset() {
 	*x = SendRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[3]
+	mi := &file_rafiki_v1_control_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -252,7 +496,7 @@ func (x *SendRequest) String() string {
 func (*SendRequest) ProtoMessage() {}
 
 func (x *SendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[3]
+	mi := &file_rafiki_v1_control_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -265,7 +509,7 @@ func (x *SendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendRequest.ProtoReflect.Descriptor instead.
 func (*SendRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{3}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SendRequest) GetChildId() string {
@@ -299,7 +543,7 @@ type SendResponse struct {
 
 func (x *SendResponse) Reset() {
 	*x = SendResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[4]
+	mi := &file_rafiki_v1_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -311,7 +555,7 @@ func (x *SendResponse) String() string {
 func (*SendResponse) ProtoMessage() {}
 
 func (x *SendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[4]
+	mi := &file_rafiki_v1_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -324,7 +568,7 @@ func (x *SendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendResponse.ProtoReflect.Descriptor instead.
 func (*SendResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SendResponse) GetMessageId() string {
@@ -354,13 +598,17 @@ type ChildSummary struct {
 	Labels        map[string]string `protobuf:"bytes,11,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	SessionId     string            `protobuf:"bytes,12,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	ContextWindow int32             `protobuf:"varint,13,opt,name=context_window,json=contextWindow,proto3" json:"context_window,omitempty"`
+	// latest_ordinal is the child's highest durable event ordinal, so a client
+	// can seed an unread watermark without a history load per child. Optional
+	// because 0 is a legal ordinal and "no events yet" must stay distinguishable.
+	LatestOrdinal *int32 `protobuf:"varint,14,opt,name=latest_ordinal,json=latestOrdinal,proto3,oneof" json:"latest_ordinal,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChildSummary) Reset() {
 	*x = ChildSummary{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[5]
+	mi := &file_rafiki_v1_control_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -372,7 +620,7 @@ func (x *ChildSummary) String() string {
 func (*ChildSummary) ProtoMessage() {}
 
 func (x *ChildSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[5]
+	mi := &file_rafiki_v1_control_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -385,7 +633,7 @@ func (x *ChildSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChildSummary.ProtoReflect.Descriptor instead.
 func (*ChildSummary) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{5}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ChildSummary) GetChildId() string {
@@ -479,6 +727,13 @@ func (x *ChildSummary) GetContextWindow() int32 {
 	return 0
 }
 
+func (x *ChildSummary) GetLatestOrdinal() int32 {
+	if x != nil && x.LatestOrdinal != nil {
+		return *x.LatestOrdinal
+	}
+	return 0
+}
+
 type ListChildrenRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Empty means every child. Otherwise only children whose status matches one
@@ -490,7 +745,7 @@ type ListChildrenRequest struct {
 
 func (x *ListChildrenRequest) Reset() {
 	*x = ListChildrenRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[6]
+	mi := &file_rafiki_v1_control_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -502,7 +757,7 @@ func (x *ListChildrenRequest) String() string {
 func (*ListChildrenRequest) ProtoMessage() {}
 
 func (x *ListChildrenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[6]
+	mi := &file_rafiki_v1_control_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -515,7 +770,7 @@ func (x *ListChildrenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListChildrenRequest.ProtoReflect.Descriptor instead.
 func (*ListChildrenRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{6}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ListChildrenRequest) GetStatuses() []string {
@@ -534,7 +789,7 @@ type ListChildrenResponse struct {
 
 func (x *ListChildrenResponse) Reset() {
 	*x = ListChildrenResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[7]
+	mi := &file_rafiki_v1_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -546,7 +801,7 @@ func (x *ListChildrenResponse) String() string {
 func (*ListChildrenResponse) ProtoMessage() {}
 
 func (x *ListChildrenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[7]
+	mi := &file_rafiki_v1_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -559,7 +814,7 @@ func (x *ListChildrenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListChildrenResponse.ProtoReflect.Descriptor instead.
 func (*ListChildrenResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{7}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ListChildrenResponse) GetChildren() []*ChildSummary {
@@ -578,7 +833,7 @@ type GetChildRequest struct {
 
 func (x *GetChildRequest) Reset() {
 	*x = GetChildRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[8]
+	mi := &file_rafiki_v1_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -590,7 +845,7 @@ func (x *GetChildRequest) String() string {
 func (*GetChildRequest) ProtoMessage() {}
 
 func (x *GetChildRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[8]
+	mi := &file_rafiki_v1_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -603,7 +858,7 @@ func (x *GetChildRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetChildRequest.ProtoReflect.Descriptor instead.
 func (*GetChildRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{8}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetChildRequest) GetChildId() string {
@@ -622,7 +877,7 @@ type GetChildResponse struct {
 
 func (x *GetChildResponse) Reset() {
 	*x = GetChildResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[9]
+	mi := &file_rafiki_v1_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -634,7 +889,7 @@ func (x *GetChildResponse) String() string {
 func (*GetChildResponse) ProtoMessage() {}
 
 func (x *GetChildResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[9]
+	mi := &file_rafiki_v1_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -647,7 +902,7 @@ func (x *GetChildResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetChildResponse.ProtoReflect.Descriptor instead.
 func (*GetChildResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{9}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetChildResponse) GetChild() *ChildSummary {
@@ -683,7 +938,7 @@ type SpawnRequest struct {
 
 func (x *SpawnRequest) Reset() {
 	*x = SpawnRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[10]
+	mi := &file_rafiki_v1_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -695,7 +950,7 @@ func (x *SpawnRequest) String() string {
 func (*SpawnRequest) ProtoMessage() {}
 
 func (x *SpawnRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[10]
+	mi := &file_rafiki_v1_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -708,7 +963,7 @@ func (x *SpawnRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnRequest.ProtoReflect.Descriptor instead.
 func (*SpawnRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{10}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SpawnRequest) GetCwd() string {
@@ -790,7 +1045,7 @@ type SpawnResponse struct {
 
 func (x *SpawnResponse) Reset() {
 	*x = SpawnResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[11]
+	mi := &file_rafiki_v1_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -802,7 +1057,7 @@ func (x *SpawnResponse) String() string {
 func (*SpawnResponse) ProtoMessage() {}
 
 func (x *SpawnResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[11]
+	mi := &file_rafiki_v1_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -815,7 +1070,7 @@ func (x *SpawnResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnResponse.ProtoReflect.Descriptor instead.
 func (*SpawnResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{11}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SpawnResponse) GetChildId() string {
@@ -836,7 +1091,7 @@ type KillRequest struct {
 
 func (x *KillRequest) Reset() {
 	*x = KillRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[12]
+	mi := &file_rafiki_v1_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -848,7 +1103,7 @@ func (x *KillRequest) String() string {
 func (*KillRequest) ProtoMessage() {}
 
 func (x *KillRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[12]
+	mi := &file_rafiki_v1_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -861,7 +1116,7 @@ func (x *KillRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KillRequest.ProtoReflect.Descriptor instead.
 func (*KillRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{12}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *KillRequest) GetChildId() string {
@@ -902,7 +1157,7 @@ type KillResponse struct {
 
 func (x *KillResponse) Reset() {
 	*x = KillResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[13]
+	mi := &file_rafiki_v1_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -914,7 +1169,7 @@ func (x *KillResponse) String() string {
 func (*KillResponse) ProtoMessage() {}
 
 func (x *KillResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[13]
+	mi := &file_rafiki_v1_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -927,7 +1182,7 @@ func (x *KillResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KillResponse.ProtoReflect.Descriptor instead.
 func (*KillResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{13}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *KillResponse) GetChildId() string {
@@ -975,18 +1230,33 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\rafter_ordinal\x18\x02 \x01(\x05H\x00R\fafterOrdinal\x88\x01\x01B\x10\n" +
 	"\x0e_after_ordinal\">\n" +
 	"\x12GetHistoryResponse\x12(\n" +
-	"\x06events\x18\x01 \x03(\v2\x10.rafiki.v1.EventR\x06events\"n\n" +
-	"\x13StreamEventsRequest\x12\x1b\n" +
-	"\tchild_ids\x18\x01 \x03(\tR\bchildIds\x12(\n" +
-	"\rafter_ordinal\x18\x02 \x01(\x05H\x00R\fafterOrdinal\x88\x01\x01B\x10\n" +
-	"\x0e_after_ordinal\"\x82\x01\n" +
+	"\x06events\x18\x01 \x03(\v2\x10.rafiki.v1.EventR\x06events\"\xa3\x01\n" +
+	"\fEventSubject\x12\x16\n" +
+	"\x05child\x18\x01 \x01(\tH\x00R\x05child\x12\x1a\n" +
+	"\asubtree\x18\x02 \x01(\tH\x00R\asubtree\x12\x12\n" +
+	"\x03all\x18\x03 \x01(\bH\x00R\x03all\x12%\n" +
+	"\x0elabel_selector\x18\x04 \x01(\tR\rlabelSelector\x12\x1b\n" +
+	"\tmax_depth\x18\x05 \x01(\x05R\bmaxDepthB\a\n" +
+	"\x05scope\"\xb0\x01\n" +
+	"\vEventCursor\x12@\n" +
+	"\bordinals\x18\x01 \x03(\v2$.rafiki.v1.EventCursor.OrdinalsEntryR\bordinals\x12\"\n" +
+	"\rfloor_unix_ms\x18\x02 \x01(\x03R\vfloorUnixMs\x1a;\n" +
+	"\rOrdinalsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xee\x01\n" +
+	"\x13StreamEventsRequest\x121\n" +
+	"\asubject\x18\x04 \x01(\v2\x17.rafiki.v1.EventSubjectR\asubject\x12(\n" +
+	"\x04tier\x18\x05 \x01(\x0e2\x14.rafiki.v1.EventTierR\x04tier\x12\x14\n" +
+	"\x05types\x18\x06 \x03(\tR\x05types\x123\n" +
+	"\x06cursor\x18\a \x01(\v2\x16.rafiki.v1.EventCursorH\x00R\x06cursor\x88\x01\x01B\t\n" +
+	"\a_cursorJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03R\tchild_idsR\rafter_ordinal\"\x82\x01\n" +
 	"\vSendRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12'\n" +
 	"\x04mode\x18\x02 \x01(\x0e2\x13.rafiki.v1.SendModeR\x04mode\x12/\n" +
 	"\x06blocks\x18\x03 \x03(\v2\x17.rafiki.v1.ContentBlockR\x06blocks\"-\n" +
 	"\fSendResponse\x12\x1d\n" +
 	"\n" +
-	"message_id\x18\x01 \x01(\tR\tmessageId\"\xe2\x03\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\"\xa1\x04\n" +
 	"\fChildSummary\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -1003,13 +1273,15 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x06labels\x18\v \x03(\v2#.rafiki.v1.ChildSummary.LabelsEntryR\x06labels\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\f \x01(\tR\tsessionId\x12%\n" +
-	"\x0econtext_window\x18\r \x01(\x05R\rcontextWindow\x1a9\n" +
+	"\x0econtext_window\x18\r \x01(\x05R\rcontextWindow\x12*\n" +
+	"\x0elatest_ordinal\x18\x0e \x01(\x05H\x02R\rlatestOrdinal\x88\x01\x01\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +
 	"\x04_pidB\f\n" +
 	"\n" +
-	"_exit_code\"1\n" +
+	"_exit_codeB\x11\n" +
+	"\x0f_latest_ordinal\"1\n" +
 	"\x13ListChildrenRequest\x12\x1a\n" +
 	"\bstatuses\x18\x01 \x03(\tR\bstatuses\"K\n" +
 	"\x14ListChildrenResponse\x123\n" +
@@ -1051,7 +1323,11 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"durationMs\x12\x1c\n" +
 	"\tescalated\x18\x05 \x01(\bR\tescalatedB\f\n" +
 	"\n" +
-	"_exit_code*e\n" +
+	"_exit_code*S\n" +
+	"\tEventTier\x12\x1a\n" +
+	"\x16EVENT_TIER_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12EVENT_TIER_DURABLE\x10\x01\x12\x12\n" +
+	"\x0eEVENT_TIER_ALL\x10\x02*e\n" +
 	"\bSendMode\x12\x19\n" +
 	"\x15SEND_MODE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10SEND_MODE_PROMPT\x10\x01\x12\x13\n" +
@@ -1079,56 +1355,64 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 	return file_rafiki_v1_control_proto_rawDescData
 }
 
-var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_rafiki_v1_control_proto_goTypes = []any{
-	(SendMode)(0),                // 0: rafiki.v1.SendMode
-	(*GetHistoryRequest)(nil),    // 1: rafiki.v1.GetHistoryRequest
-	(*GetHistoryResponse)(nil),   // 2: rafiki.v1.GetHistoryResponse
-	(*StreamEventsRequest)(nil),  // 3: rafiki.v1.StreamEventsRequest
-	(*SendRequest)(nil),          // 4: rafiki.v1.SendRequest
-	(*SendResponse)(nil),         // 5: rafiki.v1.SendResponse
-	(*ChildSummary)(nil),         // 6: rafiki.v1.ChildSummary
-	(*ListChildrenRequest)(nil),  // 7: rafiki.v1.ListChildrenRequest
-	(*ListChildrenResponse)(nil), // 8: rafiki.v1.ListChildrenResponse
-	(*GetChildRequest)(nil),      // 9: rafiki.v1.GetChildRequest
-	(*GetChildResponse)(nil),     // 10: rafiki.v1.GetChildResponse
-	(*SpawnRequest)(nil),         // 11: rafiki.v1.SpawnRequest
-	(*SpawnResponse)(nil),        // 12: rafiki.v1.SpawnResponse
-	(*KillRequest)(nil),          // 13: rafiki.v1.KillRequest
-	(*KillResponse)(nil),         // 14: rafiki.v1.KillResponse
-	nil,                          // 15: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                          // 16: rafiki.v1.SpawnRequest.LabelsEntry
-	(*Event)(nil),                // 17: rafiki.v1.Event
-	(*ContentBlock)(nil),         // 18: rafiki.v1.ContentBlock
+	(EventTier)(0),               // 0: rafiki.v1.EventTier
+	(SendMode)(0),                // 1: rafiki.v1.SendMode
+	(*GetHistoryRequest)(nil),    // 2: rafiki.v1.GetHistoryRequest
+	(*GetHistoryResponse)(nil),   // 3: rafiki.v1.GetHistoryResponse
+	(*EventSubject)(nil),         // 4: rafiki.v1.EventSubject
+	(*EventCursor)(nil),          // 5: rafiki.v1.EventCursor
+	(*StreamEventsRequest)(nil),  // 6: rafiki.v1.StreamEventsRequest
+	(*SendRequest)(nil),          // 7: rafiki.v1.SendRequest
+	(*SendResponse)(nil),         // 8: rafiki.v1.SendResponse
+	(*ChildSummary)(nil),         // 9: rafiki.v1.ChildSummary
+	(*ListChildrenRequest)(nil),  // 10: rafiki.v1.ListChildrenRequest
+	(*ListChildrenResponse)(nil), // 11: rafiki.v1.ListChildrenResponse
+	(*GetChildRequest)(nil),      // 12: rafiki.v1.GetChildRequest
+	(*GetChildResponse)(nil),     // 13: rafiki.v1.GetChildResponse
+	(*SpawnRequest)(nil),         // 14: rafiki.v1.SpawnRequest
+	(*SpawnResponse)(nil),        // 15: rafiki.v1.SpawnResponse
+	(*KillRequest)(nil),          // 16: rafiki.v1.KillRequest
+	(*KillResponse)(nil),         // 17: rafiki.v1.KillResponse
+	nil,                          // 18: rafiki.v1.EventCursor.OrdinalsEntry
+	nil,                          // 19: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                          // 20: rafiki.v1.SpawnRequest.LabelsEntry
+	(*Event)(nil),                // 21: rafiki.v1.Event
+	(*ContentBlock)(nil),         // 22: rafiki.v1.ContentBlock
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	17, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	0,  // 1: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	18, // 2: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	15, // 3: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
-	6,  // 4: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
-	6,  // 5: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	16, // 6: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
-	1,  // 7: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	3,  // 8: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	4,  // 9: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	7,  // 10: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	9,  // 11: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	11, // 12: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	13, // 13: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	2,  // 14: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	17, // 15: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	5,  // 16: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	8,  // 17: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	10, // 18: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	12, // 19: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	14, // 20: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	14, // [14:21] is the sub-list for method output_type
-	7,  // [7:14] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	21, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	18, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	4,  // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
+	0,  // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
+	5,  // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
+	1,  // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
+	22, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	19, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	9,  // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
+	9,  // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
+	20, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	2,  // 11: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	6,  // 12: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	7,  // 13: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	10, // 14: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	12, // 15: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	14, // 16: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	16, // 17: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	3,  // 18: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	21, // 19: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	8,  // 20: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	11, // 21: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	13, // 22: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	15, // 23: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	17, // 24: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	18, // [18:25] is the sub-list for method output_type
+	11, // [11:18] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -1138,17 +1422,22 @@ func file_rafiki_v1_control_proto_init() {
 	}
 	file_rafiki_v1_event_proto_init()
 	file_rafiki_v1_control_proto_msgTypes[0].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[2].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[5].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[10].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[13].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[2].OneofWrappers = []any{
+		(*EventSubject_Child)(nil),
+		(*EventSubject_Subtree)(nil),
+		(*EventSubject_All)(nil),
+	}
+	file_rafiki_v1_control_proto_msgTypes[4].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[7].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[12].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[15].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   16,
+			NumEnums:      2,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
