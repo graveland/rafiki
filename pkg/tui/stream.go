@@ -71,8 +71,11 @@ func (es *eventStream) run(ctx context.Context) {
 	// Now stream live events.
 	stream, err := es.client.StreamEvents(ctx,
 		connect.NewRequest(&rafikiv1.StreamEventsRequest{
-			ChildIds:     []string{es.childID},
-			AfterOrdinal: &lastOrdinal,
+			Subject: &rafikiv1.EventSubject{
+				Scope: &rafikiv1.EventSubject_Child{Child: es.childID},
+			},
+			Tier:   rafikiv1.EventTier_EVENT_TIER_ALL,
+			Cursor: &rafikiv1.EventCursor{Ordinals: map[string]int32{es.childID: lastOrdinal}},
 		}))
 	if err != nil {
 		slog.Warn("tui: stream events failed", "child", es.childID, "error", err)

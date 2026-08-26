@@ -17,9 +17,49 @@ message GetHistoryResponse {
   repeated Event events = 1;
 }
 
+// EventSubject names which children a subscription covers. It is a PREDICATE
+// evaluated per event, never a set resolved when the stream opens -- that is
+// what lets a child spawned later appear with no reopening and no poll.
+message EventSubject {
+  oneof scope {
+    string child   = 1;  // one child, itself
+    string subtree = 2;  // descendants of this child, bounded by max_depth
+    bool   all     = 3;  // everything the caller is entitled to
+  }
+  // Narrows only. Never widens, and never the authority -- authority is
+  // evaluated server-side and intersected. A malformed selector EXCLUDES.
+  string label_selector = 4;
+
+  // Hops below `subtree`. UNSET or 0 means UNLIMITED; 1 means direct children
+  // only. Ignored for `child` and `all`. Unlimited is the default because a
+  // watcher wants a complete model; the agent path sets 1 explicitly.
+  int32 max_depth = 5;
+}
+
+// EventTier is the guarantee a subscriber asks for, not a storage detail.
+enum EventTier {
+  EVENT_TIER_UNSPECIFIED = 0;  // treated as DURABLE
+  EVENT_TIER_DURABLE     = 1;  // replayable, ordinal-carrying
+  EVENT_TIER_ALL         = 2;  // durable + ephemeral deltas
+}
+
+// EventCursor resumes a subscription.
+message EventCursor {
+  // child_id -> last ordinal seen. A child absent from this map replays from
+  // floor_unix_ms. Without the floor, a child that spawned and exited entirely
+  // during a disconnect is indistinguishable from a brand new one.
+  map<string, int32> ordinals      = 1;
+  int64              floor_unix_ms = 2;
+}
+
 message StreamEventsRequest {
-  repeated string child_ids = 1;
-  optional int32 after_ordinal = 2;
+  EventSubject         subject = 4;
+  EventTier            tier    = 5;
+  repeated string      types   = 6;  // empty = every type in the tier
+  optional EventCursor cursor  = 7;  // absent = from now, no replay
+
+  reserved 1, 2;  // was: child_ids, after_ordinal
+  reserved "child_ids", "after_ordinal";
 }
 
 // SendMode is how a submitted message reaches the agent. PROMPT queues work;
@@ -65,6 +105,10 @@ message ChildSummary {
   map<string, string> labels = 11;
   string session_id = 12;
   int32 context_window = 13;
+  // latest_ordinal is the child's highest durable event ordinal, so a client
+  // can seed an unread watermark without a history load per child. Optional
+  // because 0 is a legal ordinal and "no events yet" must stay distinguishable.
+  optional int32 latest_ordinal = 14;
 }
 
 message ListChildrenRequest {

@@ -29,7 +29,10 @@ func (s *Server) StreamEvents(
 	req *connect.Request[rafikiv1.StreamEventsRequest],
 	stream *connect.ServerStream[rafikiv1.Event],
 ) error {
-	ids := req.Msg.GetChildIds()
+	var ids []string
+	if child := req.Msg.GetSubject().GetChild(); child != "" {
+		ids = []string{child}
+	}
 	if len(ids) == 0 {
 		return connect.NewError(connect.CodeInvalidArgument,
 			errors.New("at least one child_id is required"))
@@ -44,15 +47,17 @@ func (s *Server) StreamEvents(
 		if err != nil {
 			return connect.NewError(connect.CodeInternal, err)
 		}
-		if req.Msg.AfterOrdinal != nil {
-			after := int(req.Msg.GetAfterOrdinal())
-			kept := msgs[:0]
-			for _, m := range msgs {
-				if m.Ordinal > after {
-					kept = append(kept, m)
+		if cursor := req.Msg.GetCursor(); cursor != nil && cursor.Ordinals != nil {
+			if last, ok := cursor.Ordinals[id]; ok {
+				after := int(last)
+				kept := msgs[:0]
+				for _, m := range msgs {
+					if m.Ordinal > after {
+						kept = append(kept, m)
+					}
 				}
+				msgs = kept
 			}
-			msgs = kept
 		}
 		for _, ev := range eventconv.EventsFromMessages(id, msgs) {
 			if err := stream.Send(ev); err != nil {

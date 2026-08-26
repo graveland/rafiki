@@ -45,7 +45,9 @@ func TestStreamEventsReplaysHistoryThenFollowsLive(t *testing.T) {
 	defer cancel()
 
 	stream, err := client.StreamEvents(ctx,
-		connect.NewRequest(&rafikiv1.StreamEventsRequest{ChildIds: []string{"c_1"}}))
+		connect.NewRequest(&rafikiv1.StreamEventsRequest{
+			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
+		}))
 	if err != nil {
 		t.Fatalf("StreamEvents: %v", err)
 	}
@@ -93,7 +95,9 @@ func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
 	defer cancel()
 
 	stream, err := client.StreamEvents(ctx,
-		connect.NewRequest(&rafikiv1.StreamEventsRequest{ChildIds: []string{"c_1"}}))
+		connect.NewRequest(&rafikiv1.StreamEventsRequest{
+			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
+		}))
 	if err != nil {
 		t.Fatalf("StreamEvents: %v", err)
 	}
@@ -156,7 +160,9 @@ func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
 
 	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
 	stream, err := client.StreamEvents(context.Background(),
-		connect.NewRequest(&rafikiv1.StreamEventsRequest{ChildIds: []string{"c_1"}}))
+		connect.NewRequest(&rafikiv1.StreamEventsRequest{
+			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
+		}))
 	if err == nil && stream.Receive() {
 		t.Fatal("deny-all http.Handler wrap did not block StreamEvents; a plain http.Handler wrap must cover streaming RPCs exactly like unary ones")
 	}
@@ -214,7 +220,7 @@ func TestStreamEventsFollowsEveryChild(t *testing.T) {
 
 	go func() {
 		_ = s.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
-			ChildIds: []string{"c_1", "c_2"},
+			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 		}), &connect.ServerStream[rafikiv1.Event]{})
 	}()
 
@@ -230,13 +236,10 @@ func TestStreamEventsFollowsEveryChild(t *testing.T) {
 	}
 }
 
-// TestSubscribeCalledForEveryChild is the cheaper, more direct assertion: the
-// source must be subscribed once per requested child.
-func TestSubscribeCalledForEveryChild(t *testing.T) {
+// TestSubscribeCalledForChild proves the source is subscribed for the requested child.
+func TestSubscribeCalledForChild(t *testing.T) {
 	src := &multiSource{chans: map[string]chan *rafikiv1.Event{
 		"c_1": make(chan *rafikiv1.Event),
-		"c_2": make(chan *rafikiv1.Event),
-		"c_3": make(chan *rafikiv1.Event),
 	}}
 	s := connectapi.NewServer(&fakeLoader{})
 	s.SetChildResolver(fixedResolver{})
@@ -247,7 +250,7 @@ func TestSubscribeCalledForEveryChild(t *testing.T) {
 
 	go func() {
 		_ = s.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
-			ChildIds: []string{"c_1", "c_2", "c_3"},
+			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 		}), &connect.ServerStream[rafikiv1.Event]{})
 	}()
 
@@ -256,7 +259,7 @@ func TestSubscribeCalledForEveryChild(t *testing.T) {
 
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	if len(src.subscribed) != 3 {
-		t.Errorf("subscribed to %d children (%v), want 3", len(src.subscribed), src.subscribed)
+	if len(src.subscribed) != 1 {
+		t.Errorf("subscribed to %d children (%v), want 1", len(src.subscribed), src.subscribed)
 	}
 }
