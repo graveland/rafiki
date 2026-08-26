@@ -510,6 +510,25 @@ func TestParentedSpawnWithNoLiveExecutorStartsUnbound(t *testing.T) {
 	}
 }
 
+// An auto-resumed child (e.g. recovering on daemon restart before executors
+// reconnect) is allowed to start unbound: its workspace tools will lazy-bind
+// once the matching executor connects.
+func TestAutoResumeWithNoLiveExecutorStartsUnbound(t *testing.T) {
+	c := newTestController(t)
+	c.execPool = &fakePool{}
+	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
+	req := baseRequest()
+	req.ExecutorSelector = "env=nowhere"
+	ro, err := c.agentRuntimeOptions(req, "c1", true, "brent")
+	if err != nil {
+		t.Fatalf("an auto-resumed spawn must be allowed to start unbound: %v", err)
+	}
+	if ro.Executor == nil {
+		t.Fatal("Executor must still be non-nil, or MaterializeAll drops the " +
+			"whole workspace tier and the child silently runs tools in the daemon")
+	}
+}
+
 // markUnbound writes "unbound" through the store-then-stash path so Spawn
 // picks it up and stores it on initialization labels.
 func TestAnUnboundChildSaysSoInItsLabels(t *testing.T) {

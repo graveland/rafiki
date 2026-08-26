@@ -40,8 +40,11 @@ func TestShouldAutoResume(t *testing.T) {
 
 // TestRecoveryActionWorkspaceMode pins design §3.1. A pinned child must NOT be
 // moved to another machine by the restart path — HandleExecutorLost fails a
-// pinned child where it stood, and recovery must not become the one door that
-// quietly migrates one. An unknown mode is pinned.
+// pinned child where it stood, and boundExecutor.recover refuses to re-select
+// for one. But a pinned child CAN resume on the SAME machine when it restarts
+// alongside the daemon — planResumeBound strips only the stale workspace id
+// while keeping the executor identity so doRecover can re-provision in place.
+// An unknown mode is pinned.
 func TestRecoveryActionWorkspaceMode(t *testing.T) {
 	cases := []struct {
 		name string
@@ -49,9 +52,9 @@ func TestRecoveryActionWorkspaceMode(t *testing.T) {
 		want recoveryPlan
 	}{
 		{"ephemeral rebinds", "ephemeral", planRebindUnbound},
-		{"pinned fails", "pinned", planStayExited},
-		{"unknown mode is pinned", "", planStayExited},
-		{"garbage mode is pinned", "sideways", planStayExited},
+		{"pinned resumes on same machine", "pinned", planResumeBound},
+		{"unknown mode resumes on same machine", "", planResumeBound},
+		{"garbage mode resumes on same machine", "sideways", planResumeBound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -140,6 +143,30 @@ func TestStripStaleBindings(t *testing.T) {
 	}
 	if _, ok := got["rafiki/executor"]; ok {
 		t.Error("rafiki/executor survived")
+	}
+	if got["owner"] != "brent" {
+		t.Error("an unrelated label was dropped")
+	}
+	if got["rafiki/executor-state"] != "unbound" {
+		t.Errorf("executor-state = %q, want %q", got["rafiki/executor-state"], "unbound")
+	}
+}
+
+// TestStripStaleWorkspace proves the pinned-recovery path strips only the
+// workspace id — the executor identity survives so boundExecutor.doRecover can
+// check IsLive and re-provision on the same machine.
+func TestStripStaleWorkspace(t *testing.T) {
+	labels := map[string]string{
+		"rafiki/workspace": "w1",
+		"rafiki/executor":  "e1",
+		"owner":            "brent",
+	}
+	got := stripStaleWorkspace(labels)
+	if _, ok := got["rafiki/workspace"]; ok {
+		t.Error("rafiki/workspace survived")
+	}
+	if got["rafiki/executor"] != "e1" {
+		t.Errorf("rafiki/executor = %q, want %q — must survive so doRecover can re-provision on the same machine", got["rafiki/executor"], "e1")
 	}
 	if got["owner"] != "brent" {
 		t.Error("an unrelated label was dropped")

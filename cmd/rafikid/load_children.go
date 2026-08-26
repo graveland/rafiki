@@ -27,6 +27,13 @@ type recoveryPlan int
 const (
 	// planStayExited loads the child as exited and does not resume it.
 	planStayExited recoveryPlan = iota
+	// planResumeBound resumes the child with its executor identity intact.
+	// The stale workspace id is stripped, but rafiki/executor is kept so
+	// boundExecutor.doRecover can re-provision on the SAME executor when it
+	// reconnects. Used for pinned children whose machine is restarting
+	// alongside the daemon — they cannot change machines, but they CAN
+	// re-provision on the one they were already on.
+	planResumeBound
 	// planRebindUnbound clears the dead executor binding and resumes the child
 	// unbound, so it rebinds on first workspace-tool use.
 	planRebindUnbound
@@ -67,10 +74,13 @@ func shouldAutoResume(rec childstore.ChildRecord) bool {
 // binding is stale by construction — an executor's workspace registry is in
 // memory, so a restart loses every workspace id.
 //
-// A PINNED child is never moved. HandleExecutorLost fails a pinned child where
-// it stood and boundExecutor.recover refuses to re-select for one; recovery
-// must not become the single path that quietly migrates one to a new machine.
-// An unknown mode is pinned, matching workspaceModeOrPinned.
+// A PINNED child is never MOVED to a different machine. HandleExecutorLost
+// fails a pinned child where it stood and boundExecutor.recover refuses to
+// re-select for one; recovery must not become the single path that quietly
+// migrates one. But a pinned child CAN resume when its machine restarts
+// alongside the daemon — boundExecutor.doRecover already re-provisions on the
+// same executor when IsLive returns true. An unknown mode is pinned, matching
+// workspaceModeOrPinned.
 func recoveryAction(rec childstore.ChildRecord) recoveryPlan {
 	if !shouldAutoResume(rec) {
 		return planStayExited
@@ -78,7 +88,7 @@ func recoveryAction(rec childstore.ChildRecord) recoveryPlan {
 	if rec.WorkspaceMode == "ephemeral" {
 		return planRebindUnbound
 	}
-	return planStayExited
+	return planResumeBound
 }
 
 // stripStaleBindings removes the dead executor binding from a recovered child's
@@ -88,6 +98,23 @@ func stripStaleBindings(labels map[string]string) map[string]string {
 	out := make(map[string]string, len(labels)+1)
 	for k, v := range labels {
 		if k == "rafiki/workspace" || k == "rafiki/executor" {
+			continue
+		}
+		out[k] = v
+	}
+	out["rafiki/executor-state"] = "unbound"
+	return out
+}
+
+// stripStaleWorkspace removes only the dead workspace id from a recovered
+// child's labels, keeping the executor identity. Used for pinned children:
+// the executor restarted alongside the daemon and will reconnect under the same
+// id, so the label stays as a hint for boundExecutor.doRecover's same-executor
+// re-provision path.
+func stripStaleWorkspace(labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels)+1)
+	for k, v := range labels {
+		if k == "rafiki/workspace" {
 			continue
 		}
 		out[k] = v
@@ -132,15 +159,18 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 	}
 
 	plan := recoveryAction(rec)
-	if plan == planRebindUnbound {
+	switch plan {
+	case planRebindUnbound:
 		rec.Labels = stripStaleBindings(rec.Labels)
+	case planResumeBound:
+		rec.Labels = stripStaleWorkspace(rec.Labels)
 	}
 
 	sess := childstore.SessionFromRecord(rec)
 	sess.Status = protocol.StatusExited
 	c.st.Insert(sess)
 
-	if plan != planRebindUnbound {
+	if plan == planStayExited {
 		if shouldAutoResume(rec) {
 			slog.Info("child not auto-resumed: pinned workspace cannot change machines",
 				"childId", rec.ChildID, "workspaceMode", rec.WorkspaceMode)
