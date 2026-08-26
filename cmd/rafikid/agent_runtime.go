@@ -313,7 +313,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		if ev.GetChildId() == "" {
 			ev.ChildId = childID
 		}
-		c.native.Publish(childID, ev)
+		c.publishEvent(childID, ev)
 	})
 	return ro, nil
 }

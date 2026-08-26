@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -66,7 +67,7 @@ func ex(id string, labels map[string]string, admits string) execpool.LiveExecuto
 // beneath it.
 func selectFixture(t *testing.T, parentSelector string, live ...execpool.LiveExecutor) *Controller {
 	t.Helper()
-	c := &Controller{st: childstore.New(), cm: newChildManager(), execPool: &fakePool{live: live}}
+	c := &Controller{st: childstore.New(), cm: newChildManager(), execPool: &fakePool{live: live}, native: nativebus.New()}
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_parent", Status: protocol.StatusIdle, StartedAt: time.Now(),
 		Kind: protocol.KindFundi, ExecutorSelector: parentSelector, MaxDepth: 1, MaxChildren: 8,

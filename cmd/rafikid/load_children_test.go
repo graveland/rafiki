@@ -26,7 +26,6 @@ func TestShouldAutoResume(t *testing.T) {
 		{"exited fundi does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "exited"}, false},
 		{"shutting_down fundi does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "shutting_down"}, false},
 		{"row with neither status does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: ""}, false},
-		{"idle pi does not", childstore.ChildRecord{Kind: protocol.KindPi, LastStatus: "idle"}, false},
 		{"idle claude does not", childstore.ChildRecord{Kind: protocol.KindClaude, LastStatus: "idle"}, false},
 	}
 	for _, tc := range cases {
@@ -111,11 +110,6 @@ func TestShouldAutoResumeAfterDaemonCrash(t *testing.T) {
 		{
 			"row with neither status resumes nothing",
 			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "", LastStatus: ""},
-			false,
-		},
-		{
-			"a crashed pi child still does not resume",
-			childstore.ChildRecord{Kind: protocol.KindPi, Status: "idle", LastStatus: ""},
 			false,
 		},
 	}
