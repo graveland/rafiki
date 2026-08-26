@@ -28,6 +28,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
+	"go.graveland.dev/rafiki/pkg/eventlog"
+	"go.graveland.dev/rafiki/pkg/eventlogdb"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -139,6 +141,9 @@ type Controller struct {
 	// native fans rafiki-native events out per child, for the Connect
 	// control plane's StreamEvents.
 	native *nativebus.Registry
+
+	// evlog is the durable event log.
+	evlog eventlog.Store
 
 	// coster resolves what an agent subtree has spent. An interface rather
 	// than *insights.Insights so the admission logic is testable without a
@@ -261,6 +266,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		providers:   prov,
 		heldLeases:  make(map[string]store.Lease),
 		native:      nativebus.New(),
+		evlog:       eventLogStore(pool),
 	}
 
 	if id, source, err := paths.DaemonID(); err != nil {
@@ -296,6 +302,14 @@ func taskStore(pool *pgxpool.Pool) tasks.Store {
 		return nil
 	}
 	return tasksdb.NewPostgresStore(pool)
+}
+
+// eventLogStore returns a durable event log store.
+func eventLogStore(pool *pgxpool.Pool) eventlog.Store {
+	if pool == nil {
+		return eventlog.NewMemory()
+	}
+	return eventlogdb.New(pool)
 }
 
 // startSweeper launches a background goroutine that periodically forgets
@@ -350,6 +364,33 @@ func (c *Controller) sweepExpired() {
 }
 
 // ─── control.Controller implementation ────────────────────────────────────────
+
+// publishEvent is the ONE path by which a native event reaches anybody.
+//
+// Durable events are appended to the log first and the assigned ordinal is
+// stamped onto the copy that goes to subscribers, because a subscriber builds
+// its cursor from what it received: an event delivered without its ordinal is
+// unresumable, which defeats the entire tier.
+//
+// Every c.native.Publish call site goes through here. A rule enforced at N
+// call sites is a rule the N+1th will break.
+func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
+	if eventlog.TierOf(ev) == eventlog.TierDurable && c.evlog != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ord, err := c.evlog.Append(ctx, childID, ev)
+		cancel()
+		if err != nil {
+			// Best-effort, and deliberately so: a log write must never stop a
+			// turn. The consequence is a hole in one child's ordinal sequence,
+			// which a resuming consumer sees as a gap rather than as silence.
+			slog.Warn("event log append", "childId", childID,
+				"type", eventlog.TypeName(ev), "error", err)
+		} else {
+			ev.Ordinal = &ord
+		}
+	}
+	c.native.Publish(childID, ev)
+}
 
 func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
 	snaps := c.st.List()
@@ -804,7 +845,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			if ev.GetChildId() == "" {
 				ev.ChildId = childID
 			}
-			c.native.Publish(childID, ev)
+			c.publishEvent(childID, ev)
 		}
 		spec.PiBinary = ""
 		spec.Argv = nil
@@ -957,6 +998,19 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			c.cm.DeliverToMatching(childID, snap.Labels, b)
 		}
 	}
+
+	// The native twin of the ctrl_child_spawned frame above. Published on the
+	// SPAWNED child's bus, not the parent's, so child_id and the delivery bus
+	// agree -- a subtree subscriber sees it because the child is in the subtree,
+	// and every subject predicate stays free of a lifecycle special case.
+	c.publishEvent(childID, &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
+			ChildId:  childID,
+			ParentId: req.ParentChildID,
+			Name:     req.Name,
+		}},
+	})
 
 	// Post-Idle: name reconciliation, metadata update, status transition,
 	// monitorChild start. Shared with the Resume/RespawnChild paths via
@@ -1218,6 +1272,19 @@ func (c *Controller) activateLiveChild(
 		}
 	}
 
+	// The native twin of the ctrl_child_spawned frame above. Published on the
+	// SPAWNED child's bus, not the parent's, so child_id and the delivery bus
+	// agree -- a subtree subscriber sees it because the child is in the subtree,
+	// and every subject predicate stays free of a lifecycle special case.
+	c.publishEvent(childID, &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
+			ChildId:  childID,
+			ParentId: snap.Labels[childstore.LabelParent],
+			Name:     snap.Name,
+		}},
+	})
+
 	go c.monitorChild(childID, ch)
 
 	return control.SpawnResult{
@@ -1452,7 +1519,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 			if ev.GetChildId() == "" {
 				ev.ChildId = childID
 			}
-			c.native.Publish(childID, ev)
+			c.publishEvent(childID, ev)
 		}
 		spec.PiBinary = ""
 		spec.Argv = nil
@@ -1574,7 +1641,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 			if ev.GetChildId() == "" {
 				ev.ChildId = childID
 			}
-			c.native.Publish(childID, ev)
+			c.publishEvent(childID, ev)
 		}
 		spec.PiBinary = ""
 		spec.Argv = nil
@@ -2449,6 +2516,9 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 			c.cm.DeliverToMatching(childID, snap.Labels, b)
 		}
 	}
+	if err := c.writeRecord(childID); err != nil {
+		slog.Warn("write state record after status change", "childId", childID, "error", err)
+	}
 }
 
 // handleModelChange updates the store's Provider/Model fields and the
@@ -2614,6 +2684,20 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 			c.cm.DeliverToMatching(childID, snap.Labels, b)
 		}
 	}
+
+	var exitCodePtr *int32
+	if exitCode != nil {
+		c32 := int32(*exitCode)
+		exitCodePtr = &c32
+	}
+	c.publishEvent(childID, &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{
+			ChildId:  childID,
+			ExitCode: exitCodePtr,
+			Signal:   res.Signal,
+		}},
+	})
 
 	// Tell the parent its worker is gone. This runs before Forget (which
 	// clears batches aimed AT this child, not at its parent) and before
