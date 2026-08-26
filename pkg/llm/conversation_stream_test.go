@@ -787,6 +787,96 @@ func TestSendStreaming_RecordsResultIntoBreaker(t *testing.T) {
 	}
 }
 
+// rateLimitStreamErr builds the error an in-band SSE rate-limit rejection
+// produces — exactly what ssestream wraps for OpenRouter's live payload that
+// killed a fundi turn at iteration 41 (conversation 01a03ed5). Defined here
+// (not via IsRateLimitStreamError's internals) so the streaming-path tests
+// exercise the same string the SDK puts on the wire.
+func rateLimitStreamErr() error {
+	return sdkStreamErr(`{"type":"error","error":{"type":"rate_limit_error",` +
+		`"message":"Provider returned error","error_type":"rate_limit_exceeded"}}`)
+}
+
+// TestSend_StreamRetriesOnPreDeliveryInBandRateLimit: the provider accepts
+// the connection, then sends an SSE "error" event BEFORE any content. That
+// is the in-band twin of the typed 429 above and must take the identical
+// path: ModelGate backpressure, then one fresh attempt.
+func TestSend_StreamRetriesOnPreDeliveryInBandRateLimit(t *testing.T) {
+	sender := &fakeStreamingSender{scripts: []streamScript{
+		{trailErr: rateLimitStreamErr()},
+		{events: textStreamEvents("after retry")},
+	}}
+	c, err := NewClient(
+		WithProviderSender("anthropic", sender),
+		WithDefaultModel("claude-haiku-4-5"),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.modelGate = NewModelGate(10*time.Millisecond, 50*time.Millisecond)
+	conv, err := c.Conversation(context.Background(),
+		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var seen []string
+	msg, err := conv.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(ev anthropic.MessageStreamEventUnion) {
+			if d := textOf(ev); d != "" {
+				seen = append(seen, d)
+			}
+		}))
+	if err != nil {
+		t.Fatalf("Send with in-band rate-limit retry: %v", err)
+	}
+	if got := textOfMessage(msg); got != "after retry" {
+		t.Errorf("message = %q, want %q", got, "after retry")
+	}
+	if got := strings.Join(seen, ""); got != "after retry" {
+		t.Errorf("handler saw %q, want only the retry's content", got)
+	}
+	if sender.streamCalls != 2 {
+		t.Errorf("streamCalls = %d, want 2 (failed + retry)", sender.streamCalls)
+	}
+}
+
+// TestSend_StreamDoesNotRetryAfterDeliveryEvenForInBandRateLimit pins the
+// delivery guard against the in-band shape too: once content reached the
+// handler, no classification of the trailing error can make the send safe
+// to replay.
+func TestSend_StreamDoesNotRetryAfterDeliveryEvenForInBandRateLimit(t *testing.T) {
+	sender := &fakeStreamingSender{scripts: []streamScript{
+		{
+			events:   []ssestream.Event{messageStartEvent(), contentBlockStartEvent(), textDeltaEvent("partial")},
+			trailErr: rateLimitStreamErr(),
+		},
+		{events: textStreamEvents("SHOULD NOT APPEAR")},
+	}}
+	conv := newTestConversation(t, sender)
+
+	var seen []string
+	_, err := conv.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(ev anthropic.MessageStreamEventUnion) {
+			if d := textOf(ev); d != "" {
+				seen = append(seen, d)
+			}
+		}))
+	if err == nil {
+		t.Fatal("Send must fail: delivered content + in-band 429 cannot retry")
+	}
+	if !IsRateLimitStreamError(err) {
+		t.Errorf("expected in-band rate limit error to surface, got: %v", err)
+	}
+	if sender.streamCalls != 1 {
+		t.Errorf("streamCalls = %d, want 1 (must NOT retry after delivery)", sender.streamCalls)
+	}
+	if strings.Join(seen, "") != "partial" {
+		t.Errorf("handler saw %q, want only the first attempt's partial content", strings.Join(seen, ""))
+	}
+}
+
 func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{openErr: rateLimitErr()},

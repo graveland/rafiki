@@ -484,6 +484,13 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 			return msg, attempted, delivered, err
 		}
 		isRL, retryAfter := isRateLimit(err)
+		if !isRL && IsRateLimitStreamError(err) {
+			// The same 429 arriving as an in-band SSE "error" event — an upstream
+			// provider rejected the request after the connection came up. No
+			// Retry-After exists inside a stream payload, so retryAfter stays 0
+			// and the ModelGate's exponential backoff applies.
+			isRL = true
+		}
 		if !isRL || attempt >= rlp.MaxRetries {
 			return msg, attempted, delivered, err
 		}
