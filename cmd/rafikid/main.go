@@ -454,6 +454,8 @@ func runDaemon(opts runDaemonOpts) error {
 		if face.Control != nil {
 			face.Control.SetChildResolver(ctrl)
 			face.Control.SetEventSource(ctrl.nativeEventSource())
+			face.Control.SetLineage(ctrl)
+			face.Control.SetEventLog(ctrl.evlog)
 			face.Control.SetInbox(newConnectInbox(ctrl))
 			face.Control.SetChildLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})

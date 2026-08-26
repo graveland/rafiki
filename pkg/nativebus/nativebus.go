@@ -16,15 +16,19 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// Registry holds one bus per child.
+// Registry holds one bus per child, plus a daemon-wide allBus.
 type Registry struct {
-	mu    sync.Mutex
-	buses map[string]*bus.Bus[*rafikiv1.Event]
+	mu     sync.Mutex
+	buses  map[string]*bus.Bus[*rafikiv1.Event]
+	allBus *bus.Bus[*rafikiv1.Event]
 }
 
 // New builds an empty Registry.
 func New() *Registry {
-	return &Registry{buses: make(map[string]*bus.Bus[*rafikiv1.Event])}
+	return &Registry{
+		buses:  make(map[string]*bus.Bus[*rafikiv1.Event]),
+		allBus: bus.New[*rafikiv1.Event](bus.Options{}),
+	}
 }
 
 // busFor returns the child's bus, creating it if needed.
@@ -39,15 +43,18 @@ func (r *Registry) busFor(childID string) *bus.Bus[*rafikiv1.Event] {
 	return b
 }
 
-// Publish delivers ev to every subscriber of childID. A slow subscriber has
-// its copy dropped rather than blocking the turn — that is pkg/bus's
-// documented behaviour and the reason this wraps it instead of reimplementing.
+// Publish delivers ev to every subscriber of childID and to the daemon-wide fan-out.
+// A slow subscriber has its copy dropped rather than blocking the turn — that is
+// pkg/bus's documented behaviour and the reason this wraps it instead of reimplementing.
 //
 // The registry lock is released before Publish runs: bus.Publish walks a
 // dispatch loop, and holding the map lock across it would serialize every
 // child's emission behind one slow subscriber.
 func (r *Registry) Publish(childID string, ev *rafikiv1.Event) {
 	r.busFor(childID).Publish(ev)
+	if r.allBus != nil {
+		r.allBus.Publish(ev)
+	}
 }
 
 // Subscribe returns a channel of the child's events and a cancel func that
@@ -55,6 +62,11 @@ func (r *Registry) Publish(childID string, ev *rafikiv1.Event) {
 // matches connectapi.EventSource.
 func (r *Registry) Subscribe(childID string) (<-chan *rafikiv1.Event, func()) {
 	return r.busFor(childID).Subscribe()
+}
+
+// SubscribeAll returns a channel receiving all daemon-wide events and a cancel func.
+func (r *Registry) SubscribeAll() (<-chan *rafikiv1.Event, func()) {
+	return r.allBus.Subscribe()
 }
 
 // Forget drops a child's bus. Call it when a child is removed so a long-lived
