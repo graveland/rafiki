@@ -526,12 +526,15 @@
   `Forget` another process's children as its own.
 
 - **A pinned child never changes machines, and restart recovery is not an
-  exception.** `recoveryAction` returns `planStayExited` for
-  `workspace_mode` pinned *and* for an absent or unrecognised value, matching
-  `workspaceModeOrPinned`. Only an ephemeral child has its
+  exception — but it IS a resume.** `recoveryAction` returns `planResumeBound`
+  for `workspace_mode` pinned (or absent/unrecognised, matching
+  `workspaceModeOrPinned`). The stale workspace id is stripped while
+  `rafiki/executor` survives, so `boundExecutor.doRecover` can re-provision on
+  the SAME executor when it reconnects. Only an ephemeral child has BOTH
   `rafiki/workspace`/`rafiki/executor` labels stripped and resumes unbound.
-  Making recovery rebind a pinned child would be a backdoor around the rule
-  `HandleExecutorLost` and `boundExecutor.recover` already enforce.
+  Pinned children that migrate would be a backdoor around the rule
+  `HandleExecutorLost` and `boundExecutor.recover` already enforce — but
+  re-provisioning on the same machine is correct (the files are still there).
 
 - **Child rows are shared across every daemon, so `Forget` must check
   `ownsChildRow` first.** Before the migration, forgetting a child was

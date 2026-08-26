@@ -290,23 +290,6 @@ func sendTurn(t *testing.T, d *daemon, childID string) {
 	}
 }
 
-// waitForConversationID polls the child row until a conversation_id is written.
-func waitForConversationID(t *testing.T, pool *pgxpool.Pool, childID string) string {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		var id string
-		if err := pool.QueryRow(context.Background(),
-			`SELECT COALESCE(conversation_id::text, '') FROM conversations.child
-			  WHERE child_id = $1`, childID).Scan(&id); err == nil && id != "" {
-			return id
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	t.Fatalf("child %s never got a conversation_id", childID)
-	return ""
-}
-
 func openPool(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), dsn)

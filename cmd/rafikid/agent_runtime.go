@@ -237,15 +237,13 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		// Bind eagerly: the project tier and skills below need a live
 		// workspace, and a child that CAN bind should start bound.
 		//
-		// A failure is fatal for a TOP-LEVEL spawn and tolerable for a
-		// parented one. A human typing --executor-selector gets
-		// explainNoMatch's per-candidate diagnostic now, rather than a
-		// running agent whose every tool errors; an agent-spawned child may
-		// wait, because an executor restart parks its connection for up to a
-		// full health tick and surviving that window is what lazy binding is
-		// for.
+		// A failure is fatal for an interactive TOP-LEVEL spawn and tolerable
+		// for a parented spawn or an auto-resume (e.g. daemon restart recovery
+		// before executors reconnect). An agent-spawned or recovered child
+		// starts unbound and lazy-binds on its first tool call when its
+		// executor connects.
 		if _, _, bindErr := be.clientFor(context.Background()); bindErr != nil {
-			if req.ParentChildID == "" {
+			if req.ParentChildID == "" && !autoResume {
 				return fundi.RuntimeOptions{}, bindErr
 			}
 			slog.Warn("child starts with no executor bound; its workspace tools "+
