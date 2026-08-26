@@ -55,6 +55,13 @@ func TestIsRetryable(t *testing.T) {
 		{"HTTP 404", &anthropic.Error{StatusCode: 404}, liveCtx, false},
 		{"HTTP 429", &anthropic.Error{StatusCode: 429}, liveCtx, false}, // already handled
 
+		// In-band SSE "error" events (the SDK's opaque ssestream wrapper).
+		// The first is the exact payload a live OpenRouter gemini turn aborted
+		// with mid-iteration; without recognition it killed the whole turn.
+		{"sse timeout_error", streamSSErr(`{"type":"error","error":{"type":"timeout_error","message":"The operation was aborted","error_type":"timeout"}}`), liveCtx, true},
+		{"sse overloaded_error", streamSSErr(`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`), liveCtx, true},
+		{"sse invalid_request_error", streamSSErr(`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`), liveCtx, false},
+
 		// String fallback.
 		{"contains 'connection reset'", fmt.Errorf("read: connection reset by peer"), liveCtx, true},
 		{"contains 'broken pipe'", fmt.Errorf("write: broken pipe"), liveCtx, true},
@@ -83,6 +90,12 @@ type timedoutErr struct{}
 func (e *timedoutErr) Error() string   { return "i/o timeout" }
 func (e *timedoutErr) Timeout() bool   { return true }
 func (e *timedoutErr) Temporary() bool { return true }
+
+// streamSSErr builds the exact error the SDK's ssestream produces for an
+// in-band "error" event (ssestream v1.37.0, Stream.Next's error case).
+func streamSSErr(payload string) error {
+	return fmt.Errorf("received error while streaming: %s", payload)
+}
 
 func TestContinueWithRetry_NonTransientError_ReturnsImmediately(t *testing.T) {
 	conv := newMemConv(t, &erroringSender{err: errors.New("permanent failure")})
@@ -117,6 +130,45 @@ func TestContinueWithRetry_TransientError_Recovers(t *testing.T) {
 	_, err := continueWithRetry(context.Background(), conv)
 	if err != nil {
 		t.Fatalf("expected recovery, got error: %v", err)
+	}
+}
+
+func TestContinueWithRetry_SSEStreamTimeout_Recovers(t *testing.T) {
+	// An OpenRouter upstream timeout arriving as an in-band SSE "error" event
+	// (the exact payload from the live gemini abort that used to end the
+	// turn) must be retried like any other transient failure, not kill the
+	// loop. retryDelays are shrunk so the recovery backoff stays in
+	// milliseconds.
+	orig := retryDelays
+	retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { retryDelays = orig })
+
+	fails := 1
+	sender := &conditionalSender{
+		fn: func() (*anthropic.Message, error) {
+			if fails > 0 {
+				fails--
+				return nil, streamSSErr(`{"type":"error","error":{"type":"timeout_error",` +
+					`"message":"The operation was aborted","error_type":"timeout"}}`)
+			}
+			var m anthropic.Message
+			if err := json.Unmarshal([]byte(respEndTurn), &m); err != nil {
+				panic(err)
+			}
+			return &m, nil
+		},
+	}
+	conv := newMemConv(t, sender)
+	seedUser(t, conv)
+	resp, err := continueWithRetry(context.Background(), conv)
+	if err != nil {
+		t.Fatalf("expected recovery from sse timeout_error, got error: %v", err)
+	}
+	if resp == nil || resp.StopReason != "end_turn" {
+		t.Fatalf("expected an end_turn message after recovery, got %+v", resp)
+	}
+	if fails != 0 {
+		t.Fatalf("sender still has %d scripted failures left; retry never happened", fails)
 	}
 }
 

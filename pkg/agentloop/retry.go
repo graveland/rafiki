@@ -41,7 +41,7 @@ func isRetryable(err error, ctx context.Context) bool {
 		return true
 	}
 
-	// HTTP-level errors from the SDK.
+	// HTTP errors from the SDK.
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
 		code := apiErr.StatusCode
@@ -49,6 +49,17 @@ func isRetryable(err error, ctx context.Context) bool {
 			return false // handled by sendStreaming's own retry loop
 		}
 		return code >= 500 && code < 600
+	}
+
+	// An in-band SSE "error" event reaches here stripped of all type info:
+	// the SDK wraps the raw JSON body in a plain fmt.Errorf (see
+	// llm.sseStreamErrPrefix), so the anthropic.Error check above and the
+	// net/syscall checks below both miss it. Look inside the payload — this
+	// is how an OpenRouter upstream timeout mid-turn ("timeout_error", "The
+	// operation was aborted") is recognized as transient instead of ending
+	// the whole turn.
+	if llm.IsTransientStreamError(err) {
+		return true
 	}
 
 	// Network/syscall errors.
