@@ -91,7 +91,35 @@ func TestIsDescendant(t *testing.T) {
 	}
 }
 
+func TestDescendantDepth(t *testing.T) {
+	s := childstore.New()
+	insert(t, s, "c_root", "", "")
+	insert(t, s, "c_mid", "c_root", "c_root")
+	insert(t, s, "c_leaf", "c_mid", "c_root")
+
+	for _, tc := range []struct {
+		name           string
+		ancestor, cand string
+		want           int
+	}{
+		{"direct child", "c_root", "c_mid", 1},
+		{"grandchild", "c_root", "c_leaf", 2},
+		{"self is not a descendant", "c_root", "c_root", -1},
+		{"upward is not a descendant", "c_leaf", "c_root", -1},
+		{"unknown candidate", "c_root", "c_nope", -1},
+		{"unknown ancestor", "c_nope", "c_leaf", -1},
+		{"empty ids", "", "", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := s.DescendantDepth(tc.ancestor, tc.cand); got != tc.want {
+				t.Errorf("DescendantDepth(%q,%q) = %d, want %d", tc.ancestor, tc.cand, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDescendants(t *testing.T) {
+
 	s := tree(t)
 	got := map[string]bool{}
 	for _, snap := range s.Descendants("a") {

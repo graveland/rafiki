@@ -77,6 +77,40 @@ func (s *Store) IsDescendant(ancestorID, candidateID string) bool {
 	return false
 }
 
+// DescendantDepth returns how many parent links separate candidateID from
+// ancestorID: 1 for a direct child, 2 for a grandchild. It returns -1 when
+// candidateID is not beneath ancestorID at all, which callers must treat as
+// "refuse", never as depth 0.
+//
+// This is IsDescendant's arithmetic sibling and exists because a subscription
+// subject may be depth-bounded (eventlog.Subject.MaxDepth): "direct children
+// only" is not expressible with a boolean predicate. Like IsDescendant it
+// walks the real parent chain rather than trusting the root label, which is a
+// cache, and it is bounded by maxChainDepth for the same reason.
+func (s *Store) DescendantDepth(ancestorID, candidateID string) int {
+	if ancestorID == "" || candidateID == "" || ancestorID == candidateID {
+		return -1
+	}
+	if _, ok := s.Get(ancestorID); !ok {
+		return -1
+	}
+	if _, ok := s.Get(candidateID); !ok {
+		return -1
+	}
+	cur := candidateID
+	for depth := 1; depth <= maxChainDepth; depth++ {
+		parent, ok := s.ParentOf(cur)
+		if !ok {
+			return -1
+		}
+		if parent == ancestorID {
+			return depth
+		}
+		cur = parent
+	}
+	return -1
+}
+
 // AbsoluteDepth returns how many parent links separate childID from its
 // top-level ancestor. A top-level child is 0. An unknown child is -1, which
 // callers must treat as "refuse", never as "top level".
