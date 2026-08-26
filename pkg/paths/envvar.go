@@ -203,6 +203,14 @@ const (
 	// path, so an unset value there defaults OFF: turning on a TCP control
 	// plane must not silently also open executor enrollment to it.
 	ExecutorsEnabled = "RAFIKI_EXECUTORS_ENABLED"
+
+	// ExecutorEnvFileEnv names an override for the executor's environment file
+	// (see ExecutorEnvFile in envfile.go). It is baked into the executor's
+	// service unit at install time for the same reason RAFIKI_ENV_FILE is baked
+	// into the daemon's: the file must resolve to the same path from the
+	// installing shell and from the supervised service, or install writes one
+	// file while serve reads another.
+	ExecutorEnvFileEnv = "RAFIKI_EXECUTOR_ENV_FILE"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the

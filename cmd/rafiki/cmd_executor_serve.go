@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -61,6 +62,37 @@ func executorHandler(srv *executor.Server) http.Handler {
 	return mux
 }
 
+// loadExecutorEnv applies the executor's environment file (see
+// paths.ExecutorEnvFile) before anything in RunE resolves a default from the
+// environment. This is what gives a launchd- or systemd-supervised executor
+// the operator's ordinary working environment: captureExecutorEnv froze it
+// into the 0600 file at install time, and this is where serve picks it up.
+//
+// Precedence matches the daemon's loadServiceEnv, via LoadEnvFile: a variable
+// already present in the process environment — everything the unit bakes in,
+// HOME and PATH above all — wins over the file. The file fills gaps; it never
+// overrides.
+//
+// Scoped to `executor serve` ONLY, and deliberately not loaded at binary
+// startup the way the daemon's file is: `rafiki` is also the client, and
+// applying executor.env to every client invocation would leak captured
+// machine state — a RAFIKI_URL or credential captured on an executor-only box
+// — into unrelated commands run against some other instance.
+func loadExecutorEnv() {
+	path := paths.ExecutorEnvFile()
+	applied, warnings, err := paths.LoadEnvFile(path)
+	if err != nil {
+		slog.Error("could not read the executor environment file; continuing without it",
+			"path", path, "error", err)
+	}
+	for _, w := range warnings {
+		slog.Warn("executor environment file", "detail", w)
+	}
+	if len(applied) > 0 {
+		slog.Info("loaded executor environment file", "path", path, "vars", applied)
+	}
+}
+
 // ─── serve ─────────────────────────────────────────────────────────────────────
 
 func newExecutorServeCmd() *cobra.Command {
@@ -99,6 +131,8 @@ Two transports, exactly one of which is used:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
+
+			loadExecutorEnv()
 
 			resolvedConnect, resolvedSocket, err := resolveExecutorConnectFlags(connectAddr, connectSocket)
 			if err != nil {
