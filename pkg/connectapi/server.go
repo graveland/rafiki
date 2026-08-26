@@ -15,6 +15,7 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
+	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/inbox"
@@ -51,6 +52,8 @@ type Server struct {
 	history HistoryLoader
 
 	events    atomic.Pointer[EventSource]
+	lineageLn atomic.Pointer[eventlog.Lineage]
+	evlog     atomic.Pointer[eventlog.Store]
 	resolver  atomic.Pointer[ConversationResolver]
 	inbox     atomic.Pointer[inbox.Inbox]
 	children  atomic.Pointer[ChildLister]
@@ -65,6 +68,26 @@ func (s *Server) SetEventSource(src EventSource) { s.events.Store(&src) }
 
 func (s *Server) eventSource() EventSource {
 	if p := s.events.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// SetLineage attaches the lineage provider.
+func (s *Server) SetLineage(ln eventlog.Lineage) { s.lineageLn.Store(&ln) }
+
+func (s *Server) lineage() eventlog.Lineage {
+	if p := s.lineageLn.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// SetEventLog attaches the durable event log store.
+func (s *Server) SetEventLog(l eventlog.Store) { s.evlog.Store(&l) }
+
+func (s *Server) eventLog() eventlog.Store {
+	if p := s.evlog.Load(); p != nil {
 		return *p
 	}
 	return nil

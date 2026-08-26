@@ -27,6 +27,10 @@ func (s *nativeEventSource) Subscribe(childID string) (<-chan *rafikiv1.Event, f
 	return s.native.Subscribe(childID)
 }
 
+func (s *nativeEventSource) SubscribeAll() (<-chan *rafikiv1.Event, func()) {
+	return s.native.SubscribeAll()
+}
+
 // Subscribe satisfies connectapi.EventSource via the nativeEventSource adapter.
 // The Controller's own Subscribe method serves the frame-based protocol;
 // this is a distinct signature for the Connect-based StreamEvents path.
@@ -61,6 +65,20 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 		return protocol.ChildSummary{}, false
 	}
 	return control.SnapshotToSummary(snap, c.ContextWindow), true
+}
+
+// DescendantDepth satisfies eventlog.Lineage.
+func (c *Controller) DescendantDepth(ancestorID, candidateID string) int {
+	return c.st.DescendantDepth(ancestorID, candidateID)
+}
+
+// Labels satisfies eventlog.Lineage.
+func (c *Controller) Labels(childID string) (map[string]string, bool) {
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		return nil, false
+	}
+	return snap.Labels, true
 }
 
 func containsString(haystack []string, needle string) bool {

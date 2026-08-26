@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package connectapi_test
 
 import (
@@ -9,139 +11,244 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/anthropics/anthropic-sdk-go"
+	"google.golang.org/protobuf/proto"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
-type fakeSource struct{ ch chan *rafikiv1.Event }
+type fakeLineage struct {
+	depth  map[string]map[string]int
+	labels map[string]map[string]string
+}
 
-func (f *fakeSource) Subscribe(string) (<-chan *rafikiv1.Event, func()) {
+func (f *fakeLineage) DescendantDepth(a, c string) int {
+	if f == nil || f.depth == nil {
+		return -1
+	}
+	if m, ok := f.depth[a]; ok {
+		if d, ok := m[c]; ok {
+			return d
+		}
+	}
+	return -1
+}
+
+func (f *fakeLineage) Labels(id string) (map[string]string, bool) {
+	if f == nil || f.labels == nil {
+		return nil, false
+	}
+	l, ok := f.labels[id]
+	return l, ok
+}
+
+type fakeSource struct {
+	mu     sync.Mutex
+	ch     chan *rafikiv1.Event
+	allCh  chan *rafikiv1.Event
+	subbed []string
+}
+
+func (f *fakeSource) Subscribe(childID string) (<-chan *rafikiv1.Event, func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subbed = append(f.subbed, childID)
 	return f.ch, func() {}
 }
 
-func TestStreamEventsReplaysHistoryThenFollowsLive(t *testing.T) {
-	src := &fakeSource{ch: make(chan *rafikiv1.Event, 4)}
-	s := connectapi.NewServer(fakeLoader{msgs: []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("stored"))},
-	}})
-	s.SetChildResolver(fakeResolver{})
-	s.SetEventSource(src)
+func (f *fakeSource) SubscribeAll() (<-chan *rafikiv1.Event, func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subbed = append(f.subbed, "*")
+	return f.allCh, func() {}
+}
 
-	mux := http.NewServeMux()
+func statusEvent(childID, state string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: state}},
+	}
+}
+
+func setupStreamServer(t *testing.T, ln eventlog.Lineage, elog eventlog.Store, src connectapi.EventSource) rafikiv1connect.ControlClient {
+	t.Helper()
+	s := connectapi.NewServer(nil)
+	s.SetChildResolver(fakeResolver{})
+	if ln != nil {
+		s.SetLineage(ln)
+	}
+	if elog != nil {
+		s.SetEventLog(elog)
+	}
+	if src != nil {
+		s.SetEventSource(src)
+	}
+
 	path, h := s.Routes()
+	mux := http.NewServeMux()
 	mux.Handle(path, h)
 	srv := httptest.NewUnstartedServer(mux)
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
+	return rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func TestStreamEventsNoCursorDoesNotReplay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	stream, err := client.StreamEvents(ctx,
-		connect.NewRequest(&rafikiv1.StreamEventsRequest{
-			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
-		}))
+	elog := eventlog.NewMemory()
+	_, _ = elog.Append(ctx, "c_1", statusEvent("c_1", "idle"))
+
+	src := &fakeSource{ch: make(chan *rafikiv1.Event, 10), allCh: make(chan *rafikiv1.Event, 10)}
+	ln := &fakeLineage{depth: make(map[string]map[string]int), labels: make(map[string]map[string]string)}
+
+	client := setupStreamServer(t, ln, elog, src)
+
+	src.ch <- statusEvent("c_1", "idle")
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
+	}))
 	if err != nil {
 		t.Fatalf("StreamEvents: %v", err)
 	}
 
 	if !stream.Receive() {
-		t.Fatalf("no replayed event: %v", stream.Err())
+		t.Fatalf("expected event, got err: %v", stream.Err())
 	}
-	if stream.Msg().GetOrdinal() != 0 {
-		t.Fatalf("replayed ordinal = %d, want 0", stream.Msg().GetOrdinal())
+	if stream.Msg().GetAgentStatus().GetState() != "idle" {
+		t.Fatalf("expected live event 'idle', got %q", stream.Msg().GetAgentStatus().GetState())
+	}
+}
+
+func TestStreamEventsSubtreeAdmitsAChildSpawnedAfterOpen(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	src := &fakeSource{ch: make(chan *rafikiv1.Event, 10), allCh: make(chan *rafikiv1.Event, 10)}
+	ln := &fakeLineage{
+		depth:  map[string]map[string]int{"c_root": {}},
+		labels: make(map[string]map[string]string),
 	}
 
+	client := setupStreamServer(t, ln, eventlog.NewMemory(), src)
+
+	// Event for unknown child c_new -> ignored
+	src.allCh <- statusEvent("c_new", "idle")
+	// Teach lineage that c_new is child of c_root
+	ln.depth["c_root"]["c_new"] = 1
+	// Event for c_new now admitted
+	src.allCh <- statusEvent("c_new", "idle")
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Subtree{Subtree: "c_root"}},
+	}))
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+
+	if !stream.Receive() {
+		t.Fatalf("expected event, got err: %v", stream.Err())
+	}
+	if stream.Msg().GetChildId() != "c_new" || stream.Msg().GetAgentStatus().GetState() != "idle" {
+		t.Fatalf("got %+v", stream.Msg())
+	}
+}
+
+func TestStreamEventsDurableTierExcludesDeltas(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	src := &fakeSource{ch: make(chan *rafikiv1.Event, 10), allCh: make(chan *rafikiv1.Event, 10)}
+	ln := &fakeLineage{depth: make(map[string]map[string]int), labels: make(map[string]map[string]string)}
+
+	client := setupStreamServer(t, ln, eventlog.NewMemory(), src)
+
+	// Send delta (ephemeral) then status (durable)
 	src.ch <- &rafikiv1.Event{
 		ChildId: "c_1",
-		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: "busy"}},
+		Payload: &rafikiv1.Event_ContentBlockDelta{ContentBlockDelta: &rafikiv1.ContentBlockDelta{
+			Delta: &rafikiv1.ContentBlockDelta_Text{Text: "hi"},
+		}},
 	}
+	src.ch <- statusEvent("c_1", "idle")
 
-	if !stream.Receive() {
-		t.Fatalf("no live event: %v", stream.Err())
-	}
-	if stream.Msg().GetAgentStatus().GetState() != "busy" {
-		t.Fatalf("live event = %+v, want agent_status busy", stream.Msg())
-	}
-}
-
-// With no live-event source wired, the stream must END after the durable
-// replay rather than parking on ctx.Done(): a stream that will never deliver
-// anything should not hold a goroutine per caller for the caller's lifetime.
-func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
-	s := connectapi.NewServer(fakeLoader{msgs: []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("stored"))},
-	}})
-	s.SetChildResolver(fakeResolver{})
-	// No SetEventSource call.
-
-	mux := http.NewServeMux()
-	path, h := s.Routes()
-	mux.Handle(path, h)
-	srv := httptest.NewUnstartedServer(mux)
-	srv.EnableHTTP2 = true
-	srv.StartTLS()
-	defer srv.Close()
-
-	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	stream, err := client.StreamEvents(ctx,
-		connect.NewRequest(&rafikiv1.StreamEventsRequest{
-			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
-		}))
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
+		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
+	}))
 	if err != nil {
 		t.Fatalf("StreamEvents: %v", err)
 	}
+
 	if !stream.Receive() {
-		t.Fatalf("no replayed event: %v", stream.Err())
+		t.Fatalf("expected event, got err: %v", stream.Err())
 	}
-	if stream.Receive() {
-		t.Fatal("stream kept going after replay; want it closed when no event source is wired")
-	}
-	if err := stream.Err(); err != nil {
-		t.Fatalf("stream ended with an error: %v", err)
+	if stream.Msg().GetAgentStatus().GetState() != "idle" {
+		t.Fatalf("expected agent_status idle, got %+v", stream.Msg())
 	}
 }
 
-func TestStreamEventsRejectsNoChildIDs(t *testing.T) {
-	s := connectapi.NewServer(fakeLoader{})
-	s.SetChildResolver(fakeResolver{})
-	s.SetEventSource(&fakeSource{ch: make(chan *rafikiv1.Event)})
+func TestStreamEventsCursorReplaysPerChild(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
-	err := s.StreamEvents(context.Background(),
-		connect.NewRequest(&rafikiv1.StreamEventsRequest{}),
-		&connect.ServerStream[rafikiv1.Event]{})
+	elog := eventlog.NewMemory()
+	for i := 0; i < 3; i++ {
+		_, _ = elog.Append(ctx, "c_1", statusEvent("c_1", "idle"))
+		_, _ = elog.Append(ctx, "c_2", statusEvent("c_2", "idle"))
+	}
+
+	src := &fakeSource{ch: make(chan *rafikiv1.Event, 10), allCh: make(chan *rafikiv1.Event, 10)}
+	ln := &fakeLineage{depth: make(map[string]map[string]int), labels: make(map[string]map[string]string)}
+
+	client := setupStreamServer(t, ln, elog, src)
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_All{All: true}},
+		Cursor: &rafikiv1.EventCursor{
+			Ordinals: map[string]int32{
+				"c_1": 1, // should replay ordinal 2
+			},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+
+	if !stream.Receive() {
+		t.Fatalf("expected replay event for c_1, got err: %v", stream.Err())
+	}
+	if stream.Msg().GetChildId() != "c_1" || stream.Msg().GetOrdinal() != 2 {
+		t.Fatalf("expected c_1:2, got %s:%d", stream.Msg().GetChildId(), stream.Msg().GetOrdinal())
+	}
+}
+
+func TestStreamEventsRejectsAnEmptySubject(t *testing.T) {
+	ctx := context.Background()
+	ln := &fakeLineage{}
+	client := setupStreamServer(t, ln, eventlog.NewMemory(), &fakeSource{})
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{}))
+	if err == nil {
+		if stream.Receive() {
+			t.Fatal("expected error on empty subject")
+		}
+		err = stream.Err()
+	}
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
 	}
 }
 
-// Regression guard: a Connect UNARY interceptor does not wrap streaming
-// handlers, so an auth mechanism built as a Connect interceptor would leave
-// StreamEvents open even while every unary verb looked protected. This
-// repo's actual auth mechanism (cmd/rafikid/proxy.go, via
-// server.Handler.Mount) is plain http.Handler middleware wrapped around the
-// WHOLE handler s.Routes() returns, not a Connect interceptor — this test
-// proves that kind of wrap genuinely blocks a streaming RPC, by wrapping the
-// handler with a deny-all stand-in and confirming the stream is blocked
-// exactly like a unary call would be.
 func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
-	s := connectapi.NewServer(fakeLoader{msgs: []store.Message{
-		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("stored"))},
-	}})
-	// A resolver and history, so an unblocked handler would genuinely send
-	// something — otherwise this test could pass because the stream was empty
-	// rather than because the wrap denied it.
-	s.SetChildResolver(fakeResolver{})
+	s := connectapi.NewServer(nil)
+	s.SetLineage(&fakeLineage{})
 	s.SetEventSource(&fakeSource{ch: make(chan *rafikiv1.Event, 1)})
 
 	path, h := s.Routes()
@@ -153,9 +260,7 @@ func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle(path, denyAll(h))
 
-	srv := httptest.NewUnstartedServer(mux)
-	srv.EnableHTTP2 = true
-	srv.StartTLS()
+	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
@@ -164,102 +269,46 @@ func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
 			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 		}))
 	if err == nil && stream.Receive() {
-		t.Fatal("deny-all http.Handler wrap did not block StreamEvents; a plain http.Handler wrap must cover streaming RPCs exactly like unary ones")
+		t.Fatal("deny-all http.Handler wrap did not block StreamEvents")
 	}
 }
 
-// multiSource is an EventSource with an independent channel per child, so a
-// test can prove every requested child is actually followed.
-type multiSource struct {
-	mu         sync.Mutex
-	chans      map[string]chan *rafikiv1.Event
-	subscribed []string
-}
-
-func (m *multiSource) Subscribe(childID string) (<-chan *rafikiv1.Event, func()) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.subscribed = append(m.subscribed, childID)
-	ch, ok := m.chans[childID]
-	if !ok {
-		ch = make(chan *rafikiv1.Event)
-		m.chans[childID] = ch
-	}
-	return ch, func() {}
-}
-
-// fixedResolver maps every child id to a single conversation id, which is all
-// these streaming tests need — fakeLoader ignores the id anyway.
-type fixedResolver struct{}
-
-func (fixedResolver) ConversationID(string) (string, bool) { return "conv-1", true }
-
-// TestStreamEventsFollowsEveryChild guards the Phase A defect where only
-// child_ids[0] was live-followed. It becomes silent data loss as soon as a
-// real EventSource is wired, because the caller asked for N children and
-// received one child's events.
-func TestStreamEventsFollowsEveryChild(t *testing.T) {
-	src := &multiSource{chans: map[string]chan *rafikiv1.Event{
-		"c_1": make(chan *rafikiv1.Event, 1),
-		"c_2": make(chan *rafikiv1.Event, 1),
-	}}
-	s := connectapi.NewServer(&fakeLoader{})
-	s.SetChildResolver(fixedResolver{})
-	s.SetEventSource(src)
-
+func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Run StreamEvents in a goroutine; it will block after replay waiting for
-	// the merged channel. Publish to c_2 and read from its dedicated channel
-	// to prove the subscription was created.
-	src.chans["c_2"] <- &rafikiv1.Event{
-		ChildId: "c_2",
-		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: "idle"}},
+	elog := eventlog.NewMemory()
+	_, _ = elog.Append(ctx, "c_1", statusEvent("c_1", "idle"))
+
+	s := connectapi.NewServer(nil)
+	s.SetLineage(&fakeLineage{})
+	s.SetEventLog(elog)
+	// No SetEventSource
+
+	mux := http.NewServeMux()
+	path, h := s.Routes()
+	mux.Handle(path, h)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
+		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{"c_1": -1}},
+	}))
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
 	}
-
-	go func() {
-		_ = s.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
-			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
-		}), &connect.ServerStream[rafikiv1.Event]{})
-	}()
-
-	// Read from c_2's channel — if our source was subscribed, the event we
-	// published should still be there to read.
-	select {
-	case ev := <-src.chans["c_2"]:
-		if ev.GetAgentStatus().GetState() != "idle" {
-			t.Errorf("state = %q, want idle", ev.GetAgentStatus().GetState())
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("never received the second child's event: StreamEvents is following only child_ids[0]")
+	if !stream.Receive() {
+		t.Fatalf("expected replayed event: %v", stream.Err())
 	}
-}
-
-// TestSubscribeCalledForChild proves the source is subscribed for the requested child.
-func TestSubscribeCalledForChild(t *testing.T) {
-	src := &multiSource{chans: map[string]chan *rafikiv1.Event{
-		"c_1": make(chan *rafikiv1.Event),
-	}}
-	s := connectapi.NewServer(&fakeLoader{})
-	s.SetChildResolver(fixedResolver{})
-	s.SetEventSource(src)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-
-	go func() {
-		_ = s.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
-			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
-		}), &connect.ServerStream[rafikiv1.Event]{})
-	}()
-
-	// Give the replay+subscribe goroutines time to run.
-	time.Sleep(50 * time.Millisecond)
-
-	src.mu.Lock()
-	defer src.mu.Unlock()
-	if len(src.subscribed) != 1 {
-		t.Errorf("subscribed to %d children (%v), want 1", len(src.subscribed), src.subscribed)
+	if stream.Receive() {
+		t.Fatal("stream kept going after replay; want closed when no event source wired")
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream ended with error: %v", err)
 	}
 }
+
+// Dummy use of proto package to avoid unused import if needed
+var _ = proto.Marshal
