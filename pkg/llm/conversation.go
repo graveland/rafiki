@@ -357,6 +357,25 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	}
 
 	assistant := resp.ToParam()
+	// Some providers occasionally return a structurally broken reply: a
+	// missing or wrong role, or no content blocks at all (observed live:
+	// role "" with empty content). The reply handed back to the caller is
+	// untouched — only what history stores is repaired, because the stored
+	// history is re-sent inside every later request and the API rejects a
+	// request whose messages carry an invalid role or empty content. Without
+	// this, one broken reply permanently wedges the conversation: every
+	// later Send/Continue fails with an invalid-request error the caller
+	// never caused.
+	if assistant.Role != anthropic.MessageParamRoleAssistant {
+		assistant.Role = anthropic.MessageParamRoleAssistant
+	}
+	if len(assistant.Content) == 0 {
+		// Nothing to store — and an empty message in history would itself
+		// invalidate every later request. The turn stays captured (usage and
+		// cost live on the turn row, not the message row), and the caller
+		// still receives the reply exactly as the provider sent it.
+		return resp, nil
+	}
 	if err := conv.appendMessage(ctx, nextOrdinal(history), assistant,
 		&store.AssistantMeta{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens,
 			StopReason: string(resp.StopReason)}); err != nil {
