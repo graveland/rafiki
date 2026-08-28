@@ -128,10 +128,21 @@ func (q *Queue) deliver(ctx context.Context, childID string, source *string) err
 }
 
 // Consume marks rows the child confirmed it took into a turn.
-func (q *Queue) Consume(ctx context.Context, ids []string) error {
+//
+// childID takes the same per-child lock as Reset and Drop, even though the
+// rows themselves carry no lock. Without it, a child's exit-triggered Reset
+// racing a late ack's Consume can interleave as: Reset moves the row back to
+// pending for redelivery, then Consume marks that same row consumed before
+// anyone redelivers it -- the message is lost, silently, which is the one
+// failure this whole package exists to close. The caller always has childID
+// in hand alongside the row ids (it is recorded next to them wherever an ack
+// arrives), so requiring it here costs nothing.
+func (q *Queue) Consume(ctx context.Context, childID string, ids []string) error {
 	if q.cfg.Store == nil || len(ids) == 0 {
 		return nil
 	}
+	unlock := q.locks.lock(childID)
+	defer unlock()
 	return q.cfg.Store.MarkConsumed(ctx, ids)
 }
 

@@ -80,7 +80,7 @@ func TestQueueDeliverMarksSentWhenAnAckIsComing(t *testing.T) {
 	if rec.count() != 1 {
 		t.Fatalf("a sent row was delivered twice")
 	}
-	if err := q.Consume(ctx, []string{id}); err != nil {
+	if err := q.Consume(ctx, "c_1", []string{id}); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 	if rows, _ := st.Pending(ctx, "c_1"); len(rows) != 0 {
@@ -90,7 +90,7 @@ func TestQueueDeliverMarksSentWhenAnAckIsComing(t *testing.T) {
 
 func TestQueueDeliverConsumesImmediatelyWhenNoAckIsComing(t *testing.T) {
 	rec := &recorder{awaitAck: false}
-	q, _ := newQueue(t, rec, nil)
+	q, st := newQueue(t, rec, nil)
 	ctx := context.Background()
 
 	if _, err := q.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "hi"}); err != nil {
@@ -98,6 +98,13 @@ func TestQueueDeliverConsumesImmediatelyWhenNoAckIsComing(t *testing.T) {
 	}
 	if err := q.DeliverAll(ctx, "c_1"); err != nil {
 		t.Fatalf("DeliverAll: %v", err)
+	}
+	// The row must actually be consumed, not merely absent from Pending for
+	// some other reason (e.g. never delivered at all) -- Reset alone cannot
+	// distinguish those, since ResetSent only moves StateSent rows and a row
+	// stuck in StatePending also yields (0, nil).
+	if rows, _ := st.Pending(ctx, "c_1"); len(rows) != 0 {
+		t.Errorf("a no-ack delivery must consume the row immediately; got %d rows still pending", len(rows))
 	}
 	if n, err := q.Reset(ctx, "c_1"); err != nil || n != 0 {
 		t.Errorf("Reset after a no-ack delivery = (%d, %v), want (0, nil): the row is terminal", n, err)
@@ -141,26 +148,34 @@ func TestQueueDeliverFiltersBySource(t *testing.T) {
 	}
 }
 
+// TestQueueSerializesDeliveryPerChild races 8 concurrent drains -- the
+// immediate delivery racing the idle drain -- across 20 independent trials,
+// each with a fresh queue, fresh row, and fresh assertion. A single trial's
+// race is not reliably won by an unguarded bug (observed ~60% catch rate per
+// trial, see the task report), so one trial is not a trustworthy gate; 20
+// pushes the miss probability for a genuinely missing lock down to roughly
+// 0.4^20 ~= 1e-8, and it still runs in milliseconds because nothing here
+// sleeps.
 func TestQueueSerializesDeliveryPerChild(t *testing.T) {
-	rec := &recorder{awaitAck: true}
-	q, _ := newQueue(t, rec, nil)
-	ctx := context.Background()
-	if _, err := q.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "hi"}); err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
+	for trial := range 20 {
+		rec := &recorder{awaitAck: true}
+		q, _ := newQueue(t, rec, nil)
+		ctx := context.Background()
+		if _, err := q.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "hi"}); err != nil {
+			t.Fatalf("trial %d: Accept: %v", trial, err)
+		}
 
-	// Two concurrent drains -- the immediate delivery racing the idle drain --
-	// must between them deliver the row exactly once.
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = q.DeliverAll(ctx, "c_1")
-		}()
-	}
-	wg.Wait()
-	if rec.count() != 1 {
-		t.Fatalf("concurrent drains delivered %d copies, want 1", rec.count())
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_ = q.DeliverAll(ctx, "c_1")
+			}()
+		}
+		wg.Wait()
+		if rec.count() != 1 {
+			t.Fatalf("trial %d: concurrent drains delivered %d copies, want 1", trial, rec.count())
+		}
 	}
 }
