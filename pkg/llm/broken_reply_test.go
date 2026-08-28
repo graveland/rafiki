@@ -12,6 +12,7 @@ package llm
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -48,6 +49,23 @@ func requestRolesAllValid(t *testing.T, params anthropic.MessageNewParams) {
 	}
 }
 
+// requestBlocksAllStorable fails the test if any message in the request
+// carries a content block the Messages API would reject, or a message with no
+// content at all.
+func requestBlocksAllStorable(t *testing.T, params anthropic.MessageNewParams) {
+	t.Helper()
+	for i, m := range params.Messages {
+		if len(m.Content) == 0 {
+			t.Fatalf("request messages[%d] has no content; the API rejects an empty message", i)
+		}
+		for j, b := range m.Content {
+			if b.OfText != nil && strings.TrimSpace(b.OfText.Text) == "" {
+				t.Fatalf("request messages[%d].content[%d] is an empty text block; the API rejects it", i, j)
+			}
+		}
+	}
+}
+
 // A reply whose role is not "assistant" is stored with role "assistant", so
 // the next request is still valid. The reply returned to the caller keeps
 // whatever the provider sent.
@@ -77,7 +95,7 @@ func TestReplyWithWrongRoleIsStoredAsAssistant(t *testing.T) {
 	}
 	second := sender.lastReq[len(sender.lastReq)-1]
 	requestRolesAllValid(t, second)
-	if text, ok := second.Messages[1].Content[0].OfText, true; !ok || text == nil || text.Text != "first reply" {
+	if text := second.Messages[1].Content[0].OfText; text == nil || text.Text != "first reply" {
 		t.Fatalf("stored reply content was not preserved: %+v", second.Messages[1].Content)
 	}
 }
@@ -110,11 +128,7 @@ func TestReplyWithNoContentIsNotStored(t *testing.T) {
 	}
 	second := sender.lastReq[len(sender.lastReq)-1]
 	requestRolesAllValid(t, second)
-	for i, m := range second.Messages {
-		if len(m.Content) == 0 {
-			t.Fatalf("request messages[%d] has no content; the empty reply leaked into history", i)
-		}
-	}
+	requestBlocksAllStorable(t, second)
 }
 
 // A normal reply is stored exactly as before — same role, same content.
@@ -141,5 +155,72 @@ func TestNormalReplyIsStoredUnchanged(t *testing.T) {
 	}
 	if second.Messages[1].Content[0].OfText.Text != "fine reply" {
 		t.Fatalf("stored reply text = %q, want \"fine reply\"", second.Messages[1].Content[0].OfText.Text)
+	}
+}
+
+// An empty text block is rejected by the API exactly like a message with no
+// content at all ("text content blocks must be non-empty"), so a reply whose
+// only block is empty text has nothing storable and is not appended.
+func TestReplyWithOnlyEmptyTextIsNotStored(t *testing.T) {
+	emptyText := func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+		return cannedMessage(`{"id":"msg_t0","type":"message","role":"assistant","model":"m",
+			"content":[{"type":"text","text":""}],
+			"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":0}}`), nil
+	}
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		emptyText,
+		respondText("real reply"),
+	}}
+	conv := brokenReplyConversation(t, sender)
+	ctx := context.Background()
+
+	resp, err := conv.Send(ctx, UserText("hello"))
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Text != "" {
+		t.Fatalf("caller's copy of the reply was changed: %+v", resp.Content)
+	}
+
+	if _, err := conv.Send(ctx, UserText("and again")); err != nil {
+		t.Fatalf("Send after empty-text reply: %v", err)
+	}
+	second := sender.lastReq[len(sender.lastReq)-1]
+	requestRolesAllValid(t, second)
+	requestBlocksAllStorable(t, second)
+}
+
+// A reply that mixes an empty text block with real content keeps the real
+// content: only the block the API would reject is dropped.
+func TestReplyWithEmptyTextBlockKeepsRealContent(t *testing.T) {
+	mixed := func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+		return cannedMessage(`{"id":"msg_t1","type":"message","role":"assistant","model":"m",
+			"content":[{"type":"text","text":""},{"type":"text","text":"real content"}],
+			"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`), nil
+	}
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		mixed,
+		respondText("second reply"),
+	}}
+	conv := brokenReplyConversation(t, sender)
+	ctx := context.Background()
+
+	resp, err := conv.Send(ctx, UserText("hello"))
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(resp.Content) != 2 {
+		t.Fatalf("caller's copy of the reply was changed: %d content blocks, want 2", len(resp.Content))
+	}
+
+	if _, err := conv.Send(ctx, UserText("and again")); err != nil {
+		t.Fatalf("Send after mixed reply: %v", err)
+	}
+	second := sender.lastReq[len(sender.lastReq)-1]
+	requestRolesAllValid(t, second)
+	requestBlocksAllStorable(t, second)
+	stored := second.Messages[1].Content
+	if len(stored) != 1 || stored[0].OfText == nil || stored[0].OfText.Text != "real content" {
+		t.Fatalf("stored reply lost its real content: %+v", stored)
 	}
 }
