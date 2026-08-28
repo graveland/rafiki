@@ -52,58 +52,8 @@ func TestPostgresConformance(t *testing.T) {
 	})
 }
 
-// TestConcurrentMarkSentIsIdempotent opens two transactions explicitly. The
-// shared conformance suite cannot catch this: the memory store is atomic under
-// its own mutex and Postgres is not, which is exactly how pkg/tasks' Drop bug
-// passed the shared suite throughout.
-func TestConcurrentMarkSentIsIdempotent(t *testing.T) {
-	pool := testPool(t)
-	ctx := context.Background()
-	s := inboxdb.New(pool)
-
-	uniq, _ := inbox.NewID()
-	child := "c_race_" + uniq
-	t.Cleanup(func() {
-		_, _ = pool.Exec(ctx, "DELETE FROM conversations.agent_inbox WHERE child_id = $1", child)
-	})
-
-	rec, err := s.Accept(ctx, inbox.Inbound{ChildID: child, Mode: inbox.ModePrompt, Text: "hi"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-
-	tx1, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	defer func() { _ = tx1.Rollback(ctx) }()
-
-	// tx1 takes the row to 'sent' and holds the lock uncommitted. A second
-	// writer must not be able to observe it as pending and deliver it again.
-	if _, err := tx1.Exec(ctx,
-		"UPDATE conversations.agent_inbox SET state='sent' WHERE id=$1", rec.ID); err != nil {
-		t.Fatalf("tx1 update: %v", err)
-	}
-
-	rows, err := s.Pending(ctx, child)
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("before commit the row is still pending to everyone else; got %d rows", len(rows))
-	}
-
-	if err := tx1.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-
-	// After the commit, MarkSent from the loser must be a no-op rather than
-	// resurrecting or double-counting anything.
-	if err := s.MarkSent(ctx, []string{rec.ID}); err != nil {
-		t.Fatalf("MarkSent after commit: %v", err)
-	}
-	rows, _ = s.Pending(ctx, child)
-	if len(rows) != 0 {
-		t.Fatalf("row came back as pending after being sent: %+v", rows)
-	}
-}
+// The Postgres-only concurrency test (a real contention barrier around
+// markSentSQL) lives in postgres_internal_test.go, in package inboxdb rather
+// than inboxdb_test: it needs to execute the real markSentSQL constant
+// directly and read pgconn.CommandTag.RowsAffected, neither of which is
+// visible through the exported inbox.Store interface.

@@ -114,6 +114,22 @@ func RunConformance(t *testing.T, mk func(*testing.T) (inbox.Store, string)) {
 		if rows, _ := s.Pending(ctx, pfx+"a"); len(rows) != 0 {
 			t.Errorf("a consumed row came back as pending")
 		}
+
+		// A consumed row must never move again, in EITHER direction. A bare
+		// Pending check after a second MarkSent can't tell "still consumed"
+		// from "moved to sent" -- neither state shows up as pending -- so the
+		// discriminating check is ResetSent afterwards: if MarkSent had
+		// resurrected the row to 'sent', ResetSent would find it and return 1.
+		if err := s.MarkSent(ctx, []string{rec.ID}); err != nil {
+			t.Fatalf("MarkSent on a consumed row: %v", err)
+		}
+		if rows, _ := s.Pending(ctx, pfx+"a"); len(rows) != 0 {
+			t.Errorf("a consumed row came back as pending after a second MarkSent")
+		}
+		if n, err := s.ResetSent(ctx, pfx+"a"); err != nil || n != 0 {
+			t.Errorf("ResetSent after a second MarkSent = (%d, %v), want (0, nil) -- "+
+				"the consumed row must not have moved to sent", n, err)
+		}
 	})
 
 	t.Run("DropTerminatesEveryNonTerminalRow", func(t *testing.T) {
