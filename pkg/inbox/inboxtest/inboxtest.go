@@ -123,6 +123,10 @@ func RunConformance(t *testing.T, mk func(*testing.T) (inbox.Store, string)) {
 		sent, _ := s.Accept(ctx, inbox.Inbound{ChildID: pfx + "a", Mode: inbox.ModePrompt, Text: "sent"})
 		done, _ := s.Accept(ctx, inbox.Inbound{ChildID: pfx + "a", Mode: inbox.ModePrompt, Text: "consumed"})
 		_ = p
+		// A different child's pending row must survive Drop entirely -- the
+		// load-bearing half, since Drop is one of the two scoping-critical
+		// methods and this is what would catch an unscoped UPDATE.
+		other, _ := s.Accept(ctx, inbox.Inbound{ChildID: pfx + "b", Mode: inbox.ModePrompt, Text: "someone else's"})
 		if err := s.MarkSent(ctx, []string{sent.ID}); err != nil {
 			t.Fatalf("MarkSent: %v", err)
 		}
@@ -135,6 +139,13 @@ func RunConformance(t *testing.T, mk func(*testing.T) (inbox.Store, string)) {
 		}
 		if n != 2 {
 			t.Errorf("Drop returned %d, want 2 (pending + sent, not the consumed one)", n)
+		}
+		rows, err := s.Pending(ctx, pfx+"b")
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != other.ID {
+			t.Errorf("Drop reached another child's rows: %+v", rows)
 		}
 	})
 

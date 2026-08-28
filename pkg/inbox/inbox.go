@@ -46,6 +46,21 @@ func (m Mode) String() string {
 	}
 }
 
+// ParseMode is String's inverse. An unrecognised spelling is ModePrompt: the
+// column is CHECK-constrained, so this can only be reached by a hand-edited
+// row, and queueing work is a safer failure than injecting a steer into an
+// unrelated turn.
+func ParseMode(s string) Mode {
+	switch s {
+	case "steer":
+		return ModeSteer
+	case "abort":
+		return ModeAbort
+	default:
+		return ModePrompt
+	}
+}
+
 // State is where a message sits in its lifecycle.
 //
 // The distinction that matters is pending vs sent. A pending row has not been
