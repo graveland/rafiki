@@ -1247,6 +1247,22 @@ func (c *Controller) activateLiveChild(
 		MaxCost:            snap.MaxCost,
 		MaxChildren:        snap.MaxChildren,
 	}
+	// Replace the old exited entry HERE, not back in Resume/RespawnChild
+	// before the Idle() wait above. Deleting there left the child absent from
+	// the store — and so from ctrl_list, ctrl_get and every subscriber — for
+	// as long as the new process took to answer, up to activateLiveChild's
+	// full 5s stall timeout. That hole is reached on every daemon restart now
+	// that recovery auto-resumes children, and it made a recovered child
+	// vanish from `rafiki list` while it was in fact starting fine.
+	//
+	// Deleting immediately before the Insert keeps the original property that
+	// motivated the late delete (a FAILED spawn returns before this point and
+	// leaves the exited record intact) while closing the window: the store
+	// goes from the old record straight to the new one. snap is a copy taken
+	// before the spawn, so nothing here reads what Delete removes. The Delete
+	// is still needed rather than relying on Insert's overwrite because the
+	// secondary byName/byCwd/byStatus buckets are keyed by the OLD values.
+	c.st.Delete(childID)
 	c.st.Insert(sess)
 	c.cm.Add(childID, ch)
 
@@ -1533,13 +1549,9 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		}
 	}
 
-	// Spawn succeeded — only now remove the old exited entry. Deleting before
-	// spawn would lose the session if spawn fails (e.g. bad pi binary path);
-	// the entry would only be recoverable on controller restart via state scan.
-	c.st.Delete(childID)
-
-	// activateLiveChild (baseSnap != nil path): waits for Idle, builds the full
-	// Session from snap with Resume's session-continuity values, inserts it,
+	// activateLiveChild (baseSnap != nil path): waits for Idle, replaces the
+	// old exited entry, builds the full Session from snap with Resume's
+	// session-continuity values, inserts it,
 	// adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
 	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
 		snap.NoSession, snap.SessionFile, snap.ForkSession)
@@ -1655,12 +1667,9 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		}
 	}
 
-	// Spawn succeeded — remove the old exited entry only after the new process
-	// is confirmed running (so a failed spawn doesn't lose the record).
-	c.st.Delete(childID)
-
-	// activateLiveChild (baseSnap != nil path): waits for Idle, builds the full
-	// Session from snap with RespawnChild's session-continuity values (fresh
+	// activateLiveChild (baseSnap != nil path): waits for Idle, replaces the
+	// old exited entry, builds the full Session from snap with RespawnChild's
+	// session-continuity values (fresh
 	// start: noSession=false, resumeSession=sessionPath, forkSession=""),
 	// inserts, adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
 	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
