@@ -4,10 +4,7 @@ package inbox
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
-	"fmt"
 )
 
 // Memory delivers synchronously inside Accept, which reproduces today's
@@ -31,7 +28,7 @@ func (m *Memory) Accept(_ context.Context, in Inbound) (string, error) {
 	if m.send == nil {
 		return "", errors.New("inbox: no send func configured")
 	}
-	id, err := newID()
+	id, err := NewID()
 	if err != nil {
 		return "", err
 	}
@@ -46,13 +43,3 @@ func (m *Memory) Accept(_ context.Context, in Inbound) (string, error) {
 // never anything pending. The method exists to satisfy Inbox so the durable
 // implementation can replace Memory without touching a caller.
 func (m *Memory) Deliver(context.Context, string, func(Inbound) error) error { return nil }
-
-func newID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("inbox: generate id: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b[:]), nil
-}
-
-var _ Inbox = (*Memory)(nil)
