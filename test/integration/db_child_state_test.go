@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -39,6 +40,8 @@ func bootDaemonDB(t *testing.T, daemonID string) *daemon {
 	}
 	pool.Close()
 
+	dropDaemonRows(t, daemonID)
+
 	base := ""
 	if runtime.GOOS == "darwin" {
 		base = "/tmp"
@@ -61,11 +64,9 @@ func bootDaemonDB(t *testing.T, daemonID string) *daemon {
 		"XDG_RUNTIME_DIR="+homeDir,
 		"XDG_STATE_HOME="+homeDir,
 		"XDG_DATA_HOME="+homeDir,
-		"RAFIKI_PI_BINARY="+fakePiPath,
 		"RAFIKI_DB="+dsn,
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
-	// cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(homeDir)
@@ -144,7 +145,6 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 		"XDG_RUNTIME_DIR="+d1.homeDir,
 		"XDG_STATE_HOME="+d1.homeDir,
 		"XDG_DATA_HOME="+d1.homeDir,
-		"RAFIKI_PI_BINARY="+fakePiPath,
 		"RAFIKI_DB="+os.Getenv("RAFIKI_TEST_DSN"),
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
@@ -189,13 +189,8 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 		t.Fatal("child not found after restart with wiped state dir")
 	}
 
-	// 6. Clean up: forget the child.
-	forgetJSON := fmt.Sprintf(`{"type":"ctrl_forget","id":"f1","childId":%q}`, childID)
-	raw = d2.request(t, forgetJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Errorf("ctrl_forget failed: %+v", r.Error)
-	}
+	// 6. Clean up: kill, then forget.
+	killAndForget(t, d2, childID)
 }
 
 // TestDBChildState_ChildRowVisibleAfterRestart verifies that a child row
@@ -230,8 +225,22 @@ func TestDBChildState_ChildRowVisibleAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert child row: %v", err)
 	}
+	// A fresh pool: the one above is closed by this function's defer, which
+	// runs BEFORE cleanups, so reusing it deletes nothing and — because the
+	// error is discarded — says nothing about it either. The row carries no
+	// daemon_id (it was written here, not by a daemon), so dropDaemonRows
+	// cannot sweep it.
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM conversations.child WHERE child_id = $1`, childID)
+		p, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Logf("drop child row %s: pool: %v", childID, err)
+			return
+		}
+		defer p.Close()
+		if _, err := p.Exec(context.Background(),
+			`DELETE FROM conversations.child WHERE child_id = $1`, childID); err != nil {
+			t.Logf("drop child row %s: %v", childID, err)
+		}
 	})
 
 	d := bootDaemonDB(t, "test-visible-daemon")
@@ -288,6 +297,92 @@ func sendTurn(t *testing.T, d *daemon, childID string) {
 	if !r.Success {
 		t.Fatalf("ctrl_send failed: %+v", r.Error)
 	}
+}
+
+// killAndForget stops a recovered child and forgets it, tolerating the race
+// against recovery's auto-resume.
+//
+// A child whose last_status says it was alive when the daemon stopped is
+// auto-resumed by loadChildren, on a goroutine, so a test that has only waited
+// for the control socket can arrive at any point in that sequence: the child
+// may still be exited (kill answers child_exited), may be mid-resume, or may
+// already be running (forget answers not_exited). Neither verb alone is
+// therefore conclusive, and asserting on one reading of a state that is still
+// moving is what made this cleanup flaky. Retrying the pair until forget
+// succeeds converges on the one state both agree about.
+func killAndForget(t *testing.T, d *daemon, childID string) {
+	t.Helper()
+
+	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
+	forgetJSON := fmt.Sprintf(`{"type":"ctrl_forget","id":"f1","childId":%q}`, childID)
+
+	var last *protocol.ErrorBody
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var r protocol.Response
+
+		// ctrl_kill returns only once the child reads as exited (Kill waits
+		// for cm.Remove), so a success here needs no poll before the forget.
+		// child_exited just means the resume had not landed yet.
+		mustUnmarshal(t, d.request(t, killJSON), &r)
+		if !r.Success && r.Error != nil && r.Error.Code != protocol.ErrChildExited {
+			t.Fatalf("ctrl_kill failed: %+v", r.Error)
+		}
+
+		mustUnmarshal(t, d.request(t, forgetJSON), &r)
+		if r.Success {
+			return
+		}
+		last = r.Error
+		if r.Error != nil && r.Error.Code != protocol.ErrNotExited {
+			t.Fatalf("ctrl_forget failed: %+v", r.Error)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Errorf("ctrl_forget never succeeded; last error: %+v", last)
+}
+
+// itDaemonSeq numbers the daemons this suite boots.
+//
+// RAFIKI_DAEMON_ID must be unique per RUNNING daemon: LeaseStore.Acquire lets a
+// daemon reclaim its own leases by id, so two live daemons sharing one would
+// reclaim each other's and reproduce the split brain the lease exists to
+// prevent. Several tests boot more than one daemon, so the id cannot be
+// derived from the test name alone.
+var itDaemonSeq atomic.Int64
+
+func nextDaemonID() string {
+	return fmt.Sprintf("it-%d-%d", os.Getpid(), itDaemonSeq.Add(1))
+}
+
+// dropDaemonRows deletes, on cleanup, the child rows a test daemon wrote.
+//
+// The whole suite shares one database, and a daemon recovers EVERY row in
+// conversations.child at startup regardless of which daemon wrote it — child
+// rows are shared by design. So a child left behind is resurrected and
+// auto-resumed by every subsequent daemon boot, in this run and in every run
+// after it. Unchecked, that residue compounds until each boot is resuming
+// dozens of dead fundi engines; at around forty it made the recovery tests
+// fail outright. Deleting by daemon_id keeps the sweep to rows this test's
+// own daemon created.
+func dropDaemonRows(t *testing.T, daemonID string) {
+	t.Helper()
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" || daemonID == "" {
+		return
+	}
+	t.Cleanup(func() {
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Logf("drop rows for daemon %s: pool: %v", daemonID, err)
+			return
+		}
+		defer pool.Close()
+		if _, err := pool.Exec(context.Background(),
+			`DELETE FROM conversations.child WHERE daemon_id = $1`, daemonID); err != nil {
+			t.Logf("drop rows for daemon %s: %v", daemonID, err)
+		}
+	})
 }
 
 func openPool(t *testing.T, dsn string) *pgxpool.Pool {
@@ -350,7 +445,6 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 		"XDG_RUNTIME_DIR="+d1.homeDir,
 		"XDG_STATE_HOME="+d1.homeDir,
 		"XDG_DATA_HOME="+d1.homeDir,
-		"RAFIKI_PI_BINARY="+fakePiPath,
 		"RAFIKI_DB="+dsn,
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
