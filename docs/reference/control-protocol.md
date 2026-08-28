@@ -137,40 +137,42 @@ curl -H 'Content-Type: application/json' \
 
 | Tier | Contents | Cursor | Resumable |
 |---|---|---|---|
-| Durable | Persisted messages | `conversation_message.ordinal` | Yes, exactly |
-| Ephemeral | Live content deltas | `turn_id` only | No, by design |
+| Durable | Persisted messages, lifecycle events (`child_spawned`, `child_exited`), turns, tool executions | Per-child gap-free `ordinal` | Yes, exactly |
+| Ephemeral | Live content deltas (`content_block_delta`) | None | No, by design |
 
-`GetHistory` and `StreamEvents` both accept `afterOrdinal`. Ordinal is used
-rather than a timestamp because postgres `now()` is transaction-start time, so
-every message written in one transaction shares a byte-identical `created_at` —
-making any timestamp cursor either re-deliver or drop.
+`StreamEvents` uses `EventSubject` predicates, `EventTier`, and `EventCursor` (per-child ordinals).
+Note that the durable event ordinal is **not** `conversation_message.ordinal`: it is a separate per-child sequence starting at 0 stored in `conversations.event_log`.
 
 ### Verbs
 
 | RPC | Kind | Purpose |
 |---|---|---|
 | `GetHistory` | unary | Durable events for one child, after an optional ordinal |
-| `StreamEvents` | server-streaming | Durable replay, then live follow of **every** requested child |
+| `StreamEvents` | server-streaming | Follows events matching an `EventSubject` predicate (child, subtree with max_depth, or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam |
-| `ListChildren` | unary | List children, optionally filtered by status |
-| `GetChild` | unary | Get one child's summary by id |
+| `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal` per child) |
+| `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal`) |
 | `Spawn` | unary | Create a child with budget, executor, and label options |
 | `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
 
 ### Event vocabulary
 
-Rafiki-native events carry no ordinal and are best-effort live-only (ephemeral tier).
-They are not replayed on reconnect. The DURABLE record of a tool call remains the
-`ToolUseBlock`/`ToolResultBlock` content blocks inside `UserMessage`/`AssistantMessage`.
+Every event payload is classified into a tier:
 
 | Event | Tier | Purpose |
 |---|---|---|
-| `ToolExecutionStart` | ephemeral | Tool began executing (name, tool_use_id) |
-| `ToolExecutionEnd` | ephemeral | Tool completed (duration_ms, is_error) |
-| `Retry` | ephemeral | Turn-level retry with attempt count and reason |
-| `ChildSpawned` | ephemeral | A sub-agent was created (child_id, parent_id, name) |
-| `ChildExited` | ephemeral | A sub-agent exited (optional exit_code, signal) |
-| `AgentStatus` | ephemeral | Status change from the daemon's closed vocabulary |
+| `UserMessage` | durable | User prompt message |
+| `AssistantMessage` | durable | Assistant response message |
+| `TurnStart` | durable | Start of an agent turn |
+| `TurnEnd` | durable | End of an agent turn |
+| `ToolExecutionStart` | durable | Tool began executing (name, tool_use_id) |
+| `ToolExecutionEnd` | durable | Tool completed (duration_ms, is_error) |
+| `Retry` | durable | Turn-level retry with attempt count and reason |
+| `ChildSpawned` | durable | A sub-agent was created (child_id, parent_id, name) |
+| `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
+| `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
+| `Error` | durable | Turn or engine level error event |
+| `ContentBlockDelta` | ephemeral | Live token/text streaming delta |
 
 `AgentStatus.state` is one of the eight `protocol.Status` values: `spawning`, `idle`,
 `streaming`, `tool_running`, `compacting`, `blocked_ui`, `shutting_down`, `exited`.
