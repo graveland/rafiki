@@ -149,6 +149,10 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 	ln.Close()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port)
 
+	// Named so its child rows can be swept on cleanup — see dropDaemonRows.
+	daemonID := nextDaemonID()
+	dropDaemonRows(t, daemonID)
+
 	cmd := exec.Command(binaryPath)
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
@@ -156,6 +160,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		"XDG_STATE_HOME="+homeDir,
 		"XDG_DATA_HOME="+homeDir,
 		"RAFIKI_DB="+dsn,
+		"RAFIKI_DAEMON_ID="+daemonID,
 		"RAFIKI_EXECUTORS_ENABLED=1",
 		"RAFIKI_CONTROL_LISTEN="+listenAddr,
 		"RAFIKI_CONTROL_TLS_CERT="+certPath,

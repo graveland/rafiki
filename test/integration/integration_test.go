@@ -132,6 +132,12 @@ func bootDaemon(t *testing.T) *daemon {
 		t.Fatalf("socket path too long (%d bytes) for UDS: %s", len(socketPath), socketPath)
 	}
 
+	// Name the daemon rather than letting it mint an id, so its child rows can
+	// be swept on cleanup: they outlive homeDir, and every later daemon in the
+	// suite would otherwise recover and auto-resume them. See dropDaemonRows.
+	daemonID := nextDaemonID()
+	dropDaemonRows(t, daemonID)
+
 	cmd := exec.Command(binaryPath)
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
@@ -144,6 +150,7 @@ func bootDaemon(t *testing.T) *daemon {
 		// A developer's ambient RAFIKI_DB would otherwise point this throwaway
 		// daemon at their real conversations database.
 		"RAFIKI_DB="+os.Getenv("RAFIKI_TEST_DSN"),
+		"RAFIKI_DAEMON_ID="+daemonID,
 	)
 	// Uncomment to stream daemon logs during debugging:
 	// cmd.Stderr = os.Stderr
