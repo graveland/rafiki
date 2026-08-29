@@ -1,52 +1,44 @@
 package eventbuf
 
 import (
-	"fmt"
+	"context"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/inbox"
 )
 
 // Config controls event buffer behaviour. Zero values are replaced with
 // sensible defaults by New.
-type Config struct {
-	Debounce         time.Duration // quiet window after last push before flush (default 5s)
-	MaxWait          time.Duration // ceiling measured from first push (default 60s)
-	MaxFragments     int           // max fragments per batch (default 30)
-	MaxBytesPerFrag  int           // max bytes per fragment before truncation (default 8192)
-	MaxBytesPerFlush int           // max total bytes per flush (default 65536)
-}
-
-// Delivery says HOW a batch reaches the child. It is independent of WHEN:
-// the debounce decides when, this decides which frame kind carries it.
 //
-// Keeping them separate is the whole point. PushNow skips the debounce but
-// still waits for the turn to end (DeliverPrompt); PushSteer does not wait
-// (DeliverSteer). Welding "urgent" to "steer" makes every urgent event
-// interrupt a turn it may have nothing to do with.
-type Delivery int
-
-const (
-	// DeliverPrompt queues the batch; the child sees it when its next turn
-	// starts. This is the default for everything.
-	DeliverPrompt Delivery = iota
-	// DeliverSteer injects the batch into the turn already running. Reserve
-	// it for events that INVALIDATE that turn — a worker that has lost its
-	// executor must not spend another 40s believing it still has one.
-	DeliverSteer
-)
-
-func (d Delivery) String() string {
-	if d == DeliverSteer {
-		return "steer"
-	}
-	return "prompt"
+// The batch-shaping knobs (fragment count, total bytes) live in
+// inbox.BatchConfig now: coalescing happens at delivery, over the rows, so the
+// buffer has no batch to shape. What is left here is per-fragment truncation,
+// which happens on the way IN — an oversized fragment must never reach the
+// store in the first place.
+type Config struct {
+	Debounce        time.Duration // quiet window after last push before flush (default 5s)
+	MaxWait         time.Duration // ceiling measured from first push (default 60s)
+	MaxBytesPerFrag int           // max bytes per fragment before truncation (default 8192)
 }
 
-// FlushFn delivers a coalesced batch. childID and source identify the target;
-// d selects the frame kind.
-type FlushFn func(childID, source string, fragments []string, d Delivery)
+// FlushFn asks the owner to deliver whatever is queued for (childID, source).
+//
+// It carries no fragments: the rows ARE the batch, and the owner reads them
+// from the inbox. orphans is the degraded path only — messages whose durable
+// accept failed, which the owner injects directly so a database blip costs
+// durability rather than the notification itself.
+//
+// An orphan is the whole inbox.Inbound that could not be stored, not just its
+// text, so everything that shapes delivery travels with it — Mode above all.
+// Reducing it to a string silently downgrades a PushSteer to a prompt exactly
+// when the news is urgent enough to have been a steer. The owner is expected to
+// run orphans through inbox.Coalesce like any other rows, so the degraded path
+// gets the same grouping, caps and any-steer-makes-it-a-steer rule as the
+// durable one rather than a second implementation that drifts.
+type FlushFn func(childID, source string, orphans []inbox.Inbound)
 
 // BusyFn reports whether childID is mid-turn. A flush is deferred while true.
 type BusyFn func(childID string) bool
@@ -57,20 +49,22 @@ type bufKey struct {
 }
 
 type perKey struct {
-	keyed           map[string]string // key -> latest fragment (last-write-wins)
-	keyOrder        []string          // insertion order, for stable output
-	unkeyed         []string
-	firstPushAt     time.Time
-	timer           Timer
-	deferred        bool     // a flush was withheld because the child was busy
-	pendingDelivery Delivery // sticky steer: a deferred steer stays a steer
+	firstPushAt time.Time
+	timer       Timer
+	dirty       bool            // something was accepted since the last flush
+	deferred    bool            // a flush was withheld because the child was busy
+	orphans     []inbox.Inbound // messages the store refused; delivered without durability
 }
 
-// Buffer coalesces externally-injected agent events into debounced, batched
-// frames. Producers push pre-rendered fragments; a debounce timer with a
-// max-wait ceiling flushes them as one delivery via the configured FlushFn.
-// A flush is deferred while the child is mid-turn and released on its idle
-// transition via DrainIdle.
+// Buffer schedules the delivery of externally-injected agent events. It keeps
+// exactly what only it knows: when the quiet window elapsed, when the max-wait
+// ceiling hit, and whether the child is mid-turn.
+//
+// It does NOT hold the events. Producers push pre-rendered fragments, which
+// are persisted to the inbox on the way through; when the buffer decides it is
+// time, FlushFn asks the owner to deliver the rows. That split is the point: a
+// daemon that dies inside the quiet window used to lose the batch outright,
+// and coalescing recomputed from the rows re-coalesces correctly on restart.
 //
 // A zero-value Config is not usable; construct via New.
 type Buffer struct {
@@ -80,11 +74,12 @@ type Buffer struct {
 	state map[bufKey]*perKey
 	flush FlushFn
 	busy  BusyFn
+	acc   inbox.Accepter
 }
 
 // New returns a Buffer using the given clock. Config fields that are zero are
 // set to documented defaults. The returned buffer has no delivery function;
-// call SetFlush and SetBusy before use.
+// call SetFlush, SetBusy and SetAccepter before use.
 func New(cfg Config, clk Clock) *Buffer {
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = 5 * time.Second
@@ -92,14 +87,8 @@ func New(cfg Config, clk Clock) *Buffer {
 	if cfg.MaxWait <= 0 {
 		cfg.MaxWait = 60 * time.Second
 	}
-	if cfg.MaxFragments <= 0 {
-		cfg.MaxFragments = 30
-	}
 	if cfg.MaxBytesPerFrag <= 0 {
 		cfg.MaxBytesPerFrag = 8192
-	}
-	if cfg.MaxBytesPerFlush <= 0 {
-		cfg.MaxBytesPerFlush = 65536
 	}
 	return &Buffer{
 		cfg:   cfg,
@@ -119,21 +108,20 @@ func (b *Buffer) SetBusy(fn BusyFn) {
 	b.busy = fn
 }
 
-// pending is one assembled batch waiting to be handed to the flush callback
-// after the lock is released.
-type pending struct {
-	bk        bufKey
-	fragments []string
-	delivery  Delivery
-	forced    bool // skip the busy gate in emit
-}
+// SetAccepter attaches the durable inbox. Until it is set, every Push is an
+// orphan: still delivered, never persisted. That is the pre-durable-inbox
+// behaviour and is what a unit test with no store gets.
+func (b *Buffer) SetAccepter(a inbox.Accepter) { b.acc = a }
 
-// Push adds a fragment to the buffer for (childID, source). When key is
-// non-empty subsequent pushes with the same key overwrite (last-write-wins);
-// key == "" means the fragment accumulates. The fragment is truncated to
-// Config.MaxBytesPerFrag with a visible marker.
+// Push records a fragment for (childID, source) and arms the debounce.
 //
-// Delivery is debounced and prompt, and defers while the child is mid-turn.
+// The fragment is persisted to the inbox BEFORE the timer is armed. That
+// ordering is the whole feature: a daemon that dies inside the quiet window
+// used to lose the batch outright, which is how a coordinator ended up waiting
+// forever for a settle that had already happened.
+//
+// key is last-write-wins WITHIN (childID, source); key == "" accumulates.
+// Coalescing itself happens at delivery, over the rows.
 //
 // Source names must not contain "::". A source that does is rejected with a
 // warning log and the fragment is silently dropped.
@@ -141,79 +129,73 @@ func (b *Buffer) Push(childID, source, key, fragment string) {
 	if !validSource(childID, source, "Push") {
 		return
 	}
+	b.accept(childID, source, key, fragment, inbox.ModePrompt)
 	b.mu.Lock()
-	b.appendLocked(childID, source, key, truncate(fragment, b.cfg.MaxBytesPerFrag))
+	b.armLocked(childID, source)
 	b.mu.Unlock()
 }
 
-// PushNow bypasses the DEBOUNCE: the fragment joins any pending batch and the
-// whole thing is delivered at once instead of waiting out the quiet window.
+// PushNow bypasses the DEBOUNCE but not the busy gate: a child mid-turn keeps
+// the batch until DrainIdle.
 //
-// It does NOT bypass the busy gate. A child mid-turn keeps the batch until
-// DrainIdle. Use it for news that cannot wait for the next quiet window but
-// does not invalidate the turn in progress — a budget warning, a subagent
-// failure the coordinator will act on next turn.
+// Use it for news that cannot wait for the next quiet window but does not
+// invalidate the turn in progress — a budget warning, a subagent failure the
+// coordinator will act on next turn.
 func (b *Buffer) PushNow(childID, source, fragment string) {
 	if !validSource(childID, source, "PushNow") {
 		return
 	}
-	b.mu.Lock()
-	b.appendLocked(childID, source, "", truncate(fragment, b.cfg.MaxBytesPerFrag))
-	p := b.takeLocked(bufKey{childID, source}, DeliverPrompt)
-	b.mu.Unlock()
-	b.emit(p)
+	b.accept(childID, source, "", fragment, inbox.ModePrompt)
+	b.fire(bufKey{childID, source}, false)
 }
 
-// PushSteer bypasses BOTH the debounce and the busy gate, and delivers as a
-// steer — injected into the turn already running.
+// PushSteer bypasses BOTH the debounce and the busy gate, and is accepted as a
+// steer so the batch delivers into the turn already running. Any pending
+// fragment for the same source rides along, because Coalesce reads every
+// pending row for the group — and a group holding any steer delivers as a
+// steer, which is how stickiness survives as data rather than buffer state.
 //
 // Reserve it for events that invalidate that turn: executor lost, budget
-// exhausted mid-tool-call. Any pending batch for the same source rides along
-// so ordering is preserved.
+// exhausted mid-tool-call.
 func (b *Buffer) PushSteer(childID, source, fragment string) {
 	if !validSource(childID, source, "PushSteer") {
 		return
 	}
-	b.mu.Lock()
-	b.appendLocked(childID, source, "", truncate(fragment, b.cfg.MaxBytesPerFrag))
-	p := b.takeLocked(bufKey{childID, source}, DeliverSteer)
-	if p != nil {
-		p.forced = true
-	}
-	b.mu.Unlock()
-	b.emit(p)
+	b.accept(childID, source, "", fragment, inbox.ModeSteer)
+	b.fire(bufKey{childID, source}, true)
 }
 
-// DrainIdle flushes every batch that was DEFERRED because childID was busy.
-// Call this on the child's transition to idle.
+// DrainIdle flushes every batch DEFERRED because childID was busy. Call it on
+// the child's transition to idle.
 //
 // It deliberately leaves batches still inside their debounce window alone: a
 // fragment pushed 200ms before turn-end would otherwise be delivered on its
 // own, costing exactly the extra turn this package exists to avoid.
 func (b *Buffer) DrainIdle(childID string) {
-	var out []*pending
+	var keys []bufKey
 	b.mu.Lock()
 	for bk, pk := range b.state {
-		if bk.childID != childID || !pk.deferred || pk.isEmpty() {
-			continue
-		}
-		if p := b.takeLocked(bk, pk.pendingDelivery); p != nil {
-			p.forced = true
-			out = append(out, p)
+		if bk.childID == childID && pk.deferred && pk.dirty {
+			keys = append(keys, bk)
 		}
 	}
 	b.mu.Unlock()
-	for _, p := range out {
-		b.emit(p)
+	for _, bk := range keys {
+		b.fire(bk, true)
 	}
 }
 
-// Forget discards every buffered batch for childID and stops its timers.
+// Forget discards childID's SCHEDULING state and stops its timers.
 //
 // The daemon calls this on child exit. Without it a child that dies mid-turn
-// leaves its deferred batches in the buffer forever: DrainIdle is the only
-// thing that clears deferred state and it only fires on an idle transition,
-// which a dead child never makes.
+// leaves its deferred state in the buffer forever: DrainIdle is the only thing
+// that clears it and it only fires on an idle transition, which a dead child
+// never makes.
+//
+// It does NOT discard messages: the rows outlive the buffer, and what happens
+// to them on exit is the controller's decision (Reset on exit, Drop when the
+// child is forgotten for good). Dropping them here would delete a resumable
+// child's queue.
 func (b *Buffer) Forget(childID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -221,12 +203,19 @@ func (b *Buffer) Forget(childID string) {
 		if bk.childID != childID {
 			continue
 		}
-		pk.reset()
+		if pk.timer != nil {
+			pk.timer.Stop()
+		}
 		delete(b.state, bk)
 	}
 }
 
 // --- internal ---
+
+// acceptTimeout bounds the durable write on the push path. A producer here is
+// often the daemon's own status goroutine, so this must not become a place a
+// slow database stalls child bookkeeping.
+const acceptTimeout = 5 * time.Second
 
 func validSource(childID, source, op string) bool {
 	if strings.Contains(source, "::") {
@@ -237,30 +226,62 @@ func validSource(childID, source, op string) bool {
 	return true
 }
 
-// appendLocked records a fragment and (re)arms the debounce timer. Caller
-// must hold b.mu.
-func (b *Buffer) appendLocked(childID, source, key, fragment string) {
-	now := b.clk.Now()
-	bk := bufKey{childID, source}
-	pk := b.state[bk]
-	if pk == nil {
-		pk = &perKey{keyed: make(map[string]string)}
-		b.state[bk] = pk
+// accept persists one fragment. A store failure is logged and the whole
+// message is retained in memory as an orphan: losing durability is bad, losing
+// the notification is worse — and an orphan that lost its Mode on the way out
+// is a steer that no longer interrupts anything.
+func (b *Buffer) accept(childID, source, key, fragment string, mode inbox.Mode) {
+	// ID and AcceptedAt stay empty: the store assigns those, and this row
+	// never reached it.
+	in := inbox.Inbound{
+		ChildID: childID,
+		Mode:    mode,
+		Source:  source,
+		Key:     key,
+		Text:    truncate(fragment, b.cfg.MaxBytesPerFrag),
 	}
 
+	if b.acc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), acceptTimeout)
+		_, err := b.acc.Accept(ctx, in)
+		cancel()
+		if err == nil {
+			b.mu.Lock()
+			b.keyLocked(bufKey{childID, source}).dirty = true
+			b.mu.Unlock()
+			return
+		}
+		slog.Warn("eventbuf: durable accept failed; delivering without durability",
+			"childId", childID, "source", source, "mode", mode, "error", err)
+	}
+
+	b.mu.Lock()
+	pk := b.keyLocked(bufKey{childID, source})
+	pk.orphans = append(pk.orphans, in)
+	pk.dirty = true
+	b.mu.Unlock()
+}
+
+// keyLocked returns (creating if needed) the scheduling state for bk. Caller
+// holds b.mu.
+func (b *Buffer) keyLocked(bk bufKey) *perKey {
+	pk := b.state[bk]
+	if pk == nil {
+		pk = &perKey{}
+		b.state[bk] = pk
+	}
+	return pk
+}
+
+// armLocked (re)arms the debounce timer for (childID, source). Caller holds
+// b.mu.
+func (b *Buffer) armLocked(childID, source string) {
+	now := b.clk.Now()
+	bk := bufKey{childID, source}
+	pk := b.keyLocked(bk)
 	if pk.firstPushAt.IsZero() {
 		pk.firstPushAt = now
 	}
-
-	if key != "" {
-		if _, exists := pk.keyed[key]; !exists {
-			pk.keyOrder = append(pk.keyOrder, key)
-		}
-		pk.keyed[key] = fragment
-	} else {
-		pk.unkeyed = append(pk.unkeyed, fragment)
-	}
-
 	if pk.timer != nil {
 		pk.timer.Stop()
 	}
@@ -273,132 +294,47 @@ func (b *Buffer) appendLocked(childID, source, key, fragment string) {
 	if delay < 0 {
 		delay = 0
 	}
-
 	bkCopy := bk // capture for closure
-	pk.timer = b.clk.AfterFunc(delay, func() {
-		b.timerFired(bkCopy)
-	})
+	pk.timer = b.clk.AfterFunc(delay, func() { b.fire(bkCopy, false) })
 }
 
-// takeLocked assembles and CLEARS the batch for bk, returning it for delivery
-// after the lock is released. Returns nil when there is nothing to send.
-// Caller must hold b.mu.
-func (b *Buffer) takeLocked(bk bufKey, d Delivery) *pending {
-	pk := b.state[bk]
-	if pk == nil || pk.isEmpty() {
-		return nil
-	}
-	p := &pending{bk: bk, fragments: b.assembleBatch(pk), delivery: d}
-	pk.reset()
-	pk.deferred = false
-	pk.pendingDelivery = DeliverPrompt
-	return p
-}
-
-// emit calls the flush callback. It MUST run with b.mu released: flush is
-// Controller.injectBatch → Controller.Send, a blocking write to a child, and
-// a producer that pushes an event from inside that path would otherwise
-// deadlock on a re-entrant acquire of b.mu.
-func (b *Buffer) emit(p *pending) {
-	if p == nil || b.flush == nil {
-		return
-	}
-	// A forced delivery skips the busy gate (DrainIdle already established
-	// the child is idle; PushSteer deliberately interrupts).
-	//
-	// The check and the redeposit happen under ONE lock hold — checking
-	// b.busy outside the lock and re-acquiring only to redeposit leaves a
-	// window where a concurrent DrainIdle can run between the two, find
-	// nothing deferred yet, and miss this batch; it would then be marked
-	// deferred after the idle transition already passed and sit stranded
-	// with no armed timer until the child's next busy→idle cycle.
-	if !p.forced && b.busy != nil {
-		b.mu.Lock()
-		if b.busy(p.bk.childID) {
-			b.redepositLocked(p)
-			b.mu.Unlock()
-			return
-		}
-		b.mu.Unlock()
-	}
-	b.flush(p.bk.childID, p.bk.source, p.fragments, p.delivery)
-}
-
-// redepositLocked puts an undeliverable batch back and marks it deferred so
-// DrainIdle picks it up. Caller must hold b.mu.
-func (b *Buffer) redepositLocked(p *pending) {
-	pk := b.state[p.bk]
-	if pk == nil {
-		pk = &perKey{keyed: make(map[string]string)}
-		b.state[p.bk] = pk
-	}
-	// Prepend: this batch was assembled before anything pushed since.
-	pk.unkeyed = append(append([]string{}, p.fragments...), pk.unkeyed...)
-	pk.deferred = true
-	if p.delivery == DeliverSteer {
-		pk.pendingDelivery = DeliverSteer
-	}
-}
-
-func (b *Buffer) timerFired(bk bufKey) {
+// fire attempts a flush for bk. forced skips the busy gate (DrainIdle has
+// already established the child is idle; PushSteer deliberately interrupts).
+//
+// The busy check and the deferral happen under ONE lock hold: checking outside
+// the lock and re-acquiring to mark deferred leaves a window where a concurrent
+// DrainIdle finds nothing deferred, and the batch then sits with no armed timer
+// until the child's next busy->idle cycle.
+func (b *Buffer) fire(bk bufKey, forced bool) {
 	b.mu.Lock()
 	pk := b.state[bk]
-	if pk == nil || pk.isEmpty() {
+	if pk == nil || !pk.dirty {
 		b.mu.Unlock()
 		return
 	}
-	if b.busy != nil && b.busy(bk.childID) {
+	if !forced && b.busy != nil && b.busy(bk.childID) {
 		pk.deferred = true
 		b.mu.Unlock()
 		return
 	}
-	p := b.takeLocked(bk, pk.pendingDelivery)
-	if p != nil {
-		p.forced = true // the busy check above already passed
+	orphans := pk.orphans
+	pk.orphans = nil
+	pk.dirty = false
+	pk.deferred = false
+	pk.firstPushAt = time.Time{}
+	if pk.timer != nil {
+		pk.timer.Stop()
+		pk.timer = nil
 	}
+	flush := b.flush
 	b.mu.Unlock()
-	b.emit(p)
-}
 
-// assembleBatch builds the fragment list from a perKey, applying
-// MaxFragments and THEN MaxBytesPerFlush with visible truncation markers.
-// Both caps apply: an early return from the fragment cap would skip the byte
-// budget exactly when the batch is largest.
-func (b *Buffer) assembleBatch(pk *perKey) []string {
-	var all []string
-	for _, k := range pk.keyOrder {
-		all = append(all, pk.keyed[k])
+	// flush MUST run with b.mu released: it reaches Controller.Send, a
+	// blocking write to a child, and a producer pushing an event from inside
+	// that path would deadlock on a re-entrant acquire.
+	if flush != nil {
+		flush(bk.childID, bk.source, orphans)
 	}
-	all = append(all, pk.unkeyed...)
-
-	total := len(all)
-	omitted := 0
-
-	if b.cfg.MaxFragments > 0 && total > b.cfg.MaxFragments {
-		kept := b.cfg.MaxFragments - 1
-		if kept < 0 {
-			kept = 0
-		}
-		omitted = total - kept
-		all = all[:kept]
-	}
-
-	if b.cfg.MaxBytesPerFlush > 0 {
-		used := 0
-		for i, s := range all {
-			if used+len(s) > b.cfg.MaxBytesPerFlush {
-				omitted += len(all) - i
-				all = all[:i]
-				break
-			}
-			used += len(s)
-		}
-	}
-
-	if omitted > 0 {
-		all = append(all, fmt.Sprintf("[%d fragment(s) omitted]", omitted))
-	}
-	return all
 }
 
 // truncate cuts s to maxBytes with a visible "…(truncated)" suffix.
@@ -412,19 +348,4 @@ func truncate(s string, maxBytes int) string {
 		cut = 0
 	}
 	return s[:cut] + suffix
-}
-
-func (pk *perKey) isEmpty() bool {
-	return len(pk.keyed) == 0 && len(pk.unkeyed) == 0
-}
-
-func (pk *perKey) reset() {
-	pk.keyed = make(map[string]string)
-	pk.keyOrder = nil
-	pk.unkeyed = nil
-	pk.firstPushAt = time.Time{}
-	if pk.timer != nil {
-		pk.timer.Stop()
-		pk.timer = nil
-	}
 }
