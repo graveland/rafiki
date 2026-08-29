@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -167,5 +170,144 @@ func TestStripStaleWorkspace(t *testing.T) {
 	}
 	if got["rafiki/executor-state"] != "unbound" {
 		t.Errorf("executor-state = %q, want %q", got["rafiki/executor-state"], "unbound")
+	}
+}
+
+// TestRecoveryReplaysUnconfirmedMessages is design §8's test #1 in unit form:
+// a message written to a child that died before consuming it must be delivered
+// again, not silently retired.
+func TestRecoveryReplaysUnconfirmedMessages(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+	rec, _ := st.Accept(ctx, inbox.Inbound{
+		ChildID: "c_1", Mode: inbox.ModePrompt, Source: "subagents",
+		Key: "c_2", Text: "agent c_2 settled",
+	})
+	if err := st.MarkSent(ctx, []string{rec.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	var delivered []inbox.Batch
+	c := newTestController(t)
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{
+		Store: st,
+		Deliver: func(_ context.Context, b inbox.Batch) (bool, error) {
+			delivered = append(delivered, b)
+			return false, nil
+		},
+	})
+
+	c.replayInbox(ctx, "c_1")
+
+	if len(delivered) != 1 {
+		t.Fatalf("want the settle redelivered after restart, got %d batches", len(delivered))
+	}
+	if delivered[0].Source != "subagents" || delivered[0].Frags[0] != "agent c_2 settled" {
+		t.Errorf("replayed batch = %+v", delivered[0])
+	}
+}
+
+// TestReplayInboxIsScopedToOneChild is the multi-daemon trap in unit form.
+// Child rows are shared across every daemon; replaying c_1 must never touch
+// c_2's unconfirmed rows, or a restarting daemon would resurrect and
+// double-deliver messages belonging to a sibling daemon that is still
+// running c_2 fine.
+//
+// Mutation check: make replayInbox reset unscoped (e.g. loop over every
+// known child, or call a bulk ResetSent) and this fails — c_2's row gets
+// redelivered even though c_2 was never passed to replayInbox.
+func TestReplayInboxIsScopedToOneChild(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+
+	rec1, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "for c_1"})
+	if err != nil {
+		t.Fatalf("Accept c_1: %v", err)
+	}
+	rec2, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_2", Mode: inbox.ModePrompt, Text: "for c_2"})
+	if err != nil {
+		t.Fatalf("Accept c_2: %v", err)
+	}
+	if err := st.MarkSent(ctx, []string{rec1.ID, rec2.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	var delivered []inbox.Batch
+	c := newTestController(t)
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{
+		Store: st,
+		Deliver: func(_ context.Context, b inbox.Batch) (bool, error) {
+			delivered = append(delivered, b)
+			return false, nil
+		},
+	})
+
+	c.replayInbox(ctx, "c_1")
+
+	if len(delivered) != 1 || delivered[0].ChildID != "c_1" {
+		t.Fatalf("want only c_1 redelivered, got %+v", delivered)
+	}
+
+	// c_2's row must still be 'sent' (not reset to pending, not delivered):
+	// Pending only returns rows in StatePending, so a leaked scope would show
+	// up here as c_2's row becoming visible/redelivered.
+	pendingC2, err := st.Pending(ctx, "c_2")
+	if err != nil {
+		t.Fatalf("Pending c_2: %v", err)
+	}
+	if len(pendingC2) != 0 {
+		t.Fatalf("c_2's row was reset to pending by a replay scoped to c_1: %+v", pendingC2)
+	}
+}
+
+// TestRecoveryDropsInboxWhenChildStaysExited proves recoverOne wires
+// planStayExited to dropInboxForForgotten. A child that will not be resumed
+// has no turn left to inject into and will never get one, so its queue must
+// be terminated and recorded on the durable event log — not left pending
+// forever, which is what "wait forever for news that already happened"
+// looks like for the coordinator on the OTHER end of one of these rows.
+func TestRecoveryDropsInboxWhenChildStaysExited(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "orphaned"}); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	c := newTestController(t)
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
+
+	events, cancel := c.native.Subscribe("c_1")
+	defer cancel()
+
+	rec := childstore.ChildRecord{
+		ChildID: "c_1",
+		Kind:    protocol.KindFundi,
+		Status:  "exited",
+		// LastStatus "exited" -> shouldAutoResume false -> planStayExited.
+		LastStatus: "exited",
+	}
+	c.recoverOne(ctx, rec)
+
+	rows, err := st.Pending(ctx, "c_1")
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("a child staying exited must have its queue dropped, not left pending: %d rows survived", len(rows))
+	}
+	// Dropped rows are terminal, which is what lets the retention sweep ever
+	// reach them.
+	if n, err := st.Sweep(ctx, time.Now().Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("swept %d rows (err=%v); want 1 terminal (dropped) row", n, err)
+	}
+
+	select {
+	case ev := <-events:
+		errEv := ev.GetError()
+		if errEv == nil || errEv.Code != "inbox_dropped" {
+			t.Fatalf("want an inbox_dropped error event, got %+v", ev)
+		}
+	default:
+		t.Fatal("want an inbox_dropped event published for the forgotten child's dropped queue")
 	}
 }

@@ -472,6 +472,32 @@ func (c *Controller) dropInboxForForgotten(childID, reason string) {
 	})
 }
 
+// replayInbox returns childID's unconfirmed rows to pending and delivers
+// everything queued for it.
+//
+// Called once per child THIS DAEMON RESUMED, never as a sweep over the table.
+// Child rows are shared across daemons, so a global reset would resurrect
+// another live daemon's in-flight messages and deliver every one of them
+// twice.
+func (c *Controller) replayInbox(ctx context.Context, childID string) {
+	if c.inbox == nil {
+		return
+	}
+	n, err := c.inbox.Reset(ctx, childID)
+	if err != nil {
+		slog.Warn("inbox: replay reset failed", "childId", childID, "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("inbox: replaying messages the previous daemon never confirmed",
+			"childId", childID, "count", n)
+	}
+	if err := c.inbox.DeliverAll(ctx, childID); err != nil {
+		slog.Warn("inbox: replay delivery failed; messages stay queued",
+			"childId", childID, "error", err)
+	}
+}
+
 // sweepInbox deletes terminal rows older than inboxRetention. Called from the
 // existing 5-minute sweeper tick, so it needs no timer of its own.
 func (c *Controller) sweepInbox() {
