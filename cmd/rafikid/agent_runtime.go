@@ -315,6 +315,10 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		}
 		c.publishEvent(childID, ev)
 	})
+	// Retire the inbox rows behind each frame this child takes into a turn.
+	// childID is captured here for the same reason NativeSink captures it: it
+	// is the daemon-stamped id, never something the model can influence.
+	ro.OnConsumed = func(frameIDs []string) { c.consumeFrames(frameIDs) }
 	return ro, nil
 }
 
