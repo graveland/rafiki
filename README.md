@@ -220,6 +220,22 @@ one and the child spawns, attaches, and then never answers.
 caller's shell via `rafiki create --forward-env`, on by default. A missing key
 fails fast at spawn rather than on the first turn.
 
+## The agent inbox
+
+The daemon runs two durable stores for the same underlying traffic, and they
+give opposite guarantees on purpose. `conversations.event_log` is
+**at-least-once-to-a-cursor**, fanned out to every subscriber — any number of
+attached clients can replay a child's history from an ordinal. `conversations.agent_inbox`
+is **consume-once-into-a-turn** for exactly one consumer: the agent itself.
+Every message destined for an agent — a human's prompt, a coordinator's
+prompt, an abort, and the coalescing fragments the daemon generates from
+subagent lifecycle events — is persisted before it is acknowledged, and
+retired only when the agent confirms it entered a turn. A daemon that
+restarts between accepting a message and delivering it replays the message
+rather than losing it. One table serving both jobs would give neither
+guarantee: a fan-out log cannot be safely consumed-once, and a consume-once
+queue cannot be safely replayed by a second reader.
+
 ## Binaries
 
 The usual daemon/client split, as with `dockerd`/`docker`:
