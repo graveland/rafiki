@@ -295,3 +295,56 @@ func (c *Controller) deliverOrphans(childID string, orphans []inbox.Inbound) {
 		}
 	}
 }
+
+// isClaudeAbortTarget reports whether an abort aimed at childID is the claude
+// interrupt+resume cycle rather than a message.
+//
+// claude -p has no in-band abort frame: the only way to stop it is to signal
+// the process and resume the session. That is a SIGNAL plus a lifecycle
+// operation, not something with a place in a queue — which is why every entry
+// point must recognise it BEFORE anything is persisted. One predicate, so the
+// framed path and the Connect path cannot come to different conclusions.
+func (c *Controller) isClaudeAbortTarget(childID string) bool {
+	snap, ok := c.st.Get(childID)
+	return ok && snap.Kind == protocol.KindClaude
+}
+
+// connectAccepter is the inbox seam the Connect face holds.
+//
+// It is NOT the bare queue. Controller.Send classifies before it persists, and
+// a Connect Send that went straight to Queue.Accept skipped that: a claude
+// abort became a row, and a crash or a failed delivery between Accept and
+// delivery would leave it PENDING for the idle drain to replay — delivering a
+// stored cancellation as SIGINT+resume into an unrelated later turn.
+//
+// It also keeps handleClaudeAbort out of Queue.deliver, which holds the
+// per-child lock while it runs. handleClaudeAbort signals, polls for the exit,
+// then respawns; the exit path takes that same per-child lock to reset the
+// child's unconfirmed rows, from monitorChild's goroutine. Keeping claude
+// aborts out of the queue makes that mutual wait unreachable by construction
+// rather than survivable by timeout.
+//
+// The Controller is the right place for this: it is what knows child kinds.
+// connectapi sees only inbox.Accepter and still cannot deliver or ack.
+type connectAccepter struct{ c *Controller }
+
+// Accept classifies, then delegates.
+//
+// A claude abort returns an EMPTY message id. SendResponse.message_id names a
+// durable row the caller may quote back, and there is no row: the abort
+// happened synchronously and completely, and there is nothing left to track.
+// Minting an id here would hand the caller a handle that resolves to nothing
+// in every store, which is worse than saying nothing.
+func (a connectAccepter) Accept(ctx context.Context, in inbox.Inbound) (string, error) {
+	if in.Mode == inbox.ModeAbort && a.c.isClaudeAbortTarget(in.ChildID) {
+		return "", a.c.handleClaudeAbort(in.ChildID)
+	}
+	// acceptAndDeliver, not a bare Accept: the framed path gives a submitter
+	// persist-then-deliver, and a Connect submitter whose prompt only got
+	// persisted would wait for the child's next idle transition to see it —
+	// which for an already-idle child may never come.
+	return a.c.acceptAndDeliver(ctx, in)
+}
+
+// connectInbox returns the accepter to hand to connectapi.Server.SetInbox.
+func (c *Controller) connectInbox() inbox.Accepter { return connectAccepter{c: c} }

@@ -6,13 +6,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/control"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -379,4 +385,118 @@ func waitForChildFrame(t *testing.T, ctrl *Controller, childID, frameType string
 	}
 	t.Fatalf("no %s frame reached the child; it saw %v", frameType, seen)
 	return childFrame{}
+}
+
+// fakeClaudeScript writes a claude stand-in that announces a session and then
+// blocks on stdin. It does NOT trap SIGINT, so the interrupt actually kills it,
+// and it reports "got-<arg>" when --resume threaded a session id through —
+// which is what makes "the interrupt path ran" observable rather than assumed.
+func fakeClaudeScript(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fakeclaude.sh")
+	body := "#!/bin/bash\n" +
+		"SID=fresh\n" +
+		"for a in \"$@\"; do if [ \"$prev\" = \"--resume\" ]; then SID=\"got-$a\"; fi; prev=\"$a\"; done\n" +
+		"printf '%s\\n' \"{\\\"type\\\":\\\"system\\\",\\\"subtype\\\":\\\"init\\\",\\\"session_id\\\":\\\"$SID\\\",\\\"model\\\":\\\"claude-opus-4-8\\\"}\"\n" +
+		"while IFS= read -r line; do :; done\n" +
+		"while true; do sleep 0.05; done\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	return script
+}
+
+// TestConnectAbortToAClaudeChildIsNeverPersisted closes the hole the durable
+// inbox opened in the Connect face: Server.Send goes straight to the Accepter,
+// so an accepter that is the bare queue skips Controller.Send's classifier
+// entirely and a claude abort becomes a ROW. A crash or a failed delivery
+// between Accept and delivery would leave that row pending, and the idle drain
+// would later deliver a stored cancellation as SIGINT+resume into an unrelated
+// turn — the exact hazard "classify before persisting" exists to prevent.
+//
+// Mutation check: swap ctrl.connectInbox() for ctrl.inbox below and this test
+// fails on the row count.
+func TestConnectAbortToAClaudeChildIsNeverPersisted(t *testing.T) {
+	ctrl, childID := newClaudeTestChild(t, fakeClaudeScript(t))
+	rec := &acceptRecorder{Store: inbox.NewMemory()}
+	ctrl.inbox = ctrl.newInboxQueue(rec)
+
+	before, ok := ctrl.cm.Get(childID)
+	if !ok {
+		t.Fatalf("child %s is not live", childID)
+	}
+	pidBefore := before.PID()
+
+	srv := connectapi.NewServer(nil)
+	srv.SetInbox(ctrl.connectInbox())
+
+	resp, err := srv.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: childID,
+		Mode:    rafikiv1.SendMode_SEND_MODE_ABORT,
+	}))
+	if err != nil {
+		t.Fatalf("Send(ABORT): %v", err)
+	}
+	if got := rec.accepted(); len(got) != 0 {
+		t.Fatalf("a claude abort must never become a row; store holds %+v", got)
+	}
+	// No row means no id to quote back. An invented one would resolve to
+	// nothing in every store.
+	if id := resp.Msg.GetMessageId(); id != "" {
+		t.Errorf("message_id = %q; want empty — there is no row to name", id)
+	}
+
+	// And it must still abort: the interrupt path replaces the process under
+	// the same child id.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if ch, ok := ctrl.cm.Get(childID); ok && ch.PID() != pidBefore && ch.Status() == protocol.StatusIdle {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the abort did not reach the interrupt path: no resumed process under the same child id")
+}
+
+// TestConnectAbortToAFundiChildStillQueues pins the other half: the diversion
+// is scoped to the claude kind. A fundi child speaks abort natively, so its
+// abort is an ordinary durable message and must be persisted and delivered.
+//
+// The child's KIND is what the classifier reads, so the fixture sets it
+// directly on the store snapshot rather than paying for a real fundi spawn
+// (which re-execs rafikid and needs a model); the live process underneath only
+// has to accept a frame.
+func TestConnectAbortToAFundiChildStillQueues(t *testing.T) {
+	ctrl := newTestController(t)
+	childID := spawnTestChild(t, ctrl, nil)
+	if err := ctrl.st.Update(childID, func(s *childstore.Session) { s.Kind = protocol.KindFundi }); err != nil {
+		t.Fatalf("relabel kind: %v", err)
+	}
+	rec := &acceptRecorder{Store: inbox.NewMemory()}
+	ctrl.inbox = ctrl.newInboxQueue(rec)
+
+	srv := connectapi.NewServer(nil)
+	srv.SetInbox(ctrl.connectInbox())
+
+	resp, err := srv.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: childID,
+		Mode:    rafikiv1.SendMode_SEND_MODE_ABORT,
+	}))
+	if err != nil {
+		t.Fatalf("Send(ABORT): %v", err)
+	}
+	rows := rec.accepted()
+	if len(rows) != 1 || rows[0].Mode != inbox.ModeAbort {
+		t.Fatalf("a fundi abort must be durably accepted; store holds %+v", rows)
+	}
+	if resp.Msg.GetMessageId() != rows[0].ID {
+		t.Errorf("message_id = %q; want the row id %q", resp.Msg.GetMessageId(), rows[0].ID)
+	}
+	// And it was DELIVERED, not merely stored: an abort awaits no ack, so a
+	// successful write retires the row on the spot. A row still pending would
+	// mean Accept persisted and nothing ever wrote it to the child.
+	if pending, err := rec.Pending(context.Background(), childID); err != nil || len(pending) != 0 {
+		t.Fatalf("row still pending after Send (err=%v): %+v — it was queued but never delivered", err, pending)
+	}
 }

@@ -2061,10 +2061,8 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 	if _, intercepted := inspect(frame); intercepted {
 		return c.sendFrame(childID, frame)
 	}
-	if isAbortFrame(frame) {
-		if snap, ok := c.st.Get(childID); ok && snap.Kind == protocol.KindClaude {
-			return c.sendFrame(childID, frame)
-		}
+	if isAbortFrame(frame) && c.isClaudeAbortTarget(childID) {
+		return c.sendFrame(childID, frame)
 	}
 	in, ok := inboundFromFrame(childID, frame)
 	if !ok {
@@ -2090,10 +2088,8 @@ func (c *Controller) sendFrame(childID string, frame json.RawMessage) error {
 	// interrupted by signalling the process. Intercept abort for claude
 	// children and run the interrupt+resume cycle; pi children fall through and
 	// forward abort natively to --mode rpc.
-	if isAbortFrame(frame) {
-		if snap, ok := c.st.Get(childID); ok && snap.Kind == protocol.KindClaude {
-			return c.handleClaudeAbort(childID)
-		}
+	if isAbortFrame(frame) && c.isClaudeAbortTarget(childID) {
+		return c.handleClaudeAbort(childID)
 	}
 
 	if err := c.validateSendTarget(childID); err != nil {
