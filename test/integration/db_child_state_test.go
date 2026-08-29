@@ -21,8 +21,11 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// bootDaemonDB is bootDaemon with a RAFIKI_DB and RAFIKI_DAEMON_ID.
-func bootDaemonDB(t *testing.T, daemonID string) *daemon {
+// bootDaemonDB is bootDaemon with a RAFIKI_DB and RAFIKI_DAEMON_ID. extraEnv
+// entries are appended last, so ("KEY=value") after os.Environ() overrides
+// whatever the ambient shell set for KEY (exec.Cmd.Env: "If Env contains
+// duplicate environment keys, only the last value ... is used").
+func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 	t.Helper()
 
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
@@ -67,6 +70,7 @@ func bootDaemonDB(t *testing.T, daemonID string) *daemon {
 		"RAFIKI_DB="+dsn,
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(homeDir)
@@ -480,4 +484,180 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 		}
 	}
 	t.Fatal("child not found after crash recovery")
+}
+
+// ─── recovery replay (design §8 test #1) ───────────────────────────────────
+
+// TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash pins design §8's
+// test #1 at the level it was written for: "kill the daemon between a
+// worker's settle and the coordinator's next turn; assert the coordinator
+// receives the settle after restart." This is the headline bug the whole
+// durable-inbox phase exists to close, and unit tests alone cannot pin the
+// wiring: a unit test that calls Controller.replayInbox directly proves the
+// function works but not that recoverOne ever calls it — and removing that
+// call site left the unit suite green (see task-10-report.md).
+//
+// It reuses TestDBChildState_ResumesAfterDaemonCrash's fixture (a real,
+// in-process fundi child) rather than hand-inserting a conversations.child
+// row the way TestDBChildState_ChildRowVisibleAfterRestart does: a
+// hand-inserted row has no Model/Cwd/provider config behind it, so
+// resolveSpawnPlan fails and the child resumes as "exited" — which proves
+// nothing about replay. A real spawn is what gives recoverOne's
+// resumeWithAutoRecovery a snapshot it can actually resume, which is the
+// precondition replayInbox's call site requires (it only runs after that
+// resume succeeds).
+//
+// The agent_inbox row itself is seeded with a direct SQL INSERT in state
+// 'sent' — the state a message written to a child but never confirmed is
+// left in (see the column's own comment in migration 0024). Driving a real
+// coordinator/worker settle through the wire to produce that row would mean
+// standing up a second agent for no added coverage of the code path under
+// test.
+func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+
+	daemonID := "daemon-inbox-replay"
+
+	// Both boots get their real-provider credentials blanked, belt-and-
+	// suspenders. NewClient never fails on a missing key — Provider.APIKey's
+	// own doc comment says an unset key surfaces as an upstream 401 rather
+	// than a startup error — so this cannot break the resume this test
+	// depends on. What it buys: a resumed fundi engine that actually reaches
+	// a turn calls Engine.consume synchronously, BEFORE it ever tries to
+	// reach a model (see the state-polling comment below), so this test's
+	// assertion never needs, or waits on, a real provider response — but the
+	// engine's own subsequent (harmless, 401) attempt to reach one must not
+	// become a REAL one just because the developer running this suite
+	// sourced a real .env. Later entries win for a duplicate exec.Cmd.Env
+	// key, so appending these after os.Environ() overrides it.
+	noRealCreds := []string{"ANTHROPIC_API_KEY=", "OPENROUTER_API_KEY="}
+
+	{
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		if err := store.Migrate(context.Background(), pool); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		pool.Close()
+	}
+
+	d1 := bootDaemonDB(t, daemonID, noRealCreds...)
+	childID := d1.spawnChild(t)
+	sendTurn(t, d1, childID)
+
+	pool := openPool(t, dsn)
+	defer pool.Close()
+
+	// Seed one durable inbox row in the state a message written to a child
+	// but never confirmed is left in.
+	rowID := fmt.Sprintf("it-inbox-%s-%d", childID, time.Now().UnixNano())
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO conversations.agent_inbox
+		    (id, child_id, mode, source, coalesce_key, body, state)
+		VALUES ($1, $2, 'prompt', '', '', $3, 'sent')`,
+		rowID, childID, "integration test: replay probe",
+	); err != nil {
+		t.Fatalf("seed agent_inbox row: %v", err)
+	}
+	// The shared test database makes this run's residue a load-bearing input
+	// to the next one — clean up the row this test seeded regardless of
+	// outcome. dropDaemonRows (armed by bootDaemonDB) only ever reaches
+	// conversations.child; agent_inbox carries no daemon_id and needs its
+	// own cleanup.
+	t.Cleanup(func() {
+		p, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Logf("drop inbox row %s: pool: %v", rowID, err)
+			return
+		}
+		defer p.Close()
+		if _, err := p.Exec(context.Background(),
+			`DELETE FROM conversations.agent_inbox WHERE id = $1`, rowID); err != nil {
+			t.Logf("drop inbox row %s: %v", rowID, err)
+		}
+	})
+
+	// SIGKILL — handleChildExit never runs, so nothing resets or drops the
+	// row before the daemon dies. This is the crash the whole design exists
+	// for.
+	_ = d1.proc.Process.Signal(syscall.SIGKILL)
+	_ = d1.proc.Wait()
+
+	var state string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state); err != nil {
+		t.Fatalf("read seeded row state before restart: %v", err)
+	}
+	if state != "sent" {
+		t.Fatalf("seeded row state = %q before restart, want 'sent' — the crash must not have touched it", state)
+	}
+
+	// Restart with the same daemon id and home dir — the recovery path under
+	// test.
+	cmd := exec.Command(binaryPath)
+	cmd.Env = append(os.Environ(),
+		"HOME="+d1.homeDir,
+		"XDG_RUNTIME_DIR="+d1.homeDir,
+		"XDG_STATE_HOME="+d1.homeDir,
+		"XDG_DATA_HOME="+d1.homeDir,
+		"RAFIKI_DB="+dsn,
+		"RAFIKI_DAEMON_ID="+daemonID,
+	)
+	cmd.Env = append(cmd.Env, noRealCreds...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start second daemon: %v", err)
+	}
+	d2 := &daemon{socketPath: d1.socketPath, proc: cmd, homeDir: d1.homeDir}
+	t.Cleanup(func() {
+		_ = d2.proc.Process.Signal(syscall.SIGTERM)
+		_ = d2.proc.Wait()
+		os.RemoveAll(d2.homeDir)
+	})
+
+	dl := time.Now().Add(10 * time.Second)
+	for time.Now().Before(dl) {
+		conn, err := net.Dial("unix", d2.socketPath)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 'consumed' is the strongest assertion available and it is not flaky:
+	// Engine.consume runs synchronously, on the turn worker, immediately
+	// BEFORE the model is ever called (pkg/fundi/engine.go's own comment on
+	// the ack point), so reaching 'consumed' does not require — and is not
+	// racing — an actual model response. It only requires the resumed
+	// engine's worker to dequeue the redelivered prompt, which follows
+	// directly from recoverOne's resume goroutine calling replayInbox.
+	//
+	// 'no longer sent' was considered and rejected as the weaker option: a
+	// fundi delivery re-marks a row 'sent' as soon as it hands the frame to
+	// the engine, before the engine's own ack lands, so a poll landing in
+	// that (short but real) window would see 'sent' again even after a
+	// fully successful replay. That makes '!= sent' racy in the FAILING
+	// direction — a slow poll could read a false negative on a working
+	// replay — without being any less racy than 'consumed' in the passing
+	// direction, so it buys nothing.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if err := pool.QueryRow(context.Background(),
+			`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state); err != nil {
+			t.Fatalf("poll seeded row state: %v", err)
+		}
+		if state == "consumed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("seeded row state = %q after restart, want 'consumed' — "+
+				"the recovery replay never redelivered the row into a turn", state)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
