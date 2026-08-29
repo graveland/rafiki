@@ -55,7 +55,7 @@ type Server struct {
 	lineageLn atomic.Pointer[eventlog.Lineage]
 	evlog     atomic.Pointer[eventlog.Store]
 	resolver  atomic.Pointer[ConversationResolver]
-	inbox     atomic.Pointer[inbox.Inbox]
+	inbox     atomic.Pointer[inbox.Accepter]
 	children  atomic.Pointer[ChildLister]
 	lifecycle atomic.Pointer[ChildLifecycle]
 }
@@ -105,7 +105,11 @@ func (s *Server) SetChildResolver(r ConversationResolver) { s.resolver.Store(&r)
 
 // SetInbox attaches the inbound-message sink. Until it is set, Send fails
 // closed rather than reporting success for a message that reached nothing.
-func (s *Server) SetInbox(in inbox.Inbox) { s.inbox.Store(&in) }
+//
+// The parameter is inbox.Accepter, not the whole queue: this face may submit
+// and must not be able to deliver, mark or reset. That narrowing is the only
+// thing stopping a Connect handler from reaching a child directly.
+func (s *Server) SetInbox(in inbox.Accepter) { s.inbox.Store(&in) }
 
 // resolveConversation turns a request's child_id into the conversation id
 // store.Messages.Load needs. Centralized here because GetHistory and

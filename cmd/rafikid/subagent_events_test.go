@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
+	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
 )
@@ -24,10 +25,16 @@ type capturedBatch struct {
 	fragments []string
 }
 
-func (c *capturedFlush) fn(childID, source string, fragments []string, _ eventbuf.Delivery) {
+// fn stands in for Controller.flushInboxSource. The fixture attaches no
+// Accepter, so every push arrives as an orphan; running them through
+// inbox.Coalesce is exactly what deliverOrphans does, which is what makes
+// these assertions about the fragments the child would actually see.
+func (c *capturedFlush) fn(childID, source string, orphans []inbox.Inbound) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.got = append(c.got, capturedBatch{childID, source, append([]string(nil), fragments...)})
+	for _, b := range inbox.Coalesce(orphans, inbox.BatchConfig{}) {
+		c.got = append(c.got, capturedBatch{childID, source, b.Frags})
+	}
 }
 
 func (c *capturedFlush) batches() []capturedBatch {

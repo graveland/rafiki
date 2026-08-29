@@ -33,6 +33,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -144,6 +145,24 @@ type Controller struct {
 
 	// evlog is the durable event log.
 	evlog eventlog.Store
+
+	// inbox is the durable queue every turn-bound message rides: a prompt, a
+	// steer or an abort is persisted before it is written to a child, so a
+	// daemon that dies between accepting and delivering replays it on restart
+	// instead of stranding whoever was waiting for it. Nil only in tests that
+	// build a Controller by hand and never send.
+	inbox *inbox.Queue
+
+	// inboxBatch caps one delivered batch. Held here as well as inside the
+	// queue because the orphan path (eventbuf fragments whose durable write
+	// failed) coalesces with the same rules and must not drift from them.
+	inboxBatch inbox.BatchConfig
+
+	// sentFrames maps a written frame id to the rows it accounts for, until
+	// the child confirms it took them into a turn. In memory on purpose: see
+	// sentFrame's doc comment.
+	sentMu     sync.Mutex
+	sentFrames map[string]sentFrame
 
 	// coster resolves what an agent subtree has spent. An interface rather
 	// than *insights.Insights so the admission logic is testable without a
@@ -267,7 +286,11 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		heldLeases:  make(map[string]store.Lease),
 		native:      nativebus.New(),
 		evlog:       eventLogStore(pool),
+		inboxBatch:  inboxBatchConfig(),
+		sentFrames:  make(map[string]sentFrame),
 	}
+	// After the literal: the queue's Validate and Deliver are methods on c.
+	c.inbox = c.newInboxQueue(inboxStore(pool))
 
 	if id, source, err := paths.DaemonID(); err != nil {
 		// Not fatal: a daemon with no writable data dir and no env var can
@@ -2015,7 +2038,48 @@ func (c *Controller) emitChildLabeled(childID string, labels map[string]string) 
 	}
 }
 
+// Send is the control.Controller seam and the one place a frame is classified.
+//
+// A prompt, a steer or an abort is work for a turn: it is durably accepted
+// before it is written, so a daemon that dies between accepting and delivering
+// replays it on restart instead of stranding whoever was waiting for it. Every
+// other frame — get_state, extension_ui_response, new_session — is a control
+// frame with no turn semantics and goes straight down.
+//
+// Interception runs FIRST: a claude abort is a signal plus a resume cycle
+// rather than a message, and persisting one would replay a cancellation into
+// an unrelated later turn.
+//
+// "Accepted" now means durably queued, not written to a pipe. A child whose
+// command channel is momentarily full no longer answers ErrBackpressure to the
+// caller: the row is persisted, the delivery failure is logged, and the idle
+// drain retries it. That is strictly better than discarding the message.
 func (c *Controller) Send(childID string, frame json.RawMessage) error {
+	if c.inbox == nil {
+		return c.sendFrame(childID, frame)
+	}
+	if _, intercepted := inspect(frame); intercepted {
+		return c.sendFrame(childID, frame)
+	}
+	if isAbortFrame(frame) {
+		if snap, ok := c.st.Get(childID); ok && snap.Kind == protocol.KindClaude {
+			return c.sendFrame(childID, frame)
+		}
+	}
+	in, ok := inboundFromFrame(childID, frame)
+	if !ok {
+		return c.sendFrame(childID, frame)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := c.acceptAndDeliver(ctx, in)
+	return err
+}
+
+// sendFrame is the raw write path to a child. Everything that reaches a child
+// goes through here, INCLUDING inbox delivery — which is why it must never
+// call Send, on pain of infinite recursion.
+func (c *Controller) sendFrame(childID string, frame json.RawMessage) error {
 	// new_session and switch_session are handled via kill+respawn rather than
 	// forwarded to pi (spec §5.1).
 	if decision, ok := inspect(frame); ok {
@@ -2032,15 +2096,8 @@ func (c *Controller) Send(childID string, frame json.RawMessage) error {
 		}
 	}
 
-	snap, ok := c.st.Get(childID)
-	if !ok {
-		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
-	}
-	if snap.Status == protocol.StatusShuttingDown {
-		return &control.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
-	}
-	if snap.Status == protocol.StatusExited {
-		return &control.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+	if err := c.validateSendTarget(childID); err != nil {
+		return err
 	}
 
 	ch, ok := c.cm.Get(childID)

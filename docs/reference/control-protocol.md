@@ -149,7 +149,7 @@ Note that the durable event ordinal is **not** `conversation_message.ordinal`: i
 |---|---|---|
 | `GetHistory` | unary | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming | Follows events matching an `EventSubject` predicate (child, subtree with max_depth, or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
-| `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam |
+| `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id |
 | `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal` per child) |
 | `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal`) |
 | `Spawn` | unary | Create a child with budget, executor, and label options |
@@ -794,9 +794,37 @@ has dropped events earlier than what was returned (i.e., the caller's
 
 ### 6.12 `ctrl_send`
 
-Forward a pi-RPC frame to a child's stdin. The controller does not
-introspect or modify the `frame` field; it is re-serialized to one JSONL
-line and written verbatim.
+Forward a pi-RPC frame to a child's stdin.
+
+The controller **classifies** the frame. A `prompt`, `steer` or `abort` is
+work for a turn: it is written to the durable agent inbox
+(`conversations.agent_inbox`) BEFORE it reaches the child, so a daemon that
+dies between accepting and delivering replays it on restart instead of
+stranding whoever was waiting for it. Every other frame — `get_state`,
+`extension_ui_response`, `new_session`, `switch_session` — has no turn
+semantics and is re-serialized to one JSONL line and written verbatim, as
+before.
+
+Three consequences for a turn-bound frame:
+
+- The frame the child receives is **rebuilt** from the queued row, not
+  forwarded byte for byte. Only `type` and `message` survive; any `id` the
+  caller put inside the frame is replaced by the daemon's inbox frame id,
+  which is what a fundi child echoes back to confirm the message entered a
+  turn. Correlating a `prompt`/`steer` by an `id` chosen client-side no
+  longer works — subscribe to the child's events instead.
+- Success means **durably queued**, not written to the child's pipe. A child
+  whose command channel is momentarily full no longer answers `backpressure`
+  for these frames: the row is persisted and the child's next idle transition
+  drains it.
+- Queued fragments for the same source may be **coalesced** into one frame
+  (last-write-wins per key, caps from `RAFIKI_EVENTBUF_MAX_FRAGMENTS` and
+  `RAFIKI_EVENTBUF_MAX_BYTES_PER_FLUSH`), which is how N settling workers cost
+  one model turn instead of N.
+
+A `ctrl_send` to a child that does not exist, is shutting down, or has exited
+is refused before anything is persisted: "durably accepted" is a promise, and
+making it for a dead child would leave a row nobody will ever consume.
 
 ```jsonc
 {
@@ -819,10 +847,13 @@ Response acknowledges the *forward*, not pi's response to the frame:
 Pi's response (if any — for synchronous commands like `set_model`) and
 subsequent streaming events flow to this connection only if it is
 subscribed to the child. Clients that want to confirm pi acted on a
-command should correlate using pi's own `id` field inside the `frame`
-and watch for the matching `response` event.
+control command should correlate using pi's own `id` field inside the
+`frame` and watch for the matching `response` event. That does not apply
+to `prompt`/`steer`, whose `id` the daemon owns (above).
 
 Errors: `child_not_found`, `child_exited`, `child_in_grace`, `backpressure`.
+`backpressure` is reachable only for control frames now; a turn-bound frame
+is queued instead.
 
 ### 6.13 `ctrl_forget`
 
