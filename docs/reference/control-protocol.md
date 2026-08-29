@@ -840,6 +840,25 @@ A `ctrl_send` to a child that does not exist, is shutting down, or has exited
 is refused before anything is persisted: "durably accepted" is a promise, and
 making it for a dead child would leave a row nobody will ever consume.
 
+**Row lifecycle.** A row is dropped only when there will never be a turn to
+inject into, which makes the four transitions asymmetric:
+
+- **Idle.** The child's transition into `idle` drains everything still pending
+  for it. This is the retry path for an immediate delivery that failed. It
+  fires on that transition only — queued fragments are pending rows too, and a
+  drain on any other transition would deliver them the moment the child started
+  working, bypassing the event buffer's debounce and busy gate.
+- **Exit.** A child's exit **resets** its unconfirmed rows to pending rather
+  than dropping them. An exited child can be resumed, and its queue is exactly
+  what a resume should run.
+- **Forget.** `ctrl_forget` and `ctrl_forget_all_exited` **drop** the child's
+  remaining rows with a reason, and append an `Error` event with code
+  `inbox_dropped` to that child's durable event log, so an operator asking what
+  happened to a message they sent gets an answer with an ordinal rather than a
+  log line that has already rotated away.
+- **Retention.** Consumed and dropped rows are deleted 24 hours after they were
+  accepted, on the daemon's existing five-minute sweep.
+
 ```jsonc
 {
   "type":    "ctrl_send",

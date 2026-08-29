@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/control"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/inboxdb"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -145,7 +146,34 @@ func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error)
 // a protocol with the seam. A claude child's rows are consumed on the write,
 // which is exactly today's guarantee and no worse — but it is also why a
 // claude child's queue does not survive a restart.
-func (c *Controller) deliverInbox(_ context.Context, b inbox.Batch) (bool, error) {
+func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, error) {
+	// Honour the caller's deadline. Every deadline on this path is generous
+	// and sendFrame itself never blocks, so this only ever fires part-way
+	// through a multi-batch delivery whose store round trips already ran out
+	// of time -- where writing one more frame is exactly the wrong move.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	// A stored abort aimed at a claude child is retired here rather than
+	// written. sendFrame routes such a frame into handleClaudeAbort, which
+	// SIGINTs, polls for the exit and respawns -- all while Queue.deliver
+	// holds this child's lock, which handleChildExit needs to reset the same
+	// child's unconfirmed rows. The abort would spin out its whole wait for a
+	// cm.Remove that cannot happen until it lets go, then resume a child the
+	// blocked exit path is about to remove from the manager.
+	//
+	// Controller.Send and connectAccepter both classify before persisting, so
+	// no such row is created today. This is the guard on the one point every
+	// delivery funnels through, which is where it survives a third submitter
+	// -- and replaying a stored cancellation into an unrelated later turn was
+	// never wanted regardless of the lock.
+	if b.Mode == inbox.ModeAbort && c.isClaudeAbortTarget(b.ChildID) {
+		slog.Warn("inbox: retiring a stored abort for a claude child rather than replaying an interrupt",
+			"childId", b.ChildID, "rows", len(b.IDs))
+		return false, nil
+	}
+
 	awaitAck := b.Mode != inbox.ModeAbort
 	if snap, ok := c.st.Get(b.ChildID); !ok || snap.Kind != protocol.KindFundi {
 		awaitAck = false
@@ -348,3 +376,116 @@ func (a connectAccepter) Accept(ctx context.Context, in inbox.Inbound) (string, 
 
 // connectInbox returns the accepter to hand to connectapi.Server.SetInbox.
 func (c *Controller) connectInbox() inbox.Accepter { return connectAccepter{c: c} }
+
+// inboxRetention is how long a consumed or dropped row stays readable. Long
+// enough to answer "what did that agent receive this morning", short enough
+// that the table does not become a second conversation store.
+const inboxRetention = 24 * time.Hour
+
+// drainInbox delivers anything still pending for childID. Called on the
+// child's idle transition: it is the retry path for an immediate delivery
+// that failed, and it costs one indexed read when there is nothing to do.
+//
+// Only on the transition INTO idle, never on every status change. eventbuf's
+// fragments are inbox rows, persisted on Push and held pending while the
+// buffer debounces and while the child is mid-turn; a drain on any other
+// transition would deliver them the moment the child started working, which
+// bypasses the debounce and the busy gate together.
+//
+// The queue is a PARAMETER rather than a field read, because this is the one
+// hook that runs detached: `go c.drainInbox(c.inbox, childID)` evaluates the
+// argument on the goroutine that made the decision, so the queue this drain
+// uses is the one that existed when the child went idle.
+func (c *Controller) drainInbox(q *inbox.Queue, childID string) {
+	if q == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := q.DeliverAll(ctx, childID); err != nil {
+		slog.Warn("inbox: idle drain failed", "childId", childID, "error", err)
+	}
+}
+
+// releaseInboxOnExit returns childID's unconfirmed rows to pending.
+//
+// NOT a drop: an exited child can be resumed, and its queue is exactly what a
+// resume should run. Dropping here would silently discard work a `rafiki
+// resume` was about to perform. Scoped to this child — rows are shared across
+// daemons, so an unscoped transition reaches into another daemon's traffic.
+//
+// forgetFrames goes with it, and covers more than the rows this call resets:
+// a frame whose MarkSent failed is recorded in sentFrames and its rows stay
+// pending, so nothing else would ever retire that entry. The child's death is
+// the one moment every one of its entries is known to be dead.
+func (c *Controller) releaseInboxOnExit(childID string) {
+	if c.inbox == nil {
+		return
+	}
+	c.forgetFrames(childID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := c.inbox.Reset(ctx, childID)
+	if err != nil {
+		slog.Warn("inbox: reset on exit failed", "childId", childID, "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("inbox: unconfirmed messages returned to the queue", "childId", childID, "count", n)
+	}
+}
+
+// dropInboxForForgotten terminates childID's queue and records it in the
+// durable event log.
+//
+// Forgetting a child is the one moment there will never be a turn to inject
+// into. It is also the only moment a row can be terminated safely: a row for a
+// forgotten child is never pending-for-a-live-child again and never terminal
+// on its own, so the retention sweep — which deletes terminal rows only —
+// could never reach it, and it would leak permanently.
+//
+// The event log is where a dropped message goes on the record: an operator
+// asking "what happened to the prompt I sent" gets an answer with an ordinal
+// rather than a log line that has already rotated away.
+func (c *Controller) dropInboxForForgotten(childID, reason string) {
+	if c.inbox == nil {
+		return
+	}
+	c.forgetFrames(childID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := c.inbox.Drop(ctx, childID, reason)
+	if err != nil {
+		slog.Warn("inbox: drop failed", "childId", childID, "error", err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	slog.Warn("inbox: dropped undelivered messages", "childId", childID, "count", n, "reason", reason)
+	c.publishEvent(childID, &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+			Code:    "inbox_dropped",
+			Message: fmt.Sprintf("%d undelivered message(s) dropped: %s", n, reason),
+		}},
+	})
+}
+
+// sweepInbox deletes terminal rows older than inboxRetention. Called from the
+// existing 5-minute sweeper tick, so it needs no timer of its own.
+func (c *Controller) sweepInbox() {
+	if c.inbox == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	n, err := c.inbox.Sweep(ctx, time.Now().Add(-inboxRetention))
+	if err != nil {
+		slog.Warn("inbox: sweep failed", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("inbox: swept terminal rows", "count", n)
+	}
+}

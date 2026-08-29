@@ -349,16 +349,26 @@ func (c *Controller) startSweeper(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				c.sweepExpired()
-				// Budget breaches are checked on the same tick as expiry: both are
-				// periodic reconciliations of stored state, and a second ticker would be
-				// a second thing to reason about at shutdown.
-				sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
-				c.sweepBudgets(sweepCtx)
-				cancel()
+				c.sweepTick(ctx)
 			}
 		}
 	}()
+}
+
+// sweepTick is one pass of the periodic reconciliation: children whose grace
+// window has expired, budget breaches, and the inbox's terminal rows.
+//
+// Budget breaches and the inbox sweep ride the expiry tick rather than timers
+// of their own: all three are periodic reconciliations of stored state, and a
+// second ticker would be a second thing to reason about at shutdown. Extracted
+// from startSweeper so what the tick does is testable without waiting five
+// minutes for one.
+func (c *Controller) sweepTick(ctx context.Context) {
+	c.sweepExpired()
+	sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
+	c.sweepBudgets(sweepCtx)
+	cancel()
+	c.sweepInbox()
 }
 
 // Stop waits for background goroutines (currently the sweeper) to exit.
@@ -1914,6 +1924,9 @@ func (c *Controller) Forget(childID string) error {
 	}
 
 	c.st.Delete(childID)
+	// After the store delete, so a message accepted concurrently cannot slip
+	// in behind the drop: validateSendTarget refuses an unknown child.
+	c.dropInboxForForgotten(childID, "child forgotten")
 	if c.children != nil && c.ownsChildRow(snap) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := c.children.Delete(ctx, childID); err != nil {
@@ -1972,6 +1985,10 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 			}
 		}
 		c.st.Delete(s.ChildID)
+		// The other deletion path, and the one that leaks without this: a row
+		// for a child forgotten here is never pending-for-a-live-child again
+		// and never terminal, so the retention sweep can never reach it.
+		c.dropInboxForForgotten(s.ChildID, "child forgotten")
 		if c.children != nil && c.ownsChildRow(s) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := c.children.Delete(ctx, s.ChildID); err != nil {
@@ -2556,11 +2573,19 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	storePrev, ok := c.st.SetStatus(childID, newStatus)
 	// Release any event batches deferred while this child was mid-turn.
 	// This is rafiki's turn-end drain; it is why no busy-poller is needed.
-	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle && c.evbuf != nil {
-		if isWorkingStatus(storePrev) {
-			c.notifySubagentSettled(childID, "settled (idle)")
+	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
+		if c.evbuf != nil {
+			if isWorkingStatus(storePrev) {
+				c.notifySubagentSettled(childID, "settled (idle)")
+			}
+			c.evbuf.DrainIdle(childID)
 		}
-		c.evbuf.DrainIdle(childID)
+		// Retry anything a failed immediate delivery left pending. Outside the
+		// evbuf guard: the inbox is the durable queue whether or not an event
+		// buffer is configured. On its own goroutine, because this runs on
+		// monitorChild's status path and must not be held up by a database
+		// round trip.
+		go c.drainInbox(c.inbox, childID)
 	}
 	now := time.Now()
 	evt := protocol.CtrlChildStatus{
@@ -2771,6 +2796,14 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	if c.evbuf != nil {
 		c.evbuf.Forget(childID)
 	}
+
+	// Return this child's unconfirmed inbox rows to pending. A RESET, not a
+	// drop: the child can be resumed and its queue is exactly what a resume
+	// should run. Before cm.Remove for the same reason as the task sweep
+	// below — cm.Remove is the observable "teardown complete" signal, so a
+	// caller that has seen it must not still find rows marked sent to a
+	// process that no longer exists.
+	c.releaseInboxOnExit(childID)
 
 	c.nudgedMu.Lock()
 	delete(c.nudgedOnce, childID)
