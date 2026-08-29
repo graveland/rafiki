@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
+	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -605,5 +607,54 @@ func TestUnboundChildWithNoCandidatesGetsNilWorkspace(t *testing.T) {
 	if ro.Workspace != nil {
 		t.Fatal("with no live candidate, workspace block must be nil; a block " +
 			"naming the wrong machine is worse than none")
+	}
+}
+
+// TestAgentRuntimeOptionsWiresOnConsumed proves ro.OnConsumed is not merely
+// non-nil but actually reaches Controller.consumeFrames and retires the right
+// rows: without this wiring every delivered message stays 'sent' forever and
+// is redelivered on the next daemon restart.
+//
+// A bare "ro.OnConsumed != nil" check would pass against a closure that does
+// nothing. This seeds a real inbox row, records a sentFrame mapping for it
+// exactly as deliverInbox does, invokes the callback with that frame id, and
+// asserts the row became terminal (no longer pending) and the frame's
+// bookkeeping was forgotten.
+func TestAgentRuntimeOptionsWiresOnConsumed(t *testing.T) {
+	c := newTestController(t)
+	mem := inbox.NewMemory()
+	c.inbox = c.newInboxQueue(mem)
+
+	req := baseRequest()
+	ro, err := c.agentRuntimeOptions(req, "c_1", false, "")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.OnConsumed == nil {
+		t.Fatal("OnConsumed must be wired: without it every delivered message stays 'sent' forever")
+	}
+
+	ctx := context.Background()
+	rec, err := mem.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "hi"})
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := mem.MarkSent(ctx, []string{rec.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+	c.sentMu.Lock()
+	c.sentFrames["F1"] = sentFrame{childID: "c_1", rowIDs: []string{rec.ID}}
+	c.sentMu.Unlock()
+
+	ro.OnConsumed([]string{"F1"})
+
+	if rows, err := mem.Pending(ctx, "c_1"); err != nil || len(rows) != 0 {
+		t.Fatalf("the acked row should be terminal, still pending: %+v (err=%v)", rows, err)
+	}
+	c.sentMu.Lock()
+	_, still := c.sentFrames["F1"]
+	c.sentMu.Unlock()
+	if still {
+		t.Error("an acked frame must be forgotten")
 	}
 }
