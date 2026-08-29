@@ -86,6 +86,15 @@ type EngineConfig struct {
 
 	// NativeSink receives this engine's rafiki-native events. Optional.
 	NativeSink NativeSink
+
+	// OnConsumed reports that inbox frames have entered a turn and may be
+	// retired. Nil is legal: a standalone agent has no inbox behind it.
+	//
+	// It is called SYNCHRONOUSLY, on the turn worker, immediately before the
+	// message runs. On the daemon side that is one UPDATE; running it on a
+	// goroutine would let the turn start before its message is confirmed,
+	// reopening the very window this exists to close.
+	OnConsumed func(ids []string)
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -111,11 +120,14 @@ type Engine struct {
 	// signal.NotifyContext parent) into in-flight turns.
 	baseCtx context.Context
 	onFatal func(error)
+	// onConsumed reports that inbox frames have entered a turn and may be
+	// retired. Nil is legal: a standalone agent has no inbox behind it.
+	onConsumed func(ids []string)
 
 	mu       sync.Mutex
-	pending  []string           // FIFO of queued prompts awaiting execution
+	pending  []queued           // FIFO of queued prompts awaiting execution
 	cancel   context.CancelFunc // non-nil while a turn is running
-	steerBuf []string           // steers accepted during the running turn
+	steerBuf []queued           // steers accepted during the running turn
 	dead     bool               // set by fatal(); the worker is gone, no more turns will run
 
 	// wake carries at most one pending "queue is non-empty" signal. Sends are
@@ -123,6 +135,26 @@ type Engine struct {
 	// worker is guaranteed at least one more pass over the queue.
 	wake chan struct{}
 	wg   sync.WaitGroup // one count per queued-but-unfinished turn
+}
+
+// queued is one entry in the turn queue: the text, and the inbox frame ids it
+// discharges when it enters a turn. ids is a slice rather than a single id
+// because orphaned steers are rejoined into ONE requeued prompt (see runTurn's
+// tail), and every id in that join must be retired when the joined text
+// finally runs.
+type queued struct {
+	ids  []string
+	text string
+}
+
+// idSlice wraps a frame id for a queued entry. An empty id means "no inbox row
+// behind this message" — a standalone agent, or a test — and must produce no
+// ids at all rather than one empty string, so consume has nothing to report.
+func idSlice(id string) []string {
+	if id == "" {
+		return nil
+	}
+	return []string{id}
 }
 
 // toolSetWithConvID wraps an agentloop.ToolSet to inject the conversation ID
@@ -164,13 +196,14 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	tools := toolSetWithConvID{ToolSet: cfg.Tools, convID: conv.ID}
 
 	e := &Engine{
-		conv:    conv,
-		client:  cfg.Client,
-		tools:   tools,
-		fe:      fe,
-		em:      NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
-		baseCtx: baseCtx,
-		onFatal: cfg.OnFatal,
+		conv:       conv,
+		client:     cfg.Client,
+		tools:      tools,
+		fe:         fe,
+		em:         NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
+		baseCtx:    baseCtx,
+		onFatal:    cfg.OnFatal,
+		onConsumed: cfg.OnConsumed,
 		state: StateData{
 			SessionID:   conv.ID,
 			SessionName: cfg.Name,
@@ -239,15 +272,30 @@ func pricerFor(c *llm.Client) Pricer {
 	return cat.Pricing
 }
 
-// HandlePrompt queues text as a turn and returns immediately — the Handler
+// HandlePrompt queues text as a turn with no inbox id behind it.
+func (e *Engine) HandlePrompt(text string) { e.HandlePromptID("", text) }
+
+// HandleSteer buffers text for mid-turn injection with no inbox id behind it.
+func (e *Engine) HandleSteer(text string) { e.HandleSteerID("", text) }
+
+// HandlePromptID queues text as a turn and returns immediately — the Handler
 // contract. Queued turns run in order, one at a time.
+func (e *Engine) HandlePromptID(id, text string) {
+	e.enqueue(queued{ids: idSlice(id), text: text})
+}
+
+// enqueue appends q to the turn queue and wakes the worker. It is the only
+// writer to pending, shared by the inbound prompt path and runTurn's
+// orphaned-steer requeue.
 //
-// A prompt arriving after fatal() is rejected rather than queued. The
+// An entry arriving after fatal() is dropped rather than queued. The
 // alternative is worse than it looks: wg.Add on a dead worker is a count
 // nothing will ever Done, so the next Wait() (the owner's shutdown path)
 // would block forever. The Add is inside the lock for exactly that reason —
-// it has to be atomic with the dead check.
-func (e *Engine) HandlePrompt(text string) {
+// it has to be atomic with the dead check. A dropped entry is deliberately
+// NOT acked: it never entered a turn, and leaving its rows unconfirmed is what
+// lets a restart deliver them to the replacement child.
+func (e *Engine) enqueue(q queued) {
 	e.mu.Lock()
 	if e.dead {
 		e.mu.Unlock()
@@ -256,7 +304,7 @@ func (e *Engine) HandlePrompt(text string) {
 		return
 	}
 	e.wg.Add(1)
-	e.pending = append(e.pending, text)
+	e.pending = append(e.pending, q)
 	e.mu.Unlock()
 	select {
 	case e.wake <- struct{}{}:
@@ -264,17 +312,30 @@ func (e *Engine) HandlePrompt(text string) {
 	}
 }
 
-// HandleSteer buffers text for mid-turn injection when a turn is running, and
-// otherwise treats it as a plain prompt.
-func (e *Engine) HandleSteer(text string) {
+// HandleSteerID buffers text for mid-turn injection when a turn is running,
+// and otherwise treats it as a plain prompt.
+func (e *Engine) HandleSteerID(id, text string) {
 	e.mu.Lock()
 	if e.cancel != nil {
-		e.steerBuf = append(e.steerBuf, text)
+		e.steerBuf = append(e.steerBuf, queued{ids: idSlice(id), text: text})
 		e.mu.Unlock()
 		return
 	}
 	e.mu.Unlock()
-	e.HandlePrompt(text)
+	e.HandlePromptID(id, text)
+}
+
+// consume reports that ids have entered a turn and their inbox rows may be
+// retired.
+//
+// Synchronous on purpose: it is one UPDATE, and running it on a goroutine
+// would let a turn start before its message is confirmed, reopening the window
+// this whole mechanism exists to close.
+func (e *Engine) consume(ids []string) {
+	if e.onConsumed == nil || len(ids) == 0 {
+		return
+	}
+	e.onConsumed(ids)
 }
 
 // HandleAbort cancels the running turn's context, if any. An abort arriving
@@ -324,11 +385,18 @@ func (e *Engine) worker() {
 				e.mu.Unlock()
 				break
 			}
-			text := e.pending[0]
+			q := e.pending[0]
 			e.pending = e.pending[1:]
 			e.mu.Unlock()
 
-			if !e.runTurnGuarded(text) {
+			// Ack HERE, not after the turn: a turn can run for minutes and
+			// replaying a prompt the model already worked on duplicates the
+			// work. The residual window — a crash between this ack and the
+			// conversation append inside runTurn — is microseconds wide,
+			// against the turn-length window it closes.
+			e.consume(q.ids)
+
+			if !e.runTurnGuarded(q.text) {
 				return // fatal() has already been called; this child is ending
 			}
 		}
@@ -543,7 +611,17 @@ func (e *Engine) runTurn(text string) {
 	// multi-line steer batch that missed the last PendingUser poll becomes
 	// one extra turn, not one turn per buffered line.
 	if len(orphanedSteers) > 0 {
-		e.HandlePrompt(strings.Join(orphanedSteers, "\n"))
+		var texts, ids []string
+		for _, q := range orphanedSteers {
+			texts = append(texts, q.text)
+			ids = append(ids, q.ids...)
+		}
+		// Requeued UNACKED, carrying every id from the join: this text has not
+		// entered a turn yet, and dropping the ids here would strand those
+		// inbox rows forever — nothing downstream can retire them once the
+		// text has moved on without them. Enqueued directly rather than
+		// through HandlePromptID, which carries only one id.
+		e.enqueue(queued{ids: ids, text: strings.Join(texts, "\n")})
 	}
 }
 
@@ -776,14 +854,24 @@ func cacheHitPct(u anthropic.Usage) float64 {
 // drainSteers is the loop's mid-turn steer seam: it takes everything buffered
 // since the last poll, echoes each entry so the TUI renders the user bubble,
 // and returns them as one user message.
+//
+// This is the steer half of the ack point. A steer is retired HERE, as it is
+// handed to the running turn — not when its frame arrived, which may be a
+// whole tool call earlier, and not at turn end.
 func (e *Engine) drainSteers() []anthropic.ContentBlockParamUnion {
 	e.mu.Lock()
-	texts := e.steerBuf
+	entries := e.steerBuf
 	e.steerBuf = nil
 	e.mu.Unlock()
-	if len(texts) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
+	var texts, ids []string
+	for _, q := range entries {
+		texts = append(texts, q.text)
+		ids = append(ids, q.ids...)
+	}
+	e.consume(ids)
 	for _, t := range texts {
 		e.em.UserMessage(t)
 	}

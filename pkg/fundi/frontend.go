@@ -38,6 +38,21 @@ type Handler interface {
 	State() StateData
 }
 
+// IDHandler is the durable-inbox extension of Handler: the id is the daemon's
+// inbox FRAME id, and a handler implementing this acks it when the message
+// enters a turn.
+//
+// It is an extension rather than a wider Handler because the id is a transport
+// concern of whatever queued the message, not part of what an agent runtime
+// fundamentally does. A runtime with no inbox behind it — a test, a standalone
+// `rafikid fundi` on a terminal — should not thread an empty string through
+// every call forever. The type assertion lives in exactly one place, in Run.
+type IDHandler interface {
+	Handler
+	HandlePromptID(id, text string)
+	HandleSteerID(id, text string)
+}
+
 // StateData feeds the get_state response the daemon sniffs for session id +
 // model (internal/child/sniff.go expects data.sessionId and data.model{id,provider}).
 type StateData struct {
@@ -125,9 +140,17 @@ func (f *Frontend) Run() error {
 				Data: stateData{SessionID: s.SessionID, SessionFile: "", SessionName: s.SessionName,
 					Model: modelField{ID: s.ModelID, Provider: s.Provider}}})
 		case "prompt":
-			f.handler.HandlePrompt(hdr.Message)
+			if h, ok := f.handler.(IDHandler); ok {
+				h.HandlePromptID(hdr.ID, hdr.Message)
+			} else {
+				f.handler.HandlePrompt(hdr.Message)
+			}
 		case "steer":
-			f.handler.HandleSteer(hdr.Message)
+			if h, ok := f.handler.(IDHandler); ok {
+				h.HandleSteerID(hdr.ID, hdr.Message)
+			} else {
+				f.handler.HandleSteer(hdr.Message)
+			}
 		case "abort":
 			f.handler.HandleAbort()
 		default:

@@ -135,6 +135,11 @@ type Config struct {
 	// NativeSink receives this engine's rafiki-native events. Optional.
 	NativeSink NativeSink
 
+	// OnConsumed is handed straight to EngineConfig.OnConsumed: it is called
+	// with the inbox frame ids a message carried, at the moment that message
+	// enters a turn. Optional; nil means nothing is tracking delivery.
+	OnConsumed func(ids []string)
+
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
@@ -231,6 +236,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		AutoResume: c.AutoResume,
 		OnFatal:    c.OnFatal,
 		NativeSink: c.NativeSink,
+		OnConsumed: c.OnConsumed,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)
