@@ -177,9 +177,25 @@ func RunConformance(t *testing.T, mk func(*testing.T) (inbox.Store, string)) {
 		if err != nil {
 			t.Fatalf("Sweep: %v", err)
 		}
-		if n != 1 {
-			t.Errorf("Sweep deleted %d rows, want 1", n)
+		// n counts terminal rows across the WHOLE database (Sweep is
+		// deliberately unscoped -- see inbox.Store.Sweep), so this suite
+		// cannot assert an exact count against a database other tests and
+		// other runs share. What this subtest DOES know is that it
+		// contributed exactly one terminal row (gone, consumed above and
+		// older than the cutoff), so a correct Sweep must report at least 1;
+		// only a Sweep that deleted nothing at all -- including our own row
+		// -- can report 0. This is also the only check in this subtest that
+		// can catch a no-op Sweep: Pending never lists a consumed row either
+		// way, so it can't tell "still there, consumed" from "deleted".
+		if n < 1 {
+			t.Errorf("Sweep deleted %d rows, want at least 1 (this subtest's own terminal row)", n)
 		}
+		// The exported Store interface has no "get by id", so a deleted
+		// terminal row is not directly observable -- gone.ID's absence from
+		// storage can only be inferred, never confirmed, through Pending
+		// (which lists StatePending rows only). What IS directly observable
+		// through Pending is the positive half: the pending row must survive
+		// and still be exactly the one Sweep must not have touched.
 		rows, _ := s.Pending(ctx, pfx+"a")
 		if len(rows) != 1 || rows[0].ID != keep.ID {
 			t.Errorf("Sweep removed a pending row: %+v", rows)
