@@ -36,6 +36,10 @@ func (a *ackLog) joined() string { return strings.Join(a.snapshot(), ",") }
 // newConsumingEngine mirrors newTestEngineWithSender's config and adds the two
 // hooks these tests need. It builds the EngineConfig here rather than widening
 // newTestEngineWithSender, whose ~20 callers have no use for either hook.
+//
+// KEEP IN SYNC with newTestEngineWithSender (engine_test.go): the EngineConfig
+// below is a verbatim copy of that harness's plus OnConsumed/OnFatal, and a
+// field added there will NOT reach these tests on its own.
 func newConsumingEngine(t *testing.T, ts fakeToolSet, sender llm.Sender,
 	onConsumed func([]string), onFatal func(error)) (*Engine, *syncBuffer) {
 	t.Helper()

@@ -391,9 +391,33 @@ func (e *Engine) worker() {
 
 			// Ack HERE, not after the turn: a turn can run for minutes and
 			// replaying a prompt the model already worked on duplicates the
-			// work. The residual window — a crash between this ack and the
-			// conversation append inside runTurn — is microseconds wide,
-			// against the turn-length window it closes.
+			// work.
+			//
+			// Two residual exposures, both accepted, and neither of them
+			// microseconds — do not repeat that claim:
+			//
+			// 1. A crash between this ack and agentloop.Run's AppendUser loses
+			//    the prompt. The gap is NOT small. runTurn does two slow things
+			//    first: e.em.UserMessage, a stdout write that Frontend.Emit
+			//    holds a mutex across and which blocks indefinitely on a reader
+			//    that has stopped consuming (see fatal()'s own comment on
+			//    exactly that hazard); and e.events(), whose
+			//    priorConversationCost is a DATABASE rollup with a 3-second
+			//    timeout. Call it seconds. Still far better than the
+			//    turn-length window acking-on-write leaves open, which is what
+			//    this ack point buys.
+			//
+			// 2. agentloop.Run RETRACTS the user row it wrote when the first
+			//    send fails llm.IsPromptTooLarge, so an oversized prompt ends
+			//    up acked in the inbox AND erased from the conversation,
+			//    leaving only an agent_error frame as its record. This is the
+			//    one deterministic — not crash-window — path where an acked
+			//    message keeps no durable copy of its content, and it is
+			//    DELIBERATE. Do not "fix" it by treating IsPromptTooLarge as
+			//    "never entered a turn": an oversized prompt is
+			//    deterministically oversized, so leaving it unacked makes it a
+			//    poison pill that redelivers on every restart, forever. One
+			//    loud failure beats an infinite loop.
 			e.consume(q.ids)
 
 			if !e.runTurnGuarded(q.text) {
@@ -484,7 +508,9 @@ func (e *Engine) fatal(err error) {
 	// Queued-but-unstarted turns each hold a wg count that no worker will ever
 	// retire, and HandlePrompt refuses to add more now that dead is set — so
 	// this is the complete outstanding set, and Wait() can return.
-	queued := len(e.pending)
+	// Named outstanding, not queued: queued is a package type (the turn-queue
+	// entry) and shadowing it here is a trap for the next edit.
+	outstanding := len(e.pending)
 	e.pending = nil
 	e.steerBuf = nil
 	onFatal := e.onFatal
@@ -493,7 +519,7 @@ func (e *Engine) fatal(err error) {
 	if cancel != nil {
 		cancel()
 	}
-	for range queued {
+	for range outstanding {
 		e.wg.Done()
 	}
 

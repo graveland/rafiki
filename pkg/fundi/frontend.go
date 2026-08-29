@@ -46,7 +46,8 @@ type Handler interface {
 // concern of whatever queued the message, not part of what an agent runtime
 // fundamentally does. A runtime with no inbox behind it — a test, a standalone
 // `rafikid fundi` on a terminal — should not thread an empty string through
-// every call forever. The type assertion lives in exactly one place, in Run.
+// every call forever. The type assertion lives in exactly one place: Run
+// resolves it once, before its reader loop.
 type IDHandler interface {
 	Handler
 	HandlePromptID(id, text string)
@@ -121,6 +122,10 @@ type modelField struct {
 // (see Handler) requires prompt returns to keep the reader loop responsive to
 // abort/steer frames while a turn is in flight.
 func (f *Frontend) Run() error {
+	// Resolved once per connection rather than per frame: the handler is fixed
+	// for a Frontend's lifetime, so this is the ONE type assertion IDHandler's
+	// doc comment promises.
+	idh, isID := f.handler.(IDHandler)
 	sc := bufio.NewScanner(f.in)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
@@ -140,14 +145,14 @@ func (f *Frontend) Run() error {
 				Data: stateData{SessionID: s.SessionID, SessionFile: "", SessionName: s.SessionName,
 					Model: modelField{ID: s.ModelID, Provider: s.Provider}}})
 		case "prompt":
-			if h, ok := f.handler.(IDHandler); ok {
-				h.HandlePromptID(hdr.ID, hdr.Message)
+			if isID {
+				idh.HandlePromptID(hdr.ID, hdr.Message)
 			} else {
 				f.handler.HandlePrompt(hdr.Message)
 			}
 		case "steer":
-			if h, ok := f.handler.(IDHandler); ok {
-				h.HandleSteerID(hdr.ID, hdr.Message)
+			if isID {
+				idh.HandleSteerID(hdr.ID, hdr.Message)
 			} else {
 				f.handler.HandleSteer(hdr.Message)
 			}
