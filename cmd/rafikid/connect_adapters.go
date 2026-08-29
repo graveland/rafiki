@@ -4,13 +4,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -127,36 +124,4 @@ func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownMs, 
 		DurationMs: res.DurationMs,
 		Escalated:  res.Escalated,
 	}, nil
-}
-
-// newConnectInbox builds the in-memory Inbox that Connect's Send routes
-// through. It reproduces today's ctrl_send behaviour exactly — straight to the
-// child, no queue — while giving the durable implementation a place to land.
-func newConnectInbox(c *Controller) *inbox.Memory {
-	return inbox.NewMemory(func(childID string, m inbox.Inbound) error {
-		var frame json.RawMessage
-		switch m.Mode {
-		case inbox.ModePrompt:
-			frame = mustMarshalFrame("prompt", m.Text)
-		case inbox.ModeSteer:
-			frame = mustMarshalFrame("steer", m.Text)
-		case inbox.ModeAbort:
-			frame = json.RawMessage(`{"type":"abort"}`)
-		default:
-			return fmt.Errorf("inbox: unknown mode %v", m.Mode)
-		}
-		return c.Send(childID, frame)
-	})
-}
-
-func mustMarshalFrame(kind, message string) json.RawMessage {
-	b, err := json.Marshal(struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	}{Type: kind, Message: message})
-	if err != nil {
-		// Marshalling two strings cannot fail.
-		panic(err)
-	}
-	return b
 }

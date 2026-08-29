@@ -13,6 +13,16 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox"
 )
 
+// fakeAccepter is the narrow inbox seam the Server holds: it records what Send
+// submitted and hands back an id. Delivery is the Queue's job and is not what
+// these tests are about.
+type fakeAccepter struct{ got inbox.Inbound }
+
+func (f *fakeAccepter) Accept(_ context.Context, in inbox.Inbound) (string, error) {
+	f.got = in
+	return "m_1", nil
+}
+
 func textBlocks(s string) []*rafikiv1.ContentBlock {
 	return []*rafikiv1.ContentBlock{{
 		Index: 0,
@@ -21,12 +31,9 @@ func textBlocks(s string) []*rafikiv1.ContentBlock {
 }
 
 func TestSendRoutesPromptThroughInbox(t *testing.T) {
-	var got inbox.Inbound
+	acc := &fakeAccepter{}
 	s := connectapi.NewServer(nil)
-	s.SetInbox(inbox.NewMemory(func(_ string, in inbox.Inbound) error {
-		got = in
-		return nil
-	}))
+	s.SetInbox(acc)
 
 	resp, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1",
@@ -39,8 +46,8 @@ func TestSendRoutesPromptThroughInbox(t *testing.T) {
 	if resp.Msg.GetMessageId() == "" {
 		t.Error("SendResponse.MessageId is empty")
 	}
-	if got.ChildID != "c_1" || got.Mode != inbox.ModePrompt || got.Text != "hello" {
-		t.Errorf("inbound = %+v, want child=c_1 mode=prompt text=hello", got)
+	if acc.got.ChildID != "c_1" || acc.got.Mode != inbox.ModePrompt || acc.got.Text != "hello" {
+		t.Errorf("inbound = %+v, want child=c_1 mode=prompt text=hello", acc.got)
 	}
 }
 
@@ -53,19 +60,16 @@ func TestSendMapsSteerAndAbort(t *testing.T) {
 		{rafikiv1.SendMode_SEND_MODE_ABORT, inbox.ModeAbort},
 	}
 	for _, tc := range cases {
-		var got inbox.Inbound
+		acc := &fakeAccepter{}
 		s := connectapi.NewServer(nil)
-		s.SetInbox(inbox.NewMemory(func(_ string, in inbox.Inbound) error {
-			got = in
-			return nil
-		}))
+		s.SetInbox(acc)
 		if _, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 			ChildId: "c_1", Mode: tc.wire, Blocks: textBlocks("x"),
 		})); err != nil {
 			t.Fatalf("Send(%v): %v", tc.wire, err)
 		}
-		if got.Mode != tc.want {
-			t.Errorf("mode for %v = %v, want %v", tc.wire, got.Mode, tc.want)
+		if acc.got.Mode != tc.want {
+			t.Errorf("mode for %v = %v, want %v", tc.wire, acc.got.Mode, tc.want)
 		}
 	}
 }
@@ -82,7 +86,7 @@ func TestSendWithoutInboxFailsClosed(t *testing.T) {
 
 func TestSendRejectsEmptyChildID(t *testing.T) {
 	s := connectapi.NewServer(nil)
-	s.SetInbox(inbox.NewMemory(func(string, inbox.Inbound) error { return nil }))
+	s.SetInbox(&fakeAccepter{})
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		Mode: rafikiv1.SendMode_SEND_MODE_PROMPT, Blocks: textBlocks("x"),
 	}))
@@ -93,7 +97,7 @@ func TestSendRejectsEmptyChildID(t *testing.T) {
 
 func TestSendRejectsUnspecifiedMode(t *testing.T) {
 	s := connectapi.NewServer(nil)
-	s.SetInbox(inbox.NewMemory(func(string, inbox.Inbound) error { return nil }))
+	s.SetInbox(&fakeAccepter{})
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1", Blocks: textBlocks("x"),
 	}))
@@ -107,7 +111,7 @@ func TestSendRejectsUnspecifiedMode(t *testing.T) {
 // bytes to go until that changes.
 func TestSendRejectsNonTextBlocks(t *testing.T) {
 	s := connectapi.NewServer(nil)
-	s.SetInbox(inbox.NewMemory(func(string, inbox.Inbound) error { return nil }))
+	s.SetInbox(&fakeAccepter{})
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1",
 		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
@@ -123,7 +127,7 @@ func TestSendRejectsNonTextBlocks(t *testing.T) {
 // TestSendAbortNeedsNoBlocks: an abort carries no content.
 func TestSendAbortNeedsNoBlocks(t *testing.T) {
 	s := connectapi.NewServer(nil)
-	s.SetInbox(inbox.NewMemory(func(string, inbox.Inbound) error { return nil }))
+	s.SetInbox(&fakeAccepter{})
 	if _, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1", Mode: rafikiv1.SendMode_SEND_MODE_ABORT,
 	})); err != nil {

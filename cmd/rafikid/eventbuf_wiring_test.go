@@ -1,13 +1,12 @@
 package main
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
+	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -33,60 +32,25 @@ func TestIsBusyMatchesStatus(t *testing.T) {
 	}
 }
 
-func TestInjectBatchSendsPromptFrame(t *testing.T) {
-	// Verify the frame shape produced by injectBatch: one frame with
-	// type "prompt" whose message contains all fragments.
-	body := buildInjectionBody("subagents", []string{"a done", "b done"})
-	frame := buildInjectionFrame(body, eventbuf.DeliverPrompt)
-
-	var m map[string]string
-	if err := json.Unmarshal(frame, &m); err != nil {
-		t.Fatalf("bad JSON: %v", err)
-	}
-	if m["type"] != "prompt" {
-		t.Fatalf("type = %q; want prompt", m["type"])
-	}
-	if !strings.Contains(m["message"], "a done") || !strings.Contains(m["message"], "b done") {
-		t.Fatalf("message missing fragments: %s", m["message"])
-	}
-	if !strings.Contains(m["message"], "<rafiki-event") {
-		t.Fatalf("message missing rafiki-event wrapper: %s", m["message"])
-	}
-}
-
-func TestInjectBatchUrgentUsesSteer(t *testing.T) {
-	body := buildInjectionBody("executor", []string{"LOST"})
-	frame := buildInjectionFrame(body, eventbuf.DeliverSteer)
-
-	var m map[string]string
-	if err := json.Unmarshal(frame, &m); err != nil {
-		t.Fatalf("bad JSON: %v", err)
-	}
-	if m["type"] != "steer" {
-		t.Fatalf("type = %q; want steer (urgent events must reach a turn in progress)", m["type"])
-	}
-}
-
-func TestInjectBatchWiredThroughBuffer(t *testing.T) {
-	// Verify the full wiring: buffer flush calls the FlushFn with the right
-	// childID, source, and fragments — no Controller.Send needed.
+// TestBufferFlushCarriesOrphansWithTheirMode pins the eventbuf->controller
+// handoff: the flush names (childID, source) and carries the messages whose
+// durable write did not happen. With no Accepter attached every Push is an
+// orphan, which is exactly the degraded path the controller must still
+// deliver.
+func TestBufferFlushCarriesOrphansWithTheirMode(t *testing.T) {
 	clk := eventbuf.NewFakeClock(now())
 
 	var (
-		gotChildID  string
-		gotSource   string
-		gotFrags    []string
-		gotDelivery eventbuf.Delivery
+		gotChildID string
+		gotSource  string
+		gotOrphans []inbox.Inbound
 	)
-	recordFlush := func(childID, source string, frags []string, d eventbuf.Delivery) {
+	buf := eventbuf.New(eventbuf.Config{}, clk)
+	buf.SetFlush(func(childID, source string, orphans []inbox.Inbound) {
 		gotChildID = childID
 		gotSource = source
-		gotFrags = frags
-		gotDelivery = d
-	}
-
-	buf := eventbuf.New(eventbuf.Config{}, clk)
-	buf.SetFlush(recordFlush)
+		gotOrphans = orphans
+	})
 	buf.SetBusy(func(string) bool { return false })
 
 	buf.Push("c_test", "subagents", "", "worker 1 done")
@@ -99,28 +63,14 @@ func TestInjectBatchWiredThroughBuffer(t *testing.T) {
 	if gotSource != "subagents" {
 		t.Fatalf("source = %q; want subagents", gotSource)
 	}
-	if len(gotFrags) != 2 {
-		t.Fatalf("fragments = %d; want 2", len(gotFrags))
+	if len(gotOrphans) != 2 {
+		t.Fatalf("orphans = %d; want 2 (nothing is persisted without an Accepter)", len(gotOrphans))
 	}
-	if gotDelivery != eventbuf.DeliverPrompt {
-		t.Fatalf("delivery = %v; want DeliverPrompt for non-urgent push", gotDelivery)
+	for _, o := range gotOrphans {
+		if o.Mode != inbox.ModePrompt {
+			t.Errorf("orphan mode = %v; want prompt for a plain Push", o.Mode)
+		}
 	}
-}
-
-// --- helpers for frame construction (extracted to test independently of Send) ---
-
-func buildInjectionBody(source string, fragments []string) string {
-	return "<rafiki-event source=\"" + source + "\">\n" +
-		strings.Join(fragments, "\n") + "\n</rafiki-event>"
-}
-
-func buildInjectionFrame(body string, d eventbuf.Delivery) json.RawMessage {
-	kind := "prompt"
-	if d == eventbuf.DeliverSteer {
-		kind = "steer"
-	}
-	b, _ := json.Marshal(map[string]string{"type": kind, "message": body})
-	return json.RawMessage(b)
 }
 
 func now() time.Time { return time.Now() }
@@ -137,7 +87,6 @@ func TestEventBufConfigDefaultsOnGarbage(t *testing.T) {
 func TestEventBufConfigValidValues(t *testing.T) {
 	t.Setenv("RAFIKI_EVENTBUF_DEBOUNCE_MS", "10000")
 	t.Setenv("RAFIKI_EVENTBUF_MAX_WAIT_MS", "120000")
-	t.Setenv("RAFIKI_EVENTBUF_MAX_FRAGMENTS", "50")
 	t.Setenv("RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT", "16000")
 
 	cfg := loadEventBufConfig()
@@ -147,10 +96,30 @@ func TestEventBufConfigValidValues(t *testing.T) {
 	if cfg.MaxWait != 120*time.Second {
 		t.Fatalf("MaxWait = %v; want 120s", cfg.MaxWait)
 	}
-	if cfg.MaxFragments != 50 {
-		t.Fatalf("MaxFragments = %d; want 50", cfg.MaxFragments)
-	}
 	if cfg.MaxBytesPerFrag != 16000 {
 		t.Fatalf("MaxBytesPerFrag = %d; want 16000", cfg.MaxBytesPerFrag)
+	}
+}
+
+// TestInboxBatchConfigReadsTheBatchCaps pins where the two batch caps moved
+// to. They used to sit in eventbuf.Config; coalescing happens at delivery now,
+// so an unread env var here means the operator's cap silently does nothing.
+func TestInboxBatchConfigReadsTheBatchCaps(t *testing.T) {
+	t.Setenv("RAFIKI_EVENTBUF_MAX_FRAGMENTS", "50")
+	t.Setenv("RAFIKI_EVENTBUF_MAX_BYTES_PER_FLUSH", "16000")
+
+	cfg := inboxBatchConfig()
+	if cfg.MaxFragments != 50 {
+		t.Errorf("MaxFragments = %d; want 50", cfg.MaxFragments)
+	}
+	if cfg.MaxBytesPerFlush != 16000 {
+		t.Errorf("MaxBytesPerFlush = %d; want 16000", cfg.MaxBytesPerFlush)
+	}
+}
+
+func TestInboxBatchConfigDefaults(t *testing.T) {
+	cfg := inboxBatchConfig()
+	if cfg.MaxFragments != 30 || cfg.MaxBytesPerFlush != 65536 {
+		t.Errorf("defaults = %+v; want {30 65536}", cfg)
 	}
 }

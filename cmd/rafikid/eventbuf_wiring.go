@@ -1,11 +1,8 @@
 package main
 
 import (
-	"encoding/json"
-	"log/slog"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -30,44 +27,32 @@ func childIsBusy(st *childstore.Store, childID string) bool {
 	return true
 }
 
-// injectBatch delivers a coalesced batch to a child as a single frame.
+// wireEventBuffer attaches the buffer to the durable inbox and to the
+// controller's flush and busy hooks.
 //
-// The Delivery decides the frame kind, and nothing else does: prompt queues
-// for the child's next turn, steer injects into the turn already running.
-// The buffer owns that decision because it owns the busy gate.
-func (c *Controller) injectBatch(childID, source string, fragments []string, d eventbuf.Delivery) {
-	body := "<rafiki-event source=\"" + source + "\">\n" +
-		strings.Join(fragments, "\n") + "\n</rafiki-event>"
-
-	kind := "prompt"
-	if d == eventbuf.DeliverSteer {
-		kind = "steer"
-	}
-	frame, err := json.Marshal(map[string]string{"type": kind, "message": body})
-	if err != nil {
-		slog.Warn("eventbuf: marshal injection frame", "childId", childID, "error", err)
-		return
-	}
-	if err := c.Send(childID, json.RawMessage(frame)); err != nil {
-		slog.Warn("eventbuf: inject failed", "childId", childID, "source", source, "error", err)
-	}
-}
-
+// SetAccepter is what makes a pushed fragment durable: without it every Push
+// is an orphan, delivered but never persisted. SetFlush hands the buffer's
+// "it is time" decision back to the controller, which reads the rows.
 func (c *Controller) wireEventBuffer() {
 	if c.evbuf == nil {
 		return
 	}
-	c.evbuf.SetFlush(c.injectBatch)
+	c.evbuf.SetAccepter(c.inbox)
+	c.evbuf.SetFlush(c.flushInboxSource)
 	c.evbuf.SetBusy(func(childID string) bool { return childIsBusy(c.st, childID) })
 }
 
 // loadEventBufConfig reads event buffer tunables from the environment.
 // A zero or unparseable value falls back to the documented default.
+//
+// The batch caps (RAFIKI_EVENTBUF_MAX_FRAGMENTS,
+// RAFIKI_EVENTBUF_MAX_BYTES_PER_FLUSH) are deliberately absent: coalescing
+// happens at delivery over the persisted rows, so they are read by
+// inboxBatchConfig instead. What is left here shapes a fragment on the way IN.
 func loadEventBufConfig() eventbuf.Config {
 	return eventbuf.Config{
 		Debounce:        envDuration("RAFIKI_EVENTBUF_DEBOUNCE_MS", 5000),
 		MaxWait:         envDuration("RAFIKI_EVENTBUF_MAX_WAIT_MS", 60000),
-		MaxFragments:    envInt("RAFIKI_EVENTBUF_MAX_FRAGMENTS", 30),
 		MaxBytesPerFrag: envInt("RAFIKI_EVENTBUF_MAX_BYTES_PER_FRAGMENT", 8192),
 	}
 }

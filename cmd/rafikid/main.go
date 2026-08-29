@@ -447,7 +447,7 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore, prov)
-	ctrl.wireEventBuffer() // a no-op until evbuf is populated (Task 4)
+	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
@@ -456,7 +456,7 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetEventSource(ctrl.nativeEventSource())
 			face.Control.SetLineage(ctrl)
 			face.Control.SetEventLog(ctrl.evlog)
-			face.Control.SetInbox(newConnectInbox(ctrl))
+			face.Control.SetInbox(ctrl.inbox)
 			face.Control.SetChildLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 		}
