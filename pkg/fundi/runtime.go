@@ -122,6 +122,13 @@ type RuntimeOptions struct {
 	// this be additive.
 	NativeSink NativeSink
 
+	// OnConsumed reports that inbox frames have entered a turn and may be
+	// retired — passed straight through to EngineConfig.OnConsumed, whose doc
+	// comment carries the contract. Nil is legal and means nothing is tracking
+	// delivery: correct for the standalone `rafikid fundi` process, which has
+	// no durable inbox behind it.
+	OnConsumed func(ids []string)
+
 	// RawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
@@ -511,6 +518,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		OnConversationResolved: opts.OnConversationResolved,
 		OnFatal:                opts.OnFatal,
 		NativeSink:             opts.NativeSink,
+		OnConsumed:             opts.OnConsumed,
 		RawTrace:               opts.RawTrace,
 	}
 
