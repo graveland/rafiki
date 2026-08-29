@@ -149,11 +149,25 @@ Note that the durable event ordinal is **not** `conversation_message.ordinal`: i
 |---|---|---|
 | `GetHistory` | unary | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming | Follows events matching an `EventSubject` predicate (child, subtree with max_depth, or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
-| `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id |
+| `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see below) |
 | `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal` per child) |
 | `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal`) |
 | `Spawn` | unary | Create a child with budget, executor, and label options |
 | `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
+
+### `Send` and the durable inbox
+
+`Send` is classified by the daemon exactly as `ctrl_send` is (§6.12): a prompt,
+a steer or an abort becomes a row in `conversations.agent_inbox` before it is
+written to the child, and `message_id` names that row.
+
+The one exception is an **abort aimed at a `claude` child**. `claude -p` has no
+in-band abort frame — the only way to stop it is to signal the process and
+resume the session — so that abort is a signal plus a lifecycle operation
+rather than a message, and it is never persisted. It still aborts; the RPC
+returns success with an **empty `message_id`**, because there is no row to
+name and an invented id would resolve to nothing. Storing it would risk
+replaying a cancellation into an unrelated later turn.
 
 ### Event vocabulary
 
