@@ -175,6 +175,9 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 			slog.Info("child not auto-resumed: pinned workspace cannot change machines",
 				"childId", rec.ChildID, "workspaceMode", rec.WorkspaceMode)
 		}
+		// There is no turn to inject into and there will not be one: this
+		// child is pinned to a machine that is gone.
+		c.dropInboxForForgotten(rec.ChildID, "child not resumed after daemon restart")
 		return
 	}
 
@@ -190,6 +193,12 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 		if _, err := c.resumeWithAutoRecovery(rctx, id); err != nil {
 			slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
 			c.dropLease(id)
+			return
 		}
+		// The child is live and its runtime is wired: anything the previous
+		// daemon accepted but never got confirmed is delivered now. This is
+		// what stops a coordinator waiting forever for a settle that already
+		// happened.
+		c.replayInbox(rctx, id)
 	}(rec.ChildID)
 }
