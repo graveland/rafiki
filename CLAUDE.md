@@ -128,6 +128,22 @@
   not just the highest file on your branch. This has bitten once already, when
   `main` and `agent-platform` both claimed 13.
 
+- **Isolating a scratch daemon takes more than its own XDG dirs and DSN — `RAFIKI_URL`
+  overrides `--socket`.** `mustDial` (`cmd/rafiki/cli_helpers.go`) routes through
+  `remoteDialURL()` first: any **https://** `RAFIKI_URL` is treated as a remote control
+  plane and dialled over TLS, and the `-s`/`--socket` flag is never consulted. That
+  variable is commonly set in an interactive shell, so scratch-daemon work silently aims
+  at the production daemon; the giveaway is an error naming *TCP* while you are passing a
+  socket path, and the only thing stopping writes is that daemon's auth. `unset RAFIKI_URL`
+  belongs in every scratch recipe alongside `XDG_*` and `RAFIKI_DB`. Two related traps in
+  the same workflow: **the daemon does not migrate on startup**, so a freshly created
+  database is not usable — it logs `relation "conversations.child" does not exist` and
+  carries on degraded; and **`make check` reads the working tree**, so nothing may edit it
+  concurrently (a review subagent's scratch file produced a phantom
+  `pkg/tui [build failed]`). Capture the gate's status directly — `make check > log; echo $?`
+  — because `make check | tail` reports *tail's* exit code and will hide a lint failure
+  completely.
+
 - **No `Co-Authored-By` trailers in commit messages.**
 - **`make check` (vet + golangci-lint + unit tests, `-race`) is the only gate — there is no CI on this repo.** Run it before considering anything done.
 - **DB-backed tests silently skip without `RAFIKI_TEST_DSN`** — a green `go test ./...` does not mean the store/insights/agentcli code was exercised. Source `.env` first (`set -a; . ./.env; set +a`) and check the skip count, not just the exit code.
