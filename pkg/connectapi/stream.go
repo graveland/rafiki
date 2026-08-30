@@ -41,6 +41,7 @@ func filterFromRequest(req *rafikiv1.StreamEventsRequest) (eventlog.Filter, erro
 		subj.Scope = eventlog.ScopeSubtree
 		subj.ChildID = scope.Subtree
 		subj.MaxDepth = int(req.Subject.MaxDepth)
+		subj.IncludeSelf = req.Subject.GetIncludeSelf()
 	case *rafikiv1.EventSubject_All:
 		subj.Scope = eventlog.ScopeAll
 	default:

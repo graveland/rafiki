@@ -143,12 +143,56 @@ curl -H 'Content-Type: application/json' \
 `StreamEvents` uses `EventSubject` predicates, `EventTier`, and `EventCursor` (per-child ordinals).
 Note that the durable event ordinal is **not** `conversation_message.ordinal`: it is a separate per-child sequence starting at 0 stored in `conversations.event_log`.
 
+#### `EventSubject`
+
+| Field | Meaning |
+|---|---|
+| `child` | One child, itself. |
+| `subtree` | Descendants of this child, bounded by `max_depth`. **Never includes the root itself** unless `include_self` is set. |
+| `all` | Everything the caller is entitled to. |
+| `max_depth` | Hops below `subtree`. Unset or 0 means **unlimited**; 1 means direct children only. Ignored for `child` and `all`. |
+| `label_selector` | Narrows only, never widens. Not the authority — authority is evaluated server-side and intersected. A malformed selector **excludes**. |
+| `include_self` | Admits the `subtree` root itself. Ignored for `child` and `all`. |
+
+`include_self` is the one subject field that **widens**. It is safe because it widens by exactly
+one child — the one the subscriber already named — and authority is still intersected
+server-side, so naming a child you are not entitled to admits nothing. It does not bypass
+`label_selector`. The default is false so `subtree` keeps the meaning the agent-facing path
+relies on: `max_depth=1` is "my direct children", never "me and my children".
+
+#### Worked example: the cockpit's two subscriptions
+
+The TUI runs two concurrent `StreamEvents` over one connection.
+
+```
+Rail    subject: {subtree: <id>, include_self: true}   -- or {all: true} for a bare attach
+        tier:    DURABLE
+        types:   [turn_end, agent_status, error, retry, child_spawned, child_exited]
+        cursor:  {ordinals: {<child>: <highest received>}, floor_unix_ms: ...}
+
+Focus   subject: {child: <focused>}
+        tier:    ALL
+        cursor:  {ordinals: {<focused>: <highest rendered>}}
+```
+
+They are split rather than being one stream with a widened filter so that hopping never
+interrupts rail coverage and a slow focus consumer cannot degrade the rail. The rail's type
+filter deliberately excludes `assistant_message` and `user_message`: it needs to know a turn
+*happened*, not what it said, and carrying them would ship every child's full content — tool
+results included — to a pane a few glyphs wide. `content_block_delta` needs no exclusion
+there because it is ephemeral and the rail subscribes at `DURABLE`.
+
+`include_self` exists for the rail's first line. Attached to a child, a plain `subtree`
+subscription hears about every descendant and never about the child itself — and because the
+focus stream is `child`-scoped, the transcript looks correct right up until you hop away and
+watch that row freeze.
+
 ### Verbs
 
 | RPC | Kind | Purpose |
 |---|---|---|
 | `GetHistory` | unary | Durable events for one child, after an optional ordinal |
-| `StreamEvents` | server-streaming | Follows events matching an `EventSubject` predicate (child, subtree with max_depth, or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
+| `StreamEvents` | server-streaming | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see below) |
 | `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal` per child) |
 | `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal`) |
