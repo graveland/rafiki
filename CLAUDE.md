@@ -592,3 +592,35 @@
   field breaks on a cosmetic change. Keep `holdsLease`: this gate reads the
   lease set once at startup and cannot see a daemon that acquires between that
   read and the resume.
+
+- **The cockpit's textarea is emacs-keymapped, so a GLOBAL binding is a key you
+  can no longer type.** `handleKey` forwards unmatched keys to the textarea, and
+  `bubbles/v2/textarea`'s `DefaultKeyMap` claims `pgup`, `pgdown`, `shift+up`,
+  `shift+down`, `ctrl+n`, `ctrl+p`, `ctrl+f`, `ctrl+u`, `ctrl+k`, `ctrl+a`,
+  `ctrl+e` and more. That is *why* `pkg/tui` has a three-pane focus ring rather
+  than modified scroll keys — there is no unmodified key left for a second pane
+  while a text editor holds focus, so panes take turns owning their keys.
+  `keys.go` carries a flattened copy of that keymap and
+  `TestNoGlobalBindingStealsATextareaKey` fails the build on a collision;
+  re-check the copy when bubbles is upgraded. `ctrl+b`, `ctrl+g` and `ctrl+d`
+  are grandfathered exceptions and are unusable while typing.
+- **One renderer per child (`pkg/tui/pane.go`), never one shared.** A shared
+  renderer is what painted one child's half-finished paragraph into another
+  child's pane in C1b's review, and it is why `hop` used to call `reset()`
+  (now deleted). Pane state is evicted with its session and must never outlive
+  one. Scroll position lives on `paneState`, deliberately NOT on
+  `session.Session`, which is a pure event state machine.
+- **Tool output is not markdown and must never go through glamour.** glamour
+  joins consecutive newline-separated lines into one CommonMark paragraph, so
+  `"alpha\nbeta\ngamma"` renders as `alpha beta gamma` and a 500-line grep
+  collapses to a single ~6000-column line. Measured: plain newline-separated
+  input renders to exactly 1 line, while fenced, indented and list input render
+  to 500+. That also made `maxToolResultLines` inert for exactly the output it
+  was written for, since one line is never over a 20-line cap. `renderAssistant`
+  splits the RAW result. Assistant PROSE still goes through glamour — that
+  genuinely is markdown.
+- **`viewport.SoftWrap` defaults to false**, which truncates long lines and
+  hides the rest behind horizontal scrolling. A transcript is prose, so
+  `pkg/tui/pane.go` sets it true. Pinned by
+  `TestViewportSoftWrapsLongLines` because the default is silent.
+

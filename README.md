@@ -1029,16 +1029,65 @@ so an ordinary single-agent session looks exactly as it did before.
 
 ### Keys
 
+The cockpit has three panes — the input box, the agent rail, and the
+transcript — and **`⇥` moves between them**. Which pane holds focus decides what
+an unmodified key does, and the footer always names it.
+
+That is not decoration. The input box is a full text editor with an emacs
+keymap: it already claims `PgUp`, `PgDn`, `⇧↑`/`⇧↓`, `^N`, `^P`, `^U`, `^K` and
+more. There is no unmodified key left over for scrolling a transcript while a
+text box has focus, so panes take turns owning their keys instead.
+
+**Global — work from any pane**
+
+| Key | Does |
+|---|---|
+| `⇥` / `⇧⇥` | Move to the next / previous pane. |
+| `⌥N` / `^PgDn` | Hop to the next agent that needs you. |
+| `⌥P` / `^PgUp` | Hop to the previous agent that needs you. |
+| `^↑` / `^↓` | Hop straight up and down the rail, without changing pane. |
+| `^X` | Abort the running turn. |
+| `^B` | Collapse or restore the rail. |
+| `^G` | Toggle the help line. |
+| `^C` / `^D` | Quit. Children keep running; reattach any time. |
+
+**Input pane** (where a session starts)
+
 | Key | Does |
 |---|---|
 | `⏎` | Send a prompt — queues work for the agent. |
 | `⌥⏎` / `^S` | Steer — inject into the turn already running. |
-| `^X` | Abort the running turn. |
-| `⇥` | Hop to the next agent that needs you. |
-| `^↑` / `^↓` | Move up and down the rail. |
-| `^B` | Collapse or restore the rail. |
-| `^G` | Toggle the help line. |
-| `^C` / `^D` | Quit. Children keep running; reattach any time. |
+
+Everything else goes to the text editor.
+
+**Rail pane**
+
+| Key | Does |
+|---|---|
+| `↑` / `↓` | Move the cursor. Browsing costs nothing — no agent is opened. |
+| `⏎` | Open the selected agent and return to the input box. |
+| `esc` | Back to the input box. |
+
+Moving the cursor is deliberately separate from opening: attaching to an agent
+opens a subscription, so a rail that hopped on every keypress opened one per
+keystroke.
+
+**Transcript pane**
+
+| Key | Does |
+|---|---|
+| `↑` / `↓`, `j` / `k` | Scroll a line. |
+| `PgUp` / `PgDn`, `space` | Scroll a page. |
+| `esc` | Back to the input box. |
+
+The transcript follows new output while you are at the bottom and holds its
+place while you are not, so reading back is never interrupted by an agent still
+working. `↓ more below` appears in the footer when output is arriving off
+screen. Sending returns you to the bottom.
+
+There is no mouse support, deliberately: capturing the mouse would take away
+your terminal's own select-and-copy, and copying a stack trace out of the pane
+is worth more than a scroll wheel.
 
 Prompt and steer are separate keys rather than one key that guesses from the
 agent's state. A prompt to a busy agent is durably queued rather than dropped,
