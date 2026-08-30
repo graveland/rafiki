@@ -208,13 +208,48 @@ func (c *Controller) loadChildren(ctx context.Context) {
 		return
 	}
 
+	// One query, not one per row. loadChildren walks the whole table — a
+	// Valid() round trip per row would be ~100 of them before the daemon
+	// serves anything.
+	//
+	// A failed read is NOT an empty set: empty reads as "no lease is live",
+	// which would make every foreign row adoptable and turn a database blip
+	// into a fleet-wide takeover. On error, load every row read-only and
+	// resume nothing this cycle.
+	var live map[string]bool
+	if c.leases != nil {
+		l, err := c.leases.LiveConversations(ctx)
+		if err != nil {
+			slog.Error("read live conversation leases; recovering no children this cycle",
+				"error", err)
+			for _, rec := range recs {
+				sess := childstore.SessionFromRecord(rec)
+				sess.Status = protocol.StatusExited
+				c.st.Insert(sess)
+			}
+			return
+		}
+		live = l
+	}
+
+	var skipped, adopted int
 	for _, rec := range recs {
-		c.recoverOne(ctx, rec)
+		switch recoveryOwnership(rec, c.daemonID, live) {
+		case foreignLive:
+			skipped++
+		case foreignLapsed:
+			adopted++
+		}
+		c.recoverOne(ctx, rec, live)
+	}
+	if skipped > 0 || adopted > 0 {
+		slog.Info("recovery scoped by daemon ownership",
+			"skippedForeignLive", skipped, "adoptedForeignLapsed", adopted)
 	}
 }
 
 // recoverOne loads a single record into the store and decides whether to resume.
-func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord) {
+func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord, live map[string]bool) {
 	// Signal a still-live orphan only when the recorded pid provably belongs to
 	// THIS PID namespace. daemon_id is not that proof — it is pinned across pod
 	// restarts, and a restarted pod has the same id with a fresh namespace.
@@ -225,6 +260,47 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 			_ = syscall.Kill(rec.PID, syscall.SIGTERM)
 			slog.Info("sigterm orphan", "childId", rec.ChildID, "pid", rec.PID)
 		}
+	}
+
+	own := recoveryOwnership(rec, c.daemonID, live)
+	if own == foreignLive {
+		// Load it so `rafiki list` still shows it — we are declining to RUN
+		// it, not hiding it. Then stop.
+		//
+		// What this saves is the ATTEMPT. Without it, every foreign live
+		// child on every startup gets a full resumeWithAutoRecovery: an
+		// engine build, a lease acquire, a goroutine holding a 60s context,
+		// and a scary log line — all of it doomed. loadChildren lists the
+		// WHOLE table (childstoredb's listSQL has no WHERE), so on a shared
+		// database that is one doomed build per foreign child, every boot.
+		//
+		// Be precise about what it does NOT save, so nobody later "restores"
+		// a protection that was never here. The inbox is already safe for a
+		// foreign LIVE child by two independent mechanisms:
+		// OnConversationResolved acquires the lease BEFORE calling
+		// resetUnconfirmedOnOwnership, so a refused lease means the reset
+		// never runs; and the holdsLease check further down gates
+		// replayInbox. releaseInboxOnExit is likewise not a risk here — it
+		// sits on the planStayExited branch, which a row reading as ALIVE
+		// never reaches. This gate is defence in depth for the inbox, not
+		// its primary guard.
+		//
+		// It IS a primary guard for the c.daemonID == "" case: there the
+		// holdsLease gate is skipped entirely, and recoveryOwnership refuses
+		// every claimed row instead.
+		//
+		// The pid was already left alone: the orphan signal above is
+		// ns_token-gated and a foreign daemon's token never matches ours.
+		sess := childstore.SessionFromRecord(rec)
+		sess.Status = protocol.StatusExited
+		c.st.Insert(sess)
+		slog.Debug("child owned by another live daemon; not recovering",
+			"childId", rec.ChildID, "ownerDaemonId", rec.DaemonID)
+		return
+	}
+	if own == foreignLapsed {
+		slog.Info("adopting child from a daemon whose lease has lapsed",
+			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
 	}
 
 	plan := recoveryAction(rec)

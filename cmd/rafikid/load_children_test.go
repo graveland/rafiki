@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -301,7 +305,9 @@ func TestRecoveryStaysExitedResetsRatherThanDrops(t *testing.T) {
 		// LastStatus "exited" -> shouldAutoResume false -> planStayExited.
 		LastStatus: "exited",
 	}
-	c.recoverOne(ctx, rec)
+	// nil live set: this record has no DaemonID, so recoveryOwnership returns
+	// unclaimed and the ownership gate is a no-op for it.
+	c.recoverOne(ctx, rec, nil)
 
 	// Reset, not dropped: the row must now be visible to Pending (a later
 	// resume's idle drain can only ever redeliver 'pending' rows, never
@@ -455,5 +461,152 @@ func TestRecoveryOwnership(t *testing.T) {
 				t.Errorf("recoveryOwnership = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// lockedBuffer is a race-safe slog sink. recoverOne's resume path logs from
+// the calling goroutine but STARTS one, so a buffer the test also reads must
+// be guarded or -race trips whenever the gate is not doing its job — which is
+// exactly the run the mutation check performs.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLogs redirects slog for the duration of one test.
+func captureLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+	lb := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(lb, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return lb
+}
+
+// TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild is the
+// regression test for this chunk.
+//
+// The assertion is that the resume is never ATTEMPTED, and that is deliberate
+// rather than a weaker stand-in for an inbox assertion. The inbox is already
+// safe for a foreign LIVE child without this gate: OnConversationResolved
+// acquires the lease before calling resetUnconfirmedOnOwnership, so a refused
+// lease means the reset never runs, and holdsLease gates replayInbox. What the
+// gate adds is that a daemon sharing a database stops issuing one doomed
+// engine build, lease acquire and 60s goroutine per foreign child on every
+// single boot — loadChildren lists the whole table.
+//
+// "auto-resuming fundi child" is logged synchronously, immediately before the
+// `go func`, so this check is deterministic and not a race against the
+// goroutine.
+//
+// Mutation check: replace `if own == foreignLive` with `if false` and this
+// fails. An assertion on the inbox row alone does NOT fail under that
+// mutation — verified — which is why this test does not rest on one.
+func TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild(t *testing.T) {
+	const (
+		childID = "c_foreign"
+		conv    = "22222222-2222-2222-2222-222222222222"
+	)
+	ctx := context.Background()
+	logs := captureLogs(t)
+
+	st := inbox.NewMemory()
+	rec1, err := st.Accept(ctx, inbox.Inbound{
+		ChildID: childID, Mode: inbox.ModePrompt, Text: "in flight on the other daemon",
+	})
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := st.MarkSent(ctx, []string{rec1.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	c := newTestController(t)
+	c.daemonID = "me"
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
+
+	rec := childstore.ChildRecord{
+		ChildID:        childID,
+		Kind:           protocol.KindFundi,
+		DaemonID:       "other-daemon",
+		ConversationID: conv,
+		LastStatus:     "idle", // reads as ALIVE, so without the gate it resumes
+		Labels:         map[string]string{"rafiki/daemon": "other-daemon"},
+	}
+
+	c.recoverOne(ctx, rec, map[string]bool{conv: true})
+
+	if got := logs.String(); strings.Contains(got, "auto-resuming fundi child") {
+		t.Fatalf("attempted to resume a child owned by another live daemon; log:\n%s", got)
+	}
+
+	// It is still in the store, so `rafiki list` shows it. We are declining to
+	// RUN it, not hiding it.
+	if _, ok := c.st.Get(childID); !ok {
+		t.Fatalf("foreign-live child must still be loaded into the store")
+	}
+
+	// Defence in depth, not the primary guard (see the doc comment): its
+	// in-flight row is untouched. Pending only returns StatePending rows, so a
+	// reset would make this non-empty.
+	pending, err := st.Pending(ctx, childID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("another daemon's in-flight 'sent' row was reset to pending: %+v", pending)
+	}
+}
+
+// TestRecoverOneReleasesInboxForItsOwnExitedChild proves the gate did not
+// swallow the ordinary path: this daemon's OWN row that reads as exited still
+// takes the planStayExited branch and still resets its unconfirmed rows, which
+// is what lets a later manual `rafiki resume` deliver them.
+func TestRecoverOneReleasesInboxForItsOwnExitedChild(t *testing.T) {
+	const childID = "c_mine"
+	ctx := context.Background()
+
+	st := inbox.NewMemory()
+	rec1, err := st.Accept(ctx, inbox.Inbound{
+		ChildID: childID, Mode: inbox.ModePrompt, Text: "queued for my own child",
+	})
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := st.MarkSent(ctx, []string{rec1.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	c := newTestController(t)
+	c.daemonID = "me"
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
+
+	rec := childstore.ChildRecord{
+		ChildID:    childID,
+		Kind:       protocol.KindFundi,
+		DaemonID:   "me",
+		LastStatus: "exited", // shouldAutoResume false -> planStayExited
+	}
+
+	c.recoverOne(ctx, rec, nil)
+
+	pending, err := st.Pending(ctx, childID)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("this daemon's own exited child must have its unconfirmed rows reset; got %+v", pending)
 	}
 }
