@@ -14,6 +14,10 @@ package tui
 // event state machine.
 type paneState struct {
 	renderer *renderer
+	// atBottom drives the "↓ more below" footer marker. Task 7 makes the
+	// viewport the source of truth; until then a pane is always at the bottom,
+	// which is exactly what the pre-scrollback cockpit does.
+	atBottom bool
 }
 
 // pane returns childID's pane state, creating it on first use.
@@ -23,7 +27,7 @@ func (c *Cockpit) pane(childID string) *paneState {
 	}
 	p := c.panes[childID]
 	if p == nil {
-		p = &paneState{renderer: newRenderer()}
+		p = &paneState{renderer: newRenderer(), atBottom: true}
 		c.panes[childID] = p
 	}
 	return p
