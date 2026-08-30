@@ -12,24 +12,44 @@ import (
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
+// maxToolResultLines caps how much of one tool result reaches the pane.
+//
+// The elided remainder is NOT reachable from the TUI — it lives in the event
+// log and nothing surfaces it. That is a deliberate, known limitation (design
+// §8): 500 lines of grep inline is unusable, and rendering it through glamour
+// four times a second is worse. Raising this is a one-line change.
+const maxToolResultLines = 20
+
 // renderer caches finalized blocks and re-renders the live tail on demand.
 // It follows the two-axis design rule (2026-08-12 design §4.2):
 //  1. Immutable finalized blocks → cached styled strings
 //  2. One live tail block → re-rendered each coalescence tick
 type renderer struct {
-	md      *glamour.TermRenderer
-	mu      sync.Mutex
-	lastFP  string // fingerprint of the last rendered live tail
-	liveOut string // current live tail rendering
+	md *glamour.TermRenderer
+	mu sync.Mutex
+
+	// cached holds rendered lines for blocks[:cachedUpTo], all finalized and
+	// therefore immutable. The live tail is re-rendered per call and is never
+	// stored here.
+	cached     []string
+	cachedUpTo int
+
+	lastFP  string
+	liveOut []string
 }
 
-// reset drops the live-tail cache. The cache is keyed on a fingerprint, not on
-// a child, so a shared renderer must be reset when the pane changes owner.
+// reset drops all cached rendering. The cache used to be keyed only on a
+// fingerprint, not on a child, so a shared renderer had to be reset when the
+// pane changed owner. Each child now owns its own renderer (see pane.go), so
+// reset is only needed to clear a renderer being reused for a fresh
+// transcript.
 func (r *renderer) reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.cached = nil
+	r.cachedUpTo = 0
 	r.lastFP = ""
-	r.liveOut = ""
+	r.liveOut = nil
 }
 
 func newRenderer() *renderer {
@@ -96,9 +116,19 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			sb.WriteString("\n")
 			if tc.Result != "" {
 				rendered, _ := r.md.Render(tc.Result)
-				rendered = strings.TrimSpace(rendered)
-				for _, line := range strings.Split(rendered, "\n") {
+				lines := strings.Split(strings.TrimSpace(rendered), "\n")
+				elided := 0
+				if len(lines) > maxToolResultLines {
+					elided = len(lines) - maxToolResultLines
+					lines = lines[:maxToolResultLines]
+				}
+				for _, line := range lines {
 					sb.WriteString(styleToolResult.Render("    │ " + line))
+					sb.WriteString("\n")
+				}
+				if elided > 0 {
+					sb.WriteString(styleMeta.Render(
+						"    │ … " + itoa(int64(elided)) + " more lines"))
 					sb.WriteString("\n")
 				}
 			}
@@ -125,55 +155,73 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	return sb.String()
 }
 
-// renderBlocks returns the full rendered transcript. finalized is the index
-// into blocks after which everything is finalized (cached); blocks after that
-// (the live tail) are re-rendered.
-func (r *renderer) renderBlocks(blocks []session.Block, finalized int) string {
+// Lines renders the transcript as display lines: cached output for the
+// finalized prefix, freshly rendered output for the live tail.
+//
+// Before this, every finalized block was re-rendered through glamour on every
+// tick (250ms), and then all but the visible tail was discarded. Cost grew
+// linearly with conversation length for output nobody saw. Returning LINES
+// rather than one string is what lets viewport.SetContentLines take it
+// directly, and makes a future prepend's YOffset shift exactly len(prepended).
+func (r *renderer) Lines(blocks []session.Block, finalized int) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if len(blocks) == 0 {
-		return styleMeta.Render("Connecting…")
+	if finalized < 0 {
+		finalized = 0
+	}
+	if finalized > len(blocks) {
+		finalized = len(blocks)
 	}
 
-	needRender := false
-	if finalized < len(blocks) {
-		live := &blocks[len(blocks)-1]
-		if live.Kind == session.KindAssistant && !live.Final {
-			fp := live.Fingerprint()
-			if fp != r.lastFP {
-				r.lastFP = fp
-				needRender = true
-			}
-		}
+	// Finalized moving backwards means this is a different transcript, not a
+	// shorter one. Appending to the old cache would splice two together.
+	if finalized < r.cachedUpTo {
+		r.cached = nil
+		r.cachedUpTo = 0
+		r.lastFP = ""
+		r.liveOut = nil
 	}
-
-	var sb strings.Builder
-	for i := 0; i < finalized; i++ {
-		sb.WriteString(r.renderBlock(blocks[i]))
-		sb.WriteString("\n")
+	for i := r.cachedUpTo; i < finalized; i++ {
+		r.cached = append(r.cached, blockLines(r.renderBlock(blocks[i]))...)
 	}
+	r.cachedUpTo = finalized
 
-	// Recompute whenever the tail changed, whenever there is no cached value,
-	// and whenever there is no tail left (so the cache empties instead of
+	// Live tail: recompute when its fingerprint changed, when nothing is
+	// cached, and when the tail is empty (so the cache empties rather than
 	// stranding the last streaming fragment below finalized content).
-	//
-	// The store used to be guarded by `if !needRender`, which is backwards: a
-	// CHANGED tail computed a fresh string and then threw it away, emitting the
-	// stale one. With a single session that self-corrected on the next tick;
-	// with one renderer shared across sessions it painted the previous child's
-	// half-finished paragraph into the new child's pane for the whole turn.
-	if needRender || r.liveOut == "" || finalized >= len(blocks) {
-		var liveSb strings.Builder
-		for i := finalized; i < len(blocks); i++ {
-			liveSb.WriteString(r.renderBlock(blocks[i]))
-			liveSb.WriteString("\n")
+	fp := ""
+	if finalized < len(blocks) {
+		if live := &blocks[len(blocks)-1]; live.Kind == session.KindAssistant && !live.Final {
+			fp = live.Fingerprint()
 		}
-		r.liveOut = liveSb.String()
+	}
+	if fp != r.lastFP || r.liveOut == nil || finalized >= len(blocks) {
+		r.lastFP = fp
+		var tail []string
+		for i := finalized; i < len(blocks); i++ {
+			tail = append(tail, blockLines(r.renderBlock(blocks[i]))...)
+		}
+		r.liveOut = tail
 	}
 
-	sb.WriteString(r.liveOut)
-	return sb.String()
+	if len(r.cached) == 0 && len(r.liveOut) == 0 {
+		return []string{styleMeta.Render("Connecting…")}
+	}
+	out := make([]string, 0, len(r.cached)+len(r.liveOut))
+	out = append(out, r.cached...)
+	out = append(out, r.liveOut...)
+	return out
+}
+
+// blockLines splits one rendered block into display lines, dropping the
+// trailing empty element a block's final newline produces.
+func blockLines(s string) []string {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
 }
 
 func durStr(ms int64) string {

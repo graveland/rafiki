@@ -544,7 +544,7 @@ func (c *Cockpit) View() tea.View {
 	if f := c.focused(); f == "" {
 		conv = styleMeta.Render("Pick an agent — ^↑/^↓ to move, ⇥ for the next that needs you.")
 	} else if s := c.sessions[f]; s != nil {
-		conv = c.renderer.renderBlocks(s.Blocks, s.Finalized)
+		conv = strings.Join(c.renderer.Lines(s.Blocks, s.Finalized), "\n")
 	} else {
 		conv = styleMeta.Render("loading…")
 	}
