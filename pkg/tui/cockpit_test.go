@@ -9,6 +9,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
+	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -222,4 +223,161 @@ func TestShutdownIsIdempotent(t *testing.T) {
 	c := newTestCockpit("c_1")
 	c.shutdown()
 	c.shutdown() // must not panic on a nil stop func
+}
+
+// ── regressions from the C1b whole-branch review ─────────────────────────────
+
+// FINDING 1. seedMsg used to open the focus stream via hop(c.focused()), and
+// hop refuses a move to the child already focused -- so the call was an
+// unconditional no-op and `attach <id>` / `create` opened a cockpit whose only
+// event source was the rail: six small types, no messages, no deltas, no
+// history. A permanently empty pane.
+func TestSeedOpensTheFocusStreamForTheInitialChild(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
+
+	if c.stopRail == nil {
+		t.Error("seed must start the rail stream")
+	}
+	if c.stopFocus == nil {
+		t.Fatal("seed must open a FOCUS stream for the initially focused child; " +
+			"without it the pane only ever sees rail-tier events and stays empty")
+	}
+}
+
+// FINDING 2. The rail subscription covers every child in the subject but
+// carries none of their content. Applying it to a retained, non-focused session
+// pushed that session's cursor past what it had rendered, and hop resumes from
+// exactly that cursor -- so everything the agent produced while you were away
+// was skipped, silently and permanently.
+func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0)})
+
+	// Focused on c_1, it reaches ordinal 10 through the focus stream.
+	c.applyEvent(&rafikiv1.Event{ChildId: "c_1", Ordinal: ptr32(10),
+		Payload: &rafikiv1.Event_AssistantMessage{AssistantMessage: &rafikiv1.AssistantMessage{}}})
+	if got := c.sessions["c_1"].Cursor; got != 10 {
+		t.Fatalf("focused cursor = %d, want 10", got)
+	}
+
+	// Hop away. c_1's session is retained; the rail keeps reporting its turns.
+	c.hop("c_2")
+	c.applyEvent(turnEndFor("c_1", 250))
+
+	if got := c.sessions["c_1"].Cursor; got != 10 {
+		t.Fatalf("non-focused cursor = %d, want 10 -- a rail event advanced it, so hopping "+
+			"back would resume from %d and skip ordinals 11..%d forever", got, got, got)
+	}
+}
+
+// FINDING 3. One renderer is shared by every session and its live-tail cache is
+// keyed on a fingerprint, not on a child. The store used to be guarded by
+// `if !needRender`, so a CHANGED tail computed a fresh string and then emitted
+// the stale one -- the previous child's half-finished paragraph, for the whole
+// of the next child's turn.
+func TestRendererDoesNotBleedAcrossSessions(t *testing.T) {
+	r := newRenderer()
+	one := []session.Block{{Kind: session.KindAssistant, Text: "AAA-from-child-one"}}
+	r.renderBlocks(one, 0)
+	r.renderBlocks(one, 0) // settle the cache
+
+	for _, tail := range []string{"BBB-1", "BBB-12", "BBB-123"} {
+		two := []session.Block{{Kind: session.KindAssistant, Text: tail}}
+		out := r.renderBlocks(two, 0)
+		if strings.Contains(out, "AAA-from-child-one") {
+			t.Fatalf("render of %q leaked the previous child's tail:\n%s", tail, out)
+		}
+		if !strings.Contains(out, tail) {
+			t.Errorf("render of %q did not contain it:\n%s", tail, out)
+		}
+	}
+}
+
+// FINDING 4. reseeding was set by applyEvent and cleared only when the RPC
+// returned, and the eventMsg case dispatched on it every time -- so each event
+// arriving during a slow ListChildren queued another concurrent one. The
+// cockpit amplified against a daemon that was already slow, which is the exact
+// condition the self-heal exists for.
+func TestReseedDispatchesAtMostOneInFlight(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)})
+
+	dispatched := 0
+	for i := int32(0); i < 5; i++ {
+		_, cmd := c.Update(eventMsg{turnEndFor("c_ghost", i)})
+		if cmd != nil {
+			// tea.Batch always returns non-nil; count the re-seed explicitly.
+			if c.reseedInFlight && !c.reseeding {
+				dispatched++
+				c.reseeding = false
+			}
+		}
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched %d re-seeds for a burst from one unknown child, want 1", dispatched)
+	}
+
+	// The reply releases the latch so a later gap can still self-heal.
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
+	if c.reseedInFlight {
+		t.Error("seedMsg must clear reseedInFlight")
+	}
+}
+
+// FINDING 5. ListChildrenRequest has no subject filter, so an unfiltered seed
+// installed a row for every live child on the daemon. Rows outside the subject
+// are frozen by construction -- their events never match -- so they keep their
+// seed-time glyph forever, never badge, and still absorb focus.
+func TestSeedIsNarrowedToTheSubject(t *testing.T) {
+	kids := []*rafikiv1.ChildSummary{
+		summaryFor("c_root", "root", 0),
+		withParent(summaryFor("c_kid", "kid", 0), "c_root"),
+		withParent(summaryFor("c_grandkid", "grandkid", 0), "c_kid"),
+		summaryFor("c_other", "unrelated root", 0),
+		withParent(summaryFor("c_otherkid", "unrelated kid", 0), "c_other"),
+	}
+
+	sub := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", ChildID: "c_root",
+		Subject: &rafikiv1.EventSubject{
+			Scope:       &rafikiv1.EventSubject_Subtree{Subtree: "c_root"},
+			IncludeSelf: true,
+		}})
+	defer sub.shutdown()
+
+	// Drive the real seed path rather than calling inSubject directly, so this
+	// also fails if the narrowing is ever unwired from the handler.
+	sub.Update(seedMsg{children: kids})
+	got := map[string]bool{}
+	for _, n := range sub.rail.Nodes() {
+		got[n.ChildID] = true
+	}
+	for _, want := range []string{"c_root", "c_kid", "c_grandkid"} {
+		if !got[want] {
+			t.Errorf("%s missing from the subtree seed; got %v", want, got)
+		}
+	}
+	for _, bad := range []string{"c_other", "c_otherkid"} {
+		if got[bad] {
+			t.Errorf("%s is outside the subscription but was seeded; its row would be frozen "+
+				"at its seed-time status forever", bad)
+		}
+	}
+
+	all := NewCockpit(Options{BaseURL: "http://127.0.0.1:1"})
+	defer all.shutdown()
+	all.Update(seedMsg{children: kids})
+	if n := all.rail.Len(); n != len(kids) {
+		t.Errorf("subject `all` seeded %d of %d children", n, len(kids))
+	}
+}
+
+func ptr32(v int32) *int32 { return &v }
+
+func withParent(s *rafikiv1.ChildSummary, parent string) *rafikiv1.ChildSummary {
+	s.Labels[rail.ParentLabel] = parent
+	return s
 }

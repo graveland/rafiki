@@ -23,6 +23,15 @@ type renderer struct {
 	liveOut string // current live tail rendering
 }
 
+// reset drops the live-tail cache. The cache is keyed on a fingerprint, not on
+// a child, so a shared renderer must be reset when the pane changes owner.
+func (r *renderer) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastFP = ""
+	r.liveOut = ""
+}
+
 func newRenderer() *renderer {
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithStandardStyle("dark"),
@@ -145,19 +154,22 @@ func (r *renderer) renderBlocks(blocks []session.Block, finalized int) string {
 		sb.WriteString("\n")
 	}
 
-	if needRender || r.liveOut == "" {
+	// Recompute whenever the tail changed, whenever there is no cached value,
+	// and whenever there is no tail left (so the cache empties instead of
+	// stranding the last streaming fragment below finalized content).
+	//
+	// The store used to be guarded by `if !needRender`, which is backwards: a
+	// CHANGED tail computed a fresh string and then threw it away, emitting the
+	// stale one. With a single session that self-corrected on the next tick;
+	// with one renderer shared across sessions it painted the previous child's
+	// half-finished paragraph into the new child's pane for the whole turn.
+	if needRender || r.liveOut == "" || finalized >= len(blocks) {
 		var liveSb strings.Builder
 		for i := finalized; i < len(blocks); i++ {
 			liveSb.WriteString(r.renderBlock(blocks[i]))
 			liveSb.WriteString("\n")
 		}
-		if !needRender {
-			// Only the live tail changed; only re-render it
-			r.liveOut = liveSb.String()
-		}
-	} else {
-		// All blocks finalized; no tail to re-render
-		r.liveOut = ""
+		r.liveOut = liveSb.String()
 	}
 
 	sb.WriteString(r.liveOut)

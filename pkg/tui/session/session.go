@@ -101,11 +101,18 @@ func (s *Session) Apply(ev *rafikiv1.Event) {
 	if id := ev.GetChildId(); id != "" && s.ChildID != "" && id != s.ChildID {
 		return
 	}
+	// An ordinal we have already folded in is a duplicate, and duplicates are
+	// routine rather than exceptional: the rail and focus subscriptions overlap
+	// on the durable tier, so a focused child's turn_end and error events arrive
+	// on BOTH. Without this an error would append its KindSystem block twice.
+	// Ephemeral events carry no ordinal and are always applied.
 	if ev.Ordinal != nil {
-		if ord := ev.GetOrdinal(); !s.HasCursor || ord > s.Cursor {
-			s.Cursor = ord
-			s.HasCursor = true
+		ord := ev.GetOrdinal()
+		if s.HasCursor && ord <= s.Cursor {
+			return
 		}
+		s.Cursor = ord
+		s.HasCursor = true
 	}
 
 	switch p := ev.Payload.(type) {

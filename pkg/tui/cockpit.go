@@ -84,9 +84,13 @@ type Cockpit struct {
 	pending       string
 	showHelp      bool
 	railHidden    bool
-	// reseeding guards the self-heal in applyEvent so a burst of events from a
-	// child we do not know cannot queue one ListChildren per event.
-	reseeding bool
+	// reseeding is REQUESTED by applyEvent when it sees traffic from a child it
+	// does not know; reseedInFlight says one ListChildren is already running.
+	// Both are needed: without the second, every event arriving during the RPC
+	// queues another one, and the cockpit self-amplifies against a daemon that
+	// is already slow -- which is the exact condition the self-heal exists for.
+	reseeding      bool
+	reseedInFlight bool
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -148,6 +152,70 @@ func (c *Cockpit) seedCmd() tea.Cmd {
 	}
 }
 
+// inSubject narrows ListChildren to what the rail subscription actually covers.
+//
+// ListChildrenRequest has no subject filter -- only statuses -- so an unfiltered
+// seed installs a row for every live child on the daemon, including whole trees
+// the subscription excludes. Those rows are frozen by construction: their events
+// never match the subject, so the glyph stays at its seed-time status forever,
+// they never earn an attention badge, and ^↑/^↓ will still park focus on them.
+// Rail.Seed's refresh path deliberately does not overwrite Status, so a re-seed
+// cannot repair them either. They also bloat Rail.Cursor, making every reconnect
+// replay rows the server then discards.
+//
+// A subject the client cannot evaluate (an unrecognised scope) narrows to
+// nothing rather than everything: a rail that is missing rows is visibly wrong,
+// while a rail full of frozen ones looks fine and lies.
+func (c *Cockpit) inSubject(all []*rafikiv1.ChildSummary) []*rafikiv1.ChildSummary {
+	switch scope := c.subject.GetScope().(type) {
+	case *rafikiv1.EventSubject_All:
+		return all
+	case *rafikiv1.EventSubject_Child:
+		for _, s := range all {
+			if s.GetChildId() == scope.Child {
+				return []*rafikiv1.ChildSummary{s}
+			}
+		}
+		return nil
+	case *rafikiv1.EventSubject_Subtree:
+		parent := make(map[string]string, len(all))
+		for _, s := range all {
+			parent[s.GetChildId()] = s.GetLabels()[rail.ParentLabel]
+		}
+		descends := func(id string) bool {
+			// Bounded by the node count so a malformed parent label cannot
+			// spin here; the daemon's lineage rules make a cycle impossible
+			// but nothing in a label enforces that.
+			for i := 0; i < len(parent); i++ {
+				p, ok := parent[id]
+				if !ok || p == "" {
+					return false
+				}
+				if p == scope.Subtree {
+					return true
+				}
+				id = p
+			}
+			return false
+		}
+		out := make([]*rafikiv1.ChildSummary, 0, len(all))
+		for _, s := range all {
+			if s.GetChildId() == scope.Subtree {
+				if c.subject.GetIncludeSelf() {
+					out = append(out, s)
+				}
+				continue
+			}
+			if descends(s.GetChildId()) {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // ── Update ──────────────────────────────────────────────────────────────────
 
 func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -159,19 +227,25 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case seedMsg:
-		c.reseeding = false
+		c.reseedInFlight = false
 		if msg.err != nil {
 			c.status = "list children: " + msg.err.Error()
 			return c, nil
 		}
 		first := c.stopRail == nil
-		c.rail.Seed(msg.children)
+		c.rail.Seed(c.inSubject(msg.children))
 		if first {
 			c.status = "connected"
 			c.stopRail = streams.StartRail(context.Background(), c.cfg, c.subject,
 				c.rail.Cursor, c.evCh)
+			// openFocus, NOT hop: hop refuses a no-op move, and the initial
+			// child is already focused (NewCockpit set it so the first frame
+			// renders the right pane). Routing this through hop made the call
+			// unconditionally return nil, so `attach <id>` and `create` opened
+			// a cockpit whose only event source was the rail -- six small types,
+			// no messages, no deltas, no history: a permanently empty pane.
 			if f := c.focused(); f != "" {
-				return c, c.hop(f)
+				c.openFocus(f)
 			}
 		}
 		return c, nil
@@ -179,7 +253,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventMsg:
 		c.applyEvent(msg.ev)
 		var cmd tea.Cmd
-		if c.reseeding {
+		if c.reseeding && !c.reseedInFlight {
+			c.reseeding = false
+			c.reseedInFlight = true
 			cmd = c.seedCmd()
 		}
 		return c, tea.Batch(waitForEvent(c.evCh), cmd)
@@ -220,15 +296,22 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 
 	c.rail.Apply(ev)
 
+	// ONLY the focused child's session may be advanced. The rail subscription
+	// covers every child in the subject but carries none of their content, so
+	// applying it to a retained, non-focused session pushes that session's
+	// cursor far past what it has actually rendered -- and hop resumes from
+	// exactly that cursor. The effect was silent and total: hop away from a
+	// working agent, hop back, and every message it produced meanwhile is gone
+	// with no error and no gap marker.
+	if id != c.focused() {
+		return
+	}
 	s := c.sessions[id]
 	if s == nil {
 		return
 	}
 	before := len(s.Blocks)
 	s.Apply(ev)
-	if id != c.focused() {
-		return
-	}
 	if s.HasCursor {
 		// Delivery to the focused session IS reading.
 		c.rail.MarkRead(id, s.Cursor)
@@ -347,6 +430,16 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 	}
 
 	c.rail.SetFocus(childID)
+	// The live-tail cache is keyed on a fingerprint, not on a child.
+	c.renderer.reset()
+	c.openFocus(childID)
+	return nil
+}
+
+// openFocus starts the focus subscription for childID, creating its session if
+// needed. It has no identity guard, which is the whole reason it is separate
+// from hop: the seed path focuses a child and then needs its stream opened.
+func (c *Cockpit) openFocus(childID string) {
 	s := c.sessions[childID]
 	if s == nil {
 		s = session.New(childID)
@@ -362,7 +455,6 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 	}
 	c.stopFocus = streams.StartFocus(context.Background(), c.cfg, childID,
 		&rafikiv1.EventCursor{Ordinals: map[string]int32{childID: after}}, c.evCh)
-	return nil
 }
 
 // touch marks childID most-recently-used and evicts past maxSessions.
