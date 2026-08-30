@@ -45,7 +45,7 @@ func TestRailHiddenForASingleChild(t *testing.T) {
 	// Session-first: create/attach <id> shows no rail at all. The rail grows
 	// out of a normal session -- no cockpit to configure, no empty pane.
 	nodes := []rail.Node{{ChildID: "c_1", Name: "coordinator", Status: "idle"}}
-	if got := renderRail(nodes, "c_1", 24); got != "" {
+	if got := renderRail(nodes, "c_1", "c_1", 24); got != "" {
 		t.Errorf("renderRail with one child = %q, want empty", got)
 	}
 }
@@ -55,7 +55,7 @@ func TestRailAppearsWithTheSecondChild(t *testing.T) {
 		{ChildID: "c_1", Name: "coordinator", Status: "streaming"},
 		{ChildID: "c_2", Name: "scout", ParentID: "c_1", Depth: 1, Status: "idle", Attention: 2},
 	}
-	got := renderRail(nodes, "c_1", 24)
+	got := renderRail(nodes, "c_1", "c_1", 24)
 	if got == "" {
 		t.Fatal("renderRail with two children must render")
 	}
@@ -72,7 +72,7 @@ func TestRailIndentsByDepth(t *testing.T) {
 		{ChildID: "c_2", Name: "kid", ParentID: "c_1", Depth: 1, Status: "idle"},
 		{ChildID: "c_3", Name: "grandkid", ParentID: "c_2", Depth: 2, Status: "idle"},
 	}
-	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", 30), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30), "\n"), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("want 3 rows, got %d: %v", len(lines), lines)
 	}
@@ -89,7 +89,7 @@ func TestRailRowsAreClippedToWidth(t *testing.T) {
 		{ChildID: "c_1", Name: "a", Status: "idle"},
 		{ChildID: "c_2", Name: strings.Repeat("verylongname", 20), Status: "idle"},
 	}
-	for _, line := range strings.Split(renderRail(nodes, "c_1", 20), "\n") {
+	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20), "\n") {
 		if len([]rune(line)) > 20 {
 			t.Errorf("row is %d runes, want <= 20: %q", len([]rune(line)), line)
 		}
@@ -384,4 +384,72 @@ func ptr32(v int32) *int32 { return &v }
 func withParent(s *rafikiv1.ChildSummary, parent string) *rafikiv1.ChildSummary {
 	s.Labels[rail.ParentLabel] = parent
 	return s
+}
+
+// ── rail selection ───────────────────────────────────────────────────────────
+
+// TestMoveSelectionDoesNotHop pins the reason the rail has a cursor at all.
+// hop opens a Connect subscription (openFocus -> streams.StartFocus), so the
+// old move-and-hop binding churned one focus stream per keystroke: arrowing
+// past five agents opened five. Browsing must move a cursor and nothing else;
+// enter commits.
+func TestMoveSelectionDoesNotHop(t *testing.T) {
+	c := newTestCockpit("c_a")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_a", "alpha", 0),
+		summaryFor("c_b", "bravo", 0),
+		summaryFor("c_c", "charlie", 0),
+	})
+	c.rail.SetFocus("c_a")
+	c.selected = "c_a"
+
+	c.moveSelection(+1)
+
+	if c.selected != "c_b" {
+		t.Errorf("selection = %q, want c_b", c.selected)
+	}
+	if got := c.rail.Focus(); got != "c_a" {
+		t.Errorf("moving the selection changed focus to %q; focus must only "+
+			"change on commit", got)
+	}
+}
+
+// TestMoveSelectionClampsAtTheEnds: selection clamps where neighbour() wraps.
+// Two bindings that both wrap are indistinguishable in use, and wrapping is
+// what the attention jump does.
+func TestMoveSelectionClampsAtTheEnds(t *testing.T) {
+	c := newTestCockpit("c_a")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_a", "alpha", 0), summaryFor("c_b", "bravo", 0),
+	})
+	c.selected = "c_a"
+
+	c.moveSelection(-1)
+	if c.selected != "c_a" {
+		t.Errorf("selection moved off the top to %q", c.selected)
+	}
+
+	c.selected = "c_b"
+	c.moveSelection(+1)
+	if c.selected != "c_b" {
+		t.Errorf("selection moved off the bottom to %q", c.selected)
+	}
+}
+
+// TestMoveSelectionDefaultsToTheFocusedChild: tabbing into the rail without a
+// prior selection must start where you are looking, not at the top.
+func TestMoveSelectionDefaultsToTheFocusedChild(t *testing.T) {
+	c := newTestCockpit("c_b")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_a", "alpha", 0), summaryFor("c_b", "bravo", 0),
+		summaryFor("c_c", "charlie", 0),
+	})
+	c.rail.SetFocus("c_b")
+	c.selected = ""
+
+	c.moveSelection(+1)
+
+	if c.selected != "c_c" {
+		t.Errorf("selection = %q, want c_c (started from focused c_b)", c.selected)
+	}
 }

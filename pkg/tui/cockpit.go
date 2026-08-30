@@ -86,6 +86,10 @@ type Cockpit struct {
 	pending       string
 	showHelp      bool
 	railHidden    bool
+	// selected is the rail CURSOR, distinct from the focused child. Browsing
+	// must be free: hop opens a focus subscription per call, so a cursor that
+	// hopped on every arrow churned one Connect stream per keystroke.
+	selected string
 	// reseeding is REQUESTED by applyEvent when it sees traffic from a child it
 	// does not know; reseedInFlight says one ListChildren is already running.
 	// Both are needed: without the second, every event arriving during the RPC
@@ -485,6 +489,37 @@ func (c *Cockpit) touch(childID string) {
 }
 
 // neighbour returns the child delta rows away in display order.
+// moveSelection moves the rail cursor by delta without hopping.
+//
+// Clamped, where neighbour() wraps. Wrapping is what the attention jump does,
+// and two bindings that both wrap are indistinguishable in use. An empty
+// selection starts from the focused child, so tabbing into the rail begins
+// where you are looking rather than at the top.
+func (c *Cockpit) moveSelection(delta int) {
+	nodes := c.rail.Nodes()
+	if len(nodes) == 0 {
+		return
+	}
+	if c.selected == "" {
+		c.selected = c.focused()
+	}
+	idx := 0
+	for i, n := range nodes {
+		if n.ChildID == c.selected {
+			idx = i
+			break
+		}
+	}
+	idx += delta
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(nodes) {
+		idx = len(nodes) - 1
+	}
+	c.selected = nodes[idx].ChildID
+}
+
 func (c *Cockpit) neighbour(delta int) string {
 	nodes := c.rail.Nodes()
 	if len(nodes) == 0 {
@@ -531,7 +566,7 @@ func (c *Cockpit) View() tea.View {
 
 	railText := ""
 	if !c.railHidden {
-		railText = renderRail(c.rail.Nodes(), c.focused(), railWidth)
+		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railWidth)
 	}
 
 	bodyHeight := c.height - 6
