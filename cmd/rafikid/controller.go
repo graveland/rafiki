@@ -2803,7 +2803,28 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// below — cm.Remove is the observable "teardown complete" signal, so a
 	// caller that has seen it must not still find rows marked sent to a
 	// process that no longer exists.
-	c.releaseInboxOnExit(childID)
+	//
+	// Skipped for a fundi child this daemon never actually held the lease
+	// for. recoverOne's resume path can spawn a competing in-process engine
+	// for a conversation another daemon already owns; that engine's lease
+	// acquisition is refused, but the failure surfaces asynchronously (see
+	// holdsLease's doc comment), so THIS exit — not resumeWithAutoRecovery's
+	// return — is where "did this daemon ever really own the child" first
+	// becomes checkable on this path. Resetting the OWNING daemon's still-
+	// live child's inbox here is the other half of the bug replayInbox's own
+	// holdsLease gate closes: verified live, a doomed competing build's exit
+	// reached this call and reset the row to 'pending' with nobody left to
+	// redeliver it, stranding it exactly like an unguarded replay would —
+	// gating replayInbox alone was not sufficient. A claude/pi child never
+	// acquires a lease at all (agentRunner returns a nil Runner for anything
+	// but fundi), so it is exempt rather than silently skipped by an
+	// always-false holdsLease.
+	if snap.Kind != protocol.KindFundi || c.daemonID == "" || c.holdsLease(childID) {
+		c.releaseInboxOnExit(childID)
+	} else {
+		slog.Warn("child exited without this daemon ever holding its lease; not resetting its inbox",
+			"childId", childID)
+	}
 
 	c.nudgedMu.Lock()
 	delete(c.nudgedOnce, childID)

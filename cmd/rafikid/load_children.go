@@ -184,8 +184,9 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 	// The lease is acquired at engine build, not here. Two acquisition sites
 	// would mint two tokens for one conversation and the second would silently
 	// invalidate the first, leaving the tracked lease holding a token no write
-	// carries. resumeWithAutoRecovery surfaces the refusal when another daemon
-	// holds it, and the child stays exited.
+	// carries. resumeWithAutoRecovery is SUPPOSED to surface the refusal when
+	// another daemon holds it, but a success return here does not by itself
+	// prove that happened — see the holdsLease check below.
 	slog.Info("auto-resuming fundi child", "childId", rec.ChildID)
 	go func(id string) {
 		rctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
@@ -193,6 +194,30 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 		if _, err := c.resumeWithAutoRecovery(rctx, id); err != nil {
 			slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
 			c.dropLease(id)
+			return
+		}
+		// A success return does not prove THIS daemon owns the child: the
+		// in-process engine build runs on its own goroutine (Runner.Start
+		// returns before Build completes), and activateLiveChild's
+		// Idle-or-5s-timeout select cannot tell "became idle" apart from
+		// "the build already failed, including on a refused lease" — see
+		// holdsLease's doc comment. Every child row is visible to every
+		// daemon (loadChildren lists the whole table), so recoverOne WILL
+		// walk a row another live daemon already owns; without this check a
+		// lease refusal there still replays as though it succeeded, flipping
+		// the OTHER daemon's live child's 'sent' rows to 'pending' and
+		// stranding them.
+		//
+		// The gate applies only when leasing is actually in play — the same
+		// condition OnConversationResolved itself uses to decide whether to
+		// acquire at all (c.leases is guaranteed non-nil here; loadChildren
+		// already returned if c.children, set in the same pool!=nil block,
+		// were nil). A daemon with no identity (c.daemonID == "") never
+		// tracks a lease for anything and is already unfenced by design in
+		// that case (see NewController), so it has nothing to gate on.
+		if c.daemonID != "" && !c.holdsLease(id) {
+			slog.Warn("auto-resume reported success without holding this child's lease; "+
+				"not replaying its inbox", "childId", id)
 			return
 		}
 		// The child is live and its runtime is wired: anything the previous
