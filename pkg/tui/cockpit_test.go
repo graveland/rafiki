@@ -285,12 +285,12 @@ func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
 func TestRendererDoesNotBleedAcrossSessions(t *testing.T) {
 	r := newRenderer()
 	one := []session.Block{{Kind: session.KindAssistant, Text: "AAA-from-child-one"}}
-	r.renderBlocks(one, 0)
-	r.renderBlocks(one, 0) // settle the cache
+	r.Lines(one, 0)
+	r.Lines(one, 0) // settle the cache
 
 	for _, tail := range []string{"BBB-1", "BBB-12", "BBB-123"} {
 		two := []session.Block{{Kind: session.KindAssistant, Text: tail}}
-		out := r.renderBlocks(two, 0)
+		out := strings.Join(r.Lines(two, 0), "\n")
 		if strings.Contains(out, "AAA-from-child-one") {
 			t.Fatalf("render of %q leaked the previous child's tail:\n%s", tail, out)
 		}
