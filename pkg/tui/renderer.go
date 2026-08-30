@@ -115,8 +115,20 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			sb.WriteString(prefix)
 			sb.WriteString("\n")
 			if tc.Result != "" {
-				rendered, _ := r.md.Render(tc.Result)
-				lines := strings.Split(strings.TrimSpace(rendered), "\n")
+				// Tool output is NOT markdown and must never be reflowed as
+				// prose. glamour joins consecutive newline-separated lines
+				// into one CommonMark paragraph, so "alpha\nbeta\ngamma"
+				// rendered as "alpha beta gamma" and a 500-line grep collapsed
+				// to a single ~6000-column line. Measured: plain
+				// newline-separated input renders to exactly 1 line, while
+				// fenced, indented and list input render to 500+.
+				//
+				// That also made maxToolResultLines inert for exactly the
+				// output it was written for — one line is never over a 20-line
+				// cap — so the cap only ever fired on tool results that
+				// happened to look like markdown. Splitting the RAW result
+				// fixes both the structure and the cap.
+				lines := strings.Split(strings.TrimRight(tc.Result, "\n"), "\n")
 				elided := 0
 				if len(lines) > maxToolResultLines {
 					elided = len(lines) - maxToolResultLines
