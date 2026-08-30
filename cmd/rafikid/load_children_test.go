@@ -197,6 +197,14 @@ func TestRecoveryReplaysUnconfirmedMessages(t *testing.T) {
 		},
 	})
 
+	// The two-step pipeline, in the order recovery actually runs it:
+	// ownership established (resetUnconfirmedOnOwnership, normally called
+	// from OnConversationResolved) THEN delivery (replayInbox, normally
+	// called after resumeWithAutoRecovery returns). See I2 in the final
+	// review — running Reset and Deliver together, after the child has
+	// already gone idle, is what caused a duplicate delivery; see
+	// TestReplayDoesNotDuplicateARowTheIdleDrainAlreadyDelivered for that.
+	c.resetUnconfirmedOnOwnership("c_1")
 	c.replayInbox(ctx, "c_1")
 
 	if len(delivered) != 1 {
@@ -207,16 +215,18 @@ func TestRecoveryReplaysUnconfirmedMessages(t *testing.T) {
 	}
 }
 
-// TestReplayInboxIsScopedToOneChild is the multi-daemon trap in unit form.
-// Child rows are shared across every daemon; replaying c_1 must never touch
-// c_2's unconfirmed rows, or a restarting daemon would resurrect and
-// double-deliver messages belonging to a sibling daemon that is still
-// running c_2 fine.
+// TestResetUnconfirmedOnOwnershipIsScopedToOneChild is the multi-daemon trap
+// in unit form, now aimed at the function that actually does the resetting
+// (resetUnconfirmedOnOwnership moved the Reset out of replayInbox — see I2 in
+// the final review). Child rows are shared across every daemon; establishing
+// ownership of c_1 must never touch c_2's unconfirmed rows, or a resuming
+// daemon would resurrect and double-deliver messages belonging to a sibling
+// daemon that is still running c_2 fine.
 //
-// Mutation check: make replayInbox reset unscoped (e.g. loop over every
-// known child, or call a bulk ResetSent) and this fails — c_2's row gets
-// redelivered even though c_2 was never passed to replayInbox.
-func TestReplayInboxIsScopedToOneChild(t *testing.T) {
+// Mutation check: make resetUnconfirmedOnOwnership reset unscoped (e.g. loop
+// over every known child, or call a bulk ResetSent) and this fails — c_2's
+// row becomes visible to Pending even though c_2 was never passed in.
+func TestResetUnconfirmedOnOwnershipIsScopedToOneChild(t *testing.T) {
 	st := inbox.NewMemory()
 	ctx := context.Background()
 
@@ -232,45 +242,50 @@ func TestReplayInboxIsScopedToOneChild(t *testing.T) {
 		t.Fatalf("MarkSent: %v", err)
 	}
 
-	var delivered []inbox.Batch
 	c := newTestController(t)
-	c.inbox = inbox.NewQueue(inbox.QueueConfig{
-		Store: st,
-		Deliver: func(_ context.Context, b inbox.Batch) (bool, error) {
-			delivered = append(delivered, b)
-			return false, nil
-		},
-	})
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
 
-	c.replayInbox(ctx, "c_1")
+	c.resetUnconfirmedOnOwnership("c_1")
 
-	if len(delivered) != 1 || delivered[0].ChildID != "c_1" {
-		t.Fatalf("want only c_1 redelivered, got %+v", delivered)
+	pendingC1, err := st.Pending(ctx, "c_1")
+	if err != nil {
+		t.Fatalf("Pending c_1: %v", err)
+	}
+	if len(pendingC1) != 1 {
+		t.Fatalf("c_1's row was not reset to pending: %+v", pendingC1)
 	}
 
-	// c_2's row must still be 'sent' (not reset to pending, not delivered):
-	// Pending only returns rows in StatePending, so a leaked scope would show
-	// up here as c_2's row becoming visible/redelivered.
+	// c_2's row must still be 'sent' (not reset to pending): Pending only
+	// returns rows in StatePending, so a leaked scope would show up here as
+	// c_2's row becoming visible.
 	pendingC2, err := st.Pending(ctx, "c_2")
 	if err != nil {
 		t.Fatalf("Pending c_2: %v", err)
 	}
 	if len(pendingC2) != 0 {
-		t.Fatalf("c_2's row was reset to pending by a replay scoped to c_1: %+v", pendingC2)
+		t.Fatalf("c_2's row was reset to pending by a call scoped to c_1: %+v", pendingC2)
 	}
 }
 
-// TestRecoveryDropsInboxWhenChildStaysExited proves recoverOne wires
-// planStayExited to dropInboxForForgotten. A child that will not be resumed
-// has no turn left to inject into and will never get one, so its queue must
-// be terminated and recorded on the durable event log — not left pending
-// forever, which is what "wait forever for news that already happened"
-// looks like for the coordinator on the OTHER end of one of these rows.
-func TestRecoveryDropsInboxWhenChildStaysExited(t *testing.T) {
+// TestRecoveryStaysExitedResetsRatherThanDrops pins the final review's C1
+// correction: recoverOne's planStayExited branch used to call
+// dropInboxForForgotten (a terminal, unrepairable Drop) with no ownership
+// check at all — this Ruling reversed that outright rather than merely
+// gating it, because the rationale that used to justify a drop here
+// ("no turn to inject into and there will not be one") described a branch
+// recoveryAction no longer produces: a pinned child whose executor comes
+// back CAN be resumed later, manually, and this phase's rule is that exit
+// RESETS. A Drop here would have permanently discarded a row a later manual
+// `rafiki resume` should have been able to deliver.
+func TestRecoveryStaysExitedResetsRatherThanDrops(t *testing.T) {
 	st := inbox.NewMemory()
 	ctx := context.Background()
-	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "orphaned"}); err != nil {
+	rec0, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "orphaned"})
+	if err != nil {
 		t.Fatalf("Accept: %v", err)
+	}
+	if err := st.MarkSent(ctx, []string{rec0.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
 	}
 
 	c := newTestController(t)
@@ -288,26 +303,90 @@ func TestRecoveryDropsInboxWhenChildStaysExited(t *testing.T) {
 	}
 	c.recoverOne(ctx, rec)
 
+	// Reset, not dropped: the row must now be visible to Pending (a later
+	// resume's idle drain can only ever redeliver 'pending' rows, never
+	// 'sent' ones), and it must NOT be terminal.
 	rows, err := st.Pending(ctx, "c_1")
 	if err != nil {
 		t.Fatalf("Pending: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("a child staying exited must have its queue dropped, not left pending: %d rows survived", len(rows))
+	if len(rows) != 1 {
+		t.Fatalf("a child staying exited must have its unconfirmed row reset to pending, not dropped: %d rows pending, want 1", len(rows))
 	}
-	// Dropped rows are terminal, which is what lets the retention sweep ever
-	// reach them.
-	if n, err := st.Sweep(ctx, time.Now().Add(time.Hour)); err != nil || n != 1 {
-		t.Fatalf("swept %d rows (err=%v); want 1 terminal (dropped) row", n, err)
+	if n, err := st.Sweep(ctx, time.Now().Add(time.Hour)); err != nil || n != 0 {
+		t.Fatalf("swept %d rows (err=%v); want 0 — a reset row is not terminal and must survive the retention sweep", n, err)
 	}
 
+	// No inbox_dropped event: nothing was dropped.
 	select {
 	case ev := <-events:
-		errEv := ev.GetError()
-		if errEv == nil || errEv.Code != "inbox_dropped" {
-			t.Fatalf("want an inbox_dropped error event, got %+v", ev)
-		}
+		t.Fatalf("want no event published for a reset (not dropped) queue, got %+v", ev)
 	default:
-		t.Fatal("want an inbox_dropped event published for the forgotten child's dropped queue")
+	}
+}
+
+// TestReplayDoesNotDuplicateARowTheIdleDrainAlreadyDelivered is I2 from the
+// final review, reproduced deterministically without a live engine.
+//
+// The real race: resumeWithAutoRecovery returns only after the child reaches
+// idle, and that idle transition fires its own drain (drainInbox) BEFORE
+// recoverOne's goroutine gets around to calling replayInbox. If replayInbox
+// still did its own Reset (the old design), it could not tell "a row this
+// engine's own idle drain just delivered and marked 'sent' moments ago" apart
+// from "a row genuinely stale from before the crash" — both read 'sent' — so
+// it flipped both back to 'pending' and DeliverAll sent the fresh one again:
+// a duplicate prompt into a duplicate turn, on this phase's headline path.
+//
+// This test drives the same three steps in the same order, standing in for
+// the pieces recoverOne/OnConversationResolved orchestrate live:
+//  1. resetUnconfirmedOnOwnership (now called from OnConversationResolved,
+//     BEFORE the engine can process a frame) resets the pre-crash 'sent' row.
+//  2. The ordinary idle-transition drain (Queue.Deliver with source "",
+//     exactly what drainInbox does after I4) delivers it and marks it 'sent'
+//     again -- this is the row genuinely, correctly in flight.
+//  3. replayInbox (now Deliver-only) runs, as it does after
+//     resumeWithAutoRecovery returns.
+//
+// The row must be delivered EXACTLY ONCE: step 3 must find nothing pending,
+// because step 1 already ran before anything could mark a fresh 'sent' row,
+// and step 2 is what did that marking.
+func TestReplayDoesNotDuplicateARowTheIdleDrainAlreadyDelivered(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+	rec, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "pre-crash message"})
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := st.MarkSent(ctx, []string{rec.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	var deliveries int
+	c := newTestController(t)
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{
+		Store: st,
+		Deliver: func(_ context.Context, b inbox.Batch) (bool, error) {
+			deliveries++
+			return true, nil // awaitAck: mark 'sent', matching a fundi child
+		},
+	})
+
+	// Step 1: ownership established.
+	c.resetUnconfirmedOnOwnership("c_1")
+
+	// Step 2: the ordinary idle-transition drain, direct messages only.
+	if err := c.inbox.Deliver(ctx, "c_1", ""); err != nil {
+		t.Fatalf("Deliver (idle drain): %v", err)
+	}
+	if deliveries != 1 {
+		t.Fatalf("deliveries after the idle drain = %d, want 1", deliveries)
+	}
+
+	// Step 3: recoverOne's post-resume replay.
+	c.replayInbox(ctx, "c_1")
+
+	if deliveries != 1 {
+		t.Fatalf("deliveries after replayInbox = %d, want 1 (still) — "+
+			"the row was redelivered a second time, exactly the duplicate I2 describes", deliveries)
 	}
 }

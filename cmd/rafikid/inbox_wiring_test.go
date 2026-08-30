@@ -21,6 +21,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 func TestBuildInjectionFrameShapes(t *testing.T) {
@@ -718,6 +719,116 @@ func TestHandleChildExitResetsTheInbox(t *testing.T) {
 	}
 	rows, _ := st.Pending(ctx, childID)
 	t.Fatalf("the exit path never returned the unconfirmed row to pending; pending=%+v", rows)
+}
+
+// TestHandleChildExitResetsInboxWithNoDatabase pins I3 from the final
+// review: the exit gate's ownership check must not apply when there is no
+// lease system at all. c.leases is nil exactly when there is no database
+// pool (set only in NewController's pool != nil block, the same block that
+// sets c.children) -- the DEFAULT dev configuration, which this repo's own
+// newTestController builds (a nil pool). Without a c.leases == nil
+// disjunct in the gate, OnConversationResolved's own short-circuit means no
+// fundi child under such a daemon ever calls trackLease, so holdsLease is
+// PERMANENTLY false and this reset was skipped on EVERY fundi exit --
+// silently stranding rows at 'sent' (invisible to the pending-only idle
+// drain) and logging a false "never held the lease" WARN every time.
+//
+// Uses a real, in-process fundi child (not spawnTestChild's claude/fake-pi
+// subprocess) because Kind must genuinely be KindFundi for this test to
+// exercise the disjunct under test rather than the (already-covered)
+// claude/pi exemption.
+func TestHandleChildExitResetsInboxWithNoDatabase(t *testing.T) {
+	ctrl := newTestController(t)
+	if ctrl.leases != nil {
+		t.Fatal("test assumes no database pool; ctrl.leases must be nil")
+	}
+
+	got, err := ctrl.Spawn(context.Background(), protocol.SpawnRequest{
+		Type:      protocol.TypeCtrlSpawn,
+		Kind:      protocol.KindFundi,
+		Model:     "anthropic/sonnet-latest",
+		Cwd:       t.TempDir(),
+		NoSession: true,
+	}, users.Identity{})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	childID := got.ChildID
+
+	st := inbox.NewMemory()
+	ctrl.inbox = ctrl.newInboxQueue(st)
+
+	ctx := context.Background()
+	row, err := st.Accept(ctx, inbox.Inbound{ChildID: childID, Mode: inbox.ModePrompt, Text: "work"})
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := st.MarkSent(ctx, []string{row.ID}); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	if _, err := ctrl.Kill(context.Background(), childID, 1000, 500); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if rows, _ := st.Pending(ctx, childID); len(rows) == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rows, _ := st.Pending(ctx, childID)
+	t.Fatalf("a fundi child's exit under a no-database daemon must still reset its inbox; pending=%+v", rows)
+}
+
+// TestDrainInboxDeliversDirectMessagesOnly pins I4 from the final review:
+// the idle-transition drain (drainInbox) must retry only DIRECT messages
+// (source ""), never fragment-sourced rows -- those are eventbuf's to
+// schedule, and handleStatusChange already calls evbuf.DrainIdle, which
+// releases only deferred-and-dirty keys, right before this runs. DeliverAll's
+// Pending() read has no concept of "still inside its debounce window": it
+// returns every pending row regardless of source, so calling it here executed
+// exactly the delivery DrainIdle had just refused, one line later, defeating
+// the coalescing eventbuf exists for.
+func TestDrainInboxDeliversDirectMessagesOnly(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Source: "", Text: "direct message"}); err != nil {
+		t.Fatalf("Accept direct: %v", err)
+	}
+	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Source: "subagents", Key: "c_2", Text: "fragment, still debouncing"}); err != nil {
+		t.Fatalf("Accept fragment: %v", err)
+	}
+
+	var delivered []inbox.Batch
+	q := inbox.NewQueue(inbox.QueueConfig{
+		Store: st,
+		Deliver: func(_ context.Context, b inbox.Batch) (bool, error) {
+			delivered = append(delivered, b)
+			return false, nil
+		},
+	})
+
+	c := newTestController(t)
+	c.drainInbox(q, "c_1")
+
+	if len(delivered) != 1 {
+		t.Fatalf("delivered %d batches, want 1 (direct only)", len(delivered))
+	}
+	if delivered[0].Source != "" || delivered[0].Frags[0] != "direct message" {
+		t.Fatalf("delivered batch = %+v; want the direct message, not the still-debouncing fragment", delivered[0])
+	}
+
+	// The fragment must still be pending -- untouched, ready for eventbuf's
+	// own debounce/DrainIdle to release it in its own time.
+	rows, err := st.Pending(ctx, "c_1")
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Source != "subagents" {
+		t.Fatalf("pending after drainInbox = %+v; want the fragment still pending, untouched", rows)
+	}
 }
 
 // TestForgetPathsDropTheQueue covers BOTH deletion paths. ForgetAllExited is a

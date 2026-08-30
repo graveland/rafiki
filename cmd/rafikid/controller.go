@@ -1710,9 +1710,21 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 }
 
 // exitPersistDeadline bounds the wait for handleChildExit to finish after a
-// child process has been reaped. It is a backstop, not a timeout anyone
-// should hit: that goroutine only has to run MarkExited and cm.Remove.
-const exitPersistDeadline = 2 * time.Second
+// child process has been reaped.
+//
+// It is a backstop, not a timeout anyone should hit in the common case, but
+// "just MarkExited and cm.Remove" stopped being true once handleChildExit
+// grew synchronous durable I/O on the critical path ahead of cm.Remove:
+// notifySubagentSettled's eventbuf Push (acceptTimeout, 5s), releaseInboxOnExit's
+// Queue.Reset (10s), the task orphan sweep (3s), and releaseLease's
+// LeaseStore.Release (5s) — writeRecordLastStatus's own DB upsert (5s) runs
+// even earlier. Under real DB latency those can stack to ~28s worst case; 2s
+// was already too short to survive a single one of them, let alone all four,
+// which is what let a completed Kill still read "shutting_down" — the exact
+// failure CLAUDE.md records as misdiagnosed as a timing flake for months.
+// Raised with headroom above that worst case rather than to the sum exactly,
+// since a slow-but-live database should still resolve within the wait.
+const exitPersistDeadline = 45 * time.Second
 
 // waitForChildRemoval blocks until handleChildExit has finished for childID,
 // or the deadline passes. It reports whether the child was removed.
@@ -2843,7 +2855,17 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// acquires a lease at all (agentRunner returns a nil Runner for anything
 	// but fundi), so it is exempt rather than silently skipped by an
 	// always-false holdsLease.
-	if snap.Kind != protocol.KindFundi || c.daemonID == "" || c.holdsLease(childID) {
+	//
+	// c.leases == nil is checked FIRST and short-circuits the rest: without a
+	// database pool (inboxStore(nil), the default dev configuration)
+	// OnConversationResolved's own short-circuit means NO fundi child ever
+	// calls trackLease, so holdsLease is permanently false and every exit
+	// would otherwise skip this reset — silently stranding rows at 'sent'
+	// (invisible to the pending-only idle drain) and logging a false WARN on
+	// every single fundi exit. A prior version of this condition copied only
+	// half of OnConversationResolved's own bypass test
+	// (`c.leases == nil || c.daemonID == ""`); this restores the other half.
+	if c.leases == nil || snap.Kind != protocol.KindFundi || c.daemonID == "" || c.holdsLease(childID) {
 		c.releaseInboxOnExit(childID)
 	} else {
 		slog.Warn("child exited without this daemon ever holding its lease; not resetting its inbox",
