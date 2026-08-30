@@ -18,25 +18,53 @@ import (
 	"go.graveland.dev/rafiki/pkg/tui"
 )
 
+// attachReadsExitFlags records that runAttach honours --kill-on-exit and
+// --keep-on-exit. Before C1b the flags were declared on `attach` and read by
+// nobody -- `create` read both -- and the two tests covering them asserted only
+// that they were DECLARED, which is how a flag that did nothing survived C0.
+const attachReadsExitFlags = true
+
 func newAttachCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "attach [id|name]",
 		Aliases: []string{"at"},
-		Short:   "Attach the rafiki TUI to a running child",
-		Long: `Attach a terminal UI to an existing child.
+		Short:   "Attach the rafiki cockpit to running children",
+		Long: `Attach the cockpit — a tree rail beside a conversation.
 
-The TUI streams the conversation live over the Connect control plane, on the
-daemon's local unix socket. It renders markdown, tool calls and thinking
-blocks. Enter sends a prompt; Ctrl+C or Ctrl+D quits.
+With no argument it opens over every child you can see, with nothing focused:
+pick one from the rail. With an id or name it opens focused on that child and
+follows its delegation, so agents it spawns appear in the rail without
+resubscribing.
 
-The child keeps running after you quit — reattach any time.`,
-		Args: cobra.ExactArgs(1),
+⏎ sends a prompt, ⌥⏎ (or ^S) steers the turn already running, ^X aborts it.
+⇥ hops to the next agent that needs you, ^↑/^↓ move, ^B collapses the rail,
+^G toggles help. Children keep running after you quit — reattach any time.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: runAttach,
 	}
-	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips the exit prompt)")
-	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips the exit prompt)")
+	cmd.Flags().Bool("kill-on-exit", false, "Terminate the focused session when the cockpit quits (skips the exit prompt)")
+	cmd.Flags().Bool("keep-on-exit", false, "Always keep sessions running on exit (skips the exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	return cmd
+}
+
+// subjectFor builds the rail subscription for an entry point.
+//
+// Bare attach is `all`. Attaching to a child is its SUBTREE PLUS ITSELF:
+// eventlog.ScopeSubtree never includes the root, so without include_self the
+// attached child's own rail row would freeze the moment you hop off it -- and
+// the focus stream, being child-scoped, would hide that until you did.
+//
+// MaxDepth stays 0, which means UNLIMITED. A watcher wants a complete model;
+// the agent-facing path is the one that sets 1.
+func subjectFor(childID string) *rafikiv1.EventSubject {
+	if childID == "" {
+		return &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_All{All: true}}
+	}
+	return &rafikiv1.EventSubject{
+		Scope:       &rafikiv1.EventSubject_Subtree{Subtree: childID},
+		IncludeSelf: true,
+	}
 }
 
 func runAttach(cmd *cobra.Command, args []string) error {
@@ -44,11 +72,25 @@ func runAttach(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	childID, err := resolveChildConnect(cmdCtx(cmd), client, args[0])
-	if err != nil {
-		return err
+
+	var childID string
+	if len(args) == 1 {
+		if childID, err = resolveChildConnect(cmdCtx(cmd), client, args[0]); err != nil {
+			return err
+		}
+	} else {
+		// Rail-first. The capability pre-flight still has to happen BEFORE the
+		// alt screen: a daemon that cannot serve the cockpit must produce a
+		// line on stderr, not a working-looking UI that answers nothing.
+		if _, err := client.ListChildren(cmdCtx(cmd),
+			connect.NewRequest(&rafikiv1.ListChildrenRequest{})); err != nil {
+			return diagnoseConnectError(err, paths.ConnectSocketPath())
+		}
 	}
-	return runTUIForChild(cmd, childID)
+
+	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
+	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")
+	return attachAndDecide(cmd, childID, killOnExit, keepOnExit)
 }
 
 // resolveChildConnect maps an id or a name to a child id over Connect.
@@ -97,10 +139,11 @@ func resolveChildConnect(ctx context.Context, c rafikiv1connect.ControlClient, i
 // nothing. The predecessor logged a warning and continued.
 func runTUIForChild(cmd *cobra.Command, childID string) error {
 	sock := paths.ConnectSocketPath()
-	m := tui.NewModel(tui.Options{
+	m := tui.NewCockpit(tui.Options{
 		HTTPClient: connectHTTPClient(sock),
 		BaseURL:    connectUDSBaseURL,
 		ChildID:    childID,
+		Subject:    subjectFor(childID),
 	})
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
