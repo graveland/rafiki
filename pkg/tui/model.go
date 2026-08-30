@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Package tui is the rafiki cockpit: a tree rail beside one child's
+// conversation, over the Connect control plane.
+//
+// State lives in three pure subpackages -- session (one conversation), rail
+// (the tree, activity and attention) and streams (subscription lifetimes).
+// This package is the bubbletea shell over them: layout, keys and rendering.
+// See docs/plans/2026-08-30-rafiki-tui-c1b-design.md.
 package tui
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +21,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -31,10 +38,9 @@ type Model struct {
 	baseURL string
 	childID string
 
-	blocks    []Block
-	finalized int // index after which blocks may not be cached
-	renderer  *renderer
-	dirty     bool
+	sess     *session.Session
+	renderer *renderer
+	dirty    bool
 
 	stream *eventStream
 	evCh   chan *rafikiv1.Event
@@ -75,6 +81,7 @@ func NewModel(opts Options) *Model {
 		http:     httpClient,
 		baseURL:  opts.BaseURL,
 		childID:  opts.ChildID,
+		sess:     session.New(opts.ChildID),
 		renderer: newRenderer(),
 		ta:       ta,
 		status:   "connecting…",
@@ -109,7 +116,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case eventMsg:
-		m.handleEvent(msg.ev)
+		before := len(m.sess.Blocks)
+		m.sess.Apply(msg.ev)
+		if m.sess.Status != "" {
+			m.status = "agent: " + m.sess.Status
+		}
+		// Our own message coming back is the acknowledgement. Send means
+		// DURABLY QUEUED, not written to a pipe, so the RPC returning is not
+		// the agent having taken it.
+		if m.pending != "" && len(m.sess.Blocks) > before &&
+			m.sess.Blocks[len(m.sess.Blocks)-1].Kind == session.KindUser {
+			m.pending = ""
+		}
 		m.dirty = true
 		return m, waitForEvent(m.evCh)
 
@@ -168,7 +186,7 @@ func (m *Model) View() tea.View {
 	}
 
 	// Render the transcript.
-	transcript := m.renderer.renderBlocks(m.blocks, m.finalized)
+	transcript := m.renderer.renderBlocks(m.sess.Blocks, m.sess.Finalized)
 
 	// If there's a pending message, show it.
 	var pendingLine string
@@ -205,147 +223,6 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// ── Event handling ──────────────────────────────────────────────────────────
-
-func (m *Model) handleEvent(ev *rafikiv1.Event) {
-	switch p := ev.Payload.(type) {
-	case *rafikiv1.Event_UserMessage:
-		m.handleUserMessage(p.UserMessage)
-	case *rafikiv1.Event_AssistantMessage:
-		m.handleAssistantMessage(p.AssistantMessage)
-	case *rafikiv1.Event_TurnStart:
-		m.handleTurnStart(p.TurnStart)
-	case *rafikiv1.Event_TurnEnd:
-		m.handleTurnEnd(p.TurnEnd)
-	case *rafikiv1.Event_ContentBlockDelta:
-		m.handleContentDelta(p.ContentBlockDelta)
-	case *rafikiv1.Event_ToolExecutionStart:
-		m.handleToolStart(p.ToolExecutionStart)
-	case *rafikiv1.Event_ToolExecutionEnd:
-		m.handleToolEnd(p.ToolExecutionEnd)
-	case *rafikiv1.Event_AgentStatus:
-		m.status = fmt.Sprintf("agent: %s", p.AgentStatus.GetState())
-	case *rafikiv1.Event_Error:
-		m.status = fmt.Sprintf("error: %s", p.Error.GetMessage())
-		m.blocks = appendBlock(m.blocks, Block{
-			Kind:  kindSystem,
-			At:    time.Now(),
-			Text:  fmt.Sprintf("Error: %s", p.Error.GetMessage()),
-			Final: true,
-		})
-	}
-}
-
-func (m *Model) handleUserMessage(um *rafikiv1.UserMessage) {
-	text := textFromContent(um.GetContent())
-	m.blocks = appendBlock(m.blocks, Block{
-		Kind:  kindUser,
-		At:    time.Now(),
-		Text:  text,
-		Final: true,
-	})
-	// Clear pending indicator — our message was acknowledged.
-	if m.pending != "" {
-		m.pending = ""
-	}
-	m.finalized = len(m.blocks) // everything including this is finalized
-}
-
-func (m *Model) handleAssistantMessage(am *rafikiv1.AssistantMessage) {
-	block := Block{
-		Kind:       kindAssistant,
-		At:         time.Now(),
-		Content:    am.GetContent(),
-		StopReason: am.GetRawStopReason(),
-		Final:      true,
-	}
-	// Populate tool calls and text from content blocks.
-	for _, cb := range am.GetContent() {
-		switch b := cb.Block.(type) {
-		case *rafikiv1.ContentBlock_Text:
-			block.Text += b.Text.GetText()
-		case *rafikiv1.ContentBlock_Thinking:
-			block.ThinkText += b.Thinking.GetThinking()
-		case *rafikiv1.ContentBlock_ToolUse:
-			block.ToolCalls = append(block.ToolCalls, toolCallState{
-				ID:   b.ToolUse.GetId(),
-				Name: b.ToolUse.GetName(),
-			})
-		case *rafikiv1.ContentBlock_ToolResult:
-			for i := range block.ToolCalls {
-				if block.ToolCalls[i].ID == b.ToolResult.GetToolUseId() {
-					block.ToolCalls[i].IsError = b.ToolResult.GetIsError()
-					block.ToolCalls[i].Result = textFromContent(b.ToolResult.GetContent())
-				}
-			}
-		}
-	}
-	m.blocks = appendBlock(m.blocks, block)
-	m.finalized = len(m.blocks)
-}
-
-func (m *Model) handleTurnStart(_ *rafikiv1.TurnStart) {
-	m.blocks = appendBlock(m.blocks, Block{
-		Kind:  kindAssistant,
-		At:    time.Now(),
-		Final: false,
-	})
-}
-
-func (m *Model) handleTurnEnd(te *rafikiv1.TurnEnd) {
-	last := lastAssistant(m.blocks)
-	if last != nil {
-		last.Final = true
-		if te.StopReason != rafikiv1.StopReason_STOP_REASON_UNSPECIFIED {
-			last.StopReason = te.GetRawStopReason()
-		}
-	}
-	m.finalized = len(m.blocks)
-}
-
-func (m *Model) handleContentDelta(delta *rafikiv1.ContentBlockDelta) {
-	last := lastAssistant(m.blocks)
-	if last == nil {
-		return
-	}
-	switch d := delta.Delta.(type) {
-	case *rafikiv1.ContentBlockDelta_Text:
-		last.Text += d.Text
-	case *rafikiv1.ContentBlockDelta_Thinking:
-		last.ThinkText += d.Thinking
-	case *rafikiv1.ContentBlockDelta_InputJson:
-		if len(last.ToolCalls) > 0 {
-			last.ToolCalls[len(last.ToolCalls)-1].Input += d.InputJson
-		}
-	}
-}
-
-func (m *Model) handleToolStart(ts *rafikiv1.ToolExecutionStart) {
-	last := lastAssistant(m.blocks)
-	if last == nil {
-		return
-	}
-	last.ToolCalls = append(last.ToolCalls, toolCallState{
-		ID:      ts.GetToolUseId(),
-		Name:    ts.GetName(),
-		Running: true,
-	})
-}
-
-func (m *Model) handleToolEnd(te *rafikiv1.ToolExecutionEnd) {
-	last := lastAssistant(m.blocks)
-	if last == nil {
-		return
-	}
-	for i := range last.ToolCalls {
-		if last.ToolCalls[i].ID == te.GetToolUseId() {
-			last.ToolCalls[i].Running = false
-			last.ToolCalls[i].DurationMs = te.GetDurationMs()
-			last.ToolCalls[i].IsError = te.GetIsError()
-		}
-	}
-}
-
 // ── Sending ──────────────────────────────────────────────────────────────────
 
 func (m *Model) sendPrompt(text string) {
@@ -363,17 +240,6 @@ func (m *Model) sendPrompt(text string) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-func textFromContent(content []*rafikiv1.ContentBlock) string {
-	var sb strings.Builder
-	for _, cb := range content {
-		t := cb.GetText()
-		if t != nil {
-			sb.WriteString(t.GetText())
-		}
-	}
-	return sb.String()
-}
 
 func waitForEvent(ch <-chan *rafikiv1.Event) tea.Cmd {
 	return func() tea.Msg {

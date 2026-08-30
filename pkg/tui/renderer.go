@@ -8,6 +8,8 @@ import (
 
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
+
+	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
 // renderer caches finalized blocks and re-renders the live tail on demand.
@@ -42,22 +44,22 @@ var (
 )
 
 // renderBlock converts one block into its styled string.
-func (r *renderer) renderBlock(b Block) string {
+func (r *renderer) renderBlock(b session.Block) string {
 	switch b.Kind {
-	case kindPendingUser:
+	case session.KindPendingUser:
 		return stylePending.Render("⏳ ") + stylePending.Render(b.Text)
-	case kindUser:
+	case session.KindUser:
 		return styleUser.Render("▸ ") + styleUser.Render(b.Text)
-	case kindSystem:
+	case session.KindSystem:
 		return styleMeta.Render("⚙  ") + styleMeta.Render(b.Text)
-	case kindAssistant:
+	case session.KindAssistant:
 		return r.renderAssistant(b)
 	}
 	return ""
 }
 
 // renderAssistant renders an assistant turn with thinking, tool calls, and results.
-func (r *renderer) renderAssistant(b Block) string {
+func (r *renderer) renderAssistant(b session.Block) string {
 	var sb strings.Builder
 
 	if b.ThinkText != "" {
@@ -117,7 +119,7 @@ func (r *renderer) renderAssistant(b Block) string {
 // renderBlocks returns the full rendered transcript. finalized is the index
 // into blocks after which everything is finalized (cached); blocks after that
 // (the live tail) are re-rendered.
-func (r *renderer) renderBlocks(blocks []Block, finalized int) string {
+func (r *renderer) renderBlocks(blocks []session.Block, finalized int) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -128,8 +130,8 @@ func (r *renderer) renderBlocks(blocks []Block, finalized int) string {
 	needRender := false
 	if finalized < len(blocks) {
 		live := &blocks[len(blocks)-1]
-		if live.Kind == kindAssistant && !live.Final {
-			fp := live.fingerprint()
+		if live.Kind == session.KindAssistant && !live.Final {
+			fp := live.Fingerprint()
 			if fp != r.lastFP {
 				r.lastFP = fp
 				needRender = true
