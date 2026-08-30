@@ -170,6 +170,13 @@ func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit 
 	default:
 	}
 
+	// A bare `rafiki attach` focuses nothing, so there is no single session to
+	// offer to terminate. Prompting would ask about "" and killing would be a
+	// fleet-wide action nobody asked for.
+	if childID == "" {
+		return nil
+	}
+
 	shouldKill, err := decideKillOnExit(killOnExit, keepOnExit, childID)
 	if err != nil {
 		return err

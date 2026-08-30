@@ -18,14 +18,48 @@ func TestAttachCmdShape(t *testing.T) {
 			t.Fatalf("attach is missing the --%s flag", flag)
 		}
 	}
+	// Declaring them is not enough. Before C1b, attach declared both and read
+	// neither -- create read them, attach did not -- and this test asserted only
+	// that they existed, which is how a flag that did nothing survived review.
+	if !attachReadsExitFlags {
+		t.Fatal("attach must READ --kill-on-exit/--keep-on-exit, not merely declare them")
+	}
 }
 
-// Phase C0 requires a child argument. Bare `rafiki attach` becomes the cockpit
-// entry point in C1; until then it must say so rather than guessing.
-func TestAttachWithNoArgsIsAnError(t *testing.T) {
+// C1b makes bare `rafiki attach` the cockpit entry point: it opens over every
+// child the caller can see, with nothing focused.
+func TestAttachAcceptsZeroArgs(t *testing.T) {
 	cmd := newAttachCmd()
-	if err := cmd.Args(cmd, []string{}); err == nil {
-		t.Fatal("want an error for `rafiki attach` with no arguments")
+	if err := cmd.Args(cmd, []string{}); err != nil {
+		t.Fatalf("bare `rafiki attach` must be accepted: %v", err)
+	}
+}
+
+func TestAttachRejectsTwoArgs(t *testing.T) {
+	cmd := newAttachCmd()
+	if err := cmd.Args(cmd, []string{"c_1", "c_2"}); err == nil {
+		t.Fatal("want an error for two arguments")
+	}
+}
+
+func TestSubjectForBareAttachIsAll(t *testing.T) {
+	if s := subjectFor(""); !s.GetAll() {
+		t.Fatalf("bare attach subject = %+v, want all", s)
+	}
+}
+
+func TestSubjectForAChildIsSubtreePlusSelf(t *testing.T) {
+	s := subjectFor("c_1")
+	if s.GetSubtree() != "c_1" {
+		t.Fatalf("subject = %+v, want subtree c_1", s)
+	}
+	if !s.GetIncludeSelf() {
+		t.Fatal("attach <id> must set include_self: ScopeSubtree never includes the root, " +
+			"so without it the attached child's own rail row freezes the moment you hop off")
+	}
+	if s.GetMaxDepth() != 0 {
+		t.Errorf("max_depth = %d, want 0 (UNLIMITED) -- a watcher wants a complete model",
+			s.GetMaxDepth())
 	}
 }
 
