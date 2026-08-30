@@ -11,6 +11,7 @@ package rail
 
 import (
 	"sort"
+	"sync"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -63,7 +64,18 @@ type Node struct {
 }
 
 // Rail is the tree.
+//
+// It is mutex-guarded because its Cursor method is handed to the rail stream as
+// a callback and is therefore invoked from the stream's goroutine, while Apply
+// and the render path run on the bubbletea goroutine. The lock costs nothing at
+// UI rates and removes the whole class of bug; "pure state machine" here means
+// no I/O and no clock, not single-threaded by assumption.
+//
+// Every exported method takes the lock, and the accessors return COPIES
+// (Node values, a fresh slice) so a caller can never hold a pointer into the
+// map after the lock is released.
 type Rail struct {
+	mu      sync.Mutex
 	nodes   map[string]*Node
 	focused string
 }
@@ -72,10 +84,16 @@ type Rail struct {
 func New() *Rail { return &Rail{nodes: make(map[string]*Node)} }
 
 // Len is the number of rows.
-func (r *Rail) Len() int { return len(r.nodes) }
+func (r *Rail) Len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.nodes)
+}
 
 // Get returns one node by id.
 func (r *Rail) Get(childID string) (Node, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	n, ok := r.nodes[childID]
 	if !ok {
 		return Node{}, false
@@ -91,6 +109,8 @@ func (r *Rail) Get(childID string) (Node, bool) {
 // in the rail keeps its watermark and badge, so re-seeding to discover children
 // spawned during a disconnect does not silently mark everything read.
 func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, s := range summaries {
 		if s.GetStatus() == "exited" {
 			continue
@@ -130,6 +150,8 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 
 // Apply folds one rail-stream event into the tree.
 func (r *Rail) Apply(ev *rafikiv1.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if ev == nil {
 		return
 	}
@@ -194,6 +216,15 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 // Nodes returns every row in display order: depth-first from each root,
 // siblings by name then id so the order is stable across renders.
 func (r *Rail) Nodes() []Node {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nodesLocked()
+}
+
+// nodesLocked is Nodes without the lock, for callers that already hold it.
+// sync.Mutex is NOT reentrant: NextAttention calling the exported Nodes would
+// deadlock the render loop on the first keypress.
+func (r *Rail) nodesLocked() []Node {
 	children := make(map[string][]*Node, len(r.nodes))
 	var roots []*Node
 	for _, n := range r.nodes {

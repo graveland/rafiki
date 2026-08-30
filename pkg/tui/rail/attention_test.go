@@ -238,3 +238,23 @@ func TestEveryRequestedTypeIsConsumed(t *testing.T) {
 		}
 	}
 }
+
+// Cursor is handed to the rail stream as a callback and runs on that
+// goroutine while Apply runs on bubbletea's. Guarding it is what makes the
+// cockpit's two goroutines safe; -race is the only thing that proves it.
+func TestConcurrentApplyAndCursorAreSafe(t *testing.T) {
+	r := seeded(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := int32(1); i < 500; i++ {
+			r.Apply(turnEnd("c_1", i))
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		_ = r.Cursor()
+		_ = r.Nodes()
+		_ = r.NextAttention()
+	}
+	<-done
+}
