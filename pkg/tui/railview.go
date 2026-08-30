@@ -27,7 +27,7 @@ var (
 //
 // Rows are clipped BEFORE styling, so the width budget is measured on plain
 // text and lipgloss escape sequences never count against it.
-func renderRail(nodes []rail.Node, focused string, width int) string {
+func renderRail(nodes []rail.Node, focused, selected string, width int) string {
 	if len(nodes) < 2 {
 		return ""
 	}
@@ -41,7 +41,14 @@ func renderRail(nodes []rail.Node, focused string, width int) string {
 		if n.Attention > 0 {
 			badge = " ●" + strconv.Itoa(n.Attention)
 		}
-		row := clip(strings.Repeat("  ", n.Depth)+rail.Glyph(n)+" "+name+badge, width)
+		// The cursor is part of the PLAIN row so it counts against the width
+		// budget like everything else. Every row carries the two columns,
+		// selected or not, so rows do not shift as the cursor moves.
+		cursor := "  "
+		if n.ChildID == selected {
+			cursor = "▸ "
+		}
+		row := clip(cursor+strings.Repeat("  ", n.Depth)+rail.Glyph(n)+" "+name+badge, width)
 		switch {
 		case n.ChildID == focused:
 			sb.WriteString(styleRailFocused.Render(row))
