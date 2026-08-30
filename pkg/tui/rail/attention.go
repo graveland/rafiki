@@ -66,10 +66,18 @@ func Notable(ev *rafikiv1.Event) bool {
 
 // SetFocus records which child the user is looking at. Events for the focused
 // child never accumulate attention.
-func (r *Rail) SetFocus(childID string) { r.focused = childID }
+func (r *Rail) SetFocus(childID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.focused = childID
+}
 
 // Focus returns the focused child id, or "".
-func (r *Rail) Focus() string { return r.focused }
+func (r *Rail) Focus() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.focused
+}
 
 // countAttention decides whether one event already folded into n earns a badge.
 func (r *Rail) countAttention(n *Node, ev *rafikiv1.Event) {
@@ -105,6 +113,8 @@ func (r *Rail) countAttention(n *Node, ev *rafikiv1.Event) {
 // highest that exists and not the scroll position: you are looking at it, and
 // scrolling back to reread is not unreading.
 func (r *Rail) MarkRead(childID string, upTo int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	n, ok := r.nodes[childID]
 	if !ok {
 		return
@@ -123,7 +133,9 @@ func (r *Rail) MarkRead(childID string, upTo int32) {
 // NextAttention returns the next child needing you, in display order, starting
 // after the focused row and wrapping. "" means nothing needs you.
 func (r *Rail) NextAttention() string {
-	nodes := r.Nodes()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	nodes := r.nodesLocked()
 	if len(nodes) == 0 {
 		return ""
 	}
@@ -155,6 +167,8 @@ func (r *Rail) NextAttention() string {
 // EventCursor proto says so, and the cockpit is the first consumer that can
 // observe the difference.
 func (r *Rail) Cursor() *rafikiv1.EventCursor {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	ords := make(map[string]int32, len(r.nodes))
 	for id, n := range r.nodes {
 		ords[id] = n.RailCursor
