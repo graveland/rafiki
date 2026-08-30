@@ -1003,15 +1003,61 @@ non-Anthropic model need it in their own env. An explicit `ENABLE_TOOL_SEARCH`
 in the environment always wins, so `true` / `auto` / `auto:N` remain available
 if a future upstream does support them.
 
-## The rafiki TUI
+## The rafiki cockpit
 
-The TUI is a bubbletea program living in `pkg/tui/`, built into the `rafiki`
-binary itself — there is no separate `rafiki-attach` artifact. `rafiki create`
-spawns a child and attaches the TUI to it; `rafiki attach <id|name>` attaches to
-a child that is already running. Both speak Connect over the daemon's local unix
-socket (`<RuntimeDir>/connect.sock`), so no bun, submodule, or separate build
-step is involved.
+The cockpit is a bubbletea program living in `pkg/tui/`, built into the `rafiki`
+binary itself — there is no separate `rafiki-attach` artifact. It speaks Connect
+over the daemon's local unix socket (`<RuntimeDir>/connect.sock`), so no bun,
+submodule, or separate build step is involved.
 
 ```bash
-make build          # builds rafikid + rafiki, including the in-process TUI
+make build          # builds rafikid + rafiki, including the in-process cockpit
 ```
+
+### Entry points
+
+| Command | Opens | Rail subscribes to |
+|---|---|---|
+| `rafiki create …` | the new child, full width | its subtree, plus itself |
+| `rafiki attach <id\|name>` | that child, full width | its subtree, plus itself |
+| `rafiki attach` | the rail, nothing focused | everything you can see |
+
+A session follows its own delegation: start a conversation, let it spawn
+implementers, and they appear in the rail because they are in the subtree — not
+because anything resubscribed. The rail is absent until a second agent exists,
+so an ordinary single-agent session looks exactly as it did before.
+
+### Keys
+
+| Key | Does |
+|---|---|
+| `⏎` | Send a prompt — queues work for the agent. |
+| `⌥⏎` / `^S` | Steer — inject into the turn already running. |
+| `^X` | Abort the running turn. |
+| `⇥` | Hop to the next agent that needs you. |
+| `^↑` / `^↓` | Move up and down the rail. |
+| `^B` | Collapse or restore the rail. |
+| `^G` | Toggle the help line. |
+| `^C` / `^D` | Quit. Children keep running; reattach any time. |
+
+Prompt and steer are separate keys rather than one key that guesses from the
+agent's state. A prompt to a busy agent is durably queued rather than dropped,
+so "queue a follow-up for when it finishes" and "interrupt what it is doing now"
+are both useful and only you know which you mean.
+
+### Activity and attention
+
+Each rail row carries a glyph for what the agent is doing and, when it needs
+you, a badge for how many things are waiting.
+
+```
+◌ spawning   ○ idle        ◐ streaming   ⚒ running a tool
+⊛ compacting ‼ needs you   ◇ stopping    ⟳ retrying    ✓/✗ exited
+```
+
+The badge counts only events worth a human: a finished turn, an agent going
+idle or blocking on you, an error, a child exiting. An agent that is merely
+working shows a glyph and no badge — activity is not attention. Retries are
+deliberately not badged, because automatic retry exists so a recoverable stream
+error is not your problem; the ⟳ glyph is there so an agent stuck retrying does
+not look identical to one making progress.
