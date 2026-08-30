@@ -54,32 +54,62 @@ func TestLinesRebuildsWhenFinalizedShrinks(t *testing.T) {
 	}
 }
 
-// TestLinesCapsToolResults pins the tool-result cap. Without it a 500-line
-// grep is glamour-rendered in full on every one of the four frames a second.
+// TestLinesCapsToolResultsOnPlainOutput uses the shape tool output actually
+// has: plain newline-separated lines, like grep, ls or a stack trace.
 //
-// Blank-line-separated, not newline-separated: glamour treats a bare "a\nb"
-// as one soft-wrapped paragraph and joins it onto a single rendered line
-// (verified empirically — a naive strings.Repeat("result line\n", 500)
-// collapses to ONE output line and never reaches the cap at all). Separate
-// paragraphs are what force genuinely distinct output lines.
-func TestLinesCapsToolResults(t *testing.T) {
-	huge := strings.Repeat("result line\n\n", 500)
+// This fixture is deliberately the one the plan originally specified. It was
+// changed to blank-line-separated during implementation because it did not
+// exercise the cap — and that was the right call at the time, but it was
+// treating the symptom. The cause was that tool results went through glamour,
+// which joins consecutive newline-separated lines into ONE CommonMark
+// paragraph: verified empirically, 500 plain lines rendered to exactly 1 line
+// while fenced/indented/list input rendered to 500+. So the cap was inert for
+// precisely the output it was written for.
+//
+// Tool output is not markdown. It is rendered preformatted now, which fixes
+// both the cap and the loss of line structure.
+func TestLinesCapsToolResultsOnPlainOutput(t *testing.T) {
+	plain := strings.Repeat("result line\n", 500)
+	blocks := []session.Block{{
+		Kind:      session.KindAssistant,
+		Final:     true,
+		ToolCalls: []session.ToolCall{{Name: "grep", Result: plain}},
+	}}
+
+	got := newRenderer().Lines(blocks, 1)
+	joined := strings.Join(got, "\n")
+
+	if n := strings.Count(joined, "result line"); n > maxToolResultLines {
+		t.Errorf("tool result not capped: %d occurrences, cap is %d", n, maxToolResultLines)
+	}
+	if !strings.Contains(joined, "more lines") {
+		t.Errorf("capped output must say how much was elided; got:\n%s", joined)
+	}
+}
+
+// TestLinesPreservesToolOutputLineStructure is the other half: plain tool
+// output must stay one display line per source line. Reflowing a grep result
+// into a prose paragraph makes it unreadable, which is what glamour did.
+func TestLinesPreservesToolOutputLineStructure(t *testing.T) {
 	blocks := []session.Block{{
 		Kind:  session.KindAssistant,
 		Final: true,
 		ToolCalls: []session.ToolCall{{
-			Name: "grep", Result: huge,
+			Name:   "grep",
+			Result: "alpha\nbeta\ngamma",
 		}},
 	}}
 
-	got := strings.Join(newRenderer().Lines(blocks, 1), "\n")
+	got := newRenderer().Lines(blocks, 1)
 
-	if strings.Count(got, "result line") > maxToolResultLines {
-		t.Errorf("tool result was not capped: %d occurrences, cap is %d",
-			strings.Count(got, "result line"), maxToolResultLines)
+	var hits int
+	for _, l := range got {
+		if strings.Contains(l, "alpha") || strings.Contains(l, "beta") || strings.Contains(l, "gamma") {
+			hits++
+		}
 	}
-	if !strings.Contains(got, "more lines") {
-		t.Errorf("capped output must say how much was elided; got:\n%s", got)
+	if hits != 3 {
+		t.Errorf("three tool output lines collapsed onto %d display lines: %q", hits, got)
 	}
 }
 
