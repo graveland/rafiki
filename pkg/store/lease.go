@@ -114,6 +114,38 @@ func (s *LeaseStore) Valid(ctx context.Context, l Lease) (bool, error) {
 	return n == 1, nil
 }
 
+// LiveConversations returns the set of conversation ids under an unexpired
+// lease, whoever holds them.
+//
+// Recovery uses this to decide, for a child row claimed by a DIFFERENT daemon,
+// whether that daemon is still alive on the conversation. It is deliberately
+// holder-agnostic: the caller already knows whether the row is its own from
+// the row's daemon_id, and asking "is anyone live here" in one query beats one
+// Valid() round trip per row when loadChildren walks the whole table.
+func (s *LeaseStore) LiveConversations(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT conversation_id::text
+		  FROM conversations.conversation_lease
+		 WHERE expires_at > now()`)
+	if err != nil {
+		return nil, fmt.Errorf("lease: live conversations: %w", err)
+	}
+	defer rows.Close()
+
+	live := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("lease: live conversations: scan: %w", err)
+		}
+		live[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lease: live conversations: %w", err)
+	}
+	return live, nil
+}
+
 // intervalOf renders a duration as a Postgres interval literal. Seconds rather
 // than the Go string form, which Postgres does not parse.
 func intervalOf(d time.Duration) string {

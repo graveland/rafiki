@@ -287,3 +287,41 @@ func userMessage(text string) anthropic.MessageParam {
 		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(text)},
 	}
 }
+
+// TestLiveConversations pins the read recovery scoping depends on: which
+// conversations are under an UNEXPIRED lease, whoever holds them. A lease that
+// has lapsed must not appear — that is what lets a peer daemon adopt an
+// abandoned child instead of leaving it stranded forever.
+func TestLiveConversations(t *testing.T) {
+	pool := leasePool(t)
+	ls := NewLeases(pool)
+	ctx := context.Background()
+
+	live := newConversation(t, pool)
+	lapsed := newConversation(t, pool)
+	unleased := newConversation(t, pool)
+
+	if _, ok, err := ls.Acquire(ctx, live, "daemon-a", 5*time.Minute); err != nil || !ok {
+		t.Fatalf("acquire live: ok=%v err=%v", ok, err)
+	}
+	// A negative TTL writes an already-expired lease, which is the boundary
+	// this function exists to get right. A sleep would make the test slow and
+	// flaky for no extra coverage.
+	if _, ok, err := ls.Acquire(ctx, lapsed, "daemon-b", -1*time.Second); err != nil || !ok {
+		t.Fatalf("acquire lapsed: ok=%v err=%v", ok, err)
+	}
+
+	got, err := ls.LiveConversations(ctx)
+	if err != nil {
+		t.Fatalf("LiveConversations: %v", err)
+	}
+	if !got[live] {
+		t.Errorf("live conversation %s missing from the live set", live)
+	}
+	if got[lapsed] {
+		t.Errorf("expired lease on %s must not count as live", lapsed)
+	}
+	if got[unleased] {
+		t.Errorf("never-leased conversation %s must not count as live", unleased)
+	}
+}
