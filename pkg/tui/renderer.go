@@ -38,20 +38,6 @@ type renderer struct {
 	liveOut []string
 }
 
-// reset drops all cached rendering. The cache used to be keyed only on a
-// fingerprint, not on a child, so a shared renderer had to be reset when the
-// pane changed owner. Each child now owns its own renderer (see pane.go), so
-// reset is only needed to clear a renderer being reused for a fresh
-// transcript.
-func (r *renderer) reset() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.cached = nil
-	r.cachedUpTo = 0
-	r.lastFP = ""
-	r.liveOut = nil
-}
-
 func newRenderer() *renderer {
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithStandardStyle("dark"),
