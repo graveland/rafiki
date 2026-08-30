@@ -70,8 +70,8 @@ type Cockpit struct {
 	sessions map[string]*session.Session
 	lru      []string // least-recently-focused first
 
-	renderer *renderer
-	ta       textarea.Model
+	panes map[string]*paneState
+	ta    textarea.Model
 
 	evCh      chan *rafikiv1.Event
 	stopRail  func()
@@ -119,7 +119,7 @@ func NewCockpit(opts Options) *Cockpit {
 		subject:  subject,
 		rail:     rail.New(),
 		sessions: make(map[string]*session.Session),
-		renderer: newRenderer(),
+		panes:    map[string]*paneState{},
 		ta:       ta,
 		evCh:     make(chan *rafikiv1.Event, 256),
 		status:   "connecting…",
@@ -430,8 +430,8 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 	}
 
 	c.rail.SetFocus(childID)
-	// The live-tail cache is keyed on a fingerprint, not on a child.
-	c.renderer.reset()
+	// No renderer reset: each child owns its renderer (see pane.go), so there
+	// is no shared cache to invalidate and the target's cached work survives.
 	c.openFocus(childID)
 	return nil
 }
@@ -475,6 +475,7 @@ func (c *Cockpit) touch(childID string) {
 			break
 		}
 		delete(c.sessions, victim)
+		c.evictPane(victim)
 	}
 }
 
@@ -544,7 +545,7 @@ func (c *Cockpit) View() tea.View {
 	if f := c.focused(); f == "" {
 		conv = styleMeta.Render("Pick an agent — ^↑/^↓ to move, ⇥ for the next that needs you.")
 	} else if s := c.sessions[f]; s != nil {
-		conv = strings.Join(c.renderer.Lines(s.Blocks, s.Finalized), "\n")
+		conv = strings.Join(c.pane(f).renderer.Lines(s.Blocks, s.Finalized), "\n")
 	} else {
 		conv = styleMeta.Render("loading…")
 	}
