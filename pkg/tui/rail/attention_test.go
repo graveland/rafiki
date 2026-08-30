@@ -258,3 +258,52 @@ func TestConcurrentApplyAndCursorAreSafe(t *testing.T) {
 	}
 	<-done
 }
+
+// TestPrevAttentionScansBackwards pairs with the NextAttention tests. With
+// attention on both sides of the focused row, next and prev must disagree —
+// otherwise alt+p is just alt+n with a different name.
+func TestPrevAttentionScansBackwards(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		summary("c_a", "alpha", "", "idle", 0),
+		summary("c_b", "bravo", "", "idle", 0),
+		summary("c_c", "charlie", "", "idle", 0),
+	})
+	r.SetFocus("c_b")
+	r.Apply(turnEnd("c_a", 1))
+	r.Apply(turnEnd("c_c", 1))
+
+	if got := r.PrevAttention(); got != "c_a" {
+		t.Errorf("PrevAttention = %q, want c_a", got)
+	}
+	if got := r.NextAttention(); got != "c_c" {
+		t.Errorf("NextAttention = %q, want c_c", got)
+	}
+}
+
+// TestPrevAttentionWrapsPastTheFocusedRow mirrors
+// TestNextAttentionWrapsPastTheFocusedRow.
+func TestPrevAttentionWrapsPastTheFocusedRow(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		summary("c_a", "alpha", "", "idle", 0),
+		summary("c_b", "bravo", "", "idle", 0),
+	})
+	r.SetFocus("c_a") // first in display order
+	r.Apply(turnEnd("c_b", 1))
+	if got := r.PrevAttention(); got != "c_b" {
+		t.Errorf("PrevAttention = %q, want c_b -- the search must wrap", got)
+	}
+}
+
+// TestPrevAttentionEmptyWhenNothingNeedsYou.
+func TestPrevAttentionEmptyWhenNothingNeedsYou(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		summary("c_a", "alpha", "", "idle", 0),
+		summary("c_b", "bravo", "", "idle", 0),
+	})
+	if got := r.PrevAttention(); got != "" {
+		t.Errorf("PrevAttention = %q, want empty", got)
+	}
+}

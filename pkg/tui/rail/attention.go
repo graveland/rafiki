@@ -155,6 +155,37 @@ func (r *Rail) NextAttention() string {
 	return ""
 }
 
+// PrevAttention returns the previous child needing attention, scanning
+// backwards from the focused row and wrapping.
+//
+// The backwards mirror of NextAttention. Both exist so alt+n and alt+p are a
+// real pair: with attention on both sides of where you are, "next" and "prev"
+// must land on different children or the second binding is decoration.
+func (r *Rail) PrevAttention() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	nodes := r.nodesLocked()
+	if len(nodes) == 0 {
+		return ""
+	}
+	start := 0
+	for i, n := range nodes {
+		if n.ChildID == r.focused {
+			start = i
+			break
+		}
+	}
+	// Go's % keeps the sign of the dividend, so a bare (start-i)%len is
+	// negative and panics on index. Normalise before indexing.
+	for i := 1; i <= len(nodes); i++ {
+		idx := ((start-i)%len(nodes) + len(nodes)) % len(nodes)
+		if nodes[idx].Attention > 0 {
+			return nodes[idx].ChildID
+		}
+	}
+	return ""
+}
+
 // Cursor builds the rail stream's resume point.
 //
 // It uses RailCursor, never Seen. Seen is the READ watermark and is far behind

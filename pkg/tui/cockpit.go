@@ -86,6 +86,9 @@ type Cockpit struct {
 	pending       string
 	showHelp      bool
 	railHidden    bool
+	// focus is the pane taking un-global keys. Zero value focusInput is
+	// correct: a session starts ready to type.
+	focus focusPane
 	// selected is the rail CURSOR, distinct from the focused child. Browsing
 	// must be free: hop opens a focus subscription per call, so a cursor that
 	// hopped on every arrow churned one Connect stream per keystroke.
@@ -335,27 +338,77 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	}
 }
 
+// handleKey routes a keystroke: globals first, then the focused pane.
+//
+// The ordering is the design. Anything matched GLOBALLY is a key the textarea
+// can never receive, because the input pane's fallthrough is where unmatched
+// keys end up. bubbles/v2/textarea's DefaultKeyMap is emacs-heavy and already
+// claims pgup, pgdown, shift+arrows, ctrl+n/p/f/u/k/a/e and more — which is
+// exactly why the cockpit has a focus ring instead of modified scroll keys.
+// TestNoGlobalBindingStealsATextareaKey fails the build if this list grows
+// into one of them.
 func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := c.keys
+
+	// ── globals: live from every pane ────────────────────────────────────
 	switch {
 	case key.Matches(msg, k.Quit):
 		c.quitting = true
 		c.shutdown()
 		return c, tea.Quit
-	case key.Matches(msg, k.NextAttention), key.Matches(msg, k.NextPane):
-		// NextPane still means "next attention" until Task 6 lands the ring.
+	case key.Matches(msg, k.NextPane):
+		c.cyclePane(+1)
+		return c, nil
+	case key.Matches(msg, k.PrevPane):
+		c.cyclePane(-1)
+		return c, nil
+	case key.Matches(msg, k.NextAttention):
 		return c, c.hop(c.rail.NextAttention())
+	case key.Matches(msg, k.PrevAttention):
+		return c, c.hop(c.rail.PrevAttention())
 	case key.Matches(msg, k.HopPrev):
 		return c, c.hop(c.neighbour(-1))
 	case key.Matches(msg, k.HopNext):
 		return c, c.hop(c.neighbour(+1))
 	case key.Matches(msg, k.ToggleRail):
 		c.railHidden = !c.railHidden
+		// Never leave focus on a pane that just became invisible.
+		c.cyclePane(0)
 		return c, nil
 	case key.Matches(msg, k.Help):
 		c.showHelp = !c.showHelp
 		return c, nil
 	}
+
+	// ── pane-local ───────────────────────────────────────────────────────
+	switch c.focus {
+	case focusRail:
+		switch {
+		case key.Matches(msg, k.SelectUp):
+			c.moveSelection(-1)
+		case key.Matches(msg, k.SelectDown):
+			c.moveSelection(+1)
+		case key.Matches(msg, k.Commit):
+			cmd := c.hop(c.selected)
+			c.focus = focusInput
+			return c, cmd
+		case key.Matches(msg, k.Escape):
+			c.focus = focusInput
+		}
+		// The rail swallows everything else: a stray letter here must not
+		// reach the textarea, or you would type into an input you cannot see
+		// the cursor of.
+		return c, nil
+
+	case focusTranscript:
+		if key.Matches(msg, k.Escape) {
+			c.focus = focusInput
+			return c, nil
+		}
+		return c, c.scrollFocused(msg)
+	}
+
+	// ── input ────────────────────────────────────────────────────────────
 	if mode := modeForKey(msg.String()); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
 		text := strings.TrimSpace(c.ta.Value())
 		if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
@@ -371,17 +424,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// modeForKey maps a keypress to a send mode, or UNSPECIFIED for keys that do
-// not send.
-//
-// ctrl+s is the steer fallback because many terminals and multiplexers consume
-// alt+enter before the program sees it.
-//
-// Prompt and steer stay SEPARATE keys rather than being inferred from agent
-// state. Inferring reads as elegant and removes a real choice: C1a-2 made a
-// prompt to a busy agent durably QUEUE, so "queue a follow-up for when it
-// finishes" and "interrupt what it is doing now" are both things a user wants,
-// and only the user knows which.
+// scrollFocused forwards a key to the focused child's viewport. Task 7 gives
+// paneState a viewport; until then the transcript pane consumes keys without
+// acting on them, which is still correct: they must not reach the textarea.
+func (c *Cockpit) scrollFocused(_ tea.KeyPressMsg) tea.Cmd { return nil }
+
 func modeForKey(key string) rafikiv1.SendMode {
 	switch key {
 	case "enter":
@@ -489,6 +536,40 @@ func (c *Cockpit) touch(childID string) {
 }
 
 // neighbour returns the child delta rows away in display order.
+// cyclePane advances focus by delta, skipping the rail when it is hidden.
+//
+// A delta of 0 re-validates the current focus without moving, which is what
+// hiding the rail needs: ctrl+b is global and can fire while the rail holds
+// focus, and focus left on an invisible pane is how a modal UI traps someone.
+func (c *Cockpit) cyclePane(delta int) {
+	order := []focusPane{focusInput, focusRail, focusTranscript}
+	if c.railHidden {
+		order = []focusPane{focusInput, focusTranscript}
+	}
+	idx := 0
+	found := false
+	for i, p := range order {
+		if p == c.focus {
+			idx, found = i, true
+			break
+		}
+	}
+	if !found {
+		// Current focus is not in the ring at all (the rail, just hidden).
+		// Fall to input rather than guessing a neighbour.
+		c.focus = focusInput
+		if delta == 0 {
+			return
+		}
+		idx = 0
+	}
+	idx = (idx + delta + len(order)) % len(order)
+	c.focus = order[idx]
+	if c.focus == focusRail && c.selected == "" {
+		c.selected = c.focused()
+	}
+}
+
 // moveSelection moves the rail cursor by delta without hopping.
 //
 // Clamped, where neighbour() wraps. Wrapping is what the attention jump does,
@@ -549,8 +630,34 @@ func (c *Cockpit) shutdown() {
 
 // ── View ────────────────────────────────────────────────────────────────────
 
-const helpText = "⏎ send · ⌥⏎ or ^S steer the running turn · ^X abort · " +
-	"⇥ next agent needing you · ^↑/^↓ move · ^B rail · ^G help · ^C quit"
+// footerHints renders the bindings that apply in the focused pane.
+//
+// Derived from the keymap rather than hand-written, because the cockpit used to
+// carry the key list in two separate literals with nothing keeping them in
+// agreement. A footer that lies about the keys is worse than no footer,
+// especially now that a key's meaning depends on which pane holds focus.
+func (c *Cockpit) footerHints() string {
+	k := c.keys
+	var bs []key.Binding
+	switch c.focus {
+	case focusRail:
+		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.Escape}
+	case focusTranscript:
+		bs = []key.Binding{k.Escape}
+	default:
+		bs = []key.Binding{k.Send, k.Steer, k.Abort, k.NextAttention}
+	}
+	parts := make([]string, 0, len(bs)+3)
+	for _, b := range bs {
+		h := b.Help()
+		parts = append(parts, h.Key+" "+h.Desc)
+	}
+	parts = append(parts,
+		c.keys.NextPane.Help().Key+" pane",
+		c.keys.ToggleRail.Help().Key+" rail",
+		c.keys.Help.Help().Key+" help")
+	return strings.Join(parts, "  ")
+}
 
 func (c *Cockpit) View() tea.View {
 	if !c.ready {
@@ -593,9 +700,14 @@ func (c *Cockpit) View() tea.View {
 		conv += "\n" + stylePending.Render("⏳ "+c.pending)
 	}
 
-	footer := helpText
-	if !c.showHelp {
-		footer = "⏎ send  ⌥⏎ steer  ^X abort  ⇥ next  ^B rail  ^G help"
+	// The focused pane is NAMED, always. A modal UI whose mode is invisible is
+	// how someone gets stuck: keys stop doing what they expect and nothing on
+	// screen says why.
+	footer := "[" + c.focus.String() + "]  " + c.footerHints()
+	if f := c.focused(); f != "" {
+		if p := c.panes[f]; p != nil && !p.atBottom {
+			footer = "↓ more below  " + footer
+		}
 	}
 
 	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight) +

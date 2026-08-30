@@ -53,3 +53,63 @@ func TestDefaultKeyMapBindsWhatTheFooterClaims(t *testing.T) {
 		}
 	}
 }
+
+// ── focus ring ───────────────────────────────────────────────────────────────
+
+// TestCyclePaneSkipsHiddenRail: the ring must never focus something invisible.
+// ctrl+b hides the rail, and a focus you cannot see is a cockpit you appear to
+// be stuck in — keys stop doing what you expect and nothing on screen says why.
+func TestCyclePaneSkipsHiddenRail(t *testing.T) {
+	c := newTestCockpit("c_a")
+	c.focus = focusInput
+	c.railHidden = true
+
+	c.cyclePane(+1)
+
+	if c.focus != focusTranscript {
+		t.Errorf("focus = %v, want transcript (a hidden rail must be skipped)", c.focus)
+	}
+}
+
+func TestCyclePaneVisitsAllThreeWhenRailShown(t *testing.T) {
+	c := newTestCockpit("c_a")
+	c.focus = focusInput
+
+	c.cyclePane(+1)
+	if c.focus != focusRail {
+		t.Fatalf("after one tab: focus = %v, want rail", c.focus)
+	}
+	c.cyclePane(+1)
+	if c.focus != focusTranscript {
+		t.Fatalf("after two tabs: focus = %v, want transcript", c.focus)
+	}
+	c.cyclePane(+1)
+	if c.focus != focusInput {
+		t.Fatalf("after three tabs: focus = %v, want input", c.focus)
+	}
+}
+
+func TestCyclePaneBackwards(t *testing.T) {
+	c := newTestCockpit("c_a")
+	c.focus = focusInput
+
+	c.cyclePane(-1)
+
+	if c.focus != focusTranscript {
+		t.Errorf("shift+tab from input: focus = %v, want transcript", c.focus)
+	}
+}
+
+// TestHidingTheRailWhileItHasFocusReleasesIt: ctrl+b is global, so it can fire
+// while the rail holds focus. Leaving focus on a hidden pane is the trap.
+func TestHidingTheRailWhileItHasFocusReleasesIt(t *testing.T) {
+	c := newTestCockpit("c_a")
+	c.focus = focusRail
+	c.railHidden = true
+
+	c.cyclePane(0)
+
+	if c.focus == focusRail {
+		t.Error("focus stayed on the hidden rail")
+	}
+}
