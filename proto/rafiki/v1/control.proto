@@ -34,6 +34,17 @@ message EventSubject {
   // only. Ignored for `child` and `all`. Unlimited is the default because a
   // watcher wants a complete model; the agent path sets 1 explicitly.
   int32 max_depth = 5;
+
+  // Include the subtree root itself. Ignored for `child` and `all`.
+  //
+  // This is the one subject field that WIDENS. It is safe because it widens by
+  // exactly one child -- the one the subscriber already named -- and authority
+  // is still evaluated server-side and intersected, so naming a child you are
+  // not entitled to admits nothing. Default false keeps `subtree` meaning what
+  // the agent path relies on: max_depth=1 is "my direct children", never "me
+  // and my children". A cockpit attached to a child sets this, because
+  // otherwise the child it is attached TO is the one row it never hears about.
+  bool include_self = 6;
 }
 
 // EventTier is the guarantee a subscriber asks for, not a storage detail.

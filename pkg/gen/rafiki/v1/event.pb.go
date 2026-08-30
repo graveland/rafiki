@@ -1043,11 +1043,14 @@ func (x *ErrorEvent) GetMessage() string {
 	return ""
 }
 
-// ToolExecutionStart / ToolExecutionEnd are ephemeral-tier events carrying tool
-// TIMING. The durable record of a tool call remains the ToolUseBlock and
-// ToolResultBlock content blocks — these add only what a content block cannot
-// express: when execution began and how long it took, so a client can render
-// "bash running... 12s" rather than a frozen screen.
+// ToolExecutionStart / ToolExecutionEnd carry tool TIMING. They are
+// DURABLE-tier — pkg/eventlog/tier.go is the authority, and this comment said
+// "ephemeral" until C1b corrected it. The durable record of a tool call remains
+// the ToolUseBlock and ToolResultBlock content blocks; these add only what a
+// content block cannot express: when execution began and how long it took, so a
+// client can render "bash running... 12s" rather than a frozen screen. They are
+// the volume edge of the durable tier and the first thing to demote if
+// measurement says it is too chatty — demote with numbers, not intuition.
 type ToolExecutionStart struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ToolUseId     string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
@@ -1350,11 +1353,23 @@ func (x *ChildExited) GetSignal() string {
 
 // Event is the stream envelope.
 //
-// ordinal is set ONLY on durable-tier events (UserMessage, AssistantMessage),
-// where it is the conversation_message.ordinal that already exists in postgres
-// and is already the append-idempotency key. Ephemeral events leave it unset.
-// A client resumes with StreamEventsRequest.after_ordinal; ephemeral events
-// are best-effort and intentionally not resumable.
+// ordinal is set on DURABLE-tier events — eleven types as of C1a-1, not the two
+// this comment used to name. pkg/eventlog/tier.go is the authority.
+//
+// It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
+// 0023): zero-based and gap-free per child. It is NOT conversation_message.
+// ordinal, which this comment also used to claim — those are separate spaces,
+// and GetHistory speaks the message one while this stream speaks the event one.
+//
+// Ephemeral events (content_block_delta) leave it unset. A client resumes with
+// StreamEventsRequest.cursor, which is per-child; the old flat after_ordinal is
+// `reserved 2` on that message.
+//
+// A durable event can still arrive with ordinal UNSET, and consumers that count
+// ordinals must handle it. Controller.publishEvent appends to the log and stamps
+// the assigned ordinal onto the copy it publishes, but that append is
+// deliberately best-effort: on failure it logs at warn and publishes anyway,
+// because a log write must never stop a turn.
 type Event struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	ChildId  string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`

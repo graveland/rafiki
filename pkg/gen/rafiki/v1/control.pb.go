@@ -242,7 +242,17 @@ type EventSubject struct {
 	// Hops below `subtree`. UNSET or 0 means UNLIMITED; 1 means direct children
 	// only. Ignored for `child` and `all`. Unlimited is the default because a
 	// watcher wants a complete model; the agent path sets 1 explicitly.
-	MaxDepth      int32 `protobuf:"varint,5,opt,name=max_depth,json=maxDepth,proto3" json:"max_depth,omitempty"`
+	MaxDepth int32 `protobuf:"varint,5,opt,name=max_depth,json=maxDepth,proto3" json:"max_depth,omitempty"`
+	// Include the subtree root itself. Ignored for `child` and `all`.
+	//
+	// This is the one subject field that WIDENS. It is safe because it widens by
+	// exactly one child -- the one the subscriber already named -- and authority
+	// is still evaluated server-side and intersected, so naming a child you are
+	// not entitled to admits nothing. Default false keeps `subtree` meaning what
+	// the agent path relies on: max_depth=1 is "my direct children", never "me
+	// and my children". A cockpit attached to a child sets this, because
+	// otherwise the child it is attached TO is the one row it never hears about.
+	IncludeSelf   bool `protobuf:"varint,6,opt,name=include_self,json=includeSelf,proto3" json:"include_self,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -323,6 +333,13 @@ func (x *EventSubject) GetMaxDepth() int32 {
 		return x.MaxDepth
 	}
 	return 0
+}
+
+func (x *EventSubject) GetIncludeSelf() bool {
+	if x != nil {
+		return x.IncludeSelf
+	}
+	return false
 }
 
 type isEventSubject_Scope interface {
@@ -1230,13 +1247,14 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\rafter_ordinal\x18\x02 \x01(\x05H\x00R\fafterOrdinal\x88\x01\x01B\x10\n" +
 	"\x0e_after_ordinal\">\n" +
 	"\x12GetHistoryResponse\x12(\n" +
-	"\x06events\x18\x01 \x03(\v2\x10.rafiki.v1.EventR\x06events\"\xa3\x01\n" +
+	"\x06events\x18\x01 \x03(\v2\x10.rafiki.v1.EventR\x06events\"\xc6\x01\n" +
 	"\fEventSubject\x12\x16\n" +
 	"\x05child\x18\x01 \x01(\tH\x00R\x05child\x12\x1a\n" +
 	"\asubtree\x18\x02 \x01(\tH\x00R\asubtree\x12\x12\n" +
 	"\x03all\x18\x03 \x01(\bH\x00R\x03all\x12%\n" +
 	"\x0elabel_selector\x18\x04 \x01(\tR\rlabelSelector\x12\x1b\n" +
-	"\tmax_depth\x18\x05 \x01(\x05R\bmaxDepthB\a\n" +
+	"\tmax_depth\x18\x05 \x01(\x05R\bmaxDepth\x12!\n" +
+	"\finclude_self\x18\x06 \x01(\bR\vincludeSelfB\a\n" +
 	"\x05scope\"\xb0\x01\n" +
 	"\vEventCursor\x12@\n" +
 	"\bordinals\x18\x01 \x03(\v2$.rafiki.v1.EventCursor.OrdinalsEntryR\bordinals\x12\"\n" +

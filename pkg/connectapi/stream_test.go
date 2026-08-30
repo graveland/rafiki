@@ -312,3 +312,36 @@ func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
 
 // Dummy use of proto package to avoid unused import if needed
 var _ = proto.Marshal
+
+// A cockpit attached to a child subscribes to its subtree PLUS itself. Without
+// include_self the attached child is the one row the rail never hears about,
+// and the focus stream (ScopeChild) hides that until the user hops away.
+func TestStreamEventsSubtreeIncludeSelfAdmitsTheRoot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	src := &fakeSource{ch: make(chan *rafikiv1.Event, 10), allCh: make(chan *rafikiv1.Event, 10)}
+	ln := &fakeLineage{
+		depth:  map[string]map[string]int{"c_root": {}},
+		labels: make(map[string]map[string]string),
+	}
+	client := setupStreamServer(t, ln, eventlog.NewMemory(), src)
+
+	src.allCh <- statusEvent("c_root", "idle")
+
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{
+			Scope:       &rafikiv1.EventSubject_Subtree{Subtree: "c_root"},
+			IncludeSelf: true,
+		},
+	}))
+	if err != nil {
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("expected the subtree root's own event, got err: %v", stream.Err())
+	}
+	if got := stream.Msg().GetChildId(); got != "c_root" {
+		t.Fatalf("child id = %q, want c_root", got)
+	}
+}

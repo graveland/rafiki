@@ -49,6 +49,22 @@ type Subject struct {
 	// match nothing.
 	MaxDepth int
 
+	// IncludeSelf admits ChildID itself under ScopeSubtree. Ignored for
+	// ScopeChild and ScopeAll.
+	//
+	// This is the ONE subject field that widens rather than narrows, and it is
+	// safe for a specific reason: it widens by exactly one child, the one the
+	// subscriber already named, and authority is still evaluated separately and
+	// intersected -- naming a child you are not entitled to admits nothing. The
+	// default is false so ScopeSubtree keeps the meaning the agent path depends
+	// on: MaxDepth=1 is "my direct children", never "me and my children".
+	//
+	// The cockpit attached to a child sets it, because otherwise the child it
+	// is attached TO is the one row it never hears about -- and its focus
+	// stream is ScopeChild, so nothing would reveal that until the user hopped
+	// away.
+	IncludeSelf bool
+
 	// Selector NARROWS the scope and never widens it. It is not the
 	// authority: authority is evaluated separately by the caller and
 	// intersected. A malformed selector EXCLUDES.
@@ -98,13 +114,18 @@ func (s Subject) match(childID string, ln Lineage) bool {
 			return false
 		}
 	case ScopeSubtree:
-		d := ln.DescendantDepth(s.ChildID, childID)
-		if d < 0 {
-			return false
+		admittedAsSelf := s.IncludeSelf && childID == s.ChildID
+		if !admittedAsSelf {
+			d := ln.DescendantDepth(s.ChildID, childID)
+			if d < 0 {
+				return false
+			}
+			if s.MaxDepth > 0 && d > s.MaxDepth {
+				return false
+			}
 		}
-		if s.MaxDepth > 0 && d > s.MaxDepth {
-			return false
-		}
+		// Falls through to selectorAdmits below: IncludeSelf widens the SCOPE
+		// and must not bypass the narrowing selector.
 	case ScopeAll:
 		// Every child, subject to the selector below.
 	default:
