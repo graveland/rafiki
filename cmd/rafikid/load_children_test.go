@@ -390,3 +390,70 @@ func TestReplayDoesNotDuplicateARowTheIdleDrainAlreadyDelivered(t *testing.T) {
 			"the row was redelivered a second time, exactly the duplicate I2 describes", deliveries)
 	}
 }
+
+// TestRecoveryOwnership pins design §4.1. Every daemon sharing a database sees
+// every child row (childstoredb's listSQL has no WHERE clause), so recovery
+// must decide ownership itself rather than attempt a resume and let the lease
+// refuse it — resumeWithAutoRecovery reports success even when the engine
+// build failed on a refused lease.
+//
+// The ordering of the two empty-string checks is load-bearing and is asserted
+// below: an unclaimed row is adoptable even by an identity-less daemon, but a
+// CLAIMED row is not, because a daemon with no id cannot prove the claim is
+// its own.
+func TestRecoveryOwnership(t *testing.T) {
+	const conv = "11111111-1111-1111-1111-111111111111"
+	liveSet := map[string]bool{conv: true}
+
+	cases := []struct {
+		name string
+		rec  childstore.ChildRecord
+		me   string
+		live map[string]bool
+		want ownership
+	}{
+		{
+			"my own row",
+			childstore.ChildRecord{DaemonID: "me", ConversationID: conv},
+			"me", liveSet, ownedByMe,
+		},
+		{
+			"unclaimed row is adoptable",
+			childstore.ChildRecord{DaemonID: "", ConversationID: conv},
+			"me", liveSet, unclaimed,
+		},
+		{
+			"unclaimed row is adoptable even with no identity",
+			childstore.ChildRecord{DaemonID: "", ConversationID: conv},
+			"", liveSet, unclaimed,
+		},
+		{
+			"claimed row with no identity is refused",
+			childstore.ChildRecord{DaemonID: "other", ConversationID: conv},
+			"", map[string]bool{}, foreignLive,
+		},
+		{
+			"foreign row with a live lease is skipped",
+			childstore.ChildRecord{DaemonID: "other", ConversationID: conv},
+			"me", liveSet, foreignLive,
+		},
+		{
+			"foreign row with a lapsed lease is adopted",
+			childstore.ChildRecord{DaemonID: "other", ConversationID: conv},
+			"me", map[string]bool{}, foreignLapsed,
+		},
+		{
+			"foreign row with no conversation is adopted",
+			childstore.ChildRecord{DaemonID: "other", ConversationID: ""},
+			"me", liveSet, foreignLapsed,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := recoveryOwnership(tc.rec, tc.me, tc.live); got != tc.want {
+				t.Errorf("recoveryOwnership = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
