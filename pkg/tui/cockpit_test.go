@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 	"go.graveland.dev/rafiki/pkg/tui/session"
@@ -96,10 +98,12 @@ func TestRailRowsAreClippedToWidth(t *testing.T) {
 
 func TestClipCountsRunesNotBytes(t *testing.T) {
 	// A child name holds whatever a spawner typed. Byte truncation would split
-	// a rune and corrupt the line.
+	// a rune and corrupt the line. clip measures DISPLAY COLUMNS (a CJK glyph
+	// is one rune but two columns) — see TestClipMeasuresDisplayWidthNotRunes
+	// in railview_test.go for the fuller regression pinning this.
 	got := clip("日本語のエージェント", 5)
-	if len([]rune(got)) != 5 {
-		t.Errorf("clip = %q (%d runes), want 5 runes", got, len([]rune(got)))
+	if w := ansi.StringWidth(got); w != 5 {
+		t.Errorf("clip = %q (%d display columns), want 5", got, w)
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("clip = %q, want an ellipsis", got)
