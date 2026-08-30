@@ -2,6 +2,8 @@
 
 package tui
 
+import "charm.land/bubbles/v2/viewport"
+
 // paneState is the per-child view state of the conversation pane.
 //
 // One renderer PER CHILD, not one shared. The shared renderer is why hop had
@@ -14,6 +16,7 @@ package tui
 // event state machine.
 type paneState struct {
 	renderer *renderer
+	vp       viewport.Model
 	// atBottom drives the "↓ more below" footer marker. Task 7 makes the
 	// viewport the source of truth; until then a pane is always at the bottom,
 	// which is exactly what the pre-scrollback cockpit does.
@@ -27,7 +30,13 @@ func (c *Cockpit) pane(childID string) *paneState {
 	}
 	p := c.panes[childID]
 	if p == nil {
-		p = &paneState{renderer: newRenderer(), atBottom: true}
+		vp := viewport.New()
+		// SoftWrap defaults to FALSE, which truncates a long line and hides
+		// the remainder behind horizontal scrolling. An assistant's prose
+		// paragraph is ONE content line, so without this the transcript is
+		// readable only by scrolling sideways.
+		vp.SoftWrap = true
+		p = &paneState{renderer: newRenderer(), vp: vp, atBottom: true}
 		c.panes[childID] = p
 	}
 	return p

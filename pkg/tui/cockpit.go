@@ -416,6 +416,13 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return c, nil
 			}
 			c.ta.Reset()
+			// You just spoke; you want the reply. Pin to the bottom even if you
+			// had scrolled up to re-read something before sending.
+			if f := c.focused(); f != "" {
+				p := c.pane(f)
+				p.vp.GotoBottom()
+				p.atBottom = true
+			}
 		}
 		return c, c.send(mode, text)
 	}
@@ -424,10 +431,23 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// scrollFocused forwards a key to the focused child's viewport. Task 7 gives
-// paneState a viewport; until then the transcript pane consumes keys without
-// acting on them, which is still correct: they must not reach the textarea.
-func (c *Cockpit) scrollFocused(_ tea.KeyPressMsg) tea.Cmd { return nil }
+// scrollFocused forwards a key to the focused child's viewport.
+//
+// The viewport keeps its DEFAULT keymap here — ↑/↓, j/k, space, PgUp/PgDn —
+// which is safe precisely because typing is inactive while this pane holds
+// focus. That is the payoff of the focus ring; with a permanently-focused
+// textarea none of those keys were available.
+func (c *Cockpit) scrollFocused(msg tea.KeyPressMsg) tea.Cmd {
+	f := c.focused()
+	if f == "" {
+		return nil
+	}
+	p := c.pane(f)
+	var cmd tea.Cmd
+	p.vp, cmd = p.vp.Update(msg)
+	p.atBottom = p.vp.AtBottom()
+	return cmd
+}
 
 func modeForKey(key string) rafikiv1.SendMode {
 	switch key {
@@ -630,6 +650,55 @@ func (c *Cockpit) shutdown() {
 
 // ── View ────────────────────────────────────────────────────────────────────
 
+// bodyHeight and convWidth are the conversation pane's dimensions. Extracted
+// so the viewport and the layout cannot disagree about the space available —
+// they were inline in View and the viewport needs the same numbers.
+func (c *Cockpit) bodyHeight() int {
+	h := c.height - 6
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+func (c *Cockpit) convWidth() int {
+	w := c.width
+	if !c.railHidden && c.rail.Len() > 1 {
+		w = c.width - railWidth - 1
+	}
+	if w < 10 {
+		return 10
+	}
+	return w
+}
+
+// syncViewport feeds rendered lines to a pane's viewport, preserving the
+// reader's position.
+//
+// Follow mode: a pane at the bottom stays pinned as output arrives, which is
+// the common case of watching a live agent. A pane scrolled up keeps its
+// offset — being yanked to the bottom mid-read is worse than missing the
+// newest line, and the footer's "↓ more below" marker says there is more.
+//
+// SetContentLines rather than SetContent: the renderer already works in lines,
+// it avoids a join/split every frame, and when log-backed paging lands the
+// YOffset shift after a prepend is exactly len(prepended).
+func (c *Cockpit) syncViewport(p *paneState, lines []string) {
+	wasAtBottom := p.vp.AtBottom()
+	prev := p.vp.YOffset()
+
+	p.vp.SetWidth(c.convWidth())
+	p.vp.SetHeight(c.bodyHeight())
+	p.vp.SetContentLines(lines)
+
+	if wasAtBottom {
+		p.vp.GotoBottom()
+	} else {
+		p.vp.SetYOffset(prev)
+	}
+	p.atBottom = p.vp.AtBottom()
+}
+
 // footerHints renders the bindings that apply in the focused pane.
 //
 // Derived from the keymap rather than hand-written, because the cockpit used to
@@ -676,23 +745,16 @@ func (c *Cockpit) View() tea.View {
 		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railWidth)
 	}
 
-	bodyHeight := c.height - 6
-	if bodyHeight < 1 {
-		bodyHeight = 1
-	}
-	convWidth := c.width
-	if railText != "" {
-		convWidth = c.width - railWidth - 1
-	}
-	if convWidth < 10 {
-		convWidth = 10
-	}
+	bodyHeight := c.bodyHeight()
+	convWidth := c.convWidth()
 
 	var conv string
 	if f := c.focused(); f == "" {
-		conv = styleMeta.Render("Pick an agent — ^↑/^↓ to move, ⇥ for the next that needs you.")
+		conv = styleMeta.Render("Pick an agent — ⇥ to the rail, ↑/↓ to move, ⏎ to open.")
 	} else if s := c.sessions[f]; s != nil {
-		conv = strings.Join(c.pane(f).renderer.Lines(s.Blocks, s.Finalized), "\n")
+		p := c.pane(f)
+		c.syncViewport(p, p.renderer.Lines(s.Blocks, s.Finalized))
+		conv = p.vp.View()
 	} else {
 		conv = styleMeta.Render("loading…")
 	}
