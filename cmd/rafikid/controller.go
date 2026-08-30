@@ -1926,8 +1926,23 @@ func (c *Controller) Forget(childID string) error {
 	c.st.Delete(childID)
 	// After the store delete, so a message accepted concurrently cannot slip
 	// in behind the drop: validateSendTarget refuses an unknown child.
-	c.dropInboxForForgotten(childID, "child forgotten")
-	if c.children != nil && c.ownsChildRow(snap) {
+	//
+	// Gated on ownsChildRow, the SAME authority the row-delete below already
+	// uses — not holdsLease, which is false for every legitimately forgotten
+	// child (its lease was already released on exit) and would disable this
+	// drop entirely. loadChildren inserts every daemon's children into this
+	// daemon's local store as exited, including ones genuinely alive on
+	// another daemon right now; recoverOne's placeholder StatusExited write
+	// (before its async resume goroutine even runs) means a Forget landing in
+	// that window read this daemon's own local snapshot and, unguarded, would
+	// Drop — a full, terminal delete, worse than the reset-to-pending
+	// recoverOne's own resume path can cause — another daemon's live child's
+	// queue.
+	owns := c.ownsChildRow(snap)
+	if owns {
+		c.dropInboxForForgotten(childID, "child forgotten")
+	}
+	if c.children != nil && owns {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := c.children.Delete(ctx, childID); err != nil {
 			slog.Warn("delete child row", "childId", childID, "error", err)
@@ -1988,8 +2003,17 @@ func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
 		// The other deletion path, and the one that leaks without this: a row
 		// for a child forgotten here is never pending-for-a-live-child again
 		// and never terminal, so the retention sweep can never reach it.
-		c.dropInboxForForgotten(s.ChildID, "child forgotten")
-		if c.children != nil && c.ownsChildRow(s) {
+		//
+		// Gated on ownsChildRow, same reasoning as Forget above: sweepExpired
+		// calls ForgetAllExited on the daemon's own grace-window tick, and a
+		// recovered record — including one belonging to a still-live OTHER
+		// daemon's child — carries its old ExitedAt, so this is not merely a
+		// hypothetical race.
+		owns := c.ownsChildRow(s)
+		if owns {
+			c.dropInboxForForgotten(s.ChildID, "child forgotten")
+		}
+		if c.children != nil && owns {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := c.children.Delete(ctx, s.ChildID); err != nil {
 				slog.Warn("delete child row", "childId", s.ChildID, "error", err)

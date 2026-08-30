@@ -563,6 +563,131 @@ func TestForgetDropsTheQueue(t *testing.T) {
 	}
 }
 
+// TestForgetDoesNotDropInboxForAChildAnotherDaemonOwns is the multi-daemon
+// trap in Forget's own inbox drop: loadChildren inserts every daemon's
+// children into this daemon's local store as exited, including a child that
+// is genuinely alive on ANOTHER daemon right now, and recoverOne writes
+// exactly that placeholder status BEFORE its async resume goroutine even
+// runs. A Forget landing in that window must not act on the local snapshot
+// alone -- ownsChildRow, the same authority the row-delete a few lines below
+// already uses, is what recognises the row is not this daemon's to destroy.
+//
+// Mutation check: drop the ownsChildRow gate in Forget and this fails --
+// the row is a Drop (terminal), which is worse than the reset-to-pending the
+// lease-ownership bug caused, and there is no future resume that can ever
+// revive a dropped row.
+func TestForgetDoesNotDropInboxForAChildAnotherDaemonOwns(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "work"}); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	c := newTestController(t)
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_1",
+		Status:  protocol.StatusExited,
+		Labels:  map[string]string{"rafiki/daemon": "some-other-daemon"},
+	})
+
+	if err := c.Forget("c_1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	rows, err := st.Pending(ctx, "c_1")
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("a child owned by another daemon must keep its queue intact; %d rows survived, want 1", len(rows))
+	}
+}
+
+// TestForgetDropsInboxForAnOwnedChild is the other half: an ordinary forget
+// of a child this daemon actually owns must still drop its queue. A gate
+// here that is too aggressive leaks rows silently forever rather than
+// failing loudly, which is why this is asserted as its own test rather than
+// inferred from the cross-daemon case above.
+func TestForgetDropsInboxForAnOwnedChild(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "work"}); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	c := newTestController(t)
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_1",
+		Status:  protocol.StatusExited,
+		// No rafiki/daemon label: ownsChildRow treats an unlabelled row as
+		// ours (it predates the label), same as one this daemon labelled
+		// itself.
+	})
+
+	if err := c.Forget("c_1"); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+
+	rows, err := st.Pending(ctx, "c_1")
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("an owned, forgotten child's queue must be dropped; %d rows survived", len(rows))
+	}
+}
+
+// TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne mirrors
+// the Forget-level pair above for the sweep entry point: sweepExpired calls
+// ForgetAllExited on the daemon's own grace-window tick, and a recovered
+// record -- including one belonging to a still-live OTHER daemon's child --
+// carries its old ExitedAt, so this path reaches the identical trap on a
+// timer rather than needing a client to call Forget at the wrong moment.
+func TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne(t *testing.T) {
+	st := inbox.NewMemory()
+	ctx := context.Background()
+	for _, id := range []string{"c_mine", "c_theirs"} {
+		if _, err := st.Accept(ctx, inbox.Inbound{ChildID: id, Mode: inbox.ModePrompt, Text: "work"}); err != nil {
+			t.Fatalf("Accept %s: %v", id, err)
+		}
+	}
+
+	c := newTestController(t)
+	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
+	c.st.Insert(&childstore.Session{ChildID: "c_mine", Status: protocol.StatusExited})
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_theirs",
+		Status:  protocol.StatusExited,
+		Labels:  map[string]string{"rafiki/daemon": "some-other-daemon"},
+	})
+
+	n, err := c.ForgetAllExited(0)
+	if err != nil {
+		t.Fatalf("ForgetAllExited: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("ForgetAllExited count = %d, want 2 (both are still forgotten locally)", n)
+	}
+
+	mineRows, err := st.Pending(ctx, "c_mine")
+	if err != nil {
+		t.Fatalf("Pending c_mine: %v", err)
+	}
+	if len(mineRows) != 0 {
+		t.Fatalf("an owned child's queue must be dropped; %d rows survived", len(mineRows))
+	}
+
+	theirsRows, err := st.Pending(ctx, "c_theirs")
+	if err != nil {
+		t.Fatalf("Pending c_theirs: %v", err)
+	}
+	if len(theirsRows) != 1 {
+		t.Fatalf("a child owned by another daemon must keep its queue intact; %d rows survived, want 1", len(theirsRows))
+	}
+}
+
 // TestHandleChildExitResetsTheInbox proves the hook is wired at the exit site,
 // not merely that the helper works.
 func TestHandleChildExitResetsTheInbox(t *testing.T) {
