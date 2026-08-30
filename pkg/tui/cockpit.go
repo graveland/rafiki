@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
@@ -72,6 +73,7 @@ type Cockpit struct {
 
 	panes map[string]*paneState
 	ta    textarea.Model
+	keys  keyMap
 
 	evCh      chan *rafikiv1.Event
 	stopRail  func()
@@ -121,6 +123,7 @@ func NewCockpit(opts Options) *Cockpit {
 		sessions: make(map[string]*session.Session),
 		panes:    map[string]*paneState{},
 		ta:       ta,
+		keys:     defaultKeyMap(),
 		evCh:     make(chan *rafikiv1.Event, 256),
 		status:   "connecting…",
 	}
@@ -329,21 +332,23 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 }
 
 func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "ctrl+d":
+	k := c.keys
+	switch {
+	case key.Matches(msg, k.Quit):
 		c.quitting = true
 		c.shutdown()
 		return c, tea.Quit
-	case "tab":
+	case key.Matches(msg, k.NextAttention), key.Matches(msg, k.NextPane):
+		// NextPane still means "next attention" until Task 6 lands the ring.
 		return c, c.hop(c.rail.NextAttention())
-	case "ctrl+up":
+	case key.Matches(msg, k.HopPrev):
 		return c, c.hop(c.neighbour(-1))
-	case "ctrl+down":
+	case key.Matches(msg, k.HopNext):
 		return c, c.hop(c.neighbour(+1))
-	case "ctrl+b":
+	case key.Matches(msg, k.ToggleRail):
 		c.railHidden = !c.railHidden
 		return c, nil
-	case "ctrl+g":
+	case key.Matches(msg, k.Help):
 		c.showHelp = !c.showHelp
 		return c, nil
 	}
