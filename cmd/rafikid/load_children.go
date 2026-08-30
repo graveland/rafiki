@@ -70,6 +70,75 @@ func shouldAutoResume(rec childstore.ChildRecord) bool {
 		effective != string(protocol.StatusShuttingDown)
 }
 
+// ownership is recovery's answer to "may this daemon run this child".
+type ownership int
+
+const (
+	// ownedByMe: this daemon's own row. The k8s pod-restart path.
+	// RAFIKI_DAEMON_ID is pinned across restarts precisely so a daemon
+	// reclaims its own work immediately.
+	ownedByMe ownership = iota
+	// unclaimed: no daemon has ever stamped the row. Rows written before
+	// 0021, or by a daemon with no identity.
+	unclaimed
+	// foreignLive: another daemon claims it and is still live on the
+	// conversation. Do not touch — not the process, not the inbox.
+	foreignLive
+	// foreignLapsed: another daemon claims it but its lease has lapsed.
+	// Adoptable; this is what keeps k8s failover and replicas>1 reachable.
+	foreignLapsed
+)
+
+func (o ownership) String() string {
+	switch o {
+	case ownedByMe:
+		return "ownedByMe"
+	case unclaimed:
+		return "unclaimed"
+	case foreignLive:
+		return "foreignLive"
+	case foreignLapsed:
+		return "foreignLapsed"
+	}
+	return "unknown"
+}
+
+// recoveryOwnership classifies one child row for recovery.
+//
+// Every daemon sharing a database sees every row — childstoredb's listSQL is
+// `FROM conversations.child` with no WHERE clause — so this predicate, not the
+// lease, is what stops a daemon from running someone else's child. The lease
+// refusal is still there and still correct; it is simply not sufficient on its
+// own, because activateLiveChild cannot distinguish "became idle" from "the
+// engine build already failed, including on a refused lease", so
+// resumeWithAutoRecovery returns success either way.
+//
+// It reads rec.DaemonID, the authoritative column, never the rafiki/daemon
+// label. The label mirrors it for display under the same condition; a guard
+// that reads a display field is a guard waiting to be broken by a cosmetic
+// change.
+//
+// Evaluation order is load-bearing — see the test.
+func recoveryOwnership(rec childstore.ChildRecord, me string, live map[string]bool) ownership {
+	if rec.DaemonID == "" {
+		return unclaimed
+	}
+	if rec.DaemonID == me {
+		return ownedByMe
+	}
+	// A daemon with no identity cannot prove any claim is its own, so it
+	// declines every claimed row. This also closes the hole where c.daemonID
+	// == "" skipped the holdsLease gate entirely and replayed another
+	// daemon's inbox.
+	if me == "" {
+		return foreignLive
+	}
+	if rec.ConversationID != "" && live[rec.ConversationID] {
+		return foreignLive
+	}
+	return foreignLapsed
+}
+
 // recoveryAction decides what to do with a resumable child whose executor
 // binding is stale by construction — an executor's workspace registry is in
 // memory, so a restart loses every workspace id.
