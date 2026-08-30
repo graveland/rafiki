@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 )
@@ -56,28 +57,30 @@ func renderRail(nodes []rail.Node, focused string, width int) string {
 	return sb.String()
 }
 
-// clip truncates to width in RUNES. A child name holds whatever a spawner
-// typed, including CJK and emoji, and byte truncation would split a rune and
-// corrupt the whole line.
+// clip truncates s to width DISPLAY COLUMNS, appending an ellipsis when it cuts.
+//
+// Display columns, not runes: a lipgloss-styled string carries ANSI escape
+// sequences that are runes but occupy no columns, and a CJK glyph is one rune
+// occupying two. Counting runes made the conversation pane lose about a fifth
+// of its width and amputate the trailing reset escape, bleeding colour into
+// the rail. ansi.Truncate understands both and preserves the escapes it cuts
+// across.
 func clip(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= width {
+	if ansi.StringWidth(s) <= width {
 		return s
 	}
-	if width == 1 {
-		return "…"
-	}
-	return string(r[:width-1]) + "…"
+	return ansi.Truncate(s, width, "…")
 }
 
-// padTo pads s with spaces to width, measured in runes.
+// padTo pads s with spaces to exactly width display columns, clipping if it is
+// already wider. See clip for why display columns and not runes.
 func padTo(s string, width int) string {
-	n := len([]rune(s))
-	if n >= width {
+	w := ansi.StringWidth(s)
+	if w >= width {
 		return clip(s, width)
 	}
-	return s + strings.Repeat(" ", width-n)
+	return s + strings.Repeat(" ", width-w)
 }

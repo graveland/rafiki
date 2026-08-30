@@ -205,9 +205,22 @@ func itoa(n int64) string {
 	return string(buf[i:])
 }
 
+// truncate shortens s to at most n runes, appending an ellipsis when it cuts.
+//
+// Runes, not bytes: this is called on model-produced thinking text, and the
+// old s[:n-3] split multibyte characters and rendered mojibake on a line that
+// is always on screen. Not ansi.Truncate — this text carries no escapes, and a
+// rune budget is what the caller means.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n-3] + "…"
+	if n == 1 {
+		return "…"
+	}
+	return string(r[:n-1]) + "…"
 }
