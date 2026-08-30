@@ -172,6 +172,12 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		}
 		c.trackLease(childID, lease)
 		c.noteConversationID(childID, conversationID)
+		// Ownership is established and nothing downstream can yet have
+		// marked a row 'sent' for this engine — see
+		// resetUnconfirmedOnOwnership's doc comment for why this exact
+		// moment, and not recoverOne's later post-resume call, is what
+		// avoids a duplicate delivery.
+		c.resetUnconfirmedOnOwnership(childID)
 		return lease, nil
 	}
 

@@ -192,13 +192,23 @@ func (b *Buffer) DrainIdle(childID string) {
 // that clears it and it only fires on an idle transition, which a dead child
 // never makes.
 //
-// It does NOT discard messages: the rows outlive the buffer, and what happens
-// to them on exit is the controller's decision (Reset on exit, Drop when the
-// child is forgotten for good). Dropping them here would delete a resumable
-// child's queue.
+// It does NOT discard messages: rows that made it into the store outlive the
+// buffer, and what happens to THEM on exit is the controller's decision
+// (Reset on exit, Drop when the child is forgotten for good) — not this
+// package's. Orphans are different: they never reached the store (the durable
+// accept failed), so THIS is the only copy, and deleting the perKey without
+// handing them anywhere would silently discard exactly the fragments the
+// orphan path exists to save — a child dying right after a database blip
+// would lose them with no error and no trace. So any orphans queued for
+// childID are flushed to the owner exactly as a live fire would, before their
+// scheduling state is dropped.
 func (b *Buffer) Forget(childID string) {
+	type forgotten struct {
+		source  string
+		orphans []inbox.Inbound
+	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	var toFlush []forgotten
 	for bk, pk := range b.state {
 		if bk.childID != childID {
 			continue
@@ -206,7 +216,21 @@ func (b *Buffer) Forget(childID string) {
 		if pk.timer != nil {
 			pk.timer.Stop()
 		}
+		if len(pk.orphans) > 0 {
+			toFlush = append(toFlush, forgotten{source: bk.source, orphans: pk.orphans})
+		}
 		delete(b.state, bk)
+	}
+	flush := b.flush
+	b.mu.Unlock()
+
+	// flush MUST run with b.mu released — same reason as fire's: it reaches
+	// Controller.Send, a blocking write, and a producer pushing from inside
+	// that path would deadlock on a re-entrant acquire.
+	if flush != nil {
+		for _, f := range toFlush {
+			flush(childID, f.source, f.orphans)
+		}
 	}
 }
 

@@ -474,6 +474,43 @@ func TestForgetStopsTimersButLeavesMessagesForTheController(t *testing.T) {
 	}
 }
 
+// TestForgetFlushesOrphansRatherThanDroppingThem proves the doc comment's
+// promise ("does NOT discard messages") actually holds for orphans, which
+// have no durable row to fall back on -- Reset/Drop only ever apply to rows
+// that made it into the store. Before this fix, Forget deleted the whole
+// perKey, orphans included, with nothing to hand them to: a child dying right
+// after a database blip lost exactly the fragments the orphan path exists to
+// save, silently and without error.
+func TestForgetFlushesOrphansRatherThanDroppingThem(t *testing.T) {
+	clk := NewFakeClock(time.Unix(0, 0))
+	rec := &flushRecorder{}
+	st := failingStore{inbox.NewMemory()}
+	b := New(Config{Debounce: 5 * time.Second}, clk)
+	b.SetAccepter(inbox.NewQueue(inbox.QueueConfig{Store: st}))
+	b.SetFlush(rec.record)
+	b.SetBusy(func(string) bool { return true }) // defer the timer-fired flush
+
+	b.Push("c_dead", "subagents", "", "worker finished")
+	clk.Advance(10 * time.Second) // timer fires, defers on busy -- orphan stays in pk.orphans
+
+	if rec.n() != 0 {
+		t.Fatalf("flush ran before Forget (n=%d); test setup did not defer as expected", rec.n())
+	}
+
+	b.Forget("c_dead")
+
+	if rec.n() != 1 {
+		t.Fatalf("flushes after Forget = %d; want 1 -- the orphan must be handed to the owner", rec.n())
+	}
+	got := rec.call(0)
+	if got.childID != "c_dead" || got.source != "subagents" {
+		t.Fatalf("flush call = %+v", got)
+	}
+	if len(got.orphans) != 1 || got.orphans[0].Text != "worker finished" {
+		t.Fatalf("orphans = %+v; want the one undurable message Forget must not drop", got.orphans)
+	}
+}
+
 // failingStore is a real store whose Accept always fails. Wrapping it in a
 // real inbox.Queue reaches the orphan path through the same seam the daemon
 // uses, rather than around it — and the embedded Memory still answers Pending,

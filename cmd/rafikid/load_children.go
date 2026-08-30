@@ -175,9 +175,31 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 			slog.Info("child not auto-resumed: pinned workspace cannot change machines",
 				"childId", rec.ChildID, "workspaceMode", rec.WorkspaceMode)
 		}
-		// There is no turn to inject into and there will not be one: this
-		// child is pinned to a machine that is gone.
-		c.dropInboxForForgotten(rec.ChildID, "child not resumed after daemon restart")
+		// NOT a drop. Final review corrected this: the rationale that used to
+		// justify one ("no turn to inject into and there will not be one")
+		// described a branch recoveryAction no longer produces — a pinned
+		// child whose executor comes back CAN be resumed later (manually,
+		// via `rafiki resume`), and that resume's own idle transition drives
+		// the ordinary idle drain. Recovery-stays-exited is just an exit that
+		// already happened, on a daemon that never attempted to run it, and
+		// this phase's rule is exit RESETS — the same treatment
+		// handleChildExit gives a real exit. A `Drop` is terminal with no
+		// repair; a later resume's idle drain can only ever redeliver rows
+		// that are 'pending', not 'sent', so without this reset a manual
+		// resume of a never-auto-resumed child would silently never see rows
+		// left 'sent' by whichever daemon incarnation last wrote them. Forget
+		// remains the only drop.
+		//
+		// No ownership gate needed here, unlike Forget's: shouldAutoResume
+		// returning false for THIS row already means it reads as
+		// exited/shutting_down (or non-fundi) — a currently-live child under
+		// another daemon would read as non-terminal and take the resume path
+		// instead, never this one. A Reset is also idempotent and merely
+		// un-hides pending work; it cannot cause the duplicate-delivery
+		// hazard a Reset that runs AFTER a resume's idle transition can (see
+		// resetUnconfirmedOnOwnership's doc comment) because nothing here
+		// delivers anything, and there is no engine running yet to race.
+		c.releaseInboxOnExit(rec.ChildID)
 		return
 	}
 
@@ -220,8 +242,12 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord)
 				"not replaying its inbox", "childId", id)
 			return
 		}
-		// The child is live and its runtime is wired: anything the previous
-		// daemon accepted but never got confirmed is delivered now. This is
+		// The child is live and its runtime is wired. Its unconfirmed rows
+		// were already reset to pending back when ownership was established
+		// (resetUnconfirmedOnOwnership, inside OnConversationResolved) —
+		// this call is the delivery half only, and mainly catches whatever
+		// the child's own idle-transition drain deliberately leaves alone
+		// (fragment-sourced rows; see replayInbox's doc comment). This is
 		// what stops a coordinator waiting forever for a settle that already
 		// happened.
 		c.replayInbox(rctx, id)

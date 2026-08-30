@@ -382,9 +382,22 @@ func (c *Controller) connectInbox() inbox.Accepter { return connectAccepter{c: c
 // that the table does not become a second conversation store.
 const inboxRetention = 24 * time.Hour
 
-// drainInbox delivers anything still pending for childID. Called on the
-// child's idle transition: it is the retry path for an immediate delivery
-// that failed, and it costs one indexed read when there is nothing to do.
+// drainInbox retries a DIRECT message (source "") still pending for childID.
+// Called on the child's idle transition: it is the retry path for an
+// immediate delivery that failed, and it costs one indexed read when there is
+// nothing to do.
+//
+// Direct messages only — DeliverAll would undo eventbuf's own debouncing.
+// handleStatusChange already calls evbuf.DrainIdle right before this, which
+// deliberately releases only deferred-and-dirty (child, source) keys
+// (buffer.go's own comment on Buffer.fire); a fragment whose debounce window
+// has not elapsed yet is neither. DeliverAll's Pending() has no concept of
+// "still debouncing" — it returns every pending row regardless of source — so
+// calling it here executed exactly the delivery DrainIdle had just refused,
+// one line later, defeating the coalescing eventbuf exists for. Recovery
+// replay (replayInbox) keeps DeliverAll deliberately: there, the daemon that
+// owned the scheduling state crashed, so there is no debounce window still
+// running to respect — the only question is whether the rows go out at all.
 //
 // Only on the transition INTO idle, never on every status change. eventbuf's
 // fragments are inbox rows, persisted on Push and held pending while the
@@ -402,7 +415,7 @@ func (c *Controller) drainInbox(q *inbox.Queue, childID string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := q.DeliverAll(ctx, childID); err != nil {
+	if err := q.Deliver(ctx, childID, ""); err != nil {
 		slog.Warn("inbox: idle drain failed", "childId", childID, "error", err)
 	}
 }
@@ -472,25 +485,68 @@ func (c *Controller) dropInboxForForgotten(childID, reason string) {
 	})
 }
 
-// replayInbox returns childID's unconfirmed rows to pending and delivers
-// everything queued for it.
+// resetUnconfirmedOnOwnership returns childID's unconfirmed ('sent') rows to
+// pending the moment this daemon establishes ownership of its conversation —
+// inside OnConversationResolved, synchronously, before BuildEngine returns
+// and therefore before Frontend.Run can process a single frame.
 //
-// Called once per child THIS DAEMON RESUMED, never as a sweep over the table.
-// Child rows are shared across daemons, so a global reset would resurrect
-// another live daemon's in-flight messages and deliver every one of them
-// twice.
-func (c *Controller) replayInbox(ctx context.Context, childID string) {
+// Ordering here is the whole fix for a duplicate-delivery bug: this used to
+// run AFTER resumeWithAutoRecovery returned (see replayInbox, below), by
+// which point the child had already reached idle — and that very idle
+// transition fires its own drain (drainInbox) that can deliver a row and
+// mark it 'sent' before this ever runs. A Reset that runs after that point
+// cannot tell a row it just delivered apart from one genuinely stale from
+// before a crash: both read 'sent', and an unscoped-by-TIME Reset flips both
+// back to pending, so the freshly-delivered one goes out a SECOND time — a
+// duplicate prompt and a duplicate turn. Running the Reset here instead
+// closes the window by construction: nothing downstream of
+// OnConversationResolved can mark a NEW row 'sent' before this call
+// completes, so every 'sent' row it sees here is unconfirmed work that
+// predates this engine — never something this engine itself just sent.
+//
+// Runs for every path through OnConversationResolved — a fresh top-level
+// spawn, a manual `rafiki resume`, and an auto-recovery resume alike. A
+// brand-new conversation has no 'sent' rows, so this is a harmless no-op
+// there; a manual resume of a child recovery left "stays exited" (see
+// recoverOne) gets exactly the same treatment a crash-recovery resume does,
+// which is what makes that comment's "the idle drain would have delivered
+// its rows" claim actually true rather than aspirational.
+func (c *Controller) resetUnconfirmedOnOwnership(childID string) {
 	if c.inbox == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	n, err := c.inbox.Reset(ctx, childID)
 	if err != nil {
-		slog.Warn("inbox: replay reset failed", "childId", childID, "error", err)
+		slog.Warn("inbox: reset on ownership failed", "childId", childID, "error", err)
 		return
 	}
 	if n > 0 {
-		slog.Info("inbox: replaying messages the previous daemon never confirmed",
+		slog.Info("inbox: reset unconfirmed messages before this engine's first turn",
 			"childId", childID, "count", n)
+	}
+}
+
+// replayInbox delivers everything still queued for childID after a
+// crash-recovery resume.
+//
+// Deliver-only now — see resetUnconfirmedOnOwnership's doc comment for why
+// the Reset half moved to OnConversationResolved. By the time recoverOne
+// calls this (after resumeWithAutoRecovery returns, which is after the child
+// has reached idle), any DIRECT messages left stale by the crash have
+// already had their reset-to-pending happen well before that idle
+// transition, so the ordinary idle drain (drainInbox, direct-only) has very
+// likely already delivered them — DeliverAll's own Pending() read simply
+// will not find them here anymore, so calling it is not a second delivery,
+// it is a no-op for those rows. What this call exists to catch is whatever
+// the idle drain deliberately does not touch: fragment-sourced rows, whose
+// delivery eventbuf's debounce/coalescing schedules — but the scheduler
+// state that would normally do that died with the crashed daemon, so
+// nothing else will ever ask for them again without this call.
+func (c *Controller) replayInbox(ctx context.Context, childID string) {
+	if c.inbox == nil {
+		return
 	}
 	if err := c.inbox.DeliverAll(ctx, childID); err != nil {
 		slog.Warn("inbox: replay delivery failed; messages stay queued",
