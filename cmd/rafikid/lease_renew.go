@@ -28,6 +28,30 @@ func (c *Controller) dropLease(childID string) {
 	c.heldLeasesMu.Unlock()
 }
 
+// holdsLease reports whether THIS daemon currently holds the conversation
+// lease for childID — the only authority on which daemon actually owns a
+// child, as opposed to which daemon merely attempted to resume it.
+//
+// This is load-bearing for recovery: resumeWithAutoRecovery can report
+// success for a child whose in-process engine build is still running on its
+// own goroutine (Runner.Start returns before Build completes) and whose lease
+// acquisition was REFUSED — activateLiveChild's Idle-or-5s-timeout select
+// does not distinguish "became idle" from "stalled because the build already
+// failed", so a synchronous success return does not prove ownership. Every
+// caller that is about to act as though it owns a resumed child (replaying
+// its inbox, for one) must check this first rather than trusting that
+// return value alone. c.trackLease is called only on a successful
+// c.leases.Acquire, from inside OnConversationResolved — the single
+// lease-acquisition site every agent path funnels through — so its absence
+// here means either the acquire lost to another daemon or it has not
+// completed yet; both are reasons not to act as the owner.
+func (c *Controller) holdsLease(childID string) bool {
+	c.heldLeasesMu.Lock()
+	defer c.heldLeasesMu.Unlock()
+	_, ok := c.heldLeases[childID]
+	return ok
+}
+
 // releaseLease drops and releases the lease held for a child so another daemon
 // can take the conversation immediately rather than after the TTL.
 func (c *Controller) releaseLease(childID string) {

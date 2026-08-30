@@ -398,6 +398,37 @@ func openPool(t *testing.T, dsn string) *pgxpool.Pool {
 	return pool
 }
 
+// noRealProviderEnv returns exec.Cmd.Env overrides that stop a daemon under
+// test from ever reaching a real, live service, belt-and-suspenders against
+// whatever the developer running this suite happens to have exported.
+//
+// ANTHROPIC_API_KEY/OPENROUTER_API_KEY blanked: llm.NewClient never fails
+// construction on a missing key — providers.Provider.APIKey's own doc
+// comment says an unset key surfaces as an upstream 401 rather than a
+// startup error — so this cannot break a resume or spawn that depends on
+// engine construction succeeding. What it buys: a fundi engine that reaches
+// a turn calls Engine.consume synchronously, BEFORE it ever tries to reach a
+// model, so no assertion in this file needs, or waits on, a real provider
+// response — but the engine's own subsequent (now harmless, 401) attempt to
+// reach one must not become a REAL one.
+//
+// RAFIKI_URL/ANTHROPIC_BASE_URL blanked for the same reason and found the
+// same way: a developer's .env commonly points both at a real, live rafiki
+// deployment (self-hosted, but still a real service with its own auth and
+// traces) rather than api.anthropic.com directly, and this suite must not
+// depend on, or leave a trace on, whatever that happens to be. Blanking
+// ANTHROPIC_BASE_URL restores the default (api.anthropic.com), which the
+// blanked credentials above then make a harmless 401 against.
+//
+// Later entries win for a duplicate exec.Cmd.Env key, so appending these
+// after os.Environ() overrides whatever the ambient shell exported.
+func noRealProviderEnv() []string {
+	return []string{
+		"ANTHROPIC_API_KEY=", "OPENROUTER_API_KEY=",
+		"RAFIKI_URL=", "ANTHROPIC_BASE_URL=",
+	}
+}
+
 // ─── crash recovery test ────────────────────────────────────────────────────
 
 // TestDBChildState_ResumesAfterDaemonCrash is the regression test for the
@@ -520,20 +551,7 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 	}
 
 	daemonID := "daemon-inbox-replay"
-
-	// Both boots get their real-provider credentials blanked, belt-and-
-	// suspenders. NewClient never fails on a missing key — Provider.APIKey's
-	// own doc comment says an unset key surfaces as an upstream 401 rather
-	// than a startup error — so this cannot break the resume this test
-	// depends on. What it buys: a resumed fundi engine that actually reaches
-	// a turn calls Engine.consume synchronously, BEFORE it ever tries to
-	// reach a model (see the state-polling comment below), so this test's
-	// assertion never needs, or waits on, a real provider response — but the
-	// engine's own subsequent (harmless, 401) attempt to reach one must not
-	// become a REAL one just because the developer running this suite
-	// sourced a real .env. Later entries win for a duplicate exec.Cmd.Env
-	// key, so appending these after os.Environ() overrides it.
-	noRealCreds := []string{"ANTHROPIC_API_KEY=", "OPENROUTER_API_KEY="}
+	noRealCreds := noRealProviderEnv()
 
 	{
 		pool, err := pgxpool.New(context.Background(), dsn)
@@ -659,5 +677,164 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 				"the recovery replay never redelivered the row into a turn", state)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// ─── recovery replay: the multi-daemon trap ────────────────────────────────
+
+// TestDBChildState_InboxReplayDoesNotCrossDaemons is the bug live
+// verification found in recoverOne's resume-success path: loadChildren lists
+// EVERY child row in the table, including rows a DIFFERENT, still-live
+// daemon owns. A restarting daemon walking one of those rows takes the
+// resume path, and resumeWithAutoRecovery can report SUCCESS even though the
+// in-process engine build's lease acquisition was REFUSED — see holdsLease's
+// doc comment in cmd/rafikid/lease_renew.go: Runner.Start returns before
+// Build completes, and activateLiveChild's Idle-or-5s-timeout select cannot
+// tell "became idle" apart from "the build already failed, including on a
+// refused lease". Without a check gating replayInbox on actually holding the
+// lease, this flips the OWNING daemon's live child's 'sent' row to 'pending'
+// and strands it there — the owning daemon never asked for a reset and has
+// no reason of its own to redeliver it.
+//
+// Two real daemons, one database, different daemon ids. "owner" spawns a
+// real fundi child and gets a seeded 'sent' inbox row, same fixture as
+// TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash — but "owner" is
+// NEVER killed. It stays alive and holding its lease for the whole test,
+// which is what makes "other"'s resume attempt genuinely contend for a lease
+// already held elsewhere, rather than an uncontested one nobody is using.
+// "other" then boots fresh against the same database; its own loadChildren
+// lists the whole table, including owner's live child — whose last_status is
+// still NULL because the child has never exited — and decides to auto-resume
+// it.
+//
+// The assertion is that the row must never leave 'sent', not merely "ends up
+// back at sent": a reset-then-failed-redeliver strands the row at 'pending'
+// forever (nobody will ever retry it), which is exactly the bug, so any
+// transition away from 'sent' at any point during the poll is a failure —
+// not just whatever it settles on by the end.
+func TestDBChildState_InboxReplayDoesNotCrossDaemons(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+
+	var rowID, childID string
+	// Registered FIRST so it runs LAST (t.Cleanup is LIFO): an independent
+	// residue check after every other cleanup below — both daemons'
+	// dropDaemonRows, both daemons' stopDaemonNoRemove, and the inbox row's
+	// own cleanup — has already run. Database hygiene is verified here, not
+	// assumed: a stray row fails the test rather than passing silently.
+	t.Cleanup(func() {
+		p, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Logf("post-test residue check: pool: %v", err)
+			return
+		}
+		defer p.Close()
+		if rowID != "" {
+			var n int
+			if err := p.QueryRow(context.Background(),
+				`SELECT count(*) FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&n); err != nil {
+				t.Logf("post-test residue check (inbox row): %v", err)
+			} else if n > 0 {
+				t.Errorf("agent_inbox row %s survived its own cleanup", rowID)
+				if _, derr := p.Exec(context.Background(),
+					`DELETE FROM conversations.agent_inbox WHERE id = $1`, rowID); derr != nil {
+					t.Logf("post-test residue cleanup (inbox row): %v", derr)
+				}
+			}
+		}
+		if childID != "" {
+			var n int
+			if err := p.QueryRow(context.Background(),
+				`SELECT count(*) FROM conversations.child WHERE child_id = $1`, childID).Scan(&n); err != nil {
+				t.Logf("post-test residue check (child row): %v", err)
+			} else if n > 0 {
+				// A daemon_id corrupted by the very defect under test (see
+				// the test's own doc comment) could leave this row matched
+				// by neither daemon's own dropDaemonRows cleanup, so check
+				// directly by child_id rather than trust those two.
+				t.Errorf("conversations.child row %s survived both daemons' cleanup", childID)
+				if _, derr := p.Exec(context.Background(),
+					`DELETE FROM conversations.child WHERE child_id = $1`, childID); derr != nil {
+					t.Logf("post-test residue cleanup (child row): %v", derr)
+				}
+			}
+		}
+	})
+
+	{
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		if err := store.Migrate(context.Background(), pool); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		pool.Close()
+	}
+
+	noRealCreds := noRealProviderEnv()
+
+	dOwner := bootDaemonDB(t, "daemon-inbox-owner", noRealCreds...)
+	childID = dOwner.spawnChild(t)
+	sendTurn(t, dOwner, childID)
+	// dOwner is deliberately never killed — it stays alive, holding its
+	// lease, for the rest of this test. dOwner's own t.Cleanup (armed by
+	// bootDaemonDB) stops it afterwards, in the correct order relative to
+	// the residue check above (LIFO: stop the process, then drop its rows,
+	// then finally verify).
+
+	pool := openPool(t, dsn)
+	defer pool.Close()
+
+	rowID = fmt.Sprintf("it-inbox-cross-%s-%d", childID, time.Now().UnixNano())
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO conversations.agent_inbox
+		    (id, child_id, mode, source, coalesce_key, body, state)
+		VALUES ($1, $2, 'prompt', '', '', $3, 'sent')`,
+		rowID, childID, "integration test: cross-daemon replay probe",
+	); err != nil {
+		t.Fatalf("seed agent_inbox row: %v", err)
+	}
+	t.Cleanup(func() {
+		p, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Logf("drop inbox row %s: pool: %v", rowID, err)
+			return
+		}
+		defer p.Close()
+		if _, err := p.Exec(context.Background(),
+			`DELETE FROM conversations.agent_inbox WHERE id = $1`, rowID); err != nil {
+			t.Logf("drop inbox row %s: %v", rowID, err)
+		}
+	})
+
+	// Boot "other" against the SAME database, a different daemon id. Its own
+	// recovery pass will see childID's row — loadChildren lists the whole
+	// table, not just rows it wrote — and, since the row's last_status is
+	// still empty (the child has never exited), decide to auto-resume it:
+	// contending for a lease "owner" already holds.
+	_ = bootDaemonDB(t, "daemon-inbox-other", noRealCreds...)
+
+	// Poll comfortably longer than activateLiveChild's fixed 5s stall
+	// timeout plus the DB round trips on either side of it (lease acquire
+	// attempt, then this test's own query). Fail the instant the row is
+	// anything but 'sent' — a transient 'pending' on the way to somewhere
+	// else is exactly as much evidence of the bug as a permanent one.
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		var state string
+		if err := pool.QueryRow(context.Background(),
+			`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state); err != nil {
+			t.Fatalf("poll seeded row state: %v", err)
+		}
+		if state != "sent" {
+			t.Fatalf("seeded row state = %q; a child owned by another daemon must never be replayed", state)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
