@@ -138,3 +138,24 @@ func TestCursorTracksHighestOrdinalAndZeroIsLegal(t *testing.T) {
 		t.Errorf("cursor = %d, want 5 -- the cursor must never go backwards", s.Cursor)
 	}
 }
+
+// The rail and focus subscriptions overlap on the durable tier, so a focused
+// child's turn_end and error events arrive on BOTH. Without ordinal dedupe an
+// error appends its block twice and the transcript grows phantom entries.
+func TestDuplicateOrdinalIsIgnored(t *testing.T) {
+	s := session.New("c_1")
+	errEv := func(ord int32) *rafikiv1.Event {
+		return &rafikiv1.Event{ChildId: "c_1", Ordinal: &ord,
+			Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
+				Code: "boom", Message: "upstream died"}}}
+	}
+	s.Apply(errEv(4))
+	s.Apply(errEv(4)) // same ordinal, delivered by the other subscription
+	if len(s.Blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1 -- the duplicate must be dropped", len(s.Blocks))
+	}
+	s.Apply(errEv(5))
+	if len(s.Blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2 -- a genuinely new ordinal must still apply", len(s.Blocks))
+	}
+}
