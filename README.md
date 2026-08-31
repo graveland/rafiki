@@ -1067,6 +1067,7 @@ puts it back.
 |---|---|
 | `⏎` | Send a prompt — queues work for the agent. |
 | `⇧⏎` / `^J` | Insert a newline. Prompts can be as long as you like. |
+| paste | Over six lines folds to `[pasted #1: 40 lines]`; paste again to insert it in full. |
 | `⌥⏎` / `^S` | Steer — inject into the turn already running. |
 | `PgUp` / `PgDn` | Scroll the transcript without leaving the input box. |
 | `home` / `end` | Jump to the top / bottom of the transcript. |
@@ -1090,6 +1091,9 @@ rather than CR and every terminal can send it.
 Moving the cursor is deliberately separate from opening: attaching to an agent
 opens a subscription, so a rail that hopped on every keypress opened one per
 keystroke.
+
+The box grows with the prompt, up to ten rows, and the transcript yields
+exactly the rows it takes.
 
 `PgUp`/`PgDn` are taken outright — a three-line box has no pages — while `↑`/`↓`
 are shared: the text editor gets them first and keeps them whenever the cursor
