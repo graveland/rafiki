@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -451,5 +452,143 @@ func TestMoveSelectionDefaultsToTheFocusedChild(t *testing.T) {
 
 	if c.selected != "c_c" {
 		t.Errorf("selection = %q, want c_c (started from focused c_b)", c.selected)
+	}
+}
+
+// ── input ────────────────────────────────────────────────────────────────────
+
+// The cockpit shipped with a textarea that was never focused. bubbles'
+// textarea.Update returns immediately while !m.focus, so every printable key
+// was discarded and ⏎ always read an empty value -- the cockpit could not be
+// typed into at all, in any pane. No test drove a rune through Update, so
+// nothing caught it.
+func TestTypingReachesTheTextarea(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	for _, r := range "hello" {
+		c.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if got := c.ta.Value(); got != "hello" {
+		t.Errorf("textarea value = %q, want %q", got, "hello")
+	}
+}
+
+// The ring OWNS the textarea's focus. Left focused while another pane takes
+// keys, it blinks a cursor in an input that is ignoring you; left blurred on
+// the way back to input, typing stops working again.
+func TestOnlyTheInputPaneHoldsTextareaFocus(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
+	})
+	if !c.ta.Focused() {
+		t.Fatal("input pane holds focus at start but the textarea is blurred")
+	}
+	for _, want := range []struct {
+		pane    focusPane
+		focused bool
+	}{
+		{focusRail, false},
+		{focusTranscript, false},
+		{focusInput, true},
+	} {
+		c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		if c.focus != want.pane {
+			t.Fatalf("after ⇥ focus = %v, want %v", c.focus, want.pane)
+		}
+		if got := c.ta.Focused(); got != want.focused {
+			t.Errorf("pane %v: textarea focused = %v, want %v", want.pane, got, want.focused)
+		}
+	}
+}
+
+// Escaping back to input must restore typing, not just the label.
+func TestEscapeFromRailRefocusesTheTextarea(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // → rail
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if c.focus != focusInput {
+		t.Fatalf("esc left focus at %v, want input", c.focus)
+	}
+	if !c.ta.Focused() {
+		t.Error("esc returned to the input pane with the textarea still blurred")
+	}
+}
+
+// ^G was a write-only toggle: it flipped showHelp and View never read it, so
+// the key documented in the footer and in `rafiki attach --help` did nothing
+// at all.
+func TestHelpToggleRendersBindings(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	before := ansi.Strip(c.View().Content)
+
+	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	help := ansi.Strip(c.View().Content)
+	if help == before {
+		t.Fatal("^G changed nothing on screen")
+	}
+	for _, want := range []string{"steer", "abort", "next pane"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help overlay is missing %q:\n%s", want, help)
+		}
+	}
+
+	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	if got := ansi.Strip(c.View().Content); got != before {
+		t.Error("^G twice did not return to the previous view")
+	}
+}
+
+// ⇧⏎ is the standard newline in a send-on-⏎ input. It needs an explicit
+// binding because BOTH of the textarea's own InsertNewline keys -- enter and
+// ^M, which are the same byte -- are taken by Send, so without one a prompt
+// can only ever be a single line.
+func TestShiftEnterInsertsANewlineAndDoesNotSend(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
+
+	if got := c.ta.Value(); got != "a\nb" {
+		t.Errorf("textarea value = %q, want %q", got, "a\nb")
+	}
+	if c.pending != "" {
+		t.Errorf("⇧⏎ sent %q; it must only insert a newline", c.pending)
+	}
+}
+
+// ^J is the fallback. A terminal has to speak the Kitty keyboard protocol for
+// shift+enter to be reportable at all; without it the key arrives as a bare CR
+// and SENDS, which is the one outcome a newline binding must not have.
+func TestCtrlJInsertsANewline(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	c.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
+
+	if got := c.ta.Value(); got != "a\nb" {
+		t.Errorf("textarea value = %q, want %q", got, "a\nb")
+	}
+}
+
+// ⏎ still sends, and a multi-line prompt sends whole.
+func TestEnterStillSendsTheWholeMultilinePrompt(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if c.pending != "a\nb" {
+		t.Errorf("pending = %q, want %q", c.pending, "a\nb")
+	}
+	if c.ta.Value() != "" {
+		t.Errorf("textarea not cleared after send: %q", c.ta.Value())
 	}
 }
