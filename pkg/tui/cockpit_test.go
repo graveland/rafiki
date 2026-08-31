@@ -1238,3 +1238,33 @@ func TestPasteUnderBothBoundsIsInsertedWhole(t *testing.T) {
 		t.Error("a paste under both bounds must be inserted whole")
 	}
 }
+
+// ^U is the shell reflex for "kill the line", and the textarea's own ^U
+// (DeleteBeforeCursor) already clears the whole prompt in the common case of
+// one line with the cursor at the end — this widens it to the whole box.
+func TestClearInputEmptiesTheBoxAndItsPastes(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.PasteMsg{Content: strings.Repeat("a line\r", 40)})
+	c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	c.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if c.ta.Value() == "" || len(c.pastes) == 0 {
+		t.Fatal("fixture is vacuous: nothing to clear")
+	}
+
+	c.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+
+	if c.ta.Value() != "" {
+		t.Errorf("box still holds %q; ^U must clear all of it, not one line", c.ta.Value())
+	}
+	// The folded pastes go with it: their tokens are what referred to them,
+	// and leaving the text behind would attach it to a later prompt that
+	// happened to contain a matching token.
+	if len(c.pastes) != 0 {
+		t.Error("folded pastes outlived the input that referenced them")
+	}
+	if c.quitting {
+		t.Error("^U quit the cockpit")
+	}
+}
