@@ -1027,6 +1027,12 @@ implementers, and they appear in the rail because they are in the subtree — no
 because anything resubscribed. The rail is absent until a second agent exists,
 so an ordinary single-agent session looks exactly as it did before.
 
+Attaching loads the agent's whole conversation from the database (`GetHistory`)
+and then follows the live event stream, so a child that last spoke months ago
+opens on its full transcript rather than on whatever the event log happens to
+still hold. The two are different stores with different, unrelated ordinal
+sequences; the cockpit keeps them apart deliberately.
+
 ### Keys
 
 The cockpit has three panes — the input box, the agent rail, and the
