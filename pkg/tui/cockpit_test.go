@@ -168,24 +168,29 @@ func TestLRUEvictsTheOldestButNeverTheFocused(t *testing.T) {
 }
 
 func TestSendModesAreDistinctKeys(t *testing.T) {
+	c := newTestCockpit("c_1")
 	for _, tc := range []struct {
-		key  string
+		key  tea.KeyPressMsg
+		name string
 		want rafikiv1.SendMode
 	}{
-		{"enter", rafikiv1.SendMode_SEND_MODE_PROMPT},
-		{"alt+enter", rafikiv1.SendMode_SEND_MODE_STEER},
-		{"ctrl+s", rafikiv1.SendMode_SEND_MODE_STEER},
-		{"ctrl+x", rafikiv1.SendMode_SEND_MODE_ABORT},
-		{"j", rafikiv1.SendMode_SEND_MODE_UNSPECIFIED},
+		{tea.KeyPressMsg{Code: tea.KeyEnter}, "enter", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		{tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt}, "alt+enter", rafikiv1.SendMode_SEND_MODE_STEER},
+		{tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}, "ctrl+s", rafikiv1.SendMode_SEND_MODE_STEER},
+		{tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl}, "ctrl+x", rafikiv1.SendMode_SEND_MODE_ABORT},
+		// esc aborts: it is what muscle memory reaches for to stop a turn.
+		{tea.KeyPressMsg{Code: tea.KeyEscape}, "esc", rafikiv1.SendMode_SEND_MODE_ABORT},
+		{tea.KeyPressMsg{Code: 'j', Text: "j"}, "j", rafikiv1.SendMode_SEND_MODE_UNSPECIFIED},
 	} {
-		if got := modeForKey(tc.key); got != tc.want {
-			t.Errorf("modeForKey(%q) = %v, want %v", tc.key, got, tc.want)
+		if got := c.modeForKey(tc.key); got != tc.want {
+			t.Errorf("modeForKey(%q) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 	// Inferring the mode from agent state removes a real choice: C1a-2 made a
 	// prompt to a busy agent durably QUEUE, so queueing a follow-up and
 	// interrupting the running turn are both things a user wants.
-	if modeForKey("enter") == modeForKey("alt+enter") {
+	if c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter}) ==
+		c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt}) {
 		t.Fatal("prompt and steer must not collapse onto one key")
 	}
 }
@@ -701,5 +706,73 @@ func TestHopBackDoesNotRefetchHistory(t *testing.T) {
 	c.hop("c_2")
 	if cmd := c.hop("c_1"); cmd != nil {
 		t.Error("hopping back to a child whose transcript is already loaded must not re-fetch history")
+	}
+}
+
+// ── interaction ──────────────────────────────────────────────────────────────
+
+// A single stray ^C must not throw away an attached session. The key arms, the
+// repeat quits — and anything in between disarms, so a ^C now and a ^C a minute
+// later are two intentions rather than a quit.
+func TestQuitTakesTwoPresses(t *testing.T) {
+	for _, k := range []tea.KeyPressMsg{
+		{Code: 'c', Mod: tea.ModCtrl},
+		{Code: 'd', Mod: tea.ModCtrl},
+	} {
+		c := newTestCockpit("c_1")
+		c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+		if _, cmd := c.Update(k); cmd != nil {
+			t.Fatalf("%v: one press quit; it must arm and wait for the repeat", k)
+		}
+		if c.quitting {
+			t.Fatalf("%v: one press set quitting", k)
+		}
+		if c.notice == "" {
+			t.Errorf("%v: an armed quit must say so on screen", k)
+		}
+		if _, cmd := c.Update(k); cmd == nil {
+			t.Fatalf("%v: the repeat must quit", k)
+		}
+		if !c.quitting {
+			t.Errorf("%v: the repeat must set quitting", k)
+		}
+	}
+}
+
+func TestAnotherKeyDisarmsTheQuit(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	c.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	if _, cmd := c.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); cmd != nil {
+		t.Fatal("a keystroke between the two presses must disarm the quit")
+	}
+	if c.quitting {
+		t.Error("a disarmed quit still quit")
+	}
+}
+
+// A transcript shorter than the pane is bottom-anchored, so the newest line
+// sits on the row it will occupy once the conversation is long. A viewport
+// renders from the top by default, which made a new conversation start at the
+// ceiling and crawl down.
+func TestShortTranscriptIsBottomAnchored(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	p := c.pane("c_1")
+	c.syncViewport(p, []string{"only line"})
+
+	view := strings.Split(ansi.Strip(p.vp.View()), "\n")
+	if len(view) < 2 {
+		t.Fatalf("viewport rendered %d lines, want a full pane", len(view))
+	}
+	if strings.TrimSpace(view[0]) != "" {
+		t.Errorf("short transcript starts at the TOP of the pane; want it padded to the bottom:\n%q", view[0])
+	}
+	last := strings.TrimSpace(view[len(view)-1])
+	if last != "only line" {
+		t.Errorf("last pane row = %q, want the transcript's newest line", last)
 	}
 }
