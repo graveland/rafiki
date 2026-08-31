@@ -43,6 +43,18 @@ type SpawnSpec struct {
 	// this child's stdout. Only the claude provider translates native events
 	// today; pi and fundi children use their own paths.
 	NativeSink func(*rafikiv1.Event)
+
+	// OnMeta, when non-nil, is called each time the sniffer learns session or
+	// model metadata from a stdout frame.
+	//
+	// It exists because the daemon's store syncs SessionID from monitorChild,
+	// which is driven by BUS frames — and claude's system/init produces none.
+	// Without this hook a claude session id reaches the database only on the
+	// first bus frame of the first turn, and resume depends on that column.
+	//
+	// Called from the readStdout goroutine with no lock held. Callers must not
+	// block in it.
+	OnMeta func(SnifferMetadata)
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -195,6 +207,7 @@ type Child struct {
 	sm         *StateMachine
 	provider   ProtocolProvider
 	nativeSink func(*rafikiv1.Event)
+	onMeta     func(SnifferMetadata)
 	// preShutdownStatus is the status before BeginShutdown was called, captured
 	// so handleChildExit can record the child's real pre-exit state (idle,
 	// streaming, etc.) rather than "shutting_down" which is an artifact of the
@@ -291,6 +304,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		sm:           NewStateMachine(),
 		provider:     prov,
 		nativeSink:   spec.NativeSink,
+		onMeta:       spec.OnMeta,
 		transitionCh: make(chan struct{}, 1),
 		idle:         make(chan struct{}),
 		abandonAfter: abandonTimeout,
@@ -774,6 +788,8 @@ func frameType(line []byte) string {
 func (c *Child) handleFrame(line []byte) {
 	res := c.provider.Parse(line)
 
+	var sniffed *SnifferMetadata
+
 	c.metaMu.Lock()
 
 	if res.FirstResponse {
@@ -797,6 +813,8 @@ func (c *Child) handleFrame(line []byte) {
 		if len(md.SlashCommands) > 0 {
 			c.meta.SlashCommands = md.SlashCommands
 		}
+		md2 := md
+		sniffed = &md2
 	}
 
 	for _, e := range res.Events {
@@ -815,6 +833,10 @@ func (c *Child) handleFrame(line []byte) {
 
 	if res.FirstResponse {
 		c.idleOnce.Do(func() { close(c.idle) })
+	}
+
+	if sniffed != nil && c.onMeta != nil {
+		c.onMeta(*sniffed)
 	}
 }
 
