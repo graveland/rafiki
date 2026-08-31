@@ -1064,6 +1064,8 @@ text box has focus, so panes take turns owning their keys instead.
 | `⏎` | Send a prompt — queues work for the agent. |
 | `⇧⏎` / `^J` | Insert a newline. Prompts can be as long as you like. |
 | `⌥⏎` / `^S` | Steer — inject into the turn already running. |
+| `PgUp` / `PgDn` | Scroll the transcript without leaving the input box. |
+| `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript. |
 
 Everything else goes to the text editor.
 
@@ -1083,6 +1085,11 @@ rather than CR and every terminal can send it.
 Moving the cursor is deliberately separate from opening: attaching to an agent
 opens a subscription, so a rail that hopped on every keypress opened one per
 keystroke.
+
+`PgUp`/`PgDn` are taken outright — a three-line box has no pages — while `↑`/`↓`
+are shared: the text editor gets them first and keeps them whenever the cursor
+actually moves, so a multi-line prompt is unaffected and a single-line one
+scrolls.
 
 **Transcript pane**
 
