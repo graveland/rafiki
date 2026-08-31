@@ -50,6 +50,16 @@ type keyMap struct {
 	Steer   key.Binding
 	Newline key.Binding
 
+	// Input pane: scroll the transcript without leaving the input.
+	ScrollPageUp   key.Binding
+	ScrollPageDown key.Binding
+	ScrollLineUp   key.Binding
+	ScrollLineDown key.Binding
+
+	// Transcript pane.
+	ScrollTop    key.Binding
+	ScrollBottom key.Binding
+
 	// Rail pane.
 	SelectUp   key.Binding
 	SelectDown key.Binding
@@ -88,6 +98,24 @@ func defaultKeyMap() keyMap {
 		// binding must never have. ^J is LF, distinct from ^M everywhere, and
 		// is claimed by neither the textarea's keymap nor any cockpit global.
 		Newline: key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("⇧⏎", "newline")),
+
+		// Scrolling from the INPUT pane. Reaching the transcript should not
+		// require leaving the box you type in: the whole point of reading back
+		// is usually to decide what to type next.
+		//
+		// pgup/pgdown are taken outright. They are textarea keys, but a
+		// three-line box has no pages, so paging it is meaningless and the
+		// transcript is what the user meant. ↑/↓ are shared instead: the
+		// textarea gets them first and only an ↑ the cursor CANNOT use — no
+		// line above it — falls through to the transcript, which is how a
+		// shell's history key behaves and costs a multi-line prompt nothing.
+		ScrollPageUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("PgUp", "scroll")),
+		ScrollPageDown: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("PgDn", "scroll")),
+		ScrollLineUp:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "scroll")),
+		ScrollLineDown: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "scroll")),
+
+		ScrollTop:    key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
+		ScrollBottom: key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 
 		SelectUp:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "up")),
 		SelectDown: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "down")),

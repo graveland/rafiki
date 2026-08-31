@@ -27,7 +27,7 @@ var (
 //
 // Rows are clipped BEFORE styling, so the width budget is measured on plain
 // text and lipgloss escape sequences never count against it.
-func renderRail(nodes []rail.Node, focused, selected string, width int) string {
+func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocused bool) string {
 	if len(nodes) < 2 {
 		return ""
 	}
@@ -44,9 +44,14 @@ func renderRail(nodes []rail.Node, focused, selected string, width int) string {
 		// The cursor is part of the PLAIN row so it counts against the width
 		// budget like everything else. Every row carries the two columns,
 		// selected or not, so rows do not shift as the cursor moves.
+		// The cursor thickens when the rail HOLDS focus, so the pane that is
+		// taking your arrow keys is identifiable without pressing one.
 		cursor := "  "
 		if n.ChildID == selected {
 			cursor = "▸ "
+			if paneFocused {
+				cursor = "▶ "
+			}
 		}
 		row := clip(cursor+strings.Repeat("  ", n.Depth)+rail.Glyph(n)+" "+name+badge, width)
 		switch {

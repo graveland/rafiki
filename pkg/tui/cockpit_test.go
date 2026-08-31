@@ -46,7 +46,7 @@ func TestRailHiddenForASingleChild(t *testing.T) {
 	// Session-first: create/attach <id> shows no rail at all. The rail grows
 	// out of a normal session -- no cockpit to configure, no empty pane.
 	nodes := []rail.Node{{ChildID: "c_1", Name: "coordinator", Status: "idle"}}
-	if got := renderRail(nodes, "c_1", "c_1", 24); got != "" {
+	if got := renderRail(nodes, "c_1", "c_1", 24, false); got != "" {
 		t.Errorf("renderRail with one child = %q, want empty", got)
 	}
 }
@@ -56,7 +56,7 @@ func TestRailAppearsWithTheSecondChild(t *testing.T) {
 		{ChildID: "c_1", Name: "coordinator", Status: "streaming"},
 		{ChildID: "c_2", Name: "scout", ParentID: "c_1", Depth: 1, Status: "idle", Attention: 2},
 	}
-	got := renderRail(nodes, "c_1", "c_1", 24)
+	got := renderRail(nodes, "c_1", "c_1", 24, false)
 	if got == "" {
 		t.Fatal("renderRail with two children must render")
 	}
@@ -73,7 +73,7 @@ func TestRailIndentsByDepth(t *testing.T) {
 		{ChildID: "c_2", Name: "kid", ParentID: "c_1", Depth: 1, Status: "idle"},
 		{ChildID: "c_3", Name: "grandkid", ParentID: "c_2", Depth: 2, Status: "idle"},
 	}
-	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30, false), "\n"), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("want 3 rows, got %d: %v", len(lines), lines)
 	}
@@ -90,7 +90,7 @@ func TestRailRowsAreClippedToWidth(t *testing.T) {
 		{ChildID: "c_1", Name: "a", Status: "idle"},
 		{ChildID: "c_2", Name: strings.Repeat("verylongname", 20), Status: "idle"},
 	}
-	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20), "\n") {
+	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20, false), "\n") {
 		if len([]rune(line)) > 20 {
 			t.Errorf("row is %d runes, want <= 20: %q", len([]rune(line)), line)
 		}
@@ -774,5 +774,180 @@ func TestShortTranscriptIsBottomAnchored(t *testing.T) {
 	last := strings.TrimSpace(view[len(view)-1])
 	if last != "only line" {
 		t.Errorf("last pane row = %q, want the transcript's newest line", last)
+	}
+}
+
+// ── scrolling from the input pane ────────────────────────────────────────────
+
+// paneWithContent gives the focused pane more lines than fit, so scroll
+// position is observable.
+func paneWithContent(t *testing.T, c *Cockpit) *paneState {
+	t.Helper()
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	lines := make([]string, 200)
+	for i := range lines {
+		lines[i] = "line " + strconv.Itoa(i)
+	}
+	p := c.pane("c_1")
+	c.syncViewport(p, lines)
+	p.vp.GotoBottom()
+	return p
+}
+
+// Reaching the transcript must not require leaving the box you type in — the
+// reason to read back is usually to decide what to type next.
+func TestPageKeysScrollTheTranscriptFromTheInputPane(t *testing.T) {
+	c := newTestCockpit("c_1")
+	p := paneWithContent(t, c)
+	before := p.vp.YOffset()
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if c.focus != focusInput {
+		t.Fatal("PgUp moved focus; it must scroll in place")
+	}
+	if p.vp.YOffset() >= before {
+		t.Errorf("PgUp did not scroll: offset %d → %d", before, p.vp.YOffset())
+	}
+	if c.ta.Value() != "" {
+		t.Errorf("PgUp reached the textarea: %q", c.ta.Value())
+	}
+}
+
+// ↑ is SHARED. With a single-line prompt the cursor has nowhere to go, so the
+// key falls through to the transcript.
+func TestUpScrollsWhenTheCursorCannotMove(t *testing.T) {
+	c := newTestCockpit("c_1")
+	p := paneWithContent(t, c)
+	before := p.vp.YOffset()
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if p.vp.YOffset() >= before {
+		t.Errorf("↑ on a single-line prompt did not scroll: offset %d → %d", before, p.vp.YOffset())
+	}
+}
+
+// ...and the textarea keeps it whenever the cursor CAN move, so a multi-line
+// prompt is still editable.
+func TestUpStaysInTheTextareaWhenItHasSomewhereToGo(t *testing.T) {
+	c := newTestCockpit("c_1")
+	p := paneWithContent(t, c)
+	before := p.vp.YOffset()
+
+	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	row := c.ta.Line()
+	if row == 0 {
+		t.Fatal("fixture is vacuous: the prompt is not multi-line")
+	}
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if c.ta.Line() != row-1 {
+		t.Errorf("↑ did not move the textarea cursor: row %d → %d", row, c.ta.Line())
+	}
+	if p.vp.YOffset() != before {
+		t.Error("↑ scrolled the transcript while the cursor still had a line above it")
+	}
+}
+
+// home/end are top/bottom in the transcript. The viewport's default keymap
+// binds neither.
+func TestHomeAndEndJumpTheTranscript(t *testing.T) {
+	c := newTestCockpit("c_1")
+	p := paneWithContent(t, c)
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // → rail
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // → transcript
+	if c.focus != focusTranscript {
+		t.Fatalf("focus = %v, want transcript", c.focus)
+	}
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	if p.vp.YOffset() != 0 {
+		t.Errorf("home left offset at %d, want the top", p.vp.YOffset())
+	}
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !p.vp.AtBottom() {
+		t.Error("end did not reach the bottom")
+	}
+}
+
+// Naming the focused pane in a grey footer line was not enough: that is not
+// where the eye is, so finding it meant cycling ⇥ and watching for a response.
+func TestTheFocusedPaneIsMarkedOnScreen(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
+	})
+
+	seen := map[focusPane]string{}
+	for _, want := range []focusPane{focusRail, focusTranscript, focusInput} {
+		c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		if c.focus != want {
+			t.Fatalf("focus = %v, want %v", c.focus, want)
+		}
+		raw := c.View().Content
+		if !strings.Contains(ansi.Strip(raw), " "+want.String()+" ") {
+			t.Errorf("%v: the footer badge does not name the pane", want)
+		}
+		seen[want] = raw
+	}
+	// Each pane must look DIFFERENT, not merely be named differently: the
+	// badge alone is the thing that was already there and was missed.
+	if seen[focusRail] == seen[focusTranscript] {
+		t.Error("rail and transcript focus render identically")
+	}
+	if seen[focusInput] == seen[focusTranscript] {
+		t.Error("input and transcript focus render identically")
+	}
+}
+
+// "↓ more below" answered whether you were at the bottom, never where you
+// were. The readout is bottom-RIGHT and reports the CONTENT's length: a short
+// transcript is padded to bottom-anchor it, and the viewport counts that
+// padding as real, so asking it would report 12/12 for a one-line conversation.
+func TestScrollPositionReportsWhereYouAre(t *testing.T) {
+	c := newTestCockpit("c_1")
+	paneWithContent(t, c) // 200 lines, pane is 24 tall
+
+	if got := c.scrollPosition(); !strings.HasSuffix(got, "200/200 100%") {
+		t.Errorf("at the bottom the readout = %q, want it to end 200/200 100%%", got)
+	}
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	got := c.scrollPosition()
+	if !strings.HasPrefix(got, "↓") {
+		t.Errorf("scrolled up, readout = %q, want it to mark more below", got)
+	}
+	if strings.Contains(got, "200/200") {
+		t.Errorf("readout did not move after PgUp: %q", got)
+	}
+	if !strings.Contains(got, "/200") {
+		t.Errorf("readout lost the total: %q", got)
+	}
+}
+
+// A transcript shorter than the pane is padded to sit at the bottom; the
+// readout must count the transcript, not the padding.
+func TestScrollPositionIgnoresBottomAnchorPadding(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.syncViewport(c.pane("c_1"), []string{"one", "two"})
+
+	if got := c.scrollPosition(); !strings.HasSuffix(got, "2/2 100%") {
+		t.Errorf("readout = %q, want 2/2 100%% — the blank padding rows are not transcript", got)
+	}
+}
+
+// It is right-aligned so it does not move when the key hints do.
+func TestScrollPositionIsRightAligned(t *testing.T) {
+	c := newTestCockpit("c_1")
+	paneWithContent(t, c)
+	view := ansi.Strip(c.View().Content)
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	last := lines[len(lines)-1]
+
+	if !strings.HasSuffix(strings.TrimRight(last, " "), "100%") {
+		t.Errorf("footer does not end with the position readout:\n%q", last)
 	}
 }
