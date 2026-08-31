@@ -5,6 +5,7 @@ package llm
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -233,6 +234,40 @@ func (c *Client) Conversation(ctx context.Context, opts ...ConvOption) (*Convers
 // UserText builds a single-text-block user message payload for Send.
 func UserText(s string) []anthropic.ContentBlockParamUnion {
 	return []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(s)}
+}
+
+// UserImage is one image attached to a user message.
+//
+// Data is RAW bytes, not base64 — the encoding is this package's business, and
+// a caller holding base64 has almost certainly decoded it from somewhere to
+// re-encode it here.
+type UserImage struct {
+	MediaType string
+	Data      []byte
+}
+
+// UserContent builds a user message payload from text plus attached images.
+//
+// Images come FIRST. Anthropic's own guidance is that a model attends better to
+// an image that precedes the text asking about it, and the common shape here is
+// "here is a screenshot" followed by a question about it.
+//
+// Text may be empty when the images are the whole message; an empty text block
+// is omitted rather than sent, since a content block with no content is a
+// 400 on some providers and noise on the rest.
+func UserContent(text string, images []UserImage) []anthropic.ContentBlockParamUnion {
+	out := make([]anthropic.ContentBlockParamUnion, 0, len(images)+1)
+	for _, img := range images {
+		if len(img.Data) == 0 {
+			continue
+		}
+		out = append(out, anthropic.NewImageBlockBase64(
+			img.MediaType, base64.StdEncoding.EncodeToString(img.Data)))
+	}
+	if text != "" {
+		out = append(out, anthropic.NewTextBlock(text))
+	}
+	return out
 }
 
 type sendConfig struct {

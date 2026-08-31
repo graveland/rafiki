@@ -11,8 +11,10 @@ package inboxdb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,12 +23,12 @@ import (
 )
 
 const acceptSQL = `
-INSERT INTO conversations.agent_inbox (id, child_id, mode, source, coalesce_key, body)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO conversations.agent_inbox (id, child_id, mode, source, coalesce_key, body, attachments)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING accepted_at`
 
 const pendingSQL = `
-SELECT id, child_id, mode, source, coalesce_key, body, accepted_at
+SELECT id, child_id, mode, source, coalesce_key, body, attachments, accepted_at
   FROM conversations.agent_inbox
  WHERE child_id = $1 AND state = 'pending'
  ORDER BY accepted_at ASC, id ASC`
@@ -80,6 +82,7 @@ func (s *Store) Accept(ctx context.Context, in inbox.Inbound) (inbox.Inbound, er
 	var acceptedAt time.Time
 	if err := s.pool.QueryRow(ctx, acceptSQL,
 		in.ID, in.ChildID, in.Mode.String(), in.Source, in.Key, in.Text,
+		attachmentsJSON(in.Attachments),
 	).Scan(&acceptedAt); err != nil {
 		return inbox.Inbound{}, fmt.Errorf("inbox: accept: %w", err)
 	}
@@ -98,9 +101,20 @@ func (s *Store) Pending(ctx context.Context, childID string) ([]inbox.Inbound, e
 	for rows.Next() {
 		var r inbox.Inbound
 		var mode string
-		if err := rows.Scan(&r.ID, &r.ChildID, &mode, &r.Source, &r.Key, &r.Text, &r.AcceptedAt); err != nil {
+		var raw []byte
+		if err := rows.Scan(&r.ID, &r.ChildID, &mode, &r.Source, &r.Key, &r.Text,
+			&raw, &r.AcceptedAt); err != nil {
 			return nil, fmt.Errorf("inbox: scan: %w", err)
 		}
+		atts, err := parseAttachments(raw)
+		if err != nil {
+			// A row whose attachments will not decode still has its text, and
+			// delivering the text beats stranding the row forever. Loud, not
+			// fatal.
+			slog.Warn("inbox: dropping undecodable attachments",
+				"id", r.ID, "childId", r.ChildID, "error", err)
+		}
+		r.Attachments = atts
 		r.Mode = inbox.ParseMode(mode)
 		r.AcceptedAt = r.AcceptedAt.UTC()
 		out = append(out, r)
@@ -162,3 +176,33 @@ func (s *Store) Sweep(ctx context.Context, before time.Time) (int, error) {
 }
 
 var _ inbox.Store = (*Store)(nil)
+
+// attachmentsJSON renders attachments for the JSONB column. No attachments is
+// written as SQL NULL rather than "[]", so a row from before the column existed
+// and a row with none are byte-identical on disk.
+func attachmentsJSON(a []inbox.Attachment) any {
+	if len(a) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(a)
+	if err != nil {
+		// Attachment is two plain fields; a marshal failure is not reachable
+		// without a corrupted value, and losing the row is worse than losing
+		// the attachment.
+		slog.Warn("inbox: attachments not marshalable; storing none", "error", err)
+		return nil
+	}
+	return b
+}
+
+// parseAttachments decodes the JSONB column. NULL and [] both mean none.
+func parseAttachments(raw []byte) ([]inbox.Attachment, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var out []inbox.Attachment
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

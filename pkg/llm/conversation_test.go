@@ -616,3 +616,34 @@ func TestConversationEmptyUserIDPersistsAsNull(t *testing.T) {
 		t.Errorf("owner_user_id=%v author_user_id=%v, want NULL for both", owner, author)
 	}
 }
+
+// Images go FIRST, and an empty text block is omitted rather than sent: a
+// content block with no content is a 400 on some providers and noise on the
+// rest, and an attachment alone is a legitimate message.
+func TestUserContentOrdersImagesFirst(t *testing.T) {
+	blocks := UserContent("what is this?", []UserImage{
+		{MediaType: "image/png", Data: []byte("bytes")},
+	})
+	if len(blocks) != 2 {
+		t.Fatalf("got %d blocks, want image then text", len(blocks))
+	}
+	if blocks[0].OfImage == nil {
+		t.Error("first block is not the image")
+	}
+	if blocks[1].OfText == nil {
+		t.Error("second block is not the text")
+	}
+
+	only := UserContent("", []UserImage{{MediaType: "image/png", Data: []byte("b")}})
+	if len(only) != 1 || only[0].OfImage == nil {
+		t.Errorf("an image with no text must send just the image, got %d blocks", len(only))
+	}
+
+	if n := len(UserContent("hi", nil)); n != 1 {
+		t.Errorf("text with no images = %d blocks, want 1", n)
+	}
+	// An image carrying no bytes is skipped rather than sent as an empty block.
+	if n := len(UserContent("hi", []UserImage{{MediaType: "image/png"}})); n != 1 {
+		t.Errorf("empty image data must be skipped, got %d blocks", n)
+	}
+}
