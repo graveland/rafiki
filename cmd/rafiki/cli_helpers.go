@@ -141,7 +141,7 @@ func socketFromCmd(cmd *cobra.Command) string {
 // the user to keep or kill the session (unless overridden by flags or non-TTY
 // stdin). SIGINT/SIGTERM during the TUI skip the prompt — the user
 // is forcibly exiting and the session should keep running (default keep).
-func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit bool) error {
+func attachAndDecide(cmd *cobra.Command, ep connectEndpoint, childID string, killOnExit, keepOnExit bool) error {
 	// Install handler before starting the TUI so we catch any signal that
 	// kills the process mid-render. Buffer=1 so the send never blocks.
 	sigCh := make(chan os.Signal, 1)
@@ -151,7 +151,7 @@ func attachAndDecide(cmd *cobra.Command, childID string, killOnExit, keepOnExit 
 	// In-process now. This used to exec a `rafiki-attach` binary built from
 	// TypeScript; B4 deleted the source and the make target, so the exec path
 	// failed at runtime telling the user to run `make build-attach`.
-	if err := runTUIForChild(cmd, childID); err != nil {
+	if err := runTUIForChild(cmd, ep, childID); err != nil {
 		// Defensively reset the terminal — bubbletea may have died mid-render
 		// with raw mode or the alt screen active, and the user is about to see
 		// Go-side output.

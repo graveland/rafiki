@@ -14,7 +14,6 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
-	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/tui"
 )
 
@@ -71,14 +70,15 @@ func subjectFor(childID string) *rafikiv1.EventSubject {
 }
 
 func runAttach(cmd *cobra.Command, args []string) error {
-	client, err := newControlClient(cmd)
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
+	client := ep.control()
 
 	var childID string
 	if len(args) == 1 {
-		if childID, err = resolveChildConnect(cmdCtx(cmd), client, args[0]); err != nil {
+		if childID, err = resolveChildConnect(cmdCtx(cmd), ep, client, args[0]); err != nil {
 			return err
 		}
 	} else {
@@ -87,13 +87,13 @@ func runAttach(cmd *cobra.Command, args []string) error {
 		// line on stderr, not a working-looking UI that answers nothing.
 		if _, err := client.ListChildren(cmdCtx(cmd),
 			connect.NewRequest(&rafikiv1.ListChildrenRequest{})); err != nil {
-			return diagnoseConnectError(err, paths.ConnectSocketPath())
+			return diagnoseConnectError(err, ep.describe)
 		}
 	}
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
 	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")
-	return attachAndDecide(cmd, childID, killOnExit, keepOnExit)
+	return attachAndDecide(cmd, ep, childID, killOnExit, keepOnExit)
 }
 
 // resolveChildConnect maps an id or a name to a child id over Connect.
@@ -101,7 +101,7 @@ func runAttach(cmd *cobra.Command, args []string) error {
 // Connect-only by design: the TUI must not straddle two transports. An input
 // that already looks like a child id is returned as-is after a GetChild probe,
 // which doubles as the capability pre-flight.
-func resolveChildConnect(ctx context.Context, c rafikiv1connect.ControlClient, input string) (string, error) {
+func resolveChildConnect(ctx context.Context, ep connectEndpoint, c rafikiv1connect.ControlClient, input string) (string, error) {
 	if input == "" {
 		return "", errors.New("no child specified; run `rafiki list` to see options")
 	}
@@ -109,14 +109,14 @@ func resolveChildConnect(ctx context.Context, c rafikiv1connect.ControlClient, i
 	if strings.HasPrefix(input, "c_") {
 		_, err := c.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: input}))
 		if err != nil {
-			return "", diagnoseConnectError(err, paths.ConnectSocketPath())
+			return "", diagnoseConnectError(err, ep.describe)
 		}
 		return input, nil
 	}
 
 	resp, err := c.ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
 	if err != nil {
-		return "", diagnoseConnectError(err, paths.ConnectSocketPath())
+		return "", diagnoseConnectError(err, ep.describe)
 	}
 	var matches []string
 	for _, ch := range resp.Msg.GetChildren() {
@@ -140,11 +140,10 @@ func resolveChildConnect(ctx context.Context, c rafikiv1connect.ControlClient, i
 // screen is entered. That ordering is the point: a daemon that cannot serve
 // the TUI must produce a line on stderr, not a working-looking UI that answers
 // nothing. The predecessor logged a warning and continued.
-func runTUIForChild(cmd *cobra.Command, childID string) error {
-	sock := paths.ConnectSocketPath()
+func runTUIForChild(cmd *cobra.Command, ep connectEndpoint, childID string) error {
 	m := tui.NewCockpit(tui.Options{
-		HTTPClient: connectHTTPClient(sock),
-		BaseURL:    connectUDSBaseURL,
+		HTTPClient: ep.httpClient,
+		BaseURL:    ep.baseURL,
 		ChildID:    childID,
 		Subject:    subjectFor(childID),
 	})

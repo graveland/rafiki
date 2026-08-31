@@ -36,10 +36,85 @@ func connectHTTPClient(socketPath string) *http.Client {
 	}}
 }
 
-// newControlClient returns a Connect client for the local daemon.
-func newControlClient(cmd *cobra.Command) (rafikiv1connect.ControlClient, error) {
-	sock := paths.ConnectSocketPath()
-	return rafikiv1connect.NewControlClient(connectHTTPClient(sock), connectUDSBaseURL), nil
+// bearerTransport attaches the control-plane credential to every request.
+//
+// In the transport rather than at each call site so that the cockpit's own
+// client — which this package hands to pkg/tui and never sees again — carries
+// the same credential as the pre-flight calls. A per-call header would
+// authenticate the pre-flight and leave the TUI's stream unauthenticated,
+// which fails only once the alt screen is already up.
+type bearerTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone before mutating: RoundTrippers must not modify the caller's
+	// request.
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
+}
+
+// connectEndpoint is a resolved Connect control plane: the transport, the base
+// URL that transport expects, and a human-readable name for error messages.
+type connectEndpoint struct {
+	httpClient *http.Client
+	baseURL    string
+
+	// describe names the endpoint in diagnostics — a socket path locally, the
+	// URL remotely. Errors that say only "cannot reach the daemon" send people
+	// to the wrong machine.
+	describe string
+}
+
+// newConnectEndpoint resolves where the Connect control plane lives.
+//
+// The same gate mustDial uses (remoteDialURL — https:// only), for the same
+// reason: `rafiki attach` must reach the daemon every other verb reaches. It
+// used to hardcode the unix socket, so an operator with RAFIKI_URL set got a
+// working `rafiki list` and a cockpit that dialed a socket on their laptop.
+//
+// Remote requires a token. There is no bootstrap mode on this plane — it has
+// no user-create RPC — so an absent credential can only ever produce a 401,
+// and saying so here beats saying so after a round trip.
+func newConnectEndpoint(_ *cobra.Command) (connectEndpoint, error) {
+	u := remoteDialURL()
+	if u == "" {
+		sock := paths.ConnectSocketPath()
+		return connectEndpoint{
+			httpClient: connectHTTPClient(sock),
+			baseURL:    connectUDSBaseURL,
+			describe:   sock,
+		}, nil
+	}
+
+	token := paths.TokenFromEnv()
+	if token == "" {
+		return connectEndpoint{}, fmt.Errorf(
+			"%s names a remote daemon but no control-plane token is set: "+
+				"export %s (or write %s)", paths.URL, paths.Token, paths.TokenFile())
+	}
+
+	// Plain net/http rather than an explicit http2.Transport: the shared TLS
+	// listener advertises http/1.1 only in ALPN (net/http can hijack an
+	// HTTP/1.1 connection and not an HTTP/2 one, and both /control and
+	// /executor/connect are Upgrades). connect-go refuses only BIDI streaming
+	// below HTTP/2 — StreamEvents is server-streaming and rides HTTP/1.1
+	// chunked encoding — so letting ALPN settle on http/1.1 is correct here.
+	return connectEndpoint{
+		httpClient: &http.Client{Transport: &bearerTransport{
+			base:  http.DefaultTransport,
+			token: token,
+		}},
+		baseURL:  u,
+		describe: u,
+	}, nil
+}
+
+// control returns a Connect client for the endpoint.
+func (e connectEndpoint) control() rafikiv1connect.ControlClient {
+	return rafikiv1connect.NewControlClient(e.httpClient, e.baseURL)
 }
 
 // diagnoseConnectError turns a Connect failure into something that names the
@@ -48,10 +123,11 @@ func newControlClient(cmd *cobra.Command) (rafikiv1connect.ControlClient, error)
 // The motivating failure: `rafiki tui <id>` against a daemon with no Connect
 // routes produced "unimplemented: 404 Not Found", which reads like a missing
 // RPC. net/http answers an unrouted path with a bodiless 404 page, and Connect
-// maps a bodiless 404 to CodeUnimplemented. There is exactly one cause now
-// that the daemon requires a database: the daemon is older than the Connect
-// control plane.
-func diagnoseConnectError(err error, socketPath string) error {
+// maps a bodiless 404 to CodeUnimplemented. Two causes now: a daemon older
+// than the Connect control plane, or — remotely — one older than the mount
+// that puts those routes on the TLS listener, where the proxy face's "/"
+// answers the cockpit's path instead.
+func diagnoseConnectError(err error, endpoint string) error {
 	if err == nil {
 		return nil
 	}
@@ -61,11 +137,16 @@ func diagnoseConnectError(err error, socketPath string) error {
 			"this rafikid predates the Connect control plane the TUI needs "+
 				"(the daemon answered an unrouted path at %s). "+
 				"Rebuild and reinstall rafikid from this tree, then restart it: %w",
-			socketPath, err)
+			endpoint, err)
+	case connect.CodeUnauthenticated:
+		return fmt.Errorf(
+			"the rafiki daemon at %s rejected the control-plane credential — "+
+				"check %s (or %s): %w",
+			endpoint, paths.Token, paths.TokenFile(), err)
 	case connect.CodeUnavailable:
 		return fmt.Errorf(
 			"cannot reach the rafiki daemon at %s — is rafikid running? (`rafiki status`): %w",
-			socketPath, err)
+			endpoint, err)
 	default:
 		return err
 	}

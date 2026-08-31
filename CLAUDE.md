@@ -593,6 +593,49 @@
   lease set once at startup and cannot see a daemon that acquires between that
   read and the resume.
 
+- **The Connect control plane is mounted INSIDE the proxy face, not beside it —
+  there is exactly one mount per surface and a second one would shadow the
+  first.** `cmd/rafikid/proxy.go` composes the routes into `server.Handler`
+  (`h.ControlPath, h.Control = connectServer.Routes()`) and `h.Mount` wraps them
+  in `UserTokenAuth.Middleware`, the same credential that protects
+  `/v1/messages`; `main.go` then serves that whole mux at `"/"` on the shared
+  TLS listener. So the remote cockpit surface has always existed — verified
+  live: `POST https://<daemon>/rafiki.v1.Control/ListChildren` with a bearer
+  token answers 200 over HTTP/1.1. Reading main.go alone shows only `/control`
+  and `/executor/connect` and reads like the Connect routes are missing; adding
+  a `mux.Handle` for `/rafiki.v1.Control/` there compiles, looks right, and
+  silently SHADOWS the face's auth, because ServeMux prefers the longer
+  pattern. The `docs/reference/control-protocol.md` §2.3 claim that both mounts
+  share one handler tree is accurate — trust it over main.go's route list.
+  Consequences worth keeping: caller identity arrives via
+  `server.IdentityFromContext` (put there by that middleware) and
+  `connectLifecycle.Spawn` must read it — it hardcoded `users.Identity{}` for as
+  long as the socket was the only endpoint clients would dial, which left a
+  remote spawn unowned and therefore unmatched by executor admission selectors.
+  And **remote Connect is HTTP/1.1, not h2**: the shared listener advertises
+  `http/1.1` only (`execpool.ALPNProtocols`) because net/http can hijack an
+  HTTP/1.1 connection and not an HTTP/2 one. That is fine — connect-go refuses
+  only BIDI streaming below HTTP/2, and `StreamEvents` is server-streaming — but
+  it is load-bearing and non-obvious, so `TestStreamEventsSurvivesHTTP11ALPN`
+  pins it and asserts the negotiation really was 1.1 so it cannot go vacuous.
+
+- **`RAFIKI_URL` has to be consulted per COMMAND, and `mustDial` is only half
+  the gate.** `remoteDialURL()` (https:// only) is the shared decision, but a
+  verb that does not route through `mustDial` gets no benefit from it:
+  `rafiki attach` built its Connect client straight from
+  `paths.ConnectSocketPath()`, so an operator with `RAFIKI_URL` set had a
+  working `rafiki list` and a cockpit dialling a socket on their own laptop —
+  and the error named a socket path, which reads like a dead local daemon
+  rather than a client that ignored its configuration. `newConnectEndpoint`
+  (`cmd/rafiki/connectclient.go`) is now the one place the cockpit resolves an
+  endpoint. Two rules it encodes: the credential rides the **transport**
+  (`bearerTransport`), because the `*http.Client` is handed to `pkg/tui` and
+  never seen again, so a per-call header would authenticate the pre-flight and
+  leave the event stream unauthenticated — failing only once the alt screen is
+  up; and a remote endpoint with no token fails BEFORE the round trip, because
+  this plane has no bootstrap mode (no user-create RPC) and an absent
+  credential can only ever be a 401.
+
 - **The cockpit's textarea is emacs-keymapped, so a GLOBAL binding is a key you
   can no longer type.** `handleKey` forwards unmatched keys to the textarea, and
   `bubbles/v2/textarea`'s `DefaultKeyMap` claims `pgup`, `pgdown`, `shift+up`,

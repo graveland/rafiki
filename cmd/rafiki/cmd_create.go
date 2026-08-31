@@ -367,5 +367,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
 	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")
-	return attachAndDecide(cmd, data.ChildID, killOnExit, keepOnExit)
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	return attachAndDecide(cmd, ep, data.ChildID, killOnExit, keepOnExit)
 }
