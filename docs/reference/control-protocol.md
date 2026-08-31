@@ -92,7 +92,33 @@ Reachable at whatever `RAFIKI_URL` already names — the local loopback proxy
 face (`http://127.0.0.1:8035` by default) or a remote daemon's TLS listener
 (`https://...`), since `cmd/rafikid` mounts the same handler tree on both.
 
-The **local unix socket** is how `rafiki attach` reaches the daemon:
+**Which one the cockpit picks:** `rafiki attach` resolves its endpoint through
+`newConnectEndpoint` (`cmd/rafiki/connectclient.go`), which applies the same
+`remoteDialURL()` gate `mustDial` does — an **https://** `RAFIKI_URL` is a
+remote daemon and anything else (an http:// loopback face URL, or none) is the
+local socket. It used to hardcode the socket, so an operator with `RAFIKI_URL`
+set got a working `rafiki list` and a cockpit that dialled a socket on their
+own laptop.
+
+Remote calls carry `Authorization: Bearer <RAFIKI_TOKEN>`, attached by a
+`RoundTripper` on the client's transport rather than per call site — the
+cockpit's `*http.Client` is handed to `pkg/tui` and never seen again, so a
+per-call header would authenticate the pre-flight and leave `StreamEvents`
+unauthenticated, failing only once the alt screen is already up. A remote
+endpoint with no token fails before the round trip: this plane has no
+bootstrap mode (no user-create RPC), so an absent credential can only ever
+produce a 401.
+
+**Transport, remote:** HTTP/1.1. The shared TLS listener advertises `http/1.1`
+only in ALPN (`execpool.ALPNProtocols`) because net/http can hijack an
+HTTP/1.1 connection and not an HTTP/2 one, and both `/control` and
+`/executor/connect` are Upgrades. connect-go refuses only **bidi** streaming
+below HTTP/2; `StreamEvents` is server-streaming and rides HTTP/1.1 chunked
+encoding. Pinned by `TestStreamEventsSurvivesHTTP11ALPN`, which also asserts
+the negotiation really was HTTP/1.1 so the test cannot go vacuous.
+
+The **local unix socket** is how `rafiki attach` reaches a daemon on the same
+machine:
 
 - **Path:** `<RuntimeDir>/connect.sock` — `pkg/paths.ConnectSocketPath()`, the
   same directory as the framed-JSON control socket (§2.1). A third socket
@@ -124,6 +150,13 @@ The **local unix socket** is how `rafiki attach` reaches the daemon:
   control-plane-specific credential. There is deliberately no second auth
   scheme here: CLAUDE.md documents one credential scheme for both users and
   executors, and a parallel mechanism for this face would drift from it.
+- **Caller identity (TCP/TLS):** `UserTokenAuth.Middleware` stores the resolved
+  identity on the request context (`server.WithIdentity`), and it survives into
+  the Connect handlers. `Spawn` reads it there — never from the request
+  message, since the owner is matched by executor admission selectors and a
+  client that could name it could claim to be any owner. On the unix socket the
+  context carries nothing and the owner is the zero identity, matching a framed
+  UDS connection.
 - **Encoding:** protobuf or JSON. A unary call is an ordinary HTTP POST:
 
 ```bash

@@ -10,6 +10,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -106,7 +107,20 @@ func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (
 		MaxCost:          p.MaxCost,
 		MaxChildren:      p.MaxChildren,
 	}
-	res, err := l.c.Spawn(ctx, req, users.Identity{})
+	// The owner is read from the CONTEXT, never the request: it is matched by
+	// executor admission selectors, so a client that could name it could claim
+	// to be any owner. This mirrors dispatcher.spawn reading conn.Identity().
+	//
+	// server.UserTokenAuth.Middleware is what put it there — the Connect
+	// routes mount inside the proxy face's middleware stack
+	// (server.Handler.Mount, wired in proxy.go), so a remote caller's
+	// credential has already been resolved to a user by the time a handler
+	// runs. The zero value is correct and expected on the unix socket, which
+	// authenticates nobody because the socket itself is the credential.
+	//
+	// This was hardcoded to users.Identity{}, which was invisible while the
+	// only reachable mount was that socket.
+	res, err := l.c.Spawn(ctx, req, spawnOwner(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -124,4 +138,16 @@ func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownMs, 
 		DurationMs: res.DurationMs,
 		Escalated:  res.Escalated,
 	}, nil
+}
+
+// spawnOwner maps the proxy face's authenticated identity onto the daemon's.
+// Two types for one concept, because pkg/server predates pkg/users and the
+// face's Identity is a pointer whose nil means "no user" — the case every
+// unix-socket call takes.
+func spawnOwner(ctx context.Context) users.Identity {
+	id := server.IdentityFromContext(ctx)
+	if id == nil {
+		return users.Identity{}
+	}
+	return users.Identity{UserID: id.UserID, Username: id.Username}
 }

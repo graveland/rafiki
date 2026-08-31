@@ -1006,9 +1006,15 @@ if a future upstream does support them.
 ## The rafiki cockpit
 
 The cockpit is a bubbletea program living in `pkg/tui/`, built into the `rafiki`
-binary itself — there is no separate `rafiki-attach` artifact. It speaks Connect
-over the daemon's local unix socket (`<RuntimeDir>/connect.sock`), so no bun,
-submodule, or separate build step is involved.
+binary itself — there is no separate `rafiki-attach` artifact. It speaks Connect,
+so no bun, submodule, or separate build step is involved.
+
+It reaches the same daemon every other `rafiki` verb does: an **https://**
+`RAFIKI_URL` attaches to that remote daemon over TLS (authenticated with
+`RAFIKI_TOKEN`, or `<ConfigDir>/token`), and anything else uses the local unix
+socket at `<RuntimeDir>/connect.sock`, whose 0600 mode inside a 0700 directory
+is its credential. A remote endpoint with no token is refused up front rather
+than after a round trip — the cockpit's plane has no bootstrap mode.
 
 ```bash
 make build          # builds rafikid + rafiki, including the in-process cockpit
