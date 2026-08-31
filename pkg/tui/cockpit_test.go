@@ -1071,3 +1071,100 @@ func TestQuitConfirmationNamesBothKeys(t *testing.T) {
 		}
 	}
 }
+
+// ── input box ────────────────────────────────────────────────────────────────
+
+// A fixed three rows wasted two on the common one-line prompt and hid
+// everything past the third on a long one.
+func TestInputGrowsWithThePromptAndStops(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	start := c.ta.Height()
+	body := c.bodyHeight()
+
+	for i := 0; i < 4; i++ {
+		c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+		c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	}
+	grown := c.ta.Height()
+	if grown <= start {
+		t.Fatalf("input height %d → %d; it must grow with the prompt", start, grown)
+	}
+	// The transcript yields exactly the rows the box took, or they overlap.
+	if got, want := c.bodyHeight(), body-(grown-start); got != want {
+		t.Errorf("body height = %d, want %d — the transcript must yield the rows the input gained", got, want)
+	}
+
+	for i := 0; i < 40; i++ {
+		c.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+		c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	}
+	if h := c.ta.Height(); h > maxInputHeight {
+		t.Errorf("input grew to %d rows, past its %d cap; a prompt must not swallow the transcript",
+			h, maxInputHeight)
+	}
+}
+
+// A big paste is a file, not something you meant to type. Unrolling one buries
+// the conversation and pins the box at its cap.
+func TestLargePasteFoldsToAToken(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	big := strings.Repeat("a line\n", 50)
+
+	c.Update(tea.PasteMsg{Content: big})
+
+	shown := c.ta.Value()
+	if strings.Contains(shown, "a line") {
+		t.Errorf("a 50-line paste was unrolled into the box: %q", truncate(shown, 60))
+	}
+	if !strings.Contains(shown, "51 lines") {
+		t.Errorf("the token must say how much it stands for; got %q", shown)
+	}
+	// ...and the full text is what actually gets sent.
+	if got := c.expandPastes(shown); got != big {
+		t.Errorf("expansion did not restore the paste (%d chars vs %d)", len(got), len(big))
+	}
+}
+
+// Small pastes are what you meant to type and belong in the box.
+func TestSmallPasteIsInsertedWhole(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.PasteMsg{Content: "one\ntwo"})
+	if c.ta.Value() != "one\ntwo" {
+		t.Errorf("small paste = %q, want it inserted whole", c.ta.Value())
+	}
+}
+
+// Pasting the same content again is how you say you actually wanted to see it.
+func TestPastingTwiceInsertsTheFullText(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	big := strings.Repeat("a line\n", 50)
+
+	c.Update(tea.PasteMsg{Content: big})
+	c.Update(tea.PasteMsg{Content: big})
+
+	if !strings.Contains(c.ta.Value(), "a line") {
+		t.Error("pasting the same content twice must insert it in full")
+	}
+}
+
+// The prompt that leaves is the full text, and the tokens leave with it.
+func TestSendExpandsAndClearsPastes(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	big := strings.Repeat("a line\n", 50)
+
+	c.Update(tea.PasteMsg{Content: big})
+	c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if !strings.Contains(c.pending, "a line") {
+		t.Errorf("the sent prompt kept the token instead of the text: %q", truncate(c.pending, 60))
+	}
+	if len(c.pastes) != 0 {
+		t.Error("pastes outlived the prompt they belonged to")
+	}
+}

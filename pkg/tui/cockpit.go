@@ -33,6 +33,24 @@ import (
 // two separate intentions rather than a quit.
 const quitConfirmWindow = 2 * time.Second
 
+// pasteLineThreshold is how many lines a paste may have before it is folded
+// into a token. Small pastes are what you meant to type and belong in the box;
+// a file is not, and unrolling one buries the conversation and pushes the
+// input box to its cap where it stops showing you the end of what you typed.
+const pasteLineThreshold = 6
+
+// pastedText is one folded paste, held until the prompt is sent.
+type pastedText struct {
+	token string
+	text  string
+}
+
+// The input box grows with its content between these bounds.
+const (
+	minInputHeight = 1
+	maxInputHeight = 10
+)
+
 // railWidth is fixed rather than proportional: names are short, and a rail that
 // resizes with the window makes the conversation reflow on every drag.
 const railWidth = 22
@@ -107,6 +125,9 @@ type Cockpit struct {
 	// change: you wanted a different conversation, not a permanently wider
 	// piece of furniture.
 	railPeek bool
+	// pastes holds folded pastes in insertion order, keyed by the token
+	// standing in for each. Cleared on send: the tokens leave with the text.
+	pastes []pastedText
 	// quitArmed is when the first ^C/^D landed. A single stray one must not
 	// throw away an attached session, so the key arms and the repeat quits.
 	quitArmed time.Time
@@ -143,7 +164,15 @@ func NewCockpit(opts Options) *Cockpit {
 	ta.Placeholder = "Type a message…"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
-	ta.SetHeight(3)
+	// Grow with the prompt, within bounds. A fixed three rows wasted two of
+	// them on the common one-line prompt and hid everything past the third on
+	// a long one. MaxHeight is a real cap rather than a formality: the input
+	// and the transcript share the window, and a prompt that can swallow the
+	// conversation it is about is worse than one that scrolls.
+	ta.DynamicHeight = true
+	ta.MinHeight = minInputHeight
+	ta.MaxHeight = maxInputHeight
+	ta.SetHeight(minInputHeight)
 	// A textarea is constructed BLURRED, and bubbles' Update returns
 	// immediately while it is -- so an unfocused one silently swallows every
 	// printable key. The cockpit shipped without this call and could not be
@@ -387,6 +416,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return c, tick()
 
+	case tea.PasteMsg:
+		return c, c.handlePaste(msg.Content)
+
 	case tea.KeyPressMsg:
 		return c.handleKey(msg)
 	}
@@ -559,12 +591,13 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, c.scrollFocused(msg)
 	}
 	if mode := c.modeForKey(msg); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
-		text := strings.TrimSpace(c.ta.Value())
+		text := strings.TrimSpace(c.expandPastes(c.ta.Value()))
 		if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
 			if text == "" {
 				return c, nil
 			}
 			c.ta.Reset()
+			c.pastes = nil
 			// You just spoke; you want the reply. Pin to the bottom even if you
 			// had scrolled up to re-read something before sending.
 			if f := c.focused(); f != "" {
@@ -578,6 +611,43 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	c.ta, cmd = c.ta.Update(msg)
 	return c, cmd
+}
+
+// handlePaste folds a large paste into a token rather than unrolling it.
+//
+// Pasting the SAME content again inserts it in full — the second paste is how
+// you say you actually wanted to see it, and it costs no key of its own.
+func (c *Cockpit) handlePaste(content string) tea.Cmd {
+	if c.focus != focusInput || content == "" {
+		return nil
+	}
+	lines := strings.Count(content, "\n") + 1
+	if lines <= pasteLineThreshold {
+		c.ta.InsertString(content)
+		return nil
+	}
+	for _, p := range c.pastes {
+		if p.text == content {
+			c.ta.InsertString(content)
+			return nil
+		}
+	}
+	token := "[pasted #" + itoa(int64(len(c.pastes)+1)) + ": " +
+		itoa(int64(lines)) + " lines]"
+	c.pastes = append(c.pastes, pastedText{token: token, text: content})
+	c.ta.InsertString(token)
+	c.setNotice("paste folded — paste again to insert it in full")
+	return nil
+}
+
+// expandPastes puts the folded text back before the prompt leaves. A token the
+// user deleted takes its paste with it, which is the whole point of a token
+// you can select and remove.
+func (c *Cockpit) expandPastes(text string) string {
+	for _, p := range c.pastes {
+		text = strings.ReplaceAll(text, p.token, p.text)
+	}
+	return text
 }
 
 // scrollFocused forwards a key to the focused child's viewport.
@@ -897,8 +967,13 @@ func (c *Cockpit) shutdown() {
 // bodyHeight and convWidth are the conversation pane's dimensions. Extracted
 // so the viewport and the layout cannot disagree about the space available —
 // they were inline in View and the viewport needs the same numbers.
+// bodyHeight is what is left after the chrome, and the input box is part of
+// the chrome that MOVES: it grows with the prompt, so a fixed subtraction
+// would overlap the transcript by exactly the rows the box gained.
+//
+// The three fixed rows are the divider, the status line and the footer.
 func (c *Cockpit) bodyHeight() int {
-	h := c.height - 6
+	h := c.height - c.ta.Height() - 3
 	if h < 1 {
 		return 1
 	}
