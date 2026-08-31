@@ -116,3 +116,42 @@ func TestNativeVocabularyExcludesTurnStartAndDeltas(t *testing.T) {
 		}
 	}
 }
+
+// The user's prompt must reach the native stream. claude never echoes it on
+// stdout, so without this the cockpit shows replies with no prompts.
+func TestOutboundEchoNativeEmitsUserMessage(t *testing.T) {
+	p := newClaudeProvider()
+	frame := []byte(`{"type":"prompt","message":"do the thing"}`)
+
+	evs := p.OutboundEchoNative(frame, 1000)
+
+	assertTypes(t, nativeTypeNames(evs), []string{"user_message"})
+
+	um := evs[0].GetUserMessage()
+	if um == nil {
+		t.Fatal("event is not a UserMessage")
+	}
+	if len(um.GetContent()) != 1 {
+		t.Fatalf("content blocks = %d, want 1", len(um.GetContent()))
+	}
+	if got := um.GetContent()[0].GetText().GetText(); got != "do the thing" {
+		t.Fatalf("text = %q, want %q", got, "do the thing")
+	}
+}
+
+// Frames carrying no user-authored text produce nothing. claudeUserEcho already
+// owns this judgment (it rejects abort, set_session_name and empty messages);
+// re-deciding it here would be a second copy that drifts.
+func TestOutboundEchoNativeIgnoresNonPromptFrames(t *testing.T) {
+	p := newClaudeProvider()
+	for _, frame := range []string{
+		`{"type":"abort"}`,
+		`{"type":"set_session_name","name":"x"}`,
+		`{"type":"prompt","message":""}`,
+		`not json at all`,
+	} {
+		if evs := p.OutboundEchoNative([]byte(frame), 1000); len(evs) != 0 {
+			t.Fatalf("frame %s produced %d events, want 0", frame, len(evs))
+		}
+	}
+}

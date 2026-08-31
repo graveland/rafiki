@@ -499,6 +499,20 @@ func (c *Child) busFramesNative(line []byte, ts int64) []*rafikiv1.Event {
 	return nil
 }
 
+// outboundEchoNative translates one outbound frame into native events via the
+// provider, when it supports native echo (claudeProvider). Mirrors
+// busFramesNative's optional-interface discovery so identityProvider needs no
+// method it would only ever answer nil from.
+func (c *Child) outboundEchoNative(frame []byte, ts int64) []*rafikiv1.Event {
+	type nativeEchoer interface {
+		OutboundEchoNative([]byte, int64) []*rafikiv1.Event
+	}
+	if ne, ok := c.provider.(nativeEchoer); ok {
+		return ne.OutboundEchoNative(frame, ts)
+	}
+	return nil
+}
+
 // StderrSnapshot returns a copy of buffered stderr bytes. Safe to call at any
 // time: readStderr's writes and this read share errMu, because Done() being
 // closed no longer proves readStderr has finished (see abandon).
@@ -588,6 +602,12 @@ func (c *Child) supervise() {
 			echoTS := time.Now().UnixMilli()
 			for _, f := range c.provider.OutboundEcho(frame, echoTS) {
 				c.publishBus(f, echoTS)
+			}
+			if c.nativeSink != nil {
+				for _, ev := range c.outboundEchoNative(frame, echoTS) {
+					ev.ChildId = c.ID
+					c.nativeSink(ev)
+				}
 			}
 			c.in.append(frame) // capture the original (normalized) frame for log dumps
 		case <-c.processDone:
