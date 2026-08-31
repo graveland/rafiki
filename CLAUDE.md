@@ -610,6 +610,26 @@
   (now deleted). Pane state is evicted with its session and must never outlive
   one. Scroll position lives on `paneState`, deliberately NOT on
   `session.Session`, which is a pure event state machine.
+- **The event log is NOT the transcript, and two unrelated ordinal spaces meet
+  in the cockpit.** `conversations.event_log` begins whenever the event plane
+  was deployed; `conversations.conversation_message` holds every message ever
+  persisted, and `GetHistory` (implemented since Phase A, used by
+  `rafiki history`) already serves it in the native event vocabulary via
+  `eventconv.EventsFromMessages`. `pkg/tui` rendered only the log and never
+  called it, so every conversation older than the log — which was all of them —
+  opened as an empty pane. The fix was wiring, not a new RPC.
+  **The hazard when wiring it: `EventsFromMessages` stamps
+  `conversation_message.ordinal` (0..N over all messages), while the focus
+  stream resumes from `event_log.ordinal` (0..M over one child's EVENTS).**
+  Folding history through `Session.Apply` leaves a 1217-message conversation
+  with a cursor of 1216; the next subscription on a log holding five events
+  resumes past its end and receives nothing, forever, with no error anywhere.
+  `Session.ApplyHistory` exists solely to apply payloads WITHOUT touching the
+  cursor, and `TestHistoryDoesNotMoveTheEventLogCursor` fails if you swap it
+  back. The stream then resumes from the log head captured BEFORE the fetch
+  (`ChildSummary.latest_ordinal`), so a turn landing mid-fetch can at worst
+  appear twice — a visible duplicate beats a silent gap. An empty history falls
+  back to replaying the whole log, which is what a freshly created child needs.
 - **fundi published only HALF the native event vocabulary, and the missing
   half was the assistant's replies.** `publishNative` (`pkg/fundi/native.go`)
   carried switch arms for `AssistantMessage`, `TurnEnd` and `ContentBlockDelta`
