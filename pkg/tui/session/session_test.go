@@ -233,3 +233,35 @@ func TestToolExecutionStartDoesNotDuplicateAKnownCall(t *testing.T) {
 		t.Error("tool_execution_start must mark the known call running")
 	}
 }
+
+// tool_execution_end is the more direct witness of a failure — it carries the
+// tool's own error. A stored tool_result block whose is_error is absent must
+// not turn that ✗ back into a ✓: it is the one direction that must never
+// happen silently.
+func TestAToolResultCannotDowngradeAKnownFailure(t *testing.T) {
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_AssistantMessage{
+		AssistantMessage: &rafikiv1.AssistantMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+				Id: "tu_1", Name: "bash"}},
+		}}},
+	}})
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_ToolExecutionEnd{
+		ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_1", IsError: true}}})
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+				ToolUseId: "tu_1", // is_error absent
+				Content: []*rafikiv1.ContentBlock{{
+					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "boom"}}}},
+			}}},
+		}},
+	}})
+
+	if !s.Blocks[0].ToolCalls[0].IsError {
+		t.Error("a tool_result with no is_error downgraded a known failure to success")
+	}
+	if s.Blocks[0].ToolCalls[0].Result != "boom" {
+		t.Errorf("result = %q, want the tool's output", s.Blocks[0].ToolCalls[0].Result)
+	}
+}
