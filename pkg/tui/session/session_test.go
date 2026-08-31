@@ -3,6 +3,8 @@
 package session_test
 
 import (
+	"encoding/base64"
+	"strings"
 	"testing"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -263,5 +265,50 @@ func TestAToolResultCannotDowngradeAKnownFailure(t *testing.T) {
 	}
 	if s.Blocks[0].ToolCalls[0].Result != "boom" {
 		t.Errorf("result = %q, want the tool's output", s.Blocks[0].ToolCalls[0].Result)
+	}
+}
+
+// An image block used to render as nothing at all, which is indistinguishable
+// from a tool that returned nothing. The cockpit cannot draw pixels — a
+// graphics escape written into a bubbletea View is parsed into ultraviolet's
+// cell grid, has nowhere to live, and is dropped — so name the image instead.
+func TestImageBlockIsNamedRatherThanDropped(t *testing.T) {
+	// A real 1x1 PNG, so DecodeConfig has a header to read.
+	png, err := base64.StdEncoding.DecodeString(
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+				MediaType: "image/png", Data: png}},
+		}}},
+	}})
+
+	if len(s.Blocks) != 1 {
+		t.Fatalf("got %d blocks, want the image to produce one", len(s.Blocks))
+	}
+	got := s.Blocks[0].Text
+	for _, want := range []string{"image/png", "1×1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("placeholder %q is missing %q", got, want)
+		}
+	}
+}
+
+// An undecodable or unknown image still gets named — the point is that
+// something is there, not that we could parse it.
+func TestUnreadableImageStillGetsAPlaceholder(t *testing.T) {
+	got := session.ImagePlaceholder(&rafikiv1.ImageBlock{
+		MediaType: "image/webp", Data: []byte("not really an image"),
+	})
+	if !strings.Contains(got, "image/webp") {
+		t.Errorf("placeholder = %q, want it to name the media type", got)
+	}
+	if session.ImagePlaceholder(nil) != "" {
+		t.Error("a nil image must render as nothing")
 	}
 }

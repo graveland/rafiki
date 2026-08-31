@@ -9,6 +9,12 @@
 package session
 
 import (
+	"bytes"
+	"image"
+	_ "image/gif"  // registered for DecodeConfig
+	_ "image/jpeg" // registered for DecodeConfig
+	_ "image/png"  // registered for DecodeConfig
+	"strconv"
 	"strings"
 	"time"
 
@@ -266,6 +272,8 @@ func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
 				Name:  b.ToolUse.GetName(),
 				Input: b.ToolUse.GetInputJson(),
 			})
+		case *rafikiv1.ContentBlock_Image:
+			block.Text += ImagePlaceholder(b.Image)
 		case *rafikiv1.ContentBlock_ToolResult:
 			for i := range block.ToolCalls {
 				if block.ToolCalls[i].ID == b.ToolResult.GetToolUseId() {
@@ -351,9 +359,65 @@ func (s *Session) applyToolEnd(te *rafikiv1.ToolExecutionEnd) {
 func TextFromContent(content []*rafikiv1.ContentBlock) string {
 	var sb strings.Builder
 	for _, cb := range content {
-		if t := cb.GetText(); t != nil {
-			sb.WriteString(t.GetText())
+		switch b := cb.Block.(type) {
+		case *rafikiv1.ContentBlock_Text:
+			sb.WriteString(b.Text.GetText())
+		case *rafikiv1.ContentBlock_Image:
+			// Named rather than dropped. The cockpit cannot draw pixels (see
+			// ImagePlaceholder), and an image block that renders as nothing at
+			// all is indistinguishable from a tool that returned nothing —
+			// which is the same false reassurance a swallowed error gives.
+			sb.WriteString(ImagePlaceholder(b.Image))
 		}
 	}
 	return sb.String()
+}
+
+// ImagePlaceholder names an image the transcript cannot draw.
+//
+// bubbletea v2 renders through ultraviolet's cell grid — one grapheme, a
+// style, a hyperlink and a width per cell — so a graphics escape sequence
+// written into a View is parsed into cells, has nowhere to live, and is
+// dropped: measured over a pty, the text either side of an iTerm2 inline-image
+// sequence survives and the sequence itself does not.
+//
+// That is not the last word on images, only on escape sequences. Kitty's
+// UNICODE PLACEHOLDER protocol transmits the image out of band and then places
+// it with ordinary printable runes (U+10EEEE plus diacritics encoding the row,
+// column and image id), which pass through a cell renderer untouched because
+// they are just text. charmbracelet/crush does exactly that on this same
+// bubbletea version — see internal/ui/image/image.go — with an ANSI half-block
+// fallback where the terminal cannot. Until that is built here, say what the
+// image is.
+func ImagePlaceholder(img *rafikiv1.ImageBlock) string {
+	if img == nil {
+		return ""
+	}
+	media := img.GetMediaType()
+	if media == "" {
+		media = "image"
+	}
+	out := "🖼 " + media
+	// DecodeConfig reads only the header, so this costs a few hundred bytes of
+	// parsing rather than decoding the pixels.
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(img.GetData())); err == nil {
+		out += " " + itoa(cfg.Width) + "×" + itoa(cfg.Height)
+	}
+	if n := len(img.GetData()); n > 0 {
+		out += " (" + humanBytes(n) + ")"
+	}
+	return out
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MB"
+	case n >= 1<<10:
+		return strconv.FormatFloat(float64(n)/(1<<10), 'f', 1, 64) + " KB"
+	default:
+		return strconv.Itoa(n) + " B"
+	}
 }
