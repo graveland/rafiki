@@ -159,3 +159,77 @@ func TestDuplicateOrdinalIsIgnored(t *testing.T) {
 		t.Fatalf("blocks = %d, want 2 -- a genuinely new ordinal must still apply", len(s.Blocks))
 	}
 }
+
+// Anthropic puts tool_result in the USER message following the tool_use, and
+// TextFromContent reads text blocks only — so those messages rendered as EMPTY
+// user bubbles and every tool's output was dropped. One blank bubble per tool
+// call, no output anywhere.
+func TestToolResultAttachesToItsCallAndAddsNoBubble(t *testing.T) {
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_AssistantMessage{
+		AssistantMessage: &rafikiv1.AssistantMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+				Id: "tu_1", Name: "bash", InputJson: `{"command":"ls"}`}},
+		}}},
+	}})
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+				ToolUseId: "tu_1",
+				Content: []*rafikiv1.ContentBlock{{
+					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "a.go\nb.go"}}}},
+			}}},
+		}},
+	}})
+
+	if len(s.Blocks) != 1 {
+		t.Fatalf("got %d blocks, want 1 — a results-only message must add no user bubble", len(s.Blocks))
+	}
+	calls := s.Blocks[0].ToolCalls
+	if len(calls) != 1 {
+		t.Fatalf("got %d tool calls, want 1", len(calls))
+	}
+	if calls[0].Input != `{"command":"ls"}` {
+		t.Errorf("input = %q, want the tool's arguments", calls[0].Input)
+	}
+	if calls[0].Result != "a.go\nb.go" {
+		t.Errorf("result = %q, want the tool's output", calls[0].Result)
+	}
+}
+
+// A user message with real text alongside results still renders its text.
+func TestUserTextAlongsideAResultStillRenders(t *testing.T) {
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{
+			{Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{ToolUseId: "tu_x"}}},
+			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "and also this"}}},
+		}},
+	}})
+	if len(s.Blocks) != 1 || s.Blocks[0].Text != "and also this" {
+		t.Fatalf("blocks = %+v, want the user's text preserved", s.Blocks)
+	}
+}
+
+// The assistant message naming a tool_use is published BEFORE the tool runs, so
+// tool_execution_start is normally not new. Appending unconditionally listed
+// every call twice — invisible while fundi published no assistant messages,
+// immediate once it did.
+func TestToolExecutionStartDoesNotDuplicateAKnownCall(t *testing.T) {
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_AssistantMessage{
+		AssistantMessage: &rafikiv1.AssistantMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+				Id: "tu_1", Name: "bash"}},
+		}}},
+	}})
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_ToolExecutionStart{
+		ToolExecutionStart: &rafikiv1.ToolExecutionStart{ToolUseId: "tu_1", Name: "bash"}}})
+
+	if n := len(s.Blocks[0].ToolCalls); n != 1 {
+		t.Fatalf("got %d tool calls for one tool_use, want 1", n)
+	}
+	if !s.Blocks[0].ToolCalls[0].Running {
+		t.Error("tool_execution_start must mark the known call running")
+	}
+}
