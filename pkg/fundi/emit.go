@@ -44,6 +44,11 @@ type Emitter struct {
 	// drives it from one goroutine per turn.
 	toolStarts map[string]time.Time
 
+	// lastStop is the most recent assistant turn's raw stop reason, kept so
+	// AgentEnd can put it on the turn_end event it publishes. AgentEnd has no
+	// response of its own to read it from.
+	lastStop string
+
 	// started guards StreamStart so it is idempotent within a turn. The
 	// caller invokes StreamStart on the first CONTENT event of a streamed
 	// response, not on the API's own message_start, so that a retry (e.g.
@@ -211,6 +216,7 @@ func (e *Emitter) AgentEnd() {
 	usage := e.usage
 	e.fe.Emit(child.PiAgentEnd(e.messages, &usage))
 	e.fe.Emit(child.PiAgentSettled())
+	e.publishTurnEnd()
 	e.usage = child.PiUsage{}
 	// Also reset the streaming guard: a stream that failed or was aborted
 	// after content arrived never reaches StreamEnd, and a surviving
