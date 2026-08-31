@@ -425,6 +425,49 @@ func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
 	c.native.Publish(childID, ev)
 }
 
+// childHooks builds the per-child callbacks every SpawnSpec carries.
+//
+// Both are installed for EVERY kind, deliberately. NativeSink used to be set
+// only inside `if runner != nil` — which is fundi-only, since agentRunner
+// returns a nil Runner for every other kind — so the claude translator in
+// pkg/child was unreachable and attaching to a claude child showed an empty
+// pane. A child whose provider has no native translation simply produces no
+// events; there is nothing to gate.
+//
+// OnMeta persists the sniffed session id immediately. The store's own sync runs
+// in monitorChild off BUS frames, and claude's system/init produces none, so
+// without this the id reaches the database only on the first bus frame of the
+// first turn — and resume reads that column.
+func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(child.SnifferMetadata)) {
+	sink := func(ev *rafikiv1.Event) {
+		if ev.GetChildId() == "" {
+			ev.ChildId = childID
+		}
+		c.publishEvent(childID, ev)
+	}
+	onMeta := func(md child.SnifferMetadata) {
+		if md.SessionID == "" {
+			return
+		}
+		changed := false
+		if err := c.st.Update(childID, func(s *childstore.Session) {
+			if s.SessionID != md.SessionID {
+				s.SessionID = md.SessionID
+				changed = true
+			}
+		}); err != nil {
+			return
+		}
+		if !changed {
+			return
+		}
+		if err := c.writeRecord(childID); err != nil {
+			slog.Warn("write state record (after session sniff)", "childId", childID, "error", err)
+		}
+	}
+	return sink, onMeta
+}
+
 func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
 	snaps := c.st.List()
 	if filter.Status == "" && filter.Name == "" && filter.NameContains == "" &&
@@ -870,16 +913,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		Provider:    prov,
 		Runner:      runner,
 	}
+	spec.NativeSink, spec.OnMeta = c.childHooks(childID)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
-
-		spec.NativeSink = func(ev *rafikiv1.Event) {
-			if ev.GetChildId() == "" {
-				ev.ChildId = childID
-			}
-			c.publishEvent(childID, ev)
-		}
 		spec.PiBinary = ""
 		spec.Argv = nil
 	}
@@ -1562,14 +1599,10 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		Provider:    prov,
 		Runner:      runner,
 	}
+	spec.NativeSink, spec.OnMeta = c.childHooks(childID)
 	if runner != nil {
-
-		spec.NativeSink = func(ev *rafikiv1.Event) {
-			if ev.GetChildId() == "" {
-				ev.ChildId = childID
-			}
-			c.publishEvent(childID, ev)
-		}
+		// The agent kind's argv is parsed into RuntimeOptions above, not
+		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
 		spec.PiBinary = ""
 		spec.Argv = nil
 	}
@@ -1680,14 +1713,10 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		Provider: prov,
 		Runner:   runner,
 	}
+	spec.NativeSink, spec.OnMeta = c.childHooks(childID)
 	if runner != nil {
-
-		spec.NativeSink = func(ev *rafikiv1.Event) {
-			if ev.GetChildId() == "" {
-				ev.ChildId = childID
-			}
-			c.publishEvent(childID, ev)
-		}
+		// The agent kind's argv is parsed into RuntimeOptions above, not
+		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
 		spec.PiBinary = ""
 		spec.Argv = nil
 	}
