@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
@@ -213,5 +215,45 @@ func TestBatchToolArgumentsSummariseAsACount(t *testing.T) {
 	got := toolArgSummary("task_add", `{"items":[{"content":"a"},{"content":"b"},{"content":"c"}]}`)
 	if got != "items×3" {
 		t.Errorf("toolArgSummary(task_add, 3 items) = %q, want %q", got, "items×3")
+	}
+}
+
+// Three weights, by gutter rather than by background: pi backgrounds its tool
+// calls, which on a working agent is most of the screen. The scarce thing is
+// the agent's own prose, so that gets the solid bar, thinking a dotted one, and
+// tool calls none at all.
+func TestTranscriptWeightsAreDistinguishable(t *testing.T) {
+	blocks := []session.Block{{
+		Kind:      session.KindAssistant,
+		Final:     true,
+		Text:      "the prose",
+		ThinkText: "the reasoning",
+		ToolCalls: []session.ToolCall{{Name: "bash", Input: `{"command":"ls"}`}},
+	}}
+	lines := newRenderer().Lines(blocks, 1)
+
+	var prose, think, tool string
+	for _, l := range lines {
+		p := ansi.Strip(l)
+		switch {
+		case strings.Contains(p, "the prose"):
+			prose = p
+		case strings.Contains(p, "thinking…"):
+			think = p
+		case strings.Contains(p, "⚒"):
+			tool = p
+		}
+	}
+	if prose == "" || think == "" || tool == "" {
+		t.Fatalf("missing a weight: prose=%q think=%q tool=%q", prose, think, tool)
+	}
+	if !strings.HasPrefix(prose, "▌") {
+		t.Errorf("assistant prose lacks the solid gutter: %q", prose)
+	}
+	if !strings.HasPrefix(think, "┊") {
+		t.Errorf("thinking lacks the dotted gutter: %q", think)
+	}
+	if strings.HasPrefix(tool, "▌") || strings.HasPrefix(tool, "┊") {
+		t.Errorf("tool calls must stay unadorned: %q", tool)
 	}
 }

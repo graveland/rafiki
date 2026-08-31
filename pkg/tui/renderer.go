@@ -145,6 +145,19 @@ var (
 	styleToolResult = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))              // grey
 	styleToolArg    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))              // arg summary
 	styleDivider    = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("───")
+
+	// Focus is shown two ways because one was not enough: a reversed badge in
+	// the footer, and an accent edge on the pane itself.
+	styleFocusBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).
+			Background(lipgloss.Color("6")).Bold(true)
+	styleFocusEdge = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+
+	// The transcript's three weights, by GUTTER rather than by background.
+	// pi backgrounds its tool calls, which on a working agent is most of the
+	// screen; the scarce thing is the agent's own prose, so that gets the solid
+	// bar, thinking gets a dotted one, and tool calls get none at all.
+	styleAssistantBar = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	styleThinkBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
 // renderBlock converts one block into its styled string.
@@ -167,8 +180,8 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	var sb strings.Builder
 
 	if b.ThinkText != "" {
-		sb.WriteString(styleThink.Render("  thinking… "))
-		sb.WriteString(styleThink.Render(truncate(b.ThinkText, 120)))
+		sb.WriteString(styleThinkBar.Render("┊ "))
+		sb.WriteString(styleThink.Render("thinking… " + truncate(b.ThinkText, 120)))
 		sb.WriteString("\n")
 	}
 
@@ -233,14 +246,18 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	}
 
 	if b.Text != "" {
+		// The agent's own prose is the scarce thing on this screen and carries
+		// the solid bar on EVERY line, so a paragraph reads as one object
+		// rather than as text that happens to follow a tool call.
+		bar := styleAssistantBar.Render("▌ ")
 		rendered, err := r.md.Render(b.Text)
 		if err == nil {
 			rendered = strings.TrimSpace(rendered)
 			for _, line := range strings.Split(rendered, "\n") {
-				sb.WriteString("  " + line + "\n")
+				sb.WriteString(bar + line + "\n")
 			}
 		} else {
-			sb.WriteString("  " + b.Text + "\n")
+			sb.WriteString(bar + b.Text + "\n")
 		}
 	}
 
