@@ -3,9 +3,11 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
@@ -69,11 +71,14 @@ func TestLinesRebuildsWhenFinalizedShrinks(t *testing.T) {
 // Tool output is not markdown. It is rendered preformatted now, which fixes
 // both the cap and the loss of line structure.
 func TestLinesCapsToolResultsOnPlainOutput(t *testing.T) {
-	plain := strings.Repeat("result line\n", 500)
+	var plain strings.Builder
+	for i := 1; i <= 500; i++ {
+		plain.WriteString("result line " + strconv.Itoa(i) + "\n")
+	}
 	blocks := []session.Block{{
 		Kind:      session.KindAssistant,
 		Final:     true,
-		ToolCalls: []session.ToolCall{{Name: "grep", Result: plain}},
+		ToolCalls: []session.ToolCall{{Name: "grep", Result: plain.String()}},
 	}}
 
 	got := newRenderer().Lines(blocks, 1)
@@ -82,8 +87,16 @@ func TestLinesCapsToolResultsOnPlainOutput(t *testing.T) {
 	if n := strings.Count(joined, "result line"); n > maxToolResultLines {
 		t.Errorf("tool result not capped: %d occurrences, cap is %d", n, maxToolResultLines)
 	}
-	if !strings.Contains(joined, "more lines") {
+	if !strings.Contains(joined, "earlier lines") {
 		t.Errorf("capped output must say how much was elided; got:\n%s", joined)
+	}
+	// The TAIL survives, not the head: a command's ending carries its error,
+	// and a long build's last lines are where it has got to.
+	if !strings.Contains(joined, "result line 500") {
+		t.Errorf("capped output dropped the LAST line; the tail is the part worth keeping:\n%s", joined)
+	}
+	if strings.Contains(joined, "result line 1\n") {
+		t.Errorf("capped output kept the head; it must keep the tail:\n%s", joined)
 	}
 }
 
@@ -143,5 +156,62 @@ func TestEmptyTranscriptRendersNoLines(t *testing.T) {
 		if strings.Contains(l, "onnecting") {
 			t.Errorf("empty transcript claims to be connecting: %q", l)
 		}
+	}
+}
+
+// Seeing "bash" tells you nothing about whether to abort. The tool's own
+// argument goes on the call line, the way pi's per-tool renderCall does it.
+func TestToolCallShowsItsArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{"bash", `{"command":"go test ./..."}`, "go test ./..."},
+		{"read", `{"path":"/tmp/x.go"}`, "/tmp/x.go"},
+		{"grep", `{"pattern":"TODO","path":"/src"}`, "TODO"},
+		// Unlisted tool: any string field beats showing nothing.
+		{"mystery", `{"target":"the-thing"}`, "target=the-thing"},
+		// No arguments at all must not become a meaningless "{}".
+		{"noargs", `{}`, ""},
+	} {
+		got := toolArgSummary(tc.name, tc.input)
+		if got != tc.want {
+			t.Errorf("toolArgSummary(%q, %q) = %q, want %q", tc.name, tc.input, got, tc.want)
+		}
+	}
+}
+
+// A multi-line argument must not unroll into the transcript and bury the
+// conversation it is part of.
+func TestToolArgumentIsOneBoundedLine(t *testing.T) {
+	got := toolArgSummary("bash", `{"command":"`+strings.Repeat("x", 500)+`"}`)
+	if strings.Contains(got, "\n") {
+		t.Error("argument summary spans lines")
+	}
+	if len([]rune(got)) > maxToolArgWidth {
+		t.Errorf("argument summary is %d runes, cap is %d", len([]rune(got)), maxToolArgWidth)
+	}
+
+	multi := toolArgSummary("write", `{"path":"a\nb\nc"}`)
+	if strings.Contains(multi, "\n") {
+		t.Errorf("multi-line argument was not collapsed: %q", multi)
+	}
+}
+
+// A guessed tool name degrades silently to the JSON fallback and looks like it
+// works, so the map is pinned against the real registry.
+func TestToolArgKeysNameRealTools(t *testing.T) {
+	for name := range toolArgKeys {
+		if _, ok := tools.TierOf(name); !ok {
+			t.Errorf("toolArgKeys names %q, which is not a registered tool", name)
+		}
+	}
+}
+
+// The batch tools carry arrays of objects, not strings; their raw JSON is long
+// and unreadable and a count is the honest summary.
+func TestBatchToolArgumentsSummariseAsACount(t *testing.T) {
+	got := toolArgSummary("task_add", `{"items":[{"content":"a"},{"content":"b"},{"content":"c"}]}`)
+	if got != "items×3" {
+		t.Errorf("toolArgSummary(task_add, 3 items) = %q, want %q", got, "items×3")
 	}
 }

@@ -176,14 +176,58 @@ func (s *Session) LastAssistant() *Block {
 	return nil
 }
 
+// applyUserMessage appends the user's turn -- and routes any tool_result
+// blocks onto the tool calls they answer.
+//
+// Anthropic puts tool_result in the USER message that follows the assistant's
+// tool_use, so a tool-calling conversation alternates assistant/user with the
+// "user" half being nothing but results. TextFromContent reads text blocks
+// only, so those messages used to render as EMPTY user bubbles and the results
+// were dropped on the floor -- one blank bubble per tool call, and no output
+// anywhere. A message that carries only results appends no block at all.
 func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
+	var results int
+	for _, cb := range um.GetContent() {
+		tr, ok := cb.Block.(*rafikiv1.ContentBlock_ToolResult)
+		if !ok {
+			continue
+		}
+		results++
+		s.attachToolResult(tr.ToolResult)
+	}
+
+	text := TextFromContent(um.GetContent())
+	if text == "" && results > 0 {
+		return
+	}
 	s.Blocks = append(s.Blocks, Block{
 		Kind:  KindUser,
 		At:    time.Now(),
-		Text:  TextFromContent(um.GetContent()),
+		Text:  text,
 		Final: true,
 	})
 	s.Finalized = len(s.Blocks)
+}
+
+// attachToolResult files one result against its call, searching backwards:
+// a turn's results arrive in the message AFTER the assistant block that holds
+// the calls, and with parallel tool use several may answer calls made in the
+// same block.
+func (s *Session) attachToolResult(tr *rafikiv1.ToolResultBlock) {
+	for i := len(s.Blocks) - 1; i >= 0; i-- {
+		if s.Blocks[i].Kind != KindAssistant {
+			continue
+		}
+		for j := range s.Blocks[i].ToolCalls {
+			if s.Blocks[i].ToolCalls[j].ID != tr.GetToolUseId() {
+				continue
+			}
+			s.Blocks[i].ToolCalls[j].Result = TextFromContent(tr.GetContent())
+			s.Blocks[i].ToolCalls[j].IsError = tr.GetIsError()
+			s.Blocks[i].ToolCalls[j].Running = false
+			return
+		}
+	}
 }
 
 func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
@@ -202,8 +246,9 @@ func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
 			block.ThinkText += b.Thinking.GetThinking()
 		case *rafikiv1.ContentBlock_ToolUse:
 			block.ToolCalls = append(block.ToolCalls, ToolCall{
-				ID:   b.ToolUse.GetId(),
-				Name: b.ToolUse.GetName(),
+				ID:    b.ToolUse.GetId(),
+				Name:  b.ToolUse.GetName(),
+				Input: b.ToolUse.GetInputJson(),
 			})
 		case *rafikiv1.ContentBlock_ToolResult:
 			for i := range block.ToolCalls {
@@ -245,10 +290,24 @@ func (s *Session) applyDelta(delta *rafikiv1.ContentBlockDelta) {
 	}
 }
 
+// applyToolStart marks a call running, appending it only if it is not already
+// known.
+//
+// It is normally NOT new: the assistant message carrying the tool_use block is
+// published before the tool runs, so the call is already in the block and this
+// event only says execution began. Appending unconditionally listed every tool
+// call twice — invisible for as long as fundi published no assistant messages
+// at all, and immediate once it did.
 func (s *Session) applyToolStart(ts *rafikiv1.ToolExecutionStart) {
 	last := s.LastAssistant()
 	if last == nil {
 		return
+	}
+	for i := range last.ToolCalls {
+		if last.ToolCalls[i].ID == ts.GetToolUseId() {
+			last.ToolCalls[i].Running = true
+			return
+		}
 	}
 	last.ToolCalls = append(last.ToolCalls, ToolCall{
 		ID:      ts.GetToolUseId(),

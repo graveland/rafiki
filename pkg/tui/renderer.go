@@ -3,6 +3,8 @@
 package tui
 
 import (
+	"encoding/json"
+	"sort"
 	"strings"
 	"sync"
 
@@ -11,6 +13,92 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
+
+// toolArgKeys names the argument each tool is ABOUT, so a call renders as
+// `bash $ go test ./...` rather than `bash`. Modelled on pi, whose per-tool
+// renderCall does the same job with a hand-written function per tool
+// (`formatBashCall` renders `$ <command>`); a key per tool gets most of that
+// for a fraction of the surface, and anything unlisted falls back to compact
+// JSON rather than to nothing.
+//
+// Seeing the argument is not cosmetic: it is the difference between watching an
+// agent work and watching it say "bash" while you decide whether to abort.
+// Every key here must name a REGISTERED tool: TestToolArgKeysNameRealTools
+// checks each against tools.TierOf, because a map of guessed names silently
+// degrades to the JSON fallback and looks like it is working.
+var toolArgKeys = map[string][]string{
+	"bash":        {"command"},
+	"bash_start":  {"command"},
+	"bash_output": {"id", "job_id"},
+	"bash_kill":   {"id", "job_id"},
+	"read":        {"path", "file_path"},
+	"write":       {"path", "file_path"},
+	"edit":        {"path", "file_path"},
+	"ls":          {"path"},
+	"glob":        {"pattern", "glob"},
+	"grep":        {"pattern"},
+	"websearch":   {"query"},
+	"webfetch":    {"url"},
+	"skill":       {"name"},
+	"agent_spawn": {"name", "prompt"},
+	"agent_send":  {"child_id", "message"},
+	"agent_view":  {"child_id"},
+	"agent_kill":  {"child_id"},
+}
+
+// maxToolArgWidth caps the inline argument summary. A multi-line heredoc or a
+// whole file's contents is a legitimate argument, and one of those unrolled
+// into the transcript buries the conversation it is part of.
+const maxToolArgWidth = 100
+
+// toolArgSummary renders a tool's arguments as ONE line.
+//
+// Preference order: the tool's own key, then any string field (a tool nobody
+// listed is still usually about one string), then the compact JSON. An empty
+// object renders as nothing rather than as "{}", so a no-argument tool does not
+// gain a meaningless suffix.
+func toolArgSummary(name, input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" || input == "{}" || input == "null" {
+		return ""
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(input), &args); err != nil || len(args) == 0 {
+		// Not an object: show it as-is. A model can emit anything here and the
+		// point is to show what it emitted.
+		return truncate(collapse(input), maxToolArgWidth)
+	}
+	for _, k := range toolArgKeys[name] {
+		if v, ok := args[k].(string); ok && v != "" {
+			return truncate(collapse(v), maxToolArgWidth)
+		}
+	}
+	// Deterministic: ranging a map would reorder the summary between frames.
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if v, ok := args[k].(string); ok && v != "" {
+			return truncate(k+"="+collapse(v), maxToolArgWidth)
+		}
+	}
+	// No string anywhere. The batch tools (task_add's items, task_update's
+	// changes) are arrays of objects, and their raw JSON is both long and
+	// unreadable; a count is the honest one-line summary of a batch.
+	for _, k := range keys {
+		if v, ok := args[k].([]any); ok {
+			return k + "×" + itoa(int64(len(v)))
+		}
+	}
+	return truncate(collapse(input), maxToolArgWidth)
+}
+
+// collapse folds whitespace so a multi-line argument stays on its one line.
+func collapse(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
 
 // maxToolResultLines caps how much of one tool result reaches the pane.
 //
@@ -55,6 +143,7 @@ var (
 	stylePending    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true) // yellow italic
 	styleRunning    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))              // cyan
 	styleToolResult = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))              // grey
+	styleToolArg    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))              // arg summary
 	styleDivider    = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("───")
 )
 
@@ -84,15 +173,20 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	}
 
 	for _, tc := range b.ToolCalls {
+		arg := toolArgSummary(tc.Name, tc.Input)
+		if arg != "" {
+			arg = " " + arg
+		}
 		if tc.Running {
-			sb.WriteString(styleRunning.Render("  ⚒ " + tc.Name + " running…"))
+			sb.WriteString(styleRunning.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
+				styleRunning.Render(" …"))
 			sb.WriteString("\n")
 		} else {
 			dur := ""
 			if tc.DurationMs > 0 {
 				dur = styleMeta.Render(" (" + durStr(tc.DurationMs) + ")")
 			}
-			prefix := styleTool.Render("  ⚒ "+tc.Name) + dur
+			prefix := styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) + dur
 			if tc.IsError {
 				prefix += styleError.Render(" ✗")
 			} else {
@@ -114,19 +208,24 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				// cap — so the cap only ever fired on tool results that
 				// happened to look like markdown. Splitting the RAW result
 				// fixes both the structure and the cap.
+				// The TAIL, not the head, and the marker goes above it --
+				// pi's truncateToVisualLines does the same (`slice(-max)`).
+				// A command's ending is where its error is and where a long
+				// build's progress has got to; the first 20 lines of a failing
+				// test run are the banner.
 				lines := strings.Split(strings.TrimRight(tc.Result, "\n"), "\n")
 				elided := 0
 				if len(lines) > maxToolResultLines {
 					elided = len(lines) - maxToolResultLines
-					lines = lines[:maxToolResultLines]
-				}
-				for _, line := range lines {
-					sb.WriteString(styleToolResult.Render("    │ " + line))
-					sb.WriteString("\n")
+					lines = lines[len(lines)-maxToolResultLines:]
 				}
 				if elided > 0 {
 					sb.WriteString(styleMeta.Render(
-						"    │ … " + itoa(int64(elided)) + " more lines"))
+						"    │ … " + itoa(int64(elided)) + " earlier lines"))
+					sb.WriteString("\n")
+				}
+				for _, line := range lines {
+					sb.WriteString(styleToolResult.Render("    │ " + line))
 					sb.WriteString("\n")
 				}
 			}
