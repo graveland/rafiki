@@ -610,6 +610,38 @@
   (now deleted). Pane state is evicted with its session and must never outlive
   one. Scroll position lives on `paneState`, deliberately NOT on
   `session.Session`, which is a pure event state machine.
+- **fundi published only HALF the native event vocabulary, and the missing
+  half was the assistant's replies.** `publishNative` (`pkg/fundi/native.go`)
+  carried switch arms for `AssistantMessage`, `TurnEnd` and `ContentBlockDelta`
+  that NOTHING ever called: only `UserMessage`, `ToolExecutionStart` and
+  `ToolExecutionEnd` had call sites. So `conversations.event_log` held
+  `child_spawned`, `user_message`, the tool events and `child_exited` — and
+  nothing the model ever said — and a cockpit attaching to any agent showed its
+  own prompts with no answers. A switch arm with no caller is the shape of this
+  bug; grep for callers when a vocabulary looks complete. The durable
+  publication now happens ONCE per completed turn, at a single site in
+  `Engine.worker`'s `OnTurn` after the streamed/non-streamed branch, because
+  only one of `StreamEnd`/`AssistantTurn` is handed the provider response.
+  **`ContentBlockDelta` is still unpublished by fundi**, so a fundi turn
+  appears all at once when its LLM call completes rather than streaming in;
+  wiring it needs `TurnStart` too, and needs `session.applyAssistantMessage` to
+  REPLACE the streamed block rather than append a second one (the claude path,
+  which emits TurnStart + deltas + AssistantMessage, appears to duplicate for
+  exactly that reason — unverified).
+- **Nothing drives a content event end-to-end through `StreamEvents`**, which
+  is why the above shipped. `pkg/connectapi/stream_test.go` covers subjects,
+  tiers and cursors with synthetic status events; the fundi emitter tests cover
+  publication. The seam between them is only ever exercised by hand against a
+  real daemon. Budget for that when touching the event plane.
+- **`anthropic.Message.ToParam()` goes through `AsAny()` and is unsafe on a
+  mid-stream accumulated message.** `Message.Accumulate` only rewrites
+  `ContentBlockUnion.JSON.raw` on `content_block_stop`, so `ToParam` (and
+  `eventconv.BlocksFromParam` fed from it) yields EMPTY blocks while the struct
+  fields are already correct. `MapAssistantMessage` documents this at length and
+  `publishAssistant` reads the flattened fields for the same reason. Both
+  current callers pass a complete response, so `ToParam` would work today and
+  would silently start dropping content the first time anyone published from a
+  partial one.
 - **A `bubbles` textarea is constructed BLURRED, and its `Update` returns
   immediately while it is** — so an unfocused textarea silently swallows every
   printable key, with no error anywhere. `pkg/tui` shipped the entire
