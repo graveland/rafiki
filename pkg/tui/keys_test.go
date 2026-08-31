@@ -59,6 +59,7 @@ func TestDefaultKeyMapBindsWhatTheFooterClaims(t *testing.T) {
 // TestCyclePaneSkipsHiddenRail: the ring must never focus something invisible.
 // ctrl+b hides the rail, and a focus you cannot see is a cockpit you appear to
 // be stuck in — keys stop doing what you expect and nothing on screen says why.
+// With the rail hidden the ring has one stop, so ⇥ leaves focus alone.
 func TestCyclePaneSkipsHiddenRail(t *testing.T) {
 	c := newTestCockpit("c_a")
 	c.focus = focusInput
@@ -66,12 +67,14 @@ func TestCyclePaneSkipsHiddenRail(t *testing.T) {
 
 	c.cyclePane(+1)
 
-	if c.focus != focusTranscript {
-		t.Errorf("focus = %v, want transcript (a hidden rail must be skipped)", c.focus)
+	if c.focus != focusInput {
+		t.Errorf("focus = %v, want input (a hidden rail must be skipped)", c.focus)
 	}
 }
 
-func TestCyclePaneVisitsAllThreeWhenRailShown(t *testing.T) {
+// The ring is a two-stop toggle: the transcript pane is gone, because the input
+// pane scrolls directly and the third stop cost a press on every agent switch.
+func TestCyclePaneTogglesInputAndRail(t *testing.T) {
 	c := newTestCockpit("c_a")
 	c.focus = focusInput
 
@@ -80,12 +83,8 @@ func TestCyclePaneVisitsAllThreeWhenRailShown(t *testing.T) {
 		t.Fatalf("after one tab: focus = %v, want rail", c.focus)
 	}
 	c.cyclePane(+1)
-	if c.focus != focusTranscript {
-		t.Fatalf("after two tabs: focus = %v, want transcript", c.focus)
-	}
-	c.cyclePane(+1)
 	if c.focus != focusInput {
-		t.Fatalf("after three tabs: focus = %v, want input", c.focus)
+		t.Fatalf("after two tabs: focus = %v, want input", c.focus)
 	}
 }
 
@@ -95,8 +94,8 @@ func TestCyclePaneBackwards(t *testing.T) {
 
 	c.cyclePane(-1)
 
-	if c.focus != focusTranscript {
-		t.Errorf("shift+tab from input: focus = %v, want transcript", c.focus)
+	if c.focus != focusRail {
+		t.Errorf("shift+tab from input: focus = %v, want rail", c.focus)
 	}
 }
 

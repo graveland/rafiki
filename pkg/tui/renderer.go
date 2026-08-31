@@ -10,6 +10,7 @@ import (
 
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
@@ -124,6 +125,13 @@ type renderer struct {
 
 	lastFP  string
 	liveOut []string
+
+	// width the cache was built at. The viewport's SoftWrap is OFF (it re-wraps
+	// every line on every Update AND every View: measured at 10.9ms and 10.6ms
+	// on a 6933-line transcript, against 2.4µs and 167µs unwrapped), so the
+	// renderer owns wrapping — which also puts the gutter on continuation rows,
+	// where soft wrap left them bare.
+	width int
 }
 
 func newRenderer() *renderer {
@@ -166,7 +174,10 @@ func (r *renderer) renderBlock(b session.Block) string {
 	case session.KindPendingUser:
 		return stylePending.Render("⏳ ") + stylePending.Render(b.Text)
 	case session.KindUser:
-		return styleUser.Render("▸ ") + styleUser.Render(b.Text)
+		// A blank line ABOVE, so a prompt is separated from whatever the agent
+		// was doing before it. The prompt's own styling is untouched.
+		return "\n" + strings.Join(
+			wrapTo(styleUser.Render("▸ "), styleUser.Render(b.Text), r.width), "\n")
 	case session.KindSystem:
 		return styleMeta.Render("⚙  ") + styleMeta.Render(b.Text)
 	case session.KindAssistant:
@@ -180,9 +191,8 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	var sb strings.Builder
 
 	if b.ThinkText != "" {
-		sb.WriteString(styleThinkBar.Render("┊ "))
-		sb.WriteString(styleThink.Render("thinking… " + truncate(b.ThinkText, 120)))
-		sb.WriteString("\n")
+		r.writeWrapped(&sb, styleThinkBar.Render("┊ "),
+			styleThink.Render("thinking… "+truncate(b.ThinkText, 120)))
 	}
 
 	for _, tc := range b.ToolCalls {
@@ -238,30 +248,45 @@ func (r *renderer) renderAssistant(b session.Block) string {
 					sb.WriteString("\n")
 				}
 				for _, line := range lines {
-					sb.WriteString(styleToolResult.Render("    │ " + line))
-					sb.WriteString("\n")
+					r.writeWrapped(&sb, styleToolResult.Render("    │ "),
+						styleToolResult.Render(line))
 				}
 			}
 		}
 	}
 
 	if b.Text != "" {
-		// The agent's own prose is the scarce thing on this screen and carries
-		// the solid bar on EVERY line, so a paragraph reads as one object
-		// rather than as text that happens to follow a tool call.
+		// The agent's own prose is the scarce thing on this screen. A bar on
+		// every text line alone was too quiet to find while scrolling, so the
+		// block is given room and the gutter is given HEIGHT: a blank line
+		// separates it from what came before, and the bar runs one row above
+		// and one below the text. That turns a colour difference — which the
+		// eye has to look for — into a shape, which it does not.
+		//
+		// Vertical space is cheap now that PgUp/PgDn reach the transcript from
+		// the input box; before that, every row spent on framing was a row of
+		// conversation someone had to tab away to recover.
 		bar := styleAssistantBar.Render("▌ ")
+		edge := styleAssistantBar.Render("▌")
+		sb.WriteString("\n" + edge + "\n")
 		rendered, err := r.md.Render(b.Text)
 		if err == nil {
 			rendered = strings.TrimSpace(rendered)
 			for _, line := range strings.Split(rendered, "\n") {
-				sb.WriteString(bar + line + "\n")
+				r.writeWrapped(&sb, bar, line)
 			}
 		} else {
-			sb.WriteString(bar + b.Text + "\n")
+			r.writeWrapped(&sb, bar, b.Text)
 		}
+		sb.WriteString(edge + "\n")
 	}
 
-	if b.Final && b.StopReason != "" {
+	// Only a stop reason worth reading. end_turn is the normal ending and
+	// tool_use only repeats what the ⚒ line above already showed — printing
+	// them put a "── tool_use" rule under EVERY block of a tool-calling turn,
+	// which is most blocks, competing with the content for attention while
+	// carrying none.
+	if b.Final && interestingStop(b.StopReason) {
 		sb.WriteString(styleMeta.Render("  ── " + b.StopReason))
 		sb.WriteString("\n")
 	}
@@ -277,7 +302,12 @@ func (r *renderer) renderAssistant(b session.Block) string {
 // linearly with conversation length for output nobody saw. Returning LINES
 // rather than one string is what lets viewport.SetContentLines take it
 // directly, and makes a future prepend's YOffset shift exactly len(prepended).
-func (r *renderer) Lines(blocks []session.Block, finalized int) []string {
+func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string {
+	if width != r.width {
+		// Every cached line was wrapped to the old width.
+		r.width = width
+		r.cached, r.cachedUpTo, r.lastFP, r.liveOut = nil, 0, "", nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -329,6 +359,43 @@ func (r *renderer) Lines(blocks []session.Block, finalized int) []string {
 	out = append(out, r.cached...)
 	out = append(out, r.liveOut...)
 	return out
+}
+
+// interestingStop reports whether a stop reason tells the reader something.
+// The unusual endings — a truncated answer, a refusal, an error — all do.
+func interestingStop(reason string) bool {
+	switch reason {
+	case "", "end_turn", "tool_use", "stop":
+		return false
+	}
+	return true
+}
+
+// wrapTo folds one already-styled line to width, repeating prefix on every
+// continuation row so a gutter survives wrapping. prefix is measured on its
+// PLAIN width — it carries ANSI colour and counting the escapes would eat the
+// text budget.
+func wrapTo(prefix, text string, width int) []string {
+	indent := ansi.StringWidth(ansi.Strip(prefix))
+	avail := width - indent
+	if avail < 8 {
+		avail = 8
+	}
+	wrapped := ansi.Hardwrap(ansi.Wordwrap(text, avail, " -"), avail, true)
+	rows := strings.Split(strings.TrimRight(wrapped, "\n"), "\n")
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, prefix+row)
+	}
+	return out
+}
+
+// writeWrapped is wrapTo straight into the builder.
+func (r *renderer) writeWrapped(sb *strings.Builder, prefix, text string) {
+	for _, row := range wrapTo(prefix, text, r.width) {
+		sb.WriteString(row)
+		sb.WriteString("\n")
+	}
 }
 
 // blockLines splits one rendered block into display lines, dropping the
