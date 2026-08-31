@@ -237,14 +237,25 @@ func TestShutdownIsIdempotent(t *testing.T) {
 // unconditional no-op and `attach <id>` / `create` opened a cockpit whose only
 // event source was the rail: six small types, no messages, no deltas, no
 // history. A permanently empty pane.
+//
+// The focus stream now opens one step later — seed returns the GetHistory
+// command and the stream opens in its reply — so the test drives the command
+// rather than asserting on the frame after seed. The guarantee is unchanged
+// and slightly stronger: nothing is listening on this BaseURL, so the fetch
+// FAILS, and the focus stream must still open.
 func TestSeedOpensTheFocusStreamForTheInitialChild(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
-	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
+	_, cmd := c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
 
 	if c.stopRail == nil {
 		t.Error("seed must start the rail stream")
 	}
+	if cmd == nil {
+		t.Fatal("seed must return a command for the initially focused child; " +
+			"without it the pane only ever sees rail-tier events and stays empty")
+	}
+	c.Update(cmd())
 	if c.stopFocus == nil {
 		t.Fatal("seed must open a FOCUS stream for the initially focused child; " +
 			"without it the pane only ever sees rail-tier events and stays empty")
@@ -590,5 +601,105 @@ func TestEnterStillSendsTheWholeMultilinePrompt(t *testing.T) {
 	}
 	if c.ta.Value() != "" {
 		t.Errorf("textarea not cleared after send: %q", c.ta.Value())
+	}
+}
+
+// ── history ──────────────────────────────────────────────────────────────────
+
+func historyEvent(childID, text string, ordinal int32, assistant bool) *rafikiv1.Event {
+	blocks := []*rafikiv1.ContentBlock{{
+		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+	}}
+	ev := &rafikiv1.Event{ChildId: childID, Ordinal: &ordinal}
+	if assistant {
+		ev.Payload = &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{Content: blocks}}
+	} else {
+		ev.Payload = &rafikiv1.Event_UserMessage{
+			UserMessage: &rafikiv1.UserMessage{Content: blocks}}
+	}
+	return ev
+}
+
+// The cockpit rendered ONLY the durable event log, which begins whenever the
+// event plane was deployed — so every conversation older than the log showed
+// as an empty pane, which was all of them. GetHistory already served the whole
+// thing in this exact vocabulary and nothing called it.
+func TestHistorySeedsTheTranscript(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+
+	c.Update(historyMsg{childID: "c_1", after: 4, events: []*rafikiv1.Event{
+		historyEvent("c_1", "what is 2+2", 0, false),
+		historyEvent("c_1", "four", 1, true),
+	}})
+
+	s := c.sessions["c_1"]
+	if len(s.Blocks) != 2 {
+		t.Fatalf("history produced %d blocks, want 2", len(s.Blocks))
+	}
+	if s.Blocks[0].Text != "what is 2+2" || s.Blocks[1].Text != "four" {
+		t.Errorf("blocks = %q / %q", s.Blocks[0].Text, s.Blocks[1].Text)
+	}
+}
+
+// THE hazard in wiring history in. GetHistory stamps
+// conversation_message.ordinal; the focus stream resumes from
+// conversations.event_log.ordinal. They are unrelated sequences. Folding
+// history through Apply would leave a 1217-message conversation with a cursor
+// of 1216, and the next subscription on a log holding five events would resume
+// past its end and receive nothing, forever, with no error anywhere.
+func TestHistoryDoesNotMoveTheEventLogCursor(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+
+	c.Update(historyMsg{childID: "c_1", after: 4, events: []*rafikiv1.Event{
+		historyEvent("c_1", "old prompt", 1216, false),
+	}})
+
+	s := c.sessions["c_1"]
+	if s.HasCursor {
+		t.Fatalf("history set the event-log cursor to %d; the two ordinal spaces are unrelated", s.Cursor)
+	}
+
+	// A real log event afterwards must still land.
+	c.applyEvent(textEventFor("c_1", "live"))
+	if len(s.Blocks) != 2 {
+		t.Fatalf("live event after history produced %d blocks, want 2", len(s.Blocks))
+	}
+}
+
+// A child with no persisted conversation must replay the whole log rather than
+// resuming from its head, or a freshly created agent — whose every event is in
+// the log and nowhere else — opens on an empty pane.
+func TestEmptyHistoryReplaysTheWholeLog(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 7)}})
+
+	c.Update(historyMsg{childID: "c_1", after: 7, events: nil})
+	if c.stopFocus == nil {
+		t.Fatal("empty history must still open the focus stream")
+	}
+}
+
+// Hopping back must not re-fetch: the transcript is already in hand and a
+// second fetch re-renders the whole conversation on every hop.
+func TestHopBackDoesNotRefetchHistory(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 0),
+	}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: []*rafikiv1.Event{
+		historyEvent("c_1", "old prompt", 0, false),
+	}})
+	c.applyEvent(textEventFor("c_1", "live")) // gives the session a real cursor
+
+	c.hop("c_2")
+	if cmd := c.hop("c_1"); cmd != nil {
+		t.Error("hopping back to a child whose transcript is already loaded must not re-fetch history")
 	}
 }
