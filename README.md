@@ -1035,25 +1035,29 @@ sequences; the cockpit keeps them apart deliberately.
 
 ### Keys
 
-The cockpit has three panes — the input box, the agent rail, and the
-transcript — and **`⇥` moves between them**. Which pane holds focus decides what
-an unmodified key does, and the footer always names it.
+The cockpit has two focus targets — the input box and the agent rail — and
+**`⇥` toggles between them**. The focused one carries a reversed badge in the
+footer and an accent edge of its own.
 
-That is not decoration. The input box is a full text editor with an emacs
-keymap: it already claims `PgUp`, `PgDn`, `⇧↑`/`⇧↓`, `^N`, `^P`, `^U`, `^K` and
-more. There is no unmodified key left over for scrolling a transcript while a
-text box has focus, so panes take turns owning their keys instead.
+There was a third, a separate transcript pane, and it is gone. It existed only
+to give a scrolling viewport its own keymap while a text editor held every
+plausible scroll key — the input box is a full emacs-keymapped editor and
+claims `⇧↑`/`⇧↓`, `^N`, `^P`, `^U`, `^K` and more. The input box scrolls the
+transcript directly now, so the extra stop bought nothing and cost a keypress
+on every agent switch, which is the move made most often. Hiding the rail with
+`^A` does not give up switching: `⇥` reveals it, and picking an agent with `⏎`
+puts it back.
 
 **Global — work from any pane**
 
 | Key | Does |
 |---|---|
-| `⇥` / `⇧⇥` | Move to the next / previous pane. |
+| `⇥` / `⇧⇥` | Toggle between the input box and the agent rail; reveals it if hidden. |
 | `⌥N` / `^PgDn` | Hop to the next agent that needs you. |
 | `⌥P` / `^PgUp` | Hop to the previous agent that needs you. |
 | `^↑` / `^↓` | Hop straight up and down the rail, without changing pane. |
 | `esc` / `^X` | Abort the running turn. |
-| `^B` | Collapse or restore the rail. |
+| `^A` / `^B` | Collapse or restore the agent rail. |
 | `^G` | Toggle the help overlay — every binding, grouped by pane. |
 | `^C` / `^D` | Quit — press twice within two seconds. Children keep running; reattach any time. |
 
@@ -1065,6 +1069,7 @@ text box has focus, so panes take turns owning their keys instead.
 | `⇧⏎` / `^J` | Insert a newline. Prompts can be as long as you like. |
 | `⌥⏎` / `^S` | Steer — inject into the turn already running. |
 | `PgUp` / `PgDn` | Scroll the transcript without leaving the input box. |
+| `home` / `end` | Jump to the top / bottom of the transcript. |
 | `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript. |
 
 Everything else goes to the text editor.
@@ -1091,18 +1096,19 @@ are shared: the text editor gets them first and keeps them whenever the cursor
 actually moves, so a multi-line prompt is unaffected and a single-line one
 scrolls.
 
-**Transcript pane**
-
-| Key | Does |
-|---|---|
-| `↑` / `↓`, `j` / `k` | Scroll a line. |
-| `PgUp` / `PgDn`, `space` | Scroll a page. |
-| `esc` | Back to the input box. |
+**Reading the transcript**
 
 The transcript follows new output while you are at the bottom and holds its
 place while you are not, so reading back is never interrupted by an agent still
-working. `↓ more below` appears in the footer when output is arriving off
-screen. Sending returns you to the bottom.
+working. Sending returns you to the bottom. The bottom-right readout says where
+you are — `↓ 1840/2272 81%` — and is right-aligned so it does not move when the
+key hints do.
+
+Three weights make the transcript scannable without colouring large areas of
+it: the agent's own prose carries a solid `▌` gutter, thinking a dotted `┊`,
+and tool calls none at all. Tool calls show their argument (`⚒ bash go test
+./...`) and their output truncated from the END, since a command's ending is
+where its error is.
 
 There is no mouse support, deliberately: capturing the mouse would take away
 your terminal's own select-and-copy, and copying a stack trace out of the pane
