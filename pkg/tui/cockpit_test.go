@@ -980,3 +980,76 @@ func TestTabIsInertWhenTheRailIsHidden(t *testing.T) {
 		t.Error("⇥ with the rail hidden left the textarea blurred")
 	}
 }
+
+// ── where a bare `rafiki attach` lands ───────────────────────────────────────
+
+func bareCockpit(t *testing.T) *Cockpit {
+	t.Helper()
+	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1"})
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	return c
+}
+
+// Nothing is focused, so the input box can do nothing — Send returns early on
+// an empty child. Opening on it puts the cursor in a box that cannot accept
+// work and hides the one thing there is to do.
+func TestBareAttachLandsOnAgentSelection(t *testing.T) {
+	c := bareCockpit(t)
+	if c.focus != focusRail {
+		t.Fatalf("focus = %v before seed, want agents", c.focus)
+	}
+	if c.ta.Focused() {
+		t.Error("the textarea is focused while no agent is selected")
+	}
+
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
+	}})
+	if c.focus != focusRail {
+		t.Fatalf("focus = %v after seed, want agents", c.focus)
+	}
+	// The cursor must already be somewhere, or ↑/↓ and ⏎ need a priming press.
+	if c.selected == "" {
+		t.Error("no rail row is under the cursor; ⏎ would open nothing")
+	}
+	defer c.shutdown()
+}
+
+// One child is not a choice: picking from a list of one is a keystroke that
+// carries no information.
+func TestBareAttachWithOneChildOpensIt(t *testing.T) {
+	c := bareCockpit(t)
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "only", 0)}})
+	defer c.shutdown()
+
+	if c.focused() != "c_1" {
+		t.Errorf("focused child = %q, want the only one", c.focused())
+	}
+	if c.focus != focusInput {
+		t.Errorf("focus = %v, want input — there was nothing to choose", c.focus)
+	}
+	if !c.ta.Focused() {
+		t.Error("landed on the input pane with the textarea blurred")
+	}
+}
+
+// No children is not a choice either, and the rail cannot be entered — focus
+// must not be trapped on a pane with nothing in it.
+func TestBareAttachWithNoChildrenFallsBackToInput(t *testing.T) {
+	c := bareCockpit(t)
+	c.Update(seedMsg{children: nil})
+	defer c.shutdown()
+
+	if c.focus != focusRail {
+		// fine either way at this point; what matters is it is not stuck
+		if c.focus != focusInput {
+			t.Fatalf("focus = %v, want input", c.focus)
+		}
+	}
+	if c.focus == focusRail {
+		t.Error("focus is trapped on an empty rail")
+	}
+	if !strings.Contains(ansi.Strip(c.View().Content), "No agents running") {
+		t.Error("the empty state must say there is nothing to attach to")
+	}
+}

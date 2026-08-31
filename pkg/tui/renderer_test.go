@@ -329,3 +329,30 @@ func TestSuccessfulToolCallKeepsNoFailureBar(t *testing.T) {
 		t.Errorf("a successful call must carry no failure bar:\n%s", joined)
 	}
 }
+
+// A call that ended with no result must not claim success. HasResult is not
+// the same as a non-empty Result — a tool can legitimately return nothing —
+// and without the distinction an interrupted call is indistinguishable from a
+// silent success. There are real instances: a production database here holds
+// 38 bash calls with no matching tool_result.
+func TestToolCallWithNoResultDoesNotClaimSuccess(t *testing.T) {
+	render := func(tc session.ToolCall) string {
+		return ansi.Strip(strings.Join(newRenderer().Lines([]session.Block{{
+			Kind: session.KindAssistant, Final: true, ToolCalls: []session.ToolCall{tc},
+		}}, 1, 100), "\n"))
+	}
+
+	none := render(session.ToolCall{Name: "bash"})
+	if strings.Contains(none, "✓") {
+		t.Errorf("a call with no result claims success:\n%s", none)
+	}
+	if !strings.Contains(none, "no result") {
+		t.Errorf("a call with no result must say so:\n%s", none)
+	}
+
+	// A tool that legitimately returned nothing still succeeded.
+	empty := render(session.ToolCall{Name: "bash", HasResult: true})
+	if !strings.Contains(empty, "✓") {
+		t.Errorf("an empty-but-real result must still read as success:\n%s", empty)
+	}
+}
