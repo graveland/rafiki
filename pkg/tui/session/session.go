@@ -115,6 +115,29 @@ func (s *Session) Apply(ev *rafikiv1.Event) {
 		s.HasCursor = true
 	}
 
+	s.applyPayload(ev)
+}
+
+// ApplyHistory folds in one event from GetHistory WITHOUT touching the cursor.
+//
+// That exclusion is the whole reason this exists rather than being Apply. The
+// two ordinal spaces are unrelated: GetHistory stamps
+// conversation_message.ordinal (0..N over every message ever persisted), while
+// the focus stream resumes from conversations.event_log.ordinal (0..M over one
+// child's logged EVENTS). A 1217-message conversation whose log holds five
+// events would set the cursor to 1216, and the next subscription would resume
+// past the end of the log and receive nothing, forever, with no error.
+func (s *Session) ApplyHistory(ev *rafikiv1.Event) {
+	if ev == nil {
+		return
+	}
+	if id := ev.GetChildId(); id != "" && s.ChildID != "" && id != s.ChildID {
+		return
+	}
+	s.applyPayload(ev)
+}
+
+func (s *Session) applyPayload(ev *rafikiv1.Event) {
 	switch p := ev.Payload.(type) {
 	case *rafikiv1.Event_UserMessage:
 		s.applyUserMessage(p.UserMessage)

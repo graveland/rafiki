@@ -46,6 +46,16 @@ type seedMsg struct {
 }
 type sendFailedMsg struct{ err error }
 
+// historyMsg carries one child's persisted conversation, plus the event-log
+// ordinal that was current when the fetch was ISSUED -- the focus stream
+// resumes from that, so anything logged during the fetch still arrives.
+type historyMsg struct {
+	childID string
+	events  []*rafikiv1.Event
+	after   int32
+	err     error
+}
+
 // ── Options ─────────────────────────────────────────────────────────────────
 
 // Options configures the cockpit.
@@ -261,7 +271,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// a cockpit whose only event source was the rail -- six small types,
 			// no messages, no deltas, no history: a permanently empty pane.
 			if f := c.focused(); f != "" {
-				c.openFocus(f)
+				return c, c.openFocus(f)
 			}
 		}
 		return c, nil
@@ -275,6 +285,35 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd = c.seedCmd()
 		}
 		return c, tea.Batch(waitForEvent(c.evCh), cmd)
+
+	case historyMsg:
+		s := c.sessions[msg.childID]
+		if s == nil || msg.childID != c.focused() {
+			// Hopped away while it was in flight. Dropping it is right: the
+			// next focus on that child starts the fetch again, and applying it
+			// now would seed a session whose stream nobody is opening.
+			return c, nil
+		}
+		if msg.err != nil {
+			// A conversation the daemon cannot resolve is normal, not fatal --
+			// a child that has never taken a turn has no conversation row --
+			// so fall back to replaying the whole log, which is exactly what
+			// the cockpit did before it asked for history at all.
+			c.status = "history unavailable: " + connect.CodeOf(msg.err).String()
+			c.startFocus(msg.childID, -1)
+			return c, nil
+		}
+		for _, ev := range msg.events {
+			s.ApplyHistory(ev)
+		}
+		after := msg.after
+		if len(msg.events) == 0 {
+			// Nothing persisted: the log is all there is, so replay it whole
+			// rather than resuming from its head and showing an empty pane.
+			after = -1
+		}
+		c.startFocus(msg.childID, after)
+		return c, nil
 
 	case sendFailedMsg:
 		c.status = "send failed: " + msg.err.Error()
@@ -515,14 +554,21 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 	c.rail.SetFocus(childID)
 	// No renderer reset: each child owns its renderer (see pane.go), so there
 	// is no shared cache to invalidate and the target's cached work survives.
-	c.openFocus(childID)
-	return nil
+	return c.openFocus(childID)
 }
 
 // openFocus starts the focus subscription for childID, creating its session if
 // needed. It has no identity guard, which is the whole reason it is separate
 // from hop: the seed path focuses a child and then needs its stream opened.
-func (c *Cockpit) openFocus(childID string) {
+//
+// A session with nothing in it fetches the conversation from GetHistory FIRST
+// and opens its stream in the reply. The event log begins whenever the event
+// plane was deployed, so it is not, and was never meant to be, the transcript:
+// conversations.conversation_message holds every message and GetHistory
+// already serves it in this exact vocabulary. A cockpit that read only the log
+// showed nothing at all for a conversation older than the log -- which is
+// every conversation that existed when the cockpit was written.
+func (c *Cockpit) openFocus(childID string) tea.Cmd {
 	s := c.sessions[childID]
 	if s == nil {
 		s = session.New(childID)
@@ -530,12 +576,44 @@ func (c *Cockpit) openFocus(childID string) {
 	}
 	c.touch(childID)
 
-	// -1 rather than 0 for a fresh session: ordinal 0 is a real event and the
-	// log's Read is exclusive on afterOrdinal, so 0 would skip the first event.
-	after := int32(-1)
-	if s.HasCursor {
-		after = s.Cursor
+	if len(s.Blocks) == 0 && !s.HasCursor {
+		return c.historyCmd(childID)
 	}
+	// Already read once: resume the log from where this session left off. Its
+	// history is in hand and re-fetching it would re-render the transcript on
+	// every hop.
+	c.startFocus(childID, s.Cursor)
+	return nil
+}
+
+// historyCmd loads the persisted conversation.
+//
+// The log head is captured BEFORE the fetch and carried through so the stream
+// resumes from it. Taking it afterwards instead would drop any turn that
+// landed while the fetch was in flight; taking it before can at worst show one
+// turn twice, and a duplicate is visible while a gap is silent.
+func (c *Cockpit) historyCmd(childID string) tea.Cmd {
+	after := int32(-1)
+	if n, ok := c.rail.Get(childID); ok {
+		after = n.Latest
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		resp, err := c.client.GetHistory(ctx,
+			connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: childID}))
+		if err != nil {
+			return historyMsg{childID: childID, after: after, err: err}
+		}
+		return historyMsg{childID: childID, events: resp.Msg.GetEvents(), after: after}
+	}
+}
+
+// startFocus opens the subscription for childID resuming after ordinal.
+//
+// -1 rather than 0 for a fresh session: ordinal 0 is a real event and the
+// log's Read is exclusive on afterOrdinal, so 0 would skip the first event.
+func (c *Cockpit) startFocus(childID string, after int32) {
 	c.stopFocus = streams.StartFocus(context.Background(), c.cfg, childID,
 		&rafikiv1.EventCursor{Ordinals: map[string]int32{childID: after}}, c.evCh)
 }
