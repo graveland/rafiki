@@ -646,6 +646,26 @@
   calls, which on a working agent is most of the screen. The agent's prose is
   the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
   tool calls none at all.
+- **The cockpit cannot draw images, and the reason is the CELL GRID, not the
+  ANSI layer — but Kitty's Unicode placeholder protocol routes around it.**
+  bubbletea v2 renders through ultraviolet, whose `Cell` is one grapheme plus
+  a style, a hyperlink and a width; there is no graphics concept in the buffer
+  or the renderer. A graphics escape written into a `View` is parsed into cells,
+  has nowhere to live, and is dropped — measured over a pty: the text either
+  side of an iTerm2 inline-image sequence survives, the sequence does not.
+  `x/ansi` CAN emit iTerm2, Kitty and Sixel, so the temptation is to blame the
+  wrong layer.
+  **The way through is not escape sequences.** Kitty transmits the image out of
+  band (`tea.Raw`, which writes straight to the terminal) and then PLACES it
+  with ordinary printable runes — `kitty.Placeholder` (U+10EEEE) plus
+  diacritics encoding row, column and image id — which pass through a cell
+  renderer untouched because they are just text.
+  `charmbracelet/crush` does exactly this on the same bubbletea v2.0.9
+  (`internal/ui/image/image.go`), with an ANSI half-block fallback and
+  capability detection that queries via `tea.Raw` and watches for
+  `uv.KittyGraphicsEvent` — which is what that decode-only event is FOR.
+  Until that is built, `session.ImagePlaceholder` names the image so a block
+  never renders as nothing.
 - **A bracketed paste's line breaks are CARRIAGE RETURNS, not newlines.**
   ultraviolet's paste buffer keeps them verbatim — a bare `\r` decodes as a
   `KeyEnter` press whose `Text` is empty, so the raw byte is appended — so the
