@@ -46,8 +46,9 @@ type keyMap struct {
 	Abort         key.Binding
 
 	// Input pane.
-	Send  key.Binding
-	Steer key.Binding
+	Send    key.Binding
+	Steer   key.Binding
+	Newline key.Binding
 
 	// Rail pane.
 	SelectUp   key.Binding
@@ -73,6 +74,17 @@ func defaultKeyMap() keyMap {
 
 		Send:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send")),
 		Steer: key.NewBinding(key.WithKeys("alt+enter", "ctrl+s"), key.WithHelp("⌥⏎", "steer")),
+		// The textarea's own InsertNewline is bound to enter and ctrl+m --
+		// the SAME BYTE, and Send takes it -- so a send-on-⏎ input has no
+		// newline key at all unless one is given to it explicitly.
+		//
+		// ^J is not a nicety. A terminal must speak the Kitty keyboard
+		// protocol (bubbletea requests it, but plenty of terminals answer
+		// nothing) before shift+enter is even reportable; where it is not,
+		// the key arrives as a bare CR and SENDS -- the one outcome a newline
+		// binding must never have. ^J is LF, distinct from ^M everywhere, and
+		// is claimed by neither the textarea's keymap nor any cockpit global.
+		Newline: key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("⇧⏎", "newline")),
 
 		SelectUp:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "up")),
 		SelectDown: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "down")),

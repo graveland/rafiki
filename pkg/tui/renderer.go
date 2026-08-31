@@ -203,8 +203,11 @@ func (r *renderer) Lines(blocks []session.Block, finalized int) []string {
 		r.liveOut = tail
 	}
 
+	// No blocks, no lines. An empty transcript is not a connection state and
+	// this function cannot tell the difference anyway -- the shell knows
+	// whether a stream is open and renders the empty case itself.
 	if len(r.cached) == 0 && len(r.liveOut) == 0 {
-		return []string{styleMeta.Render("Connecting…")}
+		return nil
 	}
 	out := make([]string, 0, len(r.cached)+len(r.liveOut))
 	out = append(out, r.cached...)

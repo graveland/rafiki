@@ -127,3 +127,21 @@ func TestLinesReturnsLinesNotOneString(t *testing.T) {
 		}
 	}
 }
+
+// An empty transcript is NOT a connection state. Lines returned the literal
+// string "Connecting…" for any session with no blocks -- which is the steady
+// state of a child that has not spoken yet, not a transient one. A freshly
+// created agent therefore claimed to be connecting forever while the status
+// line two rows below it said "connected". Emptiness is the shell's to
+// describe, with the focus state it alone knows; the renderer renders blocks.
+func TestEmptyTranscriptRendersNoLines(t *testing.T) {
+	got := newRenderer().Lines(nil, 0)
+	if len(got) != 0 {
+		t.Errorf("Lines(nil, 0) = %q, want no lines", got)
+	}
+	for _, l := range got {
+		if strings.Contains(l, "onnecting") {
+			t.Errorf("empty transcript claims to be connecting: %q", l)
+		}
+	}
+}

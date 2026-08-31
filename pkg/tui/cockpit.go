@@ -116,6 +116,12 @@ func NewCockpit(opts Options) *Cockpit {
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(3)
+	// A textarea is constructed BLURRED, and bubbles' Update returns
+	// immediately while it is -- so an unfocused one silently swallows every
+	// printable key. The cockpit shipped without this call and could not be
+	// typed into at all. The returned blink command is dropped because Init
+	// already issues textarea.Blink; what matters here is the focus flag.
+	_ = ta.Focus()
 
 	subject := opts.Subject
 	if subject == nil {
@@ -357,11 +363,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.shutdown()
 		return c, tea.Quit
 	case key.Matches(msg, k.NextPane):
-		c.cyclePane(+1)
-		return c, nil
+		return c, c.cyclePane(+1)
 	case key.Matches(msg, k.PrevPane):
-		c.cyclePane(-1)
-		return c, nil
+		return c, c.cyclePane(-1)
 	case key.Matches(msg, k.NextAttention):
 		return c, c.hop(c.rail.NextAttention())
 	case key.Matches(msg, k.PrevAttention):
@@ -373,8 +377,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.ToggleRail):
 		c.railHidden = !c.railHidden
 		// Never leave focus on a pane that just became invisible.
-		c.cyclePane(0)
-		return c, nil
+		return c, c.cyclePane(0)
 	case key.Matches(msg, k.Help):
 		c.showHelp = !c.showHelp
 		return c, nil
@@ -389,11 +392,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, k.SelectDown):
 			c.moveSelection(+1)
 		case key.Matches(msg, k.Commit):
-			cmd := c.hop(c.selected)
-			c.focus = focusInput
-			return c, cmd
+			return c, tea.Batch(c.hop(c.selected), c.setFocus(focusInput))
 		case key.Matches(msg, k.Escape):
-			c.focus = focusInput
+			return c, c.setFocus(focusInput)
 		}
 		// The rail swallows everything else: a stray letter here must not
 		// reach the textarea, or you would type into an input you cannot see
@@ -402,13 +403,19 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case focusTranscript:
 		if key.Matches(msg, k.Escape) {
-			c.focus = focusInput
-			return c, nil
+			return c, c.setFocus(focusInput)
 		}
 		return c, c.scrollFocused(msg)
 	}
 
 	// ── input ────────────────────────────────────────────────────────────
+	// Newline is checked BEFORE send, and inserted by hand rather than passed
+	// through: the textarea binds InsertNewline to enter/^M, both of which
+	// Send has taken, so ⇧⏎ reaches its keymap and matches nothing at all.
+	if key.Matches(msg, k.Newline) {
+		c.ta.InsertString("\n")
+		return c, nil
+	}
 	if mode := modeForKey(msg.String()); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
 		text := strings.TrimSpace(c.ta.Value())
 		if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
@@ -556,12 +563,31 @@ func (c *Cockpit) touch(childID string) {
 }
 
 // neighbour returns the child delta rows away in display order.
+// setFocus moves the ring and carries the textarea's focus state with it.
+//
+// EVERY focus change goes through here, which is the point: the textarea must
+// be focused to accept a key at all, and must be blurred whenever another pane
+// owns the keys or it blinks a cursor in an input that is ignoring you. Two
+// separate things have to agree on every transition, so there is exactly one
+// place that can set them.
+func (c *Cockpit) setFocus(p focusPane) tea.Cmd {
+	c.focus = p
+	if p == focusRail && c.selected == "" {
+		c.selected = c.focused()
+	}
+	if p != focusInput {
+		c.ta.Blur()
+		return nil
+	}
+	return c.ta.Focus()
+}
+
 // cyclePane advances focus by delta, skipping the rail when it is hidden.
 //
 // A delta of 0 re-validates the current focus without moving, which is what
 // hiding the rail needs: ctrl+b is global and can fire while the rail holds
 // focus, and focus left on an invisible pane is how a modal UI traps someone.
-func (c *Cockpit) cyclePane(delta int) {
+func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	order := []focusPane{focusInput, focusRail, focusTranscript}
 	if c.railHidden {
 		order = []focusPane{focusInput, focusTranscript}
@@ -577,17 +603,13 @@ func (c *Cockpit) cyclePane(delta int) {
 	if !found {
 		// Current focus is not in the ring at all (the rail, just hidden).
 		// Fall to input rather than guessing a neighbour.
-		c.focus = focusInput
 		if delta == 0 {
-			return
+			return c.setFocus(focusInput)
 		}
 		idx = 0
 	}
 	idx = (idx + delta + len(order)) % len(order)
-	c.focus = order[idx]
-	if c.focus == focusRail && c.selected == "" {
-		c.selected = c.focused()
-	}
+	return c.setFocus(order[idx])
 }
 
 // moveSelection moves the rail cursor by delta without hopping.
@@ -714,7 +736,7 @@ func (c *Cockpit) footerHints() string {
 	case focusTranscript:
 		bs = []key.Binding{k.Escape}
 	default:
-		bs = []key.Binding{k.Send, k.Steer, k.Abort, k.NextAttention}
+		bs = []key.Binding{k.Send, k.Newline, k.Steer, k.Abort}
 	}
 	parts := make([]string, 0, len(bs)+3)
 	for _, b := range bs {
@@ -726,6 +748,60 @@ func (c *Cockpit) footerHints() string {
 		c.keys.ToggleRail.Help().Key+" rail",
 		c.keys.Help.Help().Key+" help")
 	return strings.Join(parts, "  ")
+}
+
+// helpLines is the ^G overlay, laid out in two columns.
+//
+// Grouped by pane, because a key's meaning DEPENDS on which pane holds focus
+// and a flat list would be wrong for two thirds of the cockpit. Derived from
+// the keymap for the same reason footerHints is: the footer and the help must
+// not be able to disagree with the bindings, or with each other.
+//
+// Two columns rather than one because the body pane clips from the TOP
+// (lastN), so a single-column sheet silently loses the global bindings -- the
+// half a lost user most needs -- on any terminal shorter than about 30 rows.
+//
+// ^G was a write-only toggle before this: it flipped showHelp and nothing ever
+// read it, so the key advertised in the footer and in `attach --help` did
+// nothing at all.
+func (c *Cockpit) helpLines(width int) []string {
+	group := func(title string, bs ...key.Binding) []string {
+		out := []string{styleRailFocused.Render(title)}
+		for _, b := range bs {
+			h := b.Help()
+			out = append(out, "  "+padTo(h.Key, 10)+h.Desc)
+		}
+		return append(out, "")
+	}
+	k := c.keys
+	left := group("anywhere",
+		k.NextPane, k.PrevPane, k.NextAttention, k.PrevAttention,
+		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.Quit)
+	right := group("input", k.Send, k.Newline, k.Steer, k.Abort)
+	right = append(right, group("agents",
+		k.SelectUp, k.SelectDown, k.Commit, k.Escape)...)
+	right = append(right, group("transcript",
+		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "scroll")),
+		key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("PgUp/PgDn", "page")),
+		k.Escape)...)
+
+	colWidth := width / 2
+	if colWidth < 24 {
+		// Too narrow to sit side by side; stack and accept the clipping.
+		return append(append([]string{}, left...), right...)
+	}
+	out := make([]string, 0, max(len(left), len(right))+1)
+	for i := 0; i < len(left) || i < len(right); i++ {
+		l, r := "", ""
+		if i < len(left) {
+			l = left[i]
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		out = append(out, padTo(l, colWidth)+r)
+	}
+	return append(out, styleMeta.Render("^G closes this."))
 }
 
 func (c *Cockpit) View() tea.View {
@@ -749,13 +825,28 @@ func (c *Cockpit) View() tea.View {
 	convWidth := c.convWidth()
 
 	var conv string
-	if f := c.focused(); f == "" {
+	switch f := c.focused(); {
+	case c.showHelp:
+		conv = strings.Join(c.helpLines(convWidth), "\n")
+	case f == "":
 		conv = styleMeta.Render("Pick an agent — ⇥ to the rail, ↑/↓ to move, ⏎ to open.")
-	} else if s := c.sessions[f]; s != nil {
+	case c.sessions[f] != nil:
+		s := c.sessions[f]
 		p := c.pane(f)
-		c.syncViewport(p, p.renderer.Lines(s.Blocks, s.Finalized))
+		lines := p.renderer.Lines(s.Blocks, s.Finalized)
+		// An empty transcript is a real, STEADY state -- a child whose event
+		// log holds nothing but its lifecycle events, which is every freshly
+		// created agent until it is asked something. The renderer used to
+		// answer it with "Connecting…", so the pane claimed to be connecting
+		// forever two rows above a status line reading "connected".
+		if len(lines) == 0 {
+			conv = styleMeta.Render("No messages yet — type below and press " +
+				c.keys.Send.Help().Key + " to start.")
+			break
+		}
+		c.syncViewport(p, lines)
 		conv = p.vp.View()
-	} else {
+	default:
 		conv = styleMeta.Render("loading…")
 	}
 	if c.pending != "" {
