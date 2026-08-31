@@ -128,11 +128,15 @@ func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error)
 	if b.Source != "" {
 		body = "<rafiki-event source=\"" + b.Source + "\">\n" + body + "\n</rafiki-event>"
 	}
+	// Attachments ride the frame beside the text. Omitted when empty so every
+	// existing frame is byte-identical to what it was, which keeps a fundi
+	// child built before this change parsing them unchanged.
 	out, err := json.Marshal(struct {
-		Type    string `json:"type"`
-		ID      string `json:"id,omitempty"`
-		Message string `json:"message"`
-	}{kind, frameID, body})
+		Type        string             `json:"type"`
+		ID          string             `json:"id,omitempty"`
+		Message     string             `json:"message"`
+		Attachments []inbox.Attachment `json:"attachments,omitempty"`
+	}{kind, frameID, body, b.Attachments})
 	if err != nil {
 		return nil, fmt.Errorf("inbox: marshal injection frame: %w", err)
 	}

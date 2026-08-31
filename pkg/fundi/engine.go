@@ -145,6 +145,10 @@ type Engine struct {
 type queued struct {
 	ids  []string
 	text string
+	// attachments ride with the text of the SAME message. Images first when
+	// the turn is built (see llm.UserContent) — the common shape is a
+	// screenshot followed by a question about it.
+	attachments []llm.UserImage
 }
 
 // idSlice wraps a frame id for a queued entry. An empty id means "no inbox row
@@ -284,6 +288,15 @@ func (e *Engine) HandlePromptID(id, text string) {
 	e.enqueue(queued{ids: idSlice(id), text: text})
 }
 
+// HandlePromptWithAttachments queues a prompt carrying non-text payloads.
+//
+// Separate from HandlePromptID rather than replacing it: the text path is by
+// far the common one, it has several callers that will never have an
+// attachment, and widening every one of them to pass nil buys nothing.
+func (e *Engine) HandlePromptWithAttachments(id, text string, images []llm.UserImage) {
+	e.enqueue(queued{ids: idSlice(id), text: text, attachments: images})
+}
+
 // enqueue appends q to the turn queue and wakes the worker. It is the only
 // writer to pending, shared by the inbound prompt path and runTurn's
 // orphaned-steer requeue.
@@ -420,7 +433,7 @@ func (e *Engine) worker() {
 			//    loud failure beats an infinite loop.
 			e.consume(q.ids)
 
-			if !e.runTurnGuarded(q.text) {
+			if !e.runTurnGuarded(q.text, q.attachments) {
 				return // fatal() has already been called; this child is ending
 			}
 		}
@@ -471,7 +484,7 @@ func (e *Engine) startupResume() {
 // dangling tool_use that the API rejects outright on the next request. A child
 // that keeps accepting prompts and fails every one of them is worse than a
 // child that exits and can be resumed.
-func (e *Engine) runTurnGuarded(text string) (ok bool) {
+func (e *Engine) runTurnGuarded(text string, images []llm.UserImage) (ok bool) {
 	defer func() {
 		// Unconditional, and deliberately before the recover: this turn is
 		// over either way, and nothing else will ever call Done for it.
@@ -483,7 +496,7 @@ func (e *Engine) runTurnGuarded(text string) (ok bool) {
 			ok = false
 		}
 	}()
-	e.runTurn(text)
+	e.runTurn(text, images)
 	return true
 }
 
@@ -572,7 +585,7 @@ func (e *Engine) fatal(err error) {
 // that bracket it. The user echo precedes agent_start: a pi child echoes the
 // user message itself, and the attach TUI renders the bubble before the
 // agent's activity indicator.
-func (e *Engine) runTurn(text string) {
+func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	// Publish cancel BEFORE the Emit calls below: those write JSON to stdout
 	// and can block on a slow reader, and an abort landing in that window
 	// used to find cancel still nil and vanish silently (see HandleAbort).
@@ -587,7 +600,7 @@ func (e *Engine) runTurn(text string) {
 	e.em.AgentStart()
 
 	events, streamOpt := e.events()
-	result, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserText(text), streamOpt)
+	result, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContent(text, images), streamOpt)
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
 	// otherwise make every failure look like an abort.
 	aborted := errors.Is(ctx.Err(), context.Canceled)

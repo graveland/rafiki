@@ -86,3 +86,28 @@ func TestCoalesceAbortIsItsOwnBatchWithNoBody(t *testing.T) {
 		t.Fatalf("abort batch = %+v, want one empty-bodied abort batch", got)
 	}
 }
+
+// Attachments survive coalescing. A direct message is never coalesced, which is
+// where they come from — but they are carried on the grouped path too, because
+// silently discarding a payload is the failure shape this repo keeps fixing.
+func TestCoalesceCarriesAttachments(t *testing.T) {
+	img := inbox.Attachment{MediaType: "image/png", Data: []byte("bytes")}
+
+	direct := inbox.Coalesce([]inbox.Inbound{
+		{ID: "1", ChildID: "c_1", Mode: inbox.ModePrompt, Text: "look", Attachments: []inbox.Attachment{img}},
+	}, inbox.BatchConfig{})
+	if len(direct) != 1 || len(direct[0].Attachments) != 1 {
+		t.Fatalf("direct message lost its attachment: %+v", direct)
+	}
+	if string(direct[0].Attachments[0].Data) != "bytes" {
+		t.Error("attachment bytes did not survive")
+	}
+
+	grouped := inbox.Coalesce([]inbox.Inbound{
+		{ID: "1", ChildID: "c_1", Mode: inbox.ModePrompt, Source: "s", Text: "a", Attachments: []inbox.Attachment{img}},
+		{ID: "2", ChildID: "c_1", Mode: inbox.ModePrompt, Source: "s", Text: "b"},
+	}, inbox.BatchConfig{})
+	if len(grouped) != 1 || len(grouped[0].Attachments) != 1 {
+		t.Fatalf("grouped batch lost its attachment: %+v", grouped)
+	}
+}

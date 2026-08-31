@@ -47,18 +47,20 @@ func (s *Server) Send(
 	}
 
 	var text string
+	var attachments []inbox.Attachment
 	if mode != inbox.ModeAbort {
 		var err error
-		text, err = textFromBlocks(req.Msg.GetBlocks())
+		text, attachments, err = contentFromBlocks(req.Msg.GetBlocks())
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	id, err := (*inboxP).Accept(ctx, inbox.Inbound{
-		ChildID: childID,
-		Mode:    mode,
-		Text:    text,
+		ChildID:     childID,
+		Mode:        mode,
+		Text:        text,
+		Attachments: attachments,
 	})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -66,21 +68,34 @@ func (s *Server) Send(
 	return connect.NewResponse(&rafikiv1.SendResponse{MessageId: id}), nil
 }
 
-// textFromBlocks flattens content blocks to the plain string the engine's
-// HandlePrompt/HandleSteer accept. A non-text block is REFUSED rather than
-// skipped: silently dropping a pasted image would look to the sender like it
-// was delivered.
-func textFromBlocks(blocks []*rafikiv1.ContentBlock) (string, error) {
+// contentFromBlocks splits content blocks into the text and the attachments the
+// inbox carries separately.
+//
+// A block type with nowhere to go is still REFUSED rather than skipped, which
+// is what the text-only version of this did for every non-text block: silently
+// dropping a payload looks to the sender exactly like delivering it.
+func contentFromBlocks(blocks []*rafikiv1.ContentBlock) (string, []inbox.Attachment, error) {
 	var sb strings.Builder
+	var atts []inbox.Attachment
 	for _, b := range blocks {
-		t := b.GetText()
-		if t == nil {
-			return "", connect.NewError(connect.CodeUnimplemented,
-				errors.New("only text blocks are supported by Send today"))
+		switch v := b.Block.(type) {
+		case *rafikiv1.ContentBlock_Text:
+			sb.WriteString(v.Text.GetText())
+		case *rafikiv1.ContentBlock_Image:
+			if len(v.Image.GetData()) == 0 {
+				return "", nil, connect.NewError(connect.CodeInvalidArgument,
+					errors.New("image block carries no data"))
+			}
+			atts = append(atts, inbox.Attachment{
+				MediaType: v.Image.GetMediaType(),
+				Data:      v.Image.GetData(),
+			})
+		default:
+			return "", nil, connect.NewError(connect.CodeUnimplemented,
+				fmt.Errorf("Send does not carry %T blocks", b.Block))
 		}
-		sb.WriteString(t.GetText())
 	}
-	return sb.String(), nil
+	return sb.String(), atts, nil
 }
 
 // ListChildren returns the daemon's children, optionally filtered by status.

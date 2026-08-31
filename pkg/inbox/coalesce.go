@@ -23,6 +23,15 @@ type Batch struct {
 	Source  string
 	IDs     []string
 	Frags   []string
+	// Attachments from every row in the batch, in row order.
+	//
+	// In practice only a DIRECT message carries any — attachments come from a
+	// human, and a direct message is never coalesced — so this is almost always
+	// nil on the grouped path. It is carried there regardless rather than
+	// dropped: silently discarding a payload is the failure shape this codebase
+	// has had to fix repeatedly, and "cannot happen" is not a reason to make it
+	// unrecoverable when it does.
+	Attachments []Attachment
 }
 
 // Coalesce turns pending rows into the batches to deliver, in delivery order.
@@ -45,6 +54,7 @@ func Coalesce(rows []Inbound, cfg BatchConfig) []Batch {
 		keyed    map[string]string
 		keyOrder []string
 		unkeyed  []string
+		attached []Attachment
 	}
 	groups := make(map[string]*group)
 	var groupOrder []string
@@ -54,6 +64,7 @@ func Coalesce(rows []Inbound, cfg BatchConfig) []Batch {
 			b := Batch{ChildID: r.ChildID, Mode: r.Mode, IDs: []string{r.ID}}
 			if r.Mode != ModeAbort {
 				b.Frags = []string{r.Text}
+				b.Attachments = r.Attachments
 			}
 			out = append(out, b)
 			continue
@@ -65,6 +76,7 @@ func Coalesce(rows []Inbound, cfg BatchConfig) []Batch {
 			groupOrder = append(groupOrder, r.Source)
 		}
 		g.ids = append(g.ids, r.ID)
+		g.attached = append(g.attached, r.Attachments...)
 		// Sticky steer, expressed as data rather than as buffer state: a group
 		// holding any steer delivers as a steer, so a steer deferred behind a
 		// later prompt cannot be quietly downgraded to a prompt.
@@ -89,11 +101,12 @@ func Coalesce(rows []Inbound, cfg BatchConfig) []Batch {
 		}
 		frags = append(frags, g.unkeyed...)
 		out = append(out, Batch{
-			ChildID: rows[0].ChildID,
-			Mode:    g.mode,
-			Source:  source,
-			IDs:     g.ids,
-			Frags:   applyCaps(frags, cfg),
+			ChildID:     rows[0].ChildID,
+			Mode:        g.mode,
+			Source:      source,
+			IDs:         g.ids,
+			Frags:       applyCaps(frags, cfg),
+			Attachments: g.attached,
 		})
 	}
 	return out

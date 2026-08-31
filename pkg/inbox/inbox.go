@@ -83,13 +83,27 @@ const (
 // last-write-wins key within that group. A direct message from a human or a
 // coordinator has both empty, and is never coalesced with anything.
 type Inbound struct {
-	ID         string
-	ChildID    string
-	Mode       Mode
-	Source     string
-	Key        string
-	Text       string
-	AcceptedAt time.Time
+	ID      string
+	ChildID string
+	Mode    Mode
+	Source  string
+	Key     string
+	Text    string
+	// Attachments ride alongside Text rather than replacing it. A message is
+	// usually "here is a screenshot" PLUS a question about it, and the text is
+	// what coalescing and every human-readable surface still work from.
+	Attachments []Attachment
+	AcceptedAt  time.Time
+}
+
+// Attachment is one non-text payload attached to a message.
+//
+// Deliberately a neutral pair rather than a protobuf ContentBlock: pkg/inbox is
+// on the durable path and must not take a dependency on a wire format it does
+// not own. Data is RAW bytes; base64 belongs at the edges that need it.
+type Attachment struct {
+	MediaType string `json:"media_type"`
+	Data      []byte `json:"data"`
 }
 
 // Accepter is the narrow seam a submitter needs: validate, persist, return an

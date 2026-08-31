@@ -109,7 +109,43 @@ func TestSendRejectsUnspecifiedMode(t *testing.T) {
 // TestSendRejectsNonTextBlocks proves an image is refused rather than silently
 // dropped: Engine.HandlePrompt takes a string, so there is nowhere for image
 // bytes to go until that changes.
-func TestSendRejectsNonTextBlocks(t *testing.T) {
+// Send CARRIES images now — this used to assert they were refused. What has
+// not changed is that a block type with nowhere to go is refused rather than
+// skipped: silently dropping a payload looks to the sender like delivering it.
+func TestSendCarriesAnImageBlock(t *testing.T) {
+	s := connectapi.NewServer(nil)
+	acc := &fakeAccepter{}
+	s.SetInbox(acc)
+	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: "c_1",
+		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
+		Blocks: []*rafikiv1.ContentBlock{
+			{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+				MediaType: "image/png", Data: []byte("\x89PNGfake"),
+			}}},
+			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "what is this?"}}},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Send with an image: %v", err)
+	}
+	if got := acc.got.Text; got != "what is this?" {
+		t.Errorf("text = %q, want the prompt", got)
+	}
+	if n := len(acc.got.Attachments); n != 1 {
+		t.Fatalf("got %d attachments, want 1", n)
+	}
+	if got := acc.got.Attachments[0].MediaType; got != "image/png" {
+		t.Errorf("media type = %q", got)
+	}
+	if string(acc.got.Attachments[0].Data) != "\x89PNGfake" {
+		t.Errorf("image bytes did not survive: %q", acc.got.Attachments[0].Data)
+	}
+}
+
+// An image block with no bytes is a caller error, not something to pass on as
+// an empty attachment.
+func TestSendRejectsAnEmptyImage(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetInbox(&fakeAccepter{})
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
@@ -117,6 +153,22 @@ func TestSendRejectsNonTextBlocks(t *testing.T) {
 		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
 		Blocks: []*rafikiv1.ContentBlock{{
 			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: "image/png"}},
+		}},
+	}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+}
+
+// A block type Send cannot carry is still refused rather than skipped.
+func TestSendRefusesABlockItCannotCarry(t *testing.T) {
+	s := connectapi.NewServer(nil)
+	s.SetInbox(&fakeAccepter{})
+	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: "c_1",
+		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
+		Blocks: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{Id: "tu_1"}},
 		}},
 	}))
 	if connect.CodeOf(err) != connect.CodeUnimplemented {

@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+
+	"go.graveland.dev/rafiki/pkg/llm"
 )
 
 // Frontend speaks pi's rpc protocol over stdio: ndjson frames in (prompt,
@@ -52,6 +54,16 @@ type IDHandler interface {
 	Handler
 	HandlePromptID(id, text string)
 	HandleSteerID(id, text string)
+}
+
+// AttachmentHandler is the extension for prompts carrying non-text payloads.
+//
+// Extension rather than a wider IDHandler for the same reason IDHandler is one:
+// a runtime that never sees an attachment should not thread a nil slice through
+// every call. Run resolves it once; a handler that does not implement it gets
+// the text and the attachments are reported as dropped rather than vanishing.
+type AttachmentHandler interface {
+	HandlePromptWithAttachments(id, text string, images []llm.UserImage)
 }
 
 // StateData feeds the get_state response the daemon sniffs for session id +
@@ -126,14 +138,21 @@ func (f *Frontend) Run() error {
 	// for a Frontend's lifetime, so this is the ONE type assertion IDHandler's
 	// doc comment promises.
 	idh, isID := f.handler.(IDHandler)
+	// Resolved once, beside IDHandler and for the same reason: a type assertion
+	// per frame in the reader loop is a cost paid on every message forever.
+	ah, _ := f.handler.(AttachmentHandler)
 	sc := bufio.NewScanner(f.in)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
 		line := sc.Bytes()
 		var hdr struct {
-			Type    string `json:"type"`
-			ID      string `json:"id,omitempty"`
-			Message string `json:"message,omitempty"`
+			Type        string `json:"type"`
+			ID          string `json:"id,omitempty"`
+			Message     string `json:"message,omitempty"`
+			Attachments []struct {
+				MediaType string `json:"media_type"`
+				Data      []byte `json:"data"`
+			} `json:"attachments,omitempty"`
 		}
 		if err := json.Unmarshal(line, &hdr); err != nil {
 			continue // unparseable input is dropped, matching pi's tolerance
@@ -145,9 +164,21 @@ func (f *Frontend) Run() error {
 				Data: stateData{SessionID: s.SessionID, SessionFile: "", SessionName: s.SessionName,
 					Model: modelField{ID: s.ModelID, Provider: s.Provider}}})
 		case "prompt":
-			if isID {
+			switch {
+			case len(hdr.Attachments) > 0 && ah != nil:
+				imgs := make([]llm.UserImage, 0, len(hdr.Attachments))
+				for _, a := range hdr.Attachments {
+					imgs = append(imgs, llm.UserImage{MediaType: a.MediaType, Data: a.Data})
+				}
+				ah.HandlePromptWithAttachments(hdr.ID, hdr.Message, imgs)
+			case isID:
+				if len(hdr.Attachments) > 0 {
+					// Never silent: the sender was told this was delivered.
+					slog.Warn("fundi: runtime cannot take attachments; delivering text only",
+						"count", len(hdr.Attachments))
+				}
 				idh.HandlePromptID(hdr.ID, hdr.Message)
-			} else {
+			default:
 				f.handler.HandlePrompt(hdr.Message)
 			}
 		case "steer":
