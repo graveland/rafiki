@@ -12,6 +12,9 @@ package tui
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +48,83 @@ const (
 	pasteLineThreshold = 6
 	pasteCharThreshold = 800
 )
+
+// imageExts are the extensions recognised as an attachable image. A closed
+// list, not a sniff: this decides whether an ordinary pasted string is treated
+// as a file reference at all, and a false positive turns a path-shaped message
+// into a failed file read.
+var imageExts = map[string]string{
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".webp": "image/webp",
+}
+
+// maxAttachmentBytes bounds what a paste can stage. Anthropic rejects images
+// over roughly 5 MB, and a bound with a message beats an opaque upstream 400.
+const maxAttachmentBytes = 5 << 20
+
+// stagedAttachment is an image staged for the next prompt.
+type stagedAttachment struct {
+	token     string
+	notice    string
+	mediaType string
+	data      []byte
+}
+
+// attachIfImagePath reads content as a path to an image and stages it.
+//
+// It reports false for anything that is not a single line naming a readable
+// image file, so ordinary text is untouched. Every rejection after that point
+// is reported rather than silent: someone who drags a file and sees their path
+// turn into plain text has no idea why.
+func (c *Cockpit) attachIfImagePath(content string) (stagedAttachment, bool) {
+	line := strings.TrimSpace(content)
+	// Terminals quote a dragged path when it contains spaces.
+	line = strings.Trim(line, "'\"")
+	if line == "" || strings.Contains(line, "\n") {
+		return stagedAttachment{}, false
+	}
+	media, ok := imageExts[strings.ToLower(filepath.Ext(line))]
+	if !ok {
+		return stagedAttachment{}, false
+	}
+	if strings.HasPrefix(line, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			line = filepath.Join(home, line[2:])
+		}
+	}
+	info, err := os.Stat(line)
+	if err != nil || info.IsDir() {
+		return stagedAttachment{}, false
+	}
+	if info.Size() > maxAttachmentBytes {
+		c.setNotice("image is " + humanBytes(info.Size()) + "; the limit is " +
+			humanBytes(maxAttachmentBytes))
+		return stagedAttachment{}, true
+	}
+	data, err := os.ReadFile(line)
+	if err != nil {
+		c.setNotice("could not read " + filepath.Base(line) + ": " + err.Error())
+		return stagedAttachment{}, true
+	}
+	name := filepath.Base(line)
+	return stagedAttachment{
+		token:     "[" + name + "]",
+		notice:    "attached " + name + " (" + humanBytes(int64(len(data))) + ")",
+		mediaType: media,
+		data:      data,
+	}, true
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return strconv.FormatFloat(float64(n)/(1<<20), 'f', 1, 64) + " MB"
+	case n >= 1<<10:
+		return strconv.FormatFloat(float64(n)/(1<<10), 'f', 1, 64) + " KB"
+	default:
+		return itoa(n) + " B"
+	}
+}
 
 // pastedText is one folded paste, held until the prompt is sent.
 type pastedText struct {
@@ -135,6 +215,10 @@ type Cockpit struct {
 	// pastes holds folded pastes in insertion order, keyed by the token
 	// standing in for each. Cleared on send: the tokens leave with the text.
 	pastes []pastedText
+	// attachments are non-text payloads staged for the next prompt. Same
+	// lifetime as pastes and cleared with them: a token you deleted took its
+	// payload with it.
+	attachments []stagedAttachment
 	// quitArmed is when the first ^C/^D landed. A single stray one must not
 	// throw away an attached session, so the key arms and the repeat quits.
 	quitArmed time.Time
@@ -574,6 +658,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// prompt that happened to contain a matching token.
 		c.ta.Reset()
 		c.pastes = nil
+		c.attachments = nil
 		return c, nil
 	}
 	switch {
@@ -608,11 +693,15 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if mode := c.modeForKey(msg); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
 		text := strings.TrimSpace(c.expandPastes(c.ta.Value()))
 		if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
-			if text == "" {
+			// An attachment alone is a message: a screenshot with nothing to
+			// say still has something to say.
+			if text == "" && len(c.attachments) == 0 {
 				return c, nil
 			}
+			images := c.attachments
 			c.ta.Reset()
 			c.pastes = nil
+			c.attachments = nil
 			// You just spoke; you want the reply. Pin to the bottom even if you
 			// had scrolled up to re-read something before sending.
 			if f := c.focused(); f != "" {
@@ -620,6 +709,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				p.vp.GotoBottom()
 				p.atBottom = true
 			}
+			return c, c.sendWith(mode, text, images)
 		}
 		return c, c.send(mode, text)
 	}
@@ -637,6 +727,19 @@ func (c *Cockpit) handlePaste(content string) tea.Cmd {
 		return nil
 	}
 	content = normalizeNewlines(content)
+	// A dragged image is a PATH, not bytes: a terminal never sends image data
+	// through a bracketed paste. Dropping a file from Finder pastes its path,
+	// which is the only way an image reaches this box today.
+	if att, handled := c.attachIfImagePath(content); handled {
+		// handled covers the rejections too — too large, unreadable — which
+		// have already set their own notice. Only a real read stages anything.
+		if len(att.data) > 0 {
+			c.attachments = append(c.attachments, att)
+			c.ta.InsertString(att.token)
+			c.setNotice(att.notice)
+		}
+		return nil
+	}
 	lines := strings.Count(content, "\n") + 1
 	if lines <= pasteLineThreshold && len(content) <= pasteCharThreshold {
 		c.ta.InsertString(content)
@@ -745,20 +848,44 @@ func (c *Cockpit) modeForKey(msg tea.KeyPressMsg) rafikiv1.SendMode {
 
 // send submits to the focused child.
 func (c *Cockpit) send(mode rafikiv1.SendMode, text string) tea.Cmd {
+	return c.sendWith(mode, text, nil)
+}
+
+// sendWith submits to the focused child, carrying any staged attachments.
+//
+// Images go FIRST in the block list, matching llm.UserContent: the common shape
+// is a screenshot followed by a question about it, and a model attends better
+// to an image that precedes the text asking about it.
+func (c *Cockpit) sendWith(mode rafikiv1.SendMode, text string, images []stagedAttachment) tea.Cmd {
 	child := c.focused()
 	if child == "" {
 		return nil
 	}
 	req := &rafikiv1.SendRequest{ChildId: child, Mode: mode}
 	if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
-		if strings.TrimSpace(text) == "" {
+		// An attachment alone is a message. Requiring text would mean a
+		// screenshot with nothing to say could not be sent at all.
+		if strings.TrimSpace(text) == "" && len(images) == 0 {
 			return nil
 		}
-		req.Blocks = []*rafikiv1.ContentBlock{{
-			Index: 0,
-			Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
-		}}
+		for _, img := range images {
+			req.Blocks = append(req.Blocks, &rafikiv1.ContentBlock{
+				Index: int32(len(req.Blocks)),
+				Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+					MediaType: img.mediaType, Data: img.data,
+				}},
+			})
+		}
+		if text != "" {
+			req.Blocks = append(req.Blocks, &rafikiv1.ContentBlock{
+				Index: int32(len(req.Blocks)),
+				Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+			})
+		}
 		c.pending = text
+		if text == "" {
+			c.pending = "(" + itoa(int64(len(images))) + " attached)"
+		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
