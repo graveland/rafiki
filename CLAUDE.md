@@ -646,6 +646,27 @@
   calls, which on a working agent is most of the screen. The agent's prose is
   the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
   tool calls none at all.
+- **Images travel end to end now, and the middle of the pipe was the only
+  text-shaped part.** Both ENDS already spoke blocks: `SendRequest.blocks` is
+  `repeated ContentBlock`, and `llm.Conversation.AppendUser` takes
+  `[]anthropic.ContentBlockParamUnion` (which is how `tool_result` blocks
+  already travel). What refused was the middle — `connectapi`'s block flattener,
+  `inbox.Inbound.Text`, `agent_inbox.body`, the child-facing JSON frame, and
+  `Engine.HandlePromptID`. Each now carries `inbox.Attachment{MediaType, Data}`
+  beside the text; migration 0025 adds `agent_inbox.attachments` JSONB where
+  NULL and `[]` both mean none.
+  Three rules worth keeping. **Images go FIRST** in the block list
+  (`llm.UserContent`) — a model attends better to an image preceding the text
+  asking about it. **An attachment alone is a message**, so the send path must
+  not require text; requiring it made a screenshot unsendable. And the TUI
+  stages a **pasted PATH**, never bytes: a terminal never sends image data
+  through a bracketed paste, so dragging a file pastes its path and that is the
+  only ingress today.
+  Proven end to end against a real daemon: a 64×64 solid-red PNG pasted as a
+  path, sent, and a vision model answered "Red." Verify with the stored message
+  shape (`["image","text"]` in `conversation_message`) rather than the model's
+  words — the first run looked like a failure because the model said it could
+  not see images while the block was in fact stored correctly.
 - **The cockpit cannot draw images, and the reason is the CELL GRID, not the
   ANSI layer — but Kitty's Unicode placeholder protocol routes around it.**
   bubbletea v2 renders through ultraviolet, whose `Cell` is one grapheme plus
