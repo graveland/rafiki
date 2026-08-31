@@ -568,6 +568,14 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.ta.InsertString("\n")
 		return c, nil
 	}
+	if key.Matches(msg, k.ClearInput) {
+		// The folded pastes go with it: their tokens are what referred to
+		// them, and leaving the text behind would attach it to the next
+		// prompt that happened to contain a matching token.
+		c.ta.Reset()
+		c.pastes = nil
+		return c, nil
+	}
 	switch {
 	case key.Matches(msg, k.ScrollTop):
 		// home/end were transcript-pane-only and so appeared not to work at
@@ -1114,7 +1122,7 @@ func (c *Cockpit) footerHints() string {
 	case focusRail:
 		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.Escape}
 	default:
-		bs = []key.Binding{k.Send, k.Newline, k.Steer, k.Abort, k.ScrollPageUp}
+		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort}
 	}
 	parts := make([]string, 0, len(bs)+3)
 	for _, b := range bs {
@@ -1155,7 +1163,7 @@ func (c *Cockpit) helpLines(width int) []string {
 	left := group("anywhere",
 		k.NextPane, k.PrevPane, k.NextAttention, k.PrevAttention,
 		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.Quit)
-	right := group("input", k.Send, k.Newline, k.Steer, k.Abort)
+	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
 		k.SelectUp, k.SelectDown, k.Commit, k.Escape)...)
 	right = append(right, group("reading",

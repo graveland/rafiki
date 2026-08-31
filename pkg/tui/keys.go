@@ -52,6 +52,9 @@ type keyMap struct {
 	Steer   key.Binding
 	Newline key.Binding
 
+	// Input pane.
+	ClearInput key.Binding
+
 	// Input pane: scroll the transcript without leaving the input.
 	ScrollPageUp   key.Binding
 	ScrollPageDown key.Binding
@@ -108,6 +111,15 @@ func defaultKeyMap() keyMap {
 		// binding must never have. ^J is LF, distinct from ^M everywhere, and
 		// is claimed by neither the textarea's keymap nor any cockpit global.
 		Newline: key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("⇧⏎", "newline")),
+
+		// ^U rather than ^Z. The textarea already binds ^U to
+		// DeleteBeforeCursor, which for the common case — one line, cursor at
+		// the end — clears the whole prompt already, so this widens a key that
+		// nearly does the job and matches every shell user's reflex for "kill
+		// the line". ^Z carries two conflicting reflexes and both are wrong
+		// here: it is SUSPEND in a terminal, and UNDO in every GUI editor —
+		// binding it to a destructive clear is precisely backwards.
+		ClearInput: key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("^U", "clear")),
 
 		// Scrolling from the INPUT pane. Reaching the transcript should not
 		// require leaving the box you type in: the whole point of reading back
