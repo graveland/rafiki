@@ -37,7 +37,7 @@ follows its delegation, so agents it spawns appear in the rail without
 resubscribing.
 
 ⏎ sends a prompt, ⇧⏎ (or ^J) inserts a newline, ⌥⏎ (or ^S) steers the turn
-already running, ^X aborts it.
+already running, esc (or ^X) aborts it.
 ⇥ cycles the three panes — input, agents, transcript — and each one owns its
 keys while it has focus. ⌥N hops to the next agent that needs you, ^↑/^↓ move,
 ^B collapses the rail, ^G toggles help. Children keep running after you quit —
