@@ -152,7 +152,13 @@ var (
 	styleRunning    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))              // cyan
 	styleToolResult = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))              // grey
 	styleToolArg    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))              // arg summary
-	styleDivider    = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("───")
+
+	// A failed tool call is the thing you are scrolling to find. It gets a red
+	// bar down its ENTIRE height — the call line and every row of output — so
+	// it is findable at a glance rather than by reading for a ✗ among the ✓s.
+	styleFailBar  = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
+	styleFailText = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleDivider  = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("───")
 
 	// Focus is shown two ways because one was not enough: a reversed badge in
 	// the footer, and an accent edge on the pane itself.
@@ -209,11 +215,14 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			if tc.DurationMs > 0 {
 				dur = styleMeta.Render(" (" + durStr(tc.DurationMs) + ")")
 			}
-			prefix := styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) + dur
+			var prefix string
 			if tc.IsError {
-				prefix += styleError.Render(" ✗")
+				prefix = styleFailBar.Render("  ▌ ") +
+					styleFailText.Render("⚒ "+tc.Name) + styleToolArg.Render(arg) +
+					dur + styleError.Render(" ✗")
 			} else {
-				prefix += styleMeta.Render(" ✓")
+				prefix = styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
+					dur + styleMeta.Render(" ✓")
 			}
 			sb.WriteString(prefix)
 			sb.WriteString("\n")
@@ -242,14 +251,19 @@ func (r *renderer) renderAssistant(b session.Block) string {
 					elided = len(lines) - maxToolResultLines
 					lines = lines[len(lines)-maxToolResultLines:]
 				}
+				gutter := styleToolResult.Render("    │ ")
+				text := styleToolResult
+				if tc.IsError {
+					gutter = styleFailBar.Render("  ▌ ") + styleToolResult.Render("│ ")
+					text = styleFailText
+				}
 				if elided > 0 {
-					sb.WriteString(styleMeta.Render(
-						"    │ … " + itoa(int64(elided)) + " earlier lines"))
+					sb.WriteString(gutter + styleMeta.Render(
+						"… "+itoa(int64(elided))+" earlier lines"))
 					sb.WriteString("\n")
 				}
 				for _, line := range lines {
-					r.writeWrapped(&sb, styleToolResult.Render("    │ "),
-						styleToolResult.Render(line))
+					r.writeWrapped(&sb, gutter, text.Render(line))
 				}
 			}
 		}

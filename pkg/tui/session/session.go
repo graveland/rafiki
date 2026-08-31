@@ -223,7 +223,14 @@ func (s *Session) attachToolResult(tr *rafikiv1.ToolResultBlock) {
 				continue
 			}
 			s.Blocks[i].ToolCalls[j].Result = TextFromContent(tr.GetContent())
-			s.Blocks[i].ToolCalls[j].IsError = tr.GetIsError()
+			// Never DOWNGRADE a failure. tool_execution_end may already have
+			// said this call failed, and it is the more direct witness — it
+			// carries the tool's own error. A stored tool_result block whose
+			// is_error is absent or false would otherwise turn a ✗ back into a
+			// ✓, which is the one direction that must never happen silently.
+			if tr.GetIsError() {
+				s.Blocks[i].ToolCalls[j].IsError = true
+			}
 			s.Blocks[i].ToolCalls[j].Running = false
 			return
 		}

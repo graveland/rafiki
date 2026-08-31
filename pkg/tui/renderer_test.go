@@ -280,3 +280,52 @@ func TestOnlyInterestingStopReasonsAreShown(t *testing.T) {
 		}
 	}
 }
+
+// A failed tool call is what you scroll to find. It gets a red bar down its
+// ENTIRE height — the call line and every row of output — so it is findable at
+// a glance rather than by reading for a ✗ among the ✓s.
+func TestFailedToolCallIsMarkedDownItsWholeHeight(t *testing.T) {
+	blocks := []session.Block{{
+		Kind: session.KindAssistant, Final: true,
+		ToolCalls: []session.ToolCall{{
+			Name: "bash", Input: `{"command":"git rev-list --count HEAD"}`,
+			Result:  "spawn refused: no executor satisfies\n  0 live executor(s)",
+			IsError: true,
+		}},
+	}}
+	lines := newRenderer().Lines(blocks, 1, 100)
+
+	var marked, total int
+	for _, l := range lines {
+		p := strings.TrimSpace(ansi.Strip(l))
+		if p == "" {
+			continue
+		}
+		total++
+		if strings.HasPrefix(p, "▌") {
+			marked++
+		}
+	}
+	if total == 0 {
+		t.Fatal("nothing rendered")
+	}
+	if marked != total {
+		t.Errorf("%d of %d rows carry the failure bar; every row of a failed call must:\n%s",
+			marked, total, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(ansi.Strip(strings.Join(lines, "\n")), "✗") {
+		t.Error("a failed call must still be marked ✗")
+	}
+}
+
+// A successful call stays unadorned — the bar has to mean something.
+func TestSuccessfulToolCallKeepsNoFailureBar(t *testing.T) {
+	blocks := []session.Block{{
+		Kind: session.KindAssistant, Final: true,
+		ToolCalls: []session.ToolCall{{Name: "bash", Result: "ok", IsError: false}},
+	}}
+	joined := ansi.Strip(strings.Join(newRenderer().Lines(blocks, 1, 100), "\n"))
+	if strings.Contains(joined, "▌") {
+		t.Errorf("a successful call must carry no failure bar:\n%s", joined)
+	}
+}
