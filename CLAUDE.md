@@ -646,6 +646,17 @@
   calls, which on a working agent is most of the screen. The agent's prose is
   the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
   tool calls none at all.
+- **A bracketed paste's line breaks are CARRIAGE RETURNS, not newlines.**
+  ultraviolet's paste buffer keeps them verbatim — a bare `\r` decodes as a
+  `KeyEnter` press whose `Text` is empty, so the raw byte is appended — so the
+  pasted content can contain no `\n` at all. Counting lines with
+  `strings.Count(content, "\n")` returned 1 for a forty-line paste, and every
+  real ⌘V of multi-line text sailed under the fold threshold and unrolled into
+  the input box. Verified over a pty across all three separators: CRLF and LF
+  folded, CR-only did not. `normalizeNewlines` folds CRLF and bare CR to LF
+  before counting AND before storing, so the agent never receives a prompt
+  whose line breaks are carriage returns either. Any future test that fakes a
+  paste with `\n` will pass while the real terminal path is broken — use `\r`.
 - **The input box has DYNAMIC height, so `bodyHeight` must subtract
   `ta.Height()` rather than a constant.** `bubbles`' textarea does the growing
   itself (`DynamicHeight` + `MinHeight`/`MaxHeight`, recalculated on every
