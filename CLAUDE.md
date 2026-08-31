@@ -610,6 +610,31 @@
   (now deleted). Pane state is evicted with its session and must never outlive
   one. Scroll position lives on `paneState`, deliberately NOT on
   `session.Session`, which is a pure event state machine.
+- **A `bubbles` textarea is constructed BLURRED, and its `Update` returns
+  immediately while it is** — so an unfocused textarea silently swallows every
+  printable key, with no error anywhere. `pkg/tui` shipped the entire
+  three-pane focus ring without ever calling `ta.Focus()`: the cockpit could
+  not be typed into in any pane, and because `⏎` reads `ta.Value()`, sending
+  looked broken too. Every focus change now goes through `Cockpit.setFocus`,
+  the one place the ring and the textarea's focus flag are set together — a
+  bare `c.focus = …` assignment re-opens the bug. `TestTypingReachesTheTextarea`
+  drives a rune through `Update`; nothing did before, which is how a completely
+  unusable UI passed a green gate. Second-order consequence, worth knowing
+  before adding any input binding: `⏎` is Send, and the textarea's own
+  `InsertNewline` is bound to `enter` AND `ctrl+m` — the same byte — so a
+  send-on-`⏎` input has NO newline key until one is given to it explicitly.
+  `⇧⏎` alone is not enough: it is only reportable by a terminal speaking the
+  Kitty keyboard protocol, and everywhere else it arrives as a bare CR and
+  SENDS, so the binding carries `ctrl+j` (LF, distinct from `^M` everywhere)
+  as its fallback.
+- **An empty transcript is a STEADY state, not a connection state.** The
+  renderer answered zero blocks with the literal string `"Connecting…"`, which
+  is the permanent condition of any child whose event log holds only its
+  lifecycle events — every freshly created agent until it is asked something.
+  The pane therefore claimed to be connecting forever, two rows above a status
+  line reading `connected`. `renderer.Lines` returns NO lines for no blocks;
+  the shell renders the empty case, because it is the only side that knows
+  whether a stream is open.
 - **Tool output is not markdown and must never go through glamour.** glamour
   joins consecutive newline-separated lines into one CommonMark paragraph, so
   `"alpha\nbeta\ngamma"` renders as `alpha beta gamma` and a 500-line grep
