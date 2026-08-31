@@ -107,6 +107,33 @@ func (p *claudeProvider) OutboundEcho(frame []byte, ts int64) [][]byte {
 	return frames
 }
 
+// OutboundEchoNative is the rafiki-native sibling of OutboundEcho.
+//
+// It reuses claudeUserEcho's parse rather than re-deciding which frames carry
+// user text: that judgment (reject abort, set_session_name, empty messages)
+// exists once and a second copy would drift from it.
+//
+// It does NOT append to p.st.messages — OutboundEcho already did that for the
+// pi path, and both run on the supervise goroutine for the same frame, so
+// appending here would record the user's message twice.
+func (p *claudeProvider) OutboundEchoNative(frame []byte, ts int64) []*rafikiv1.Event {
+	msg, _, ok := claudeUserEcho(frame, ts)
+	if !ok {
+		return nil
+	}
+	return []*rafikiv1.Event{{
+		TsUnixMs: ts,
+		Payload: &rafikiv1.Event_UserMessage{
+			UserMessage: &rafikiv1.UserMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: fmt.Sprint(msg.Content)}},
+				}},
+			},
+		},
+	}}
+}
+
 // claudeStreamFrame is the full claude stream-json envelope BusFrames needs to
 // translate. It is richer than the minimal claudeFrame used by Parse: it decodes
 // content blocks (text/thinking/tool_use/tool_result) and the result text.
