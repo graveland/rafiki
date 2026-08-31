@@ -646,6 +646,23 @@
   calls, which on a working agent is most of the screen. The agent's prose is
   the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
   tool calls none at all.
+- **A tool's OUTPUT rides a `UserMessage` carrying a `tool_result` block, both
+  live and in history — `ToolExecutionEnd` has no room for it.** That event
+  carries a duration and an error flag and no text, and the user turn holding
+  the result was persisted to `conversation_message` but never published, so
+  LIVE tool output did not exist: watching an agent work showed every call with
+  its arguments and its ✓/✗ and nothing of what it returned, and the output
+  appeared only on reattach. Verified against a real daemon — every event
+  arrived with `resultLen=0`. `Emitter.publishToolResult` publishes the same
+  shape `eventconv.EventsFromMessages` produces, so a live viewer and a
+  replayed one converge on one code path. No duplication on reattach: history
+  is applied first and the focus stream resumes from the log HEAD.
+- **Never DOWNGRADE a tool call's failure.** `tool_execution_end` is the more
+  direct witness — it carries the tool's own error — and `attachToolResult`
+  used to overwrite `IsError` with the stored block's value unconditionally,
+  so a block with `is_error` absent turned a ✗ back into a ✓. Only ever set it
+  true. (Note the stored blocks DO carry it: `agentloop.go`'s
+  `NewToolResultBlock(id, result, err != nil)`, verified in the database.)
 - **Tool RESULTS arrive on the user message, not the assistant one, and
   `TextFromContent` reads text blocks only.** Anthropic puts `tool_result` in
   the USER turn following the assistant's `tool_use`, so a tool-calling
