@@ -130,3 +130,39 @@ func findAssistant(t *testing.T, evs []*rafikiv1.Event) *rafikiv1.AssistantMessa
 	t.Fatalf("no assistant_message among %d published events", len(evs))
 	return nil
 }
+
+// Live tool output did not exist. ToolExecutionEnd carries a duration and an
+// error flag and no text, and the user turn holding the result was persisted
+// but never published — so watching an agent work showed every tool call with
+// its arguments and its ✓/✗ and nothing of what it returned. Verified against
+// a real daemon before the fix: every event arrived with resultLen=0.
+func TestToolEndPublishesTheOutput(t *testing.T) {
+	var out bytes.Buffer
+	em := NewEmitter(NewFrontend(bytes.NewReader(nil), &out, nil), "anthropic", nil)
+	sink := &nativeCapture{}
+	em.SetNativeSink(sink)
+
+	em.ToolStart("tu_1", "bash", []byte(`{"command":"false"}`))
+	em.ToolEnd("tu_1", "bash", "cat: /nope: No such file", true)
+
+	var tr *rafikiv1.ToolResultBlock
+	for _, ev := range sink.events {
+		for _, cb := range ev.GetUserMessage().GetContent() {
+			if b := cb.GetToolResult(); b != nil {
+				tr = b
+			}
+		}
+	}
+	if tr == nil {
+		t.Fatalf("no tool_result published; got %d events", len(sink.events))
+	}
+	if tr.GetToolUseId() != "tu_1" {
+		t.Errorf("tool_use_id = %q, want tu_1", tr.GetToolUseId())
+	}
+	if !tr.GetIsError() {
+		t.Error("a failed tool's result must carry is_error")
+	}
+	if got := tr.GetContent()[0].GetText().GetText(); got != "cat: /nope: No such file" {
+		t.Errorf("result text = %q", got)
+	}
+}

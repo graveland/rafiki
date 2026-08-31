@@ -202,6 +202,8 @@ func (e *Emitter) ToolEnd(id, name, result string, isErr bool) {
 		DurationMs: durationMs,
 		IsError:    isErr,
 	})
+	// ...and the output itself, which ToolExecutionEnd has no room for.
+	e.publishToolResult(id, result, isErr)
 }
 
 // AgentEnd emits the terminal agent_end frame (carrying every accumulated
