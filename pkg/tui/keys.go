@@ -73,7 +73,10 @@ type keyMap struct {
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Quit:          key.NewBinding(key.WithKeys("ctrl+c", "ctrl+d"), key.WithHelp("^C", "quit")),
+		// Both spellings in the help text: the confirmation notice is built
+		// from it, and naming only ^C after someone pressed ^D reads as the
+		// cockpit having missed the key.
+		Quit:          key.NewBinding(key.WithKeys("ctrl+c", "ctrl+d"), key.WithHelp("^C/^D", "quit")),
 		NextPane:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("⇥", "next pane")),
 		PrevPane:      key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧⇥", "prev pane")),
 		NextAttention: key.NewBinding(key.WithKeys("alt+n", "ctrl+pgdown"), key.WithHelp("⌥N", "next needing you")),

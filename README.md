@@ -1059,7 +1059,7 @@ puts it back.
 | `esc` / `^X` | Abort the running turn. |
 | `^A` / `^B` | Collapse or restore the agent rail. |
 | `^G` | Toggle the help overlay — every binding, grouped by pane. |
-| `^C` / `^D` | Quit — press twice within two seconds. Children keep running; reattach any time. |
+| `^C/^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time. |
 
 **Input pane** (where a session starts)
 
