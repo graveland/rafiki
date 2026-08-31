@@ -610,6 +610,29 @@
   (now deleted). Pane state is evicted with its session and must never outlive
   one. Scroll position lives on `paneState`, deliberately NOT on
   `session.Session`, which is a pure event state machine.
+- **`viewport.SoftWrap` is OFF and `pkg/tui`'s renderer wraps instead — do not
+  turn it back on.** The viewport re-wraps EVERY line on every `Update` AND
+  every `View`: measured on a real 6933-line transcript, `Update` cost 10.9ms
+  and `View` 10.6ms with it on, against 2.4µs and 167µs with it off. A held
+  arrow key therefore queued redraws faster than the terminal could draw them.
+  `renderer.Lines` takes a width, wraps with `ansi.Wordwrap`/`ansi.Hardwrap`,
+  and repeats each block's gutter prefix on continuation rows — which soft wrap
+  left bare. Two consequences: the renderer's cache is keyed on width so a
+  RESIZE invalidates it (one ~44ms rewrap, paid per drag-release rather than per
+  keystroke), and `TestLongLinesWrapRatherThanRunOffTheEdge` asserts the OUTCOME
+  rather than the flag, because the requirement outlived the mechanism.
+  Separately, `paneState.linesFor` skips the rebuild entirely when the
+  transcript has not changed (`paneSig`: block count, finalized count, width,
+  height, live-tail fingerprint) — scrolling changes the offset, not content.
+- **The focus ring is TWO stops, not three.** A separate transcript pane existed
+  only to give the viewport its own keymap while the textarea held every
+  plausible scroll key. The input pane scrolls directly now — PgUp/PgDn and
+  home/end outright, ↑/↓ shared with the cursor via a `ta.Line()` before/after
+  comparison — so the third stop bought nothing and cost a press on the most
+  frequent action. `^A` (agents) hides the rail, `⇥` reveals it, and `⏎` on an
+  agent puts it back: `railPeek` records that ⇥ was what revealed it, and an
+  explicit `^A` outranks a peek. Note this ring was a CORRECT answer to a
+  constraint a later change removed, and nothing prompted revisiting it.
 - **Three ways the cockpit tells you where you are, because each one alone was
   missed.** The focused pane carries a reversed badge in the footer AND an
   accent edge on the pane itself (a thickened rail cursor, a heavy divider, the
