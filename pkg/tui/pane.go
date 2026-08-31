@@ -17,10 +17,13 @@ import "charm.land/bubbles/v2/viewport"
 type paneState struct {
 	renderer *renderer
 	vp       viewport.Model
-	// atBottom drives the "↓ more below" footer marker. Task 7 makes the
-	// viewport the source of truth; until then a pane is always at the bottom,
-	// which is exactly what the pre-scrollback cockpit does.
+	// atBottom drives the follow-mode decision and the position readout.
 	atBottom bool
+	// contentLines is the transcript's REAL length, before the blank rows
+	// syncViewport prepends to bottom-anchor a short one. The viewport counts
+	// the padding, so asking it would report "12/12 100%" for a one-line
+	// conversation and move the number around as the window resized.
+	contentLines int
 }
 
 // pane returns childID's pane state, creating it on first use.

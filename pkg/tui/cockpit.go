@@ -19,6 +19,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
+	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -475,8 +476,15 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case focusTranscript:
-		if key.Matches(msg, k.Escape) {
+		switch {
+		case key.Matches(msg, k.Escape):
 			return c, c.setFocus(focusInput)
+		case key.Matches(msg, k.ScrollTop):
+			c.jumpScroll(true)
+			return c, nil
+		case key.Matches(msg, k.ScrollBottom):
+			c.jumpScroll(false)
+			return c, nil
 		}
 		return c, c.scrollFocused(msg)
 	}
@@ -488,6 +496,25 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, k.Newline) {
 		c.ta.InsertString("\n")
 		return c, nil
+	}
+	switch {
+	case key.Matches(msg, k.ScrollPageUp), key.Matches(msg, k.ScrollPageDown):
+		// Outright: a three-line box has no pages, so paging it is meaningless
+		// and the transcript is what was meant.
+		return c, c.scrollFocused(msg)
+	case key.Matches(msg, k.ScrollLineUp), key.Matches(msg, k.ScrollLineDown):
+		// Shared. The textarea gets first refusal and keeps the key whenever
+		// the cursor actually moves; only an ↑ with no line above it — the
+		// common single-line prompt — reaches the transcript. Comparing the
+		// row before and after is the only honest test of "the textarea could
+		// not use this", and it costs a multi-line prompt nothing.
+		row := c.ta.Line()
+		var cmd tea.Cmd
+		c.ta, cmd = c.ta.Update(msg)
+		if c.ta.Line() != row {
+			return c, cmd
+		}
+		return c, c.scrollFocused(msg)
 	}
 	if mode := c.modeForKey(msg); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
 		text := strings.TrimSpace(c.ta.Value())
@@ -517,6 +544,22 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // which is safe precisely because typing is inactive while this pane holds
 // focus. That is the payoff of the focus ring; with a permanently-focused
 // textarea none of those keys were available.
+// jumpScroll sends the focused pane to the top or the bottom. The viewport's
+// default keymap binds neither home nor end.
+func (c *Cockpit) jumpScroll(top bool) {
+	f := c.focused()
+	if f == "" {
+		return
+	}
+	p := c.pane(f)
+	if top {
+		p.vp.GotoTop()
+	} else {
+		p.vp.GotoBottom()
+	}
+	p.atBottom = p.vp.AtBottom()
+}
+
 func (c *Cockpit) scrollFocused(msg tea.KeyPressMsg) tea.Cmd {
 	f := c.focused()
 	if f == "" {
@@ -837,6 +880,7 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 	// the reader's eye has to move, and then move back, for the first screenful
 	// only. joinColumns used to do this padding; the viewport took over the
 	// pane and it was lost with it.
+	p.contentLines = len(lines)
 	if pad := h - len(lines); pad > 0 {
 		lines = append(make([]string, pad), lines...)
 	}
@@ -848,6 +892,44 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 		p.vp.SetYOffset(prev)
 	}
 	p.atBottom = p.vp.AtBottom()
+}
+
+// scrollPosition is the bottom-right readout: how far down the transcript the
+// last visible line is, and how long the transcript is.
+//
+// It reports the CONTENT's length, never the viewport's, because a short
+// transcript is padded to bottom-anchor it and the viewport counts that padding
+// as real. Lines rather than blocks: the reader is looking at lines, and a
+// percentage of blocks jumps unevenly when one block is a 500-line tool result.
+func (c *Cockpit) scrollPosition() string {
+	f := c.focused()
+	if f == "" {
+		return ""
+	}
+	p := c.panes[f]
+	if p == nil || p.contentLines == 0 {
+		return ""
+	}
+	total := p.contentLines
+	last := total
+	if !p.atBottom {
+		// Only meaningful while scrolled: at the bottom the last visible line
+		// IS the last line, and deriving it from the offset would disagree by
+		// the padding on a short transcript.
+		if seen := p.vp.YOffset() + p.vp.Height(); seen < total {
+			last = seen
+		}
+	}
+	pct := 100
+	if total > 0 {
+		pct = last * 100 / total
+	}
+	arrow := " "
+	if !p.atBottom {
+		arrow = "↓"
+	}
+	return arrow + " " + itoa(int64(last)) + "/" + itoa(int64(total)) +
+		" " + itoa(int64(pct)) + "%"
 }
 
 // footerHints renders the bindings that apply in the focused pane.
@@ -863,9 +945,9 @@ func (c *Cockpit) footerHints() string {
 	case focusRail:
 		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.Escape}
 	case focusTranscript:
-		bs = []key.Binding{k.Escape}
+		bs = []key.Binding{k.ScrollTop, k.ScrollBottom, k.Escape}
 	default:
-		bs = []key.Binding{k.Send, k.Newline, k.Steer, k.Abort}
+		bs = []key.Binding{k.Send, k.Newline, k.Steer, k.Abort, k.ScrollPageUp}
 	}
 	parts := make([]string, 0, len(bs)+3)
 	for _, b := range bs {
@@ -947,7 +1029,8 @@ func (c *Cockpit) View() tea.View {
 
 	railText := ""
 	if !c.railHidden {
-		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railWidth)
+		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railWidth,
+			c.focus == focusRail)
 	}
 
 	bodyHeight := c.bodyHeight()
@@ -987,17 +1070,28 @@ func (c *Cockpit) View() tea.View {
 		statusLine = c.notice
 	}
 
-	// The focused pane is NAMED, always. A modal UI whose mode is invisible is
-	// how someone gets stuck: keys stop doing what they expect and nothing on
-	// screen says why.
-	footer := "[" + c.focus.String() + "]  " + c.footerHints()
-	if f := c.focused(); f != "" {
-		if p := c.panes[f]; p != nil && !p.atBottom {
-			footer = "↓ more below  " + footer
+	// The focused pane is NAMED and MARKED, always. Naming it in the footer was
+	// not enough on its own: a word in a grey status line is not where the eye
+	// is, so finding the focused pane meant cycling ⇥ and watching for a
+	// response. The badge is reversed out so it reads as a state rather than as
+	// more footer text, and each pane carries an accent edge (below) so the
+	// answer is also where you are looking.
+	footer := styleFocusBadge.Render(" "+c.focus.String()+" ") + "  " + c.footerHints()
+	// Position goes bottom-RIGHT, on its own end of the line: a scroll readout
+	// that shares the left edge with the key hints moves every time the hints
+	// change, and a number that moves is a number you have to hunt for. The
+	// old marker said only "↓ more below", which answers whether you are at the
+	// bottom and not where you are.
+	if pos := c.scrollPosition(); pos != "" {
+		gap := c.width - ansi.StringWidth(ansi.Strip(footer)) - ansi.StringWidth(pos) - 1
+		if gap < 1 {
+			gap = 1
 		}
+		footer += strings.Repeat(" ", gap) + styleMeta.Render(pos)
 	}
 
-	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight) +
+	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight,
+		c.focus == focusTranscript) +
 		"\n" + styleDivider + "\n" + c.ta.View() + "\n" +
 		styleMeta.Render(statusLine) + "\n" + styleMeta.Render(footer)
 
@@ -1007,7 +1101,11 @@ func (c *Cockpit) View() tea.View {
 }
 
 // joinColumns places the rail beside the conversation, both clipped to height.
-func joinColumns(left, right string, leftWidth, rightWidth, height int) string {
+func joinColumns(left, right string, leftWidth, rightWidth, height int, rightFocused bool) string {
+	bar := styleMeta.Render("│")
+	if rightFocused {
+		bar = styleFocusEdge.Render("┃")
+	}
 	rightLines := lastN(strings.Split(right, "\n"), height)
 	if left == "" {
 		return strings.Join(rightLines, "\n")
@@ -1024,7 +1122,7 @@ func joinColumns(left, right string, leftWidth, rightWidth, height int) string {
 			r = rightLines[i]
 		}
 		sb.WriteString(padTo(l, leftWidth))
-		sb.WriteString("│")
+		sb.WriteString(bar)
 		sb.WriteString(clip(r, rightWidth))
 		if i < height-1 {
 			sb.WriteString("\n")
