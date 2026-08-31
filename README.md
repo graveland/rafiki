@@ -1048,7 +1048,7 @@ text box has focus, so panes take turns owning their keys instead.
 | `^↑` / `^↓` | Hop straight up and down the rail, without changing pane. |
 | `^X` | Abort the running turn. |
 | `^B` | Collapse or restore the rail. |
-| `^G` | Toggle the help line. |
+| `^G` | Toggle the help overlay — every binding, grouped by pane. |
 | `^C` / `^D` | Quit. Children keep running; reattach any time. |
 
 **Input pane** (where a session starts)
@@ -1056,9 +1056,15 @@ text box has focus, so panes take turns owning their keys instead.
 | Key | Does |
 |---|---|
 | `⏎` | Send a prompt — queues work for the agent. |
+| `⇧⏎` / `^J` | Insert a newline. Prompts can be as long as you like. |
 | `⌥⏎` / `^S` | Steer — inject into the turn already running. |
 
 Everything else goes to the text editor.
+
+`⇧⏎` needs a terminal that speaks the Kitty keyboard protocol — Ghostty, Kitty,
+WezTerm, recent iTerm2 and Alacritty do. Anywhere else the key arrives
+indistinguishable from a bare `⏎` and sends, which is why `^J` exists: it is LF
+rather than CR and every terminal can send it.
 
 **Rail pane**
 
