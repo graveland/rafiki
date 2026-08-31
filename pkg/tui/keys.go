@@ -70,7 +70,10 @@ func defaultKeyMap() keyMap {
 		HopNext:       key.NewBinding(key.WithKeys("ctrl+down"), key.WithHelp("^↓", "hop down")),
 		ToggleRail:    key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("^B", "rail")),
 		Help:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^G", "help")),
-		Abort:         key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("^X", "abort")),
+		// esc first: it is what muscle memory reaches for to stop a running
+		// turn, and it is free in the input pane (the textarea ignores it,
+		// and the other two panes match their own Escape before this).
+		Abort: key.NewBinding(key.WithKeys("esc", "ctrl+x"), key.WithHelp("esc", "abort turn")),
 
 		Send:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "send")),
 		Steer: key.NewBinding(key.WithKeys("alt+enter", "ctrl+s"), key.WithHelp("⌥⏎", "steer")),

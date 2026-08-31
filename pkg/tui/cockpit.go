@@ -27,6 +27,11 @@ import (
 	"go.graveland.dev/rafiki/pkg/tui/streams"
 )
 
+// quitConfirmWindow is how long a first ^C/^D stays armed. Long enough to be a
+// deliberate double-tap, short enough that a ^C now and a ^C a minute later are
+// two separate intentions rather than a quit.
+const quitConfirmWindow = 2 * time.Second
+
 // railWidth is fixed rather than proportional: names are short, and a rail that
 // resizes with the window makes the conversation reflow on every drag.
 const railWidth = 22
@@ -96,6 +101,13 @@ type Cockpit struct {
 	pending       string
 	showHelp      bool
 	railHidden    bool
+	// quitArmed is when the first ^C/^D landed. A single stray one must not
+	// throw away an attached session, so the key arms and the repeat quits.
+	quitArmed time.Time
+	// notice is a transient line shown instead of status, for things the user
+	// needs to see once (the quit confirmation) rather than a standing state.
+	notice      string
+	noticeUntil time.Time
 	// focus is the pane taking un-global keys. Zero value focusInput is
 	// correct: a session starts ready to type.
 	focus focusPane
@@ -159,6 +171,13 @@ func NewCockpit(opts Options) *Cockpit {
 }
 
 func (c *Cockpit) focused() string { return c.rail.Focus() }
+
+// setNotice shows one transient line in place of the status. It expires on the
+// existing 250ms tick rather than on a timer of its own.
+func (c *Cockpit) setNotice(s string) {
+	c.notice = s
+	c.noticeUntil = time.Now().Add(quitConfirmWindow)
+}
 
 // Init seeds the rail from ListChildren and starts the event pump.
 func (c *Cockpit) Init() tea.Cmd {
@@ -321,6 +340,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case tickMsg:
+		if c.notice != "" && time.Now().After(c.noticeUntil) {
+			c.notice = ""
+		}
 		return c, tick()
 
 	case tea.KeyPressMsg:
@@ -396,8 +418,20 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := c.keys
 
 	// ── globals: live from every pane ────────────────────────────────────
+	// Any keystroke that is not the repeat disarms, so ^C followed by typing
+	// does not leave a live trigger behind for minutes.
+	armed := !c.quitArmed.IsZero() && time.Since(c.quitArmed) < quitConfirmWindow
+	if !key.Matches(msg, k.Quit) {
+		c.quitArmed = time.Time{}
+	}
+
 	switch {
 	case key.Matches(msg, k.Quit):
+		if !armed {
+			c.quitArmed = time.Now()
+			c.setNotice("press " + k.Quit.Help().Key + " again to quit — children keep running")
+			return c, nil
+		}
 		c.quitting = true
 		c.shutdown()
 		return c, tea.Quit
@@ -455,7 +489,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.ta.InsertString("\n")
 		return c, nil
 	}
-	if mode := modeForKey(msg.String()); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
+	if mode := c.modeForKey(msg); mode != rafikiv1.SendMode_SEND_MODE_UNSPECIFIED {
 		text := strings.TrimSpace(c.ta.Value())
 		if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
 			if text == "" {
@@ -495,13 +529,19 @@ func (c *Cockpit) scrollFocused(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 
-func modeForKey(key string) rafikiv1.SendMode {
-	switch key {
-	case "enter":
+// modeForKey maps an input-pane keystroke to a send mode.
+//
+// It reads the BINDINGS rather than switching on key strings. It used to carry
+// its own copy of them, which is the drift footerHints was already rewritten to
+// avoid: a keymap change had to be made in two places and only one of them
+// failed a test.
+func (c *Cockpit) modeForKey(msg tea.KeyPressMsg) rafikiv1.SendMode {
+	switch {
+	case key.Matches(msg, c.keys.Send):
 		return rafikiv1.SendMode_SEND_MODE_PROMPT
-	case "alt+enter", "ctrl+s":
+	case key.Matches(msg, c.keys.Steer):
 		return rafikiv1.SendMode_SEND_MODE_STEER
-	case "ctrl+x":
+	case key.Matches(msg, c.keys.Abort):
 		return rafikiv1.SendMode_SEND_MODE_ABORT
 	}
 	return rafikiv1.SendMode_SEND_MODE_UNSPECIFIED
@@ -787,8 +827,19 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 	wasAtBottom := p.vp.AtBottom()
 	prev := p.vp.YOffset()
 
+	h := c.bodyHeight()
 	p.vp.SetWidth(c.convWidth())
-	p.vp.SetHeight(c.bodyHeight())
+	p.vp.SetHeight(h)
+	// Bottom-anchored: a transcript shorter than the pane is padded at the TOP
+	// so the newest line sits on the same row it will occupy once the
+	// conversation is long. A viewport renders from the top by default, which
+	// made a new or short conversation start at the ceiling and crawl down —
+	// the reader's eye has to move, and then move back, for the first screenful
+	// only. joinColumns used to do this padding; the viewport took over the
+	// pane and it was lost with it.
+	if pad := h - len(lines); pad > 0 {
+		lines = append(make([]string, pad), lines...)
+	}
 	p.vp.SetContentLines(lines)
 
 	if wasAtBottom {
@@ -931,6 +982,11 @@ func (c *Cockpit) View() tea.View {
 		conv += "\n" + stylePending.Render("⏳ "+c.pending)
 	}
 
+	statusLine := c.status
+	if c.notice != "" {
+		statusLine = c.notice
+	}
+
 	// The focused pane is NAMED, always. A modal UI whose mode is invisible is
 	// how someone gets stuck: keys stop doing what they expect and nothing on
 	// screen says why.
@@ -943,7 +999,7 @@ func (c *Cockpit) View() tea.View {
 
 	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight) +
 		"\n" + styleDivider + "\n" + c.ta.View() + "\n" +
-		styleMeta.Render(c.status) + "\n" + styleMeta.Render(footer)
+		styleMeta.Render(statusLine) + "\n" + styleMeta.Render(footer)
 
 	v := tea.NewView(out)
 	v.AltScreen = true
