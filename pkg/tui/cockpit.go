@@ -172,6 +172,14 @@ func NewCockpit(opts Options) *Cockpit {
 		c.rail.SetFocus(opts.ChildID)
 		c.sessions[opts.ChildID] = session.New(opts.ChildID)
 		c.lru = []string{opts.ChildID}
+	} else {
+		// A bare `rafiki attach` has nothing focused, so the input box can do
+		// nothing at all — Send returns early on an empty child. Opening on it
+		// puts the cursor in a box that cannot accept work and hides the one
+		// thing there is to do. Start on the rail; the seed narrows it further
+		// once the children are known.
+		c.focus = focusRail
+		c.ta.Blur()
 	}
 	return c
 }
@@ -200,6 +208,33 @@ func (c *Cockpit) seedCmd() tea.Cmd {
 			return seedMsg{err: err}
 		}
 		return seedMsg{children: resp.Msg.GetChildren()}
+	}
+}
+
+// landRailFirst decides where a bare `rafiki attach` should start, once the
+// children are known.
+//
+// One child is not a choice: open it, because making someone pick from a list
+// of one is a keystroke that carries no information. No children is not a
+// choice either, and the rail cannot be entered — fall back to the input so
+// the empty state reads normally rather than trapping focus on a pane with
+// nothing in it. Only a real choice lands on the rail, with the first row
+// already under the cursor so ↑/↓ and ⏎ work without a priming keystroke.
+func (c *Cockpit) landRailFirst() tea.Cmd {
+	nodes := c.rail.Nodes()
+	switch len(nodes) {
+	case 0:
+		return c.setFocus(focusInput)
+	case 1:
+		c.rail.SetFocus(nodes[0].ChildID)
+		c.selected = nodes[0].ChildID
+		cmd := c.openFocus(nodes[0].ChildID)
+		return tea.Batch(cmd, c.setFocus(focusInput))
+	default:
+		if c.selected == "" {
+			c.selected = nodes[0].ChildID
+		}
+		return c.setFocus(focusRail)
 	}
 }
 
@@ -298,6 +333,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if f := c.focused(); f != "" {
 				return c, c.openFocus(f)
 			}
+			return c, c.landRailFirst()
 		}
 		return c, nil
 
@@ -1063,8 +1099,10 @@ func (c *Cockpit) View() tea.View {
 	switch f := c.focused(); {
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
+	case f == "" && c.rail.Len() == 0:
+		conv = styleMeta.Render("No agents running. Start one with `rafiki create`.")
 	case f == "":
-		conv = styleMeta.Render("Pick an agent — ⇥ to the rail, ↑/↓ to move, ⏎ to open.")
+		conv = styleMeta.Render("Pick an agent — ↑/↓ to move, ⏎ to open.")
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)

@@ -27,10 +27,18 @@ const (
 
 // ToolCall is one tool invocation inside an assistant turn.
 type ToolCall struct {
-	ID         string
-	Name       string
-	Input      string
-	Result     string
+	ID     string
+	Name   string
+	Input  string
+	Result string
+	// HasResult records that a tool_result actually arrived, which is NOT the
+	// same as Result being non-empty: a tool can legitimately return nothing.
+	// Without it a call that never produced a result at all — interrupted, or
+	// its turn cut short — is indistinguishable from one that succeeded
+	// silently, and the transcript claims a ✓ for work that never finished.
+	// There are real instances of this: a production database here holds 38
+	// bash calls with no matching tool_result.
+	HasResult  bool
 	IsError    bool
 	Running    bool
 	DurationMs int64
@@ -223,6 +231,7 @@ func (s *Session) attachToolResult(tr *rafikiv1.ToolResultBlock) {
 				continue
 			}
 			s.Blocks[i].ToolCalls[j].Result = TextFromContent(tr.GetContent())
+			s.Blocks[i].ToolCalls[j].HasResult = true
 			// Never DOWNGRADE a failure. tool_execution_end may already have
 			// said this call failed, and it is the more direct witness — it
 			// carries the tool's own error. A stored tool_result block whose
@@ -262,6 +271,7 @@ func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
 				if block.ToolCalls[i].ID == b.ToolResult.GetToolUseId() {
 					block.ToolCalls[i].IsError = b.ToolResult.GetIsError()
 					block.ToolCalls[i].Result = TextFromContent(b.ToolResult.GetContent())
+					block.ToolCalls[i].HasResult = true
 				}
 			}
 		}

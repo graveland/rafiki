@@ -158,6 +158,7 @@ var (
 	// it is findable at a glance rather than by reading for a ✗ among the ✓s.
 	styleFailBar  = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 	styleFailText = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleWarn     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styleDivider  = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("───")
 
 	// Focus is shown two ways because one was not enough: a reversed badge in
@@ -220,9 +221,15 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				prefix = styleFailBar.Render("  ▌ ") +
 					styleFailText.Render("⚒ "+tc.Name) + styleToolArg.Render(arg) +
 					dur + styleError.Render(" ✗")
-			} else {
+			} else if tc.HasResult {
 				prefix = styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
 					dur + styleMeta.Render(" ✓")
+			} else {
+				// Ended, but no result ever arrived — interrupted, or its turn
+				// cut short. Claiming ✓ here says the work finished, which is
+				// the same false reassurance a swallowed error gave.
+				prefix = styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
+					dur + styleWarn.Render(" ⋯ no result")
 			}
 			sb.WriteString(prefix)
 			sb.WriteString("\n")
