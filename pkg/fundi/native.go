@@ -99,6 +99,34 @@ func (e *Emitter) publishTurnEnd() {
 	})
 }
 
+// publishToolResult publishes a completed tool's OUTPUT.
+//
+// It rides a UserMessage carrying a tool_result block because that is exactly
+// the shape history has: Anthropic puts tool_result in the user turn, so
+// EventsFromMessages produces this and a live viewer and a replayed one
+// converge on one code path rather than two.
+//
+// Without it, live tool output did not exist. ToolExecutionEnd carries a
+// duration and an error flag and no text, and the user turn holding the result
+// was persisted but never published — so watching an agent work showed every
+// tool call with its arguments, its ✓ or ✗, and nothing whatsoever of what it
+// returned. The output only appeared on reattach, from the conversation store.
+func (e *Emitter) publishToolResult(id, result string, isErr bool) {
+	if e.native == nil {
+		return
+	}
+	e.publishNative(&rafikiv1.UserMessage{
+		Content: []*rafikiv1.ContentBlock{{
+			Index: 0,
+			Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+				ToolUseId: id,
+				IsError:   isErr,
+				Content:   nativeText(result),
+			}},
+		}},
+	})
+}
+
 func (e *Emitter) publishNative(payload any) {
 	if e.native == nil {
 		return
