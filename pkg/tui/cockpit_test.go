@@ -1053,3 +1053,21 @@ func TestBareAttachWithNoChildrenFallsBackToInput(t *testing.T) {
 		t.Error("the empty state must say there is nothing to attach to")
 	}
 }
+
+// The confirmation is built from the binding's help text, so naming only ^C
+// after someone pressed ^D reads as the cockpit having missed the key.
+func TestQuitConfirmationNamesBothKeys(t *testing.T) {
+	for _, k := range []tea.KeyPressMsg{
+		{Code: 'c', Mod: tea.ModCtrl},
+		{Code: 'd', Mod: tea.ModCtrl},
+	} {
+		c := newTestCockpit("c_1")
+		c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		c.Update(k)
+		for _, want := range []string{"^C", "^D"} {
+			if !strings.Contains(c.notice, want) {
+				t.Errorf("after %v the notice is %q, want it to name %s", k, c.notice, want)
+			}
+		}
+	}
+}
