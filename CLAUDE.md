@@ -646,6 +646,24 @@
   calls, which on a working agent is most of the screen. The agent's prose is
   the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
   tool calls none at all.
+- **A routed tool must return an ERROR, never the error's text as a successful
+  result.** `agentloop` computes `is_error` as `err != nil` (`agentloop.go`'s
+  `NewToolResultBlock(use.id, result, err != nil)`), so a tool that swallows a
+  failure into `NewErrorResult(err), nil` reports SUCCESS carrying the
+  diagnostic as its output. `executorProxy.Execute` did exactly that, which
+  meant every executor-routed tool failure — `read`, `write`, `edit`, `glob`,
+  `grep`, `ls`, `bash` and all seven `lsp_*` — rendered a ✓, and, worse, told
+  the MODEL its call had succeeded and left it to infer otherwise from the
+  prose. An unbindable executor is the common way in: nothing ran at all.
+  `jobs.go` had the same swallow for `bash_start`/`bash_output`/`bash_kill`,
+  two lines below a validation failure that correctly returned an error.
+  Nothing is lost by returning the error: agentloop substitutes
+  `"Error executing tool: %v"` when a failing tool yields no text.
+  **Still soft, deliberately unreviewed:** `websearch` and `webfetch` return
+  `NewErrorResult(..), nil` for network and input failures. Those are
+  daemon-tier tools whose failures the model can reasonably retry, which is a
+  different question from infrastructure that never ran — decide it on its own
+  merits rather than by analogy to this fix.
 - **A tool's OUTPUT rides a `UserMessage` carrying a `tool_result` block, both
   live and in history — `ToolExecutionEnd` has no room for it.** That event
   carries a duration and an error flag and no text, and the user turn holding
