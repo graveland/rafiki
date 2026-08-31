@@ -610,6 +610,25 @@
   (now deleted). Pane state is evicted with its session and must never outlive
   one. Scroll position lives on `paneState`, deliberately NOT on
   `session.Session`, which is a pure event state machine.
+- **Tool RESULTS arrive on the user message, not the assistant one, and
+  `TextFromContent` reads text blocks only.** Anthropic puts `tool_result` in
+  the USER turn following the assistant's `tool_use`, so a tool-calling
+  conversation alternates with the "user" half being nothing but results.
+  `applyUserMessage` flattened content to text, which meant every one of those
+  rendered as an EMPTY user bubble and every tool's output was dropped — 606
+  tool calls on one real conversation, 0 outputs shown. Results are routed onto
+  the call they answer now (searching assistant blocks backwards, since
+  parallel tool use answers several calls made in one block), and a
+  results-only message appends no block at all.
+  Two related traps in the same path: `ToolCall.Input` existed and was never
+  populated, so a call rendered as a bare `bash` with no argument — the
+  difference between watching an agent work and deciding whether to abort it
+  blind; and `applyToolStart` appended unconditionally, which duplicated every
+  call now that the assistant message naming the `tool_use` is published BEFORE
+  the tool runs (invisible for as long as fundi published no assistant messages
+  at all). `toolArgKeys` is pinned to the real registry by
+  `TestToolArgKeysNameRealTools` via `tools.TierOf`, because a guessed tool name
+  degrades silently to the JSON fallback and looks like it works.
 - **The event log is NOT the transcript, and two unrelated ordinal spaces meet
   in the cockpit.** `conversations.event_log` begins whenever the event plane
   was deployed; `conversations.conversation_message` holds every message ever

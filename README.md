@@ -1052,10 +1052,10 @@ text box has focus, so panes take turns owning their keys instead.
 | `⌥N` / `^PgDn` | Hop to the next agent that needs you. |
 | `⌥P` / `^PgUp` | Hop to the previous agent that needs you. |
 | `^↑` / `^↓` | Hop straight up and down the rail, without changing pane. |
-| `^X` | Abort the running turn. |
+| `esc` / `^X` | Abort the running turn. |
 | `^B` | Collapse or restore the rail. |
 | `^G` | Toggle the help overlay — every binding, grouped by pane. |
-| `^C` / `^D` | Quit. Children keep running; reattach any time. |
+| `^C` / `^D` | Quit — press twice within two seconds. Children keep running; reattach any time. |
 
 **Input pane** (where a session starts)
 
