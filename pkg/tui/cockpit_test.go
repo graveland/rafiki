@@ -1168,3 +1168,73 @@ func TestSendExpandsAndClearsPastes(t *testing.T) {
 		t.Error("pastes outlived the prompt they belonged to")
 	}
 }
+
+// A terminal sends CARRIAGE RETURNS for the line breaks inside a bracketed
+// paste, and the paste buffer keeps them verbatim — so the content contains no
+// \n at all, counting by \n returned 1 for a forty-line paste, and every real
+// ⌘V of multi-line text sailed under the threshold and unrolled into the box.
+func TestCarriageReturnPasteIsCountedAndFolded(t *testing.T) {
+	for _, tc := range []struct{ name, sep string }{
+		{"CR", "\r"}, {"CRLF", "\r\n"}, {"LF", "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestCockpit("c_1")
+			c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			var body strings.Builder
+			for i := 0; i < 40; i++ {
+				if i > 0 {
+					body.WriteString(tc.sep)
+				}
+				body.WriteString("line")
+			}
+
+			c.Update(tea.PasteMsg{Content: body.String()})
+
+			shown := c.ta.Value()
+			if !strings.Contains(shown, "40 lines") {
+				t.Fatalf("a 40-line %s paste was not folded; box holds %q",
+					tc.name, truncate(shown, 60))
+			}
+			// What gets SENT must have real newlines: an agent should not
+			// receive a prompt whose line breaks are carriage returns.
+			expanded := c.expandPastes(shown)
+			if strings.Contains(expanded, "\r") {
+				t.Error("carriage returns survived into the sent prompt")
+			}
+			if n := strings.Count(expanded, "\n"); n != 39 {
+				t.Errorf("expanded paste has %d newlines, want 39", n)
+			}
+		})
+	}
+}
+
+// Lines alone was not enough: one wide line is a single line of many thousands
+// of characters and pinned the box at its cap.
+func TestWidePasteFoldsEvenOnOneLine(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	wide := strings.Repeat("x", pasteCharThreshold+1)
+
+	c.Update(tea.PasteMsg{Content: wide})
+
+	shown := c.ta.Value()
+	if strings.Contains(shown, wide) {
+		t.Errorf("a %d-character single-line paste was not folded", len(wide))
+	}
+	if !strings.Contains(shown, "chars") {
+		t.Errorf("a one-line paste must be measured in chars; got %q", shown)
+	}
+	if got := c.expandPastes(shown); got != wide {
+		t.Error("expansion did not restore the wide paste")
+	}
+}
+
+func TestPasteUnderBothBoundsIsInsertedWhole(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	small := strings.Repeat("y", pasteCharThreshold-1)
+	c.Update(tea.PasteMsg{Content: small})
+	if c.ta.Value() != small {
+		t.Error("a paste under both bounds must be inserted whole")
+	}
+}

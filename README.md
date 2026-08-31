@@ -1067,7 +1067,7 @@ puts it back.
 |---|---|
 | `⏎` | Send a prompt — queues work for the agent. |
 | `⇧⏎` / `^J` | Insert a newline. Prompts can be as long as you like. |
-| paste | Over six lines folds to `[pasted #1: 40 lines]`; paste again to insert it in full. |
+| paste | Over six lines or 800 characters folds to `[pasted #1: 40 lines]`; paste again to insert it in full. |
 | `⌥⏎` / `^S` | Steer — inject into the turn already running. |
 | `PgUp` / `PgDn` | Scroll the transcript without leaving the input box. |
 | `home` / `end` | Jump to the top / bottom of the transcript. |

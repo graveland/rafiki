@@ -33,11 +33,18 @@ import (
 // two separate intentions rather than a quit.
 const quitConfirmWindow = 2 * time.Second
 
-// pasteLineThreshold is how many lines a paste may have before it is folded
-// into a token. Small pastes are what you meant to type and belong in the box;
-// a file is not, and unrolling one buries the conversation and pushes the
-// input box to its cap where it stops showing you the end of what you typed.
-const pasteLineThreshold = 6
+// A paste is folded into a token once it passes EITHER bound.
+//
+// Lines alone was not enough: a minified file, a long URL or one wide log line
+// is a SINGLE line of many thousands of characters, and it went straight into
+// the box — pinning the input at its ten-row cap where it stops showing the
+// end of what you typed, which is what folding exists to prevent. The
+// character bound sits near what the box can show at that cap, so the rule is
+// roughly "more than fits on screen".
+const (
+	pasteLineThreshold = 6
+	pasteCharThreshold = 800
+)
 
 // pastedText is one folded paste, held until the prompt is sent.
 type pastedText struct {
@@ -621,8 +628,9 @@ func (c *Cockpit) handlePaste(content string) tea.Cmd {
 	if c.focus != focusInput || content == "" {
 		return nil
 	}
+	content = normalizeNewlines(content)
 	lines := strings.Count(content, "\n") + 1
-	if lines <= pasteLineThreshold {
+	if lines <= pasteLineThreshold && len(content) <= pasteCharThreshold {
 		c.ta.InsertString(content)
 		return nil
 	}
@@ -632,12 +640,37 @@ func (c *Cockpit) handlePaste(content string) tea.Cmd {
 			return nil
 		}
 	}
-	token := "[pasted #" + itoa(int64(len(c.pastes)+1)) + ": " +
-		itoa(int64(lines)) + " lines]"
+	// Describe it in the unit that made it too big: "1 lines" tells a reader
+	// nothing about a 40KB paste that happens to contain no line breaks.
+	size := itoa(int64(lines)) + " lines"
+	if lines == 1 {
+		size = itoa(int64(len(content))) + " chars"
+	}
+	token := "[pasted #" + itoa(int64(len(c.pastes)+1)) + ": " + size + "]"
 	c.pastes = append(c.pastes, pastedText{token: token, text: content})
 	c.ta.InsertString(token)
 	c.setNotice("paste folded — paste again to insert it in full")
 	return nil
+}
+
+// normalizeNewlines folds CRLF and bare CR to LF.
+//
+// A terminal sends CARRIAGE RETURNS for the line breaks inside a bracketed
+// paste, and ultraviolet's paste buffer keeps them verbatim: a bare \r decodes
+// as a KeyEnter press whose Text is empty, so the raw byte is appended. So the
+// pasted content genuinely contains no \n at all, counting lines by \n
+// returned 1 for a forty-line paste, and every real ⌘V of multi-line text
+// sailed under the threshold and unrolled into the box. Verified over a pty:
+// CRLF and LF folded, CR-only did not.
+//
+// Normalizing here also fixes what gets SENT — an agent should not receive a
+// prompt whose line breaks are carriage returns.
+func normalizeNewlines(s string) string {
+	if !strings.ContainsRune(s, '\r') {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
 }
 
 // expandPastes puts the folded text back before the prompt leaves. A token the
