@@ -646,6 +646,13 @@
   calls, which on a working agent is most of the screen. The agent's prose is
   the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
   tool calls none at all.
+- **`ToolCall.HasResult` is not `Result != ""`.** A tool can legitimately
+  return nothing, and a call that never produced a result at all — interrupted,
+  or its turn cut short — is otherwise indistinguishable from a silent success,
+  so the transcript drew a ✓ for work that never finished. Real instances
+  exist: the production database here holds 38 `bash` calls with no matching
+  `tool_result`. `attachToolResult` sets the flag; the renderer draws ✓ only
+  when it is set and `⋯ no result` otherwise.
 - **A routed tool must return an ERROR, never the error's text as a successful
   result.** `agentloop` computes `is_error` as `err != nil` (`agentloop.go`'s
   `NewToolResultBlock(use.id, result, err != nil)`), so a tool that swallows a
