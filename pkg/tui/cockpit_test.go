@@ -3,6 +3,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -1266,5 +1268,95 @@ func TestClearInputEmptiesTheBoxAndItsPastes(t *testing.T) {
 	}
 	if c.quitting {
 		t.Error("^U quit the cockpit")
+	}
+}
+
+// ── attachments ──────────────────────────────────────────────────────────────
+
+// A terminal never sends image DATA through a bracketed paste. Dragging a file
+// pastes its PATH, which is the only way an image reaches the input box today.
+func TestPastingAnImagePathStagesIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	c.Update(tea.PasteMsg{Content: path})
+
+	if len(c.attachments) != 1 {
+		t.Fatalf("staged %d attachments, want 1", len(c.attachments))
+	}
+	if got := c.attachments[0].mediaType; got != "image/png" {
+		t.Errorf("media type = %q, want image/png", got)
+	}
+	if !strings.Contains(c.ta.Value(), "shot.png") {
+		t.Errorf("the box should name the attachment; got %q", c.ta.Value())
+	}
+	// The path itself must not be left in the prompt as text.
+	if strings.Contains(c.ta.Value(), dir) {
+		t.Errorf("the raw path leaked into the prompt: %q", c.ta.Value())
+	}
+}
+
+// Ordinary text that merely looks path-shaped is untouched, and so is a path
+// to something that is not there.
+func TestNonImagePastesAreUnaffected(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	c.Update(tea.PasteMsg{Content: "/no/such/file.png"})
+	if len(c.attachments) != 0 {
+		t.Error("a path to a missing file must not stage an attachment")
+	}
+	if c.ta.Value() != "/no/such/file.png" {
+		t.Errorf("a missing path must land as plain text; got %q", c.ta.Value())
+	}
+
+	c.ta.Reset()
+	c.Update(tea.PasteMsg{Content: "just some prose"})
+	if len(c.attachments) != 0 || c.ta.Value() != "just some prose" {
+		t.Errorf("prose was mangled: attachments=%d value=%q", len(c.attachments), c.ta.Value())
+	}
+}
+
+// An attachment alone is a message: a screenshot with nothing to say still has
+// something to say. Requiring text would make it unsendable.
+func TestAnAttachmentAloneCanBeSent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "only.png")
+	if err := os.WriteFile(path, []byte("\x89PNGdata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.PasteMsg{Content: path})
+	c.ta.Reset() // no text at all, just the attachment
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("an attachment with no text must still send")
+	}
+	if len(c.attachments) != 0 {
+		t.Error("attachments outlived the prompt they rode on")
+	}
+}
+
+// ^U clears staged attachments too — the token that referred to them is gone.
+func TestClearInputDropsStagedAttachments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.png")
+	if err := os.WriteFile(path, []byte("\x89PNGdata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.PasteMsg{Content: path})
+
+	c.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	if len(c.attachments) != 0 {
+		t.Error("^U left attachments staged with no token referring to them")
 	}
 }
