@@ -482,72 +482,23 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 	}
 }
 
+// nativeAssistant maps one claude assistant frame to rafiki-native events.
+//
+// The emitted vocabulary is deliberately IDENTICAL to fundi's — AssistantMessage
+// then ToolExecutionStart then ToolExecutionEnd — because pkg/tui/session
+// reduces both with one code path and only that ordering is correct there.
+//
+// Two events this deliberately does NOT emit:
+//
+//   - TurnStart. BusFrames runs before BusFramesNative on every line and its
+//     openTurn() already set the shared p.st.turnActive, so the guard here was
+//     always false and this never fired in production anyway.
+//   - ContentBlockDelta. claude's stream-json carries COMPLETE messages, so a
+//     synthesized delta duplicates the AssistantMessage below; worse, the
+//     cockpit appends delta text to LastAssistant(), which before the message
+//     arrives is the PREVIOUS turn's finalized block.
 func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel string, ts int64) []*rafikiv1.Event {
 	var out []*rafikiv1.Event
-
-	// TurnStart if not already active.
-	if !p.st.turnActive {
-		p.st.turnActive = true
-		out = append(out, &rafikiv1.Event{
-			TsUnixMs: ts,
-			Payload:  &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}},
-		})
-	}
-
-	// ContentBlockDeltas for text/thinking.
-	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			if b.Text != "" {
-				out = append(out, &rafikiv1.Event{
-					TsUnixMs: ts,
-					Payload: &rafikiv1.Event_ContentBlockDelta{
-						ContentBlockDelta: &rafikiv1.ContentBlockDelta{
-							Delta: &rafikiv1.ContentBlockDelta_Text{Text: b.Text},
-						},
-					},
-				})
-			}
-		case "thinking":
-			if b.Thinking != "" {
-				out = append(out, &rafikiv1.Event{
-					TsUnixMs: ts,
-					Payload: &rafikiv1.Event_ContentBlockDelta{
-						ContentBlockDelta: &rafikiv1.ContentBlockDelta{
-							Delta: &rafikiv1.ContentBlockDelta_Thinking{Thinking: b.Thinking},
-						},
-					},
-				})
-			}
-		case "tool_use":
-
-			out = append(out, &rafikiv1.Event{
-				TsUnixMs: ts,
-				Payload: &rafikiv1.Event_ToolExecutionStart{
-					ToolExecutionStart: &rafikiv1.ToolExecutionStart{
-						ToolUseId: b.ID,
-						Name:      b.Name,
-					},
-				},
-			})
-		}
-	}
-
-	// ToolExecutionEnd for any tool results embedded in the assistant frame.
-	for _, b := range blocks {
-		if b.Type == "tool_result" {
-			_ = toolResultText(b.Content)
-			out = append(out, &rafikiv1.Event{
-				TsUnixMs: ts,
-				Payload: &rafikiv1.Event_ToolExecutionEnd{
-					ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
-						ToolUseId: b.ToolUseID,
-						IsError:   b.IsError,
-					},
-				},
-			})
-		}
-	}
 
 	// Build the content blocks for the assistant message.
 	var content []*rafikiv1.ContentBlock
@@ -594,29 +545,51 @@ func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel
 		}
 	}
 
-	out = append(out, &rafikiv1.Event{
-		TsUnixMs: ts,
-		Payload: &rafikiv1.Event_AssistantMessage{
-			AssistantMessage: &rafikiv1.AssistantMessage{
-				Content:    content,
-				StopReason: rafikiv1.StopReason_STOP_REASON_TOOL_USE,
+	if len(content) > 0 {
+		out = append(out, &rafikiv1.Event{
+			TsUnixMs: ts,
+			Payload: &rafikiv1.Event_AssistantMessage{
+				AssistantMessage: &rafikiv1.AssistantMessage{
+					Content:    content,
+					StopReason: rafikiv1.StopReason_STOP_REASON_TOOL_USE,
+				},
 			},
-		},
-	})
+		})
+	}
+
+	// Execution events follow the message that declares them.
+	for _, b := range blocks {
+		if b.Type == "tool_use" {
+			out = append(out, &rafikiv1.Event{
+				TsUnixMs: ts,
+				Payload: &rafikiv1.Event_ToolExecutionStart{
+					ToolExecutionStart: &rafikiv1.ToolExecutionStart{
+						ToolUseId: b.ID,
+						Name:      b.Name,
+					},
+				},
+			})
+		}
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			out = append(out, &rafikiv1.Event{
+				TsUnixMs: ts,
+				Payload: &rafikiv1.Event_ToolExecutionEnd{
+					ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
+						ToolUseId: b.ToolUseID,
+						IsError:   b.IsError,
+					},
+				},
+			})
+		}
+	}
 
 	return out
 }
 
 func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*rafikiv1.Event {
 	var out []*rafikiv1.Event
-
-	if !p.st.turnActive {
-		p.st.turnActive = true
-		out = append(out, &rafikiv1.Event{
-			TsUnixMs: ts,
-			Payload:  &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}},
-		})
-	}
 
 	for _, b := range blocks {
 		if b.Type != "tool_result" {

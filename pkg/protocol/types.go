@@ -161,8 +161,10 @@ type SpawnRequest struct {
 	Type string `json:"type"`
 	ID   string `json:"id,omitempty"`
 
-	// Kind selects the child protocol/binary: "pi" (default, when empty) or
-	// "claude" (Claude Code CLI, driven over stream-json).
+	// Kind selects the child protocol/binary: "fundi" (default, when empty —
+	// this repo's own agent runtime, run in-process) or "claude" (Claude Code
+	// CLI, driven over stream-json). See kinds.go; "pi" was a third kind and
+	// was retired, with no alias.
 	Kind string `json:"kind,omitempty"`
 
 	// ConfigDir, for kind=claude, is exported to the child as CLAUDE_CONFIG_DIR
