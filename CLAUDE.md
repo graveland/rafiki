@@ -646,6 +646,12 @@
   calls, which on a working agent is most of the screen. The agent's prose is
   the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
   tool calls none at all.
+- **The input box has DYNAMIC height, so `bodyHeight` must subtract
+  `ta.Height()` rather than a constant.** `bubbles`' textarea does the growing
+  itself (`DynamicHeight` + `MinHeight`/`MaxHeight`, recalculated on every
+  insert); the cockpit's job is only to stop assuming three rows. A fixed
+  subtraction overlaps the transcript by exactly the rows the box gains, and
+  the failure is invisible until someone types a long prompt.
 - **`ToolCall.HasResult` is not `Result != ""`.** A tool can legitimately
   return nothing, and a call that never produced a result at all — interrupted,
   or its turn cut short — is otherwise indistinguishable from a silent success,
