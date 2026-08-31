@@ -180,7 +180,21 @@ func (p *executorProxy) InputSchema() Schema { return p.tool.InputSchema() }
 func (p *executorProxy) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	result, err := p.client.Execute(ctx, p.tool.Name(), json.RawMessage(input))
 	if err != nil {
-		return NewErrorResult(err), nil
+		// Return the ERROR, not the error's text as a successful result.
+		//
+		// This used to be `NewErrorResult(err), nil`, which made agentloop
+		// compute is_error as `err != nil` = false: every executor-routed tool
+		// failure — read, write, edit, glob, grep, ls, bash and all seven
+		// lsp_* — was reported as a SUCCESS carrying the failure message as
+		// its output. The TUI drew a ✓ on it, and, worse, the model was told
+		// the same thing and had to infer from the prose that its call had
+		// failed. An unbindable executor is the common way to hit it: nothing
+		// ran at all, and the model heard that it had.
+		//
+		// Nothing is lost by returning it: agentloop substitutes
+		// "Error executing tool: %v" when a failing tool yields no text, so
+		// the diagnostic still reaches the model — now marked as a failure.
+		return ToolResult{}, err
 	}
 	return NewTextResult(result), nil
 }

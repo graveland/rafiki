@@ -85,7 +85,7 @@ func (t *bashStartTool) Execute(ctx context.Context, input ToolInput) (ToolResul
 	}
 	handle, err := t.client.StartJob(ctx, params.Command)
 	if err != nil {
-		return NewErrorResult(fmt.Errorf("bash_start: %w", err)), nil
+		return ToolResult{}, fmt.Errorf("bash_start: %w", err)
 	}
 	return NewTextResult(fmt.Sprintf(
 		"Started background job %s\nPoll it with bash_output {\"handle\":%q}; stop it with bash_kill.",
@@ -138,7 +138,7 @@ func (t *bashOutputTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 	// already bounds what it retains.
 	snap, err := t.client.JobOutput(ctx, params.Handle, 0)
 	if err != nil {
-		return NewErrorResult(fmt.Errorf("bash_output: %w", err)), nil
+		return ToolResult{}, fmt.Errorf("bash_output: %w", err)
 	}
 	if !snap.Found {
 		// Deliberately not a time window: a finished job's output is kept until
@@ -212,7 +212,7 @@ func (t *bashKillTool) Execute(ctx context.Context, input ToolInput) (ToolResult
 		return ToolResult{}, fmt.Errorf("bash_kill: handle is required")
 	}
 	if err := t.client.KillJob(ctx, params.Handle); err != nil {
-		return NewErrorResult(fmt.Errorf("bash_kill: %w", err)), nil
+		return ToolResult{}, fmt.Errorf("bash_kill: %w", err)
 	}
 	return NewTextResult(fmt.Sprintf("Killed job %s and everything it spawned.", params.Handle)), nil
 }

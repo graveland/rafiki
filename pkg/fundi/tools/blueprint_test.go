@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -194,4 +196,46 @@ func TestToolOptsWebFlowsToMaterialize(t *testing.T) {
 	if gotWeb {
 		t.Fatal("Materialize received Web=true when ToolOpts.Web was false (zero value)")
 	}
+}
+
+// A routed tool whose executor call fails must FAIL, not return the failure
+// text as a successful result. agentloop computes is_error as `err != nil`, so
+// swallowing the error reported every executor-routed tool failure — read,
+// write, edit, glob, grep, ls, bash, every lsp_* — as a success carrying the
+// diagnostic as output. The TUI drew a ✓ on it, and the model was told the
+// same. An unbindable executor is the common way in: nothing ran at all.
+func TestRoutedToolPropagatesAnExecutorFailure(t *testing.T) {
+	proxy := &executorProxy{
+		tool:   readOnlyProbeTool{},
+		client: failingExecClient{err: errors.New(`spawn refused: no executor satisfies "machine=greyshift"`)},
+	}
+
+	res, err := proxy.Execute(context.Background(), ToolInput(`{}`))
+	if err == nil {
+		t.Fatalf("an executor failure returned success with result %q; "+
+			"agentloop marks is_error from the error, so this renders as a ✓ "+
+			"and tells the model its call worked", res.Text)
+	}
+	if !strings.Contains(err.Error(), "no executor satisfies") {
+		t.Errorf("error = %v, want the executor's own diagnostic", err)
+	}
+}
+
+// failingExecClient embeds the existing stub so only Execute has to differ.
+type failingExecClient struct {
+	stubExecutorClient
+	err error
+}
+
+func (f failingExecClient) Execute(context.Context, string, json.RawMessage) (string, error) {
+	return "", f.err
+}
+
+type readOnlyProbeTool struct{}
+
+func (readOnlyProbeTool) Name() string        { return "bash" }
+func (readOnlyProbeTool) Description() string { return "probe" }
+func (readOnlyProbeTool) InputSchema() Schema { return Schema{Type: "object"} }
+func (readOnlyProbeTool) Execute(context.Context, ToolInput) (ToolResult, error) {
+	return NewTextResult("unused"), nil
 }
