@@ -9,10 +9,14 @@ import "charm.land/bubbles/v2/key"
 // rather than a switch on msg.String().
 type focusPane int
 
+// The ring is TWO stops, not three. A separate transcript pane existed to give
+// the viewport its own keymap while a textarea held every plausible scroll key
+// — but the input pane scrolls directly now (PgUp/PgDn/home/end outright, ↑/↓
+// when the cursor cannot move), so the third stop bought nothing and cost a
+// press on every agent switch, which is the move people make most.
 const (
 	focusInput focusPane = iota
 	focusRail
-	focusTranscript
 )
 
 func (p focusPane) String() string {
@@ -21,8 +25,6 @@ func (p focusPane) String() string {
 		return "input"
 	case focusRail:
 		return "agents"
-	case focusTranscript:
-		return "transcript"
 	}
 	return "?"
 }
@@ -78,8 +80,13 @@ func defaultKeyMap() keyMap {
 		PrevAttention: key.NewBinding(key.WithKeys("alt+p", "ctrl+pgup"), key.WithHelp("⌥P", "prev needing you")),
 		HopPrev:       key.NewBinding(key.WithKeys("ctrl+up"), key.WithHelp("^↑", "hop up")),
 		HopNext:       key.NewBinding(key.WithKeys("ctrl+down"), key.WithHelp("^↓", "hop down")),
-		ToggleRail:    key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("^B", "rail")),
-		Help:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^G", "help")),
+		// ^A for "agents". It costs the textarea its line-start key, which is
+		// a real loss now that home is a scroll key too — but the box is three
+		// lines and a mnemonic on the move you make constantly is worth more
+		// than line-start on a short prompt. ^B stays as an alias for muscle
+		// memory; alt+< and ctrl+home still reach the start of the input.
+		ToggleRail: key.NewBinding(key.WithKeys("ctrl+a", "ctrl+b"), key.WithHelp("^A", "agents")),
+		Help:       key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^G", "help")),
 		// esc first: it is what muscle memory reaches for to stop a running
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).
@@ -151,7 +158,13 @@ var textareaKeys = map[string]bool{
 // grandfathered are textarea keys the cockpit already took before this chunk.
 // ctrl+b (rail) and ctrl+g (help) must stay reachable from every pane, and
 // ctrl+d quits. The design accepts that you cannot use them while typing.
-var grandfathered = map[string]bool{"ctrl+b": true, "ctrl+g": true, "ctrl+d": true}
+var grandfathered = map[string]bool{
+	"ctrl+a": true, "ctrl+b": true, "ctrl+g": true, "ctrl+d": true,
+	// Scroll keys the input pane claims outright. pgup/pgdown page a
+	// three-line box, which is meaningless; home/end are line-start/line-end,
+	// which ^A gave up anyway and alt+</ctrl+home still provide.
+	"home": true, "end": true, "pgup": true, "pgdown": true,
+}
 
 // globalConflicts returns the names of global bindings that steal a textarea
 // key, ignoring the grandfathered three. It must return empty.

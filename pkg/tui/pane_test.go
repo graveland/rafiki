@@ -2,7 +2,14 @@
 
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+
+	"go.graveland.dev/rafiki/pkg/tui/session"
+)
 
 // TestPaneStateIsPerChild pins the fix for C1b's shared-renderer finding: one
 // renderer served every child, so hopping had to reset it, and a hop mid-stream
@@ -107,16 +114,44 @@ func TestSyncViewportTracksAtBottomForTheFooter(t *testing.T) {
 	}
 }
 
-// TestViewportSoftWrapsLongLines: SoftWrap defaults to FALSE, which truncates
-// a long line and hides the rest behind horizontal scrolling. An assistant's
-// prose paragraph is ONE content line, so without this it is readable only by
-// scrolling sideways.
-func TestViewportSoftWrapsLongLines(t *testing.T) {
-	c := newTestCockpit("c_a")
-	c.width, c.height = 40, 20
-	p := c.pane("c_a")
+// A long line must WRAP, not disappear sideways: an assistant's prose
+// paragraph is one content line, and unwrapped it is readable only by
+// scrolling horizontally.
+//
+// This used to assert viewport.SoftWrap, which is off again — the viewport
+// re-wraps every line on every Update AND every View (10.9ms and 10.6ms on a
+// 6933-line transcript, against 2.4µs and 167µs without), so a held arrow key
+// outran the screen. The renderer wraps instead. The MECHANISM changed and the
+// requirement did not, so the test asserts the outcome rather than the flag.
+func TestLongLinesWrapRatherThanRunOffTheEdge(t *testing.T) {
+	const width = 40
+	long := strings.Repeat("alpha beta ", 40)
+	blocks := []session.Block{{Kind: session.KindUser, Final: true, Text: long}}
 
-	if !p.vp.SoftWrap {
-		t.Fatal("viewport must soft-wrap: a transcript is prose, not a table")
+	lines := newRenderer().Lines(blocks, 1, width)
+	if len(lines) < 5 {
+		t.Fatalf("a %d-character line rendered to %d rows at width %d; it is not wrapping",
+			len(long), len(lines), width)
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(ansi.Strip(l)); w > width {
+			t.Errorf("row %d is %d columns wide, over the %d available: %q", i, w, width, l)
+		}
+	}
+}
+
+// Wrapping is the renderer's now, so a resize has to invalidate its cache —
+// every cached line was wrapped to the old width.
+func TestResizeRewrapsTheCachedTranscript(t *testing.T) {
+	blocks := []session.Block{{
+		Kind: session.KindUser, Final: true, Text: strings.Repeat("alpha beta ", 40),
+	}}
+	r := newRenderer()
+	narrow := len(r.Lines(blocks, 1, 40))
+	wide := len(r.Lines(blocks, 1, 120))
+
+	if narrow <= wide {
+		t.Errorf("rows at width 40 = %d, at width 120 = %d; the cache was not rewrapped",
+			narrow, wide)
 	}
 }

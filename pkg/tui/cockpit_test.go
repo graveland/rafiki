@@ -302,12 +302,12 @@ func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
 func TestRendererDoesNotBleedAcrossSessions(t *testing.T) {
 	r := newRenderer()
 	one := []session.Block{{Kind: session.KindAssistant, Text: "AAA-from-child-one"}}
-	r.Lines(one, 0)
-	r.Lines(one, 0) // settle the cache
+	r.Lines(one, 0, 100)
+	r.Lines(one, 0, 100) // settle the cache
 
 	for _, tail := range []string{"BBB-1", "BBB-12", "BBB-123"} {
 		two := []session.Block{{Kind: session.KindAssistant, Text: tail}}
-		out := strings.Join(r.Lines(two, 0), "\n")
+		out := strings.Join(r.Lines(two, 0, 100), "\n")
 		if strings.Contains(out, "AAA-from-child-one") {
 			t.Fatalf("render of %q leaked the previous child's tail:\n%s", tail, out)
 		}
@@ -506,7 +506,6 @@ func TestOnlyTheInputPaneHoldsTextareaFocus(t *testing.T) {
 		focused bool
 	}{
 		{focusRail, false},
-		{focusTranscript, false},
 		{focusInput, true},
 	} {
 		c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -850,17 +849,13 @@ func TestUpStaysInTheTextareaWhenItHasSomewhereToGo(t *testing.T) {
 	}
 }
 
-// home/end are top/bottom in the transcript. The viewport's default keymap
-// binds neither.
+// home/end are top/bottom, FROM THE INPUT PANE. They were transcript-pane-only
+// and so appeared not to work at all: with PgUp/PgDn reading from the input
+// box nobody tabbed away, and a key that only works in a pane you never visit
+// is a key that does not work.
 func TestHomeAndEndJumpTheTranscript(t *testing.T) {
 	c := newTestCockpit("c_1")
 	p := paneWithContent(t, c)
-	c.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // → rail
-	c.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // → transcript
-	if c.focus != focusTranscript {
-		t.Fatalf("focus = %v, want transcript", c.focus)
-	}
-
 	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
 	if p.vp.YOffset() != 0 {
 		t.Errorf("home left offset at %d, want the top", p.vp.YOffset())
@@ -881,7 +876,7 @@ func TestTheFocusedPaneIsMarkedOnScreen(t *testing.T) {
 	})
 
 	seen := map[focusPane]string{}
-	for _, want := range []focusPane{focusRail, focusTranscript, focusInput} {
+	for _, want := range []focusPane{focusRail, focusInput} {
 		c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		if c.focus != want {
 			t.Fatalf("focus = %v, want %v", c.focus, want)
@@ -892,13 +887,10 @@ func TestTheFocusedPaneIsMarkedOnScreen(t *testing.T) {
 		}
 		seen[want] = raw
 	}
-	// Each pane must look DIFFERENT, not merely be named differently: the
+	// The panes must look DIFFERENT, not merely be named differently: the
 	// badge alone is the thing that was already there and was missed.
-	if seen[focusRail] == seen[focusTranscript] {
-		t.Error("rail and transcript focus render identically")
-	}
-	if seen[focusInput] == seen[focusTranscript] {
-		t.Error("input and transcript focus render identically")
+	if seen[focusRail] == seen[focusInput] {
+		t.Error("rail and input focus render identically")
 	}
 }
 
@@ -949,5 +941,42 @@ func TestScrollPositionIsRightAligned(t *testing.T) {
 
 	if !strings.HasSuffix(strings.TrimRight(last, " "), "100%") {
 		t.Errorf("footer does not end with the position readout:\n%q", last)
+	}
+}
+
+// ⇥ is a TOGGLE, not a three-stop cycle. The transcript pane existed to give
+// the viewport its own keymap while a textarea held every plausible scroll key;
+// the input pane scrolls directly now, so the third stop bought nothing and
+// cost a press on every agent switch — the move made most often.
+func TestFocusRingIsATwoStopToggle(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
+	})
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if c.focus != focusRail {
+		t.Fatalf("first ⇥ → %v, want agents", c.focus)
+	}
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if c.focus != focusInput {
+		t.Fatalf("second ⇥ → %v, want input; the ring must be two stops", c.focus)
+	}
+}
+
+// With the rail hidden there is nothing to switch to, and ⇥ must leave focus
+// where it is rather than parking it on a pane that no longer exists.
+func TestTabIsInertWhenTheRailIsHidden(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}) // hide the rail
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if c.focus != focusInput {
+		t.Errorf("focus = %v, want input", c.focus)
+	}
+	if !c.ta.Focused() {
+		t.Error("⇥ with the rail hidden left the textarea blurred")
 	}
 }

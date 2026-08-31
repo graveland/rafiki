@@ -102,6 +102,11 @@ type Cockpit struct {
 	pending       string
 	showHelp      bool
 	railHidden    bool
+	// railPeek records that ⇥ revealed a hidden rail, so committing or
+	// cancelling puts it back. Picking an agent is a round trip, not a mode
+	// change: you wanted a different conversation, not a permanently wider
+	// piece of furniture.
+	railPeek bool
 	// quitArmed is when the first ^C/^D landed. A single stray one must not
 	// throw away an attached session, so the key arms and the repeat quits.
 	quitArmed time.Time
@@ -450,6 +455,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, c.hop(c.neighbour(+1))
 	case key.Matches(msg, k.ToggleRail):
 		c.railHidden = !c.railHidden
+		// An explicit toggle is a decision: it outranks a peek, so ⏎ afterwards
+		// must not undo what the user just asked for.
+		c.railPeek = false
 		// Never leave focus on a pane that just became invisible.
 		return c, c.cyclePane(0)
 	case key.Matches(msg, k.Help):
@@ -466,27 +474,15 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, k.SelectDown):
 			c.moveSelection(+1)
 		case key.Matches(msg, k.Commit):
-			return c, tea.Batch(c.hop(c.selected), c.setFocus(focusInput))
+			cmd := c.hop(c.selected)
+			return c, tea.Batch(cmd, c.leaveRail())
 		case key.Matches(msg, k.Escape):
-			return c, c.setFocus(focusInput)
+			return c, c.leaveRail()
 		}
 		// The rail swallows everything else: a stray letter here must not
 		// reach the textarea, or you would type into an input you cannot see
 		// the cursor of.
 		return c, nil
-
-	case focusTranscript:
-		switch {
-		case key.Matches(msg, k.Escape):
-			return c, c.setFocus(focusInput)
-		case key.Matches(msg, k.ScrollTop):
-			c.jumpScroll(true)
-			return c, nil
-		case key.Matches(msg, k.ScrollBottom):
-			c.jumpScroll(false)
-			return c, nil
-		}
-		return c, c.scrollFocused(msg)
 	}
 
 	// ── input ────────────────────────────────────────────────────────────
@@ -498,6 +494,16 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, nil
 	}
 	switch {
+	case key.Matches(msg, k.ScrollTop):
+		// home/end were transcript-pane-only and so appeared not to work at
+		// all: with PgUp/PgDn reading from here, nobody tabbed away, and a key
+		// that only works in a pane you never visit is a key that does not
+		// work. ^A/^E keep line-start/line-end for editing.
+		c.jumpScroll(true)
+		return c, nil
+	case key.Matches(msg, k.ScrollBottom):
+		c.jumpScroll(false)
+		return c, nil
 	case key.Matches(msg, k.ScrollPageUp), key.Matches(msg, k.ScrollPageDown):
 		// Outright: a three-line box has no pages, so paging it is meaningless
 		// and the transcript is what was meant.
@@ -749,9 +755,17 @@ func (c *Cockpit) setFocus(p focusPane) tea.Cmd {
 // hiding the rail needs: ctrl+b is global and can fire while the rail holds
 // focus, and focus left on an invisible pane is how a modal UI traps someone.
 func (c *Cockpit) cyclePane(delta int) tea.Cmd {
-	order := []focusPane{focusInput, focusRail, focusTranscript}
+	// ⇥ REVEALS a hidden rail rather than doing nothing. Hiding it is about
+	// screen space, not about giving up the ability to switch agents, and a
+	// dead ⇥ reads as a broken key.
+	if c.railHidden && delta != 0 && c.rail.Len() > 1 {
+		c.railHidden = false
+		c.railPeek = true
+		return c.setFocus(focusRail)
+	}
+	order := []focusPane{focusInput, focusRail}
 	if c.railHidden {
-		order = []focusPane{focusInput, focusTranscript}
+		order = []focusPane{focusInput}
 	}
 	idx := 0
 	found := false
@@ -771,6 +785,17 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	}
 	idx = (idx + delta + len(order)) % len(order)
 	return c.setFocus(order[idx])
+}
+
+// leaveRail returns focus to the input, re-hiding the rail if ⇥ was what
+// revealed it. Both exits go through here: picking an agent and changing your
+// mind should leave the screen in the same shape you found it.
+func (c *Cockpit) leaveRail() tea.Cmd {
+	if c.railPeek {
+		c.railHidden = true
+		c.railPeek = false
+	}
+	return c.setFocus(focusInput)
 }
 
 // moveSelection moves the rail cursor by delta without hopping.
@@ -944,8 +969,6 @@ func (c *Cockpit) footerHints() string {
 	switch c.focus {
 	case focusRail:
 		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.Escape}
-	case focusTranscript:
-		bs = []key.Binding{k.ScrollTop, k.ScrollBottom, k.Escape}
 	default:
 		bs = []key.Binding{k.Send, k.Newline, k.Steer, k.Abort, k.ScrollPageUp}
 	}
@@ -991,10 +1014,10 @@ func (c *Cockpit) helpLines(width int) []string {
 	right := group("input", k.Send, k.Newline, k.Steer, k.Abort)
 	right = append(right, group("agents",
 		k.SelectUp, k.SelectDown, k.Commit, k.Escape)...)
-	right = append(right, group("transcript",
-		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "scroll")),
-		key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("PgUp/PgDn", "page")),
-		k.Escape)...)
+	right = append(right, group("reading",
+		k.ScrollPageUp, k.ScrollTop, k.ScrollBottom,
+		key.NewBinding(key.WithKeys("up", "down"),
+			key.WithHelp("↑/↓", "scroll (when the cursor cannot move)")))...)
 
 	colWidth := width / 2
 	if colWidth < 24 {
@@ -1045,18 +1068,20 @@ func (c *Cockpit) View() tea.View {
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)
-		lines := p.renderer.Lines(s.Blocks, s.Finalized)
+		lines := p.linesFor(s, convWidth, bodyHeight)
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
 		// created agent until it is asked something. The renderer used to
 		// answer it with "Connecting…", so the pane claimed to be connecting
 		// forever two rows above a status line reading "connected".
-		if len(lines) == 0 {
+		if lines != nil && len(lines) == 0 {
 			conv = styleMeta.Render("No messages yet — type below and press " +
 				c.keys.Send.Help().Key + " to start.")
 			break
 		}
-		c.syncViewport(p, lines)
+		if lines != nil {
+			c.syncViewport(p, lines)
+		}
 		conv = p.vp.View()
 	default:
 		conv = styleMeta.Render("loading…")
@@ -1091,7 +1116,7 @@ func (c *Cockpit) View() tea.View {
 	}
 
 	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight,
-		c.focus == focusTranscript) +
+		c.focus == focusRail) +
 		"\n" + styleDivider + "\n" + c.ta.View() + "\n" +
 		styleMeta.Render(statusLine) + "\n" + styleMeta.Render(footer)
 
@@ -1101,9 +1126,12 @@ func (c *Cockpit) View() tea.View {
 }
 
 // joinColumns places the rail beside the conversation, both clipped to height.
-func joinColumns(left, right string, leftWidth, rightWidth, height int, rightFocused bool) string {
+func joinColumns(left, right string, leftWidth, rightWidth, height int, leftFocused bool) string {
+	// The divider is the rail's accent edge: heavy and coloured while the rail
+	// holds focus. The badge in the footer says which pane has it; this says it
+	// where the eye already is.
 	bar := styleMeta.Render("│")
-	if rightFocused {
+	if leftFocused {
 		bar = styleFocusEdge.Render("┃")
 	}
 	rightLines := lastN(strings.Split(right, "\n"), height)

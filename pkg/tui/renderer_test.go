@@ -31,11 +31,11 @@ func finalizedBlocks(n int) []session.Block {
 func TestLinesCacheIsTransparent(t *testing.T) {
 	blocks := finalizedBlocks(5)
 
-	cold := newRenderer().Lines(blocks, len(blocks))
+	cold := newRenderer().Lines(blocks, len(blocks), 100)
 
 	warm := newRenderer()
-	warm.Lines(blocks[:3], 3) // prime
-	got := warm.Lines(blocks, len(blocks))
+	warm.Lines(blocks[:3], 3, 100) // prime
+	got := warm.Lines(blocks, len(blocks), 100)
 
 	if strings.Join(got, "\n") != strings.Join(cold, "\n") {
 		t.Errorf("warm cache output differs from cold:\nwarm: %q\ncold: %q", got, cold)
@@ -47,11 +47,11 @@ func TestLinesCacheIsTransparent(t *testing.T) {
 // to a stale cache there would splice two children's transcripts together.
 func TestLinesRebuildsWhenFinalizedShrinks(t *testing.T) {
 	r := newRenderer()
-	r.Lines(finalizedBlocks(5), 5)
+	r.Lines(finalizedBlocks(5), 5, 100)
 
 	short := finalizedBlocks(2)
-	got := r.Lines(short, 2)
-	want := newRenderer().Lines(short, 2)
+	got := r.Lines(short, 2, 100)
+	want := newRenderer().Lines(short, 2, 100)
 
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("shrinking Finalized did not rebuild:\ngot:  %q\nwant: %q", got, want)
@@ -83,7 +83,7 @@ func TestLinesCapsToolResultsOnPlainOutput(t *testing.T) {
 		ToolCalls: []session.ToolCall{{Name: "grep", Result: plain.String()}},
 	}}
 
-	got := newRenderer().Lines(blocks, 1)
+	got := newRenderer().Lines(blocks, 1, 100)
 	joined := strings.Join(got, "\n")
 
 	if n := strings.Count(joined, "result line"); n > maxToolResultLines {
@@ -115,7 +115,7 @@ func TestLinesPreservesToolOutputLineStructure(t *testing.T) {
 		}},
 	}}
 
-	got := newRenderer().Lines(blocks, 1)
+	got := newRenderer().Lines(blocks, 1, 100)
 
 	var hits int
 	for _, l := range got {
@@ -132,7 +132,7 @@ func TestLinesPreservesToolOutputLineStructure(t *testing.T) {
 // viewport.SetContentLines, and a prepend's YOffset shift is exactly
 // len(prepended) only if a block's lines are separate elements.
 func TestLinesReturnsLinesNotOneString(t *testing.T) {
-	got := newRenderer().Lines(finalizedBlocks(3), 3)
+	got := newRenderer().Lines(finalizedBlocks(3), 3, 100)
 	if len(got) < 3 {
 		t.Fatalf("expected at least one line per block, got %d: %q", len(got), got)
 	}
@@ -150,7 +150,7 @@ func TestLinesReturnsLinesNotOneString(t *testing.T) {
 // line two rows below it said "connected". Emptiness is the shell's to
 // describe, with the focus state it alone knows; the renderer renders blocks.
 func TestEmptyTranscriptRendersNoLines(t *testing.T) {
-	got := newRenderer().Lines(nil, 0)
+	got := newRenderer().Lines(nil, 0, 100)
 	if len(got) != 0 {
 		t.Errorf("Lines(nil, 0) = %q, want no lines", got)
 	}
@@ -230,7 +230,7 @@ func TestTranscriptWeightsAreDistinguishable(t *testing.T) {
 		ThinkText: "the reasoning",
 		ToolCalls: []session.ToolCall{{Name: "bash", Input: `{"command":"ls"}`}},
 	}}
-	lines := newRenderer().Lines(blocks, 1)
+	lines := newRenderer().Lines(blocks, 1, 100)
 
 	var prose, think, tool string
 	for _, l := range lines {
@@ -255,5 +255,28 @@ func TestTranscriptWeightsAreDistinguishable(t *testing.T) {
 	}
 	if strings.HasPrefix(tool, "▌") || strings.HasPrefix(tool, "┊") {
 		t.Errorf("tool calls must stay unadorned: %q", tool)
+	}
+}
+
+// A "── tool_use" rule under every block of a tool-calling turn — which is
+// most blocks — competes with the content while repeating what the ⚒ line
+// already showed. The unusual endings still show.
+func TestOnlyInterestingStopReasonsAreShown(t *testing.T) {
+	render := func(reason string) string {
+		blocks := []session.Block{{
+			Kind: session.KindAssistant, Final: true,
+			Text: "hi", StopReason: reason,
+		}}
+		return ansi.Strip(strings.Join(newRenderer().Lines(blocks, 1, 100), "\n"))
+	}
+	for _, quiet := range []string{"end_turn", "tool_use", "stop", ""} {
+		if strings.Contains(render(quiet), "──") {
+			t.Errorf("stop reason %q is routine and must not be printed", quiet)
+		}
+	}
+	for _, loud := range []string{"max_tokens", "refusal", "error"} {
+		if !strings.Contains(render(loud), loud) {
+			t.Errorf("stop reason %q is worth reading and must be printed", loud)
+		}
 	}
 }

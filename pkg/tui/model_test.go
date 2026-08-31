@@ -17,7 +17,7 @@ func TestRenderProducesOutput(t *testing.T) {
 		{Kind: session.KindUser, Text: "hello", Final: true},
 		{Kind: session.KindAssistant, Text: "hi back", Final: true},
 	}
-	if out := r.Lines(blocks, 2); len(out) == 0 {
+	if out := r.Lines(blocks, 2, 100); len(out) == 0 {
 		t.Fatal("Lines returned no output")
 	}
 }
