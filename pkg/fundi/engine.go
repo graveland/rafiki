@@ -788,11 +788,19 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			if err != nil {
 				return // a failed call has no assistant message to render
 			}
+			// The pi frames first, then ONE durable native publication for
+			// both paths. It lives here rather than inside StreamEnd and
+			// AssistantTurn because only one of those two is handed the
+			// provider response, and because a completed turn is exactly the
+			// boundary the durable event describes — how it was transported
+			// is not the event's business. The early return above is why a
+			// failed call publishes nothing: there is no assistant message.
 			if wasStreamed {
 				e.em.StreamEnd(e.em.mapMessage(resp))
-				return
+			} else {
+				e.em.AssistantTurn(resp)
 			}
-			e.em.AssistantTurn(resp)
+			e.em.publishAssistant(resp)
 		},
 		// OnToolStart/OnToolEnd are the only callbacks here that do NOT run on
 		// the turn goroutine: agentloop invokes them from inside its per-tool
