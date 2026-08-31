@@ -610,6 +610,19 @@
   (now deleted). Pane state is evicted with its session and must never outlive
   one. Scroll position lives on `paneState`, deliberately NOT on
   `session.Session`, which is a pure event state machine.
+- **Three ways the cockpit tells you where you are, because each one alone was
+  missed.** The focused pane carries a reversed badge in the footer AND an
+  accent edge on the pane itself (a thickened rail cursor, a heavy divider, the
+  textarea's own focus styling) — naming it in a grey footer line was already
+  there and was not noticed, because that is not where the eye is. Scroll
+  position is a bottom-RIGHT readout (`↓ 1840/2272 81%`), right-aligned so it
+  does not move when the key hints do, and it reports `paneState.contentLines`
+  rather than the viewport's count: a short transcript is padded to
+  bottom-anchor it and the viewport counts that padding as real.
+  Transcript weight is by GUTTER, never background — pi backgrounds its tool
+  calls, which on a working agent is most of the screen. The agent's prose is
+  the scarce thing and gets the solid `▌` on every line, thinking a dotted `┊`,
+  tool calls none at all.
 - **Tool RESULTS arrive on the user message, not the assistant one, and
   `TextFromContent` reads text blocks only.** Anthropic puts `tool_result` in
   the USER turn following the assistant's `tool_use`, so a tool-calling
