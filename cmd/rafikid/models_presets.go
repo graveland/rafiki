@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -104,6 +105,172 @@ func (c *Controller) ListModels(ctx context.Context, provider string) ([]protoco
 		})
 	}
 	return out, nil
+}
+
+// catalogFacts is what the catalog contributes about one model id. Separate
+// from connectapi.ModelRow so decorateRows is testable without building a
+// ModelCatalog and without a network fixture.
+type catalogFacts struct {
+	name            string
+	contextLength   int
+	maxCompletion   int
+	promptUSD       *float64
+	completionUSD   *float64
+	cacheReadUSD    *float64
+	cacheWriteUSD   *float64
+	inputModalities []string
+}
+
+// sourcesForKind returns the model sources a child of the given kind can
+// actually resolve.
+//
+// Moved here from cmd/rafiki: the two kinds have genuinely different model
+// universes, and offering one kind's ids to another produces a child that
+// spawns, attaches, and then never answers — no error, just a TUI that never
+// becomes idle. That knowledge belongs where the spawn happens, not in a copy
+// the client keeps.
+//
+//   - "claude" shells out to Claude Code, which resolves only Anthropic ids.
+//   - "fundi" (the DEFAULT, and the empty/not-yet-typed case) is rafiki's
+//     native runtime, so it takes what rafiki resolves: the curated ids and
+//     family aliases, plus any OpenRouter slash id.
+func sourcesForKind(kind string) map[models.Source]bool {
+	switch kind {
+	case protocol.KindClaude:
+		return map[models.Source]bool{models.SourceBuiltin: true}
+	default:
+		return map[models.Source]bool{
+			models.SourceUserConfig: true,
+			models.SourceBuiltin:    true,
+			models.SourceAlias:      true,
+			models.SourceOpenRouter: true,
+			models.SourceLocal:      true,
+		}
+	}
+}
+
+// decorateRows joins the spine against the catalog by id.
+//
+// The SPINE decides which rows exist and what Source each carries; the catalog
+// only ever contributes optional fields. The catalog never invents a row,
+// because the spine is where kind-scoping is applied and a row that bypassed it
+// would be offered for a child that cannot run it.
+func decorateRows(spine []models.Model, cat map[string]catalogFacts) []connectapi.ModelRow {
+	out := make([]connectapi.ModelRow, 0, len(spine))
+	for _, m := range spine {
+		row := connectapi.ModelRow{
+			ID:       m.ID,
+			Provider: m.Provider,
+			Model:    m.Model,
+			Name:     m.Name,
+			Source:   string(m.Source),
+		}
+		if f, ok := cat[m.ID]; ok {
+			if f.name != "" && row.Name == "" {
+				row.Name = f.name
+			}
+			if f.contextLength > 0 {
+				v := f.contextLength
+				row.ContextWindow = &v
+			}
+			if f.maxCompletion > 0 {
+				v := f.maxCompletion
+				row.MaxCompletionTokens = &v
+			}
+			row.PromptUSD = f.promptUSD
+			row.CompletionUSD = f.completionUSD
+			row.CacheReadUSD = f.cacheReadUSD
+			row.CacheWriteUSD = f.cacheWriteUSD
+			row.InputModalities = f.inputModalities
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// filterByProvider drops rows whose provider does not match. An empty provider
+// keeps everything.
+func filterByProvider(rows []connectapi.ModelRow, provider string) []connectapi.ModelRow {
+	if provider == "" {
+		return rows
+	}
+	out := make([]connectapi.ModelRow, 0, len(rows))
+	for _, r := range rows {
+		if r.Provider == provider {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// catalogFactsByID flattens the daemon's already-warm catalog into a join
+// table. One Rows() call rather than per-id lookups: each of those resolves
+// and locks, so a ~300-model catalog would cost 300 of each.
+func (c *Controller) catalogFactsByID() map[string]catalogFacts {
+	if c.catalog == nil {
+		return nil
+	}
+	rows := c.catalog.Rows()
+	out := make(map[string]catalogFacts, len(rows))
+	for _, r := range rows {
+		f := catalogFacts{
+			name:            r.Name,
+			contextLength:   r.ContextLength,
+			maxCompletion:   r.MaxCompletionTokens,
+			inputModalities: r.InputModalities,
+		}
+		if r.Pricing != nil {
+			p := *r.Pricing
+			f.promptUSD = &p.PromptUSD
+			f.completionUSD = &p.CompletionUSD
+			f.cacheReadUSD = &p.CacheReadUSD
+			f.cacheWriteUSD = &p.CacheWriteUSD
+		}
+		out["openrouter/"+r.ID] = f
+		out[r.ID] = f // the spine spells OpenRouter ids both ways
+	}
+	return out
+}
+
+// ListModelRows answers the Connect ListModels RPC.
+//
+// The daemon's OpenRouter rows come from routing.ModelCatalog, NOT from
+// models.loadOpenRouter: the daemon warms the catalog for routing already, and
+// consulting models' own OpenRouter source would run a second HTTP fetch with a
+// second disk cache and a different TTL in the same process.
+func (c *Controller) ListModelRows(ctx context.Context, provider, kind string) ([]connectapi.ModelRow, error) {
+	want := sourcesForKind(kind)
+	spineWant := make(map[models.Source]bool, len(want))
+	for s, on := range want {
+		if s == models.SourceOpenRouter {
+			continue // served from the catalog below
+		}
+		spineWant[s] = on
+	}
+	spine := models.ListSources(ctx, providersOrDefault(c.providers), spineWant)
+
+	facts := c.catalogFactsByID()
+	if want[models.SourceOpenRouter] && c.catalog != nil {
+		seen := make(map[string]bool, len(spine))
+		for _, m := range spine {
+			seen[m.ID] = true
+		}
+		for _, r := range c.catalog.Rows() {
+			id := "openrouter/" + r.ID
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			spine = append(spine, models.Model{
+				ID: id, Provider: "openrouter", Model: r.ID,
+				Name: r.Name, Source: models.SourceOpenRouter,
+			})
+		}
+	}
+
+	rows := filterByProvider(decorateRows(spine, facts), provider)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	return rows, nil
 }
 
 // presetEntry is the JSON shape of one entry in the presets file.
