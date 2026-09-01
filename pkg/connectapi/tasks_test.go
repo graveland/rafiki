@@ -4,6 +4,7 @@ package connectapi
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -64,5 +65,36 @@ func TestListTasksWithNoListerIsEmpty(t *testing.T) {
 	}
 	if len(resp.Msg.GetTasks()) != 0 {
 		t.Errorf("got rows from a server with no lister")
+	}
+}
+
+// tasks.ListFilter.Limit == 0 means UNLIMITED, and conversation_id empty means
+// every conversation -- so an unclamped call can materialise the whole ledger.
+// The frame verb has clamped to 2000 all along.
+func TestListTasksClampsRowCount(t *testing.T) {
+	f := &fakeTaskLister{}
+	s := NewServer(nil)
+	s.SetTaskLister(f)
+
+	if _, err := s.ListTasks(context.Background(),
+		connect.NewRequest(&rafikiv1.ListTasksRequest{})); err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if f.got.Limit != taskListMaxRows {
+		t.Errorf("Limit = %d, want %d", f.got.Limit, taskListMaxRows)
+	}
+}
+
+// rafiki requires a database, so a ledger that cannot answer is a real
+// failure. Disguising it as an empty list hides a broken daemon behind a
+// cockpit that simply shows no tasks.
+func TestListTasksSurfacesAStoreError(t *testing.T) {
+	f := &fakeTaskLister{err: errors.New("task ledger unavailable")}
+	s := NewServer(nil)
+	s.SetTaskLister(f)
+
+	if _, err := s.ListTasks(context.Background(),
+		connect.NewRequest(&rafikiv1.ListTasksRequest{})); err == nil {
+		t.Error("a store error must not be reported as an empty list")
 	}
 }

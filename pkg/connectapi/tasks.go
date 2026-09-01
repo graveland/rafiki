@@ -24,11 +24,23 @@ type TaskLister interface {
 // same reason as SetChildLister: the Controller is built after this Server.
 func (s *Server) SetTaskLister(l TaskLister) { s.taskLister.Store(&l) }
 
+// taskListMaxRows mirrors pkg/control/dispatch.go's clamp.
+//
+// ListTasksRequest has no limit field and tasks.ListFilter.Limit == 0 means
+// UNLIMITED, so without this one call with an empty conversation_id -- which
+// means every conversation -- materialises the whole ledger into memory and
+// onto the wire, past protocol.MaxFrameBytes' worth of rows. The frame verb
+// has carried this clamp all along; the Connect path shipped without it.
+const taskListMaxRows = 2000
+
 // ListTasks answers the task ledger for one conversation.
 //
-// A daemon with no ledger answers an EMPTY list rather than an error: the
-// cockpit hides the box when there is nothing to show, and an error there
-// would render as a failure on every DB-less daemon.
+// A Server with no lister attached answers an EMPTY list: that is a wiring
+// state, not a runtime one, and it keeps the zero value usable in tests.
+// A STORE error is returned AS an error -- rafiki requires a database, so a
+// ledger that cannot answer is a real failure and must not be disguised as an
+// empty list. The cockpit chooses to hide the box rather than surface it,
+// which is the caller's decision and not this handler's.
 func (s *Server) ListTasks(
 	ctx context.Context, req *connect.Request[rafikiv1.ListTasksRequest],
 ) (*connect.Response[rafikiv1.ListTasksResponse], error) {
@@ -40,6 +52,7 @@ func (s *Server) ListTasks(
 	rows, err := (*lp).TaskList(ctx, protocol.TaskListRequest{
 		ConversationID: req.Msg.GetConversationId(),
 		All:            req.Msg.GetIncludeDropped(),
+		Limit:          taskListMaxRows,
 	})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
