@@ -43,17 +43,18 @@ type paneState struct {
 // because a resize genuinely does change every wrapped line, and the last is
 // the live tail's fingerprint, which is what moves during streaming.
 type paneSig struct {
-	blocks    int
-	finalized int
-	width     int
-	height    int
-	liveFP    string
+	blocks     int
+	finalized  int
+	width      int
+	height     int
+	expandArgs bool
+	liveFP     string
 }
 
 // linesFor returns the rendered transcript, or NIL when the pane is already
 // showing it. A nil result means "nothing to do" and is distinct from an empty
 // one, which means "this transcript has no lines".
-func (p *paneState) linesFor(s *session.Session, width, height int) []string {
+func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs bool) []string {
 	sig := paneSig{
 		blocks:    len(s.Blocks),
 		finalized: s.Finalized,
@@ -63,11 +64,15 @@ func (p *paneState) linesFor(s *session.Session, width, height int) []string {
 		// stays live until its tool calls resolve, so the one that changes is
 		// routinely not the tail.
 		liveFP: session.LiveFingerprint(s.Blocks, s.Finalized),
+		// expandArgs changes every argument line the renderer draws, so it is
+		// part of the signature: without it the toggle flips a flag nothing reads.
+		expandArgs: expandArgs,
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
 	}
 	p.sig, p.sigInit = sig, true
+	p.renderer.expandArgs = expandArgs
 	return p.renderer.Lines(s.Blocks, s.Finalized, width)
 }
 

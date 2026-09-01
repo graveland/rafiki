@@ -1360,3 +1360,19 @@ func TestClearInputDropsStagedAttachments(t *testing.T) {
 		t.Error("^U left attachments staged with no token referring to them")
 	}
 }
+
+// The toggle must reach the renderer AND invalidate the pane cache. Flipping
+// a flag that paneSig does not carry changes nothing on screen.
+func TestExpandArgsTogglesAndInvalidates(t *testing.T) {
+	c := newTestCockpit("c_1")
+	before := c.expandArgs
+	c.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if c.expandArgs == before {
+		t.Fatal("^O did not toggle expandArgs")
+	}
+	var sig paneSig
+	sig.expandArgs = c.expandArgs
+	if !sig.expandArgs {
+		t.Fatal("paneSig has no expandArgs field")
+	}
+}

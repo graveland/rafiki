@@ -45,6 +45,8 @@ type keyMap struct {
 	HopNext       key.Binding
 	ToggleRail    key.Binding
 	Help          key.Binding
+	ExpandArgs    key.Binding
+	Redraw        key.Binding
 	Abort         key.Binding
 
 	// Input pane.
@@ -93,6 +95,13 @@ func defaultKeyMap() keyMap {
 		// memory; alt+< and ctrl+home still reach the start of the input.
 		ToggleRail: key.NewBinding(key.WithKeys("ctrl+a", "ctrl+b"), key.WithHelp("^A", "agents")),
 		Help:       key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^G", "help")),
+		// ^E would be the mnemonic and is taken: the textarea binds it to
+		// end-of-line. ^O is free and is what other agent TUIs use.
+		ExpandArgs: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("^O", "expand args")),
+		// ^L repaints. It is a safety net for output that bypasses slog and
+		// lands on the alt screen, not the primary defence -- see the ring
+		// handler in cmd/rafiki.
+		Redraw: key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("^L", "redraw")),
 		// esc first: it is what muscle memory reaches for to stop a running
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).
@@ -188,7 +197,8 @@ func (k keyMap) globalConflicts() []string {
 		"Quit": k.Quit, "NextPane": k.NextPane, "PrevPane": k.PrevPane,
 		"NextAttention": k.NextAttention, "PrevAttention": k.PrevAttention,
 		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
-		"ToggleRail": k.ToggleRail, "Help": k.Help, "Abort": k.Abort,
+		"ToggleRail": k.ToggleRail, "Help": k.Help,
+		"ExpandArgs": k.ExpandArgs, "Redraw": k.Redraw, "Abort": k.Abort,
 	}
 	var out []string
 	for name, b := range globals {

@@ -207,6 +207,7 @@ type Cockpit struct {
 	pending       string
 	showHelp      bool
 	railHidden    bool
+	expandArgs    bool
 	// railPeek records that ⇥ revealed a hidden rail, so committing or
 	// cancelling puts it back. Picking an agent is a round trip, not a mode
 	// change: you wanted a different conversation, not a permanently wider
@@ -621,6 +622,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, c.cyclePane(0)
 	case key.Matches(msg, k.Help):
 		c.showHelp = !c.showHelp
+		return c, nil
+	case key.Matches(msg, k.ExpandArgs):
+		c.expandArgs = !c.expandArgs
 		return c, nil
 	}
 
@@ -1259,7 +1263,8 @@ func (c *Cockpit) footerHints() string {
 	parts = append(parts,
 		c.keys.NextPane.Help().Key+" pane",
 		c.keys.ToggleRail.Help().Key+" rail",
-		c.keys.Help.Help().Key+" help")
+		c.keys.Help.Help().Key+" help",
+		c.keys.ExpandArgs.Help().Key+" "+c.keys.ExpandArgs.Help().Desc)
 	return strings.Join(parts, "  ")
 }
 
@@ -1289,7 +1294,7 @@ func (c *Cockpit) helpLines(width int) []string {
 	k := c.keys
 	left := group("anywhere",
 		k.NextPane, k.PrevPane, k.NextAttention, k.PrevAttention,
-		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.Quit)
+		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
 		k.SelectUp, k.SelectDown, k.Commit, k.Escape)...)
@@ -1349,7 +1354,7 @@ func (c *Cockpit) View() tea.View {
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)
-		lines := p.linesFor(s, convWidth, bodyHeight)
+		lines := p.linesFor(s, convWidth, bodyHeight, c.expandArgs)
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
 		// created agent until it is asked something. The renderer used to
