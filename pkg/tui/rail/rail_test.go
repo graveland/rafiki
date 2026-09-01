@@ -239,3 +239,26 @@ func TestSetCostSeedsWithoutDoubleCounting(t *testing.T) {
 		t.Errorf("Cost = %v, want 5.0: SetCost assigns, it does not add", n.Cost)
 	}
 }
+
+// A re-seed carrying a rollup computed before the newest conversation_turn
+// rows were visible must not erase cost this rail already counted: those
+// ordinals are below CostThrough and Apply will never re-add them.
+func TestSetCostNeverLowersAnAccumulatedTotal(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(costTurnEnd("c1", 0, 3.0))
+	r.SetCost("c1", 1.0) // a lagging server rollup
+
+	n, _ := r.Get("c1")
+	if n.Cost != 3.0 {
+		t.Errorf("Cost = %v, want 3.0: a stale seed must not lower the total", n.Cost)
+	}
+
+	// The seed IS authoritative for turns that predate this client, which the
+	// stream never replays -- those only ever raise the number.
+	r.SetCost("c1", 9.0)
+	n, _ = r.Get("c1")
+	if n.Cost != 9.0 {
+		t.Errorf("Cost = %v, want 9.0: a higher seed must win", n.Cost)
+	}
+}

@@ -256,7 +256,20 @@ func (r *Rail) Nodes() []Node {
 func (r *Rail) SetCost(childID string, cost float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if n, ok := r.nodes[childID]; ok {
+	n, ok := r.nodes[childID]
+	if !ok {
+		return
+	}
+	// The MAXIMUM, not an assignment. conversation_turn rows land after the
+	// turn_end event that reported them, so a re-seed can carry a rollup
+	// computed before the newest turns were visible. Assigning it would drop
+	// cost this rail had already counted -- permanently, because those
+	// ordinals are below CostThrough and Apply will never re-add them.
+	//
+	// Taking the max is safe in the other direction too: the seed is
+	// authoritative for turns that predate this client's attachment, which the
+	// stream never replays, and those only ever make the number bigger.
+	if cost > n.Cost {
 		n.Cost = cost
 	}
 }

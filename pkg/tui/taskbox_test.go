@@ -75,3 +75,19 @@ func TestTaskBoxRespectsWidth(t *testing.T) {
 		}
 	}
 }
+
+// View draws a divider ABOVE the box, so the box costs len(box)+1 screen rows.
+// Subtracting only its own lines made the view one row too tall whenever the
+// box was visible, pushing the footer off the bottom of the alt screen.
+func TestTaskBoxRowsCountsItsDivider(t *testing.T) {
+	if got := taskBoxRows(nil); got != 0 {
+		t.Errorf("taskBoxRows(nil) = %d, want 0", got)
+	}
+	box := renderTaskBox([]*rafikiv1.TaskRow{row("1", "work", "in_progress")}, 40)
+	if len(box) == 0 {
+		t.Fatal("box did not render")
+	}
+	if got, want := taskBoxRows(box), len(box)+1; got != want {
+		t.Errorf("taskBoxRows = %d, want %d (the box plus its divider)", got, want)
+	}
+}
