@@ -508,7 +508,7 @@ func TestToolArgLinesAreSorted(t *testing.T) {
 	ia := strings.Index(joined, "alpha")
 	im := strings.Index(joined, "monkey")
 	iz := strings.Index(joined, "zebra")
-	if !(ia < im && im < iz) {
+	if ia >= im || im >= iz {
 		t.Errorf("arguments not sorted by key:\n%s", joined)
 	}
 }
