@@ -482,7 +482,11 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// a cockpit whose only event source was the rail -- six small types,
 			// no messages, no deltas, no history: a permanently empty pane.
 			if f := c.focused(); f != "" {
-				return c, c.openFocus(f)
+				// fetchTasks as well as openFocus, matching hop: without it
+				// `attach <id>` on an agent that already has a ledger showed no
+				// box until a task_* call happened to complete, which is the
+				// case the box exists for.
+				return c, tea.Batch(c.openFocus(f), c.fetchTasks(f))
 			}
 			return c, c.landRailFirst()
 		}
@@ -713,6 +717,12 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, nil
 	case key.Matches(msg, k.ExpandArgs):
 		c.expandArgs = !c.expandArgs
+		// paneSig alone is NOT enough. It makes linesFor call Lines again, but
+		// Lines reuses r.cached for every block below Finalized -- which is the
+		// whole visible transcript -- so the toggle reached only the live tail.
+		for _, p := range c.panes {
+			p.invalidate()
+		}
 		return c, nil
 	case key.Matches(msg, k.Redraw):
 		for _, p := range c.panes {
@@ -1287,8 +1297,19 @@ func (c *Cockpit) taskBoxLines() []string {
 	return renderTaskBox(c.tasks[f], c.convWidth())
 }
 
+// taskBoxRows is how many SCREEN ROWS the box costs, which is not len(box):
+// View draws a divider above it. bodyHeight subtracting only the box's own
+// lines made the view one row too tall whenever the box was visible, pushing
+// the footer off the bottom of the alt screen.
+func taskBoxRows(box []string) int {
+	if len(box) == 0 {
+		return 0
+	}
+	return len(box) + 1
+}
+
 func (c *Cockpit) bodyHeight() int {
-	h := c.height - c.ta.Height() - 3 - len(c.taskBoxLines())
+	h := c.height - c.ta.Height() - 3 - taskBoxRows(c.taskBoxLines())
 	if h < 1 {
 		return 1
 	}

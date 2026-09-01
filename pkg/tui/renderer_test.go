@@ -536,3 +536,32 @@ func TestExpandedShowsFullMultilineValues(t *testing.T) {
 		}
 	}
 }
+
+// ^O reaches the whole transcript, not just the live tail. renderer.Lines
+// reuses r.cached for every block below Finalized, so toggling the flag
+// without discarding that cache changed nothing a reader could see.
+func TestExpandArgsChangesAFinalizedBlock(t *testing.T) {
+	blocks := []session.Block{{
+		Kind: session.KindAssistant, Final: true,
+		ToolCalls: []session.ToolCall{{
+			ID: "t1", Name: "write", HasResult: true,
+			Input: `{"path":"n.md","content":"one\ntwo\nthree"}`,
+		}},
+	}}
+
+	r := newRenderer()
+	r.expandArgs = false
+	compact := strings.Join(r.Lines(blocks, 1, 80), "\n")
+
+	// Same renderer, flag flipped, cache discarded the way the cockpit does it.
+	r.expandArgs = true
+	r.cached, r.cachedUpTo, r.lastFP, r.liveOut = nil, 0, "", nil
+	expanded := strings.Join(r.Lines(blocks, 1, 80), "\n")
+
+	if compact == expanded {
+		t.Fatalf("expanding a finalized block changed nothing:\n%s", compact)
+	}
+	if !strings.Contains(expanded, "two") {
+		t.Errorf("expanded output is missing the full value:\n%s", expanded)
+	}
+}
