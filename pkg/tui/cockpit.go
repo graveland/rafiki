@@ -626,6 +626,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.ExpandArgs):
 		c.expandArgs = !c.expandArgs
 		return c, nil
+	case key.Matches(msg, k.Redraw):
+		for _, p := range c.panes {
+			p.invalidate()
+		}
+		return c, tea.ClearScreen
 	}
 
 	// ── pane-local ───────────────────────────────────────────────────────

@@ -35,8 +35,9 @@ pick one from the rail. With an id or name it opens focused on that child and
 follows its delegation, so agents it spawns appear in the rail without
 resubscribing.
 
-⏎ sends a prompt, ⇧⏎ (or ^J) inserts a newline, ⌥⏎ (or ^S) steers the turn
-already running, esc (or ^X) aborts it.
+⏎ sends a prompt — it steers the agent if it is mid-turn — ⇧⏎ (or ^J) inserts a
+newline, ⌥⏎ (or ^S) steers the turn already running, esc (or ^X) aborts it.
+^O expands full tool arguments, ^L repaints the screen.
 ⇥ cycles the three panes — input, agents, transcript — and each one owns its
 keys while it has focus. ⌥N hops to the next agent that needs you, ^↑/^↓ move,
 ^B collapses the rail, ^G toggles help. Children keep running after you quit —

@@ -1409,3 +1409,24 @@ func TestExplicitModesAreNotRewritten(t *testing.T) {
 		t.Errorf("abort was rewritten to %v", got)
 	}
 }
+
+// ^L must force a real repaint, not a cached one. The pane skips rebuilding
+// when its signature is unchanged, so clearing the screen without
+// invalidating leaves it blank until the next event.
+func TestRedrawInvalidatesThePaneCache(t *testing.T) {
+	p := &paneState{renderer: newRenderer(), atBottom: true}
+	s := session.New("c1")
+	s.Blocks = []session.Block{{Kind: session.KindUser, Text: "hello", Final: true}}
+	s.Finalized = 1
+
+	if got := p.linesFor(s, 80, 24, false); got == nil {
+		t.Fatal("first render returned nil")
+	}
+	if got := p.linesFor(s, 80, 24, false); got != nil {
+		t.Fatal("second render should have been a cache hit")
+	}
+	p.invalidate()
+	if got := p.linesFor(s, 80, 24, false); got == nil {
+		t.Error("invalidate did not force a rebuild")
+	}
+}
