@@ -11,15 +11,25 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-func newForgetCmd() *cobra.Command {
+func newCloseCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "forget [id|name...]",
-		Aliases: []string{"rm"},
-		Short:   "Drop exited children from the controller",
-		Long: `Drop one or more exited children from the controller's in-memory store.
-Disk artifacts (logs, state record) are NOT removed.
+		Use: "close [id|name...]",
+		// `forget` is kept forever, not deprecated: it is in muscle memory and
+		// in scripts, and an alias costs one line.
+		Aliases: []string{"forget", "rm"},
+		Short:   "Finalize exited conversations",
+		Long: `Finalize one or more exited children.
 
-With --all-exited, forgets every exited child (optionally filtered by --older-than).`,
+A closed conversation can never be resumed, reattached or continued again: the
+child leaves the controller's store and its conversations.child row is dropped.
+
+Its TRANSCRIPT is kept. No foreign key references conversations.child, so the
+conversation stays fully readable through 'rafiki history' and
+'rafiki conversations' after closing. What is reclaimed is the child's log dump
+directory and, for fundi children, its clipped-output spill directory.
+
+With --all-exited, closes every exited child (optionally filtered by
+--older-than).`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			allExited, _ := cmd.Flags().GetBool("all-exited")
 			if allExited {
@@ -30,10 +40,10 @@ With --all-exited, forgets every exited child (optionally filtered by --older-th
 			}
 			return nil
 		},
-		RunE: runForget,
+		RunE: runClose,
 	}
-	cmd.Flags().Bool("all-exited", false, "Forget all exited children")
-	cmd.Flags().Duration("older-than", 0, "Only forget exited children older than this")
+	cmd.Flags().Bool("all-exited", false, "Close all exited children")
+	cmd.Flags().Duration("older-than", 0, "Only close exited children older than this")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
 			return ch.Status == string(protocol.StatusExited)
@@ -42,7 +52,7 @@ With --all-exited, forgets every exited child (optionally filtered by --older-th
 	return cmd
 }
 
-func runForget(cmd *cobra.Command, args []string) error {
+func runClose(cmd *cobra.Command, args []string) error {
 	c := mustDial(cmd)
 	defer c.Close()
 
@@ -82,16 +92,16 @@ func runForget(cmd *cobra.Command, args []string) error {
 			ChildID: childID,
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: forget %q: %v\n", arg, err)
+			fmt.Fprintf(os.Stderr, "error: close %q: %v\n", arg, err)
 			failures++
 			continue
 		}
 		if !resp.Success {
-			fmt.Fprintf(os.Stderr, "error: forget %q: %s\n", arg, client.FormatError(resp))
+			fmt.Fprintf(os.Stderr, "error: close %q: %s\n", arg, client.FormatError(resp))
 			failures++
 			continue
 		}
-		fmt.Printf("forgot %s\n", childID)
+		fmt.Printf("closed %s\n", childID)
 	}
 	if failures > 0 {
 		return fmt.Errorf("%d target(s) failed", failures)

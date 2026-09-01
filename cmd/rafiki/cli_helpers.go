@@ -101,7 +101,7 @@ func completeChildren(cmd *cobra.Command, toComplete string) []string {
 
 // completeChildrenByState is like completeChildren but filters candidates by
 // the given predicate. Use it to restrict completions to a relevant subset
-// (e.g. only exited children for `forget`, only live ones for `kill`).
+// (e.g. only exited children for `close`, only live ones for `kill`).
 func completeChildrenByState(cmd *cobra.Command, toComplete string, keep func(protocol.ChildSummary) bool) []string {
 	c, err := client.Dial(socketFromCmd(cmd))
 	if err != nil {
@@ -189,14 +189,14 @@ func attachAndDecide(cmd *cobra.Command, ep connectEndpoint, childID string, kil
 	c := mustDial(cmd)
 	defer c.Close()
 
-	// Use the same kill+forget policy as `rafiki kill` so a confirmed
+	// Use the same kill+close policy as `rafiki kill` so a confirmed
 	// terminate also removes the child from `rafiki list` on clean exit.
-	res, err := killAndMaybeForget(cmdCtx(cmd), c, childID, 0, 0, false)
+	res, err := killAndMaybeClose(cmdCtx(cmd), c, childID, 0, 0, false)
 	if err != nil {
 		return fmt.Errorf("kill: %w", err)
 	}
-	if res.ForgetErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: forget after kill failed: %v\n", res.ForgetErr)
+	if res.CloseErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: close after kill failed: %v\n", res.CloseErr)
 	}
 	return nil
 }

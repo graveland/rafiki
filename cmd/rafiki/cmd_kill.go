@@ -21,17 +21,21 @@ func newKillCmd() *cobra.Command {
 		Long: `Stop one or more running children gracefully, escalating to SIGKILL only if necessary.
 
 On a clean exit (exit code 0, no signal, no timeout escalation), the child
-is also forgotten from the daemon's in-memory store (removed from rafiki list).
+is also closed (removed from the daemon's in-memory store and rafiki list).
 Disk artifacts (logs, state record) are not affected.
 
-Use --no-forget to keep exited children visible in rafiki list even after a
+Use --no-close to keep exited children visible in rafiki list even after a
 clean exit (e.g. for /tree navigation or inspection).`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runKill,
 	}
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
-	cmd.Flags().Bool("no-forget", false, "Keep children in rafiki list even after a clean exit")
+	cmd.Flags().Bool("no-close", false, "Keep children in rafiki list even after a clean exit")
+	// The old spelling stays reachable for scripts; marking it deprecated is
+	// what stops --help advertising both.
+	cmd.Flags().Bool("no-forget", false, "Deprecated: use --no-close")
+	_ = cmd.Flags().MarkDeprecated("no-forget", "use --no-close")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
 			return ch.Status != string(protocol.StatusExited)
@@ -48,7 +52,10 @@ func runKill(cmd *cobra.Command, args []string) error {
 
 	st, _ := cmd.Flags().GetDuration("shutdown-timeout")
 	kt, _ := cmd.Flags().GetDuration("kill-timeout")
-	noForget, _ := cmd.Flags().GetBool("no-forget")
+	noClose, _ := cmd.Flags().GetBool("no-close")
+	if legacy, _ := cmd.Flags().GetBool("no-forget"); legacy {
+		noClose = true
+	}
 
 	// If custom timeouts push past the default RPC window, extend the context.
 	total := st + kt
@@ -60,7 +67,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 
 	var failures int
 	for _, arg := range args {
-		if err := killOne(ctx, cmd, c, arg, st, kt, noForget); err != nil {
+		if err := killOne(ctx, cmd, c, arg, st, kt, noClose); err != nil {
 			fmt.Fprintf(os.Stderr, "error: kill %q: %v\n", arg, err)
 			failures++
 		}
@@ -71,46 +78,47 @@ func runKill(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// killOne kills and optionally forgets a single target. Errors are returned to
+// killOne kills and optionally closes a single target. Errors are returned to
 // the caller for aggregation across multiple targets.
-func killOne(ctx context.Context, _ *cobra.Command, c *client.Client, arg string, st, kt time.Duration, noForget bool) error {
+func killOne(ctx context.Context, _ *cobra.Command, c *client.Client, arg string, st, kt time.Duration, noClose bool) error {
 	childID, err := c.Resolve(ctx, arg)
 	if err != nil {
 		return err
 	}
 
-	res, err := killAndMaybeForget(ctx, c, childID, st, kt, noForget)
+	res, err := killAndMaybeClose(ctx, c, childID, st, kt, noClose)
 	if err != nil {
 		return err
 	}
 
 	out := map[string]any{
 		"kill":   res.Kill,
-		"forgot": res.DidForget,
+		"closed": res.DidClose,
 	}
-	if res.ForgetErr != nil {
-		out["forgetError"] = res.ForgetErr.Error()
+	if res.CloseErr != nil {
+		out["closeError"] = res.CloseErr.Error()
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
 }
 
-// killAndForgetResult bundles outputs from a kill+(optional)forget operation.
-type killAndForgetResult struct {
-	Kill      protocol.KillResponseData
-	DidForget bool
-	ForgetErr error
+// killAndCloseResult bundles outputs from a kill+(optional)close operation.
+type killAndCloseResult struct {
+	Kill     protocol.KillResponseData
+	DidClose bool
+	CloseErr error
 }
 
-// killAndMaybeForget sends ctrl_kill for childID and, on a clean exit
-// (exitCode 0, no signal, not escalated) and when noForget is false, follows
-// up with ctrl_forget. Returns the kill result and whether forget ran.
+// killAndMaybeClose sends ctrl_kill for childID and, on a clean exit
+// (exitCode 0, no signal, not escalated) and when noClose is false, follows
+// up with ctrl_forget — the wire verb's frozen spelling. Returns the kill
+// result and whether the close ran.
 //
 // Shared between `rafiki kill` and `rafiki create`/`rafiki attach`'s post-detach
-// terminate prompt so both code paths apply the same auto-forget policy.
-func killAndMaybeForget(ctx context.Context, c *client.Client, childID string, st, kt time.Duration, noForget bool) (killAndForgetResult, error) {
-	var res killAndForgetResult
+// terminate prompt so both code paths apply the same auto-close policy.
+func killAndMaybeClose(ctx context.Context, c *client.Client, childID string, st, kt time.Duration, noClose bool) (killAndCloseResult, error) {
+	var res killAndCloseResult
 
 	req := protocol.KillRequest{
 		Type:    protocol.TypeCtrlKill,
@@ -132,24 +140,24 @@ func killAndMaybeForget(ctx context.Context, c *client.Client, childID string, s
 	}
 
 	if err := json.Unmarshal(resp.Data, &res.Kill); err != nil {
-		// Couldn't decode kill response — surface the raw payload and skip forget logic.
+		// Couldn't decode kill response — surface the raw payload and skip close logic.
 		return res, fmt.Errorf("decode kill response: %w (raw=%s)", err, string(resp.Data))
 	}
 
 	cleanExit := res.Kill.ExitCode != nil && *res.Kill.ExitCode == 0 &&
 		res.Kill.Signal == "" && !res.Kill.Escalated
-	if cleanExit && !noForget {
+	if cleanExit && !noClose {
 		fresp, ferr := c.Request(ctx, protocol.ForgetRequest{
 			Type:    protocol.TypeCtrlForget,
 			ChildID: childID,
 		})
 		switch {
 		case ferr != nil:
-			res.ForgetErr = ferr
+			res.CloseErr = ferr
 		case !fresp.Success:
-			res.ForgetErr = fmt.Errorf("%s", client.FormatError(fresp))
+			res.CloseErr = fmt.Errorf("%s", client.FormatError(fresp))
 		default:
-			res.DidForget = true
+			res.DidClose = true
 		}
 	}
 
