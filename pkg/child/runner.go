@@ -72,6 +72,14 @@ func newProcessRunner(spec SpawnSpec) (*processRunner, error) {
 	return &processRunner{cmd: cmd}, nil
 }
 
+// NewProcessRunner exposes the subprocess runner to other packages.
+//
+// It exists so pkg/daraja can host a process with the SAME semantics a
+// daemon-side child gets — process-group signalling and an os.Process.Wait that
+// does not block on inherited pipes — rather than growing a second, subtly
+// different implementation of both.
+func NewProcessRunner(spec SpawnSpec) (Runner, error) { return newProcessRunner(spec) }
+
 func (p *processRunner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	stdin, err := p.cmd.StdinPipe()
 	if err != nil {
