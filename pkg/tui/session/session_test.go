@@ -312,3 +312,86 @@ func TestUnreadableImageStillGetsAPlaceholder(t *testing.T) {
 		t.Error("a nil image must render as nothing")
 	}
 }
+
+// A tool result that arrives AFTER its assistant message must not be walled
+// off behind the finalization watermark. renderer.Lines treats every block
+// below Finalized as immutable and caches it once, so a block finalized
+// before its tool calls resolve is frozen forever showing no result.
+func TestAssistantBlockIsNotFinalizedUntilItsToolsResolve(t *testing.T) {
+	s := session.New("c1")
+
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c1",
+		Payload: &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+						Id: "tu_1", Name: "bash", InputJson: `{"command":"ls"}`,
+					}},
+				}},
+			},
+		},
+	})
+
+	if s.Finalized != 0 {
+		t.Fatalf("Finalized = %d, want 0: an assistant block with an unanswered tool call can still change", s.Finalized)
+	}
+
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c1",
+		Payload: &rafikiv1.Event_UserMessage{
+			UserMessage: &rafikiv1.UserMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+						ToolUseId: "tu_1",
+						Content: []*rafikiv1.ContentBlock{{
+							Index: 0,
+							Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "go.mod"}},
+						}},
+					}},
+				}},
+			},
+		},
+	})
+
+	if s.Finalized != 1 {
+		t.Fatalf("Finalized = %d, want 1: the result arrived, so the block is settled", s.Finalized)
+	}
+}
+
+// The anti-stall guard. A tool call that never returns must not park the
+// watermark forever: every block after it would stay in the live region and
+// be re-rendered on every tick, which is the 10.9ms-per-Update regime the
+// two-axis renderer design exists to avoid.
+func TestTurnEndSettlesBlocksWithUnansweredToolCalls(t *testing.T) {
+	s := session.New("c1")
+
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c1",
+		Payload: &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+						Id: "tu_orphan", Name: "bash",
+					}},
+				}},
+			},
+		},
+	})
+	if s.Finalized != 0 {
+		t.Fatalf("Finalized = %d, want 0 before turn_end", s.Finalized)
+	}
+
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c1",
+		Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{}},
+	})
+
+	if s.Finalized != len(s.Blocks) {
+		t.Fatalf("Finalized = %d, want %d: turn_end settles everything before it, answered or not",
+			s.Finalized, len(s.Blocks))
+	}
+}

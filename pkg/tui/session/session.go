@@ -82,6 +82,29 @@ func (b Block) Fingerprint() string {
 	return sb.String()
 }
 
+// Settled reports whether b can never change again.
+//
+// This is the whole meaning of Session.Finalized, and getting it wrong is
+// silent: renderer.Lines caches every block below the watermark exactly once
+// and never looks at it again, so a block finalized too early is frozen on
+// screen showing whatever was true at that instant. An assistant block's tool
+// calls resolve AFTER the message announcing them arrives, which is why
+// Final alone is not enough.
+func (b Block) Settled() bool {
+	if b.Kind != KindAssistant {
+		return true
+	}
+	if !b.Final {
+		return false
+	}
+	for _, tc := range b.ToolCalls {
+		if !tc.HasResult {
+			return false
+		}
+	}
+	return true
+}
+
 // Session is one child's conversation.
 type Session struct {
 	ChildID string
@@ -101,6 +124,32 @@ type Session struct {
 // New returns an empty session for one child.
 func New(childID string) *Session {
 	return &Session{ChildID: childID}
+}
+
+// recomputeFinalized advances the watermark to the first block that can still
+// change. It only ever moves FORWARD: renderer.Lines treats a backwards move
+// as "this is a different transcript" and throws its whole cache away.
+func (s *Session) recomputeFinalized() {
+	i := s.Finalized
+	if i < 0 {
+		i = 0
+	}
+	for i < len(s.Blocks) && s.Blocks[i].Settled() {
+		i++
+	}
+	s.Finalized = i
+}
+
+// settleAll marks every block that exists now as immutable, whether or not
+// its tool calls were ever answered.
+//
+// This is the anti-stall guard and it is not optional. A turn that ends with
+// a call still outstanding — interrupted, or cut short — would otherwise park
+// the watermark permanently, leaving every later block in the live region to
+// be re-rendered on every tick. The live region must be bounded by the length
+// of one turn; if it is ever longer, this is missing.
+func (s *Session) settleAll() {
+	s.Finalized = len(s.Blocks)
 }
 
 // Apply folds one event into the session.
@@ -176,7 +225,10 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 			Text:  "Error: " + p.Error.GetMessage(),
 			Final: true,
 		})
-		s.Finalized = len(s.Blocks)
+		s.settleAll()
+	case *rafikiv1.Event_ChildExited:
+		// A dead child answers no more tool calls.
+		s.settleAll()
 	}
 }
 
@@ -212,6 +264,9 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 
 	text := TextFromContent(um.GetContent())
 	if text == "" && results > 0 {
+		// A results-only message appends no block, but it just answered tool
+		// calls -- which is exactly what unsticks the watermark.
+		s.recomputeFinalized()
 		return
 	}
 	s.Blocks = append(s.Blocks, Block{
@@ -220,7 +275,7 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 		Text:  text,
 		Final: true,
 	})
-	s.Finalized = len(s.Blocks)
+	s.recomputeFinalized()
 }
 
 // attachToolResult files one result against its call, searching backwards:
@@ -285,7 +340,7 @@ func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
 		}
 	}
 	s.Blocks = append(s.Blocks, block)
-	s.Finalized = len(s.Blocks)
+	s.recomputeFinalized()
 }
 
 func (s *Session) applyTurnEnd(te *rafikiv1.TurnEnd) {
@@ -295,7 +350,7 @@ func (s *Session) applyTurnEnd(te *rafikiv1.TurnEnd) {
 			last.StopReason = te.GetRawStopReason()
 		}
 	}
-	s.Finalized = len(s.Blocks)
+	s.settleAll()
 }
 
 func (s *Session) applyDelta(delta *rafikiv1.ContentBlockDelta) {
