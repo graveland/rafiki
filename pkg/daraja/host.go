@@ -57,6 +57,18 @@ type HostOptions struct {
 	Argv   []string
 	Cwd    string
 	Env    []string
+
+	// EnvOverride replaces the inherited environment with Env instead of
+	// appending to it.
+	//
+	// Explicit rather than inferred from len(Env), which is what this used to
+	// be: passthrough auth is defined by the ABSENCE of ANTHROPIC_AUTH_TOKEN
+	// and ANTHROPIC_API_KEY, so a caller that builds a complete environment
+	// needs override, while a caller adding one variable needs the opposite —
+	// and inferring it from a length silently gives the second caller the
+	// first behaviour, dropping HOME, PATH and the credential store the child
+	// needs.
+	EnvOverride bool
 }
 
 // Host owns one child process. Its methods are safe for concurrent use: the
@@ -67,56 +79,118 @@ type Host struct {
 	mu      sync.Mutex
 	runner  child.Runner
 	stdin   io.WriteCloser
+	exitCh  chan ExitInfo
 	running bool
 
 	events chan Event
-	// closeOnce guards events, which exactly one goroutine may close.
-	closeOnce sync.Once
+
+	// done closes when the host is finished, releasing every blocked sender
+	// and telling the consumer to stop.
+	//
+	// events is deliberately NEVER closed. It has several senders — the stdout
+	// pump, the exit watcher, and Restart's marker — and closing a channel out
+	// from under a blocked sender panics the process, which is exactly what
+	// happened when Shutdown closed it directly. A done channel every sender
+	// and the consumer select on removes the whole class.
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func NewHost(opts HostOptions) *Host {
-	return &Host{opts: opts, events: make(chan Event, eventBuffer)}
+	return &Host{
+		opts:   opts,
+		events: make(chan Event, eventBuffer),
+		done:   make(chan struct{}),
+	}
 }
 
-// Events returns the ordered event stream. One consumer.
+// Events returns the ordered event stream. One consumer. Never closed — select
+// on Done to learn that the host has finished.
 func (h *Host) Events() <-chan Event { return h.events }
+
+// Done closes when the host has finished and no further events will be sent.
+func (h *Host) Done() <-chan struct{} { return h.done }
+
+// emit publishes ev, or reports false if the host finished first.
+func (h *Host) emit(ev Event) bool {
+	select {
+	case h.events <- ev:
+		return true
+	case <-h.done:
+		return false
+	}
+}
 
 // Start launches the process.
 func (h *Host) Start() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.startLocked(h.opts.Argv)
+	stdout, err := h.startLocked(h.opts.Argv)
+	h.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	go h.pump(stdout)
+	return nil
 }
 
-// startLocked launches a process. h.mu must be held.
-func (h *Host) startLocked(argv []string) error {
+// startLocked launches a process and returns its stdout WITHOUT pumping it.
+//
+// The caller starts the pump, because Restart must emit its boundary marker
+// before the replacement's first byte can reach the consumer — and it cannot
+// emit while holding h.mu. Returning the pipe unread is what lets it do both.
+// h.mu must be held.
+func (h *Host) startLocked(argv []string) (io.ReadCloser, error) {
 	if h.running {
-		return errors.New("daraja: already running")
+		return nil, errors.New("daraja: already running")
 	}
 	runner, err := child.NewProcessRunner(child.SpawnSpec{
 		PiBinary:    h.opts.Binary,
 		Argv:        argv,
 		Cwd:         h.opts.Cwd,
 		Env:         h.opts.Env,
-		EnvOverride: len(h.opts.Env) > 0,
+		EnvOverride: h.opts.EnvOverride,
 	})
 	if err != nil {
-		return fmt.Errorf("daraja: build runner: %w", err)
+		return nil, fmt.Errorf("daraja: build runner: %w", err)
 	}
 	stdin, stdout, stderr, err := runner.Start()
 	if err != nil {
-		return fmt.Errorf("daraja: start: %w", err)
+		return nil, fmt.Errorf("daraja: start: %w", err)
 	}
-	h.runner, h.stdin, h.running = runner, stdin, true
+	exitCh := make(chan ExitInfo, 1)
+	h.runner, h.stdin, h.exitCh, h.running = runner, stdin, exitCh, true
 
-	go h.pump(stdout)
+	go h.watch(runner, exitCh)
 	// stderr is drained and discarded: the controller reads the child's
 	// protocol on stdout, and an undrained pipe eventually blocks the writer.
 	go func() { _, _ = io.Copy(io.Discard, stderr) }()
-	return nil
+	return stdout, nil
 }
 
-// pump copies stdout into the event stream until EOF.
+// watch reaps the process exactly once and decides whether anybody asked for
+// it. There is ONE waiter per process: os.Process.Wait is not safe to call
+// twice, so stopLocked reads this outcome rather than waiting itself.
+func (h *Host) watch(runner child.Runner, exitCh chan ExitInfo) {
+	code, sig := runner.Wait()
+	info := ExitInfo{ExitCode: code, Signal: sig}
+	exitCh <- info // buffered: a deliberate stop may or may not be reading
+
+	// stopLocked holds h.mu for its whole body and clears h.runner before
+	// returning, so an exit it caused is identified by the runner no longer
+	// being the current one. Anything else is the child dying on its own.
+	h.mu.Lock()
+	unexpected := h.runner == runner
+	if unexpected {
+		h.running, h.stdin = false, nil
+	}
+	h.mu.Unlock()
+
+	if unexpected {
+		h.emit(Event{Exited: &info})
+	}
+}
+
+// pump copies stdout into the event stream until EOF or shutdown.
 func (h *Host) pump(stdout io.ReadCloser) {
 	defer stdout.Close()
 	buf := make([]byte, stdoutChunk)
@@ -125,7 +199,9 @@ func (h *Host) pump(stdout io.ReadCloser) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			h.events <- Event{Stdout: chunk}
+			if !h.emit(Event{Stdout: chunk}) {
+				return
+			}
 		}
 		if err != nil {
 			return
@@ -162,67 +238,71 @@ func (h *Host) WriteStdin(p []byte) error {
 	return err
 }
 
-// Restart signals the process, waits for it, and launches a replacement with
-// argv. The boundary marker is emitted BEFORE the new process can write, which
-// is what lets a consumer reset its per-process state at the right point.
+// Restart signals the process, waits for it, and launches a replacement.
 func (h *Host) Restart(argv []string, grace time.Duration) (int, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.running {
 		h.stopLocked(grace, true)
 	}
-	if err := h.startLocked(argv); err != nil {
+	stdout, err := h.startLocked(argv)
+	if err != nil {
+		h.mu.Unlock()
 		return 0, err
 	}
 	pid := h.runner.PID()
-	h.events <- Event{Restarted: &pid}
+	h.mu.Unlock()
+
+	// The marker is emitted with the lock RELEASED — this send blocks until the
+	// consumer drains, and blocking under h.mu wedges Health, WriteStdin and
+	// Shutdown behind a slow reader. Ordering still holds because the
+	// replacement's stdout is not pumped until after this returns.
+	h.emit(Event{Restarted: &pid})
+	go h.pump(stdout)
 	return pid, nil
 }
 
 // Shutdown ends the process and reports the outcome. Idempotent.
+//
+// No Exited event is emitted: the outcome is this call's return value, and the
+// caller that asked for the shutdown does not need telling twice. Exited is for
+// a child that died on its own.
 func (h *Host) Shutdown(grace time.Duration) (int, string, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.running {
-		return 0, "", nil
+	var info ExitInfo
+	if h.running {
+		info = h.stopLocked(grace, false)
 	}
-	code, sig := h.stopLocked(grace, false)
-	h.closeOnce.Do(func() { close(h.events) })
-	return code, sig, nil
+	h.mu.Unlock()
+
+	h.doneOnce.Do(func() { close(h.done) })
+	return info.ExitCode, info.Signal, nil
 }
 
-// stopLocked interrupts, waits out grace, escalates to Kill, and reaps.
-// h.mu must be held. interrupt selects SIGINT (a turn abort) over SIGTERM.
-func (h *Host) stopLocked(grace time.Duration, interrupt bool) (int, string) {
+// stopLocked signals, waits out grace, escalates to Kill, and takes the
+// outcome from the watcher. h.mu must be held; interrupt selects SIGINT (a turn
+// abort) over SIGTERM.
+//
+// This does block while holding h.mu, deliberately: the wait is bounded by
+// grace plus a reap, and releasing the lock would let a concurrent Restart
+// start a process this call is about to declare stopped.
+func (h *Host) stopLocked(grace time.Duration, interrupt bool) ExitInfo {
 	if grace <= 0 {
 		grace = defaultGrace
 	}
+	runner, exitCh := h.runner, h.exitCh
 	if interrupt {
-		_ = h.runner.Interrupt()
+		_ = runner.Interrupt()
 	} else {
-		_ = h.runner.Terminate()
+		_ = runner.Terminate()
 	}
 
-	type outcome struct {
-		code int
-		sig  string
-	}
-	done := make(chan outcome, 1)
-	runner := h.runner
-	go func() {
-		code, sig := runner.Wait()
-		done <- outcome{code, sig}
-	}()
-
+	var info ExitInfo
 	select {
-	case o := <-done:
-		h.running, h.stdin, h.runner = false, nil, nil
-		return o.code, o.sig
+	case info = <-exitCh:
 	case <-time.After(grace):
 		_ = runner.Kill()
-		o := <-done
-		h.running, h.stdin, h.runner = false, nil, nil
-		return o.code, o.sig
+		info = <-exitCh
 	}
+	h.running, h.stdin, h.runner, h.exitCh = false, nil, nil, nil
+	return info
 }

@@ -92,10 +92,11 @@ func (s *Server) Relay(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case ev, ok := <-s.host.Events():
-			if !ok {
-				return nil
-			}
+		case <-s.host.Done():
+			// The event channel is never closed — it has several senders and
+			// closing it under one would panic. Done is the end signal.
+			return nil
+		case ev := <-s.host.Events():
 			resp, err := relayResponse(ev)
 			if err != nil {
 				return err
