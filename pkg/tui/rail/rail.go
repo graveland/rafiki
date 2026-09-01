@@ -47,6 +47,10 @@ type Node struct {
 	ExitCode *int32
 	Retrying bool
 
+	// SessionID is the child's session/conversation id from ListChildren, so
+	// the task box can address the ledger by conversation without another RPC.
+	SessionID string
+
 	// Latest is the highest ordinal known to exist for this child; it drives the
 	// activity indicator. RailCursor is the highest ordinal RECEIVED on the rail
 	// stream and is the reconnect resume point. Seen is the highest delivered to
@@ -133,13 +137,15 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			if p := s.GetLabels()[ParentLabel]; p != "" {
 				existing.ParentID = p
 			}
+			existing.SessionID = s.GetSessionId()
 			continue
 		}
 		n := &Node{
-			ChildID:  s.GetChildId(),
-			Name:     s.GetName(),
-			ParentID: s.GetLabels()[ParentLabel],
-			Status:   s.GetStatus(),
+			ChildID:   s.GetChildId(),
+			Name:      s.GetName(),
+			ParentID:  s.GetLabels()[ParentLabel],
+			Status:    s.GetStatus(),
+			SessionID: s.GetSessionId(),
 		}
 		// Seeding is a CLEAN BOARD: everything that happened before you attached
 		// counts as read. Attaching is not a claim to have read anything; it is

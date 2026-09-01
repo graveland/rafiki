@@ -157,6 +157,11 @@ type seedMsg struct {
 }
 type sendFailedMsg struct{ err error }
 
+type tasksLoadedMsg struct {
+	childID string
+	rows    []*rafikiv1.TaskRow
+}
+
 // historyMsg carries one child's persisted conversation, plus the event-log
 // ordinal that was current when the fetch was ISSUED -- the focus stream
 // resumes from that, so anything logged during the fetch still arrives.
@@ -213,6 +218,15 @@ type Cockpit struct {
 	// change: you wanted a different conversation, not a permanently wider
 	// piece of furniture.
 	railPeek bool
+	// tasks holds the focused child's ledger, keyed by child id so a hop back
+	// shows the last known list rather than an empty box while the refetch is
+	// in flight.
+	tasks map[string][]*rafikiv1.TaskRow
+	// taskRefresh says the event just processed completed a ledger mutation
+	// for the focused child and the next Update should issue one fetch.
+	// applyEvent is a void fold, so the request rides out to the caller
+	// instead of a tea.Cmd being minted mid-fold.
+	taskRefresh bool
 	// pastes holds folded pastes in insertion order, keyed by the token
 	// standing in for each. Cleared on send: the tokens leave with the text.
 	pastes []pastedText
@@ -433,6 +447,13 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.ready = true
 		return c, nil
 
+	case tasksLoadedMsg:
+		if c.tasks == nil {
+			c.tasks = map[string][]*rafikiv1.TaskRow{}
+		}
+		c.tasks[msg.childID] = msg.rows
+		return c, nil
+
 	case seedMsg:
 		c.reseedInFlight = false
 		if msg.err != nil {
@@ -474,6 +495,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c.reseeding = false
 			c.reseedInFlight = true
 			cmd = c.seedCmd()
+		}
+		if c.taskRefresh {
+			c.taskRefresh = false
+			cmd = tea.Batch(cmd, c.fetchTasks(c.focused()))
 		}
 		return c, tea.Batch(waitForEvent(c.evCh), cmd)
 
@@ -532,6 +557,56 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applyEvent routes one event to the rail and, when it is the focused child's,
 // to that session. Both see it: the rail needs the ordinal for RailCursor even
 // while the user is looking at the child.
+// isTaskTool names the ledger mutations. A completed one is the refresh
+// trigger, which is why there is no polling and no new event type: the ledger
+// stays authoritative and the event plane is not asked to carry a lossy copy
+// of it.
+func isTaskTool(name string) bool {
+	switch name {
+	case "task_add", "task_update", "task_drop":
+		return true
+	}
+	return false
+}
+
+// toolNameFor resolves a tool_use id to its name. ToolExecutionEnd carries a
+// duration and an error flag and no name, so the name has to come from the
+// assistant block that announced the call.
+func toolNameFor(s *session.Session, toolUseID string) string {
+	for i := len(s.Blocks) - 1; i >= 0; i-- {
+		for _, tc := range s.Blocks[i].ToolCalls {
+			if tc.ID == toolUseID {
+				return tc.Name
+			}
+		}
+	}
+	return ""
+}
+
+// fetchTasks loads the focused child's ledger. A failure yields no message at
+// all: the box is a readout, and an unreachable ledger should hide it rather
+// than raise an error over the conversation.
+func (c *Cockpit) fetchTasks(childID string) tea.Cmd {
+	n, ok := c.rail.Get(childID)
+	if !ok {
+		return nil
+	}
+	convID := n.SessionID
+	if convID == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		resp, err := c.client.ListTasks(ctx,
+			connect.NewRequest(&rafikiv1.ListTasksRequest{ConversationId: convID}))
+		if err != nil {
+			return nil
+		}
+		return tasksLoadedMsg{childID: childID, rows: resp.Msg.GetTasks()}
+	}
+}
+
 func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	id := ev.GetChildId()
 
@@ -577,6 +652,10 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	if c.pending != "" && len(s.Blocks) > before &&
 		s.Blocks[len(s.Blocks)-1].Kind == session.KindUser {
 		c.pending = ""
+	}
+	// A completed ledger mutation is the refresh trigger; no polling.
+	if te := ev.GetToolExecutionEnd(); te != nil && isTaskTool(toolNameFor(s, te.GetToolUseId())) {
+		c.taskRefresh = true
 	}
 }
 
@@ -973,7 +1052,7 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 	c.rail.SetFocus(childID)
 	// No renderer reset: each child owns its renderer (see pane.go), so there
 	// is no shared cache to invalidate and the target's cached work survives.
-	return c.openFocus(childID)
+	return tea.Batch(c.openFocus(childID), c.fetchTasks(childID))
 }
 
 // openFocus starts the focus subscription for childID, creating its session if
