@@ -97,7 +97,7 @@ func defaultKeyMap() keyMap {
 		Help:       key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^G", "help")),
 		// ^E would be the mnemonic and is taken: the textarea binds it to
 		// end-of-line. ^O is free and is what other agent TUIs use.
-		ExpandArgs: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("^O", "expand args")),
+		ExpandArgs: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("^O", "expand detail")),
 		// ^L repaints. It is a safety net for output that bypasses slog and
 		// lands on the alt screen, not the primary defence -- see the ring
 		// handler in cmd/rafiki.
