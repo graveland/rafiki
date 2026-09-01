@@ -101,6 +101,115 @@ func collapse(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// headlineKey reports which argument toolArgSummary already put on the call
+// line, so the detail list does not repeat it. It mirrors toolArgSummary's
+// preference order exactly; the two drifting apart shows up as a duplicated
+// or a missing argument, both of which are quiet.
+func headlineKey(name string, args map[string]any) string {
+	for _, k := range toolArgKeys[name] {
+		if v, ok := args[k].(string); ok && v != "" {
+			return k
+		}
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if v, ok := args[k].(string); ok && v != "" {
+			return k
+		}
+	}
+	return ""
+}
+
+// toolArgLines renders every argument EXCEPT the headline one, sorted by key.
+//
+// Compact folds each value onto one line, marking how much was folded away.
+// Expanded prints values in full, using the same head/tail window as a tool
+// result -- a write's content is as long as its output would be and deserves
+// the same budget.
+func toolArgLines(name, input string, expanded bool) []string {
+	input = strings.TrimSpace(input)
+	if input == "" || input == "{}" || input == "null" {
+		return nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(input), &args); err != nil || len(args) == 0 {
+		return nil
+	}
+	skip := headlineKey(name, args)
+
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		if k != skip {
+			keys = append(keys, k)
+		}
+	}
+	// Deterministic: ranging a map would reorder the list between frames.
+	sort.Strings(keys)
+
+	var out []string
+	for _, k := range keys {
+		raw := valueString(args[k])
+		if !expanded {
+			out = append(out, k+": "+truncate(collapse(raw), maxToolArgWidth)+sizeNote(raw))
+			continue
+		}
+		vlines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
+		if len(vlines) == 1 {
+			out = append(out, k+": "+raw)
+			continue
+		}
+		out = append(out, k+":")
+		head, tail, elided := elide(vlines)
+		for _, l := range head {
+			out = append(out, "  "+l)
+		}
+		if elided > 0 {
+			out = append(out, "   [omitted "+itoa(int64(elided))+" lines]")
+		}
+		for _, l := range tail {
+			out = append(out, "  "+l)
+		}
+	}
+	return out
+}
+
+// valueString renders one JSON value as text. A string is itself; anything
+// else is its compact JSON, because a model can put an object or an array
+// here and showing "map[]" helps nobody.
+func valueString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// sizeNote appends a byte count when a value was folded or clipped, so the
+// reader can tell a short argument from a whole file.
+func sizeNote(raw string) string {
+	if len(raw) <= maxToolArgWidth && !strings.ContainsAny(raw, "\n\r") {
+		return ""
+	}
+	return " (" + itoa(int64(len(raw))) + " B)"
+}
+
+// elide splits lines into the head/tail window, sharing the tool result's
+// budget so one long argument cannot outweigh the output it produced.
+func elide(lines []string) (head, tail []string, elided int) {
+	if len(lines) <= toolResultHeadLines+toolResultTailLines {
+		return nil, lines, 0
+	}
+	elided = len(lines) - toolResultHeadLines - toolResultTailLines
+	return lines[:toolResultHeadLines], lines[len(lines)-toolResultTailLines:], elided
+}
+
 // toolResultHeadLines and toolResultTailLines bound how much of one tool
 // result reaches the pane, showing BOTH ends.
 //
@@ -138,6 +247,11 @@ type renderer struct {
 	// renderer owns wrapping — which also puts the gutter on continuation rows,
 	// where soft wrap left them bare.
 	width int
+
+	// expandArgs prints tool arguments in full rather than folded. Part of the
+	// cache key via paneSig: flipping it must invalidate, or the toggle does
+	// nothing visible.
+	expandArgs bool
 }
 
 func newRenderer() *renderer {
@@ -217,6 +331,9 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			sb.WriteString(styleRunning.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
 				styleRunning.Render(" …"))
 			sb.WriteString("\n")
+			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs) {
+				r.writeWrapped(&sb, styleToolResult.Render("    "), styleToolArg.Render(al))
+			}
 		} else {
 			dur := ""
 			if tc.DurationMs > 0 {
@@ -242,6 +359,9 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			}
 			sb.WriteString(prefix)
 			sb.WriteString("\n")
+			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs) {
+				r.writeWrapped(&sb, styleToolResult.Render("    "), styleToolArg.Render(al))
+			}
 			if tc.Result != "" {
 				// Tool output is NOT markdown and must never be reflowed as
 				// prose. glamour joins consecutive newline-separated lines
@@ -262,15 +382,7 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				// truncateToVisualLines does the same (`slice(-max)`), and it is
 				// incomplete.
 				lines := strings.Split(strings.TrimRight(tc.Result, "\n"), "\n")
-				var head, tail []string
-				elided := 0
-				if len(lines) > toolResultHeadLines+toolResultTailLines {
-					elided = len(lines) - toolResultHeadLines - toolResultTailLines
-					head = lines[:toolResultHeadLines]
-					tail = lines[len(lines)-toolResultTailLines:]
-				} else {
-					tail = lines
-				}
+				head, tail, elided := elide(lines)
 				gutter := styleToolResult.Render("    │ ")
 				text := styleToolResult
 				if tc.IsError {
