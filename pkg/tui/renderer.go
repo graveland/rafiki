@@ -355,12 +355,7 @@ func (r *renderer) Lines(blocks []session.Block, finalized, width int) []string 
 	// Live tail: recompute when its fingerprint changed, when nothing is
 	// cached, and when the tail is empty (so the cache empties rather than
 	// stranding the last streaming fragment below finalized content).
-	fp := ""
-	if finalized < len(blocks) {
-		if live := &blocks[len(blocks)-1]; live.Kind == session.KindAssistant && !live.Final {
-			fp = live.Fingerprint()
-		}
-	}
+	fp := session.LiveFingerprint(blocks, finalized)
 	if fp != r.lastFP || r.liveOut == nil || finalized >= len(blocks) {
 		r.lastFP = fp
 		var tail []string

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
@@ -354,5 +355,71 @@ func TestToolCallWithNoResultDoesNotClaimSuccess(t *testing.T) {
 	empty := render(session.ToolCall{Name: "bash", HasResult: true})
 	if !strings.Contains(empty, "✓") {
 		t.Errorf("an empty-but-real result must still read as success:\n%s", empty)
+	}
+}
+
+// The regression that would have caught the frozen transcript. A tool result
+// arriving after the assistant message must appear on the NEXT render.
+func TestToolResultArrivingLateIsRendered(t *testing.T) {
+	s := session.New("c1")
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c1",
+		Payload: &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+						Id: "tu_1", Name: "bash", InputJson: `{"command":"ls"}`,
+					}},
+				}},
+			},
+		},
+	})
+
+	r := newRenderer()
+	first := strings.Join(r.Lines(s.Blocks, s.Finalized, 80), "\n")
+	if strings.Contains(first, "MARKER_OUTPUT") {
+		t.Fatalf("result present before it arrived:\n%s", first)
+	}
+
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c1",
+		Payload: &rafikiv1.Event_UserMessage{
+			UserMessage: &rafikiv1.UserMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+						ToolUseId: "tu_1",
+						Content: []*rafikiv1.ContentBlock{{
+							Index: 0,
+							Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "MARKER_OUTPUT"}},
+						}},
+					}},
+				}},
+			},
+		},
+	})
+
+	second := strings.Join(r.Lines(s.Blocks, s.Finalized, 80), "\n")
+	if !strings.Contains(second, "MARKER_OUTPUT") {
+		t.Errorf("a tool result that arrived after its assistant message was never rendered:\n%s", second)
+	}
+}
+
+// With more than one unfinalized block, a change in an EARLIER one must still
+// invalidate the live region. Fingerprinting only the last block leaves a
+// stale-render hole.
+func TestLiveFingerprintCoversEveryUnfinalizedBlock(t *testing.T) {
+	blocks := []session.Block{
+		{Kind: session.KindAssistant, Final: true,
+			ToolCalls: []session.ToolCall{{ID: "a", Name: "bash"}}},
+		{Kind: session.KindAssistant, Final: false, Text: "tail"},
+	}
+	before := session.LiveFingerprint(blocks, 0)
+	blocks[0].ToolCalls[0].Result = "changed"
+	blocks[0].ToolCalls[0].HasResult = true
+	after := session.LiveFingerprint(blocks, 0)
+	if before == after {
+		t.Error("a change in a non-final block that is not the last one did not change the fingerprint")
 	}
 }
