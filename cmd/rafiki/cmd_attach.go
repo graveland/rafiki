@@ -141,14 +141,28 @@ func resolveChildConnect(ctx context.Context, ep connectEndpoint, c rafikiv1conn
 // the TUI must produce a line on stderr, not a working-looking UI that answers
 // nothing. The predecessor logged a warning and continued.
 func runTUIForChild(cmd *cobra.Command, ep connectEndpoint, childID string) error {
+	// Capture the process's own logs while the alt screen is up. Without this
+	// the session executor's join/park/reconnect messages go to the default
+	// handler -- stderr -- and corrupt the cockpit mid-draw.
+	ring, restoreLogging, err := installTUILogging(500)
+	if err != nil {
+		return err
+	}
+	defer restoreLogging()
 	m := tui.NewCockpit(tui.Options{
 		HTTPClient: ep.httpClient,
 		BaseURL:    ep.baseURL,
 		ChildID:    childID,
 		Subject:    subjectFor(childID),
 	})
-	if _, err := tea.NewProgram(m).Run(); err != nil {
-		return fmt.Errorf("tui: %w", err)
+	// Run returns the final model too; the cockpit holds all state worth
+	// keeping, so it is discarded.
+	_, runErr := tea.NewProgram(m).Run()
+	if runErr != nil {
+		// After the alt screen is gone, not before. A dying executor that
+		// logged nowhere is worse than a corrupted screen.
+		ring.Dump()
+		return fmt.Errorf("tui: %w", runErr)
 	}
 	return nil
 }
