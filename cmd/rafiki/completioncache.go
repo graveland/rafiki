@@ -26,10 +26,8 @@ import (
 // mutating verb drops the entry, so 15s only ever hides a child that ANOTHER
 // actor created.
 const (
-	// Both are consumed by the completion wiring (plan tasks 7 and 8); the
-	// cache itself ships first so the TTLs are decided with it.
-	childCacheTTL = 15 * time.Second //nolint:unused // wired by completion handlers (task 7)
-	modelCacheTTL = time.Hour        //nolint:unused // wired by completion handlers (task 8)
+	childCacheTTL = 15 * time.Second
+	modelCacheTTL = time.Hour
 )
 
 // cacheEntry wraps the payload with its write time. The TTL is applied by the
@@ -101,10 +99,4 @@ func cacheWrite(kind, endpoint string, v any) {
 // actually notices is the one they caused themselves.
 func cacheDrop(kind, endpoint string) {
 	_ = os.Remove(cachePath(kind, endpoint))
-}
-
-// corruptCacheForTest truncates an entry to invalid JSON. Test-only hook, here
-// rather than in the test file because cachePath is unexported.
-func corruptCacheForTest(kind, endpoint string) error {
-	return os.WriteFile(cachePath(kind, endpoint), []byte("{not json"), 0o600)
 }

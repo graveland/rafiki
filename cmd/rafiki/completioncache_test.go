@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -71,4 +72,10 @@ func TestCacheDegradesQuietly(t *testing.T) {
 	if cacheRead("children", "unix:/x", time.Minute, &got) {
 		t.Error("a corrupt entry must be a miss, not a hit")
 	}
+}
+
+// corruptCacheForTest truncates an entry to invalid JSON. Lives in the test
+// file because that is the same package — it needs nothing outside it.
+func corruptCacheForTest(kind, endpoint string) error {
+	return os.WriteFile(cachePath(kind, endpoint), []byte("{not json"), 0o600)
 }

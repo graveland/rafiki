@@ -37,7 +37,7 @@ clean exit (e.g. for /tree navigation or inspection).`,
 	cmd.Flags().Bool("no-forget", false, "Deprecated: use --no-close")
 	_ = cmd.Flags().MarkDeprecated("no-forget", "use --no-close")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
+		return completeChildrenByState(cmd, toComplete, func(ch completionChild) bool {
 			return ch.Status != string(protocol.StatusExited)
 		}), cobra.ShellCompDirectiveNoFileComp
 	}
@@ -72,6 +72,8 @@ func runKill(cmd *cobra.Command, args []string) error {
 			failures++
 		}
 	}
+	// Children changed state even on a mixed run, so the cache is stale either way.
+	dropChildCompletionCache()
 	if failures > 0 {
 		return fmt.Errorf("%d target(s) failed", failures)
 	}
