@@ -1376,3 +1376,36 @@ func TestExpandArgsTogglesAndInvalidates(t *testing.T) {
 		t.Fatal("paneSig has no expandArgs field")
 	}
 }
+
+// A prompt sent to a busy agent used to sit in the inbox until the turn
+// settled, because ModePrompt is busy-gated. Typing at a working agent should
+// reach it at the next opportunity.
+func TestEnterSteersABusyAgent(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   rafikiv1.SendMode
+	}{
+		{"streaming", rafikiv1.SendMode_SEND_MODE_STEER},
+		{"tool_running", rafikiv1.SendMode_SEND_MODE_STEER},
+		{"compacting", rafikiv1.SendMode_SEND_MODE_STEER},
+		{"idle", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		{"spawning", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		{"blocked_ui", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		{"exited", rafikiv1.SendMode_SEND_MODE_PROMPT},
+		{"", rafikiv1.SendMode_SEND_MODE_PROMPT},
+	} {
+		if got := sendModeFor(rafikiv1.SendMode_SEND_MODE_PROMPT, tc.status); got != tc.want {
+			t.Errorf("status %q: got %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
+// An explicit steer stays a steer, and abort is never rewritten.
+func TestExplicitModesAreNotRewritten(t *testing.T) {
+	if got := sendModeFor(rafikiv1.SendMode_SEND_MODE_STEER, "idle"); got != rafikiv1.SendMode_SEND_MODE_STEER {
+		t.Errorf("an explicit steer at an idle agent became %v", got)
+	}
+	if got := sendModeFor(rafikiv1.SendMode_SEND_MODE_ABORT, "streaming"); got != rafikiv1.SendMode_SEND_MODE_ABORT {
+		t.Errorf("abort was rewritten to %v", got)
+	}
+}
