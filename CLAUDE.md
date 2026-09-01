@@ -361,6 +361,26 @@
   detection must never be added**: sniffing `/proc/1/cgroup` is the executor
   asserting a fact that gates it, which is what `SelfReported` already forbids.
 
+- **launchd seeds `SSH_AUTH_SOCK` into every LaunchAgent, which makes
+  `executor.env`'s captured value for it inert — that is what the
+  executor-overrides.env file exists to beat.** `rafiki executor serve` applies
+  TWO files at startup, in order: `executor.env` (`paths.ExecutorEnvFile`,
+  fill-gaps — the unit wins), then `executor-overrides.env`
+  (`paths.ExecutorOverridesFile`, `RAFIKI_EXECUTOR_OVERRIDES_FILE`) where every
+  variable is set UNCONDITIONALLY via `paths.LoadEnvFileOverrides`. launchd
+  injects `SSH_AUTH_SOCK=/var/run/com.apple.launchd.*/Listeners` — its own
+  per-session agent socket, often holding no identities — into every
+  LaunchAgent's environment, so by the time serve runs the variable is already
+  present and the value captured at install (e.g. `/Users/brent/.ssh/.agent`,
+  the agent that actually holds the keys) is silently skipped. Only an override
+  entry beats it. Install NEVER writes the overrides file: its whole point is
+  hand-curating the exact vars the automated capture gets wrong, and
+  auto-writing it from the installing shell would re-freeze the wrong value
+  with force semantics (worse than inert). The overrides path is resolved
+  AFTER the fill-gaps load, so executor.env itself may name the overrides file.
+  Note the daemon deliberately has no such file: `service.env`'s fill-gaps
+  precedence is load-bearing for `RAFIKI_DB=... rafikid` overriding the file.
+
 - **A background job needs `WaitDelay`, and its exit code comes from
   `ProcessState`, not from the error.** `exec.Cmd.Wait` waits for the process
   AND for its output pipes to reach EOF; a backgrounded grandchild inherits

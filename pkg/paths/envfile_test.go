@@ -188,6 +188,67 @@ func TestExecutorEnvFile_HonoursOverride(t *testing.T) {
 	}
 }
 
+func TestExecutorOverridesFile_HonoursOverride(t *testing.T) {
+	t.Setenv(ExecutorOverridesFileEnv, "/tmp/executor-overrides-custom.env")
+	if got := ExecutorOverridesFile(); got != "/tmp/executor-overrides-custom.env" {
+		t.Errorf("ExecutorOverridesFile() = %q, want the override", got)
+	}
+	t.Setenv(ExecutorOverridesFileEnv, "")
+	if got := ExecutorOverridesFile(); filepath.Base(got) != "executor-overrides.env" {
+		t.Errorf("ExecutorOverridesFile() = %q, want it to end in executor-overrides.env", got)
+	}
+}
+
+// The overrides loader is the executor's escape hatch: launchd seeds
+// SSH_AUTH_SOCK into every LaunchAgent, and under LoadEnvFile's fill-gaps
+// precedence a captured value in executor.env is inert — only a file that
+// OVERRIDES can beat the unit. Every variable it names wins, present or not,
+// which is the exact opposite of TestLoadEnvFile_ExistingEnvWins.
+func TestLoadEnvFileOverrides_BeatsTheEnvironment(t *testing.T) {
+	p := writeEnv(t, `RAFIKI_OVR_NEW=from-file
+RAFIKI_OVR_EXISTING=from-file
+RAFIKI_OVR_EMPTY=
+`)
+	// Present in the env BEFORE the load, with a different value: the fill-gaps
+	// loader would leave it alone; this loader must replace it.
+	t.Setenv("RAFIKI_OVR_EXISTING", "from-process")
+	os.Unsetenv("RAFIKI_OVR_NEW") //nolint:errcheck
+	t.Setenv("RAFIKI_OVR_NEW", "")
+	os.Unsetenv("RAFIKI_OVR_NEW") //nolint:errcheck
+	// A variable the file does not name must be left untouched.
+	t.Setenv("RAFIKI_OVR_UNTOUCHED", "keep-me")
+
+	applied, warnings, err := LoadEnvFileOverrides(p)
+	if err != nil {
+		t.Fatalf("LoadEnvFileOverrides: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %v", warnings)
+	}
+	if len(applied) != 3 {
+		t.Errorf("applied %d vars, want 3: %v", len(applied), applied)
+	}
+	for k, want := range map[string]string{
+		"RAFIKI_OVR_NEW":       "from-file",
+		"RAFIKI_OVR_EXISTING":  "from-file", // overrode the process value
+		"RAFIKI_OVR_EMPTY":     "",
+		"RAFIKI_OVR_UNTOUCHED": "keep-me",
+	} {
+		if got := os.Getenv(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// Same optional-configuration contract as LoadEnvFile: a missing overrides
+// file must not fail serve.
+func TestLoadEnvFileOverrides_MissingIsNotAnError(t *testing.T) {
+	applied, warnings, err := LoadEnvFileOverrides(filepath.Join(t.TempDir(), "nope.env"))
+	if err != nil || len(applied) != 0 || len(warnings) != 0 {
+		t.Errorf("missing file: got applied=%v warnings=%v err=%v, want all empty", applied, warnings, err)
+	}
+}
+
 // parseEnvFile is the pure half of LoadEnvFile: it must report what a file
 // says without touching the process environment. MergeEnvFile depends on
 // that, because it has to learn a file's keys during an install without
