@@ -3491,6 +3491,7 @@ func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest)
 	}
 
 	f := tasks.ListFilter{
+		ConversationID: req.ConversationID,
 		Assignee:       req.ChildID,
 		Status:         tasks.Status(req.Status),
 		IncludeDropped: req.All,

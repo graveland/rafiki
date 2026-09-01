@@ -458,6 +458,7 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetEventLog(ctrl.evlog)
 			face.Control.SetInbox(ctrl.connectInbox())
 			face.Control.SetChildLister(ctrl)
+			face.Control.SetTaskLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 		}
 	}

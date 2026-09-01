@@ -47,6 +47,8 @@ const (
 	ControlSpawnProcedure = "/rafiki.v1.Control/Spawn"
 	// ControlKillProcedure is the fully-qualified name of the Control's Kill RPC.
 	ControlKillProcedure = "/rafiki.v1.Control/Kill"
+	// ControlListTasksProcedure is the fully-qualified name of the Control's ListTasks RPC.
+	ControlListTasksProcedure = "/rafiki.v1.Control/ListTasks"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
@@ -58,6 +60,7 @@ type ControlClient interface {
 	GetChild(context.Context, *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error)
 	Spawn(context.Context, *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error)
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
+	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -113,6 +116,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("Kill")),
 			connect.WithClientOptions(opts...),
 		),
+		listTasks: connect.NewClient[v1.ListTasksRequest, v1.ListTasksResponse](
+			httpClient,
+			baseURL+ControlListTasksProcedure,
+			connect.WithSchema(controlMethods.ByName("ListTasks")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -125,6 +134,7 @@ type controlClient struct {
 	getChild     *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
 	spawn        *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
 	kill         *connect.Client[v1.KillRequest, v1.KillResponse]
+	listTasks    *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -162,6 +172,11 @@ func (c *controlClient) Kill(ctx context.Context, req *connect.Request[v1.KillRe
 	return c.kill.CallUnary(ctx, req)
 }
 
+// ListTasks calls rafiki.v1.Control.ListTasks.
+func (c *controlClient) ListTasks(ctx context.Context, req *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error) {
+	return c.listTasks.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -171,6 +186,7 @@ type ControlHandler interface {
 	GetChild(context.Context, *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error)
 	Spawn(context.Context, *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error)
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
+	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -222,6 +238,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("Kill")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListTasksHandler := connect.NewUnaryHandler(
+		ControlListTasksProcedure,
+		svc.ListTasks,
+		connect.WithSchema(controlMethods.ByName("ListTasks")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -238,6 +260,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlSpawnHandler.ServeHTTP(w, r)
 		case ControlKillProcedure:
 			controlKillHandler.ServeHTTP(w, r)
+		case ControlListTasksProcedure:
+			controlListTasksHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -273,4 +297,8 @@ func (UnimplementedControlHandler) Spawn(context.Context, *connect.Request[v1.Sp
 
 func (UnimplementedControlHandler) Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Kill is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListTasks is not implemented"))
 }
