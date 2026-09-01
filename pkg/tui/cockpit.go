@@ -832,6 +832,41 @@ func (c *Cockpit) scrollFocused(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 
+// workingStatus reports whether a child is mid-turn.
+//
+// The set of statuses is CLOSED (protocol.Status's eight) and there is no
+// "running" -- a predicate written from intuition as status == "running"
+// matches nothing and silently does nothing, which this repo has shipped once
+// already in the recovery path.
+func workingStatus(s string) bool {
+	switch s {
+	case "streaming", "tool_running", "compacting":
+		return true
+	}
+	return false
+}
+
+// sendModeFor upgrades a PROMPT to a STEER when the target is mid-turn.
+//
+// ModePrompt is debounced and busy-GATED, so a prompt typed at a working agent
+// waits in agent_inbox until the turn settles -- which is the ⏳ that never
+// clears. A steer is delivered at the next opportunity instead.
+//
+// Over-applying steer is safe: Engine.HandleSteerID buffers for mid-turn
+// injection when a turn is running and otherwise treats the text as a plain
+// prompt, so the client's status view being a few milliseconds stale can only
+// be wrong in the harmless direction.
+//
+// Only the cockpit's ⏎ is rewritten. SEND_MODE_PROMPT stays intact on the wire
+// for callers that genuinely want queueing -- a coordinator's agent_send,
+// where the debounce and the per-(child, source) coalescing are the point.
+func sendModeFor(mode rafikiv1.SendMode, status string) rafikiv1.SendMode {
+	if mode == rafikiv1.SendMode_SEND_MODE_PROMPT && workingStatus(status) {
+		return rafikiv1.SendMode_SEND_MODE_STEER
+	}
+	return mode
+}
+
 // modeForKey maps an input-pane keystroke to a send mode.
 //
 // It reads the BINDINGS rather than switching on key strings. It used to carry
@@ -864,6 +899,9 @@ func (c *Cockpit) sendWith(mode rafikiv1.SendMode, text string, images []stagedA
 	child := c.focused()
 	if child == "" {
 		return nil
+	}
+	if n, ok := c.rail.Get(child); ok {
+		mode = sendModeFor(mode, n.Status)
 	}
 	req := &rafikiv1.SendRequest{ChildId: child, Mode: mode}
 	if mode != rafikiv1.SendMode_SEND_MODE_ABORT {
