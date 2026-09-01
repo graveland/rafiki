@@ -384,7 +384,7 @@ func TestBuildSpawnRequest_KindDefaultsAgent(t *testing.T) {
 	// The default is the native runtime, not a foreign subprocess: it is the kind
 	// with in-band abort and per-turn cost accounting, and the only one whose
 	// model ids this repo can resolve. --model completion keys off the same
-	// default (see modelSourcesForKind).
+	// default (kind scoping lives daemon-side; see cmd/rafikid's sourcesForKind).
 	if req.Kind != protocol.KindFundi {
 		t.Errorf("Kind = %q, want fundi (default)", req.Kind)
 	}

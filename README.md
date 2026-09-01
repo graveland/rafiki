@@ -208,11 +208,22 @@ process stays resident.
 | `claude` | Claude Code |
 
 The kinds have **different model universes**, and `--model` completion is scoped
-to the one you picked. A `fundi` child routes through this module, so it takes
+to the one you picked. The scoping lives daemon-side now (`sourcesForKind` in
+`cmd/rafikid`), and completion asks the daemon the CLI is actually pointed at
+(`RAFIKI_URL` included), so against a remote daemon it offers that daemon's
+models, not the ones resolvable on your laptop. A `fundi` child routes
+through this module, so it takes
 concrete Anthropic ids, `<family>-latest` aliases and any OpenRouter slash id. A
 `pi` child resolves the id against pi's *own* providers in
 `~/.pi/agent/models.json`, so an OpenRouter slash id means nothing to it — pick
 one and the child spawns, attaches, and then never answers.
+
+Completion needs a reachable daemon. Candidates are cached per endpoint for a
+short window (children 15s, models 1h), every mutating verb (`create`, `kill`,
+`close`, `label`) drops its cache entry, and any failure — unreachable daemon,
+missing token — quietly yields no candidates rather than an error. `rafiki
+models` bypasses the model cache and rewrites it, which is the escape hatch
+after adding a provider or starting a new local model.
 
 `fundi` needs `ANTHROPIC_API_KEY` in the **daemon-visible** environment
 (unconditionally — the client always builds an Anthropic sender), plus
@@ -497,9 +508,10 @@ resolves a model id gets it for free) and pins
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to 16384 instead of leaving Claude Code's
 200K assumption in place. `context_window` is optional — an alias declared
 purely for the shorthand behaves exactly as before context-window-wise. The
-alias also shows up in `rafiki models list` and `--model` tab completion
-(`source: alias`), independent of whether the server is currently reachable —
-declaring it is enough, no live probe involved.
+alias also shows up in `rafiki models` and `--model` tab completion
+(`source: alias`) — the daemon enumerates it from your provider config without
+a live probe of the local server, and the CLI learns it from the daemon, so a
+reachable daemon is all it takes to see it.
 
 Three more fields on the same `[providers.<name>.models.<alias>]` table tune
 what gets sent to a small-context model in the first place, since the

@@ -231,6 +231,8 @@ watch that row freeze.
 | `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal` and `cost_usd`) |
 | `Spawn` | unary | Create a child with budget, executor, and label options |
 | `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
+| `Close` | unary | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped (§6.13 is the same operation on the framed protocol, whose wire spelling `ctrl_forget` stays frozen). An error for a live child — closing is never an implicit kill |
+| `ListModels` | unary | The daemon's model rows: one per id the daemon can resolve for a kind, with source and — when the catalog knows the id — optional context window, per-token USD prices and input modalities. `kind` scopes the sources (`claude` resolves only Anthropic ids; empty means the fundi default), `provider` filters by provider. This is what `rafiki models` and `--model` completion read |
 | `ListTasks` | unary | One conversation's task ledger, mapped from `Controller.TaskList` (the same implementation behind the `ctrl_task_list` frame verb). `conversation_id` empty means every conversation; `include_dropped` surfaces rows an agent abandoned, hidden by default. rafiki requires a database, so a ledger that cannot answer is a real failure and surfaces as `CodeInternal` rather than as an empty list; the cockpit chooses to hide the box rather than surface it. Rows are clamped to 2000, matching the `ctrl_task_list` frame verb — `tasks.ListFilter.Limit == 0` means unlimited and `conversation_id` empty means every conversation. Each `TaskRow` carries `handle` — the dotted ordinal path ("2.1"), computed on read and never persisted — plus `content`, `active_form`, `status`, `assignee` and `drop_reason` |
 
 ### `Send` and the durable inbox
@@ -1222,6 +1224,18 @@ raw numbers ride along for future callers; the `rafiki claude` client reads only
 `autoCompactWindow` and does no maths. There is no error code — an unreachable
 daemon is a transport failure the client handles by leaving the model's defaults
 alone, and an unknown model is `known: false`.
+
+### 6.22 `ctrl_list_models`
+
+Enumerates LLM models from all configured sources, with an optional `provider`
+filter, answering `[]ModelInfo` (`id`/`provider`/`model`/`name`/`source` — the
+source vocabulary is the old one, `user-config | builtin | ollama | lmstudio`).
+
+**Frozen.** New callers should not adopt this verb: its source vocabulary and
+row shape predate the daemon's current model spine, and it carries none of the
+catalog facts (context window, prices, modalities) the Connect `ListModels` RPC
+(§2.3) reports. `rafiki models` and `--model` completion moved to Connect for
+exactly those reasons; the frame verb stays only so old clients keep working.
 
 ## 7. Controller → client events
 

@@ -1,123 +1,122 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
+	"strconv"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
-
-	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func newModelsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "models",
 		Aliases: []string{"model"},
-		Short:   "List available models from all sources",
-		Long: `List LLM models discoverable by the controller.
+		Short:   "List the models the daemon offers",
+		Long: `List LLM models the DAEMON offers, through its Connect control plane.
 
-Sources (in priority order):
-  user-config   ~/.pi/agent/models.json (your configured providers)
+This is the daemon's view — the same list --model completion reads — not what
+the CLI could discover on its own. Rows carry what the daemon knows about each
+id: its source, and, when it has a catalog entry, the context window, per-million
+prices and whether the model accepts images.
+
+Sources reported per row:
+  user-config   your configured providers (providers.toml)
   builtin       curated static list of common provider/model IDs
-  ollama        live Ollama server (OLLAMA_HOST, default localhost:11434)
-  lmstudio      live LM Studio server (LM_STUDIO_HOST, default localhost:1234)
+  alias         providers.toml [providers.<name>.models.<alias>] entries
+  openrouter    the daemon's OpenRouter catalog snapshot
+  local         the daemon's live probe of a configured local provider
 
-Results are deduplicated by ID; user-config entries shadow builtin entries
-with the same ID and carry the user's display name.`,
+An empty CONTEXT or price cell means the daemon has no catalog entry for that
+id — every locally-served model — which is not the same as a zero. The VISION
+column says ? there for the same reason.
+
+The command always asks the daemon and then rewrites the completion cache, so
+it is the documented escape hatch for a stale completion: run it after adding
+a provider or starting a new local model, instead of waiting out the cache.`,
 		Args: cobra.NoArgs,
 		RunE: runModels,
 	}
 	cmd.Flags().String("provider", "", "Filter by provider name (e.g. anthropic, openai, ollama)")
-	cmd.Flags().String("source", "", "Filter by source: builtin|user-config|ollama|lmstudio")
+	cmd.Flags().String("source", "", "Filter by source: user-config|builtin|alias|openrouter|local")
 	_ = cmd.RegisterFlagCompletionFunc("provider", cobra.FixedCompletions(
 		[]string{"anthropic", "openai", "google", "xai", "ollama", "lmstudio"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
 	_ = cmd.RegisterFlagCompletionFunc("source", cobra.FixedCompletions(
-		[]string{"builtin", "user-config", "ollama", "lmstudio"},
+		[]string{"user-config", "builtin", "alias", "openrouter", "local"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
 	return cmd
 }
 
 func runModels(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-
 	provider, _ := cmd.Flags().GetString("provider")
 	source, _ := cmd.Flags().GetString("source")
 
-	resp, err := c.Request(cmdCtx(cmd), protocol.ListModelsRequest{
-		Type:     protocol.TypeCtrlListModels,
-		Provider: provider,
-	})
+	rows, err := fetchModelRows(cmd, provider, "")
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_list_models: %s", client.FormatError(resp))
-	}
 
-	var data protocol.ListModelsResponseData
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return fmt.Errorf("decode models response: %w", err)
+	// rafiki models is the escape hatch for a stale completion cache: it always
+	// asks the daemon, so it also rewrites what completion reads next. This is
+	// the documented way to pick up a newly-configured provider or a fresh
+	// ollama model without waiting out modelCacheTTL.
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.GetId())
 	}
+	cacheWrite("models-fundi", completionEndpointKey(), ids)
 
-	// Source filter is applied client-side; provider filter is server-side.
-	infos := data.Models
-	if source != "" {
-		filtered := infos[:0]
-		for _, m := range infos {
-			if m.Source == source {
-				filtered = append(filtered, m)
-			}
+	t := table.NewWriter()
+	t.SetOutputMirror(os.Stdout)
+	t.AppendHeader(table.Row{"ID", "PROVIDER", "SOURCE", "CONTEXT", "IN $/M", "OUT $/M", "VISION"})
+	for _, r := range rows {
+		if source != "" && r.GetSource() != source {
+			continue
 		}
-		infos = filtered
-	}
-
-	mode, useColor := outputOpts(cmd)
-	return renderModels(os.Stdout, infos, mode, useColor)
-}
-
-func renderModels(w io.Writer, infos []protocol.ModelInfo, mode outputMode, useColor bool) error {
-	if mode == outputJSON {
-		if infos == nil {
-			infos = []protocol.ModelInfo{}
-		}
-		return writeJSON(w, map[string]any{"models": infos})
-	}
-
-	tw := table.NewWriter()
-	tw.SetOutputMirror(w)
-	st := table.StyleLight
-	st.Color = table.ColorOptions{}
-	tw.SetStyle(st)
-
-	colNames := []string{"ID", "NAME", "PROVIDER", "MODEL", "SOURCE"}
-	headerRow := make(table.Row, len(colNames))
-	for i, name := range colNames {
-		if useColor {
-			headerRow[i] = dim(name)
-		} else {
-			headerRow[i] = name
-		}
-	}
-	tw.AppendHeader(headerRow)
-
-	for _, m := range infos {
-		tw.AppendRow(table.Row{
-			m.ID,
-			defaultDash(m.Name),
-			defaultDash(m.Provider),
-			defaultDash(m.Model),
-			m.Source,
+		t.AppendRow(table.Row{
+			r.GetId(), r.GetProvider(), r.GetSource(),
+			optInt(r.ContextWindow), perMillion(r.PromptUsd), perMillion(r.CompletionUsd),
+			visionCell(r.GetInputModalities()),
 		})
 	}
-
-	tw.Render()
+	t.Render()
 	return nil
+}
+
+// optInt renders an absent optional as an em dash. A zero is a REAL value and
+// prints as 0 — the whole reason these fields are optional.
+func optInt(v *int32) string {
+	if v == nil {
+		return "—"
+	}
+	return strconv.Itoa(int(*v))
+}
+
+// perMillion renders a per-token price the way humans quote them. Absent stays
+// absent: an unpriced model must not read as free.
+func perMillion(v *float64) string {
+	if v == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.2f", *v*1e6)
+}
+
+// visionCell answers from the catalog's claim, and says so when there is none.
+// Empty modalities means the daemon has NO catalog entry — every locally-served
+// model — which is not the same as "no vision", and rendering it as "no" would
+// hide the whole local fleet from anyone filtering on this column.
+func visionCell(mods []string) string {
+	if len(mods) == 0 {
+		return "?"
+	}
+	for _, m := range mods {
+		if m == "image" {
+			return "yes"
+		}
+	}
+	return "no"
 }

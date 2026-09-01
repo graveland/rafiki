@@ -1,61 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
 	"context"
 	"sort"
+	"strings"
 
-	"go.graveland.dev/rafiki/pkg/models"
-	"go.graveland.dev/rafiki/pkg/paths"
-	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/providers"
+	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// modelSourcesForKind returns the model sources that a child of the given kind
-// can actually resolve.
+// completeModel returns tab-completion candidates for the --model flag.
 //
-// The two kinds have genuinely different model universes, and offering one
-// kind's ids to another produces a child that spawns, attaches, and then never
-// answers — no error, just a TUI that never becomes idle:
+// It asks the DAEMON, which is the only thing that knows what it can run. The
+// previous implementation called models.ListSources locally: that fetched the
+// OpenRouter catalog with the client's own credentials and probed ollama and
+// LM Studio on the CLIENT's localhost, so against a remote daemon it offered
+// the models on your laptop — which that daemon cannot run.
 //
-//   - "fundi" (the DEFAULT kind) is rafiki's native runtime through this
-//     module's llm/routing, so it takes exactly what rafiki resolves: the
-//     curated Anthropic ids and <family>-latest aliases, plus any OpenRouter
-//     slash id.
-//   - "claude" shells out to Claude Code, which only knows Anthropic ids.
-//
-// When --kind has not been typed yet, cobra gives us the flag's default and we
-// answer for that rather than for everything — a completion list that is a
-// superset of what will actually work is how this went wrong before.
-func modelSourcesForKind(kind string) map[models.Source]bool {
-	switch kind {
-	case protocol.KindClaude:
-		// Claude Code resolves Anthropic ids itself; the curated list and the
-		// family aliases are the only entries that can apply.
-		return map[models.Source]bool{models.SourceBuiltin: true}
-	default: // protocol.KindFundi, and the not-yet-typed case
-		return map[models.Source]bool{
-			models.SourceBuiltin:    true,
-			models.SourceOpenRouter: true,
+// Kind scoping now lives in the daemon too (sourcesForKind in cmd/rafikid): a
+// "claude" child resolves only Anthropic ids, and offering it an OpenRouter id
+// produces a child that spawns, attaches and then never answers.
+func completeModel(cmd *cobra.Command, kind, toComplete string) []string {
+	ids := modelIDs(cmd, kind)
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.HasPrefix(id, toComplete) {
+			out = append(out, id)
 		}
-	}
-}
-
-// completeModel returns tab-completion candidates for the --model flag, scoped
-// to the kind of child being created (see modelSourcesForKind). Sources are
-// best-effort and errors are swallowed, so completion never blocks or errors.
-func completeModel(kind, _ string) []string {
-	// ListSources, not List-then-filter: an unwanted source is never consulted,
-	// so a pi completion pays no OpenRouter round trip and a fundi completion
-	// pays no Ollama/LM Studio probe.
-	set, err := providers.Load(paths.ProvidersFile())
-	if err != nil {
-		return nil
-	}
-	list := models.ListSources(context.Background(), set, modelSourcesForKind(kind))
-	out := make([]string, 0, len(list))
-	for _, m := range list {
-		out = append(out, m.ID)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// modelIDs returns every model id the daemon offers for kind, cached.
+//
+// The cache is keyed by KIND as well as endpoint: the two kinds have different
+// model universes, and serving a claude completion from the fundi cache offers
+// ids Claude Code cannot resolve.
+func modelIDs(cmd *cobra.Command, kind string) []string {
+	if kind == "" {
+		kind = "fundi"
+	}
+	cacheKind := "models-" + kind
+
+	var ids []string
+	if cacheRead(cacheKind, completionEndpointKey(), modelCacheTTL, &ids) {
+		return ids
+	}
+	rows, err := fetchModelRows(cmd, "", kind)
+	if err != nil {
+		return nil
+	}
+	ids = make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.GetId())
+	}
+	cacheWrite(cacheKind, completionEndpointKey(), ids)
+	return ids
+}
+
+// fetchModelRows asks the daemon for its model rows. Shared by completion and
+// by `rafiki models`, which passes its own filters and ignores the cache.
+func fetchModelRows(cmd *cobra.Command, provider, kind string) ([]*rafikiv1.ModelRow, error) {
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), completionDeadline)
+	defer cancel()
+
+	resp, err := ep.control().ListModels(ctx,
+		connect.NewRequest(&rafikiv1.ListModelsRequest{Provider: provider, Kind: kind}))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg.GetModels(), nil
 }
