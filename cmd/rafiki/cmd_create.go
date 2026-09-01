@@ -106,7 +106,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	// line by the time this runs; an unset flag yields its default, "fundi".
 	_ = cmd.RegisterFlagCompletionFunc("model", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		kind, _ := c.Flags().GetString("kind")
-		return completeModel(kind, toComplete), cobra.ShellCompDirectiveNoFileComp
+		return completeModel(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
 }
 

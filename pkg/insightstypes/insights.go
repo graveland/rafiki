@@ -8,18 +8,11 @@ package insightstypes
 import (
 	"errors"
 	"fmt"
-
-	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 // ErrNotFound is returned when a requested conversation does not exist. Callers
 // (e.g. the gRPC handler) match it with errors.Is to map to a NotFound status.
 var ErrNotFound = errors.New("insights: conversation not found")
-
-// Pricer resolves a model id to its per-token list price. It is injected (the
-// server passes ModelCatalog.Pricing) so insights carries no catalog/network
-// concern. ok=false leaves the model unpriced.
-type Pricer func(model string) (routing.ModelPricing, bool)
 
 // Path selects a capture path in filters. It maps to the immutable driven_by
 // column: the proxy (client-driven) path vs. the in-process (server-driven) one.
