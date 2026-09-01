@@ -1431,7 +1431,8 @@ func (c *Cockpit) footerHints() string {
 		c.keys.NextPane.Help().Key+" pane",
 		c.keys.ToggleRail.Help().Key+" rail",
 		c.keys.Help.Help().Key+" help",
-		c.keys.ExpandArgs.Help().Key+" "+c.keys.ExpandArgs.Help().Desc)
+		c.keys.ExpandArgs.Help().Key+" "+c.keys.ExpandArgs.Help().Desc,
+		c.keys.Redraw.Help().Key+" "+c.keys.Redraw.Help().Desc)
 	return strings.Join(parts, "  ")
 }
 
@@ -1461,7 +1462,7 @@ func (c *Cockpit) helpLines(width int) []string {
 	k := c.keys
 	left := group("anywhere",
 		k.NextPane, k.PrevPane, k.NextAttention, k.PrevAttention,
-		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs, k.Quit)
+		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs, k.Redraw, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
 		k.SelectUp, k.SelectDown, k.Commit, k.Escape)...)

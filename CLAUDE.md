@@ -899,3 +899,22 @@
   `pkg/tui/pane.go` sets it true. Pinned by
   `TestViewportSoftWrapsLongLines` because the default is silent.
 
+- **`session.Finalized` means "this block can never change again", and an
+  assistant block does NOT qualify until its tool calls resolve.** The
+  renderer caches every block below the watermark exactly once and never
+  looks at it again, so a block finalized early is frozen on screen showing
+  whatever was true at that instant. `applyAssistantMessage` used to set
+  `Finalized = len(Blocks)` eagerly, and `tool_execution_end` and the
+  `tool_result` arrive AFTERWARDS — so every tool call rendered with no
+  duration, no output and `⋯ no result`, and the output appeared only on
+  reattach, where `GetHistory` applies everything before the first render.
+  `Block.Settled` and `recomputeFinalized` are the fix; `settleAll` (on
+  `turn_end`, `child_exited` and errors) is the anti-stall guard and is NOT
+  optional — without it one unanswered call parks the watermark forever and
+  every later block re-renders on every tick, which is the 10.9ms-per-`Update`
+  regime the two-axis renderer design exists to escape, arrived at from the
+  other direction. The live region must be bounded by one turn's length.
+  Related: `renderer.Lines` and `paneSig` must fingerprint the WHOLE live
+  region (`session.LiveFingerprint`), not just the last block, and
+  `Block.Fingerprint` must include `HasResult`/`IsError`/`DurationMs` — a
+  tool that succeeds returning nothing moves only `HasResult`.
