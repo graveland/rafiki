@@ -5,12 +5,15 @@ package connectapi_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestClosePassesChildIDThrough(t *testing.T) {
@@ -49,6 +52,44 @@ func TestCloseWithoutLifecycleFailsClosed(t *testing.T) {
 	}
 }
 
+// Controller.Close returns authored ControllerError values, and the code the
+// daemon attached at the source is the classification. A double-close must
+// read as NotFound and closing a still-running child as FailedPrecondition —
+// not Internal, which tells the client the daemon is broken. The authored
+// message text is forwarded with it (the daemon writes both strings).
+func TestCloseNotFoundBecomesNotFound(t *testing.T) {
+	f := &fakeLifecycle{closeErr: &control.ControllerError{
+		Code:    protocol.ErrNotFound,
+		Message: "child not found: c_1",
+	}}
+	s := connectapi.NewServer(nil)
+	s.SetChildLifecycle(f)
+	_, err := s.Close(context.Background(),
+		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("code = %v, want NotFound", connect.CodeOf(err))
+	}
+	if err == nil || !strings.Contains(err.Error(), "child not found: c_1") {
+		t.Errorf("message = %v, want the daemon's authored text", err)
+	}
+}
+
+func TestCloseNotExitedBecomesFailedPrecondition(t *testing.T) {
+	f := &fakeLifecycle{closeErr: &control.ControllerError{
+		Code:    protocol.ErrNotExited,
+		Message: "child is still running",
+	}}
+	s := connectapi.NewServer(nil)
+	s.SetChildLifecycle(f)
+	_, err := s.Close(context.Background(),
+		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+}
+
+// A generic error — something that is not a ControllerError — keeps the
+// blanket Internal the rest of this file uses.
 func TestCloseErrorBecomesInternal(t *testing.T) {
 	f := &fakeLifecycle{closeErr: errors.New("still running")}
 	s := connectapi.NewServer(nil)
