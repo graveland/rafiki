@@ -227,8 +227,8 @@ watch that row freeze.
 | `GetHistory` | unary | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see below) |
-| `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal` per child) |
-| `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal`) |
+| `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal` and `cost_usd` per child) |
+| `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal` and `cost_usd`) |
 | `Spawn` | unary | Create a child with budget, executor, and label options |
 | `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
 
