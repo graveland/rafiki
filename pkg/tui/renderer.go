@@ -47,10 +47,29 @@ var toolArgKeys = map[string][]string{
 	"agent_kill":  {"child_id"},
 }
 
-// maxToolArgWidth caps the inline argument summary. A multi-line heredoc or a
-// whole file's contents is a legitimate argument, and one of those unrolled
-// into the transcript buries the conversation it is part of.
+// maxToolArgWidth is the FLOOR for the inline argument summary, used when the
+// pane is too narrow to compute a real budget.
+//
+// It used to be the flat cap, which meant a 200-column terminal threw away
+// half its width on every tool call -- and for a single-argument tool like
+// bash, where the command IS the call, the tail of every long command was
+// simply unreachable. argBudget derives the real number from the pane.
+//
+// A cap of some kind is still needed on this line specifically: the call line
+// is written raw rather than through writeWrapped, so an over-long summary
+// runs off the pane and bleeds into the rail.
 const maxToolArgWidth = 100
+
+// argBudget is how many columns the inline summary may take on the call line,
+// after the gutter, the tool name, the duration and the status glyph.
+func argBudget(width int, name string) int {
+	// "  ⚒ " + name + " " + arg + " (1234ms)" + " ✓"
+	b := width - 4 - len(name) - 1 - 9 - 2
+	if b < maxToolArgWidth {
+		return maxToolArgWidth
+	}
+	return b
+}
 
 // toolArgSummary renders a tool's arguments as ONE line.
 //
@@ -58,7 +77,7 @@ const maxToolArgWidth = 100
 // listed is still usually about one string), then the compact JSON. An empty
 // object renders as nothing rather than as "{}", so a no-argument tool does not
 // gain a meaningless suffix.
-func toolArgSummary(name, input string) string {
+func toolArgSummary(name, input string, budget int) string {
 	input = strings.TrimSpace(input)
 	if input == "" || input == "{}" || input == "null" {
 		return ""
@@ -67,11 +86,11 @@ func toolArgSummary(name, input string) string {
 	if err := json.Unmarshal([]byte(input), &args); err != nil || len(args) == 0 {
 		// Not an object: show it as-is. A model can emit anything here and the
 		// point is to show what it emitted.
-		return truncate(collapse(input), maxToolArgWidth)
+		return truncate(collapse(input), budget)
 	}
 	for _, k := range toolArgKeys[name] {
 		if v, ok := args[k].(string); ok && v != "" {
-			return truncate(collapse(v), maxToolArgWidth)
+			return truncate(collapse(v), budget)
 		}
 	}
 	// Deterministic: ranging a map would reorder the summary between frames.
@@ -82,7 +101,7 @@ func toolArgSummary(name, input string) string {
 	sort.Strings(keys)
 	for _, k := range keys {
 		if v, ok := args[k].(string); ok && v != "" {
-			return truncate(k+"="+collapse(v), maxToolArgWidth)
+			return truncate(k+"="+collapse(v), budget)
 		}
 	}
 	// No string anywhere. The batch tools (task_add's items, task_update's
@@ -93,7 +112,7 @@ func toolArgSummary(name, input string) string {
 			return k + "×" + itoa(int64(len(v)))
 		}
 	}
-	return truncate(collapse(input), maxToolArgWidth)
+	return truncate(collapse(input), budget)
 }
 
 // collapse folds whitespace so a multi-line argument stays on its one line.
@@ -130,7 +149,7 @@ func headlineKey(name string, args map[string]any) string {
 // Expanded prints values in full, using the same head/tail window as a tool
 // result -- a write's content is as long as its output would be and deserves
 // the same budget.
-func toolArgLines(name, input string, expanded bool) []string {
+func toolArgLines(name, input string, expanded bool, budget int) []string {
 	input = strings.TrimSpace(input)
 	if input == "" || input == "{}" || input == "null" {
 		return nil
@@ -139,7 +158,15 @@ func toolArgLines(name, input string, expanded bool) []string {
 	if err := json.Unmarshal([]byte(input), &args); err != nil || len(args) == 0 {
 		return nil
 	}
+	// The headline argument is on the call line already, so compact omits it
+	// here. Expanded must NOT: that line is truncated, and for a
+	// single-argument tool like bash it is the only argument there is -- so
+	// skipping it in both modes made the full command unreachable from the
+	// cockpit entirely, which is the one thing ^O exists to fix.
 	skip := headlineKey(name, args)
+	if expanded {
+		skip = ""
+	}
 
 	keys := make([]string, 0, len(args))
 	for k := range args {
@@ -154,7 +181,7 @@ func toolArgLines(name, input string, expanded bool) []string {
 	for _, k := range keys {
 		raw := valueString(args[k])
 		if !expanded {
-			out = append(out, k+": "+truncate(collapse(raw), maxToolArgWidth)+sizeNote(raw))
+			out = append(out, k+": "+truncate(collapse(raw), budget)+sizeNote(raw))
 			continue
 		}
 		vlines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
@@ -200,15 +227,32 @@ func sizeNote(raw string) string {
 	return " (" + itoa(int64(len(raw))) + " B)"
 }
 
+// elideRows bounds a block to a row budget, keeping BOTH ends.
+func elideRows(rows []string, head, tail int) (h, t []string, elided int) {
+	if len(rows) <= head+tail {
+		return nil, rows, 0
+	}
+	return rows[:head], rows[len(rows)-tail:], len(rows) - head - tail
+}
+
 // elide splits lines into the head/tail window, sharing the tool result's
 // budget so one long argument cannot outweigh the output it produced.
 func elide(lines []string) (head, tail []string, elided int) {
-	if len(lines) <= toolResultHeadLines+toolResultTailLines {
-		return nil, lines, 0
-	}
-	elided = len(lines) - toolResultHeadLines - toolResultTailLines
-	return lines[:toolResultHeadLines], lines[len(lines)-toolResultTailLines:], elided
+	return elideRows(lines, toolResultHeadLines, toolResultTailLines)
 }
+
+// thinkHeadRows and thinkTailRows bound a thinking block, in WRAPPED ROWS
+// rather than characters.
+//
+// The old cap was truncate(ThinkText, 120) -- one line, cut mid-sentence,
+// which is where the reasoning gets interesting. A row budget bounds the
+// screen cost the same way while letting a paragraph be a paragraph, and the
+// tail is kept because that is where the model states what it decided.
+// ^O lifts the budget entirely.
+const (
+	thinkHeadRows = 3
+	thinkTailRows = 5
+)
 
 // toolResultHeadLines and toolResultTailLines bound how much of one tool
 // result reaches the pane, showing BOTH ends.
@@ -318,12 +362,32 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	var sb strings.Builder
 
 	if b.ThinkText != "" {
-		r.writeWrapped(&sb, styleThinkBar.Render("┊ "),
-			styleThink.Render("thinking… "+truncate(b.ThinkText, 120)))
+		gutter := styleThinkBar.Render("┊ ")
+		rows := wrapTo(gutter, styleThink.Render("thinking… "+collapse(b.ThinkText)), r.width)
+		// elideRows already returns (nil, rows, 0) when the block fits, so the
+		// under-budget case needs no branch of its own.
+		head, tail, elided := []string(nil), rows, 0
+		if !r.expandArgs {
+			head, tail, elided = elideRows(rows, thinkHeadRows, thinkTailRows)
+		}
+		for _, row := range head {
+			sb.WriteString(row)
+			sb.WriteString("\n")
+		}
+		if elided > 0 {
+			sb.WriteString(gutter + styleMeta.Render(
+				" [omitted "+itoa(int64(elided))+" lines]"))
+			sb.WriteString("\n")
+		}
+		for _, row := range tail {
+			sb.WriteString(row)
+			sb.WriteString("\n")
+		}
 	}
 
 	for _, tc := range b.ToolCalls {
-		arg := toolArgSummary(tc.Name, tc.Input)
+		budget := argBudget(r.width, tc.Name)
+		arg := toolArgSummary(tc.Name, tc.Input, budget)
 		if arg != "" {
 			arg = " " + arg
 		}
@@ -331,7 +395,7 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			sb.WriteString(styleRunning.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
 				styleRunning.Render(" …"))
 			sb.WriteString("\n")
-			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs) {
+			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs, budget) {
 				r.writeWrapped(&sb, styleToolResult.Render("    "), styleToolArg.Render(al))
 			}
 		} else {
@@ -359,7 +423,7 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			}
 			sb.WriteString(prefix)
 			sb.WriteString("\n")
-			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs) {
+			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs, budget) {
 				r.writeWrapped(&sb, styleToolResult.Render("    "), styleToolArg.Render(al))
 			}
 			if tc.Result != "" {

@@ -177,9 +177,9 @@ func TestToolCallShowsItsArgument(t *testing.T) {
 		// No arguments at all must not become a meaningless "{}".
 		{"noargs", `{}`, ""},
 	} {
-		got := toolArgSummary(tc.name, tc.input)
+		got := toolArgSummary(tc.name, tc.input, maxToolArgWidth)
 		if got != tc.want {
-			t.Errorf("toolArgSummary(%q, %q) = %q, want %q", tc.name, tc.input, got, tc.want)
+			t.Errorf("toolArgSummary(%q, %q, maxToolArgWidth) = %q, want %q", tc.name, tc.input, got, tc.want)
 		}
 	}
 }
@@ -187,7 +187,7 @@ func TestToolCallShowsItsArgument(t *testing.T) {
 // A multi-line argument must not unroll into the transcript and bury the
 // conversation it is part of.
 func TestToolArgumentIsOneBoundedLine(t *testing.T) {
-	got := toolArgSummary("bash", `{"command":"`+strings.Repeat("x", 500)+`"}`)
+	got := toolArgSummary("bash", `{"command":"`+strings.Repeat("x", 500)+`"}`, maxToolArgWidth)
 	if strings.Contains(got, "\n") {
 		t.Error("argument summary spans lines")
 	}
@@ -195,7 +195,7 @@ func TestToolArgumentIsOneBoundedLine(t *testing.T) {
 		t.Errorf("argument summary is %d runes, cap is %d", len([]rune(got)), maxToolArgWidth)
 	}
 
-	multi := toolArgSummary("write", `{"path":"a\nb\nc"}`)
+	multi := toolArgSummary("write", `{"path":"a\nb\nc"}`, maxToolArgWidth)
 	if strings.Contains(multi, "\n") {
 		t.Errorf("multi-line argument was not collapsed: %q", multi)
 	}
@@ -214,9 +214,9 @@ func TestToolArgKeysNameRealTools(t *testing.T) {
 // The batch tools carry arrays of objects, not strings; their raw JSON is long
 // and unreadable and a count is the honest summary.
 func TestBatchToolArgumentsSummariseAsACount(t *testing.T) {
-	got := toolArgSummary("task_add", `{"items":[{"content":"a"},{"content":"b"},{"content":"c"}]}`)
+	got := toolArgSummary("task_add", `{"items":[{"content":"a"},{"content":"b"},{"content":"c"}]}`, maxToolArgWidth)
 	if got != "items×3" {
-		t.Errorf("toolArgSummary(task_add, 3 items) = %q, want %q", got, "items×3")
+		t.Errorf("toolArgSummary(task_add, 3 items, maxToolArgWidth) = %q, want %q", got, "items×3")
 	}
 }
 
@@ -487,7 +487,7 @@ func TestShortToolResultIsNotElided(t *testing.T) {
 // Every argument, not just the one the tool is "about". Seeing only the path
 // of an edit tells you nothing about what the edit does.
 func TestCompactToolArgsListEveryKey(t *testing.T) {
-	got := toolArgLines("edit", `{"path":"src/main.go","old_string":"a","new_string":"b","replace_all":false}`, false)
+	got := toolArgLines("edit", `{"path":"src/main.go","old_string":"a","new_string":"b","replace_all":false}`, false, maxToolArgWidth)
 	joined := strings.Join(got, "\n")
 	for _, want := range []string{"old_string", "new_string", "replace_all"} {
 		if !strings.Contains(joined, want) {
@@ -503,7 +503,7 @@ func TestCompactToolArgsListEveryKey(t *testing.T) {
 // Deterministic ordering: ranging a map reorders the list between frames.
 func TestToolArgLinesAreSorted(t *testing.T) {
 	in := `{"zebra":"z","alpha":"a","monkey":"m"}`
-	got := toolArgLines("nosuchtool", in, false)
+	got := toolArgLines("nosuchtool", in, false, maxToolArgWidth)
 	joined := strings.Join(got, "\n")
 	ia := strings.Index(joined, "alpha")
 	im := strings.Index(joined, "monkey")
@@ -516,7 +516,7 @@ func TestToolArgLinesAreSorted(t *testing.T) {
 // Compact folds a multi-line value to one line and says how big it was.
 func TestCompactFoldsMultilineValues(t *testing.T) {
 	in := `{"path":"n.md","content":"one\ntwo\nthree"}`
-	got := toolArgLines("write", in, false)
+	got := toolArgLines("write", in, false, maxToolArgWidth)
 	joined := strings.Join(got, "\n")
 	if strings.Count(joined, "\n") != len(got)-1 {
 		t.Errorf("a compact argument line contains a newline:\n%q", joined)
@@ -529,7 +529,7 @@ func TestCompactFoldsMultilineValues(t *testing.T) {
 // Expanded prints the value in full, across lines.
 func TestExpandedShowsFullMultilineValues(t *testing.T) {
 	in := `{"path":"n.md","content":"one\ntwo\nthree"}`
-	joined := strings.Join(toolArgLines("write", in, true), "\n")
+	joined := strings.Join(toolArgLines("write", in, true, maxToolArgWidth), "\n")
 	for _, want := range []string{"one", "two", "three"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("expanded output missing %q:\n%s", want, joined)
@@ -563,5 +563,89 @@ func TestExpandArgsChangesAFinalizedBlock(t *testing.T) {
 	}
 	if !strings.Contains(expanded, "two") {
 		t.Errorf("expanded output is missing the full value:\n%s", expanded)
+	}
+}
+
+// bash's `command` is its ONLY argument, so skipping the headline key in both
+// modes made the full command unreachable from the cockpit: truncated on the
+// call line, and absent from the detail list. ^O exists to fix exactly this.
+func TestExpandShowsTheHeadlineArgumentInFull(t *testing.T) {
+	cmd := "echo " + strings.Repeat("alpha beta gamma delta ", 12)
+	input := `{"command":"` + cmd + `"}`
+
+	compact := strings.Join(toolArgLines("bash", input, false, maxToolArgWidth), "\n")
+	if strings.Contains(compact, "command") {
+		t.Errorf("compact must leave the headline on the call line:\n%s", compact)
+	}
+
+	expanded := strings.Join(toolArgLines("bash", input, true, maxToolArgWidth), "\n")
+	if !strings.Contains(expanded, "command") {
+		t.Fatalf("expanded dropped bash's only argument:\n%s", expanded)
+	}
+	// The tail of the command, which the call line's truncation cuts off.
+	if !strings.Contains(expanded, "delta") {
+		t.Errorf("expanded is still truncating the command:\n%s", expanded)
+	}
+}
+
+// A wide pane must not be capped at the narrow-pane floor. bash's command IS
+// the call, so throwing away half a 200-column terminal loses the part of a
+// long command that says what it actually did.
+func TestArgBudgetGrowsWithThePane(t *testing.T) {
+	if got := argBudget(80, "bash"); got != maxToolArgWidth {
+		t.Errorf("argBudget(80) = %d, want the %d floor", got, maxToolArgWidth)
+	}
+	wide := argBudget(200, "bash")
+	if wide <= maxToolArgWidth {
+		t.Errorf("argBudget(200) = %d, want more than the %d floor", wide, maxToolArgWidth)
+	}
+
+	long := "echo " + strings.Repeat("x y ", 60)
+	got := toolArgSummary("bash", `{"command":"`+long+`"}`, wide)
+	if len([]rune(got)) <= maxToolArgWidth {
+		t.Errorf("a wide pane still truncated at the floor: %d runes", len([]rune(got)))
+	}
+}
+
+// Thinking was truncate(ThinkText, 120) -- one line, cut mid-sentence, which
+// is where the reasoning gets interesting. It is bounded in wrapped ROWS now,
+// keeping both ends, and ^O lifts the bound entirely.
+func TestThinkingIsBoundedByRowsAndFullyShownWhenExpanded(t *testing.T) {
+	think := strings.TrimSpace(strings.Repeat("The user wants a test command. ", 60))
+	blocks := []session.Block{{Kind: session.KindAssistant, Final: true, ThinkText: think}}
+
+	r := newRenderer()
+	compact := strings.Join(r.Lines(blocks, 1, 80), "\n")
+	if !strings.Contains(compact, "[omitted") {
+		t.Errorf("a long thinking block must be elided, not silently cut:\n%s", compact)
+	}
+	if n := strings.Count(compact, "\n"); n > thinkHeadRows+thinkTailRows+4 {
+		t.Errorf("thinking took %d rows, budget is %d+%d plus chrome", n, thinkHeadRows, thinkTailRows)
+	}
+
+	r2 := newRenderer()
+	r2.expandArgs = true
+	expanded := strings.Join(r2.Lines(blocks, 1, 80), "\n")
+	if strings.Contains(expanded, "[omitted") {
+		t.Errorf("^O must show the whole thinking block:\n%s", expanded)
+	}
+	if len(expanded) <= len(compact) {
+		t.Error("expanded thinking is not longer than the elided form")
+	}
+}
+
+// The old cap was 120 characters on one line. A short thinking block must not
+// be elided at all, and a normal one must survive past 120 characters.
+func TestShortThinkingIsNotElided(t *testing.T) {
+	think := "The user wants me to run a test bash command with a good number of arguments. " +
+		"Let me run something with many arguments so the rendering is exercised properly."
+	blocks := []session.Block{{Kind: session.KindAssistant, Final: true, ThinkText: think}}
+	out := strings.Join(newRenderer().Lines(blocks, 1, 100), "\n")
+	if strings.Contains(out, "[omitted") {
+		t.Errorf("a two-sentence thinking block was elided:\n%s", out)
+	}
+	// The tail, which truncate(_, 120) cut off.
+	if !strings.Contains(out, "properly") {
+		t.Errorf("thinking is still cut at 120 characters:\n%s", out)
 	}
 }
