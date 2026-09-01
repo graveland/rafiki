@@ -460,6 +460,7 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetChildLister(ctrl)
 			face.Control.SetTaskLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
+			face.Control.SetModelLister(connectModels{c: ctrl})
 		}
 	}
 	// The executor pool no longer owns a listener. It is reached at a PATH on

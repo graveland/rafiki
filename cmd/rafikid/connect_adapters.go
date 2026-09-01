@@ -228,6 +228,16 @@ func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownMs, 
 	}, nil
 }
 
+// connectModels adapts *Controller to connectapi.ModelLister. A distinct type
+// for the same reason connectLifecycle is one: Controller.ListModels already
+// exists with a different signature (it answers the framed ctrl_list_models),
+// and renaming it would touch every existing caller for no gain.
+type connectModels struct{ c *Controller }
+
+func (m connectModels) ListModels(ctx context.Context, provider, kind string) ([]connectapi.ModelRow, error) {
+	return m.c.ListModelRows(ctx, provider, kind)
+}
+
 // spawnOwner maps the proxy face's authenticated identity onto the daemon's.
 // Two types for one concept, because pkg/server predates pkg/users and the
 // face's Identity is a pointer whose nil means "no user" — the case every
