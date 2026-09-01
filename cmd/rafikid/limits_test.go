@@ -216,6 +216,10 @@ func (f fakeCoster) SubtreeCost(context.Context, insights.SubtreeSelector) (floa
 	return f.spend, f.err
 }
 
+func (f fakeCoster) CostsByConversation(context.Context, insights.SubtreeSelector) ([]insights.ConversationCost, error) {
+	return nil, nil
+}
+
 func TestBudgetExhaustedRefusesSpawn(t *testing.T) {
 	c := limitsFixture(t, 3)
 	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 5.00 })

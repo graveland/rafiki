@@ -164,6 +164,10 @@ func (c *Controller) checkConcurrency(req protocol.SpawnRequest) error {
 // subtreeCoster is the one thing the budget checks need from insights.
 type subtreeCoster interface {
 	SubtreeCost(ctx context.Context, sel insights.SubtreeSelector) (float64, error)
+	// CostsByConversation prices the selection per conversation in one round
+	// trip. The budget path wants the collapsed total; a LIST wants each
+	// child's own number, and asking SubtreeCost N times is N round trips.
+	CostsByConversation(ctx context.Context, sel insights.SubtreeSelector) ([]insights.ConversationCost, error)
 }
 
 // checkBudget enforces the cost ceiling at admission.
