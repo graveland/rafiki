@@ -70,7 +70,19 @@ func (b Block) Fingerprint() string {
 	for _, tc := range b.ToolCalls {
 		sb.WriteString(tc.ID)
 		sb.WriteString(tc.Name)
+		sb.WriteString(tc.Input)
 		sb.WriteString(tc.Result)
+		// HasResult, IsError and DurationMs all change what is drawn without
+		// changing Result -- a tool that succeeds returning nothing moves only
+		// HasResult, and the whole point of that flag is that it is not the
+		// same question as an empty string.
+		if tc.HasResult {
+			sb.WriteString("has")
+		}
+		if tc.IsError {
+			sb.WriteString("err")
+		}
+		sb.WriteString(strconv.FormatInt(tc.DurationMs, 10))
 		if tc.Running {
 			sb.WriteString("running")
 		}
@@ -78,6 +90,28 @@ func (b Block) Fingerprint() string {
 	sb.WriteString(b.StopReason)
 	if b.Final {
 		sb.WriteString("final")
+	}
+	return sb.String()
+}
+
+// LiveFingerprint hashes every block that can still change.
+//
+// The renderer re-renders the whole region from finalized to the end, so the
+// invalidation key has to cover the whole region too. Fingerprinting only the
+// last block was correct while exactly one block could be unfinalized; it
+// became a stale-render hole the moment an assistant block stayed live until
+// its tool calls resolved.
+func LiveFingerprint(blocks []Block, finalized int) string {
+	if finalized < 0 {
+		finalized = 0
+	}
+	if finalized >= len(blocks) {
+		return ""
+	}
+	var sb strings.Builder
+	for i := finalized; i < len(blocks); i++ {
+		sb.WriteString(blocks[i].Fingerprint())
+		sb.WriteByte(0x1e)
 	}
 	return sb.String()
 }

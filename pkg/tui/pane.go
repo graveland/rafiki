@@ -54,13 +54,15 @@ type paneSig struct {
 // showing it. A nil result means "nothing to do" and is distinct from an empty
 // one, which means "this transcript has no lines".
 func (p *paneState) linesFor(s *session.Session, width, height int) []string {
-	sig := paneSig{blocks: len(s.Blocks), finalized: s.Finalized, width: width, height: height}
-	// Only an unfinalized tail can change without the counts changing; a
-	// finalized block is immutable by construction.
-	if s.Finalized < len(s.Blocks) {
-		if live := &s.Blocks[len(s.Blocks)-1]; live.Kind == session.KindAssistant && !live.Final {
-			sig.liveFP = live.Fingerprint()
-		}
+	sig := paneSig{
+		blocks:    len(s.Blocks),
+		finalized: s.Finalized,
+		width:     width,
+		height:    height,
+		// Every unfinalized block, not just the last one: an assistant block
+		// stays live until its tool calls resolve, so the one that changes is
+		// routinely not the tail.
+		liveFP: session.LiveFingerprint(s.Blocks, s.Finalized),
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
