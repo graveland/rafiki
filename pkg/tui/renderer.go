@@ -101,13 +101,19 @@ func collapse(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// maxToolResultLines caps how much of one tool result reaches the pane.
+// toolResultHeadLines and toolResultTailLines bound how much of one tool
+// result reaches the pane, showing BOTH ends.
 //
-// The elided remainder is NOT reachable from the TUI — it lives in the event
-// log and nothing surfaces it. That is a deliberate, known limitation (design
-// §8): 500 lines of grep inline is unusable, and rendering it through glamour
-// four times a second is worse. Raising this is a one-line change.
-const maxToolResultLines = 20
+// The tail alone was the old rule, on the reasoning that a command's ending
+// is where its error is. True, and incomplete: a failing test run's banner and
+// its first failure are in the head, and a head-less window makes a 300-line
+// result unidentifiable. The elided middle is NOT reachable from the TUI --
+// it lives in the event log and nothing surfaces it. That is a known
+// limitation, not an oversight.
+const (
+	toolResultHeadLines = 4
+	toolResultTailLines = 12
+)
 
 // renderer caches finalized blocks and re-renders the live tail on demand.
 // It follows the two-axis design rule (2026-08-12 design §4.2):
@@ -245,21 +251,25 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				// newline-separated input renders to exactly 1 line, while
 				// fenced, indented and list input render to 500+.
 				//
-				// That also made maxToolResultLines inert for exactly the
-				// output it was written for — one line is never over a 20-line
-				// cap — so the cap only ever fired on tool results that
-				// happened to look like markdown. Splitting the RAW result
-				// fixes both the structure and the cap.
-				// The TAIL, not the head, and the marker goes above it --
-				// pi's truncateToVisualLines does the same (`slice(-max)`).
-				// A command's ending is where its error is and where a long
-				// build's progress has got to; the first 20 lines of a failing
-				// test run are the banner.
+				// That also made the old tail-only cap inert for exactly the
+				// output it was written for — one line is never over the cap —
+				// so the cap only ever fired on tool results that happened to
+				// look like markdown. Splitting the RAW result fixes both the
+				// structure and the cap.
+				// Both ends, not just the tail: the head carries a failing test
+				// run's banner and its first failure, the tail how it ended.
+				// The TAIL, not the head, was the old rule -- pi's
+				// truncateToVisualLines does the same (`slice(-max)`), and it is
+				// incomplete.
 				lines := strings.Split(strings.TrimRight(tc.Result, "\n"), "\n")
+				var head, tail []string
 				elided := 0
-				if len(lines) > maxToolResultLines {
-					elided = len(lines) - maxToolResultLines
-					lines = lines[len(lines)-maxToolResultLines:]
+				if len(lines) > toolResultHeadLines+toolResultTailLines {
+					elided = len(lines) - toolResultHeadLines - toolResultTailLines
+					head = lines[:toolResultHeadLines]
+					tail = lines[len(lines)-toolResultTailLines:]
+				} else {
+					tail = lines
 				}
 				gutter := styleToolResult.Render("    │ ")
 				text := styleToolResult
@@ -267,12 +277,15 @@ func (r *renderer) renderAssistant(b session.Block) string {
 					gutter = styleFailBar.Render("  ▌ ") + styleToolResult.Render("│ ")
 					text = styleFailText
 				}
+				for _, line := range head {
+					r.writeWrapped(&sb, gutter, text.Render(line))
+				}
 				if elided > 0 {
 					sb.WriteString(gutter + styleMeta.Render(
-						"… "+itoa(int64(elided))+" earlier lines"))
+						" [omitted "+itoa(int64(elided))+" lines]"))
 					sb.WriteString("\n")
 				}
-				for _, line := range lines {
+				for _, line := range tail {
 					r.writeWrapped(&sb, gutter, text.Render(line))
 				}
 			}
