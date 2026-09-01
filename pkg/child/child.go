@@ -52,8 +52,17 @@ type SpawnSpec struct {
 	// Without this hook a claude session id reaches the database only on the
 	// first bus frame of the first turn, and resume depends on that column.
 	//
-	// Called from the readStdout goroutine with no lock held. Callers must not
-	// block in it.
+	// Called from the readStdout goroutine with no lock held, and SYNCHRONOUSLY:
+	// whatever it does delays draining the child's stdout, so a slow callback
+	// stalls the pipe and eventually blocks the child's writes.
+	//
+	// The daemon's callback does a bounded database write (5s timeout) and is
+	// deliberately synchronous — losing the session id to a crash costs the
+	// child's whole conversation, which is worse than one stalled read. It is
+	// affordable only because it writes at most ONCE per child: see childHooks'
+	// `changed` guard in cmd/rafikid, which is load-bearing rather than an
+	// optimisation, because Parse reports metadata on every claude `result`
+	// frame — once per turn — not just on `system/init`.
 	OnMeta func(SnifferMetadata)
 }
 
