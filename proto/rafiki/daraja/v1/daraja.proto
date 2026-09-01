@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package rafiki.daraja.v1;
+
+option go_package = "go.graveland.dev/rafiki/pkg/darajapb;darajapb";
+
+// DarajaService is served BY daraja, which hosts exactly one child process.
+//
+// daraja moves BYTES. It never parses the child's protocol: all translation,
+// persistence and state live in rafikid, where they are already a shared
+// concern and where the session id that resume depends on is already resolved.
+service DarajaService {
+  // Relay carries the child's stdio in both directions. One stream for the
+  // host's lifetime — it deliberately SURVIVES a Restart, because the consumer
+  // keeps per-child state across an abort and tearing the stream down would
+  // discard it.
+  rpc Relay(stream RelayRequest) returns (stream RelayResponse);
+
+  // Restart replaces the child process: signal, wait for exit, launch again
+  // with the supplied argv. ONE verb rather than Stop plus Launch, because the
+  // invariant that makes a 1:1 host simple is that a daraja always has exactly
+  // one child; splitting it creates a childless daraja that then needs
+  // representing, timing out and reaping.
+  rpc Restart(RestartRequest) returns (RestartResponse);
+
+  // Shutdown ends the child and then daraja exits, preserving the same
+  // invariant from the other side.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message RelayRequest {
+  // Bytes to write to the child's stdin, verbatim. No framing is imposed: the
+  // child's protocol is the caller's business.
+  bytes stdin = 1;
+}
+
+message RelayResponse {
+  oneof event {
+    bytes stdout = 1;
+    ProcessRestarted restarted = 2;
+    ProcessExited exited = 3;
+  }
+}
+
+// ProcessRestarted marks the boundary between one child process's output and
+// its replacement's, IN the byte stream.
+//
+// It is load-bearing rather than informational. A consumer that translates the
+// child's output holds per-process state, and a replacement process starts that
+// state over. Without an in-band marker the consumer cannot tell where to reset
+// and carries stale state into the new process — which presents as a hung
+// child, not as an error.
+message ProcessRestarted {
+  int32 pid = 1;
+}
+
+message ProcessExited {
+  // exit_code is 0 for a signalled process, which is reported in signal
+  // instead; -1 means the outcome could not be determined.
+  int32 exit_code = 1;
+  string signal = 2;
+}
+
+message RestartRequest {
+  // argv excludes the binary itself. The caller owns argv because only it knows
+  // the session to resume; daraja never invents arguments.
+  repeated string argv = 1;
+  // grace_ms to wait after the interrupt before escalating to a hard kill.
+  // Zero means the server default.
+  int32 grace_ms = 2;
+}
+
+message RestartResponse {
+  int32 pid = 1;
+}
+
+message ShutdownRequest {
+  int32 grace_ms = 1;
+}
+
+message ShutdownResponse {
+  int32 exit_code = 1;
+  string signal = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  int32 pid = 1;
+  bool running = 2;
+}
