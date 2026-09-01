@@ -87,10 +87,11 @@ func TestLinesCapsToolResultsOnPlainOutput(t *testing.T) {
 	got := newRenderer().Lines(blocks, 1, 100)
 	joined := strings.Join(got, "\n")
 
-	if n := strings.Count(joined, "result line"); n > maxToolResultLines {
-		t.Errorf("tool result not capped: %d occurrences, cap is %d", n, maxToolResultLines)
+	if n := strings.Count(joined, "result line"); n > toolResultHeadLines+toolResultTailLines {
+		t.Errorf("tool result not capped: %d occurrences, cap is %d",
+			n, toolResultHeadLines+toolResultTailLines)
 	}
-	if !strings.Contains(joined, "earlier lines") {
+	if !strings.Contains(joined, "omitted") {
 		t.Errorf("capped output must say how much was elided; got:\n%s", joined)
 	}
 	// The TAIL survives, not the head: a command's ending carries its error,
@@ -435,5 +436,50 @@ func TestAbandonedToolCallDoesNotUseTheBlockedTaskGlyph(t *testing.T) {
 	out := render(session.ToolCall{Name: "bash"})
 	if strings.Contains(out, "⊘") {
 		t.Errorf("⊘ means a blocked task; an abandoned tool call must not use it:\n%s", out)
+	}
+}
+
+// A long result shows both ends. The head carries a command's banner and its
+// first error; the tail carries how it ended.
+func TestLongToolResultShowsHeadAndTail(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 300; i++ {
+		lines = append(lines, "L"+strconv.Itoa(i))
+	}
+	out := render(session.ToolCall{
+		Name:      "bash",
+		HasResult: true,
+		Result:    strings.Join(lines, "\n"),
+	})
+
+	for _, want := range []string{"L1", "L4", "L289", "L300"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q from head/tail window:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"L5", "L150", "L288"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("%q should have been elided:\n%s", notWant, out)
+		}
+	}
+	// 300 - 4 - 12 = 284
+	if !strings.Contains(out, "[omitted 284 lines]") {
+		t.Errorf("missing or wrong omission marker:\n%s", out)
+	}
+}
+
+// Exactly the budget, and one under it, must not be elided at all.
+func TestShortToolResultIsNotElided(t *testing.T) {
+	for _, n := range []int{1, 15, 16} {
+		var lines []string
+		for i := 1; i <= n; i++ {
+			lines = append(lines, "L"+strconv.Itoa(i))
+		}
+		out := render(session.ToolCall{
+			Name: "bash", HasResult: true, Result: strings.Join(lines, "\n"),
+		})
+		if strings.Contains(out, "omitted") {
+			t.Errorf("a %d-line result was elided; the budget is 16:\n%s", n, out)
+		}
 	}
 }
