@@ -93,6 +93,10 @@ type ChildLifecycle interface {
 	Spawn(ctx context.Context, p SpawnParams) (string, error)
 	// Kill ends a child and reports how it ended.
 	Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (KillOutcome, error)
+	// Close finalizes an exited child: it leaves the daemon's store and can
+	// never be resumed again. The transcript is NOT deleted. Closing a live
+	// child is an error, not an implicit kill.
+	Close(ctx context.Context, childID string) error
 }
 
 // KillOutcome mirrors protocol.KillResponseData, which is what the daemon's

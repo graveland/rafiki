@@ -169,14 +169,14 @@ func (f *fakeController) Kill(ctx context.Context, childID string, shutdownMs, k
 	return control.KillResult{}, nil
 }
 
-func (f *fakeController) Forget(childID string) error {
+func (f *fakeController) Close(childID string) error {
 	if f.forgetFn != nil {
 		return f.forgetFn(childID)
 	}
 	return nil
 }
 
-func (f *fakeController) ForgetAllExited(olderThanMs int64) (int, error) {
+func (f *fakeController) CloseAllExited(olderThanMs int64) (int, error) {
 	if f.forgetAllExitedFn != nil {
 		return f.forgetAllExitedFn(olderThanMs)
 	}

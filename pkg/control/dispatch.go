@@ -115,8 +115,11 @@ type Controller interface {
 	Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (SpawnResult, error)
 	Resume(ctx context.Context, childID string, apiKey string) (SpawnResult, error)
 	Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (KillResult, error)
-	Forget(childID string) error
-	ForgetAllExited(olderThanMs int64) (int, error)
+	// Close finalizes an exited child. The framed wire type is still
+	// TypeCtrlForget: this protocol is frozen and its spelling is not worth a
+	// compatibility shim to correct.
+	Close(childID string) error
+	CloseAllExited(olderThanMs int64) (int, error)
 
 	// Frame forwarding.
 	Send(childID string, frame json.RawMessage) error
@@ -757,7 +760,7 @@ func (d *dispatcher) forget(frame []byte, id string) []byte {
 	if req.ChildID == "" {
 		return errResponse(protocol.TypeCtrlForget, id, protocol.ErrInvalidArgs, "childId required")
 	}
-	if err := d.c.Forget(req.ChildID); err != nil {
+	if err := d.c.Close(req.ChildID); err != nil {
 		return mapErr(protocol.TypeCtrlForget, id, err, protocol.ErrNotFound)
 	}
 	return okResponse(protocol.TypeCtrlForget, id, nil)
@@ -768,7 +771,7 @@ func (d *dispatcher) forgetAllExited(frame []byte, id string) []byte {
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlForgetAllExited, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	count, err := d.c.ForgetAllExited(req.OlderThanMs)
+	count, err := d.c.CloseAllExited(req.OlderThanMs)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlForgetAllExited, id, err, protocol.ErrInternal)
 	}

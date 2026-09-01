@@ -379,7 +379,7 @@ func TestForget_RemovesAgentSpillDir(t *testing.T) {
 		ExitedAt:     now,
 	})
 
-	if err := ctrl.Forget(childID); err != nil {
+	if err := ctrl.Close(childID); err != nil {
 		t.Fatalf("Forget: %v", err)
 	}
 
@@ -414,7 +414,7 @@ func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 		ExitedAt:     now,
 	})
 
-	n, err := ctrl.ForgetAllExited(0)
+	n, err := ctrl.CloseAllExited(0)
 	if err != nil {
 		t.Fatalf("ForgetAllExited: %v", err)
 	}

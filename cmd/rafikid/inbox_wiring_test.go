@@ -592,7 +592,7 @@ func TestForgetDoesNotDropInboxForAChildAnotherDaemonOwns(t *testing.T) {
 		Labels:  map[string]string{"rafiki/daemon": "some-other-daemon"},
 	})
 
-	if err := c.Forget("c_1"); err != nil {
+	if err := c.Close("c_1"); err != nil {
 		t.Fatalf("Forget: %v", err)
 	}
 
@@ -627,7 +627,7 @@ func TestForgetDropsInboxForAnOwnedChild(t *testing.T) {
 		// itself.
 	})
 
-	if err := c.Forget("c_1"); err != nil {
+	if err := c.Close("c_1"); err != nil {
 		t.Fatalf("Forget: %v", err)
 	}
 
@@ -664,7 +664,7 @@ func TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne(t *test
 		Labels:  map[string]string{"rafiki/daemon": "some-other-daemon"},
 	})
 
-	n, err := c.ForgetAllExited(0)
+	n, err := c.CloseAllExited(0)
 	if err != nil {
 		t.Fatalf("ForgetAllExited: %v", err)
 	}
@@ -845,7 +845,7 @@ func TestForgetPathsDropTheQueue(t *testing.T) {
 		{
 			name: "Forget",
 			forget: func(t *testing.T, ctrl *Controller, childID string) {
-				if err := ctrl.Forget(childID); err != nil {
+				if err := ctrl.Close(childID); err != nil {
 					t.Fatalf("Forget: %v", err)
 				}
 			},
@@ -853,7 +853,7 @@ func TestForgetPathsDropTheQueue(t *testing.T) {
 		{
 			name: "ForgetAllExited",
 			forget: func(t *testing.T, ctrl *Controller, childID string) {
-				n, err := ctrl.ForgetAllExited(0)
+				n, err := ctrl.CloseAllExited(0)
 				if err != nil || n != 1 {
 					t.Fatalf("ForgetAllExited = %d, %v; want 1, nil", n, err)
 				}

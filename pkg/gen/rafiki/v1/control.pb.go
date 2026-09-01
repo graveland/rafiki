@@ -1249,6 +1249,102 @@ func (x *KillResponse) GetEscalated() bool {
 	return false
 }
 
+// CloseRequest finalizes a conversation: the child leaves the daemon's store
+// and can never again be resumed, reattached or continued. Its transcript is
+// NOT deleted — no foreign key references conversations.child, so
+// conversation_message, event_log and conversation_turn all survive and stay
+// readable through GetHistory.
+//
+// The child must already be exited; closing a live child is an error, not an
+// implicit kill.
+type CloseRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloseRequest) Reset() {
+	*x = CloseRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloseRequest) ProtoMessage() {}
+
+func (x *CloseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloseRequest.ProtoReflect.Descriptor instead.
+func (*CloseRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *CloseRequest) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+type CloseResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloseResponse) Reset() {
+	*x = CloseResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloseResponse) ProtoMessage() {}
+
+func (x *CloseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloseResponse.ProtoReflect.Descriptor instead.
+func (*CloseResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CloseResponse) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
 // TaskRow is one row of the task ledger. Handle is the dotted ordinal path
 // ("2.1"), computed on read and never persisted -- an agent addresses tasks by
 // handle so it never has to carry a UUID across turns.
@@ -1266,7 +1362,7 @@ type TaskRow struct {
 
 func (x *TaskRow) Reset() {
 	*x = TaskRow{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[16]
+	mi := &file_rafiki_v1_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1278,7 +1374,7 @@ func (x *TaskRow) String() string {
 func (*TaskRow) ProtoMessage() {}
 
 func (x *TaskRow) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[16]
+	mi := &file_rafiki_v1_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,7 +1387,7 @@ func (x *TaskRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskRow.ProtoReflect.Descriptor instead.
 func (*TaskRow) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{16}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *TaskRow) GetHandle() string {
@@ -1349,7 +1445,7 @@ type ListTasksRequest struct {
 
 func (x *ListTasksRequest) Reset() {
 	*x = ListTasksRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[17]
+	mi := &file_rafiki_v1_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1361,7 +1457,7 @@ func (x *ListTasksRequest) String() string {
 func (*ListTasksRequest) ProtoMessage() {}
 
 func (x *ListTasksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[17]
+	mi := &file_rafiki_v1_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1374,7 +1470,7 @@ func (x *ListTasksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTasksRequest.ProtoReflect.Descriptor instead.
 func (*ListTasksRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{17}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ListTasksRequest) GetConversationId() string {
@@ -1400,7 +1496,7 @@ type ListTasksResponse struct {
 
 func (x *ListTasksResponse) Reset() {
 	*x = ListTasksResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[18]
+	mi := &file_rafiki_v1_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1412,7 +1508,7 @@ func (x *ListTasksResponse) String() string {
 func (*ListTasksResponse) ProtoMessage() {}
 
 func (x *ListTasksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[18]
+	mi := &file_rafiki_v1_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1425,7 +1521,7 @@ func (x *ListTasksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTasksResponse.ProtoReflect.Descriptor instead.
 func (*ListTasksResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{18}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ListTasksResponse) GetTasks() []*TaskRow {
@@ -1469,7 +1565,7 @@ type ModelRow struct {
 
 func (x *ModelRow) Reset() {
 	*x = ModelRow{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[19]
+	mi := &file_rafiki_v1_control_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1481,7 +1577,7 @@ func (x *ModelRow) String() string {
 func (*ModelRow) ProtoMessage() {}
 
 func (x *ModelRow) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[19]
+	mi := &file_rafiki_v1_control_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1494,7 +1590,7 @@ func (x *ModelRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelRow.ProtoReflect.Descriptor instead.
 func (*ModelRow) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{19}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ModelRow) GetId() string {
@@ -1594,7 +1690,7 @@ type ListModelsRequest struct {
 
 func (x *ListModelsRequest) Reset() {
 	*x = ListModelsRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[20]
+	mi := &file_rafiki_v1_control_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1606,7 +1702,7 @@ func (x *ListModelsRequest) String() string {
 func (*ListModelsRequest) ProtoMessage() {}
 
 func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[20]
+	mi := &file_rafiki_v1_control_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1619,7 +1715,7 @@ func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsRequest.ProtoReflect.Descriptor instead.
 func (*ListModelsRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{20}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ListModelsRequest) GetProvider() string {
@@ -1645,7 +1741,7 @@ type ListModelsResponse struct {
 
 func (x *ListModelsResponse) Reset() {
 	*x = ListModelsResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[21]
+	mi := &file_rafiki_v1_control_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1657,7 +1753,7 @@ func (x *ListModelsResponse) String() string {
 func (*ListModelsResponse) ProtoMessage() {}
 
 func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[21]
+	mi := &file_rafiki_v1_control_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1670,7 +1766,7 @@ func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsResponse.ProtoReflect.Descriptor instead.
 func (*ListModelsResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{21}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ListModelsResponse) GetModels() []*ModelRow {
@@ -1786,7 +1882,11 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"durationMs\x12\x1c\n" +
 	"\tescalated\x18\x05 \x01(\bR\tescalatedB\f\n" +
 	"\n" +
-	"_exit_code\"\xb1\x01\n" +
+	"_exit_code\")\n" +
+	"\fCloseRequest\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\"*\n" +
+	"\rCloseResponse\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\"\xb1\x01\n" +
 	"\aTaskRow\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\tR\x06handle\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1f\n" +
@@ -1835,7 +1935,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x15SEND_MODE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10SEND_MODE_PROMPT\x10\x01\x12\x13\n" +
 	"\x0fSEND_MODE_STEER\x10\x02\x12\x13\n" +
-	"\x0fSEND_MODE_ABORT\x10\x032\xef\x04\n" +
+	"\x0fSEND_MODE_ABORT\x10\x032\xab\x05\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -1844,7 +1944,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\fListChildren\x12\x1e.rafiki.v1.ListChildrenRequest\x1a\x1f.rafiki.v1.ListChildrenResponse\x12C\n" +
 	"\bGetChild\x12\x1a.rafiki.v1.GetChildRequest\x1a\x1b.rafiki.v1.GetChildResponse\x12:\n" +
 	"\x05Spawn\x12\x17.rafiki.v1.SpawnRequest\x1a\x18.rafiki.v1.SpawnResponse\x127\n" +
-	"\x04Kill\x12\x16.rafiki.v1.KillRequest\x1a\x17.rafiki.v1.KillResponse\x12F\n" +
+	"\x04Kill\x12\x16.rafiki.v1.KillRequest\x1a\x17.rafiki.v1.KillResponse\x12:\n" +
+	"\x05Close\x12\x17.rafiki.v1.CloseRequest\x1a\x18.rafiki.v1.CloseResponse\x12F\n" +
 	"\tListTasks\x12\x1b.rafiki.v1.ListTasksRequest\x1a\x1c.rafiki.v1.ListTasksResponse\x12I\n" +
 	"\n" +
 	"ListModels\x12\x1c.rafiki.v1.ListModelsRequest\x1a\x1d.rafiki.v1.ListModelsResponseB4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
@@ -1862,7 +1963,7 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_rafiki_v1_control_proto_goTypes = []any{
 	(EventTier)(0),               // 0: rafiki.v1.EventTier
 	(SendMode)(0),                // 1: rafiki.v1.SendMode
@@ -1882,32 +1983,34 @@ var file_rafiki_v1_control_proto_goTypes = []any{
 	(*SpawnResponse)(nil),        // 15: rafiki.v1.SpawnResponse
 	(*KillRequest)(nil),          // 16: rafiki.v1.KillRequest
 	(*KillResponse)(nil),         // 17: rafiki.v1.KillResponse
-	(*TaskRow)(nil),              // 18: rafiki.v1.TaskRow
-	(*ListTasksRequest)(nil),     // 19: rafiki.v1.ListTasksRequest
-	(*ListTasksResponse)(nil),    // 20: rafiki.v1.ListTasksResponse
-	(*ModelRow)(nil),             // 21: rafiki.v1.ModelRow
-	(*ListModelsRequest)(nil),    // 22: rafiki.v1.ListModelsRequest
-	(*ListModelsResponse)(nil),   // 23: rafiki.v1.ListModelsResponse
-	nil,                          // 24: rafiki.v1.EventCursor.OrdinalsEntry
-	nil,                          // 25: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                          // 26: rafiki.v1.SpawnRequest.LabelsEntry
-	(*Event)(nil),                // 27: rafiki.v1.Event
-	(*ContentBlock)(nil),         // 28: rafiki.v1.ContentBlock
+	(*CloseRequest)(nil),         // 18: rafiki.v1.CloseRequest
+	(*CloseResponse)(nil),        // 19: rafiki.v1.CloseResponse
+	(*TaskRow)(nil),              // 20: rafiki.v1.TaskRow
+	(*ListTasksRequest)(nil),     // 21: rafiki.v1.ListTasksRequest
+	(*ListTasksResponse)(nil),    // 22: rafiki.v1.ListTasksResponse
+	(*ModelRow)(nil),             // 23: rafiki.v1.ModelRow
+	(*ListModelsRequest)(nil),    // 24: rafiki.v1.ListModelsRequest
+	(*ListModelsResponse)(nil),   // 25: rafiki.v1.ListModelsResponse
+	nil,                          // 26: rafiki.v1.EventCursor.OrdinalsEntry
+	nil,                          // 27: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                          // 28: rafiki.v1.SpawnRequest.LabelsEntry
+	(*Event)(nil),                // 29: rafiki.v1.Event
+	(*ContentBlock)(nil),         // 30: rafiki.v1.ContentBlock
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	27, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	24, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	29, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	26, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
 	4,  // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
 	0,  // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
 	5,  // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
 	1,  // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	28, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	25, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	30, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	27, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
 	9,  // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
 	9,  // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	26, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
-	18, // 11: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
-	21, // 12: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
+	28, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	20, // 11: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
+	23, // 12: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
 	2,  // 13: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
 	6,  // 14: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
 	7,  // 15: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
@@ -1915,19 +2018,21 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	12, // 17: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
 	14, // 18: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
 	16, // 19: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	19, // 20: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	22, // 21: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	3,  // 22: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	27, // 23: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	8,  // 24: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	11, // 25: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	13, // 26: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	15, // 27: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	17, // 28: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	20, // 29: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	23, // 30: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	22, // [22:31] is the sub-list for method output_type
-	13, // [13:22] is the sub-list for method input_type
+	18, // 20: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	21, // 21: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	24, // 22: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	3,  // 23: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	29, // 24: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	8,  // 25: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	11, // 26: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	13, // 27: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	15, // 28: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	17, // 29: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	19, // 30: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	22, // 31: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	25, // 32: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	23, // [23:33] is the sub-list for method output_type
+	13, // [13:23] is the sub-list for method input_type
 	13, // [13:13] is the sub-list for extension type_name
 	13, // [13:13] is the sub-list for extension extendee
 	0,  // [0:13] is the sub-list for field type_name
@@ -1949,14 +2054,14 @@ func file_rafiki_v1_control_proto_init() {
 	file_rafiki_v1_control_proto_msgTypes[7].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[12].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[15].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[19].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[21].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   25,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
