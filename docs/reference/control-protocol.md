@@ -231,7 +231,7 @@ watch that row freeze.
 | `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal` and `cost_usd`) |
 | `Spawn` | unary | Create a child with budget, executor, and label options |
 | `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
-| `ListTasks` | unary | One conversation's task ledger, mapped from `Controller.TaskList` (the same implementation behind the `ctrl_task_list` frame verb). `conversation_id` empty means every conversation; `include_dropped` surfaces rows an agent abandoned, hidden by default. A daemon with no ledger answers an EMPTY list rather than an error, because the cockpit hides the box when there is nothing to show. Each `TaskRow` carries `handle` — the dotted ordinal path ("2.1"), computed on read and never persisted — plus `content`, `active_form`, `status`, `assignee` and `drop_reason` |
+| `ListTasks` | unary | One conversation's task ledger, mapped from `Controller.TaskList` (the same implementation behind the `ctrl_task_list` frame verb). `conversation_id` empty means every conversation; `include_dropped` surfaces rows an agent abandoned, hidden by default. rafiki requires a database, so a ledger that cannot answer is a real failure and surfaces as `CodeInternal` rather than as an empty list; the cockpit chooses to hide the box rather than surface it. Rows are clamped to 2000, matching the `ctrl_task_list` frame verb — `tasks.ListFilter.Limit == 0` means unlimited and `conversation_id` empty means every conversation. Each `TaskRow` carries `handle` — the dotted ordinal path ("2.1"), computed on read and never persisted — plus `content`, `active_form`, `status`, `assignee` and `drop_reason` |
 
 ### `Send` and the durable inbox
 
