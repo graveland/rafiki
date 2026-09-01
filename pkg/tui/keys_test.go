@@ -112,3 +112,13 @@ func TestHidingTheRailWhileItHasFocusReleasesIt(t *testing.T) {
 		t.Error("focus stayed on the hidden rail")
 	}
 }
+
+// ^E is the obvious mnemonic for expand and is NOT available: bubbles'
+// textarea binds it to end-of-line. ^O is free and matches other agent TUIs.
+func TestExpandArgsBindingIsFree(t *testing.T) {
+	for _, k := range defaultKeyMap().ExpandArgs.Keys() {
+		if textareaKeys[k] && !grandfathered[k] {
+			t.Errorf("ExpandArgs binds %q, which the textarea already owns", k)
+		}
+	}
+}
