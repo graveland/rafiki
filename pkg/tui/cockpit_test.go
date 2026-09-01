@@ -1430,3 +1430,18 @@ func TestRedrawInvalidatesThePaneCache(t *testing.T) {
 		t.Error("invalidate did not force a rebuild")
 	}
 }
+
+// No polling. The cockpit already sees every tool call, so a completed task
+// mutation is the refresh trigger.
+func TestTaskToolsTriggerARefresh(t *testing.T) {
+	for _, name := range []string{"task_add", "task_update", "task_drop"} {
+		if !isTaskTool(name) {
+			t.Errorf("%s must trigger a task refresh", name)
+		}
+	}
+	for _, name := range []string{"bash", "read", "agent_spawn", ""} {
+		if isTaskTool(name) {
+			t.Errorf("%s must not trigger a task refresh", name)
+		}
+	}
+}
