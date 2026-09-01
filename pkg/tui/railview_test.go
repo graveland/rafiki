@@ -8,6 +8,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"go.graveland.dev/rafiki/pkg/tui/rail"
 )
 
 // TestClipMeasuresDisplayWidthNotRunes pins the bug that made the conversation
@@ -77,5 +79,41 @@ func TestTruncateIsRuneSafe(t *testing.T) {
 	// Short input must be returned untouched.
 	if got := truncate("héllo", 50); got != "héllo" {
 		t.Errorf("truncate altered a short string: %q", got)
+	}
+}
+
+func TestFmtCost(t *testing.T) {
+	for _, tc := range []struct {
+		in   float64
+		want string
+	}{
+		{0, ""},
+		{0.004, "$0.00"},
+		{0.42, "$0.42"},
+		{12.5, "$12.50"},
+		{1234.5, "$1234.50"},
+	} {
+		if got := fmtCost(tc.in); got != tc.want {
+			t.Errorf("fmtCost(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The cost must be part of the PLAIN row so it counts against the width
+// budget. Rows are clipped before styling; a cost appended afterwards would
+// push the row past the pane and bleed into the transcript.
+func TestRailRowCostCountsAgainstWidth(t *testing.T) {
+	nodes := []rail.Node{
+		{ChildID: "c1", Name: "root", Cost: 12.34},
+		{ChildID: "c2", Name: "worker", ParentID: "c1", Depth: 1, Cost: 1.0},
+	}
+	out := renderRail(nodes, "c1", "c1", 30, false)
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if w := ansi.StringWidth(line); w > 30 {
+			t.Errorf("row is %d columns wide, budget is 30: %q", w, line)
+		}
+	}
+	if !strings.Contains(out, "$12.34") {
+		t.Errorf("cost missing from the rail:\n%s", out)
 	}
 }

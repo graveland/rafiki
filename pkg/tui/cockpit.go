@@ -1261,6 +1261,30 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 // transcript is padded to bottom-anchor it and the viewport counts that padding
 // as real. Lines rather than blocks: the reader is looking at lines, and a
 // percentage of blocks jumps unevenly when one block is a 500-line tool result.
+// costReadout is the footer's spend for the focused agent: self, then what
+// this agent's subagents spent on its behalf. Two numbers only when there is a
+// second one to show, and nothing at all while every total is zero -- a wall
+// of $0.00 beside idle agents is noise, not information.
+func (c *Cockpit) costReadout() string {
+	f := c.focused()
+	if f == "" {
+		return ""
+	}
+	n, ok := c.rail.Get(f)
+	if !ok {
+		return ""
+	}
+	self := fmtCost(n.Cost)
+	sub := fmtCost(c.rail.SubtreeCost(f) - n.Cost)
+	switch {
+	case self != "" && sub != "":
+		return self + " +" + sub
+	case self != "":
+		return self
+	}
+	return ""
+}
+
 func (c *Cockpit) scrollPosition() string {
 	f := c.focused()
 	if f == "" {
@@ -1445,12 +1469,19 @@ func (c *Cockpit) View() tea.View {
 	// change, and a number that moves is a number you have to hunt for. The
 	// old marker said only "↓ more below", which answers whether you are at the
 	// bottom and not where you are.
+	readout := c.costReadout()
 	if pos := c.scrollPosition(); pos != "" {
-		gap := c.width - ansi.StringWidth(ansi.Strip(footer)) - ansi.StringWidth(pos) - 1
+		if readout != "" {
+			readout += "  "
+		}
+		readout += pos
+	}
+	if readout != "" {
+		gap := c.width - ansi.StringWidth(ansi.Strip(footer)) - ansi.StringWidth(readout) - 1
 		if gap < 1 {
 			gap = 1
 		}
-		footer += strings.Repeat(" ", gap) + styleMeta.Render(pos)
+		footer += strings.Repeat(" ", gap) + styleMeta.Render(readout)
 	}
 
 	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight,
