@@ -311,6 +311,19 @@ reports conflicts; it never rewrites what the file already has.
 Point `RAFIKI_EXECUTOR_ENV_FILE` somewhere custom (or edit the file by hand) to
 manage it directly — see `.env.example`.
 
+Fill-gaps precedence cannot fix a variable the service manager seeds itself
+and gets wrong: launchd injects `SSH_AUTH_SOCK` (its own per-session agent
+socket) into every LaunchAgent, so a value captured into `executor.env` is
+inert — the unit always wins. For exactly those variables, serve applies a
+second file after the first: `<config dir>/executor-overrides.env` (0600,
+hand-maintained — install never writes it), where every variable you name is
+set **unconditionally**, beating the unit and `executor.env` alike.
+`SSH_AUTH_SOCK` and a corrected `PATH` are the canonical residents; to change
+either, edit the file and restart the service — no reinstall. Location:
+`RAFIKI_EXECUTOR_OVERRIDES_FILE`, and `executor.env` itself may name it (serve
+resolves the overrides path after loading that file, so an entry there is
+honoured).
+
 **Without an executor, an agent has no workspace tools at all.** `read`, `write`, `edit`,
 `glob`, `grep`, `ls`, `bash` and the `lsp_*` verbs are not registered — not registered and
 failing, and above all not silently running against the daemon's own filesystem. What

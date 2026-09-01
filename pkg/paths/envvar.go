@@ -199,6 +199,14 @@ const (
 	// installing shell and from the supervised service, or install writes one
 	// file while serve reads another.
 	ExecutorEnvFileEnv = "RAFIKI_EXECUTOR_ENV_FILE"
+
+	// ExecutorOverridesFileEnv names the executor's environment-OVERRIDE file
+	// (see ExecutorOverridesFile in envfile.go): the variables that beat the
+	// unit and executor.env alike, because launchd/systemd seed them
+	// themselves and get them wrong. It is read by serve at startup, lazily,
+	// so it needs no unit baking: an operator can name it from executor.env
+	// (which serve loads first) and the default otherwise.
+	ExecutorOverridesFileEnv = "RAFIKI_EXECUTOR_OVERRIDES_FILE"
 )
 
 // Variables consumed only by the TypeScript side (rafiki-attach and the

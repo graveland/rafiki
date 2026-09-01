@@ -63,6 +63,25 @@ func ExecutorEnvFile() string {
 	return filepath.Join(ConfigDir(), "executor.env")
 }
 
+// ExecutorOverridesFile is the EXECUTOR's environment-OVERRIDE file:
+// $RAFIKI_EXECUTOR_OVERRIDES_FILE if set, else <config dir>/executor-overrides.env.
+//
+// Every variable this file names is applied UNCONDITIONALLY (see
+// LoadEnvFileOverrides), defeating the fill-gaps precedence that governs
+// ExecutorEnvFile. It exists for the variables the service manager seeds
+// itself and gets wrong: launchd injects SSH_AUTH_SOCK — its own per-session
+// agent socket — into every LaunchAgent, so a captured value in executor.env
+// is inert under "the unit wins", and only a file that overrides can point
+// the executor at the agent that actually holds the keys. Hand-maintained
+// (0600); install never writes it, because force semantics make an
+// auto-captured value harmful where an inert one was merely useless.
+func ExecutorOverridesFile() string {
+	if v := os.Getenv(ExecutorOverridesFileEnv); v != "" {
+		return v
+	}
+	return filepath.Join(ConfigDir(), "executor-overrides.env")
+}
+
 // envAssignment is one KEY=VALUE parsed out of an environment file, in file
 // order.
 type envAssignment struct{ Key, Value string }
@@ -145,27 +164,19 @@ func parseEnvFile(r io.Reader, name string) (vars []envAssignment, warnings []st
 	return vars, warnings, sc.Err()
 }
 
-// LoadEnvFile parses path and applies each assignment to the process
-// environment, and returns the names it set.
-//
-// A name already present in the environment is left alone and not returned:
-// the real environment wins, so `RAFIKI_DB=... rafikid` still overrides the
-// file, and a service manager's own settings are not silently replaced by a
-// file the operator forgot about.
-//
-// A missing file is not an error — this is optional configuration, and a daemon
-// that refuses to start because an optional file is absent is worse than one
-// that starts without it. Malformed lines are returned as warnings rather than
-// failing the load, for the same reason: one bad line should not cost the
-// operator every good one. (Contrast pkg/models, where a malformed models.json
-// silently yields nothing at all; that is the behaviour this avoids.)
-func LoadEnvFile(path string) (applied []string, warnings []string, err error) {
+// readEnvFile opens path, warns on loose permissions (the file holds
+// credentials and should be 0600) and parses it. ok is false when the file is
+// absent, which is not an error: environment files are optional configuration,
+// and a daemon that refuses to start because an optional file is missing is
+// worse than one that starts without it. A non-IsNotExist open failure is an
+// error. parseEnvFile's warnings ride along.
+func readEnvFile(path string) (vars []envAssignment, warnings []string, ok bool, err error) {
 	f, err := os.Open(path) //nolint:gosec // operator-supplied path, by design
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil, nil
+			return nil, nil, false, nil
 		}
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	defer f.Close() //nolint:errcheck // read-only close is not actionable
 
@@ -182,10 +193,55 @@ func LoadEnvFile(path string) (applied []string, warnings []string, err error) {
 
 	vars, parseWarnings, parseErr := parseEnvFile(f, path)
 	warnings = append(warnings, parseWarnings...)
-	for _, v := range vars {
-		applyEnv(v.Key, v.Value, &applied)
+	return vars, warnings, true, parseErr
+}
+
+// LoadEnvFile parses path and applies each assignment to the process
+// environment, and returns the names it set.
+//
+// A name already present in the environment is left alone and not returned:
+// the real environment wins, so `RAFIKI_DB=... rafikid` still overrides the
+// file, and a service manager's own settings are not silently replaced by a
+// file the operator forgot about.
+//
+// A missing file is not an error — this is optional configuration, and a daemon
+// that refuses to start because an optional file is absent is worse than one
+// that starts without it. Malformed lines are returned as warnings rather than
+// failing the load, for the same reason: one bad line should not cost the
+// operator every good one. (Contrast pkg/models, where a malformed models.json
+// silently yields nothing at all; that is the behaviour this avoids.)
+func LoadEnvFile(path string) (applied []string, warnings []string, err error) {
+	vars, warnings, ok, err := readEnvFile(path)
+	if err != nil || !ok {
+		return applied, warnings, err
 	}
-	return applied, warnings, parseErr
+	for _, v := range vars {
+		applyEnv(v.Key, v.Value, false, &applied)
+	}
+	return applied, warnings, err
+}
+
+// LoadEnvFileOverrides parses path and applies each assignment to the process
+// environment UNCONDITIONALLY — the opposite of LoadEnvFile's "the real
+// environment wins". Every variable the file names replaces the process's
+// value outright, whether or not it was already present.
+//
+// This is the executor's escape hatch, and it is load-bearing for exactly one
+// class of variable: ones the service manager seeds itself and gets wrong.
+// launchd injects SSH_AUTH_SOCK (its own per-session agent socket) into every
+// LaunchAgent's environment, so a value captured into executor.env at install
+// is silently skipped under fill-gaps precedence — only a file that OVERRIDES
+// can beat the unit. Same missing-file and malformed-line handling as
+// LoadEnvFile: optional config, fail soft.
+func LoadEnvFileOverrides(path string) (applied []string, warnings []string, err error) {
+	vars, warnings, ok, err := readEnvFile(path)
+	if err != nil || !ok {
+		return applied, warnings, err
+	}
+	for _, v := range vars {
+		applyEnv(v.Key, v.Value, true, &applied)
+	}
+	return applied, warnings, err
 }
 
 // closeQuoted reports whether s contains the closing double quote of a value,
@@ -211,10 +267,15 @@ var envUnescaper = strings.NewReplacer(`\n`, "\n", `\r`, "\r", `\t`, "\t", `\"`,
 
 func unescape(s string) string { return envUnescaper.Replace(s) }
 
-// applyEnv sets k unless it is already present: the real environment wins.
-func applyEnv(k, v string, applied *[]string) {
-	if _, ok := os.LookupEnv(k); ok {
-		return
+// applyEnv sets k unless force is false and the variable is already present.
+// force=true is the overrides semantic: the file wins over everything. With
+// force=false the real environment wins — a service manager's own settings are
+// not silently replaced by a file the operator forgot about.
+func applyEnv(k, v string, force bool, applied *[]string) {
+	if !force {
+		if _, ok := os.LookupEnv(k); ok {
+			return
+		}
 	}
 	if err := os.Setenv(k, v); err == nil {
 		*applied = append(*applied, k)

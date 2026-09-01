@@ -62,16 +62,25 @@ func executorHandler(srv *executor.Server) http.Handler {
 	return mux
 }
 
-// loadExecutorEnv applies the executor's environment file (see
-// paths.ExecutorEnvFile) before anything in RunE resolves a default from the
-// environment. This is what gives a launchd- or systemd-supervised executor
-// the operator's ordinary working environment: captureExecutorEnv froze it
-// into the 0600 file at install time, and this is where serve picks it up.
+// loadExecutorEnv applies the executor's environment files before anything in
+// RunE resolves a default from the environment. This is what gives a launchd-
+// or systemd-supervised executor the operator's ordinary working environment:
+// captureExecutorEnv froze it into the 0600 file at install time, and this is
+// where serve picks it up.
 //
-// Precedence matches the daemon's loadServiceEnv, via LoadEnvFile: a variable
-// already present in the process environment — everything the unit bakes in,
-// HOME and PATH above all — wins over the file. The file fills gaps; it never
-// overrides.
+// Two files, two precedences, applied in order:
+//
+//   - executor.env (paths.ExecutorEnvFile) fills gaps. A variable already
+//     present in the process environment — everything the unit bakes in, HOME
+//     and PATH above all — wins over the file.
+//   - executor-overrides.env (paths.ExecutorOverridesFile) WINS: every
+//     variable it names is set unconditionally, beating the unit and the
+//     fill-gaps file alike. It exists for the variables launchd/systemd seed
+//     themselves and get wrong — SSH_AUTH_SOCK is the canonical case: launchd
+//     injects its own per-session agent socket into every LaunchAgent, so a
+//     captured value in executor.env is inert under fill-gaps precedence, and
+//     only a file that overrides can point the executor at the agent that
+//     actually holds the keys. Hand-maintained; install never writes it.
 //
 // Scoped to `executor serve` ONLY, and deliberately not loaded at binary
 // startup the way the daemon's file is: `rafiki` is also the client, and
@@ -90,6 +99,28 @@ func loadExecutorEnv() {
 	}
 	if len(applied) > 0 {
 		slog.Info("loaded executor environment file", "path", path, "vars", applied)
+	}
+
+	// Resolved AFTER the fill-gaps load, so executor.env itself can name the
+	// overrides file (a RAFIKI_EXECUTOR_OVERRIDES_FILE entry there is applied
+	// by the load above and picked up here); the default is otherwise
+	// <config dir>/executor-overrides.env.
+	overrides := paths.ExecutorOverridesFile()
+	if overrides == path {
+		slog.Warn("executor environment overrides file is the environment file itself; ignoring",
+			"path", path)
+		return
+	}
+	oapplied, owarnings, oerr := paths.LoadEnvFileOverrides(overrides)
+	if oerr != nil {
+		slog.Error("could not read the executor environment overrides file; continuing without it",
+			"path", overrides, "error", oerr)
+	}
+	for _, w := range owarnings {
+		slog.Warn("executor environment overrides file", "detail", w)
+	}
+	if len(oapplied) > 0 {
+		slog.Info("loaded executor environment overrides file", "path", overrides, "vars", oapplied)
 	}
 }
 
