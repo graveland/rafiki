@@ -337,18 +337,15 @@ func TestSuccessfulToolCallKeepsNoFailureBar(t *testing.T) {
 // silent success. There are real instances: a production database here holds
 // 38 bash calls with no matching tool_result.
 func TestToolCallWithNoResultDoesNotClaimSuccess(t *testing.T) {
-	render := func(tc session.ToolCall) string {
-		return ansi.Strip(strings.Join(newRenderer().Lines([]session.Block{{
-			Kind: session.KindAssistant, Final: true, ToolCalls: []session.ToolCall{tc},
-		}}, 1, 100), "\n"))
-	}
-
 	none := render(session.ToolCall{Name: "bash"})
 	if strings.Contains(none, "✓") {
 		t.Errorf("a call with no result claims success:\n%s", none)
 	}
-	if !strings.Contains(none, "no result") {
-		t.Errorf("a call with no result must say so:\n%s", none)
+	if !strings.Contains(none, "⋯") {
+		t.Errorf("a call the turn abandoned must be marked:\n%s", none)
+	}
+	if strings.Contains(none, "no result") {
+		t.Errorf("the verbose 'no result' text is gone; the glyph is the whole marker:\n%s", none)
 	}
 
 	// A tool that legitimately returned nothing still succeeded.
@@ -421,5 +418,22 @@ func TestLiveFingerprintCoversEveryUnfinalizedBlock(t *testing.T) {
 	after := session.LiveFingerprint(blocks, 0)
 	if before == after {
 		t.Error("a change in a non-final block that is not the last one did not change the fingerprint")
+	}
+}
+
+// render draws one tool call in a finalized assistant block, stripped of ANSI
+// so assertions read plain text.
+func render(tc session.ToolCall) string {
+	return ansi.Strip(strings.Join(newRenderer().Lines([]session.Block{{
+		Kind: session.KindAssistant, Final: true, ToolCalls: []session.ToolCall{tc},
+	}}, 1, 100), "\n"))
+}
+
+// One glyph, one meaning. ⊘ is a BLOCKED TASK in the task box; an abandoned
+// tool call is ⋯. Both are on screen at once, so they must not collide.
+func TestAbandonedToolCallDoesNotUseTheBlockedTaskGlyph(t *testing.T) {
+	out := render(session.ToolCall{Name: "bash"})
+	if strings.Contains(out, "⊘") {
+		t.Errorf("⊘ means a blocked task; an abandoned tool call must not use it:\n%s", out)
 	}
 }

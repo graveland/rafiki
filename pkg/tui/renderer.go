@@ -227,9 +227,12 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			} else {
 				// Ended, but no result ever arrived — interrupted, or its turn
 				// cut short. Claiming ✓ here says the work finished, which is
-				// the same false reassurance a swallowed error gave.
+				// the same false reassurance a swallowed error gave. The glyph
+				// alone is the marker: absence of a ✓ is already the signal and
+				// does not need words. ⋯ rather than ⊘, which the task box uses
+				// for a blocked task.
 				prefix = styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
-					dur + styleWarn.Render(" ⋯ no result")
+					dur + styleWarn.Render(" ⋯")
 			}
 			sb.WriteString(prefix)
 			sb.WriteString("\n")
