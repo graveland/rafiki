@@ -76,6 +76,21 @@ func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs b
 	return p.renderer.Lines(s.Blocks, s.Finalized, width)
 }
 
+// invalidate forces the next linesFor to rebuild, discarding the renderer's
+// cached blocks as well as the viewport signature.
+//
+// ^L exists for output that never went through slog and landed on the alt
+// screen anyway -- an executor subprocess, a library writing to stderr
+// directly. Clearing the terminal without this leaves the pane blank until
+// the next event happens to change the signature.
+func (p *paneState) invalidate() {
+	p.sigInit = false
+	p.renderer.cached = nil
+	p.renderer.cachedUpTo = 0
+	p.renderer.lastFP = ""
+	p.renderer.liveOut = nil
+}
+
 // pane returns childID's pane state, creating it on first use.
 func (c *Cockpit) pane(childID string) *paneState {
 	if c.panes == nil {
