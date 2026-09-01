@@ -60,6 +60,16 @@ type Node struct {
 	CountedThrough int32
 	HasSeen        bool
 
+	// Cost is this child's spend in USD, summed from turn_end. CostThrough is
+	// the highest ordinal already added, and is a SEPARATE watermark from
+	// Latest/RailCursor/Seen/CountedThrough for the same reason those are
+	// separate from each other: the rail and focus subscriptions overlap on
+	// the durable tier, so the same turn_end arrives twice and a sum with no
+	// watermark doubles the bill.
+	Cost         float64
+	CostThrough  int32
+	HasCostFloor bool
+
 	Attention int
 }
 
@@ -208,6 +218,17 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 		n.Status = "exited"
 		n.ExitCode = p.ChildExited.ExitCode
 		n.Retrying = false
+	case *rafikiv1.Event_TurnEnd:
+		// turn_end carries ONE turn's cost -- Emitter.AgentEnd resets its
+		// usage accumulator -- so these sum. The ordinal guard is what stops
+		// the overlapping rail and focus streams billing twice.
+		if c := p.TurnEnd.CostUsd; c != nil && ev.Ordinal != nil {
+			if ord := ev.GetOrdinal(); !n.HasCostFloor || ord > n.CostThrough {
+				n.Cost += *c
+				n.CostThrough = ord
+				n.HasCostFloor = true
+			}
+		}
 	}
 
 	r.countAttention(n, ev)
@@ -219,6 +240,53 @@ func (r *Rail) Nodes() []Node {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.nodesLocked()
+}
+
+// SetCost seeds a child's spend from ListChildren.
+//
+// It ASSIGNS rather than adds: the rail resumes from the log head, so turns
+// that happened before this client attached are never replayed, and the seed
+// is the only source for them. Calling it twice must not double the number.
+func (r *Rail) SetCost(childID string, cost float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n, ok := r.nodes[childID]; ok {
+		n.Cost = cost
+	}
+}
+
+// SubtreeCost sums childID and every descendant.
+//
+// Computed here rather than fetched, because the rail already holds the tree.
+// Summing PER CHILD also sidesteps the correlation hazard a server-side
+// rollup carries: a fundi child's conversation is found by UUID and a proxy
+// child's by external_ref, and a subtree routinely mixes them.
+func (r *Rail) SubtreeCost(childID string) float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	children := make(map[string][]string, len(r.nodes))
+	for id, n := range r.nodes {
+		if n.ParentID != "" {
+			children[n.ParentID] = append(children[n.ParentID], id)
+		}
+	}
+	var walk func(string) float64
+	seen := make(map[string]bool, len(r.nodes))
+	walk = func(id string) float64 {
+		if seen[id] {
+			return 0
+		}
+		seen[id] = true
+		total := 0.0
+		if n, ok := r.nodes[id]; ok {
+			total = n.Cost
+		}
+		for _, kid := range children[id] {
+			total += walk(kid)
+		}
+		return total
+	}
+	return walk(childID)
 }
 
 // nodesLocked is Nodes without the lock, for callers that already hold it.
