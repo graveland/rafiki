@@ -180,11 +180,19 @@ func LatestAlias(model string) (string, bool) {
 
 type orModel struct {
 	ID          string `json:"id"`
+	Name        string `json:"name"`
 	Created     int64  `json:"created"`
 	ContextLen  int    `json:"context_length"`
 	TopProvider struct {
 		MaxCompletionTokens int `json:"max_completion_tokens"`
 	} `json:"top_provider"`
+	// Architecture carries the only signal for what a model can ACCEPT.
+	// InputModalities is nil for an entry with no architecture block and for
+	// any snapshot written before this field was decoded — both of which mean
+	// UNKNOWN, never "accepts nothing". A text-only model reports ["text"].
+	Architecture struct {
+		InputModalities []string `json:"input_modalities"`
+	} `json:"architecture"`
 	// Pricing is OpenRouter's per-token USD price object. A cached snapshot
 	// written before this field existed decodes with empty strings, so its
 	// models resolve as unpriced until the next successful refresh repopulates
@@ -766,10 +774,27 @@ func AutoCompactWindow(contextLen, maxCompletion int) int {
 // pricingFromOR.
 type CatalogEntry struct {
 	ID                  string
+	Name                string
 	Created             int64
 	ContextLength       int
 	MaxCompletionTokens int
 	Pricing             *ModelPricing
+	InputModalities     []string
+}
+
+// CatalogRow is one catalog entry flattened for enumeration.
+//
+// Pricing is a POINTER and InputModalities a possibly-nil slice because absent
+// and zero differ: an entry OpenRouter does not price must stay distinguishable
+// from one it prices at zero, and an entry with no architecture block must stay
+// distinguishable from a model that accepts nothing.
+type CatalogRow struct {
+	ID                  string
+	Name                string
+	ContextLength       int
+	MaxCompletionTokens int
+	Pricing             *ModelPricing
+	InputModalities     []string
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
@@ -778,8 +803,9 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 	defer c.mu.Unlock()
 	c.models = make([]orModel, len(entries))
 	for i, e := range entries {
-		c.models[i] = orModel{ID: e.ID, Created: e.Created, ContextLen: e.ContextLength}
+		c.models[i] = orModel{ID: e.ID, Name: e.Name, Created: e.Created, ContextLen: e.ContextLength}
 		c.models[i].TopProvider.MaxCompletionTokens = e.MaxCompletionTokens
+		c.models[i].Architecture.InputModalities = e.InputModalities
 		if e.Pricing != nil {
 			c.models[i].Pricing = orPricing{
 				Prompt:            formatPrice(e.Pricing.PromptUSD),
@@ -794,6 +820,44 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 }
 
 func formatPrice(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
+
+// Rows returns every model in the current snapshot, refreshing it first.
+//
+// One accessor rather than per-id ContextWindow/Pricing calls: each of those
+// runs ResolveModel and takes the mutex, so enumerating a ~300-model catalog
+// through them costs 300 resolutions and 300 lock acquisitions to answer a
+// question the snapshot can answer in one pass. Alias ids ("~"-prefixed) are
+// skipped for the same reason AllIDs skips them — they are routing aliases,
+// not models anyone picks.
+func (c *ModelCatalog) Rows() []CatalogRow {
+	if c == nil {
+		return nil
+	}
+	c.refresh()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen := make(map[string]bool, len(c.models))
+	out := make([]CatalogRow, 0, len(c.models))
+	for _, m := range c.models {
+		if strings.HasPrefix(m.ID, "~") || m.ID == "" || seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		row := CatalogRow{
+			ID:                  m.ID,
+			Name:                m.Name,
+			ContextLength:       m.ContextLen,
+			MaxCompletionTokens: m.TopProvider.MaxCompletionTokens,
+			InputModalities:     m.Architecture.InputModalities,
+		}
+		if p, ok := pricingFromOR(m.Pricing); ok {
+			row.Pricing = &p
+		}
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
 
 // optionalPriceString seeds a cache price the way OpenRouter sends it: omitted
 // (empty) for a model that doesn't price it. A zero in a CatalogEntry therefore

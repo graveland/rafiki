@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -659,5 +660,104 @@ func TestProviderPrefsMarshal(t *testing.T) {
 				t.Errorf("Marshal = %s, want %s", b, tc.want)
 			}
 		})
+	}
+}
+
+func TestCatalogDecodesNameAndInputModalities(t *testing.T) {
+	body := `{"data":[
+	 {"id":"openai/gpt-4o","name":"GPT-4o","created":1,"context_length":128000,
+	  "architecture":{"input_modalities":["text","image"]},
+	  "pricing":{"prompt":"0.000005","completion":"0.000015"}},
+	 {"id":"openai/text-only","name":"Text Only","created":2,"context_length":8000,
+	  "architecture":{"input_modalities":["text"]}}
+	]}`
+	c, srv := newTestCatalog(t, body)
+	defer srv.Close()
+
+	rows := c.Rows()
+	byID := map[string]CatalogRow{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	got, ok := byID["openai/gpt-4o"]
+	if !ok {
+		t.Fatalf("gpt-4o missing from Rows(); got %d rows", len(rows))
+	}
+	if got.Name != "GPT-4o" {
+		t.Errorf("Name = %q, want %q", got.Name, "GPT-4o")
+	}
+	if len(got.InputModalities) != 2 || got.InputModalities[0] != "text" ||
+		got.InputModalities[1] != "image" {
+		t.Errorf("InputModalities = %v, want [text image]", got.InputModalities)
+	}
+	if got.ContextLength != 128000 {
+		t.Errorf("ContextLength = %d, want 128000", got.ContextLength)
+	}
+	if got.Pricing == nil {
+		t.Fatal("Pricing = nil, want parsed prices")
+	}
+	if got.Pricing.PromptUSD != 0.000005 {
+		t.Errorf("PromptUSD = %v, want 0.000005", got.Pricing.PromptUSD)
+	}
+
+	// A text-only model reports ["text"] and must stay distinguishable from
+	// a model the catalog knows nothing about (nil).
+	if txt := byID["openai/text-only"]; len(txt.InputModalities) != 1 {
+		t.Errorf("text-only InputModalities = %v, want [text]", txt.InputModalities)
+	}
+}
+
+// An entry with no architecture block must yield NIL modalities, not an empty
+// non-nil slice: nil is what the picker reads as "unknown", and an empty slice
+// would read as "this model accepts nothing".
+func TestCatalogAbsentArchitectureYieldsNilModalities(t *testing.T) {
+	body := `{"data":[{"id":"openai/bare","created":1,"context_length":4096}]}`
+	c, srv := newTestCatalog(t, body)
+	defer srv.Close()
+
+	rows := c.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	if rows[0].InputModalities != nil {
+		t.Errorf("InputModalities = %#v, want nil", rows[0].InputModalities)
+	}
+	if rows[0].Pricing != nil {
+		t.Errorf("Pricing = %#v, want nil for an unpriced entry", rows[0].Pricing)
+	}
+}
+
+// A snapshot persisted before these fields existed must still decode, with the
+// new fields empty, rather than failing the whole cache load. Same caveat
+// Pricing already carries.
+func TestCatalogStaleSnapshotDecodesWithoutNewFields(t *testing.T) {
+	old := `{"fetched":"2099-01-01T00:00:00Z","models":[
+	 {"id":"openai/gpt-4o","created":1,"context_length":128000}
+	]}`
+	store := &memStore{data: []byte(old)}
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler)).WithCache(store)
+
+	rows := c.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1 from the stale snapshot", len(rows))
+	}
+	if rows[0].Name != "" || rows[0].InputModalities != nil {
+		t.Errorf("stale row = %+v, want empty Name and nil InputModalities", rows[0])
+	}
+	if rows[0].ContextLength != 128000 {
+		t.Errorf("ContextLength = %d, want the field the old snapshot DID carry", rows[0].ContextLength)
+	}
+}
+
+// Rows() must skip the "~" alias ids for the same reason AllIDs does: they are
+// routing aliases, not models a user picks.
+func TestRowsSkipsTildeAliases(t *testing.T) {
+	c, srv := newTestCatalog(t, orFixture)
+	defer srv.Close()
+	for _, r := range c.Rows() {
+		if strings.HasPrefix(r.ID, "~") {
+			t.Errorf("Rows() returned alias id %q", r.ID)
+		}
 	}
 }
