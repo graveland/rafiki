@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -52,7 +53,7 @@ func TestLogRingDropsOldestPastCapacity(t *testing.T) {
 // and an executor reconnect is only debuggable with the info-level trail.
 func TestLogRingKeepsInfo(t *testing.T) {
 	r := newLogRing(4)
-	if !r.Enabled(nil, slog.LevelInfo) {
+	if !r.Enabled(context.Background(), slog.LevelInfo) {
 		t.Error("info records are dropped; the ring exists so they need not be")
 	}
 }
