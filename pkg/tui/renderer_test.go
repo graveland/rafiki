@@ -483,3 +483,56 @@ func TestShortToolResultIsNotElided(t *testing.T) {
 		}
 	}
 }
+
+// Every argument, not just the one the tool is "about". Seeing only the path
+// of an edit tells you nothing about what the edit does.
+func TestCompactToolArgsListEveryKey(t *testing.T) {
+	got := toolArgLines("edit", `{"path":"src/main.go","old_string":"a","new_string":"b","replace_all":false}`, false)
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"old_string", "new_string", "replace_all"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing argument %q:\n%s", want, joined)
+		}
+	}
+	// The headline argument is on the call line already and must not repeat.
+	if strings.Contains(joined, "path:") {
+		t.Errorf("the headline argument was repeated in the list:\n%s", joined)
+	}
+}
+
+// Deterministic ordering: ranging a map reorders the list between frames.
+func TestToolArgLinesAreSorted(t *testing.T) {
+	in := `{"zebra":"z","alpha":"a","monkey":"m"}`
+	got := toolArgLines("nosuchtool", in, false)
+	joined := strings.Join(got, "\n")
+	ia := strings.Index(joined, "alpha")
+	im := strings.Index(joined, "monkey")
+	iz := strings.Index(joined, "zebra")
+	if !(ia < im && im < iz) {
+		t.Errorf("arguments not sorted by key:\n%s", joined)
+	}
+}
+
+// Compact folds a multi-line value to one line and says how big it was.
+func TestCompactFoldsMultilineValues(t *testing.T) {
+	in := `{"path":"n.md","content":"one\ntwo\nthree"}`
+	got := toolArgLines("write", in, false)
+	joined := strings.Join(got, "\n")
+	if strings.Count(joined, "\n") != len(got)-1 {
+		t.Errorf("a compact argument line contains a newline:\n%q", joined)
+	}
+	if !strings.Contains(joined, "B)") {
+		t.Errorf("missing size marker on a folded value:\n%s", joined)
+	}
+}
+
+// Expanded prints the value in full, across lines.
+func TestExpandedShowsFullMultilineValues(t *testing.T) {
+	in := `{"path":"n.md","content":"one\ntwo\nthree"}`
+	joined := strings.Join(toolArgLines("write", in, true), "\n")
+	for _, want := range []string{"one", "two", "three"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expanded output missing %q:\n%s", want, joined)
+		}
+	}
+}
