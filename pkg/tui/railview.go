@@ -18,6 +18,16 @@ var (
 	styleRailDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
+// fmtCost renders a spend. Zero renders as nothing: a row of "$0.00" beside
+// every idle agent is noise, and the number is only interesting once there is
+// one.
+func fmtCost(usd float64) string {
+	if usd == 0 {
+		return ""
+	}
+	return "$" + strconv.FormatFloat(usd, 'f', 2, 64)
+}
+
 // renderRail draws the tree.
 //
 // It returns "" for fewer than two rows on purpose: the rail GROWS OUT OF a
@@ -53,7 +63,18 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 				cursor = "▶ "
 			}
 		}
-		row := clip(cursor+strings.Repeat("  ", n.Depth)+rail.Glyph(n)+" "+name+badge, width)
+		// The cost joins the PLAIN row so it counts against the width budget,
+		// like the cursor and the badge. Rows are clipped before styling, so
+		// anything appended afterwards escapes the pane and bleeds colour into
+		// the transcript.
+		left := cursor + strings.Repeat("  ", n.Depth) + rail.Glyph(n) + " " + name + badge
+		cost := fmtCost(n.Cost)
+		row := clip(left, width)
+		if cost != "" {
+			if gap := width - ansi.StringWidth(clip(left, width-len(cost)-1)) - len(cost); gap >= 1 {
+				row = clip(left, width-len(cost)-1) + strings.Repeat(" ", gap) + cost
+			}
+		}
 		switch {
 		case n.ChildID == focused:
 			sb.WriteString(styleRailFocused.Render(row))
