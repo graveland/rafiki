@@ -478,12 +478,15 @@ type ConversationExportRequest struct {
 
 // TaskListRequest queries the task ledger (§ ctrl_task_list).
 type TaskListRequest struct {
-	Type    string `json:"type"`
-	ID      string `json:"id,omitempty"`
-	ChildID string `json:"childId,omitempty"` // tasks assigned to this child
-	Status  string `json:"status,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
-	All     bool   `json:"all,omitempty"` // include dropped
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+	// ConversationID scopes the query to one conversation's ledger. Empty
+	// means every conversation, matching tasks.ListFilter.
+	ConversationID string `json:"conversationId,omitempty"`
+	ChildID        string `json:"childId,omitempty"` // tasks assigned to this child
+	Status         string `json:"status,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	All            bool   `json:"all,omitempty"` // include dropped
 }
 
 // ─── Response envelope and per-command response data types ───────────────────

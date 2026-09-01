@@ -51,13 +51,14 @@ type ConversationResolver interface {
 type Server struct {
 	history HistoryLoader
 
-	events    atomic.Pointer[EventSource]
-	lineageLn atomic.Pointer[eventlog.Lineage]
-	evlog     atomic.Pointer[eventlog.Store]
-	resolver  atomic.Pointer[ConversationResolver]
-	inbox     atomic.Pointer[inbox.Accepter]
-	children  atomic.Pointer[ChildLister]
-	lifecycle atomic.Pointer[ChildLifecycle]
+	events     atomic.Pointer[EventSource]
+	lineageLn  atomic.Pointer[eventlog.Lineage]
+	evlog      atomic.Pointer[eventlog.Store]
+	resolver   atomic.Pointer[ConversationResolver]
+	inbox      atomic.Pointer[inbox.Accepter]
+	children   atomic.Pointer[ChildLister]
+	lifecycle  atomic.Pointer[ChildLifecycle]
+	taskLister atomic.Pointer[TaskLister]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }

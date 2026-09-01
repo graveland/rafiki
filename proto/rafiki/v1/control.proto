@@ -189,6 +189,30 @@ message KillResponse {
   bool escalated = 5;
 }
 
+// TaskRow is one row of the task ledger. Handle is the dotted ordinal path
+// ("2.1"), computed on read and never persisted -- an agent addresses tasks by
+// handle so it never has to carry a UUID across turns.
+message TaskRow {
+  string handle = 1;
+  string content = 2;
+  string active_form = 3;
+  string status = 4;
+  string assignee = 5;
+  string drop_reason = 6;
+}
+
+message ListTasksRequest {
+  // Empty means every conversation, matching tasks.ListFilter.
+  string conversation_id = 1;
+  // include_dropped surfaces rows an agent decided not to do. Dropped rows are
+  // hidden by default.
+  bool include_dropped = 2;
+}
+
+message ListTasksResponse {
+  repeated TaskRow tasks = 1;
+}
+
 service Control {
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
@@ -197,4 +221,5 @@ service Control {
   rpc GetChild(GetChildRequest) returns (GetChildResponse);
   rpc Spawn(SpawnRequest) returns (SpawnResponse);
   rpc Kill(KillRequest) returns (KillResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
 }
