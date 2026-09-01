@@ -449,6 +449,11 @@ func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(chi
 		if md.SessionID == "" {
 			return
 		}
+		// The `changed` guard is load-bearing, not an optimisation. This runs on
+		// the child's readStdout goroutine and writeRecord is a database upsert
+		// with a 5s timeout, so an unguarded write would stall stdout once per
+		// TURN: claudeProvider.Parse reports metadata on every `result` frame,
+		// not only on `system/init`. Guarded, it writes once per child.
 		changed := false
 		if err := c.st.Update(childID, func(s *childstore.Session) {
 			if s.SessionID != md.SessionID {

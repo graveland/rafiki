@@ -155,3 +155,22 @@ func TestOutboundEchoNativeIgnoresNonPromptFrames(t *testing.T) {
 		}
 	}
 }
+
+// OutboundEchoNative type-asserts Content to string and drops the echo when it
+// is not one. This pins the invariant that assertion rests on.
+//
+// A test asserting the assertion's own fallback would be vacuous — nothing
+// reachable through claudeUserEcho produces a non-string today. This instead
+// fails the moment that stops being true, and says what to go fix: otherwise
+// the change lands and every claude prompt silently stops reaching the cockpit.
+func TestClaudeUserEchoContentIsAString(t *testing.T) {
+	msg, _, ok := claudeUserEcho([]byte(`{"type":"prompt","message":"hi"}`), 1000)
+	if !ok {
+		t.Fatal("claudeUserEcho rejected a valid prompt frame")
+	}
+	if _, isString := msg.Content.(string); !isString {
+		t.Fatalf("PiUserMessage.Content is %T, want string — OutboundEchoNative's "+
+			"type assertion now drops every prompt silently; teach it the new shape",
+			msg.Content)
+	}
+}

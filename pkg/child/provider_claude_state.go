@@ -121,13 +121,24 @@ func (p *claudeProvider) OutboundEchoNative(frame []byte, ts int64) []*rafikiv1.
 	if !ok {
 		return nil
 	}
+	// PiUserMessage.Content is `any`, and claudeUserEcho is its only constructor
+	// today, so this assertion always succeeds. It is a type ASSERTION rather
+	// than fmt.Sprint deliberately: the day that field carries []PiContentBlock
+	// — which is where multi-block user turns are heading, since images already
+	// travel end to end and lead the block list — fmt.Sprint would render Go
+	// syntax straight into the user's visible message with nothing failing.
+	// Dropping the echo is the loud failure; a garbled prompt is the silent one.
+	text, ok := msg.Content.(string)
+	if !ok {
+		return nil
+	}
 	return []*rafikiv1.Event{{
 		TsUnixMs: ts,
 		Payload: &rafikiv1.Event_UserMessage{
 			UserMessage: &rafikiv1.UserMessage{
 				Content: []*rafikiv1.ContentBlock{{
 					Index: 0,
-					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: fmt.Sprint(msg.Content)}},
+					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
 				}},
 			},
 		},
