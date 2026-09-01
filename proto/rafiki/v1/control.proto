@@ -189,6 +189,22 @@ message KillResponse {
   bool escalated = 5;
 }
 
+// CloseRequest finalizes a conversation: the child leaves the daemon's store
+// and can never again be resumed, reattached or continued. Its transcript is
+// NOT deleted — no foreign key references conversations.child, so
+// conversation_message, event_log and conversation_turn all survive and stay
+// readable through GetHistory.
+//
+// The child must already be exited; closing a live child is an error, not an
+// implicit kill.
+message CloseRequest {
+  string child_id = 1;
+}
+
+message CloseResponse {
+  string child_id = 1;
+}
+
 // TaskRow is one row of the task ledger. Handle is the dotted ordinal path
 // ("2.1"), computed on read and never persisted -- an agent addresses tasks by
 // handle so it never has to carry a UUID across turns.
@@ -264,6 +280,7 @@ service Control {
   rpc GetChild(GetChildRequest) returns (GetChildResponse);
   rpc Spawn(SpawnRequest) returns (SpawnResponse);
   rpc Kill(KillRequest) returns (KillResponse);
+  rpc Close(CloseRequest) returns (CloseResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
 }

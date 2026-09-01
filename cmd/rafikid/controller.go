@@ -390,21 +390,21 @@ func (c *Controller) Stop() {
 	c.sweeperWg.Wait()
 }
 
-// sweepExpired forgets all exited children whose ExitedAt is older than
+// sweepExpired closes all exited children whose ExitedAt is older than
 // graceWindow. Called periodically by the sweeper goroutine.
 func (c *Controller) sweepExpired() {
 	cutoff := time.Now().Add(-c.graceWindow)
-	var toForget []string
+	var toClose []string
 	for _, s := range c.st.FindByStatus(protocol.StatusExited) {
 		if !s.ExitedAt.IsZero() && s.ExitedAt.Before(cutoff) {
-			toForget = append(toForget, s.ChildID)
+			toClose = append(toClose, s.ChildID)
 		}
 	}
-	for _, id := range toForget {
-		_ = c.Forget(id)
+	for _, id := range toClose {
+		_ = c.Close(id)
 	}
-	if len(toForget) > 0 {
-		slog.Info("sweep: forgot expired children", "count", len(toForget))
+	if len(toClose) > 0 {
+		slog.Info("sweep: closed expired children", "count", len(toClose))
 	}
 }
 
@@ -1948,7 +1948,16 @@ func (c *Controller) ownsChildRow(snap childstore.Snapshot) bool {
 	return owner == "" || owner == c.daemonID
 }
 
-func (c *Controller) Forget(childID string) error {
+// Close finalizes an exited child: it leaves the in-memory store and its
+// conversations.child row, and can never be resumed, reattached or continued
+// again. Its TRANSCRIPT is not deleted — no foreign key references
+// conversations.child, so conversation_message, event_log and conversation_turn
+// all survive and stay readable through `rafiki history`.
+//
+// The framed wire type is still spelled ctrl_forget, deliberately: that
+// protocol is frozen (see docs/plans/2026-09-01-model-catalog-and-close-design.md
+// §3.0), and its old clients must keep working regardless.
+func (c *Controller) Close(childID string) error {
 	// Wait for handleChildExit (running on monitorChild's goroutine) to finish
 	// before we touch on-disk state. Two races are possible when forget arrives
 	// immediately after a kill:
@@ -1958,7 +1967,7 @@ func (c *Controller) Forget(childID string) error {
 	//  2. MarkExited has run (status=exited) but cm.Remove hasn't yet — the
 	//     child is still in cm.  Without this wait, our delete can race with
 	//     writeRecord's atomic-rename: writeRecord's .tmp is in-progress when
-	//     Forget runs os.Remove(.json) — finds nothing — then writeRecord
+	//     Close runs os.Remove(.json) — finds nothing — then writeRecord
 	//     completes the rename, leaving an orphan .json that rafiki ls picks
 	//     up on the next daemon restart via loadOrphans.
 	//
@@ -1991,7 +2000,7 @@ func (c *Controller) Forget(childID string) error {
 	// drop entirely. loadChildren inserts every daemon's children into this
 	// daemon's local store as exited, including ones genuinely alive on
 	// another daemon right now; recoverOne's placeholder StatusExited write
-	// (before its async resume goroutine even runs) means a Forget landing in
+	// (before its async resume goroutine even runs) means a Close landing in
 	// that window read this daemon's own local snapshot and, unguarded, would
 	// Drop — a full, terminal delete, worse than the reset-to-pending
 	// recoverOne's own resume path can cause — another daemon's live child's
@@ -2019,7 +2028,7 @@ func (c *Controller) Forget(childID string) error {
 }
 
 // deleteLogDump removes the per-child log dump directory at ~/.pi/run/logs/<childID>.
-// Forget calls this so 'rafiki forget' fully removes the child's footprint rather
+// Close calls this so finalizing a child fully removes its footprint rather
 // than leaving orphan dumps to accumulate forever.  Missing directory is not
 // an error (no dump was written, e.g. for a child that crashed pre-Idle).
 func (c *Controller) deleteLogDump(childID string) error {
@@ -2034,7 +2043,7 @@ func (c *Controller) deleteLogDump(childID string) error {
 }
 
 // deleteSpillDir removes an agent-kind child's clipped-tool-output spill
-// directory (see buildAgentArgv/agentSpillDir). Forget/ForgetAllExited call
+// directory (see buildAgentArgv/agentSpillDir). Close/CloseAllExited call
 // this for "fundi" kind children so 'rafiki forget' fully removes the child's
 // footprint, mirroring deleteLogDump. Missing directory is not an error (the
 // child may have exited before writing any spilled output).
@@ -2046,7 +2055,7 @@ func (c *Controller) deleteSpillDir(childID string) error {
 	return nil
 }
 
-func (c *Controller) ForgetAllExited(olderThanMs int64) (int, error) {
+func (c *Controller) CloseAllExited(olderThanMs int64) (int, error) {
 	snaps := c.st.FindByStatus(protocol.StatusExited)
 	now := time.Now().UnixMilli()
 	count := 0
@@ -3154,7 +3163,7 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 // agentSpillDir returns the deterministic spill directory for an agent-kind
 // child's clipped tool output: <stateDir>/spill/<childID>. Shared by
 // buildAgentArgv (which pins the child's --spill-dir here, overriding Task
-// 14's own os.TempDir()-based default) and Forget/ForgetAllExited (which
+// 14's own os.TempDir()-based default) and Close/CloseAllExited (which
 // remove it), so the two can never diverge on the path.
 func agentSpillDir(stateDir, childID string) string {
 	return filepath.Join(stateDir, "spill", childID)

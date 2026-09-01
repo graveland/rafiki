@@ -238,6 +238,10 @@ func (m connectModels) ListModels(ctx context.Context, provider, kind string) ([
 	return m.c.ListModelRows(ctx, provider, kind)
 }
 
+func (l connectLifecycle) Close(_ context.Context, childID string) error {
+	return l.c.Close(childID)
+}
+
 // spawnOwner maps the proxy face's authenticated identity onto the daemon's.
 // Two types for one concept, because pkg/server predates pkg/users and the
 // face's Identity is a pointer whose nil means "no user" — the case every

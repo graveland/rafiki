@@ -47,6 +47,8 @@ const (
 	ControlSpawnProcedure = "/rafiki.v1.Control/Spawn"
 	// ControlKillProcedure is the fully-qualified name of the Control's Kill RPC.
 	ControlKillProcedure = "/rafiki.v1.Control/Kill"
+	// ControlCloseProcedure is the fully-qualified name of the Control's Close RPC.
+	ControlCloseProcedure = "/rafiki.v1.Control/Close"
 	// ControlListTasksProcedure is the fully-qualified name of the Control's ListTasks RPC.
 	ControlListTasksProcedure = "/rafiki.v1.Control/ListTasks"
 	// ControlListModelsProcedure is the fully-qualified name of the Control's ListModels RPC.
@@ -62,6 +64,7 @@ type ControlClient interface {
 	GetChild(context.Context, *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error)
 	Spawn(context.Context, *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error)
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
+	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 }
@@ -119,6 +122,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("Kill")),
 			connect.WithClientOptions(opts...),
 		),
+		close: connect.NewClient[v1.CloseRequest, v1.CloseResponse](
+			httpClient,
+			baseURL+ControlCloseProcedure,
+			connect.WithSchema(controlMethods.ByName("Close")),
+			connect.WithClientOptions(opts...),
+		),
 		listTasks: connect.NewClient[v1.ListTasksRequest, v1.ListTasksResponse](
 			httpClient,
 			baseURL+ControlListTasksProcedure,
@@ -143,6 +152,7 @@ type controlClient struct {
 	getChild     *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
 	spawn        *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
 	kill         *connect.Client[v1.KillRequest, v1.KillResponse]
+	close        *connect.Client[v1.CloseRequest, v1.CloseResponse]
 	listTasks    *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
 	listModels   *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
 }
@@ -182,6 +192,11 @@ func (c *controlClient) Kill(ctx context.Context, req *connect.Request[v1.KillRe
 	return c.kill.CallUnary(ctx, req)
 }
 
+// Close calls rafiki.v1.Control.Close.
+func (c *controlClient) Close(ctx context.Context, req *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error) {
+	return c.close.CallUnary(ctx, req)
+}
+
 // ListTasks calls rafiki.v1.Control.ListTasks.
 func (c *controlClient) ListTasks(ctx context.Context, req *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error) {
 	return c.listTasks.CallUnary(ctx, req)
@@ -201,6 +216,7 @@ type ControlHandler interface {
 	GetChild(context.Context, *connect.Request[v1.GetChildRequest]) (*connect.Response[v1.GetChildResponse], error)
 	Spawn(context.Context, *connect.Request[v1.SpawnRequest]) (*connect.Response[v1.SpawnResponse], error)
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
+	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 }
@@ -254,6 +270,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("Kill")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlCloseHandler := connect.NewUnaryHandler(
+		ControlCloseProcedure,
+		svc.Close,
+		connect.WithSchema(controlMethods.ByName("Close")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlListTasksHandler := connect.NewUnaryHandler(
 		ControlListTasksProcedure,
 		svc.ListTasks,
@@ -282,6 +304,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlSpawnHandler.ServeHTTP(w, r)
 		case ControlKillProcedure:
 			controlKillHandler.ServeHTTP(w, r)
+		case ControlCloseProcedure:
+			controlCloseHandler.ServeHTTP(w, r)
 		case ControlListTasksProcedure:
 			controlListTasksHandler.ServeHTTP(w, r)
 		case ControlListModelsProcedure:
@@ -321,6 +345,10 @@ func (UnimplementedControlHandler) Spawn(context.Context, *connect.Request[v1.Sp
 
 func (UnimplementedControlHandler) Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Kill is not implemented"))
+}
+
+func (UnimplementedControlHandler) Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Close is not implemented"))
 }
 
 func (UnimplementedControlHandler) ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error) {

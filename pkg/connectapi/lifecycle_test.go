@@ -21,6 +21,8 @@ type fakeLifecycle struct {
 	killedID   string
 	gotShutdow int64
 	gotKill    int64
+	closedID   string
+	closeErr   error
 }
 
 func (f *fakeLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (string, error) {
@@ -39,6 +41,11 @@ func (f *fakeLifecycle) Kill(_ context.Context, childID string, shutdownMs, kill
 		return connectapi.KillOutcome{}, f.killErr
 	}
 	return f.killOut, nil
+}
+
+func (f *fakeLifecycle) Close(_ context.Context, childID string) error {
+	f.closedID = childID
+	return f.closeErr
 }
 
 func TestSpawnPassesFieldsThrough(t *testing.T) {
