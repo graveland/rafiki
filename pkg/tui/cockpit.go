@@ -1275,8 +1275,20 @@ func (c *Cockpit) shutdown() {
 // would overlap the transcript by exactly the rows the box gained.
 //
 // The three fixed rows are the divider, the status line and the footer.
+// taskBoxLines is the focused agent's box, or nil. Computed in one place so
+// bodyHeight and View cannot disagree about how tall it is -- a fixed
+// subtraction overlaps the transcript by exactly the rows the box gains, and
+// stays invisible until someone hits the case.
+func (c *Cockpit) taskBoxLines() []string {
+	f := c.focused()
+	if f == "" {
+		return nil
+	}
+	return renderTaskBox(c.tasks[f], c.convWidth())
+}
+
 func (c *Cockpit) bodyHeight() int {
-	h := c.height - c.ta.Height() - 3
+	h := c.height - c.ta.Height() - 3 - len(c.taskBoxLines())
 	if h < 1 {
 		return 1
 	}
@@ -1564,8 +1576,14 @@ func (c *Cockpit) View() tea.View {
 	}
 
 	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight,
-		c.focus == focusRail) +
-		"\n" + styleDivider + "\n" + c.ta.View() + "\n" +
+		c.focus == focusRail)
+	// The task box sits between the transcript and the input, and bodyHeight
+	// already subtracted its height -- the two must move together, which is
+	// why both go through taskBoxLines.
+	if box := c.taskBoxLines(); len(box) > 0 {
+		out += "\n" + styleDivider + "\n" + strings.Join(box, "\n")
+	}
+	out += "\n" + styleDivider + "\n" + c.ta.View() + "\n" +
 		styleMeta.Render(statusLine) + "\n" + styleMeta.Render(footer)
 
 	v := tea.NewView(out)
