@@ -531,6 +531,10 @@ type ChildSummary struct {
 	// catalog, a model the catalog hasn't seen, or a cold/stale cache.
 	ContextWindow       int `json:"contextWindow,omitempty"`
 	MaxCompletionTokens int `json:"maxCompletionTokens,omitempty"`
+	// CostUSD is total spend, or nil when it could not be determined. Pointer
+	// because 0 means "spent nothing" and nil means "not known" -- with no
+	// database configured there is no rollup to read.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
 }
 
 // ListResponseData is the data payload for ctrl_list responses.
