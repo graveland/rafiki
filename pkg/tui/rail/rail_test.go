@@ -165,3 +165,77 @@ func TestReSeedPreservesWatermarkAndBadge(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// costTurnEnd is a turn_end carrying a cost.
+func costTurnEnd(childID string, ordinal int32, cost float64) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Ordinal: &ordinal,
+		Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{CostUsd: &cost}},
+	}
+}
+
+// TurnEnd carries the cost of ONE turn (Emitter.AgentEnd resets its usage), so
+// costs are summed.
+func TestRailSumsTurnCost(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(costTurnEnd("c1", 0, 0.25))
+	r.Apply(costTurnEnd("c1", 1, 0.75))
+
+	n, ok := r.Get("c1")
+	if !ok {
+		t.Fatal("c1 missing")
+	}
+	if n.Cost != 1.0 {
+		t.Errorf("Cost = %v, want 1.0", n.Cost)
+	}
+}
+
+// The rail and focus subscriptions overlap on the durable tier, so the same
+// turn_end arrives twice. Summing without a watermark doubles the bill.
+func TestRailDoesNotDoubleCountADuplicateTurnEnd(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(costTurnEnd("c1", 7, 0.50))
+	r.Apply(costTurnEnd("c1", 7, 0.50))
+
+	n, _ := r.Get("c1")
+	if n.Cost != 0.50 {
+		t.Errorf("Cost = %v, want 0.50: a duplicate ordinal must not be counted twice", n.Cost)
+	}
+}
+
+// A focused agent's headline number includes what its subagents spent.
+func TestSubtreeCostSumsDescendants(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(spawned("c2", "c1", "worker", 0))
+	r.Apply(spawned("c3", "c2", "deep", 0))
+	r.Apply(costTurnEnd("c1", 0, 1.0))
+	r.Apply(costTurnEnd("c2", 0, 2.0))
+	r.Apply(costTurnEnd("c3", 0, 4.0))
+
+	if got := r.SubtreeCost("c1"); got != 7.0 {
+		t.Errorf("SubtreeCost(c1) = %v, want 7.0", got)
+	}
+	if got := r.SubtreeCost("c2"); got != 6.0 {
+		t.Errorf("SubtreeCost(c2) = %v, want 6.0", got)
+	}
+	if got := r.SubtreeCost("c3"); got != 4.0 {
+		t.Errorf("SubtreeCost(c3) = %v, want 4.0", got)
+	}
+}
+
+// A seed from ListChildren must not be undone by a later stream event, and
+// must not be added to twice.
+func TestSetCostSeedsWithoutDoubleCounting(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.SetCost("c1", 5.0)
+	r.SetCost("c1", 5.0)
+	n, _ := r.Get("c1")
+	if n.Cost != 5.0 {
+		t.Errorf("Cost = %v, want 5.0: SetCost assigns, it does not add", n.Cost)
+	}
+}
