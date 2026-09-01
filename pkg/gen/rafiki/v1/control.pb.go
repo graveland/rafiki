@@ -1435,6 +1435,251 @@ func (x *ListTasksResponse) GetTasks() []*TaskRow {
 	return nil
 }
 
+// ModelRow is one model the daemon can run, plus whatever its catalog knows
+// about it. Every catalog field is optional because the daemon has NO catalog
+// entry for a locally-served model (ollama, LM Studio, a custom provider), and
+// "not reported" must stay distinguishable from a real zero — the same rule
+// every Usage field follows. Collapsing any of them turns "never heard of this
+// model" into "free, with a zero-token context window", which sorts every
+// local model to the top of a cheapest-first list.
+//
+// Prices are USD PER TOKEN, exactly as OpenRouter reports them. A renderer
+// multiplies by a million itself.
+type ModelRow struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Id                  string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"` // "provider/model", exactly as SpawnRequest.model
+	Provider            string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	Model               string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	Name                string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	Source              string                 `protobuf:"bytes,5,opt,name=source,proto3" json:"source,omitempty"` // user-config|builtin|alias|openrouter|local
+	ContextWindow       *int32                 `protobuf:"varint,6,opt,name=context_window,json=contextWindow,proto3,oneof" json:"context_window,omitempty"`
+	MaxCompletionTokens *int32                 `protobuf:"varint,7,opt,name=max_completion_tokens,json=maxCompletionTokens,proto3,oneof" json:"max_completion_tokens,omitempty"`
+	PromptUsd           *float64               `protobuf:"fixed64,8,opt,name=prompt_usd,json=promptUsd,proto3,oneof" json:"prompt_usd,omitempty"`
+	CompletionUsd       *float64               `protobuf:"fixed64,9,opt,name=completion_usd,json=completionUsd,proto3,oneof" json:"completion_usd,omitempty"`
+	CacheReadUsd        *float64               `protobuf:"fixed64,10,opt,name=cache_read_usd,json=cacheReadUsd,proto3,oneof" json:"cache_read_usd,omitempty"`
+	CacheWriteUsd       *float64               `protobuf:"fixed64,11,opt,name=cache_write_usd,json=cacheWriteUsd,proto3,oneof" json:"cache_write_usd,omitempty"`
+	// "text", "image", "file". EMPTY means the daemon has no catalog entry for
+	// this id, NEVER "text only" — a text-only model reports ["text"]. A client
+	// filtering on vision must surface unknowns rather than hide them, or it
+	// silently hides every locally-served model.
+	InputModalities []string `protobuf:"bytes,12,rep,name=input_modalities,json=inputModalities,proto3" json:"input_modalities,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ModelRow) Reset() {
+	*x = ModelRow{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModelRow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModelRow) ProtoMessage() {}
+
+func (x *ModelRow) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModelRow.ProtoReflect.Descriptor instead.
+func (*ModelRow) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *ModelRow) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ModelRow) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *ModelRow) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *ModelRow) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ModelRow) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *ModelRow) GetContextWindow() int32 {
+	if x != nil && x.ContextWindow != nil {
+		return *x.ContextWindow
+	}
+	return 0
+}
+
+func (x *ModelRow) GetMaxCompletionTokens() int32 {
+	if x != nil && x.MaxCompletionTokens != nil {
+		return *x.MaxCompletionTokens
+	}
+	return 0
+}
+
+func (x *ModelRow) GetPromptUsd() float64 {
+	if x != nil && x.PromptUsd != nil {
+		return *x.PromptUsd
+	}
+	return 0
+}
+
+func (x *ModelRow) GetCompletionUsd() float64 {
+	if x != nil && x.CompletionUsd != nil {
+		return *x.CompletionUsd
+	}
+	return 0
+}
+
+func (x *ModelRow) GetCacheReadUsd() float64 {
+	if x != nil && x.CacheReadUsd != nil {
+		return *x.CacheReadUsd
+	}
+	return 0
+}
+
+func (x *ModelRow) GetCacheWriteUsd() float64 {
+	if x != nil && x.CacheWriteUsd != nil {
+		return *x.CacheWriteUsd
+	}
+	return 0
+}
+
+func (x *ModelRow) GetInputModalities() []string {
+	if x != nil {
+		return x.InputModalities
+	}
+	return nil
+}
+
+type ListModelsRequest struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Provider string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"` // empty = every provider
+	// kind scopes which sources can answer: a "claude" child resolves only
+	// Anthropic ids, so offering it an OpenRouter id produces a child that
+	// spawns, attaches and never answers. Empty means the fundi default.
+	Kind          string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListModelsRequest) Reset() {
+	*x = ListModelsRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListModelsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListModelsRequest) ProtoMessage() {}
+
+func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListModelsRequest.ProtoReflect.Descriptor instead.
+func (*ListModelsRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ListModelsRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *ListModelsRequest) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+type ListModelsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Models        []*ModelRow            `protobuf:"bytes,1,rep,name=models,proto3" json:"models,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListModelsResponse) Reset() {
+	*x = ListModelsResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListModelsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListModelsResponse) ProtoMessage() {}
+
+func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListModelsResponse.ProtoReflect.Descriptor instead.
+func (*ListModelsResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ListModelsResponse) GetModels() []*ModelRow {
+	if x != nil {
+		return x.Models
+	}
+	return nil
+}
+
 var File_rafiki_v1_control_proto protoreflect.FileDescriptor
 
 const file_rafiki_v1_control_proto_rawDesc = "" +
@@ -1555,7 +1800,33 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12'\n" +
 	"\x0finclude_dropped\x18\x02 \x01(\bR\x0eincludeDropped\"=\n" +
 	"\x11ListTasksResponse\x12(\n" +
-	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks*S\n" +
+	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\xa6\x04\n" +
+	"\bModelRow\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x14\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x16\n" +
+	"\x06source\x18\x05 \x01(\tR\x06source\x12*\n" +
+	"\x0econtext_window\x18\x06 \x01(\x05H\x00R\rcontextWindow\x88\x01\x01\x127\n" +
+	"\x15max_completion_tokens\x18\a \x01(\x05H\x01R\x13maxCompletionTokens\x88\x01\x01\x12\"\n" +
+	"\n" +
+	"prompt_usd\x18\b \x01(\x01H\x02R\tpromptUsd\x88\x01\x01\x12*\n" +
+	"\x0ecompletion_usd\x18\t \x01(\x01H\x03R\rcompletionUsd\x88\x01\x01\x12)\n" +
+	"\x0ecache_read_usd\x18\n" +
+	" \x01(\x01H\x04R\fcacheReadUsd\x88\x01\x01\x12+\n" +
+	"\x0fcache_write_usd\x18\v \x01(\x01H\x05R\rcacheWriteUsd\x88\x01\x01\x12)\n" +
+	"\x10input_modalities\x18\f \x03(\tR\x0finputModalitiesB\x11\n" +
+	"\x0f_context_windowB\x18\n" +
+	"\x16_max_completion_tokensB\r\n" +
+	"\v_prompt_usdB\x11\n" +
+	"\x0f_completion_usdB\x11\n" +
+	"\x0f_cache_read_usdB\x12\n" +
+	"\x10_cache_write_usd\"C\n" +
+	"\x11ListModelsRequest\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +
+	"\x12ListModelsResponse\x12+\n" +
+	"\x06models\x18\x01 \x03(\v2\x13.rafiki.v1.ModelRowR\x06models*S\n" +
 	"\tEventTier\x12\x1a\n" +
 	"\x16EVENT_TIER_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12EVENT_TIER_DURABLE\x10\x01\x12\x12\n" +
@@ -1564,7 +1835,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x15SEND_MODE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10SEND_MODE_PROMPT\x10\x01\x12\x13\n" +
 	"\x0fSEND_MODE_STEER\x10\x02\x12\x13\n" +
-	"\x0fSEND_MODE_ABORT\x10\x032\xa4\x04\n" +
+	"\x0fSEND_MODE_ABORT\x10\x032\xef\x04\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -1574,7 +1845,9 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bGetChild\x12\x1a.rafiki.v1.GetChildRequest\x1a\x1b.rafiki.v1.GetChildResponse\x12:\n" +
 	"\x05Spawn\x12\x17.rafiki.v1.SpawnRequest\x1a\x18.rafiki.v1.SpawnResponse\x127\n" +
 	"\x04Kill\x12\x16.rafiki.v1.KillRequest\x1a\x17.rafiki.v1.KillResponse\x12F\n" +
-	"\tListTasks\x12\x1b.rafiki.v1.ListTasksRequest\x1a\x1c.rafiki.v1.ListTasksResponseB4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
+	"\tListTasks\x12\x1b.rafiki.v1.ListTasksRequest\x1a\x1c.rafiki.v1.ListTasksResponse\x12I\n" +
+	"\n" +
+	"ListModels\x12\x1c.rafiki.v1.ListModelsRequest\x1a\x1d.rafiki.v1.ListModelsResponseB4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
 
 var (
 	file_rafiki_v1_control_proto_rawDescOnce sync.Once
@@ -1589,7 +1862,7 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_rafiki_v1_control_proto_goTypes = []any{
 	(EventTier)(0),               // 0: rafiki.v1.EventTier
 	(SendMode)(0),                // 1: rafiki.v1.SendMode
@@ -1612,46 +1885,52 @@ var file_rafiki_v1_control_proto_goTypes = []any{
 	(*TaskRow)(nil),              // 18: rafiki.v1.TaskRow
 	(*ListTasksRequest)(nil),     // 19: rafiki.v1.ListTasksRequest
 	(*ListTasksResponse)(nil),    // 20: rafiki.v1.ListTasksResponse
-	nil,                          // 21: rafiki.v1.EventCursor.OrdinalsEntry
-	nil,                          // 22: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                          // 23: rafiki.v1.SpawnRequest.LabelsEntry
-	(*Event)(nil),                // 24: rafiki.v1.Event
-	(*ContentBlock)(nil),         // 25: rafiki.v1.ContentBlock
+	(*ModelRow)(nil),             // 21: rafiki.v1.ModelRow
+	(*ListModelsRequest)(nil),    // 22: rafiki.v1.ListModelsRequest
+	(*ListModelsResponse)(nil),   // 23: rafiki.v1.ListModelsResponse
+	nil,                          // 24: rafiki.v1.EventCursor.OrdinalsEntry
+	nil,                          // 25: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                          // 26: rafiki.v1.SpawnRequest.LabelsEntry
+	(*Event)(nil),                // 27: rafiki.v1.Event
+	(*ContentBlock)(nil),         // 28: rafiki.v1.ContentBlock
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	24, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	21, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	27, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	24, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
 	4,  // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
 	0,  // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
 	5,  // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
 	1,  // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	25, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	22, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	28, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	25, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
 	9,  // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
 	9,  // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	23, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	26, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
 	18, // 11: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
-	2,  // 12: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	6,  // 13: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	7,  // 14: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	10, // 15: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	12, // 16: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	14, // 17: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	16, // 18: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	19, // 19: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	3,  // 20: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	24, // 21: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	8,  // 22: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	11, // 23: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	13, // 24: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	15, // 25: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	17, // 26: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	20, // 27: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	20, // [20:28] is the sub-list for method output_type
-	12, // [12:20] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	21, // 12: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
+	2,  // 13: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	6,  // 14: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	7,  // 15: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	10, // 16: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	12, // 17: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	14, // 18: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	16, // 19: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	19, // 20: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	22, // 21: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	3,  // 22: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	27, // 23: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	8,  // 24: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	11, // 25: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	13, // 26: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	15, // 27: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	17, // 28: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	20, // 29: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	23, // 30: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	22, // [22:31] is the sub-list for method output_type
+	13, // [13:22] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -1670,13 +1949,14 @@ func file_rafiki_v1_control_proto_init() {
 	file_rafiki_v1_control_proto_msgTypes[7].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[12].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[15].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[19].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   22,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

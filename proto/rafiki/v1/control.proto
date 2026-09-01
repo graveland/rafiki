@@ -213,6 +213,49 @@ message ListTasksResponse {
   repeated TaskRow tasks = 1;
 }
 
+// ModelRow is one model the daemon can run, plus whatever its catalog knows
+// about it. Every catalog field is optional because the daemon has NO catalog
+// entry for a locally-served model (ollama, LM Studio, a custom provider), and
+// "not reported" must stay distinguishable from a real zero — the same rule
+// every Usage field follows. Collapsing any of them turns "never heard of this
+// model" into "free, with a zero-token context window", which sorts every
+// local model to the top of a cheapest-first list.
+//
+// Prices are USD PER TOKEN, exactly as OpenRouter reports them. A renderer
+// multiplies by a million itself.
+message ModelRow {
+  string id       = 1;  // "provider/model", exactly as SpawnRequest.model
+  string provider = 2;
+  string model    = 3;
+  string name     = 4;
+  string source   = 5;  // user-config|builtin|alias|openrouter|local
+
+  optional int32  context_window        = 6;
+  optional int32  max_completion_tokens = 7;
+  optional double prompt_usd            = 8;
+  optional double completion_usd        = 9;
+  optional double cache_read_usd        = 10;
+  optional double cache_write_usd       = 11;
+
+  // "text", "image", "file". EMPTY means the daemon has no catalog entry for
+  // this id, NEVER "text only" — a text-only model reports ["text"]. A client
+  // filtering on vision must surface unknowns rather than hide them, or it
+  // silently hides every locally-served model.
+  repeated string input_modalities = 12;
+}
+
+message ListModelsRequest {
+  string provider = 1;  // empty = every provider
+  // kind scopes which sources can answer: a "claude" child resolves only
+  // Anthropic ids, so offering it an OpenRouter id produces a child that
+  // spawns, attaches and never answers. Empty means the fundi default.
+  string kind = 2;
+}
+
+message ListModelsResponse {
+  repeated ModelRow models = 1;
+}
+
 service Control {
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
@@ -222,4 +265,5 @@ service Control {
   rpc Spawn(SpawnRequest) returns (SpawnResponse);
   rpc Kill(KillRequest) returns (KillResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
 }
