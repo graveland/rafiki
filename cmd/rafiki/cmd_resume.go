@@ -31,7 +31,7 @@ If id|name is omitted, uses the active marker.`,
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
+		return completeChildrenByState(cmd, toComplete, func(ch completionChild) bool {
 			return ch.Status == string(protocol.StatusExited)
 		}), cobra.ShellCompDirectiveNoFileComp
 	}

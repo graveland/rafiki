@@ -15,7 +15,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/paths"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // remoteDialURL returns RAFIKI_URL when it names a remote control plane
@@ -91,10 +90,8 @@ func resolveTarget(ctx context.Context, c *client.Client, input string) (string,
 }
 
 // completeChildren returns child IDs and names that start with toComplete.
-// Used by Cobra dynamic-completion handlers. Swallows all errors so that
-// tab completion gracefully no-ops when the daemon is down.
 func completeChildren(cmd *cobra.Command, toComplete string) []string {
-	return completeChildrenByState(cmd, toComplete, func(_ protocol.ChildSummary) bool {
+	return completeChildrenByState(cmd, toComplete, func(completionChild) bool {
 		return true
 	})
 }
@@ -102,20 +99,9 @@ func completeChildren(cmd *cobra.Command, toComplete string) []string {
 // completeChildrenByState is like completeChildren but filters candidates by
 // the given predicate. Use it to restrict completions to a relevant subset
 // (e.g. only exited children for `close`, only live ones for `kill`).
-func completeChildrenByState(cmd *cobra.Command, toComplete string, keep func(protocol.ChildSummary) bool) []string {
-	c, err := client.Dial(socketFromCmd(cmd))
-	if err != nil {
-		return nil
-	}
-	defer c.Close()
-
-	children, err := c.List(cmdCtx(cmd), protocol.ListFilter{})
-	if err != nil {
-		return nil
-	}
-
+func completeChildrenByState(cmd *cobra.Command, toComplete string, keep func(completionChild) bool) []string {
 	var out []string
-	for _, ch := range children {
+	for _, ch := range completionChildren(cmd) {
 		if !keep(ch) {
 			continue
 		}
@@ -127,14 +113,6 @@ func completeChildrenByState(cmd *cobra.Command, toComplete string, keep func(pr
 		}
 	}
 	return out
-}
-
-// socketFromCmd extracts the --socket flag value from the command (or its
-// ancestors). Returns "" if the flag is not set, which Dial treats as the
-// default path.
-func socketFromCmd(cmd *cobra.Command) string {
-	s, _ := cmd.Flags().GetString("socket")
-	return s
 }
 
 // attachAndDecide runs the in-process TUI and, after it exits normally, prompts
@@ -256,18 +234,9 @@ func isStdinTTY() bool {
 // completeLabelPairs returns "k=v" completions from all currently-known
 // children, skipping rafiki/ auto-labels.  Used for --label flag completion.
 func completeLabelPairs(cmd *cobra.Command, toComplete string) []string {
-	c, err := client.Dial(socketFromCmd(cmd))
-	if err != nil {
-		return nil
-	}
-	defer c.Close()
-	children, err := c.List(cmdCtx(cmd), protocol.ListFilter{})
-	if err != nil {
-		return nil
-	}
 	seen := make(map[string]struct{})
 	var out []string
-	for _, ch := range children {
+	for _, ch := range completionChildren(cmd) {
 		for k, v := range ch.Labels {
 			if strings.HasPrefix(k, "rafiki/") {
 				continue
@@ -276,10 +245,10 @@ func completeLabelPairs(cmd *cobra.Command, toComplete string) []string {
 			if _, ok := seen[pair]; ok {
 				continue
 			}
+			seen[pair] = struct{}{}
 			if strings.HasPrefix(pair, toComplete) {
 				out = append(out, pair)
 			}
-			seen[pair] = struct{}{}
 		}
 	}
 	return out
@@ -288,18 +257,9 @@ func completeLabelPairs(cmd *cobra.Command, toComplete string) []string {
 // completeLabelKeys returns label key completions from all currently-known
 // children, skipping rafiki/ auto-labels.  Used for --has-label flag completion.
 func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
-	c, err := client.Dial(socketFromCmd(cmd))
-	if err != nil {
-		return nil
-	}
-	defer c.Close()
-	children, err := c.List(cmdCtx(cmd), protocol.ListFilter{})
-	if err != nil {
-		return nil
-	}
 	seen := make(map[string]struct{})
 	var out []string
-	for _, ch := range children {
+	for _, ch := range completionChildren(cmd) {
 		for k := range ch.Labels {
 			if strings.HasPrefix(k, "rafiki/") {
 				continue
@@ -307,10 +267,10 @@ func completeLabelKeys(cmd *cobra.Command, toComplete string) []string {
 			if _, ok := seen[k]; ok {
 				continue
 			}
+			seen[k] = struct{}{}
 			if strings.HasPrefix(k, toComplete) {
 				out = append(out, k)
 			}
-			seen[k] = struct{}{}
 		}
 	}
 	return out

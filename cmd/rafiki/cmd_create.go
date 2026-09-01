@@ -352,6 +352,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ctrl_spawn: %s", client.FormatError(resp))
 	}
 
+	// The child set changed, so whatever a TAB answered a moment ago is stale.
+	dropChildCompletionCache()
+
 	var data protocol.SpawnResponseData
 	_ = json.Unmarshal(resp.Data, &data)
 	if err := setActive(data.ChildID); err != nil {

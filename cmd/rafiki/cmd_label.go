@@ -80,6 +80,9 @@ func runLabel(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ctrl_set_labels: %s", client.FormatError(resp))
 	}
 
+	// Labels feed label completion; what the last TAB showed is now stale.
+	dropChildCompletionCache()
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	var data protocol.SetLabelsResponseData

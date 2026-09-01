@@ -45,7 +45,7 @@ With --all-exited, closes every exited child (optionally filtered by
 	cmd.Flags().Bool("all-exited", false, "Close all exited children")
 	cmd.Flags().Duration("older-than", 0, "Only close exited children older than this")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return completeChildrenByState(cmd, toComplete, func(ch protocol.ChildSummary) bool {
+		return completeChildrenByState(cmd, toComplete, func(ch completionChild) bool {
 			return ch.Status == string(protocol.StatusExited)
 		}), cobra.ShellCompDirectiveNoFileComp
 	}
@@ -74,6 +74,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 		if !resp.Success {
 			return fmt.Errorf("ctrl_forget_all_exited: %s", client.FormatError(resp))
 		}
+		dropChildCompletionCache()
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(json.RawMessage(resp.Data))
@@ -103,6 +104,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("closed %s\n", childID)
 	}
+	dropChildCompletionCache()
 	if failures > 0 {
 		return fmt.Errorf("%d target(s) failed", failures)
 	}
