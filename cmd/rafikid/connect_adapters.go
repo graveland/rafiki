@@ -49,13 +49,26 @@ func (c *Controller) nativeEventSource() *nativeEventSource {
 // wrong by hand.
 func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 	snaps := c.List(protocol.ListFilter{})
-	out := make([]protocol.ChildSummary, 0, len(snaps))
+	kept := make([]childstore.Snapshot, 0, len(snaps))
 	for _, s := range snaps {
 		if len(statuses) > 0 && !containsString(statuses, string(s.Status)) {
 			continue
 		}
+		kept = append(kept, s)
+	}
+	// ONE rollup for the whole list. Pricing each child with its own
+	// SubtreeCost call meant N serial round trips, each with its own timeout,
+	// on the cockpit's seed path -- and the seed is re-run whenever an unknown
+	// child produces traffic, which is exactly the busy-fleet case where N is
+	// large.
+	costs := c.costsFor(kept)
+
+	out := make([]protocol.ChildSummary, 0, len(kept))
+	for _, s := range kept {
 		sum := control.SnapshotToSummary(s, c.ContextWindow)
-		c.attachCost(s, &sum)
+		if cost, ok := costs[s.ChildID]; ok {
+			sum.CostUSD = &cost
+		}
 		out = append(out, sum)
 	}
 	return out
@@ -68,45 +81,76 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 		return protocol.ChildSummary{}, false
 	}
 	sum := control.SnapshotToSummary(snap, c.ContextWindow)
-	c.attachCost(snap, &sum)
+	if cost, ok := c.costsFor([]childstore.Snapshot{snap})[childID]; ok {
+		sum.CostUSD = &cost
+	}
 	return sum, true
 }
 
-// attachCost fills in a summary's CostUSD from the insights rollup.
-//
-// The child's SessionID is passed as BOTH correlation routes: a fundi child's
-// conversation is found by UUID and a proxy child's by external_ref, and the
-// summary does not say which kind this is. An id matching neither rolls up 0,
-// which the display hides.
-func (c *Controller) attachCost(snap childstore.Snapshot, sum *protocol.ChildSummary) {
-	if snap.SessionID == "" {
-		return
-	}
-	sum.CostUSD = c.costFor(snap.SessionID)
-}
+// costRollupTimeout bounds the whole batch, not one child. It is a display
+// number: a slow rollup must not hold up the list it decorates.
+const costRollupTimeout = 3 * time.Second
 
-// costFor is best-effort by design, exactly like the proxy's costFields and
-// Engine.priorConversationCost. A rollup that fails must leave the field nil
-// rather than reporting zero: nil is "not known" and zero is "spent nothing",
-// and reporting the second for the first understates a budget.
+// costsFor prices every child in one round trip, keyed by child id.
 //
-// c.coster is the same subtreeCoster the budget sweep uses (controller.go's
-// field comment explains why it is an interface); it is nil on a daemon with
-// no pool, which is exactly the "not known" case.
-func (c *Controller) costFor(convID string) *float64 {
-	if convID == "" || c.coster == nil {
+// The two correlation routes are NOT interchangeable and getting them the
+// wrong way round is silent. A conversation is found by UUID for a fundi child
+// (childstore.Snapshot.SessionID) and by external_ref for a proxy child, where
+// the daemon sets X-Rafiki-Session to the CHILD id. subtreeSelector is the
+// established mapping and says the same thing; handing SessionID to both
+// routes makes every proxy child match neither, roll up 0, and report a
+// non-nil zero -- which then overwrites a cost the rail had correctly
+// accumulated from turn_end.
+//
+// Absent from the map means NOT KNOWN (no cost source, or the rollup failed)
+// and leaves CostUSD nil. Present-and-zero means the query ran and found no
+// turns, which is a different fact and is allowed to be reported.
+func (c *Controller) costsFor(snaps []childstore.Snapshot) map[string]float64 {
+	if c.coster == nil || len(snaps) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	var sel insights.SubtreeSelector
+	for _, s := range snaps {
+		if s.SessionID != "" {
+			sel.ConversationIDs = append(sel.ConversationIDs, s.SessionID)
+		}
+		sel.ExternalRefs = append(sel.ExternalRefs, s.ChildID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
 	defer cancel()
-	total, err := c.coster.SubtreeCost(ctx, insights.SubtreeSelector{
-		ConversationIDs: []string{convID},
-		ExternalRefs:    []string{convID},
-	})
+	rows, err := c.coster.CostsByConversation(ctx, sel)
 	if err != nil {
 		return nil
 	}
-	return &total
+
+	byConv := make(map[string]insights.ConversationCost, len(rows))
+	byRef := make(map[string]insights.ConversationCost, len(rows))
+	for _, r := range rows {
+		byConv[r.ConversationID] = r
+		if r.ExternalRef != "" {
+			byRef[r.ExternalRef] = r
+		}
+	}
+
+	out := make(map[string]float64, len(snaps))
+	for _, s := range snaps {
+		total := 0.0
+		var counted string
+		if s.SessionID != "" {
+			if r, ok := byConv[s.SessionID]; ok {
+				total += r.Cost
+				counted = r.ConversationID
+			}
+		}
+		// Dedupe on the conversation row: a child reachable by BOTH routes
+		// resolves to one row and must be counted once.
+		if r, ok := byRef[s.ChildID]; ok && r.ConversationID != counted {
+			total += r.Cost
+		}
+		out[s.ChildID] = total
+	}
+	return out
 }
 
 // DescendantDepth satisfies eventlog.Lineage.

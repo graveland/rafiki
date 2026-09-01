@@ -5,6 +5,8 @@ package insights
 import (
 	"context"
 	"fmt"
+
+	"github.com/google/uuid"
 )
 
 // SubtreeSelector names the conversations belonging to one agent subtree.
@@ -116,4 +118,99 @@ func nonNilStrings(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// ConversationCost is one conversation's priced spend.
+type ConversationCost struct {
+	ConversationID string
+	ExternalRef    string
+	Cost           float64
+}
+
+// CostsByConversation prices the selected conversations INDIVIDUALLY, in one
+// round trip.
+//
+// SubtreeCost answers "what has this subtree spent" and collapses everything
+// into a single number, which is the right shape for a budget check and the
+// wrong one for a list: filling N children's costs with N calls to it is N
+// serial round trips, each with its own timeout, on the cockpit's seed path.
+//
+// Rows are returned rather than a map because a conversation is reachable by
+// two different keys and the caller has to decide how to combine them. A map
+// keyed by both would silently double a child whose id matches one row by
+// UUID and another by external_ref.
+func (i *Insights) CostsByConversation(ctx context.Context, sel SubtreeSelector) ([]ConversationCost, error) {
+	if sel.empty() {
+		return nil, nil
+	}
+
+	// Filter to well-formed UUIDs. $1::uuid[] rejects the whole ARRAY on one
+	// malformed element, so a single non-UUID session id — a pi child's, say —
+	// would fail every child's cost in the batch rather than just its own.
+	// That risk is created by batching: the per-child form could only ever
+	// poison one row.
+	rows, err := i.pool.Query(ctx,
+		`SELECT c.id::text, coalesce(c.external_ref,''), coalesce(t.model,''), `+tokenSums+` `+statsFrom+`
+		 WHERE c.id = ANY($1::uuid[]) OR c.external_ref = ANY($2::text[])
+		 GROUP BY c.id, c.external_ref, t.model`,
+		uuidsOnly(sel.ConversationIDs), nonNilStrings(sel.ExternalRefs))
+	if err != nil {
+		return nil, fmt.Errorf("costs by conversation: %w", err)
+	}
+
+	type row struct {
+		convID, extRef, model           string
+		in, out, cacheRead, cacheCreate int64
+	}
+	var collected []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.convID, &r.extRef, &r.model,
+			&r.in, &r.out, &r.cacheRead, &r.cacheCreate); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("costs by conversation: scan: %w", err)
+		}
+		collected = append(collected, r)
+	}
+	// Release the cursor BEFORE pricing, for the same reason SubtreeCostDetailed
+	// does: the pricer consults the model catalog, and holding an open cursor
+	// across that is how the existing cost() path deadlocked under load.
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("costs by conversation: rows: %w", err)
+	}
+	if i.pricer == nil {
+		return nil, nil
+	}
+
+	byConv := make(map[string]*ConversationCost, len(collected))
+	for _, r := range collected {
+		cc := byConv[r.convID]
+		if cc == nil {
+			cc = &ConversationCost{ConversationID: r.convID, ExternalRef: r.extRef}
+			byConv[r.convID] = cc
+		}
+		// An unpriced model contributes nothing rather than failing the batch:
+		// one model with no list price must not blank every other child's cost.
+		if p, ok := i.pricer(r.model); ok {
+			cc.Cost += p.CostOf(r.in, r.out, r.cacheRead, r.cacheCreate).Total
+		}
+	}
+	out := make([]ConversationCost, 0, len(byConv))
+	for _, cc := range byConv {
+		out = append(out, *cc)
+	}
+	return out, nil
+}
+
+// uuidsOnly drops anything that is not a well-formed UUID. See
+// CostsByConversation for why the whole array is at stake.
+func uuidsOnly(s []string) []string {
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if _, err := uuid.Parse(v); err == nil {
+			out = append(out, v)
+		}
+	}
+	return out
 }

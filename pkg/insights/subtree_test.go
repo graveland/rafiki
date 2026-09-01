@@ -88,3 +88,80 @@ func TestSubtreeCostReportsUnpricedModels(t *testing.T) {
 		t.Fatalf("the caller must learn which models could not be priced; got %v", unpriced)
 	}
 }
+
+// CostsByConversation is SubtreeCost's per-row form: same two correlation
+// routes, but each conversation priced separately so a LIST can be filled in
+// one round trip instead of one per child.
+func TestCostsByConversationPricesEachRouteSeparately(t *testing.T) {
+	pool := newTestPool(t)
+	ins := New(pool).WithPricer(func(model string) (routing.ModelPricing, bool) {
+		if model == "test/model" {
+			return routing.ModelPricing{PromptUSD: 1e-6, CompletionUSD: 2e-6}, true
+		}
+		return routing.ModelPricing{}, false
+	})
+
+	convA := insertConversation(t, pool, "server", "")
+	var convB string
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO conversations.conversation (persona, model, origin_entrypoint, driven_by, external_ref)
+		 VALUES ('team-platform', 'claude-fable-5', 'test', 'client', 'c_child2') RETURNING id::text`,
+	).Scan(&convB); err != nil {
+		t.Fatalf("insert external_ref conversation: %v", err)
+	}
+
+	insertTurn(t, pool, convA, seedTurn{model: "test/model", inTok: 1_000_000, outTok: 500_000})
+	insertTurn(t, pool, convB, seedTurn{model: "test/model", inTok: 2_000_000})
+
+	rows, err := ins.CostsByConversation(context.Background(), SubtreeSelector{
+		ConversationIDs: []string{convA},
+		ExternalRefs:    []string{"c_child2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(rows), rows)
+	}
+	byID := map[string]ConversationCost{}
+	for _, r := range rows {
+		byID[r.ConversationID] = r
+	}
+	// A is 1.0 input + 1.0 output; B is 2.0 input. SubtreeCost collapses these
+	// to 4.0; the point here is that they stay apart.
+	if got := byID[convA].Cost; math.Abs(got-2.0) > 1e-9 {
+		t.Errorf("convA = %f, want 2.0", got)
+	}
+	if got := byID[convB].Cost; math.Abs(got-2.0) > 1e-9 {
+		t.Errorf("convB = %f, want 2.0", got)
+	}
+	if got := byID[convB].ExternalRef; got != "c_child2" {
+		t.Errorf("convB external_ref = %q, want c_child2 -- the caller matches on it", got)
+	}
+}
+
+// $1::uuid[] rejects the whole ARRAY on one malformed element, so a single
+// non-UUID session id would fail every child's cost in the batch rather than
+// just its own. That risk is created by batching; the per-child form could
+// only ever poison one row.
+func TestCostsByConversationSurvivesANonUUIDSessionID(t *testing.T) {
+	pool := newTestPool(t)
+	ins := New(pool).WithPricer(func(string) (routing.ModelPricing, bool) {
+		return routing.ModelPricing{PromptUSD: 1e-6}, true
+	})
+
+	convA := insertConversation(t, pool, "server", "")
+	insertTurn(t, pool, convA, seedTurn{model: "test/model", inTok: 1_000_000})
+
+	rows, err := ins.CostsByConversation(context.Background(), SubtreeSelector{
+		// A pi session id is not a UUID. controller.go warns about handing one
+		// to a query expecting one; here it must simply not match.
+		ConversationIDs: []string{convA, "sess_not_a_uuid"},
+	})
+	if err != nil {
+		t.Fatalf("one malformed id must not fail the batch: %v", err)
+	}
+	if len(rows) != 1 || math.Abs(rows[0].Cost-1.0) > 1e-9 {
+		t.Fatalf("got %+v, want one row costing 1.0", rows)
+	}
+}
