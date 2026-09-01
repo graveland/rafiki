@@ -557,21 +557,44 @@ func TestHandleConnResponseNotCorruptedByConcurrentBroadcast(t *testing.T) {
 	}
 }
 
+// syncLogBuf is a bytes.Buffer guarded by a mutex. The default logger is
+// process-global: while the ticker goroutines below are still Delivering (they
+// stop only at cleanup), a Deliver that errors logs into this buffer from ITS
+// goroutine, and the test goroutine reads it from assertLogLevel. A bare
+// bytes.Buffer is a data race between those two, and -race caught exactly that
+// in TestBlockedWriteTimesOutDespiteConcurrentPeerDelivers.
+type syncLogBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // captureSlog temporarily replaces the default slog logger with one that
 // writes text-format records — including debug — to a buffer, and restores
 // the previous default when the test ends.
-func captureSlog(t *testing.T) *bytes.Buffer {
+func captureSlog(t *testing.T) *syncLogBuf {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &syncLogBuf{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
+	return buf
 }
 
 // assertLogLevel fails the test unless every captured record whose message
 // contains msgSubstr was logged at want.
-func assertLogLevel(t *testing.T, buf *bytes.Buffer, msgSubstr string, want slog.Level) {
+func assertLogLevel(t *testing.T, buf *syncLogBuf, msgSubstr string, want slog.Level) {
 	t.Helper()
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	found := false
