@@ -69,6 +69,7 @@ func newRootCmd() *cobra.Command {
 		newCompletionCmd(),
 		newClaudeCmd(),
 		newExecutorCmd(),
+		newDarajaCmd(),
 		newUserCmd(),
 	)
 
