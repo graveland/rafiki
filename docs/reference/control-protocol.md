@@ -972,6 +972,12 @@ Drop an exited child from the controller's in-memory store. Does not
 remove disk artifacts (logs or state record); the user manages those
 out-of-band.
 
+Naming: the CLI and the Connect plane call this operation `close`
+(`rafiki close`, with `forget` kept as a command alias; the Connect RPC is
+`Close`). The framed wire spelling below is FROZEN — `ctrl_forget` and
+`ctrl_forget_all_exited` are the wire names for what those surfaces call
+closing, and existing clients keep working unchanged.
+
 ```jsonc
 { "type": "ctrl_forget", "id": "12", "childId": "c_01HX..." }
 ```

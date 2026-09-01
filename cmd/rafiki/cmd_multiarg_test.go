@@ -10,10 +10,10 @@ import (
 
 // ─── Argument validation tests ───────────────────────────────────────────────
 
-// TestForgetCmd_MultiArg verifies that multiple positional args are accepted
+// TestCloseCmd_MultiArg verifies that multiple positional args are accepted
 // and that zero positional args are rejected (unless --all-exited is given).
-func TestForgetCmd_MultiArg_AcceptsMultiple(t *testing.T) {
-	cmd := newForgetCmd()
+func TestCloseCmd_MultiArg_AcceptsMultiple(t *testing.T) {
+	cmd := newCloseCmd()
 	// Replace RunE so we don't need a real daemon; just exercise cobra's Args.
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{"child-a", "child-b", "child-c"})
@@ -22,8 +22,8 @@ func TestForgetCmd_MultiArg_AcceptsMultiple(t *testing.T) {
 	}
 }
 
-func TestForgetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
-	cmd := newForgetCmd()
+func TestCloseCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
+	cmd := newCloseCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{}) // no args, no --all-exited
 	err := cmd.Execute()
@@ -35,8 +35,8 @@ func TestForgetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
 	}
 }
 
-func TestForgetCmd_AllExited_ZeroArgsOK(t *testing.T) {
-	cmd := newForgetCmd()
+func TestCloseCmd_AllExited_ZeroArgsOK(t *testing.T) {
+	cmd := newCloseCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{"--all-exited"})
 	if err := cmd.Execute(); err != nil {
@@ -91,7 +91,7 @@ func TestGetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
 // These tests exercise the filter predicates without needing a live daemon.
 // They verify the boolean logic used by completeChildrenByState callers.
 
-func TestCompletionPredicate_ForgetExitedOnly(t *testing.T) {
+func TestCompletionPredicate_CloseExitedOnly(t *testing.T) {
 	exited := func(ch protocol.ChildSummary) bool {
 		return ch.Status == string(protocol.StatusExited)
 	}
@@ -110,7 +110,7 @@ func TestCompletionPredicate_ForgetExitedOnly(t *testing.T) {
 		ch := protocol.ChildSummary{Status: tc.status}
 		got := exited(ch)
 		if got != tc.want {
-			t.Errorf("forget predicate(%q) = %v, want %v", tc.status, got, tc.want)
+			t.Errorf("close predicate(%q) = %v, want %v", tc.status, got, tc.want)
 		}
 	}
 }

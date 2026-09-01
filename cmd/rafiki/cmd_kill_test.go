@@ -4,24 +4,24 @@ import (
 	"testing"
 )
 
-func TestKillCmd_NoForgetFlag(t *testing.T) {
+func TestKillCmd_NoCloseFlag(t *testing.T) {
 	cmd := newKillCmd()
 
-	// --no-forget must be parseable and default to false.
-	noForget, err := cmd.Flags().GetBool("no-forget")
+	// --no-close must be parseable and default to false.
+	noClose, err := cmd.Flags().GetBool("no-close")
 	if err != nil {
-		t.Fatalf("--no-forget flag not registered: %v", err)
+		t.Fatalf("--no-close flag not registered: %v", err)
 	}
-	if noForget {
-		t.Error("--no-forget default should be false")
+	if noClose {
+		t.Error("--no-close default should be false")
 	}
 
 	// Setting the flag must be accepted.
-	if err := cmd.Flags().Set("no-forget", "true"); err != nil {
-		t.Fatalf("could not set --no-forget: %v", err)
+	if err := cmd.Flags().Set("no-close", "true"); err != nil {
+		t.Fatalf("could not set --no-close: %v", err)
 	}
-	noForget, _ = cmd.Flags().GetBool("no-forget")
-	if !noForget {
-		t.Error("--no-forget should be true after Set")
+	noClose, _ = cmd.Flags().GetBool("no-close")
+	if !noClose {
+		t.Error("--no-close should be true after Set")
 	}
 }
