@@ -255,6 +255,16 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 		// is not yet available; by the time SetCatalog returns the socket is not
 		// yet listening, so no concurrent read can observe the intermediate state.
 		c.insights = local.New(local.Options{Pool: c.pool, Pricer: cat.Pricing})
+		// The COSTER gets the same pricer, for the same reason. NewController
+		// built it as a bare insights.New(pool), and CostsByConversation
+		// short-circuits to NO rows while unpriced (pkg/insights/subtree.go) —
+		// so every child seeded a non-nil zero, the cockpit adopted it, and an
+		// attached session showed no cost for anything predating the client's
+		// own turn_end stream, even though every turn was captured. Priced here
+		// rather than in NewController because the catalog does not exist yet.
+		if c.pool != nil {
+			c.coster = insights.New(c.pool).WithPricer(cat.Pricing)
+		}
 	}
 }
 
@@ -310,7 +320,9 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 
 	// Wire the coster only when there is a database: without one every
 	// budgeted spawn fails closed (which is what checkBudget does when
-	// coster is nil), while unbudgeted ones are unaffected.
+	// coster is nil), while unbudgeted ones are unaffected. PRICER-LESS here
+	// on purpose — the catalog does not exist yet; SetCatalog rebuilds it
+	// with the catalog's Pricing so ListChildren can fill CostUSD.
 	if pool != nil {
 		c.coster = insights.New(pool)
 		c.children = childstoredb.New(pool)
