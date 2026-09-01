@@ -441,6 +441,15 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		first := c.stopRail == nil
 		c.rail.Seed(c.inSubject(msg.children))
+		// Seed each child's spend before any turn_end arrives: the rail resumes
+		// from the log head, so turns that predate this client are otherwise
+		// invisible to the cost readout. CostUsd nil (no rollup) seeds nothing;
+		// SetCost assigns rather than adds, so a re-seed cannot double the number.
+		for _, s := range c.inSubject(msg.children) {
+			if s.CostUsd != nil {
+				c.rail.SetCost(s.GetChildId(), s.GetCostUsd())
+			}
+		}
 		if first {
 			c.status = "connected"
 			c.stopRail = streams.StartRail(context.Background(), c.cfg, c.subject,

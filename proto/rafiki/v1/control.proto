@@ -120,6 +120,11 @@ message ChildSummary {
   // can seed an unread watermark without a history load per child. Optional
   // because 0 is a legal ordinal and "no events yet" must stay distinguishable.
   optional int32 latest_ordinal = 14;
+  // cost_usd is this child's total spend. Optional because 0 is a legal cost
+  // and "not reported" -- no database, or an unpriced model -- must stay
+  // distinguishable from "spent nothing", the same rule every Usage field
+  // follows.
+  optional double cost_usd = 15;
 }
 
 message ListChildrenRequest {

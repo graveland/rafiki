@@ -4,10 +4,13 @@ package main
 
 import (
 	"context"
+	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
@@ -51,7 +54,9 @@ func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 		if len(statuses) > 0 && !containsString(statuses, string(s.Status)) {
 			continue
 		}
-		out = append(out, control.SnapshotToSummary(s, c.ContextWindow))
+		sum := control.SnapshotToSummary(s, c.ContextWindow)
+		c.attachCost(s, &sum)
+		out = append(out, sum)
 	}
 	return out
 }
@@ -62,7 +67,46 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 	if !ok {
 		return protocol.ChildSummary{}, false
 	}
-	return control.SnapshotToSummary(snap, c.ContextWindow), true
+	sum := control.SnapshotToSummary(snap, c.ContextWindow)
+	c.attachCost(snap, &sum)
+	return sum, true
+}
+
+// attachCost fills in a summary's CostUSD from the insights rollup.
+//
+// The child's SessionID is passed as BOTH correlation routes: a fundi child's
+// conversation is found by UUID and a proxy child's by external_ref, and the
+// summary does not say which kind this is. An id matching neither rolls up 0,
+// which the display hides.
+func (c *Controller) attachCost(snap childstore.Snapshot, sum *protocol.ChildSummary) {
+	if snap.SessionID == "" {
+		return
+	}
+	sum.CostUSD = c.costFor(snap.SessionID)
+}
+
+// costFor is best-effort by design, exactly like the proxy's costFields and
+// Engine.priorConversationCost. A rollup that fails must leave the field nil
+// rather than reporting zero: nil is "not known" and zero is "spent nothing",
+// and reporting the second for the first understates a budget.
+//
+// c.coster is the same subtreeCoster the budget sweep uses (controller.go's
+// field comment explains why it is an interface); it is nil on a daemon with
+// no pool, which is exactly the "not known" case.
+func (c *Controller) costFor(convID string) *float64 {
+	if convID == "" || c.coster == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	total, err := c.coster.SubtreeCost(ctx, insights.SubtreeSelector{
+		ConversationIDs: []string{convID},
+		ExternalRefs:    []string{convID},
+	})
+	if err != nil {
+		return nil
+	}
+	return &total
 }
 
 // DescendantDepth satisfies eventlog.Lineage.
