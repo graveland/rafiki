@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -526,5 +527,53 @@ func TestNoLocalExecutorIsNotASpawnField(t *testing.T) {
 	}
 	if req.ExecutorSelector != "" {
 		t.Errorf("ExecutorSelector = %q, want empty", req.ExecutorSelector)
+	}
+}
+
+func TestMaxCostConvertsThroughConfiguredCurrency(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	clientstate.Update(func(s *clientstate.State) {
+		s.Currency = &clientstate.Currency{Code: "CAD", Rate: 1.38}
+	})
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("max-cost", "13.80"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.MaxCost == nil {
+		t.Fatal("MaxCost is nil, want a converted USD value")
+	}
+	if diff := *req.MaxCost - 10.0; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("MaxCost = %v, want ~10.0 (13.80 CAD at 1.38 CAD/USD)", *req.MaxCost)
+	}
+}
+
+func TestMaxCostWithNoCurrencyIsUnconverted(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	cmd := newTestCreateCmd()
+	if err := cmd.Flags().Set("cwd", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("max-cost", "10"); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.MaxCost == nil || *req.MaxCost != 10 {
+		t.Errorf("MaxCost = %v, want 10 (no currency configured)", req.MaxCost)
 	}
 }
