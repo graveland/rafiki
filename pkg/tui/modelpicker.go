@@ -176,6 +176,10 @@ func newModelPicker(kind, seed string, all []*rafikiv1.ModelRow, loaded bool, er
 	in.Prompt = ""
 	in.CharLimit = 0
 	in.Placeholder = "filter…"
+	// Without a width bubbles renders a ONE-character placeholder -- "filter…"
+	// came out as "f". The picker re-sizes this to the pane on every render;
+	// this is only so a picker never rendered still has a sane box.
+	in.SetWidth(40)
 	in.SetValue(seed)
 	in.Focus()
 	// A known failure is NOT a loading state. Without the err guard a picker
@@ -410,6 +414,7 @@ func (p *modelPicker) view(width, height int, v modelView, q *queryDialog) strin
 	b.WriteString(styleMeta.Render("  " + p.kind))
 	b.WriteString("\n")
 	b.WriteString(styleMeta.Render("/ "))
+	p.filter.SetWidth(max(20, width-4))
 	b.WriteString(p.filter.View())
 	b.WriteString("\n\n")
 

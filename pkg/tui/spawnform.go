@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -97,6 +98,9 @@ type spawnForm struct {
 	// navigable rather than truncated at whatever happened to fit.
 	suggestOff int
 }
+
+// fieldLabelWidth is the column the row labels occupy.
+const fieldLabelWidth = 8
 
 // formChrome is the rows the form spends on things that are not suggestions:
 // title, blank, four field rows, blank, hints, and the detail block.
@@ -260,6 +264,18 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog) string 
 	b.WriteString(styleRailFocused.Render("new agent"))
 	b.WriteString("\n\n")
 
+	// bubbles renders a placeholder of exactly ONE character when Width is
+	// unset: placeholderView sizes its buffer to Width()+1, copies the
+	// placeholder into it, and then early-returns having emitted only p[:1].
+	// "(auto)" came out as "(". Sizing the inputs to the panel fixes the
+	// placeholder and lets long model ids scroll inside their own box.
+	inputW := max(20, width-fieldLabelWidth-6)
+	for i := spawnField(0); i < spawnFieldCount; i++ {
+		if i != fieldKind {
+			f.inputs[i].SetWidth(inputW)
+		}
+	}
+
 	for i := spawnField(0); i < spawnFieldCount; i++ {
 		marker := "  "
 		if i == f.focus {
@@ -267,7 +283,7 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog) string 
 		}
 		b.WriteString(marker)
 		// padTo measures with ansi.StringWidth, so the style codes cost no columns.
-		b.WriteString(padTo(styleMeta.Render(i.label()), 8))
+		b.WriteString(padTo(styleMeta.Render(i.label()), fieldLabelWidth))
 
 		if i == fieldKind {
 			b.WriteString(f.kindView())
@@ -519,6 +535,10 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 // that catalog may not be fetched yet.
 func (c *Cockpit) kindChanged() tea.Cmd {
 	kind := c.form.kind()
+	// The two kinds have different model universes, so a model carried across
+	// a kind change is very likely one the new kind cannot resolve. Swap in
+	// that kind's own remembered model instead of leaving a stale id behind.
+	c.form.inputs[fieldModel].SetValue(clientstate.LastModelFor(kind))
 	c.form.suggestCur = -1
 	c.form.refreshSuggestions(c.models[kind], c.modelView)
 	return c.fetchModelsCmd(kind)
@@ -539,6 +559,11 @@ func (c *Cockpit) applySpawned(m spawnedMsg) tea.Cmd {
 			c.form.err = trimRPCError(m.err)
 		}
 		return nil
+	}
+	// Remember the model, so the next bare `rafiki create` opens on it. Keyed
+	// by kind, because the two kinds resolve different id universes.
+	if c.form != nil {
+		clientstate.RememberModel(c.form.kind(), strings.TrimSpace(c.form.inputs[fieldModel].Value()))
 	}
 	c.form = nil
 	// Land on the new agent. Its rail row arrives on the event stream's

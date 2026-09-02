@@ -33,6 +33,13 @@ import (
 type State struct {
 	// ModelView is the cockpit's remembered model filter and ordering.
 	ModelView *ModelView `json:"modelView,omitempty"`
+	// LastModel is the model most recently spawned, keyed by child KIND.
+	//
+	// It makes RAFIKI_DEFAULT_MODEL optional rather than obsolete: the
+	// variable is an explicit configuration and still outranks this, so
+	// setting it keeps working exactly as before, and unsetting it falls back
+	// to whatever you last chose instead of to the daemon's default.
+	LastModel map[string]string `json:"lastModel,omitempty"`
 }
 
 // Load reads the document, returning a zero State on any failure.
@@ -97,4 +104,34 @@ func Update(mutate func(*State)) {
 	s := Load()
 	mutate(&s)
 	Save(s)
+}
+
+// LastModelFor returns the model most recently spawned for a kind, or "".
+//
+// Keyed by KIND because the two kinds have different model universes: a
+// "claude" child resolves only Anthropic ids, so remembering one model across
+// both would eventually prefill a claude spawn with an OpenRouter id and
+// produce a child that spawns, attaches and never answers.
+func LastModelFor(kind string) string {
+	if kind == "" {
+		return ""
+	}
+	return Load().LastModel[kind]
+}
+
+// RememberModel records the model a spawn actually used.
+//
+// Through Update, so it preserves every other section. An empty model is not
+// recorded: "the daemon's default" is not a choice worth replaying, and
+// storing it would pin whatever that default happened to be on the day.
+func RememberModel(kind, model string) {
+	if kind == "" || model == "" {
+		return
+	}
+	Update(func(s *State) {
+		if s.LastModel == nil {
+			s.LastModel = map[string]string{}
+		}
+		s.LastModel[kind] = model
+	})
 }

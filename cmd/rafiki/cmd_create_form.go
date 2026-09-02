@@ -79,8 +79,10 @@ func runCreateForm(cmd *cobra.Command, req protocol.SpawnRequest) error {
 		BaseURL:    ep.baseURL,
 		OpenCreate: true,
 		CreateDefaults: tui.SpawnDefaults{
-			Name:  req.Name,
-			Kind:  req.Kind,
+			Name: req.Name,
+			Kind: req.Kind,
+			// req.Model already carries the whole precedence chain, including
+			// the remembered model -- see buildSpawnRequest.
 			Model: req.Model,
 			Cwd:   req.Cwd,
 		},
