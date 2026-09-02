@@ -1124,6 +1124,37 @@ func TestShouldStopEndsTurnGracefully(t *testing.T) {
 	}
 }
 
+// With no MaxIterations override and no ShouldStop, the loop must run past
+// the old implicit 250-iteration default — proving that default no longer
+// exists. The test provides its own bounded cutoff via ShouldStop (a real
+// infinite loop would hang the test suite), and asserts the cutoff, not an
+// iteration count, is what actually stopped the turn.
+func TestNoDefaultIterationCap(t *testing.T) {
+	sender := &toolAwareSender{}
+	tools := &fakeTools{}
+	conv := newMemConv(t, sender)
+
+	var calls int
+	ev := &Events{
+		ShouldStop: func() (bool, string) {
+			calls++
+			return calls > 260, "test cutoff past the old 250 default"
+		},
+	}
+
+	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Stats.Iterations <= 250 {
+		t.Errorf("Stats.Iterations = %d, want > 250 — the old default cap must no longer apply", result.Stats.Iterations)
+	}
+	if !result.LimitReached || result.LimitReason != "test cutoff past the old 250 default" {
+		t.Errorf("LimitReached=%v LimitReason=%q, want true / the test's own cutoff reason",
+			result.LimitReached, result.LimitReason)
+	}
+}
+
 func slicesEqualInt(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
