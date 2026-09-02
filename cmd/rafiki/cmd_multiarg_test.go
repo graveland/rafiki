@@ -91,27 +91,22 @@ func TestGetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
 // These tests exercise the filter predicates without needing a live daemon.
 // They verify the boolean logic used by completeChildrenByState callers.
 
-func TestCompletionPredicate_CloseExitedOnly(t *testing.T) {
-	exited := func(ch protocol.ChildSummary) bool {
-		return ch.Status == string(protocol.StatusExited)
+// TestCloseCmd_ValidArgsFunctionUnfiltered pins that close completion offers
+// every child, not just exited ones: close stops a live target first, so
+// restricting completion to exited children (the pre-split behavior, when
+// close could only ever target something already stopped) hides exactly the
+// targets `rafiki close` is now meant to handle in one step.
+func TestCloseCmd_ValidArgsFunctionUnfiltered(t *testing.T) {
+	cmd := newCloseCmd()
+	if cmd.ValidArgsFunction == nil {
+		t.Fatal("ValidArgsFunction not set")
 	}
-	cases := []struct {
-		status string
-		want   bool
-	}{
-		{"exited", true},
-		{"idle", false},
-		{"streaming", false},
-		{"tool_running", false},
-		{"spawning", false},
-		{"shutting_down", false},
-	}
-	for _, tc := range cases {
-		ch := protocol.ChildSummary{Status: tc.status}
-		got := exited(ch)
-		if got != tc.want {
-			t.Errorf("close predicate(%q) = %v, want %v", tc.status, got, tc.want)
-		}
+	// completeChildren (unfiltered) is what newCloseCmd wires up now; this
+	// smoke-checks it doesn't crash without a daemon rather than re-deriving
+	// completeChildren's own behavior, which has its own tests.
+	_, directive := cmd.ValidArgsFunction(cmd, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
 	}
 }
 
