@@ -140,6 +140,11 @@ type Config struct {
 	// enters a turn. Optional; nil means nothing is tracking delivery.
 	OnConsumed func(ids []string)
 
+	// OnTurnEnded is handed straight to EngineConfig.OnTurnEnded: it reports
+	// how the most recent turn ended. Optional; nil means nobody is
+	// listening.
+	OnTurnEnded func(TurnOutcome)
+
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
@@ -226,17 +231,18 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	}
 
 	eng, err := NewEngine(EngineConfig{
-		Client:     client,
-		ConvOpts:   convOpts,
-		Tools:      c.Tools,
-		Provider:   p.Name,
-		ModelID:    modelID,
-		Name:       c.Name,
-		BaseCtx:    ctx,
-		AutoResume: c.AutoResume,
-		OnFatal:    c.OnFatal,
-		NativeSink: c.NativeSink,
-		OnConsumed: c.OnConsumed,
+		Client:      client,
+		ConvOpts:    convOpts,
+		Tools:       c.Tools,
+		Provider:    p.Name,
+		ModelID:     modelID,
+		Name:        c.Name,
+		BaseCtx:     ctx,
+		AutoResume:  c.AutoResume,
+		OnFatal:     c.OnFatal,
+		NativeSink:  c.NativeSink,
+		OnConsumed:  c.OnConsumed,
+		OnTurnEnded: c.OnTurnEnded,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)

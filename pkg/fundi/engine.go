@@ -45,6 +45,19 @@ const fatalEmitTimeout = 2 * time.Second
 // realtime updates.
 const streamFlushInterval = 250 * time.Millisecond
 
+// TurnOutcome describes how one runTurn (or startupResume) call ended.
+// agentloop.Result already distinguishes a clean finish from a
+// guardrail-forced wrap-up (LimitReached/LimitReason); TurnOutcome carries
+// that plus the third case agentloop's Result cannot express on its own — a
+// turn that failed outright — so a caller (the daemon's parent-settle
+// notification) can tell a coordinator the real reason instead of a generic
+// "it's idle now".
+type TurnOutcome struct {
+	Clean       bool
+	LimitReason string
+	Err         error
+}
+
 // EngineConfig is the wiring for one agent child: the rafiki client and the
 // conversation options that identify its conversation, the tools it may call,
 // and the identity it reports through get_state.
@@ -95,6 +108,13 @@ type EngineConfig struct {
 	// goroutine would let the turn start before its message is confirmed,
 	// reopening the very window this exists to close.
 	OnConsumed func(ids []string)
+
+	// OnTurnEnded reports how the most recent runTurn/startupResume call
+	// ended: cleanly, via a guardrail (LimitReason set), or via a real error
+	// (Err set). Nil is legal and means nobody is listening. Unlike OnFatal,
+	// this fires on every ordinary turn boundary, not just a panic — it is
+	// the coordinator-notification seam, not the child-lifecycle one.
+	OnTurnEnded func(TurnOutcome)
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -123,6 +143,10 @@ type Engine struct {
 	// onConsumed reports that inbox frames have entered a turn and may be
 	// retired. Nil is legal: a standalone agent has no inbox behind it.
 	onConsumed func(ids []string)
+	// onTurnEnded reports how the most recent turn ended. Nil is legal: most
+	// callers (a standalone `rafikid agent` process, most tests) have nobody
+	// listening.
+	onTurnEnded func(TurnOutcome)
 
 	mu       sync.Mutex
 	pending  []queued           // FIFO of queued prompts awaiting execution
@@ -200,14 +224,15 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	tools := toolSetWithConvID{ToolSet: cfg.Tools, convID: conv.ID}
 
 	e := &Engine{
-		conv:       conv,
-		client:     cfg.Client,
-		tools:      tools,
-		fe:         fe,
-		em:         NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
-		baseCtx:    baseCtx,
-		onFatal:    cfg.OnFatal,
-		onConsumed: cfg.OnConsumed,
+		conv:        conv,
+		client:      cfg.Client,
+		tools:       tools,
+		fe:          fe,
+		em:          NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
+		baseCtx:     baseCtx,
+		onFatal:     cfg.OnFatal,
+		onConsumed:  cfg.OnConsumed,
+		onTurnEnded: cfg.OnTurnEnded,
 		state: StateData{
 			SessionID:   conv.ID,
 			SessionName: cfg.Name,
@@ -460,10 +485,12 @@ func (e *Engine) startupResume() {
 	case result.LimitReached:
 		slog.Info("agent: startup resume wrapped up by guardrail",
 			"conversation", e.conv.ID, "reason", result.LimitReason)
+		e.turnEnded(TurnOutcome{LimitReason: result.LimitReason})
 		e.em.AgentEnd()
 	default:
 		slog.Info("agent: startup resume completed",
 			"conversation", e.conv.ID)
+		e.turnEnded(TurnOutcome{Clean: true})
 		e.em.AgentEnd()
 	}
 }
@@ -498,6 +525,14 @@ func (e *Engine) runTurnGuarded(text string, images []llm.UserImage) (ok bool) {
 	}()
 	e.runTurn(text, images)
 	return true
+}
+
+// turnEnded reports how the turn just finished. Nil-safe: most callers
+// (a standalone `rafikid agent` process, most tests) have nobody listening.
+func (e *Engine) turnEnded(o TurnOutcome) {
+	if e.onTurnEnded != nil {
+		e.onTurnEnded(o)
+	}
 }
 
 // fatal marks the engine dead, releases every outstanding Wait() count, and
@@ -636,6 +671,7 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	case err != nil:
 		slog.Error("agent: turn failed", "conversation", e.conv.ID, "error", err)
 		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+		e.turnEnded(TurnOutcome{Err: err})
 	case result.LimitReached:
 		// Not a failure: the model got a forced-text wrap-up call and
 		// answered (see agentloop.wrapUp) instead of being cut off
@@ -643,6 +679,9 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 		// coordinator watching this child) can tell a budget-limited turn
 		// apart from an ordinary clean completion.
 		slog.Info("agent: turn hit its guardrail and was wrapped up", "conversation", e.conv.ID, "reason", result.LimitReason)
+		e.turnEnded(TurnOutcome{LimitReason: result.LimitReason})
+	default:
+		e.turnEnded(TurnOutcome{Clean: true})
 	}
 	e.em.AgentEnd()
 

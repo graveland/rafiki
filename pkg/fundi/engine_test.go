@@ -162,6 +162,92 @@ func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*
 	return eng, out
 }
 
+// newTestEngineWithConfig is newTestEngineWithSender's building block for
+// tests that need an EngineConfig field neither of the other two helpers
+// expose (OnTurnEnded, MaxCost). extra is applied to the config after every
+// other field is set, so it can only add, never has to fight a default.
+func newTestEngineWithConfig(t *testing.T, ts fakeToolSet, sender llm.Sender, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
+	t.Helper()
+	silenceSlog(t)
+	client, err := llm.NewClient(
+		llm.WithProviderSender("anthropic", sender),
+		llm.WithDefaultModel("claude-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &syncBuffer{}
+	fe := NewFrontend(strings.NewReader(""), out, nil)
+	cfg := EngineConfig{
+		Client:   client,
+		Tools:    ts,
+		Provider: "anthropic",
+		ModelID:  "claude-x",
+		Name:     "w1",
+		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
+	}
+	if extra != nil {
+		extra(&cfg)
+	}
+	eng, err := NewEngine(cfg, fe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fe.handler = eng
+	return eng, out
+}
+
+func TestOnTurnEndedReportsCleanCompletion(t *testing.T) {
+	var got []TurnOutcome
+	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
+		return "file.txt", nil
+	}}
+	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleResp, sampleEndTurn), func(cfg *EngineConfig) {
+		cfg.OnTurnEnded = func(o TurnOutcome) { got = append(got, o) }
+	})
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	if len(got) != 1 {
+		t.Fatalf("OnTurnEnded fired %d times, want 1: %+v", len(got), got)
+	}
+	if !got[0].Clean || got[0].LimitReason != "" || got[0].Err != nil {
+		t.Errorf("outcome = %+v, want Clean with nothing else set", got[0])
+	}
+}
+
+// TestOnTurnEndedReportsGuardrailReason is written but left empty-bodied
+// (skipped) here: it needs Task 7's Config.MaxCost, which does not exist
+// yet. Task 7's own Step 1 replaces this body with the real test — do not
+// implement it in this task.
+func TestOnTurnEndedReportsGuardrailReason(t *testing.T) {
+	t.Skip("needs Task 7's EngineConfig.MaxCost — implemented there")
+}
+
+func TestOnTurnEndedReportsRealError(t *testing.T) {
+	var got []TurnOutcome
+	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
+		return "file.txt", nil
+	}}
+	// Only one scripted body: the loop's second Continue call finds the fake
+	// sender exhausted and fails the turn outright — the same pattern
+	// TestEngineEmitsAgentErrorOnLoopFailure already uses for a real (not
+	// aborted) turn failure.
+	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleResp), func(cfg *EngineConfig) {
+		cfg.OnTurnEnded = func(o TurnOutcome) { got = append(got, o) }
+	})
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	if len(got) != 1 || got[0].Clean {
+		t.Fatalf("outcome = %+v, want a non-clean error outcome", got)
+	}
+	if got[0].Err == nil || !strings.Contains(got[0].Err.Error(), "scripted turns exhausted") {
+		t.Errorf("Err = %v, want it to wrap the fake sender's exhaustion error", got[0].Err)
+	}
+}
+
 // blockingSender wraps a Sender and pauses its Nth call until the test
 // releases it. It exists to land a steer strictly after the agent loop's
 // FINAL PendingUser poll but before agentloop.Run returns — a window a
