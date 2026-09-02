@@ -34,7 +34,7 @@ func TestEmitterPublishesNativeAssistantMessage(t *testing.T) {
 			{Type: "text", Text: "the answer"},
 			{Type: "tool_use", ID: "tu_1", Name: "bash", Input: []byte(`{"cmd":"ls"}`)},
 		},
-	})
+	}, 0)
 
 	am := findAssistant(t, sink.events)
 	if got := am.GetRawStopReason(); got != "end_turn" {
@@ -75,11 +75,32 @@ func TestStreamedTurnPublishesTheAssistantMessage(t *testing.T) {
 	}
 	em.StreamStart(MapAssistantMessage(resp, "anthropic", nil))
 	em.StreamEnd(MapAssistantMessage(resp, "anthropic", nil))
-	em.publishAssistant(resp)
+	em.publishAssistant(resp, 0)
 
 	am := findAssistant(t, sink.events)
 	if got := am.GetContent()[0].GetText().GetText(); got != "streamed reply" {
 		t.Errorf("text = %q, want %q", got, "streamed reply")
+	}
+}
+
+func TestPublishAssistantCarriesRunningCost(t *testing.T) {
+	var out bytes.Buffer
+	em := NewEmitter(NewFrontend(bytes.NewReader(nil), &out, nil), "anthropic", nil)
+	sink := &nativeCapture{}
+	em.SetNativeSink(sink)
+
+	em.publishAssistant(&anthropic.Message{
+		Role:       "assistant",
+		StopReason: anthropic.StopReasonEndTurn,
+		Content:    []anthropic.ContentBlockUnion{{Type: "text", Text: "hi"}},
+	}, 1.2345)
+
+	am := findAssistant(t, sink.events)
+	if am.CostUsd == nil {
+		t.Fatal("CostUsd is nil, want the running total")
+	}
+	if diff := am.GetCostUsd() - 1.2345; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUsd = %v, want 1.2345", am.GetCostUsd())
 	}
 }
 
@@ -100,7 +121,7 @@ func TestAgentEndPublishesTurnEnd(t *testing.T) {
 		Usage:      anthropic.Usage{InputTokens: 10, OutputTokens: 3},
 	}
 	em.AssistantTurn(resp)
-	em.publishAssistant(resp)
+	em.publishAssistant(resp, 0)
 	em.AgentEnd()
 
 	var te *rafikiv1.TurnEnd

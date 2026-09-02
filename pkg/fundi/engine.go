@@ -871,7 +871,7 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			} else {
 				e.em.AssistantTurn(resp)
 			}
-			e.em.publishAssistant(resp)
+			e.em.publishAssistant(resp, runningTotal)
 		},
 		// OnToolStart/OnToolEnd are the only callbacks here that do NOT run on
 		// the turn goroutine: agentloop invokes them from inside its per-tool

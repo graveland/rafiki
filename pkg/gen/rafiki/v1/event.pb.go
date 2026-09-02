@@ -640,6 +640,13 @@ type AssistantMessage struct {
 	// leaves it empty for user rows.
 	StopReason    StopReason `protobuf:"varint,2,opt,name=stop_reason,json=stopReason,proto3,enum=rafiki.v1.StopReason" json:"stop_reason,omitempty"`
 	RawStopReason string     `protobuf:"bytes,3,opt,name=raw_stop_reason,json=rawStopReason,proto3" json:"raw_stop_reason,omitempty"`
+	// cost_usd is the RUNNING total for the turn this message belongs to —
+	// every completed prior turn plus every iteration of this one so far,
+	// including this reply — not the final per-turn cost TurnEnd.cost_usd
+	// reports. Optional for the same reason every Usage/cost field in this
+	// proto is: absence and a reported zero are different facts, and a client
+	// (the TUI rail) needs to tell "not yet priced" from "genuinely free".
+	CostUsd       *float64 `protobuf:"fixed64,4,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -693,6 +700,13 @@ func (x *AssistantMessage) GetRawStopReason() string {
 		return x.RawStopReason
 	}
 	return ""
+}
+
+func (x *AssistantMessage) GetCostUsd() float64 {
+	if x != nil && x.CostUsd != nil {
+		return *x.CostUsd
+	}
+	return 0
 }
 
 type TurnStart struct {
@@ -1681,12 +1695,14 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"toolResultB\a\n" +
 	"\x05block\"@\n" +
 	"\vUserMessage\x121\n" +
-	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"\xa5\x01\n" +
+	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\"\xd2\x01\n" +
 	"\x10AssistantMessage\x121\n" +
 	"\acontent\x18\x01 \x03(\v2\x17.rafiki.v1.ContentBlockR\acontent\x126\n" +
 	"\vstop_reason\x18\x02 \x01(\x0e2\x15.rafiki.v1.StopReasonR\n" +
 	"stopReason\x12&\n" +
-	"\x0fraw_stop_reason\x18\x03 \x01(\tR\rrawStopReason\":\n" +
+	"\x0fraw_stop_reason\x18\x03 \x01(\tR\rrawStopReason\x12\x1e\n" +
+	"\bcost_usd\x18\x04 \x01(\x01H\x00R\acostUsd\x88\x01\x01B\v\n" +
+	"\t_cost_usd\":\n" +
 	"\tTurnStart\x12\x17\n" +
 	"\aturn_id\x18\x01 \x01(\tR\x06turnId\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\"\xd7\x01\n" +
@@ -1848,6 +1864,7 @@ func file_rafiki_v1_event_proto_init() {
 		(*ContentBlock_Image)(nil),
 		(*ContentBlock_ToolResult)(nil),
 	}
+	file_rafiki_v1_event_proto_msgTypes[8].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[10].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[11].OneofWrappers = []any{
 		(*ContentBlockDelta_Text)(nil),

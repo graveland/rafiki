@@ -41,7 +41,7 @@ func (e *Emitter) SetNativeSink(s NativeSink) { e.native = s }
 // ToParam while the struct fields are already correct. Both current callers
 // pass a complete response, so ToParam would work today — and would silently
 // start dropping content the first time anyone published from a partial one.
-func (e *Emitter) publishAssistant(resp *anthropic.Message) {
+func (e *Emitter) publishAssistant(resp *anthropic.Message, runningCostUSD float64) {
 	if e.native == nil {
 		return
 	}
@@ -75,6 +75,7 @@ func (e *Emitter) publishAssistant(resp *anthropic.Message) {
 		Content:       blocks,
 		StopReason:    eventconv.StopReasonFromString(e.lastStop),
 		RawStopReason: e.lastStop,
+		CostUsd:       proto.Float64(runningCostUSD),
 	})
 }
 
