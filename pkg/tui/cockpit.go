@@ -260,6 +260,10 @@ type Cockpit struct {
 	// form is the open create modal, nil when none. A modal owns every key
 	// while it is up, so this is checked before the global bindings.
 	form *spawnForm
+	// picker is the model browser opened from the form's model row, nil when
+	// none. It stacks ON TOP of the form -- esc returns to the form rather
+	// than dismissing both, because the other fields are still half filled in.
+	picker *modelPicker
 	// endArmed is when `x` was first pressed, and endArmedID is WHICH row it
 	// was pressed on. The id is not optional bookkeeping: arming on one agent
 	// and then moving the cursor before the repeat would otherwise end a
@@ -551,6 +555,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.pending = ""
 		return c, nil
 
+	case modelsLoadedMsg:
+		c.applyModelsLoaded(msg)
+		return c, nil
+
 	case spawnedMsg:
 		return c, c.applySpawned(msg)
 
@@ -701,6 +709,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// The globals list holds ⇥, esc, ^A and the arrow keys, all of which the
 	// form needs for itself; letting them match first would make the form's
 	// own tab order unreachable.
+	if c.picker != nil {
+		return c.handlePickerKey(msg, max(1, c.bodyHeight()-pickerChrome))
+	}
 	if c.form != nil {
 		return c.handleFormKey(msg)
 	}
@@ -1577,6 +1588,8 @@ func (c *Cockpit) View() tea.View {
 
 	var conv string
 	switch f := c.focused(); {
+	case c.picker != nil:
+		conv = c.picker.view(convWidth, bodyHeight)
 	case c.form != nil:
 		conv = c.form.view(convWidth)
 	case c.showHelp:
