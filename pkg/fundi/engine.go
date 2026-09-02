@@ -115,6 +115,14 @@ type EngineConfig struct {
 	// this fires on every ordinary turn boundary, not just a panic — it is
 	// the coordinator-notification seam, not the child-lifecycle one.
 	OnTurnEnded func(TurnOutcome)
+
+	// MaxCost is this child's OWN cost budget in USD (0 = unlimited),
+	// checked after every LLM reply — see Engine.events()'s ShouldStop wiring.
+	// This is distinct from a subtree-wide budget: it only ever sees costs
+	// this engine itself has incurred, not descendants it may have spawned.
+	// A coordinator's subtree-wide enforcement is cmd/rafikid's periodic
+	// sweepBudgets, unaffected by this field.
+	MaxCost float64
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -147,6 +155,9 @@ type Engine struct {
 	// callers (a standalone `rafikid agent` process, most tests) have nobody
 	// listening.
 	onTurnEnded func(TurnOutcome)
+	// maxCost is this child's own cost budget in USD (0 = unlimited) — see
+	// events()'s ShouldStop wiring and costGuardrail.
+	maxCost float64
 
 	mu       sync.Mutex
 	pending  []queued           // FIFO of queued prompts awaiting execution
@@ -233,6 +244,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		onFatal:     cfg.OnFatal,
 		onConsumed:  cfg.OnConsumed,
 		onTurnEnded: cfg.OnTurnEnded,
+		maxCost:     cfg.MaxCost,
 		state: StateData{
 			SessionID:   conv.ID,
 			SessionName: cfg.Name,
@@ -753,6 +765,12 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 	var acc anthropic.Message
 	var streamed bool
 	var lastFlush time.Time
+	// runningTotal is this turn's cost-so-far (prior completed turns plus
+	// every iteration of THIS turn), refreshed by OnTurn on every LLM reply.
+	// ShouldStop reads it — agentloop calls OnTurn before ShouldStop within
+	// the same iteration (see drive's ordering), so by the time ShouldStop
+	// runs it always reflects the reply that was just received.
+	var runningTotal float64
 
 	handler := func(ev anthropic.MessageStreamEventUnion) {
 		llm.FixEmptyToolInput(&ev)
@@ -817,6 +835,7 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 				// reset at a turn boundary the way a per-turn running total would.
 				iterCost := costOf(e.em.pricer, string(resp.Model), resp.Usage)
 				conversationTotal := priorCost + e.em.usage.Cost.Total + iterCost.Total
+				runningTotal = conversationTotal
 				cachePct := cacheHitPct(resp.Usage)
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
@@ -874,8 +893,28 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			e.em.ToolEnd(id, name, result, err != nil)
 		},
 		PendingUser: e.drainSteers,
+		ShouldStop: func() (bool, string) {
+			return costGuardrail(runningTotal, e.maxCost)
+		},
 	}
 	return ev, llm.WithStreamHandler(handler)
+}
+
+// costGuardrail decides whether a turn's running cost has reached its
+// budget. maxCost <= 0 means unlimited (matching the daemon's grantedCost
+// convention) and never stops. Extracted from events()'s ShouldStop closure
+// so the threshold logic is unit-testable without needing a real pricing
+// catalog wired into a test client.
+func costGuardrail(runningTotal, maxCost float64) (bool, string) {
+	if maxCost <= 0 {
+		return false, ""
+	}
+	if runningTotal >= maxCost {
+		return true, fmt.Sprintf(
+			"agent's own cost budget ($%.2f of $%.2f) exhausted",
+			runningTotal, maxCost)
+	}
+	return false, ""
 }
 
 // recoverEmit contains a panic raised inside one of the observation callbacks

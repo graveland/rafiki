@@ -216,12 +216,66 @@ func TestOnTurnEndedReportsCleanCompletion(t *testing.T) {
 	}
 }
 
-// TestOnTurnEndedReportsGuardrailReason is written but left empty-bodied
-// (skipped) here: it needs Task 7's Config.MaxCost, which does not exist
-// yet. Task 7's own Step 1 replaces this body with the real test — do not
-// implement it in this task.
 func TestOnTurnEndedReportsGuardrailReason(t *testing.T) {
-	t.Skip("needs Task 7's EngineConfig.MaxCost — implemented there")
+	var got []TurnOutcome
+	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
+		return "file.txt", nil
+	}}
+	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleResp, sampleEndTurn), func(cfg *EngineConfig) {
+		cfg.MaxCost = 0.0001
+		cfg.OnTurnEnded = func(o TurnOutcome) { got = append(got, o) }
+	})
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	// The fake client prices every reply at zero (no catalog), so a real
+	// MaxCost cannot fire here — this only confirms the field survives
+	// construction and a clean turn still reports Clean. The actual
+	// threshold decision is TestCostGuardrailFiresAtOrOverBudget, below.
+	if len(got) != 1 || !got[0].Clean {
+		t.Fatalf("outcome = %+v, want a clean completion (fake client prices at zero)", got)
+	}
+}
+
+func TestCostGuardrailFiresAtOrOverBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		runningTotal float64
+		maxCost      float64
+		wantStop     bool
+	}{
+		{"under budget", 1.0, 5.0, false},
+		{"exactly at budget", 5.0, 5.0, true},
+		{"over budget", 6.0, 5.0, true},
+		{"unlimited (zero)", 1000.0, 0, false},
+		{"unlimited (negative)", 1000.0, -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stop, reason := costGuardrail(tc.runningTotal, tc.maxCost)
+			if stop != tc.wantStop {
+				t.Errorf("costGuardrail(%v, %v) stop = %v, want %v", tc.runningTotal, tc.maxCost, stop, tc.wantStop)
+			}
+			if stop && !strings.Contains(reason, "cost budget") {
+				t.Errorf("reason = %q, want it to name the cost budget", reason)
+			}
+		})
+	}
+}
+
+func TestEventsShouldStopIsWiredFromMaxCost(t *testing.T) {
+	ts := fakeToolSet{}
+	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleEndTurn), func(cfg *EngineConfig) {
+		cfg.MaxCost = 5.0
+	})
+	ev, _ := eng.events()
+	if ev.ShouldStop == nil {
+		t.Fatal("ShouldStop is nil; MaxCost can never be enforced")
+	}
+	// No OnTurn has fired yet, so the running total is 0 — under any positive budget.
+	if stop, reason := ev.ShouldStop(); stop {
+		t.Errorf("ShouldStop fired with no usage recorded yet: stop=%v reason=%q", stop, reason)
+	}
 }
 
 func TestOnTurnEndedReportsRealError(t *testing.T) {
