@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -392,6 +393,36 @@ func (conv *Conversation) Continue(ctx context.Context, opts ...SendOption) (*an
 	}
 
 	assistant := resp.ToParam()
+	// Some providers occasionally return a structurally broken reply: a
+	// missing or wrong role, or content the API will not accept back
+	// (observed live: role "" with no content at all). The reply handed back
+	// to the caller is untouched — only what history stores is repaired,
+	// because the stored history is re-sent inside every later request and
+	// the API rejects a request whose messages carry an invalid role, no
+	// content, or an empty text block. Without this, one broken reply
+	// permanently wedges the conversation: every later Send/Continue fails
+	// with an invalid-request error the caller never caused. Each repair is
+	// logged — a silently dropped reply is indistinguishable from a provider
+	// that never answered.
+	if assistant.Role != anthropic.MessageParamRoleAssistant {
+		conv.client.logger.Warn("reply had a non-assistant role; storing it as assistant",
+			"conversation", conv.ID, "role", string(assistant.Role))
+		assistant.Role = anthropic.MessageParamRoleAssistant
+	}
+	if kept := storableContent(assistant.Content); len(kept) != len(assistant.Content) {
+		conv.client.logger.Warn("reply carried content blocks the API would reject; dropping them from history",
+			"conversation", conv.ID, "blocks", len(assistant.Content), "kept", len(kept))
+		assistant.Content = kept
+	}
+	if len(assistant.Content) == 0 {
+		// Nothing left to store — and an empty message in history would
+		// itself invalidate every later request. The turn stays captured
+		// (usage and cost live on the turn row, not the message row), and the
+		// caller still receives the reply exactly as the provider sent it.
+		conv.client.logger.Warn("reply had no storable content; not appending it to history",
+			"conversation", conv.ID, "stop_reason", string(resp.StopReason))
+		return resp, nil
+	}
 	if err := conv.appendMessage(ctx, nextOrdinal(history), assistant,
 		&store.AssistantMeta{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens,
 			StopReason: string(resp.StopReason)}); err != nil {
@@ -461,6 +492,37 @@ func (conv *Conversation) loadHistory(ctx context.Context) ([]store.Message, err
 		return conv.mem, nil
 	}
 	return conv.client.messages.Load(ctx, conv.ID)
+}
+
+// storableContent returns content without the blocks the Messages API would
+// reject if they came back inside a later request's history. It returns the
+// input slice untouched when there is nothing to drop, so the ordinary reply
+// costs no allocation, and it never mutates a block — the caller's
+// *anthropic.Message shares those pointers.
+func storableContent(content []anthropic.ContentBlockParamUnion) []anthropic.ContentBlockParamUnion {
+	if !slices.ContainsFunc(content, emptyTextBlock) {
+		return content
+	}
+	kept := make([]anthropic.ContentBlockParamUnion, 0, len(content))
+	for _, b := range content {
+		if !emptyTextBlock(b) {
+			kept = append(kept, b)
+		}
+	}
+	return kept
+}
+
+// emptyTextBlock reports whether b is a text block carrying nothing. That is
+// the only block shape the API rejects outright ("text content blocks must be
+// non-empty"), which makes it the only shape history must not carry: a stored
+// reply is re-sent inside every later request, so one of these wedges the
+// conversation exactly as a contentless message does. Whitespace-only counts
+// as empty — it carries nothing either way, and as a message's last block it
+// also trips the trailing-whitespace rule on any later prefill. Every other
+// block kind is stored verbatim; guessing at emptiness for tool_use or
+// thinking blocks would drop content the API accepts.
+func emptyTextBlock(b anthropic.ContentBlockParamUnion) bool {
+	return b.OfText != nil && strings.TrimSpace(b.OfText.Text) == ""
 }
 
 // appendMessage writes through the storage seam, preserving the store's
