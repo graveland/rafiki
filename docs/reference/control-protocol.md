@@ -774,6 +774,12 @@ Errors: `child_not_found`, `child_exited` (already gone).
 `escalated: true` if SIGTERM or SIGKILL was needed; `false` if pi exited
 from stdin EOF alone.
 
+Naming: the CLI calls this operation `stop` (`rafiki stop`, with `kill`/`k`
+kept as aliases — muscle memory and scripts); the framed wire spelling
+`ctrl_kill` is unchanged/frozen. `stop` never closes or finalizes the child —
+it stays in `rafiki list` with `status=exited`. That composition (stop, then
+finalize) lives in `close` now — see §6.13.
+
 ### 6.6 `ctrl_auth` (TCP/TLS only)
 
 ```jsonc
@@ -995,6 +1001,11 @@ Naming: the CLI and the Connect plane call this operation `close`
 `Close`). The framed wire spelling below is FROZEN — `ctrl_forget` and
 `ctrl_forget_all_exited` are the wire names for what those surfaces call
 closing, and existing clients keep working unchanged.
+
+`rafiki close` stops the child first (via `ctrl_kill`, §6.5) if it is still
+running, then sends `ctrl_forget` — unconditionally, not gated on a clean
+exit. This is CLI-side composition; the wire-level contract below (only valid
+in `exited` status) is unchanged.
 
 ```jsonc
 { "type": "ctrl_forget", "id": "12", "childId": "c_01HX..." }

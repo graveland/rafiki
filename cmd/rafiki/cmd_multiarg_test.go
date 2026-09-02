@@ -44,10 +44,10 @@ func TestCloseCmd_AllExited_ZeroArgsOK(t *testing.T) {
 	}
 }
 
-// TestKillCmd_MultiArg verifies that multiple positional args are accepted and
+// TestStopCmd_MultiArg verifies that multiple positional args are accepted and
 // that zero positional args are rejected.
-func TestKillCmd_MultiArg_AcceptsMultiple(t *testing.T) {
-	cmd := newKillCmd()
+func TestStopCmd_MultiArg_AcceptsMultiple(t *testing.T) {
+	cmd := newStopCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{"child-a", "child-b"})
 	if err := cmd.Execute(); err != nil {
@@ -55,8 +55,8 @@ func TestKillCmd_MultiArg_AcceptsMultiple(t *testing.T) {
 	}
 }
 
-func TestKillCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
-	cmd := newKillCmd()
+func TestStopCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
+	cmd := newStopCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{})
 	err := cmd.Execute()

@@ -68,7 +68,9 @@ func TestCLI_Status(t *testing.T) {
 }
 
 // TestCLI_CreateListKillForget exercises the core child lifecycle via the CLI:
-// create --detached → list (child present) → kill → poll for exited → forget.
+// create --detached → list (child present) → stop → poll for exited (still
+// listed) → close (gone). `stop` no longer auto-closes on a clean exit — that
+// composition moved to `close` — so the two steps are asserted separately.
 func TestCLI_CreateListKillForget(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
@@ -113,11 +115,11 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		t.Fatalf("list missing childId %s: %s", childID, out)
 	}
 
-	// kill
-	killCmd := cliCmd("--socket", d.socketPath, "kill", "smoke")
-	out, err = killCmd.CombinedOutput()
+	// stop
+	stopCmd := cliCmd("--socket", d.socketPath, "stop", "smoke")
+	out, err = stopCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("kill failed: %v\n%s", err, out)
+		t.Fatalf("stop failed: %v\n%s", err, out)
 	}
 
 	// poll until status=exited (up to 5 seconds)
@@ -131,12 +133,24 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// `rafiki kill` auto-forgets on clean exit (commit 995a7e1), so `smoke`
-	// should already be gone from the store.  Verify by attempting to get it.
-	getCmd := cliCmd("--socket", d.socketPath, "get", "smoke")
+	// `rafiki stop` no longer closes: `smoke` must still be listed, exited.
+	// `get` always emits indented JSON (it ignores --output), hence the space.
+	getCmd := cliCmd("--socket", d.socketPath, "--output", "json", "get", "smoke")
+	out, err = getCmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
+		t.Fatalf("expected smoke to still be listed as exited after stop; get output: %s (err=%v)", out, err)
+	}
+
+	// close finalizes it.
+	closeCmd := cliCmd("--socket", d.socketPath, "close", "smoke")
+	out, err = closeCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("close failed: %v\n%s", err, out)
+	}
+	getCmd = cliCmd("--socket", d.socketPath, "get", "smoke")
 	out, _ = getCmd.CombinedOutput()
 	if !strings.Contains(string(out), "no child matches") {
-		t.Fatalf("expected child to be auto-forgotten after kill; get output: %s", out)
+		t.Fatalf("expected child to be gone after close; get output: %s", out)
 	}
 }
 
@@ -174,7 +188,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 
 // TestCLI_CreateDetached verifies that `rafiki create --detached` spawns a child
 // and returns JSON containing a childId, then confirms the child appears in
-// `rafiki list`. Cleans up via kill + forget.
+// `rafiki list`. Cleans up via stop + close (stop no longer auto-closes).
 func TestCLI_CreateDetached(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
@@ -221,11 +235,11 @@ func TestCLI_CreateDetached(t *testing.T) {
 		t.Fatalf("list missing childId %s: %s", childID, out)
 	}
 
-	// kill
-	killCmd := cliCmd("--socket", d.socketPath, "kill", "test-detached")
-	out, err = killCmd.CombinedOutput()
+	// stop
+	stopCmd := cliCmd("--socket", d.socketPath, "stop", "test-detached")
+	out, err = stopCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("kill failed: %v\n%s", err, out)
+		t.Fatalf("stop failed: %v\n%s", err, out)
 	}
 
 	// poll until status=exited (up to 5 seconds).
@@ -239,12 +253,24 @@ func TestCLI_CreateDetached(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// `rafiki kill` auto-forgets on clean exit (commit 995a7e1), so the child
-	// should already be gone from the store.
-	getCmd := cliCmd("--socket", d.socketPath, "get", "test-detached")
+	// `rafiki stop` no longer closes: the child must still be listed, exited.
+	// `get` always emits indented JSON (it ignores --output), hence the space.
+	getCmd := cliCmd("--socket", d.socketPath, "--output", "json", "get", "test-detached")
+	out, err = getCmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
+		t.Fatalf("expected test-detached to still be listed as exited after stop; get output: %s (err=%v)", out, err)
+	}
+
+	// close finalizes it.
+	closeCmd := cliCmd("--socket", d.socketPath, "close", "test-detached")
+	out, err = closeCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("close failed: %v\n%s", err, out)
+	}
+	getCmd = cliCmd("--socket", d.socketPath, "get", "test-detached")
 	out, _ = getCmd.CombinedOutput()
 	if !strings.Contains(string(out), "no child matches") {
-		t.Fatalf("expected child to be auto-forgotten after kill; get output: %s", out)
+		t.Fatalf("expected child to be gone after close; get output: %s", out)
 	}
 }
 
