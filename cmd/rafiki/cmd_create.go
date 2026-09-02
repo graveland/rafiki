@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -30,6 +31,24 @@ With --detached, rafiki create spawns the child and exits without attaching.
 The child runs in the background; reattach later with 'rafiki attach <name>'.
 
 --cwd defaults to the current directory. Specify explicitly to override.
+
+Run with no arguments, rafiki create opens a form: pick the kind, search models
+by name, and filter or sort them by cost, context, capability and benchmark
+score (^S). The form is prefilled with exactly what a bare create would have
+spawned, so pressing enter is the same as not using it. Pass anything that
+shapes the child -- a name, --model, --kind, --cwd, --preset, -d -- and create
+spawns directly instead; -i opens the form anyway, prefilled.
+
+Model precedence, strongest first:
+  --model
+  RAFIKI_DEFAULT_MODEL
+  the model last spawned for this kind (remembered per kind)
+  --preset's model
+  the daemon's default
+
+The remembered model makes RAFIKI_DEFAULT_MODEL optional rather than obsolete:
+the variable is something you configured and still wins, so setting it behaves
+exactly as before.
 
 Environment variable defaults (applied before explicit flags; lowest priority):
   RAFIKI_DEFAULT_PRESET  preset name from <config dir>/presets.json (see 'rafiki presets')
@@ -161,10 +180,21 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute (got %q)", cwd)
 	}
 
-	// RAFIKI_DEFAULT_MODEL: fallback when --model not given.
+	// Model precedence, weakest last: --model, then RAFIKI_DEFAULT_MODEL, then
+	// the last model actually spawned for this kind, then the daemon default.
+	//
+	// The remembered model sits BELOW the environment variable on purpose. The
+	// variable is something a person configured; this is something they merely
+	// did once, and an inference must not override a declaration. A preset,
+	// which is also a declaration, is applied later and only when this whole
+	// chain came back empty.
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
 		model = paths.Get(paths.DefaultModel)
+	}
+	if model == "" {
+		kindForModel, _ := cmd.Flags().GetString("kind")
+		model = clientstate.LastModelFor(kindForModel)
 	}
 
 	configDir, _ := cmd.Flags().GetString("config-dir")
@@ -363,6 +393,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	var data protocol.SpawnResponseData
 	_ = json.Unmarshal(resp.Data, &data)
+	// Remember what actually got spawned, not what was asked for: a preset or
+	// an alias may have supplied it, and replaying the resolved choice is what
+	// makes the next bare create land on the same model.
+	clientstate.RememberModel(req.Kind, req.Model)
 	if err := setActive(data.ChildID); err != nil {
 		// Best effort — log to stderr but don't fail.
 		fmt.Fprintln(os.Stderr, "warning: could not update active marker:", err)

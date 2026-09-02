@@ -746,6 +746,27 @@
   after an upgrade is worse than one that failed to load; an unrecognised name
   is DROPPED, degrading the query rather than refusing it.
 
+- **A remembered choice must never outrank a declared one.** `create`'s model
+  chain is `--model` > `RAFIKI_DEFAULT_MODEL` > the model last spawned FOR THAT
+  KIND > the preset's model > the daemon default. The remembered value sits
+  below the environment variable deliberately: the variable is something a
+  person configured and this is something they merely did once, so the
+  inference must not override the declaration — which is also what keeps
+  setting the variable behaving exactly as it always did. `LastModel` is keyed
+  by kind because a `claude` child cannot resolve an OpenRouter id, and one
+  remembered model across both kinds would eventually prefill a spawn that
+  attaches and never answers. An EMPTY model is never recorded: "the daemon's
+  default" is not a choice worth replaying, and storing it pins whatever that
+  default happened to be that day.
+
+- **An unwidthed `bubbles` textinput renders a ONE-CHARACTER placeholder.**
+  `placeholderView` sizes its buffer to `Width()+1`, copies the placeholder in,
+  then early-returns having emitted only `p[:1]` — so `"(auto)"` renders as
+  `"("` and `"filter…"` as `"f"`, with no error anywhere. Both shipped that way
+  and appeared in output nobody read closely. Call `SetWidth` on every
+  textinput; `pkg/tui` re-sizes them to the pane on each render so long model
+  ids scroll inside their own box.
+
 - **`NewCockpit` reads client state at CONSTRUCTION, so `pkg/tui` needs a
   `TestMain` that isolates `XDG_STATE_HOME`.** Without it every cockpit test
   reads — and every one that closes the query panel writes — the developer's

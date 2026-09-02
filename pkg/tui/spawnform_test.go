@@ -367,3 +367,40 @@ func TestOpenCreateFetchesTheCatalog(t *testing.T) {
 		t.Error("no catalog fetch was started for a form opened at construction")
 	}
 }
+
+// bubbles renders a ONE-character placeholder when Width is unset:
+// placeholderView sizes its buffer to Width()+1, copies the placeholder in,
+// and early-returns having emitted only p[:1]. "(auto)" came out as "(" and
+// the picker's "filter…" as "f", in shipped output nobody read closely.
+func TestPlaceholdersRenderInFull(t *testing.T) {
+	c := formCockpit(t)
+	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil))
+	for _, want := range []string{"(auto)", "(daemon default)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("placeholder %q is missing or truncated:\n%s", want, out)
+		}
+	}
+}
+
+func TestPickerFilterPlaceholderRendersInFull(t *testing.T) {
+	c, p := loadedPicker(t)
+	p.filter.SetValue("")
+	out := ansi.Strip(p.view(90, 20, c.modelView, nil))
+	if !strings.Contains(out, "filter…") {
+		t.Errorf("the filter placeholder is truncated:\n%s", out)
+	}
+}
+
+// A field the user has typed into must show what they typed, not a placeholder
+// and not a truncation of it.
+func TestTypedValueSurvivesTheWidthChange(t *testing.T) {
+	c := formCockpit(t)
+	focusModelRow(c)
+	for _, r := range "anthropic/claude-opus-5" {
+		c.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	out := ansi.Strip(c.form.view(120, 24, c.modelView, nil))
+	if !strings.Contains(out, "anthropic/claude-opus-5") {
+		t.Errorf("the typed model id is not shown in full:\n%s", out)
+	}
+}
