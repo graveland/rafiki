@@ -5,6 +5,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"charm.land/bubbles/v2/key"
 )
 
 // TestNoGlobalBindingStealsATextareaKey is this chunk's most important test.
@@ -119,6 +121,37 @@ func TestExpandArgsBindingIsFree(t *testing.T) {
 	for _, k := range defaultKeyMap().ExpandArgs.Keys() {
 		if textareaKeys[k] && !grandfathered[k] {
 			t.Errorf("ExpandArgs binds %q, which the textarea already owns", k)
+		}
+	}
+}
+
+// The lifecycle keys are BARE LETTERS, which is only safe because they live in
+// the agents pane — the rail swallows every unmatched key, so nothing there is
+// being typed into. Promoting either to a global would make it a character you
+// can no longer type in the prompt, which is the exact failure globalConflicts
+// exists to catch and would not catch here: the conflict is with ordinary text,
+// not with a textarea binding.
+func TestLifecycleKeysStayRailLocal(t *testing.T) {
+	k := defaultKeyMap()
+	globals := map[string]key.Binding{
+		"Quit": k.Quit, "NextPane": k.NextPane, "PrevPane": k.PrevPane,
+		"NextAttention": k.NextAttention, "PrevAttention": k.PrevAttention,
+		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
+		"ToggleRail": k.ToggleRail, "Help": k.Help,
+		"ExpandArgs": k.ExpandArgs, "Redraw": k.Redraw, "Abort": k.Abort,
+	}
+	rail := map[string]bool{}
+	for _, s := range k.NewAgent.Keys() {
+		rail[s] = true
+	}
+	for _, s := range k.EndAgent.Keys() {
+		rail[s] = true
+	}
+	for name, b := range globals {
+		for _, s := range b.Keys() {
+			if rail[s] {
+				t.Errorf("global %s binds %q, which is a rail lifecycle key", name, s)
+			}
 		}
 	}
 }

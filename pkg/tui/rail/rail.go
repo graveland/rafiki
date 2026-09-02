@@ -115,6 +115,28 @@ func (r *Rail) Get(childID string) (Node, bool) {
 	return *n, true
 }
 
+// Remove drops one node and reparents nothing: a closed child's descendants
+// are closed with it or already gone, and re-seeding is what repairs the tree
+// if that turns out to be wrong.
+//
+// This exists for CLOSE specifically, and close is the only caller that needs
+// it. Every other way a child leaves the rail is driven by an event -- an exit
+// marks the row rather than dropping it, because the exit code is worth seeing.
+// A closed child publishes nothing ever again (it is gone from the daemon's
+// store), so if this did not drop the row, nothing would until the next reseed.
+func (r *Rail) Remove(childID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.nodes[childID]; !ok {
+		return
+	}
+	delete(r.nodes, childID)
+	if r.focused == childID {
+		r.focused = ""
+	}
+	r.recomputeDepths()
+}
+
 // Seed installs or refreshes membership from ListChildren.
 //
 // Callers pass every summary; Seed drops the exited ones itself, so the "never

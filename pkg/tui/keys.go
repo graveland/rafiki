@@ -71,6 +71,8 @@ type keyMap struct {
 	SelectUp   key.Binding
 	SelectDown key.Binding
 	Commit     key.Binding
+	NewAgent   key.Binding
+	EndAgent   key.Binding
 
 	// Any pane: return to input.
 	Escape key.Binding
@@ -151,6 +153,17 @@ func defaultKeyMap() keyMap {
 		SelectUp:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "up")),
 		SelectDown: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "down")),
 		Commit:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "open")),
+		// Bare letters, and they cost the textarea NOTHING: the rail swallows
+		// every unmatched key, so these live entirely inside a pane where no
+		// text is being entered. That is the whole reason agent-level verbs
+		// belong here rather than on a global chord -- ctrl+n is a textarea key
+		// (cursor down), and every other free ctrl key would have to be
+		// grandfathered into a key you can no longer type.
+		NewAgent: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
+		// One key for three outcomes, because they are the same intent at
+		// different stages: stop a live child, force one that will not stop,
+		// close one that already exited. Each is confirmed by a repeat.
+		EndAgent: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "stop/close")),
 
 		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back to input")),
 	}

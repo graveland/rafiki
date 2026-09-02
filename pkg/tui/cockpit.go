@@ -20,6 +20,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
 	"github.com/charmbracelet/x/ansi"
@@ -255,6 +256,16 @@ type Cockpit struct {
 	// is already slow -- which is the exact condition the self-heal exists for.
 	reseeding      bool
 	reseedInFlight bool
+
+	// form is the open create modal, nil when none. A modal owns every key
+	// while it is up, so this is checked before the global bindings.
+	form *spawnForm
+	// endArmed is when `x` was first pressed, and endArmedID is WHICH row it
+	// was pressed on. The id is not optional bookkeeping: arming on one agent
+	// and then moving the cursor before the repeat would otherwise end a
+	// different agent than the one the confirmation named.
+	endArmed   time.Time
+	endArmedID string
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -540,6 +551,17 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.pending = ""
 		return c, nil
 
+	case spawnedMsg:
+		return c, c.applySpawned(msg)
+
+	case killedMsg:
+		c.applyKilled(msg)
+		return c, nil
+
+	case closedMsg:
+		c.applyClosed(msg)
+		return c, nil
+
 	case tickMsg:
 		if c.notice != "" && time.Now().After(c.noticeUntil) {
 			c.notice = ""
@@ -675,6 +697,22 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := c.keys
 
+	// A modal owns EVERY key, checked before the globals rather than after.
+	// The globals list holds ⇥, esc, ^A and the arrow keys, all of which the
+	// form needs for itself; letting them match first would make the form's
+	// own tab order unreachable.
+	if c.form != nil {
+		return c.handleFormKey(msg)
+	}
+
+	// Any keystroke that is not the repeat disarms the end confirmation, for
+	// the same reason the quit confirmation disarms: a live destructive
+	// trigger must not survive an unrelated key.
+	if !key.Matches(msg, k.EndAgent) {
+		c.endArmed = time.Time{}
+		c.endArmedID = ""
+	}
+
 	// ── globals: live from every pane ────────────────────────────────────
 	// Any keystroke that is not the repeat disarms, so ^C followed by typing
 	// does not leave a live trigger behind for minutes.
@@ -742,6 +780,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, k.Commit):
 			cmd := c.hop(c.selected)
 			return c, tea.Batch(cmd, c.leaveRail())
+		case key.Matches(msg, k.NewAgent):
+			c.form = newSpawnForm()
+			return c, textinput.Blink
+		case key.Matches(msg, k.EndAgent):
+			return c, c.endSelected()
 		case key.Matches(msg, k.Escape):
 			return c, c.leaveRail()
 		}
@@ -1439,7 +1482,7 @@ func (c *Cockpit) footerHints() string {
 	var bs []key.Binding
 	switch c.focus {
 	case focusRail:
-		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.Escape}
+		bs = []key.Binding{k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Escape}
 	default:
 		bs = []key.Binding{k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort}
 	}
@@ -1486,7 +1529,7 @@ func (c *Cockpit) helpLines(width int) []string {
 		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs, k.Redraw, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
-		k.SelectUp, k.SelectDown, k.Commit, k.Escape)...)
+		k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Escape)...)
 	right = append(right, group("reading",
 		k.ScrollPageUp, k.ScrollTop, k.ScrollBottom,
 		key.NewBinding(key.WithKeys("up", "down"),
@@ -1534,6 +1577,8 @@ func (c *Cockpit) View() tea.View {
 
 	var conv string
 	switch f := c.focused(); {
+	case c.form != nil:
+		conv = c.form.view(convWidth)
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
 	case f == "" && c.rail.Len() == 0:
