@@ -3,8 +3,10 @@
 package main
 
 import (
+	"context"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -90,3 +92,56 @@ func TestDecorateFiltersByProvider(t *testing.T) {
 }
 
 func f64ptr(v float64) *float64 { return &v }
+
+// The builtin source's curation is cross-provider — anthropic AND openrouter
+// ids share one list — so the source-set filter alone leaks openrouter ids
+// into the claude kind. The kind's contract is served at the ROW layer; pin it
+// there, where the plan's original source-set test was too coarse to see it.
+func TestFilterRowsForKindClaudeKeepsOnlyAnthropic(t *testing.T) {
+	rows := []connectapi.ModelRow{
+		{ID: "anthropic/claude-opus-5", Provider: "anthropic", Source: "builtin"},
+		{ID: "anthropic/opus-latest", Provider: "anthropic", Source: "builtin"},
+		{ID: "openrouter/openai/gpt-4o", Provider: "openrouter", Source: "builtin"},
+		{ID: "openrouter/google/gemini-2.5-pro", Provider: "openrouter", Source: "builtin"},
+		{ID: "anthropic-oauth/claude-opus-5", Provider: "anthropic-oauth", Source: "user-config"},
+	}
+
+	got := filterRowsForKind(rows, protocol.KindClaude)
+	if len(got) != 2 {
+		t.Fatalf("claude rows = %+v, want only the two provider==anthropic rows", got)
+	}
+	for _, r := range got {
+		if r.Provider != "anthropic" {
+			t.Errorf("claude row %q has provider %q, want anthropic", r.ID, r.Provider)
+		}
+	}
+
+	// Only claude narrows rows. fundi, the empty not-yet-typed case, and any
+	// other kind keep everything — the source set did that job.
+	for _, kind := range []string{"", protocol.KindFundi, "nonsense"} {
+		if got := filterRowsForKind(rows, kind); len(got) != len(rows) {
+			t.Errorf("kind %q dropped rows (%d of %d); only the claude kind narrows rows", kind, len(got), len(rows))
+		}
+	}
+}
+
+// End to end over the real spine: sourcesForKind(claude) admits {builtin}, and
+// the builtin curation carries openrouter ids, so ListModelRows must narrow
+// the rows itself or claude completion offers ids Claude Code cannot run.
+// Hermetic: the claude source set enables no network-backed source and the
+// default provider set is in-memory.
+func TestListModelRowsClaudeKindAdmitsOnlyAnthropic(t *testing.T) {
+	c := &Controller{} // catalog nil, providers default: builtin-only spine for claude
+	rows, err := c.ListModelRows(context.Background(), "", protocol.KindClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("no rows for the claude kind; the builtin spine came back empty")
+	}
+	for _, r := range rows {
+		if r.Provider != "anthropic" {
+			t.Errorf("claude-kind row %q has provider %q; the builtin curation's non-Anthropic ids leak", r.ID, r.Provider)
+		}
+	}
+}
