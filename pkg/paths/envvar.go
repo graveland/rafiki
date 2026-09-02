@@ -25,6 +25,11 @@ const (
 	// GraceHours overrides how long an exited child's record is retained.
 	GraceHours = "RAFIKI_GRACE_HOURS"
 
+	// HeartbeatInterval overrides how often a continuously-working child's
+	// parent gets a check-in push. A Go duration string (e.g. "5m"); "0"
+	// disables the feature entirely.
+	HeartbeatInterval = "RAFIKI_HEARTBEAT_INTERVAL"
+
 	// DefaultModel supplies the model when `rafiki create` gets no --model.
 	DefaultModel = "RAFIKI_DEFAULT_MODEL"
 
