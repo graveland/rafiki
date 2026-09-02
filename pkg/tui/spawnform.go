@@ -99,8 +99,8 @@ type spawnForm struct {
 }
 
 // formChrome is the rows the form spends on things that are not suggestions:
-// title, blank, four field rows, blank, hints.
-const formChrome = 8
+// title, blank, four field rows, blank, hints, and the detail block.
+const formChrome = 8 + detailHeight
 
 // suggestWindow is how many suggestion rows fit in a body pane of this height.
 //
@@ -329,45 +329,15 @@ func (f *spawnForm) suggestView(width, window int, v modelView) string {
 		b.WriteString(styleMeta.Render(visionCellGlyph(r)))
 		b.WriteString("\n")
 	}
-	if d := f.detailLine(now); d != "" {
-		b.WriteString(d)
+	var sel *rafikiv1.ModelRow
+	if f.suggestCur >= 0 && f.suggestCur < len(f.suggest) {
+		sel = f.suggest[f.suggestCur]
+	}
+	for _, line := range modelDetail(sel, now, width) {
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// detailLine describes the highlighted suggestion. Same reasoning as the
-// picker's: the sparse facts belong on one line for one row rather than in a
-// column that is empty for most of them.
-func (f *spawnForm) detailLine(now time.Time) string {
-	if f.suggestCur < 0 || f.suggestCur >= len(f.suggest) {
-		return ""
-	}
-	r := f.suggest[f.suggestCur]
-	var parts []string
-	if r.MaxCompletionTokens != nil {
-		parts = append(parts, fmt.Sprintf("max out %d", *r.MaxCompletionTokens))
-	}
-	if r.CacheReadUsd != nil {
-		parts = append(parts, "cache read "+priceCell(r.CacheReadUsd))
-	}
-	switch toolsKind(r) {
-	case toolsNo:
-		parts = append(parts, styleError.Render("no tools"))
-	case toolsUnknown:
-		parts = append(parts, "tools unknown")
-	}
-	if hasParam(r, "reasoning") {
-		parts = append(parts, "reasoning")
-	}
-	if src := r.GetSource(); src != "" {
-		parts = append(parts, src)
-	}
-	line := "    " + styleMeta.Render(strings.Join(parts, " · "))
-	if w := expiryWarning(r, now); w != "" {
-		line += "  " + styleWarn.Render("⚠ "+w)
-	}
-	return line
 }
 
 // kindView renders the choice row as its options, the selected one marked.

@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
+	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -326,7 +327,7 @@ func expiryWarning(r *rafikiv1.ModelRow, now time.Time) string {
 	if days == 0 {
 		return "removed today"
 	}
-	return fmt.Sprintf("removed in %dd (%s)", days, raw)
+	return fmt.Sprintf("removed %s (%dd)", raw, days)
 }
 
 // ageCell renders how long ago a model was listed. Absent is an em dash, and
@@ -421,8 +422,8 @@ func visionCellGlyph(r *rafikiv1.ModelRow) string {
 // ── rendering ────────────────────────────────────────────────────────────────
 
 // pickerChrome is the rows the picker spends on things that are not models:
-// title, filter, blank, header, blank, footer.
-const pickerChrome = 6
+// title, filter, blank, header, footer, and the detail block.
+const pickerChrome = 5 + detailHeight
 
 func (p *modelPicker) view(width, height int, v modelView) string {
 	var b strings.Builder
@@ -487,9 +488,12 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 		b.WriteString("\n")
 	}
 
-	if d := p.detailLine(now); d != "" {
-		b.WriteString("\n")
-		b.WriteString(d)
+	var sel *rafikiv1.ModelRow
+	if p.cursor >= 0 && p.cursor < len(p.rows) {
+		sel = p.rows[p.cursor]
+	}
+	for _, line := range modelDetail(sel, now, width) {
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 
@@ -533,50 +537,127 @@ func (p *modelPicker) footer(v modelView) string {
 	return strings.Join(parts, "   ")
 }
 
-// detailLine describes the HIGHLIGHTED row: the long tail of facts that would
-// each need a column of their own.
+// detailHeight is the rows a detail block always occupies: a rule and two
+// content lines.
 //
-// This is where the sparse fields live. knowledge-cutoff-style data is present
-// for well under half the catalog, and a column that is empty for most rows
-// costs width on every row to inform a few; on one line, for one row, it costs
-// nothing when absent.
-func (p *modelPicker) detailLine(now time.Time) string {
-	if p.cursor < 0 || p.cursor >= len(p.rows) {
-		return ""
+// ALWAYS, even with nothing highlighted. Reserving the space unconditionally
+// keeps the list a fixed height, and a list that grows and shrinks as the
+// highlight moves is far worse than two blank rows.
+const detailHeight = 3
+
+// modelDetail renders everything known about one model as a fixed block.
+//
+// ONE function for both views. The form and the picker each grew their own
+// near-copy of this, which is the drift this file already avoids for filtering
+// and sorting; there is no reason detail should be the exception.
+//
+// The layout is FIXED-POSITION: every field keeps its column and its label
+// whether or not it has a value, and an absent one reads "—". A block whose
+// fields shuffle as you move the highlight cannot be read by glancing at the
+// same spot twice, which is what the old free-form "a · b · c" line got wrong.
+func modelDetail(r *rafikiv1.ModelRow, now time.Time, width int) []string {
+	rule := styleMeta.Render(strings.Repeat("─", max(1, width)))
+	if r == nil {
+		return []string{rule, "", ""}
 	}
-	r := p.rows[p.cursor]
-	var parts []string
-	if n := r.GetName(); n != "" && n != r.GetId() {
-		parts = append(parts, n)
+
+	// Line one: identity on the left, capabilities on the right.
+	//
+	// The capabilities go here rather than on line two because they are what
+	// disqualifies a model outright -- a "NO" under tools means this row cannot
+	// be an agent at all -- and the eye lands on line one first.
+	name := r.GetName()
+	if name == "" {
+		name = r.GetId()
 	}
-	if r.MaxCompletionTokens != nil {
-		parts = append(parts, fmt.Sprintf("max out %d", *r.MaxCompletionTokens))
+	right := detailField("tools", toolsWord(r), 15) +
+		detailField("vision", visionWord(r), 16) +
+		detailField("thinking", yesNo(hasParam(r, "reasoning")), 12)
+	rightW := ansi.StringWidth(ansi.Strip(right))
+	// The removal warning rides line ONE, not the tail of line two.
+	//
+	// It is the single most consequential fact about a row, and on line two it
+	// sat past ~100 columns where it was the first thing to clip. Here it
+	// costs a long display name some characters instead, which is the right
+	// trade: nobody picks a model on its display name.
+	warn := ""
+	if w := expiryWarning(r, now); w != "" {
+		warn = "  " + styleWarn.Render("⚠ "+w)
 	}
-	if r.CacheReadUsd != nil {
-		// Cache reads dominate the bill for a long-running agent -- the whole
-		// reason ProviderGuard exists -- so an input price alone understates
-		// what an agent actually costs.
-		parts = append(parts, "cache read "+priceCell(r.CacheReadUsd))
+	warnW := ansi.StringWidth(ansi.Strip(warn))
+	left := " " + styleRailFocused.Render(clip(name, max(10, width-rightW-warnW-2))) + warn
+	gap := width - ansi.StringWidth(ansi.Strip(left)) - rightW
+	if gap < 1 {
+		gap = 1
 	}
+	line1 := left + strings.Repeat(" ", gap) + right
+
+	// Line two: the numbers, ordered by decision value. A narrow terminal
+	// clips the tail, so source and age -- the two you are least likely to
+	// choose on -- go last deliberately.
+	line2 := " " +
+		detailField("ctx", ctxCell(r), 12) +
+		detailField("in/out", priceCell(r.PromptUsd)+"/"+priceCell(r.CompletionUsd), 21) +
+		detailField("cache", priceCell(r.CacheReadUsd)+"/"+priceCell(r.CacheWriteUsd), 21) +
+		detailField("max out", tokCell(r.MaxCompletionTokens), 15) +
+		detailField("age", ageCell(r, now), 11) +
+		detailField("source", orDash(r.GetSource()), 18)
+
+	return []string{rule, line1, clip(line2, width)}
+}
+
+// detailField renders one label/value cell at a FIXED width, so the eye can
+// return to the same column for the same fact on every row.
+func detailField(label, value string, w int) string {
+	return padTo(styleMeta.Render(label+" ")+value, w)
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+// tokCell renders a token count compactly; absent is an em dash, never 0.
+func tokCell(v *int32) string {
+	if v == nil {
+		return "—"
+	}
+	if *v >= 1000 {
+		return fmt.Sprintf("%dk", *v/1000)
+	}
+	return fmt.Sprintf("%d", *v)
+}
+
+// toolsWord and visionWord spell the three-state answers out. "unknown" is a
+// real answer and must not render as "no": the daemon has no catalog entry for
+// any locally-served model.
+func toolsWord(r *rafikiv1.ModelRow) string {
 	switch toolsKind(r) {
 	case toolsYes:
-		parts = append(parts, "tools")
+		return "yes"
 	case toolsNo:
-		parts = append(parts, styleError.Render("no tools"))
-	default:
-		parts = append(parts, styleMeta.Render("tools unknown"))
+		return styleError.Render("NO")
 	}
-	if hasParam(r, "reasoning") {
-		parts = append(parts, "reasoning")
+	return styleMeta.Render("unknown")
+}
+
+func visionWord(r *rafikiv1.ModelRow) string {
+	switch visionKind(r) {
+	case visionYes:
+		return "yes"
+	case visionNo:
+		return "no"
 	}
-	if src := r.GetSource(); src != "" {
-		parts = append(parts, src)
+	return styleMeta.Render("unknown")
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
 	}
-	line := styleMeta.Render("  " + strings.Join(parts, " · "))
-	if w := expiryWarning(r, now); w != "" {
-		line += "  " + styleWarn.Render("⚠ "+w)
-	}
-	return line
+	return "no"
 }
 
 // hasParam reports whether the catalog lists a request parameter for a model.
