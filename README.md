@@ -1077,7 +1077,7 @@ plausible scroll key — the input box is a full emacs-keymapped editor and
 claims `⇧↑`/`⇧↓`, `^N`, `^P`, `^U`, `^K` and more. The input box scrolls the
 transcript directly now, so the extra stop bought nothing and cost a keypress
 on every agent switch, which is the move made most often. Hiding the rail with
-`^A` does not give up switching: `⇥` reveals it, and picking an agent with `⏎`
+`^R` does not give up switching: `⇥` reveals it, and picking an agent with `⏎`
 puts it back.
 
 **Global — work from any pane**
@@ -1089,7 +1089,7 @@ puts it back.
 | `⌥P` / `^PgUp` | Hop to the previous agent that needs you. |
 | `^↑` / `^↓` | Hop straight up and down the rail, without changing pane. |
 | `esc` / `^X` | Abort the running turn. |
-| `^A` / `^B` | Collapse or restore the agent rail. |
+| `^R` / `^B` | Collapse or restore the agent rail. |
 | `^G` | Toggle the help overlay — every binding, grouped by pane. |
 | `^C/^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time. |
 

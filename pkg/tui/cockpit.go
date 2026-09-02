@@ -773,7 +773,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := c.keys
 
 	// A modal owns EVERY key, checked before the globals rather than after.
-	// The globals list holds ⇥, esc, ^A and the arrow keys, all of which the
+	// The globals list holds ⇥, esc, ^R and the arrow keys, all of which the
 	// form needs for itself; letting them match first would make the form's
 	// own tab order unreachable.
 	if c.query != nil {

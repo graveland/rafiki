@@ -25,6 +25,21 @@ func TestNoGlobalBindingStealsATextareaKey(t *testing.T) {
 	}
 }
 
+// TestCtrlAReachesTheTextarea pins that ToggleRail moved off ctrl+a: it used
+// to be the rail toggle, which stole the textarea's line-start binding —
+// ctrl+a is now unclaimed by any global, so it reaches the textarea like any
+// other unbound emacs key.
+func TestCtrlAReachesTheTextarea(t *testing.T) {
+	for _, s := range defaultKeyMap().ToggleRail.Keys() {
+		if s == "ctrl+a" {
+			t.Fatal("ToggleRail must not bind ctrl+a — it belongs to the textarea's line-start")
+		}
+	}
+	if grandfathered["ctrl+a"] {
+		t.Error("ctrl+a should not be grandfathered: nothing global claims it anymore")
+	}
+}
+
 // TestDefaultKeyMapBindsWhatTheFooterClaims keeps the advertised keys and the
 // real ones from drifting — they are separate hand-maintained strings today.
 func TestDefaultKeyMapBindsWhatTheFooterClaims(t *testing.T) {
@@ -39,6 +54,7 @@ func TestDefaultKeyMapBindsWhatTheFooterClaims(t *testing.T) {
 		{"prevPane", "shift+tab", k.PrevPane},
 		{"nextAttention", "alt+n", k.NextAttention},
 		{"prevAttention", "alt+p", k.PrevAttention},
+		{"toggleRail", "ctrl+r", k.ToggleRail},
 		{"toggleRail", "ctrl+b", k.ToggleRail},
 		{"help", "ctrl+g", k.Help},
 		{"send", "enter", k.Send},
