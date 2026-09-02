@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -87,12 +88,45 @@ type spawnForm struct {
 	// is load-bearing: with nothing highlighted ⏎ SUBMITS, exactly as it does
 	// on every other row, so the key never means two things at once.
 	suggestCur int
+	// suggestOff is the first row drawn. The list holds every match and the
+	// panel shows a window onto it, so a filter matching 200 models is
+	// navigable rather than truncated at whatever happened to fit.
+	suggestOff int
 }
 
-// maxSuggestions bounds the typeahead. Six is enough to recognise the one you
-// meant without the list pushing the cwd row off a short terminal; the full
-// picker is where you go to see all of them.
-const maxSuggestions = 6
+// formChrome is the rows the form spends on things that are not suggestions:
+// title, blank, four field rows, blank, hints.
+const formChrome = 8
+
+// suggestWindow is how many suggestion rows fit in a body pane of this height.
+//
+// It accounts for the optional error and busy lines because they push the list
+// down: a window computed as if they were absent scrolls one screenful past
+// where the panel actually ends.
+func (f *spawnForm) suggestWindow(height int) int {
+	chrome := formChrome
+	if f.err != "" {
+		chrome += 2
+	}
+	if f.busy {
+		chrome += 2
+	}
+	return max(1, height-chrome)
+}
+
+// moveSuggest walks the highlight and drags the window with it.
+func (f *spawnForm) moveSuggest(delta, window int) {
+	if len(f.suggest) == 0 {
+		return
+	}
+	f.suggestCur = min(max(f.suggestCur+delta, 0), len(f.suggest)-1)
+	if f.suggestCur < f.suggestOff {
+		f.suggestOff = f.suggestCur
+	}
+	if window > 0 && f.suggestCur >= f.suggestOff+window {
+		f.suggestOff = f.suggestCur - window + 1
+	}
+}
 
 // newSpawnForm builds the modal with sensible prefills.
 //
@@ -128,9 +162,6 @@ func (f *spawnForm) refreshSuggestions(all []*rafikiv1.ModelRow) {
 	q := strings.ToLower(strings.TrimSpace(f.inputs[fieldModel].Value()))
 	f.suggest = f.suggest[:0]
 	for _, r := range all {
-		if len(f.suggest) == maxSuggestions {
-			break
-		}
 		if q != "" && !strings.Contains(strings.ToLower(r.GetId()), q) &&
 			!strings.Contains(strings.ToLower(r.GetName()), q) {
 			continue
@@ -140,6 +171,9 @@ func (f *spawnForm) refreshSuggestions(all []*rafikiv1.ModelRow) {
 	if f.suggestCur >= len(f.suggest) {
 		f.suggestCur = len(f.suggest) - 1
 	}
+	// A new filter restarts the window as well as the highlight: scrolled 40
+	// rows into the OLD list, the new one would open somewhere arbitrary.
+	f.suggestOff = 0
 }
 
 // showSuggestions reports whether the typeahead is on screen. It follows FOCUS,
@@ -205,7 +239,7 @@ func (f *spawnForm) update(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 // view renders the modal. width is the body pane's width.
-func (f *spawnForm) view(width int) string {
+func (f *spawnForm) view(width, height int) string {
 	var b strings.Builder
 	b.WriteString(styleRailFocused.Render("new agent"))
 	b.WriteString("\n\n")
@@ -227,7 +261,7 @@ func (f *spawnForm) view(width int) string {
 		b.WriteString("\n")
 
 		if i == fieldModel && f.showSuggestions() {
-			b.WriteString(f.suggestView(width))
+			b.WriteString(f.suggestView(width, f.suggestWindow(height)))
 		}
 	}
 
@@ -250,7 +284,17 @@ func (f *spawnForm) view(width int) string {
 		// The model row has its own vocabulary and it is worth the line: ↑/↓
 		// mean the list here rather than the field ring, and ^F is the only
 		// route to the sort and vision filters.
-		hints = "↑/↓ pick   ⏎ take   ^F all models   ⇥ field   esc cancel"
+		//
+		// The count is not decoration now that the list scrolls: without it a
+		// window showing 20 of 300 matches looks exactly like all 20 matches.
+		pos := ""
+		if n := len(f.suggest); n > 0 {
+			shown := min(n, f.suggestOff+f.suggestWindow(height))
+			if n > shown-f.suggestOff {
+				pos = fmt.Sprintf("   %d-%d of %d", f.suggestOff+1, shown, n)
+			}
+		}
+		hints = "↑/↓ pick   ⏎ take   ^F all models   ⇥ field   esc cancel" + pos
 	}
 	b.WriteString(styleMeta.Render(hints))
 	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
@@ -261,9 +305,11 @@ func (f *spawnForm) view(width int) string {
 // Each row carries the facts that decide a choice -- context, price, whether it
 // sees images -- because "which of these three opus ids" is not answerable from
 // the id alone. The columns are the picker's, narrowed.
-func (f *spawnForm) suggestView(width int) string {
+func (f *spawnForm) suggestView(width, window int) string {
 	var b strings.Builder
-	for i, r := range f.suggest {
+	end := min(len(f.suggest), f.suggestOff+window)
+	for i := f.suggestOff; i < end; i++ {
+		r := f.suggest[i]
 		lead := "    "
 		id := r.GetId()
 		if i == f.suggestCur {
@@ -300,7 +346,7 @@ func (f *spawnForm) kindView() string {
 // The modal is checked before the cockpit's globals, so everything it does not
 // claim is swallowed rather than falling through -- a ⇥ that reached cyclePane
 // would move focus to a pane hidden behind the modal.
-func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea.Cmd) {
 	f := c.form
 	switch msg.String() {
 	case "esc", "ctrl+c":
@@ -321,7 +367,7 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// field. Leaving the row is still ⇥, which is the key that always
 		// means that; ↓ next to a visible list can only sensibly mean the list.
 		if f.showSuggestions() && f.suggestCur < len(f.suggest)-1 {
-			f.suggestCur++
+			f.moveSuggest(+1, window)
 			return c, nil
 		}
 		if f.showSuggestions() && f.suggestCur >= 0 {
@@ -333,8 +379,13 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "up":
 		// ↑ off the top returns to the text, not to the previous field: the
 		// way out of a typeahead is back to what you were typing.
-		if f.showSuggestions() && f.suggestCur >= 0 {
-			f.suggestCur--
+		if f.showSuggestions() && f.suggestCur == 0 {
+			// Off the top row: back to the text, and the window with it.
+			f.suggestCur, f.suggestOff = -1, 0
+			return c, nil
+		}
+		if f.showSuggestions() && f.suggestCur > 0 {
+			f.moveSuggest(-1, window)
 			return c, nil
 		}
 		f.suggestCur = -1

@@ -722,7 +722,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c.handlePickerKey(msg, max(1, c.bodyHeight()-pickerChrome))
 	}
 	if c.form != nil {
-		return c.handleFormKey(msg)
+		return c.handleFormKey(msg, c.form.suggestWindow(c.bodyHeight()))
 	}
 
 	// Any keystroke that is not the repeat disarms the end confirmation, for
@@ -1604,7 +1604,7 @@ func (c *Cockpit) View() tea.View {
 	case c.picker != nil:
 		conv = c.picker.view(convWidth, bodyHeight)
 	case c.form != nil:
-		conv = c.form.view(convWidth)
+		conv = c.form.view(convWidth, bodyHeight)
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
 	case f == "" && c.rail.Len() == 0:
