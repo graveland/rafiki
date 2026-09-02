@@ -277,6 +277,10 @@ type Cockpit struct {
 	models     map[string][]*rafikiv1.ModelRow
 	modelsErr  map[string]string
 	modelsBusy map[string]bool
+	// query is the open filter+sort band, nil when none. It sits OVER the
+	// picker or the form rather than replacing them, so every keystroke
+	// re-sorts the rows still visible above it.
+	query *queryDialog
 	// modelView is the shared sort and vision filter. On the cockpit rather
 	// than either view: the typeahead and the full browser are two windows
 	// onto one question, and sorting in one must hold in the other.
@@ -727,11 +731,14 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// The globals list holds ⇥, esc, ^A and the arrow keys, all of which the
 	// form needs for itself; letting them match first would make the form's
 	// own tab order unreachable.
+	if c.query != nil {
+		return c.handleQueryKey(msg)
+	}
 	if c.picker != nil {
 		return c.handlePickerKey(msg, max(1, c.bodyHeight()-pickerChrome))
 	}
 	if c.form != nil {
-		return c.handleFormKey(msg, c.form.suggestWindow(c.bodyHeight()))
+		return c.handleFormKey(msg, c.form.suggestWindow(c.bodyHeight(), c.query))
 	}
 
 	// Any keystroke that is not the repeat disarms the end confirmation, for
@@ -1624,9 +1631,9 @@ func (c *Cockpit) View() tea.View {
 	var conv string
 	switch f := c.focused(); {
 	case c.picker != nil:
-		conv = c.picker.view(convWidth, bodyHeight, c.modelView)
+		conv = c.picker.view(convWidth, bodyHeight, c.modelView, c.query)
 	case c.form != nil:
-		conv = c.form.view(convWidth, bodyHeight, c.modelView)
+		conv = c.form.view(convWidth, bodyHeight, c.modelView, c.query)
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
 	case f == "" && c.rail.Len() == 0:

@@ -732,6 +732,34 @@
   DIFFERENT axis from `created` — a model listed last week can carry a cutoff
   from a year earlier — so both earn their own field.
 
+- **Constraints and ordering are SEPARATE, which is why `^S` opens a
+  filter+sort band and not a multi-key sort.** "context ↓ then price ↑" still
+  lists every 8k model, just lower down; "ctx ≥1M and price ≤$2, ordered by
+  intelligence" removes them. Sort priority cannot express a constraint. The
+  band sits OVER the list rather than replacing it, so every keystroke
+  re-filters the rows still visible above — choosing a query blind and then
+  discovering what it matched is the interaction it replaces. `^R` keeps the
+  old one-key cycle, because one obvious ordering should not need a panel.
+  Price needs BOTH sides of a bound and is the proof the pair is necessary:
+  7 free models pass a bare `≤$2`, so excluding rate-limited free models needs
+  the low side while capping spend needs the high side, simultaneously.
+
+- **A descending sort must NOT invert the ABSENCE verdict** — `compareField`
+  returns `byPresence` and `sortModels` returns that answer unflipped. An
+  absent value is not "the largest", it is no answer, so it sorts last in both
+  directions; flipping it puts every unscored model at the top of "smartest
+  descending", and 47 of the 104 models passing a typical query have no score.
+  This shipped wrong with a comment claiming it was right — the comment
+  described the intent and the code flipped anyway. Two absent values TIE, so
+  the next key decides. Bounds follow the same rule from the other side:
+  `bound.admits` ADMITS a row the catalog cannot answer for, because every
+  locally-served model has no price, no context and no score.
+
+- **`tea.KeyPressMsg.String()` spells space as `"space"`, so `case " ":` is a
+  silently dead binding.** The create form's kind-cycling shipped that way and
+  nothing caught it: the test drove `←/→` only. Any new key case wants a test
+  that drives the real `handleKey` path, not the handler's internals.
+
 - **Model columns are pinned plus ONE, chosen by the sort.** The panel cannot
   hold every fact, and sorting by something invisible is a list that reorders
   for no visible reason — so `modelSort.column()` returns the extra column a

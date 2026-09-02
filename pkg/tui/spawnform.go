@@ -107,7 +107,7 @@ const formChrome = 8 + detailHeight
 // It accounts for the optional error and busy lines because they push the list
 // down: a window computed as if they were absent scrolls one screenful past
 // where the panel actually ends.
-func (f *spawnForm) suggestWindow(height int) int {
+func (f *spawnForm) suggestWindow(height int, q *queryDialog) int {
 	chrome := formChrome
 	if f.err != "" {
 		chrome += 2
@@ -115,7 +115,7 @@ func (f *spawnForm) suggestWindow(height int) int {
 	if f.busy {
 		chrome += 2
 	}
-	return max(1, height-chrome)
+	return max(1, height-chrome-queryRows(q))
 }
 
 // moveSuggest walks the highlight and drags the window with it.
@@ -235,7 +235,7 @@ func (f *spawnForm) update(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 // view renders the modal. width is the body pane's width.
-func (f *spawnForm) view(width, height int, v modelView) string {
+func (f *spawnForm) view(width, height int, v modelView, q *queryDialog) string {
 	f.viewSummary = v.summary()
 	var b strings.Builder
 	b.WriteString(styleRailFocused.Render("new agent"))
@@ -258,7 +258,7 @@ func (f *spawnForm) view(width, height int, v modelView) string {
 		b.WriteString("\n")
 
 		if i == fieldModel && f.showSuggestions() {
-			b.WriteString(f.suggestView(width, f.suggestWindow(height), v))
+			b.WriteString(f.suggestView(width, f.suggestWindow(height, q), v))
 		}
 	}
 
@@ -286,7 +286,7 @@ func (f *spawnForm) view(width, height int, v modelView) string {
 		// window showing 20 of 300 matches looks exactly like all 20 matches.
 		pos := ""
 		if n := len(f.suggest); n > 0 {
-			shown := min(n, f.suggestOff+f.suggestWindow(height))
+			shown := min(n, f.suggestOff+f.suggestWindow(height, q))
 			if n > shown-f.suggestOff {
 				pos = fmt.Sprintf("   %d-%d of %d", f.suggestOff+1, shown, n)
 			}
@@ -294,6 +294,10 @@ func (f *spawnForm) view(width, height int, v modelView) string {
 		hints = "↑/↓ pick   ⏎ take   ^S/^V/^T " + f.viewSummary + "   ^F all   ⇥" + pos
 	}
 	b.WriteString(styleMeta.Render(hints))
+	if q != nil {
+		b.WriteString("\n")
+		b.WriteString(q.view(width, v))
+	}
 	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
 }
 
@@ -304,8 +308,14 @@ func (f *spawnForm) view(width, height int, v modelView) string {
 // the id alone. The columns are the picker's, narrowed.
 func (f *spawnForm) suggestView(width, window int, v modelView) string {
 	var b strings.Builder
-	extraTitle, extraW, hasExtra := v.sort.column()
-	_ = extraTitle // the inline list has no header row; the hint line names the sort
+	// The inline list has no header row, so the hint line is what names the
+	// sort; the columns themselves just appear.
+	extras := extraColumns(v.keys)
+	extraW := 0
+	for _, f := range extras {
+		_, w := f.header()
+		extraW += w
+	}
 	idW := max(20, width-32-extraW)
 
 	now := time.Now()
@@ -323,8 +333,9 @@ func (f *spawnForm) suggestView(width, window int, v modelView) string {
 		b.WriteString("  ")
 		b.WriteString(styleMeta.Render(padTo(ctxCell(r), 9)))
 		b.WriteString(styleMeta.Render(padTo(priceCell(r.PromptUsd), 8)))
-		if hasExtra {
-			b.WriteString(styleMeta.Render(padTo(extraCell(r, v.sort, now), extraW)))
+		for _, f := range extras {
+			_, w := f.header()
+			b.WriteString(styleMeta.Render(padTo(cellFor(r, f, now), w)))
 		}
 		b.WriteString(styleMeta.Render(visionCellGlyph(r)))
 		b.WriteString("\n")
@@ -414,15 +425,22 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			f.cycleKind(+1)
 			return c, c.kindChanged()
 		}
-	case " ":
+	case "space":
+		// "space", not " ": bubbletea's KeyPressMsg.String() spells it out, so
+		// a case of " " matches nothing and the binding is silently dead. This
+		// shipped that way once.
 		if f.focus == fieldKind {
 			f.cycleKind(+1)
 			return c, c.kindChanged()
 		}
 	case "ctrl+s":
-		// Sorting works inline, not only in the full browser: "cheapest thing
-		// matching opus" is a question the typeahead should answer without
-		// making you open another panel to ask it.
+		// The band opens over the typeahead, so the suggestions re-order under
+		// it as the query is composed.
+		c.query = &queryDialog{}
+		return c, nil
+	case "ctrl+r":
+		// The one-key cycle survives for the common case: one obvious
+		// ordering should not need a panel.
 		c.modelView.cycleSort()
 		f.suggestCur = -1
 		f.refreshSuggestions(c.models[f.kind()], c.modelView)

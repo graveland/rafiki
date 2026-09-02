@@ -25,7 +25,7 @@ func keyMsg(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyLeft}
 	case "right":
 		return tea.KeyPressMsg{Code: tea.KeyRight}
-	case " ":
+	case "space":
 		return tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 	}
 	return tea.KeyPressMsg{Code: rune(s[0]), Text: s}
@@ -110,6 +110,21 @@ func TestKindCyclesAndIsNeverFreeText(t *testing.T) {
 		}
 	}
 	t.Errorf("kind = %q, which is not one of %v", c.form.kind(), spawnKinds)
+}
+
+// space cycles the kind row too. bubbletea spells the key "space", so a
+// `case " "` matches nothing and the binding is dead with no error anywhere --
+// which is exactly how it shipped the first time.
+func TestSpaceCyclesTheKindRow(t *testing.T) {
+	c := formCockpit(t)
+	c.form.focus = fieldKind
+	first := c.form.kind()
+
+	c.handleKey(keyMsg("space"))
+
+	if c.form.kind() == first {
+		t.Errorf("space did not cycle the kind; still %q", first)
+	}
 }
 
 func TestEscapeCancelsTheForm(t *testing.T) {
@@ -220,7 +235,7 @@ func TestFormOwnsTheBodyPane(t *testing.T) {
 
 func TestFormShowsEveryFieldAndBothKinds(t *testing.T) {
 	c := formCockpit(t)
-	out := c.form.view(80, 24, c.modelView)
+	out := c.form.view(80, 24, c.modelView, nil)
 	for _, want := range []string{"name", "kind", "model", "cwd"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("form view is missing the %q row", want)

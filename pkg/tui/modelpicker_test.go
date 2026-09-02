@@ -155,7 +155,7 @@ func TestFilterResetsTheCursor(t *testing.T) {
 // price as zero is exactly what the optional wire fields exist to prevent.
 func TestCheapestSortPutsUnpricedModelsLast(t *testing.T) {
 	c, p := loadedPicker(t)
-	c.modelView.sort = sortCost
+	c.modelView.keys = []sortKey{{field: colIn}}
 	p.apply(c.modelView)
 
 	if got := p.rows[0].GetId(); got != "deepseek/chat" {
@@ -168,7 +168,7 @@ func TestCheapestSortPutsUnpricedModelsLast(t *testing.T) {
 
 func TestBiggestContextSortPutsUnknownContextLast(t *testing.T) {
 	c, p := loadedPicker(t)
-	c.modelView.sort = sortContext
+	c.modelView.keys = []sortKey{{field: colCtx, desc: true}}
 	p.apply(c.modelView)
 
 	if got := p.rows[0].GetId(); got != "openai/gpt-4o" {
@@ -330,36 +330,34 @@ func TestPickerOwnsTheBodyPaneAboveTheForm(t *testing.T) {
 	}
 }
 
-func TestCtrlSCyclesTheSortAndWraps(t *testing.T) {
+// ^R still cycles the primary key; ^S now opens the dialog instead.
+func TestCtrlRCyclesThePrimarySortAndWraps(t *testing.T) {
 	c, _ := loadedPicker(t)
-	if c.modelView.sort != sortID {
-		t.Fatalf("initial sort = %v, want sortID", c.modelView.sort)
-	}
-	seen := map[modelSort]bool{c.modelView.sort: true}
-	for i := 0; i < int(modelSortCount)-1; i++ {
-		c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
-		if seen[c.modelView.sort] {
-			t.Fatalf("^S revisited %v before covering every sort", c.modelView.sort)
+	first := c.modelView.keys[0].field
+	seen := map[modelField]bool{first: true}
+	for i := 0; i < int(modelFieldCount)-1; i++ {
+		c.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+		got := c.modelView.keys[0].field
+		if seen[got] {
+			t.Fatalf("^R revisited %v before covering every field", got)
 		}
-		seen[c.modelView.sort] = true
+		seen[got] = true
 	}
-	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
-	if c.modelView.sort != sortID {
-		t.Errorf("sort = %v after a full cycle, want it to wrap", c.modelView.sort)
+	c.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if c.modelView.keys[0].field != first {
+		t.Errorf("field = %v after a full cycle, want it to wrap", c.modelView.keys[0].field)
 	}
 }
 
-// Every sort must have a label. An unnamed one renders as "?" in the footer,
-// which is the only place the active sort is visible at all.
-func TestEverySortIsNamed(t *testing.T) {
-	for s := modelSort(0); s < modelSortCount; s++ {
-		if s.String() == "?" {
-			t.Errorf("sort %d has no label", s)
+// Every field must have a label: an unnamed one renders "?" in the dialog,
+// which is the only place the ordering is visible.
+func TestEveryFieldIsNamed(t *testing.T) {
+	for f := modelField(0); f < modelFieldCount; f++ {
+		if f.String() == "?" {
+			t.Errorf("field %d has no label", f)
 		}
 	}
 }
-
-// ── live typeahead ───────────────────────────────────────────────────────────
 
 // The point of the whole interaction: filtering happens on the keystroke, with
 // no key to press to make it happen.
@@ -562,8 +560,8 @@ func TestSuggestionsFillThePanelAndKeepEveryMatch(t *testing.T) {
 		t.Errorf("suggest = %d, want every match retained", len(c.form.suggest))
 	}
 	// A tall pane shows more rows than a short one; that is the whole request.
-	tall := c.form.suggestWindow(40)
-	short := c.form.suggestWindow(14)
+	tall := c.form.suggestWindow(40, nil)
+	short := c.form.suggestWindow(14, nil)
 	if tall <= short {
 		t.Errorf("window: tall=%d short=%d, want the taller pane to show more", tall, short)
 	}
@@ -645,8 +643,8 @@ func TestSuggestionsShowTheDecidingFacts(t *testing.T) {
 
 // ── sort and vision, shared by both views ────────────────────────────────────
 
-// The ask: sorting must work inline, not only after opening the full browser.
-func TestCtrlSSortsTheInlineTypeahead(t *testing.T) {
+// Sorting reaches the inline typeahead, not only the full browser.
+func TestSortReachesTheInlineTypeahead(t *testing.T) {
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
@@ -654,11 +652,9 @@ func TestCtrlSSortsTheInlineTypeahead(t *testing.T) {
 		t.Fatalf("first suggestion = %q, want alphabetical order to start", got)
 	}
 
-	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	c.modelView.keys = []sortKey{{field: colIn}}
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 
-	if c.modelView.sort != sortCost {
-		t.Fatalf("sort = %v, want sortCost", c.modelView.sort)
-	}
 	if got := c.form.suggest[0].GetId(); got != "deepseek/chat" {
 		t.Errorf("first suggestion = %q, want the cheapest", got)
 	}
@@ -686,15 +682,16 @@ func TestCtrlVFiltersVisionInTheInlineTypeahead(t *testing.T) {
 	}
 }
 
-// One setting, two windows. Sorting inline and then opening the browser must
-// not silently reorder under you.
+// One setting, two windows: sorting inline then opening the browser must not
+// silently reorder under you.
 func TestSortCarriesFromTheTypeaheadIntoTheBrowser(t *testing.T) {
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
-	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}) // → cheapest
+	c.modelView.keys = []sortKey{{field: colIn}}
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 
-	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl}) // open browser
+	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 
 	if c.picker == nil {
 		t.Fatal("browser did not open")
@@ -704,27 +701,26 @@ func TestSortCarriesFromTheTypeaheadIntoTheBrowser(t *testing.T) {
 	}
 }
 
-// ...and back the other way.
 func TestSortCarriesFromTheBrowserBackToTheTypeahead(t *testing.T) {
 	c, _ := loadedPicker(t)
-	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
-	want := c.modelView.sort
+	c.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	want := c.modelView.keys[0].field
 
 	c.handleKey(keyMsg("esc")) // back to the form
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 
-	if c.modelView.sort != want {
-		t.Errorf("sort = %v after returning to the form, want %v", c.modelView.sort, want)
+	if c.modelView.keys[0].field != want {
+		t.Errorf("field = %v after returning to the form, want %v",
+			c.modelView.keys[0].field, want)
 	}
 }
 
-// The two views must never disagree about what matches. They had separate
-// copies of this logic, which is exactly how they would drift.
+// The two views must never disagree about what matches.
 func TestBothViewsSelectIdenticallyForTheSameQuery(t *testing.T) {
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
-	c.modelView = modelView{sort: sortCost, visionOnly: true}
+	c.modelView = modelView{keys: []sortKey{{field: colIn}}, visionOnly: true}
 
 	c.form.inputs[fieldModel].SetValue("a")
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
@@ -742,16 +738,14 @@ func TestBothViewsSelectIdenticallyForTheSameQuery(t *testing.T) {
 	}
 }
 
-// The active sort is otherwise invisible, and an on vision filter looks like a
-// catalog that happens to hold no text-only models.
 func TestHintLineNamesTheActiveView(t *testing.T) {
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
-	c.modelView = modelView{sort: sortCost, visionOnly: true}
+	c.modelView = modelView{keys: []sortKey{{field: colIn}}, visionOnly: true}
 
-	out := ansi.Strip(c.form.view(90, 24, c.modelView))
-	if !strings.Contains(out, "cheapest") {
+	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil))
+	if !strings.Contains(out, "in$") {
 		t.Errorf("hint line does not name the sort:\n%s", out)
 	}
 	if !strings.Contains(out, "vision on") {
@@ -759,7 +753,7 @@ func TestHintLineNamesTheActiveView(t *testing.T) {
 	}
 }
 
-// Changing sort or filter must drop the highlight: it names a row in the OLD
+// Changing the query must drop the highlight: it names a row in the OLD
 // order, and keeping it selects whatever now sits there.
 func TestChangingTheViewClearsTheHighlight(t *testing.T) {
 	c := formCockpit(t)
@@ -770,14 +764,12 @@ func TestChangingTheViewClearsTheHighlight(t *testing.T) {
 		t.Fatal("nothing highlighted to begin with")
 	}
 
-	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	c.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
 
 	if c.form.suggestCur != -1 {
 		t.Errorf("suggestCur = %d after a re-sort, want -1", c.form.suggestCur)
 	}
 }
-
-// ── tool support, age, expiry ────────────────────────────────────────────────
 
 func toolRows() []*rafikiv1.ModelRow {
 	day := int64(24 * 60 * 60)
@@ -854,8 +846,7 @@ func TestHintLineFlagsWhenNonToolModelsAreIncluded(t *testing.T) {
 
 func TestNewestSortOrdersByListingDateAndPutsUnknownLast(t *testing.T) {
 	c, p := loadedPicker(t)
-	seedModels(c, c.picker.kind, toolRows())
-	c.modelView = modelView{sort: sortNewest}
+	c.modelView = modelView{keys: []sortKey{{field: colAge, desc: true}}}
 	p.all = toolRows()
 	p.apply(c.modelView)
 
@@ -867,18 +858,29 @@ func TestNewestSortOrdersByListingDateAndPutsUnknownLast(t *testing.T) {
 	}
 }
 
-// Sorting by something invisible is a list that reorders for no reason, so the
-// AGE column appears exactly when it is the sort key.
-func TestAgeColumnAppearsOnlyWhenSortingByAge(t *testing.T) {
-	if _, _, ok := sortID.column(); ok {
-		t.Error("sortID asked for an extra column; it sorts by a pinned one")
+// Sorting by something invisible is a list that reorders for no visible
+// reason, so an unpinned sort field brings its own column.
+func TestOnlyUnpinnedFieldsAddAColumn(t *testing.T) {
+	for _, f := range []modelField{colModel, colCtx, colIn, colOut} {
+		if got := extraColumns([]sortKey{{field: f}}); len(got) != 0 {
+			t.Errorf("sorting by %v added a column; it is already pinned", f)
+		}
 	}
-	if _, _, ok := sortCost.column(); ok {
-		t.Error("sortCost asked for an extra column; price is already pinned")
+	got := extraColumns([]sortKey{{field: colAge, desc: true}})
+	if len(got) != 1 || got[0] != colAge {
+		t.Errorf("extraColumns = %v, want [age]", got)
 	}
-	title, w, ok := sortNewest.column()
-	if !ok || title != "AGE" || w <= 0 {
-		t.Errorf("sortNewest.column() = (%q,%d,%v), want an AGE column", title, w, ok)
+	if title, w := colAge.header(); title != "AGE" || w <= 0 {
+		t.Errorf("colAge.header() = (%q,%d), want an AGE column", title, w)
+	}
+}
+
+// Two keys may add two columns, no more: a four-key sort must not squeeze the
+// model id off the row.
+func TestExtraColumnsAreCappedAtTwo(t *testing.T) {
+	keys := []sortKey{{field: colAge}, {field: colIntel}, {field: colCode}, {field: colAgentic}}
+	if got := extraColumns(keys); len(got) != 2 {
+		t.Errorf("extraColumns = %v, want it capped at 2", got)
 	}
 }
 
@@ -1052,33 +1054,35 @@ func scoredRows() []*rafikiv1.ModelRow {
 
 func TestAgenticSortIsHighestFirstAndUnscoredLast(t *testing.T) {
 	c, p := loadedPicker(t)
-	c.modelView = modelView{sort: sortAgentic}
+	c.modelView = modelView{keys: []sortKey{{field: colAgentic, desc: true}}}
 	p.all = scoredRows()
 	p.apply(c.modelView)
 
 	if got := p.rows[0].GetId(); got != "b/best" {
 		t.Errorf("first row = %q, want the highest score", got)
 	}
-	// Absent is UNSCORED, not zero. Sorting it below a 0.3 would be the same
-	// failure absent pricing would be under "cheapest".
+	// Absent is UNSCORED, never zero, and DESCENDING must not flip that: an
+	// unscored model at the top of "smartest" is the failure this guards.
 	if got := p.rows[len(p.rows)-1].GetId(); got != "c/unscored" {
 		t.Errorf("last row = %q, want the unscored model last", got)
 	}
 }
 
-// Sorting by a score you cannot see is a list that reorders for no reason.
 func TestAgenticSortShowsItsOwnColumn(t *testing.T) {
-	title, w, ok := sortAgentic.column()
-	if !ok || title != "AGENTIC" || w <= 0 {
-		t.Fatalf("sortAgentic.column() = (%q,%d,%v), want an AGENTIC column", title, w, ok)
+	got := extraColumns([]sortKey{{field: colAgentic, desc: true}})
+	if len(got) != 1 || got[0] != colAgentic {
+		t.Fatalf("extraColumns = %v, want [agentic]", got)
+	}
+	if title, w := colAgentic.header(); title != "AGENTIC" || w <= 0 {
+		t.Errorf("colAgentic.header() = (%q,%d), want an AGENTIC column", title, w)
 	}
 	f := 59.2
 	row := &rafikiv1.ModelRow{Id: "b/best", AgenticIndex: &f}
-	if got := extraCell(row, sortAgentic, time.Now()); got != "59.2" {
-		t.Errorf("extraCell = %q, want the score", got)
+	if got := cellFor(row, colAgentic, time.Now()); got != "59.2" {
+		t.Errorf("cellFor = %q, want the score", got)
 	}
-	if got := extraCell(row, sortNewest, time.Now()); got != "—" {
-		t.Errorf("extraCell under sortNewest = %q, want the age cell", got)
+	if got := cellFor(row, colAge, time.Now()); got != "—" {
+		t.Errorf("cellFor(age) = %q, want an em dash", got)
 	}
 }
 
