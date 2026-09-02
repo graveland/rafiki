@@ -291,6 +291,13 @@ message ModelRow {
   // the catalog reports, never as a promise, and never let absence read as a
   // low score.
   optional double agentic_index = 17;
+
+  // The other two artificial_analysis scores. All three are present for
+  // exactly the same entries -- a row with one has all three -- and carry the
+  // same caveat: a third-party claim, absent for most of the catalog, and
+  // absence must never read as a low score.
+  optional double intelligence_index = 18;
+  optional double coding_index       = 19;
 }
 
 message ListModelsRequest {

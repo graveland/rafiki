@@ -594,6 +594,12 @@ func modelDetail(r *rafikiv1.ModelRow, now time.Time, width int) []string {
 	right := detailField("tools", toolsWord(r), 15) +
 		detailField("vision", visionWord(r), 16) +
 		detailField("thinking", yesNo(hasParam(r, "reasoning")), 13) +
+		// The three artificial_analysis scores sit together because they ARE
+		// together: one source, one presence, and only meaningful read
+		// against each other -- a high coding score next to a low agentic one
+		// is the useful shape, and splitting them across lines hides it.
+		detailField("intel", scoreCell(r.IntelligenceIndex), 12) +
+		detailField("code", scoreCell(r.CodingIndex), 11) +
 		detailField("agentic", agenticCell(r), 13)
 	rightW := ansi.StringWidth(ansi.Strip(right))
 	// The removal warning rides line ONE, not the tail of line two.
@@ -684,14 +690,17 @@ func visionWord(r *rafikiv1.ModelRow) string {
 	return styleMeta.Render("unknown")
 }
 
-// agenticCell renders the third-party agentic score. Absent is an em dash --
-// unscored, not zero.
-func agenticCell(r *rafikiv1.ModelRow) string {
-	if r.AgenticIndex == nil {
+// scoreCell renders one third-party index. Absent is an em dash -- UNSCORED,
+// not zero. 62% of the catalog carries no benchmark at all, and a 0.0 there
+// would read as the worst model rather than as no answer.
+func scoreCell(v *float64) string {
+	if v == nil {
 		return "—"
 	}
-	return fmt.Sprintf("%.1f", *r.AgenticIndex)
+	return fmt.Sprintf("%.1f", *v)
 }
+
+func agenticCell(r *rafikiv1.ModelRow) string { return scoreCell(r.AgenticIndex) }
 
 // cutoffCell renders the training-data cutoff, which is a DIFFERENT axis from
 // age: a model listed last week can have a cutoff from a year before that.

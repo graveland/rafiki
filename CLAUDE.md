@@ -718,11 +718,13 @@
   `modelDetail` is ONE function for the form and the picker; they each grew a
   near-copy first, which is the same drift `selectModels` already prevents.
 
-- **`agentic_index` is a third-party CLAIM and is absent for 62% of the
-  catalog.** It lives at `benchmarks.artificial_analysis.agentic_index` (164 of
-  421 live entries, range 0.3-61.3) alongside `intelligence_index` and
-  `coding_index`, which are present for exactly the same entries and are one
-  line each to add. Absent means UNSCORED and sorts LAST under "most agentic",
+- **The three `artificial_analysis` indices are third-party CLAIMS, arrive
+  TOGETHER, and are absent for 62% of the catalog.** `intelligence_index`,
+  `coding_index` and `agentic_index` live under `benchmarks.artificial_analysis`
+  and are present for exactly the same 164 of 421 live entries — a row with one
+  has all three — so the detail block shows all three side by side: they are
+  only meaningful read against each other, and a high coding score beside a low
+  agentic one is the useful shape. Absent means UNSCORED and sorts LAST under "most agentic",
   never as a zero — a 0 would rank an unbenchmarked model below one that
   genuinely scored 0.3, and every locally-served model is unbenchmarked. Treat
   the number the way `ProviderGuard` treats `supports_implicit_caching`: report

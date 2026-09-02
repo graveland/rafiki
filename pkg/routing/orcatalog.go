@@ -206,18 +206,18 @@ type orModel struct {
 	// present for 183 of 421 live entries. A DIFFERENT axis from Created: a
 	// model listed last week can have a cutoff from a year before that.
 	KnowledgeCutoff string `json:"knowledge_cutoff"`
-	// Benchmarks carries third-party scores. Only agentic_index is decoded --
-	// it measures the thing rafiki picks models FOR. Its siblings
-	// intelligence_index and coding_index sit in the same object and are
-	// present for exactly the same 164 entries, so adding either is one line
-	// if anyone wants it.
+	// Benchmarks carries third-party scores. The three artificial_analysis
+	// indices are present for exactly the same 164 of 421 live entries, so
+	// they arrive and go missing together — a row with one has all three.
 	//
-	// A third-party score is a CLAIM, not a guarantee, and it is absent for
-	// 62% of the catalog — including every locally-served model. Treat it the
-	// way ProviderGuard treats supports_implicit_caching.
+	// A third-party score is a CLAIM, not a guarantee, and all three are
+	// absent for 62% of the catalog including every locally-served model.
+	// Treat them the way ProviderGuard treats supports_implicit_caching.
 	Benchmarks struct {
 		ArtificialAnalysis struct {
-			AgenticIndex *float64 `json:"agentic_index"`
+			IntelligenceIndex *float64 `json:"intelligence_index"`
+			CodingIndex       *float64 `json:"coding_index"`
+			AgenticIndex      *float64 `json:"agentic_index"`
 		} `json:"artificial_analysis"`
 	} `json:"benchmarks"`
 	// ExpirationDate is a FORWARD warning, verified against the live catalog:
@@ -826,6 +826,8 @@ type CatalogEntry struct {
 	SupportedParameters []string
 	ExpiresAt           string
 	KnowledgeCutoff     string
+	IntelligenceIndex   *float64
+	CodingIndex         *float64
 	AgenticIndex        *float64
 }
 
@@ -860,8 +862,11 @@ type CatalogRow struct {
 	ExpiresAt string
 	// KnowledgeCutoff is YYYY-MM-DD, empty when the catalog does not report it.
 	KnowledgeCutoff string
-	// AgenticIndex is a third-party agentic score (0-100ish), nil when absent.
-	AgenticIndex *float64
+	// The three artificial_analysis scores, nil when absent. They arrive and
+	// go missing together.
+	IntelligenceIndex *float64
+	CodingIndex       *float64
+	AgenticIndex      *float64
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
@@ -889,6 +894,8 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 		c.models[i].SupportedParameters = e.SupportedParameters
 		c.models[i].ExpirationDate = e.ExpiresAt
 		c.models[i].KnowledgeCutoff = e.KnowledgeCutoff
+		c.models[i].Benchmarks.ArtificialAnalysis.IntelligenceIndex = e.IntelligenceIndex
+		c.models[i].Benchmarks.ArtificialAnalysis.CodingIndex = e.CodingIndex
 		c.models[i].Benchmarks.ArtificialAnalysis.AgenticIndex = e.AgenticIndex
 		if e.Pricing != nil {
 			c.models[i].Pricing = orPricing{
@@ -934,6 +941,8 @@ func (c *ModelCatalog) Rows() []CatalogRow {
 			SupportedParameters: m.SupportedParameters,
 			ExpiresAt:           m.ExpirationDate,
 			KnowledgeCutoff:     m.KnowledgeCutoff,
+			IntelligenceIndex:   m.Benchmarks.ArtificialAnalysis.IntelligenceIndex,
+			CodingIndex:         m.Benchmarks.ArtificialAnalysis.CodingIndex,
 			AgenticIndex:        m.Benchmarks.ArtificialAnalysis.AgenticIndex,
 			ContextLength:       m.ContextLen,
 			MaxCompletionTokens: m.TopProvider.MaxCompletionTokens,
