@@ -12,6 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -103,7 +104,13 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("record-requests", false, "Record raw LLM API requests and responses for debugging")
 	cmd.Flags().String("parent", "", "Child id of the spawning parent (records rafiki/parent and rafiki/root)")
 	cmd.Flags().Int("max-depth", -1, "how many further levels of agents this child may spawn (0 = none; default 1). Bounded absolutely by the daemon's RAFIKI_MAX_DEPTH")
-	cmd.Flags().Float64("max-cost", -1, "USD budget for this child's whole subtree (unset = unlimited)")
+	maxCostHelp := "USD budget for this child's whole subtree (unset = unlimited)"
+	if cur := clientstate.Load().Currency; cur != nil && cur.Rate > 0 && cur.Code != "" {
+		maxCostHelp = fmt.Sprintf(
+			"budget for this child's whole subtree, in %s (unset = unlimited); see `rafiki config`",
+			cur.Code)
+	}
+	cmd.Flags().Float64("max-cost", -1, maxCostHelp)
 	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 4)")
 	cmd.Flags().String("executor-selector", paths.Get(paths.ExecutorSelector),
 		"label selector choosing an executor from the daemon's pool to run this agent's filesystem and shell tools on (e.g. owner=brent,env=home); also see RAFIKI_EXECUTOR_SELECTOR")
@@ -267,7 +274,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	}
 	if cmd.Flags().Changed("max-cost") {
 		v, _ := cmd.Flags().GetFloat64("max-cost")
-		req.MaxCost = &v
+		usd := costfmt.ToUSD(v, clientstate.Load().Currency)
+		req.MaxCost = &usd
 	}
 	if cmd.Flags().Changed("max-children") {
 		v, _ := cmd.Flags().GetInt("max-children")
