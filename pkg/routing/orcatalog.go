@@ -193,6 +193,21 @@ type orModel struct {
 	Architecture struct {
 		InputModalities []string `json:"input_modalities"`
 	} `json:"architecture"`
+	// SupportedParameters is what the model accepts on a request. "tools" is
+	// the one that matters most here: a model without it cannot tool-call, and
+	// an agent that cannot tool-call spawns, attaches and does nothing useful.
+	//
+	// NIL means UNKNOWN, never "supports nothing" — the same rule
+	// InputModalities follows. Three live catalog entries carry no list at all
+	// (the openrouter/* router meta-models), and every locally-served model has
+	// no catalog entry whatsoever.
+	SupportedParameters []string `json:"supported_parameters"`
+	// ExpirationDate is a FORWARD warning, verified against the live catalog:
+	// all ten dated entries are in the future and none in the past, because
+	// OpenRouter DELISTS a model rather than leaving it listed and expired.
+	// Some carry an obvious sentinel far out (2098-12-31) meaning "no planned
+	// removal", so a consumer must bound how far ahead it warns.
+	ExpirationDate string `json:"expiration_date"`
 	// Pricing is OpenRouter's per-token USD price object. A cached snapshot
 	// written before this field existed decodes with empty strings, so its
 	// models resolve as unpriced until the next successful refresh repopulates
@@ -790,6 +805,8 @@ type CatalogEntry struct {
 	MaxCompletionTokens int
 	Pricing             *ModelPricing
 	InputModalities     []string
+	SupportedParameters []string
+	ExpiresAt           string
 }
 
 // CatalogRow is one catalog entry flattened for enumeration.
@@ -812,6 +829,15 @@ type CatalogRow struct {
 	CacheReadUSD        *float64
 	CacheWriteUSD       *float64
 	InputModalities     []string
+	// Created is OpenRouter's LISTING date, not the model's release date. They
+	// track closely enough to order by, but the distinction matters if anyone
+	// renders it as "released". Zero means a snapshot written before this
+	// field was carried.
+	Created int64
+	// SupportedParameters is nil for UNKNOWN, never empty-for-none.
+	SupportedParameters []string
+	// ExpiresAt is OpenRouter's expiration_date verbatim, empty when none.
+	ExpiresAt string
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
@@ -836,6 +862,8 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 			c.models[i].TopProvider.MaxCompletionTokens = &v
 		}
 		c.models[i].Architecture.InputModalities = e.InputModalities
+		c.models[i].SupportedParameters = e.SupportedParameters
+		c.models[i].ExpirationDate = e.ExpiresAt
 		if e.Pricing != nil {
 			c.models[i].Pricing = orPricing{
 				Prompt:            formatPrice(e.Pricing.PromptUSD),
@@ -876,6 +904,9 @@ func (c *ModelCatalog) Rows() []CatalogRow {
 		row := CatalogRow{
 			ID:                  m.ID,
 			Name:                m.Name,
+			Created:             m.Created,
+			SupportedParameters: m.SupportedParameters,
+			ExpiresAt:           m.ExpirationDate,
 			ContextLength:       m.ContextLen,
 			MaxCompletionTokens: m.TopProvider.MaxCompletionTokens,
 			PromptUSD:           optionalPrice(m.Pricing.Prompt),

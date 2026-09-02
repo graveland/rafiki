@@ -40,6 +40,13 @@ type ModelRow struct {
 	// That means UNKNOWN, never "accepts nothing" — a text-only model reports
 	// ["text"].
 	InputModalities []string
+	// Created is OpenRouter's listing date (unix seconds); nil when unknown.
+	Created *int64
+	// SupportedParameters is nil for UNKNOWN, never empty-for-none. "tools" is
+	// the entry that decides whether a model can be an agent at all.
+	SupportedParameters []string
+	// ExpiresAt is a forward removal date (YYYY-MM-DD), empty when none.
+	ExpiresAt string
 }
 
 // ModelLister is the narrow slice of the daemon's Controller needed to
@@ -79,12 +86,18 @@ func (s *Server) ListModels(
 // the loop variable's storage.
 func toProtoModel(r ModelRow) *rafikiv1.ModelRow {
 	out := &rafikiv1.ModelRow{
-		Id:              r.ID,
-		Provider:        r.Provider,
-		Model:           r.Model,
-		Name:            r.Name,
-		Source:          r.Source,
-		InputModalities: r.InputModalities,
+		Id:                  r.ID,
+		Provider:            r.Provider,
+		Model:               r.Model,
+		Name:                r.Name,
+		Source:              r.Source,
+		InputModalities:     r.InputModalities,
+		SupportedParameters: r.SupportedParameters,
+		ExpiresAt:           r.ExpiresAt,
+	}
+	if r.Created != nil {
+		v := *r.Created
+		out.Created = &v
 	}
 	if r.ContextWindow != nil {
 		v := int32(*r.ContextWindow)

@@ -258,6 +258,27 @@ message ModelRow {
   // filtering on vision must surface unknowns rather than hide them, or it
   // silently hides every locally-served model.
   repeated string input_modalities = 12;
+
+  // created is OpenRouter's LISTING date (unix seconds), not the model's
+  // release date. They track closely enough to order by; the distinction
+  // matters only if a client renders it as "released". Optional because a
+  // locally-served model has no catalog entry and 0 is a legal timestamp.
+  optional int64 created = 13;
+
+  // supported_parameters is what the model accepts on a request. "tools" is
+  // the one that decides whether it can be an agent at all.
+  //
+  // EMPTY means the daemon has no catalog entry, NEVER "supports nothing" --
+  // the same rule input_modalities follows. A client filtering on tool support
+  // must keep unknowns, or it hides every locally-served model.
+  repeated string supported_parameters = 14;
+
+  // expires_at is OpenRouter's expiration_date verbatim (YYYY-MM-DD), empty
+  // when none. It is a FORWARD warning: OpenRouter delists a model rather than
+  // leaving it listed and expired, so a date here is always in the future.
+  // Some entries carry a far-future sentinel meaning "no planned removal", so
+  // a renderer must bound how far ahead it warns.
+  string expires_at = 15;
 }
 
 message ListModelsRequest {
