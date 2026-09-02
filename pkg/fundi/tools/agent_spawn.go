@@ -12,8 +12,13 @@ func init() {
 
 const agentSpawnDescription = "Spawn a subagent to do a piece of work in parallel " +
 	"with you. Returns immediately with the new agent's id — it does NOT wait for " +
-	"the work to finish. You will be told when it settles; until then you can keep " +
-	"working, and you can watch it with agent_list and agent_view.\n\n" +
+	"the work to finish. You will be notified when it settles (told why: done, hit " +
+	"a cost budget, or failed), and pinged periodically while it is still working on " +
+	"something long. Do not sleep, poll, or repeatedly call agent_list/agent_view to " +
+	"check whether it is done — that costs you a turn each time and tells you nothing " +
+	"sooner than the notification will. Keep doing your own work in the meantime; use " +
+	"agent_list/agent_view only when you actually need to look something up (which " +
+	"agent is which, or what one has said so far), not as a waiting loop.\n\n" +
 	"Give it a `prompt` that stands on its own: the subagent starts with none of " +
 	"your context and cannot ask you a follow-up question mid-turn. Pass `task` " +
 	"(a handle from your own task list, like \"2.1\") to hand it a specific unit of " +
