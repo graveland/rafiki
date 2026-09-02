@@ -3,13 +3,17 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 func i32q(v int32) *int32     { return &v }
@@ -515,5 +519,132 @@ func TestAnyMeansUnfilteredNotExcluded(t *testing.T) {
 	}
 	if !sawUnknown {
 		t.Error("required excluded a model of unknown capability")
+	}
+}
+
+// ── remembering the query ────────────────────────────────────────────────────
+
+func TestModelViewRoundTripsThroughDisk(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	want := defaultModelView()
+	want.keys = []sortKey{{field: colIntel, desc: true}, {field: colIn}}
+	want.setBound(colCtx, bound{minIx: stopIndex(t, minStops(colCtx), "1M")})
+	want.setBound(colIn, bound{
+		minIx: stopIndex(t, minStops(colIn), ">free"),
+		maxIx: stopIndex(t, maxStops(colIn), "$2"),
+	})
+	want.visionOnly = true
+
+	saveModelView(want)
+	got := loadModelView()
+
+	if len(got.keys) != 2 || got.keys[0].field != colIntel || !got.keys[0].desc {
+		t.Errorf("keys = %+v, want intel↓ then in$↑", got.keys)
+	}
+	if got.keys[1].field != colIn || got.keys[1].desc {
+		t.Errorf("second key = %+v, want in$ ascending", got.keys[1])
+	}
+	if got.boundFor(colCtx) != want.boundFor(colCtx) {
+		t.Errorf("ctx bound = %+v, want %+v", got.boundFor(colCtx), want.boundFor(colCtx))
+	}
+	if got.boundFor(colIn) != want.boundFor(colIn) {
+		t.Errorf("in$ bound = %+v, want %+v", got.boundFor(colIn), want.boundFor(colIn))
+	}
+	if !got.visionOnly || !got.toolsOnly {
+		t.Errorf("flags = vision:%v tools:%v, want both on", got.visionOnly, got.toolsOnly)
+	}
+}
+
+// Storing by NAME is what stops a reordered enum silently reinterpreting a
+// saved query -- "sort by intelligence" must not become "sort by code".
+func TestStoredQueryIsKeyedByNameNotOrdinal(t *testing.T) {
+	v := defaultModelView()
+	v.keys = []sortKey{{field: colAgentic, desc: true}}
+	v.setBound(colCtx, bound{minIx: 3})
+
+	p := toStored(v)
+	if p.Keys[0].Field != "agentic" {
+		t.Errorf("key stored as %q, want the field NAME", p.Keys[0].Field)
+	}
+	if _, ok := p.Bounds["ctx"]; !ok {
+		t.Errorf("bounds keyed by %v, want the field name", p.Bounds)
+	}
+	if p.Bounds["ctx"].Min != "1M" {
+		t.Errorf("bound stored as %q, want the stop LABEL", p.Bounds["ctx"].Min)
+	}
+}
+
+// An unrecognised name degrades the query rather than refusing it.
+func TestUnknownFieldsAndStopsAreDropped(t *testing.T) {
+	v := fromStored(&clientstate.ModelView{
+		Keys: []clientstate.SortKey{{Field: "no-such-field"}, {Field: "ctx", Desc: true}},
+		Bounds: map[string]clientstate.Bound{
+			"no-such-field": {Min: "1M"},
+			"ctx":           {Min: "no-such-stop"},
+		},
+		ToolsOnly: true,
+	})
+	if len(v.keys) != 1 || v.keys[0].field != colCtx {
+		t.Errorf("keys = %+v, want only the recognised one", v.keys)
+	}
+	if v.boundFor(colCtx).set() {
+		t.Error("an unrecognised stop label produced a bound anyway")
+	}
+	if _, ok := v.bounds[colModel]; ok {
+		t.Error("an unrecognised field produced a bound")
+	}
+}
+
+// A document that decodes to nothing orderable still needs a total order, or
+// the list comes back in whatever order the daemon happened to send.
+func TestEmptyStoredQueryStillSorts(t *testing.T) {
+	if v := fromStored(&clientstate.ModelView{}); len(v.keys) == 0 {
+		t.Fatal("no sort keys at all")
+	}
+	if v := fromStored(nil); len(v.keys) == 0 {
+		t.Fatal("a nil section produced no sort keys")
+	}
+}
+
+// Every failure is silent: a UI preference must never stop the cockpit opening.
+func TestCorruptOrMissingStateFallsBackToDefaults(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	if got := loadModelView(); !got.toolsOnly {
+		t.Error("a missing file did not fall back to the default view")
+	}
+
+	path := paths.ClientStateFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadModelView(); !got.toolsOnly || len(got.keys) == 0 {
+		t.Errorf("a corrupt file did not fall back to the default view: %+v", got)
+	}
+}
+
+// Closing the panel commits, so the next cockpit opens on the same query.
+func TestClosingThePanelSavesTheQuery(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := openQuery(t)
+	seekCell(t, c, queryRow{field: colAgentic}, colSortCell)
+	c.handleKey(keyMsg("space"))
+
+	c.handleKey(keyMsg("esc"))
+
+	got := loadModelView()
+	var found bool
+	for _, k := range got.keys {
+		if k.field == colAgentic {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the query was not persisted when the panel closed")
 	}
 }

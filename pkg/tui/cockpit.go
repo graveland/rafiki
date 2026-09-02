@@ -188,6 +188,21 @@ type Options struct {
 	ChildID string
 	// Subject is the rail subscription's scope. Nil means `all`.
 	Subject *rafikiv1.EventSubject
+	// OpenCreate opens straight into the create form, for `rafiki create` with
+	// nothing to go on. CreateDefaults prefills it -- with exactly what a bare
+	// create would have spawned, so the default case costs one ⏎ and shows
+	// what it is about to do rather than replacing it with a questionnaire.
+	OpenCreate     bool
+	CreateDefaults SpawnDefaults
+}
+
+// SpawnDefaults prefills the create form. Empty fields keep the form's own
+// defaults; cwd falls back to the client's working directory.
+type SpawnDefaults struct {
+	Name  string
+	Kind  string
+	Model string
+	Cwd   string
 }
 
 // ── Model ───────────────────────────────────────────────────────────────────
@@ -338,7 +353,12 @@ func NewCockpit(opts Options) *Cockpit {
 		keys:      defaultKeyMap(),
 		evCh:      make(chan *rafikiv1.Event, 256),
 		status:    "connecting…",
-		modelView: defaultModelView(),
+		modelView: loadModelView(),
+	}
+	if opts.OpenCreate {
+		c.form = newSpawnForm()
+		c.form.prefill(opts.CreateDefaults)
+		c.form.refreshSuggestions(nil, c.modelView)
 	}
 	if opts.ChildID != "" {
 		c.rail.SetFocus(opts.ChildID)
@@ -367,7 +387,14 @@ func (c *Cockpit) setNotice(s string) {
 
 // Init seeds the rail from ListChildren and starts the event pump.
 func (c *Cockpit) Init() tea.Cmd {
-	return tea.Batch(c.seedCmd(), waitForEvent(c.evCh), tick(), textarea.Blink)
+	cmds := []tea.Cmd{c.seedCmd(), waitForEvent(c.evCh), tick(), textarea.Blink}
+	if c.form != nil {
+		// A form opened at CONSTRUCTION never saw the `n` keypress that
+		// normally starts the catalog fetch, so its typeahead would sit empty
+		// until something else asked.
+		cmds = append(cmds, c.fetchModelsCmd(c.form.kind()))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (c *Cockpit) seedCmd() tea.Cmd {
@@ -1348,6 +1375,9 @@ func (c *Cockpit) neighbour(delta int) string {
 
 // shutdown stops both streams. Safe to call more than once.
 func (c *Cockpit) shutdown() {
+	// ^R and ^V/^T change the query without ever opening the panel, so exit is
+	// the other commit point.
+	saveModelView(c.modelView)
 	if c.stopFocus != nil {
 		c.stopFocus()
 		c.stopFocus = nil

@@ -41,6 +41,8 @@ Environment variable defaults (applied before explicit flags; lowest priority):
 	}
 	addSpawnFlags(cmd)
 	cmd.Flags().BoolP("detached", "d", false, "Spawn without attaching; the child runs in the background")
+	cmd.Flags().BoolP("interactive", "i", false,
+		"Choose the agent's settings in a form, with model search and filtering")
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
@@ -324,6 +326,10 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
 	detached, _ := cmd.Flags().GetBool("detached")
+
+	if wantsCreateForm(cmd, args, isStdinTTY()) {
+		return runCreateForm(cmd, req)
+	}
 
 	// Only when the caller named no executor of their own. An explicit
 	// --executor-selector means "work over there", and standing up a local

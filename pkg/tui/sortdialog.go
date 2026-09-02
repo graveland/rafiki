@@ -378,6 +378,10 @@ func (c *Cockpit) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "enter", "ctrl+s", "ctrl+c":
 		c.query = nil
+		// Closing the panel is the natural commit point: it is where a query
+		// stops being edited, and saving on every keystroke would write the
+		// file per arrow key for no gain.
+		saveModelView(c.modelView)
 	case "up":
 		d.moveRow(-1, window)
 	case "down":
