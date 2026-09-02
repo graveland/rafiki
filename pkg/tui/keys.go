@@ -90,12 +90,14 @@ func defaultKeyMap() keyMap {
 		PrevAttention: key.NewBinding(key.WithKeys("alt+p", "ctrl+pgup"), key.WithHelp("⌥P", "prev needing you")),
 		HopPrev:       key.NewBinding(key.WithKeys("ctrl+up"), key.WithHelp("^↑", "hop up")),
 		HopNext:       key.NewBinding(key.WithKeys("ctrl+down"), key.WithHelp("^↓", "hop down")),
-		// ^A for "agents". It costs the textarea its line-start key, which is
-		// a real loss now that home is a scroll key too — but the box is three
-		// lines and a mnemonic on the move you make constantly is worth more
-		// than line-start on a short prompt. ^B stays as an alias for muscle
-		// memory; alt+< and ctrl+home still reach the start of the input.
-		ToggleRail: key.NewBinding(key.WithKeys("ctrl+a", "ctrl+b"), key.WithHelp("^A", "agents")),
+		// ^R for "rail". Used to be ^A ("agents"), which cost the textarea its
+		// line-start key — home was already a scroll key, so ^A/^E were the
+		// only way left to reach line-start/line-end while typing, and giving
+		// up the more-used of the two turned out to cost more than expected.
+		// ^R is free and reads fine once you know it's short for "rail". ^B
+		// stays as an alias for muscle memory from the earlier binding;
+		// alt+< and ctrl+home still reach the start of the input.
+		ToggleRail: key.NewBinding(key.WithKeys("ctrl+r", "ctrl+b"), key.WithHelp("^R", "rail")),
 		Help:       key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^G", "help")),
 		// ^E would be the mnemonic and is taken: the textarea binds it to
 		// end-of-line. ^O is free and is what other agent TUIs use.
@@ -195,8 +197,11 @@ var textareaKeys = map[string]bool{
 // grandfathered are textarea keys the cockpit already took before this chunk.
 // ctrl+b (rail) and ctrl+g (help) must stay reachable from every pane, and
 // ctrl+d quits. The design accepts that you cannot use them while typing.
+// ctrl+a is deliberately NOT here: it used to be ToggleRail's primary
+// binding, and now that ToggleRail moved to ctrl+r, ctrl+a reaches the
+// textarea's line-start like every other unclaimed emacs key should.
 var grandfathered = map[string]bool{
-	"ctrl+a": true, "ctrl+b": true, "ctrl+g": true, "ctrl+d": true,
+	"ctrl+b": true, "ctrl+g": true, "ctrl+d": true,
 	// Scroll keys the input pane claims outright. pgup/pgdown page a
 	// three-line box, which is meaningless; home/end are line-start/line-end,
 	// which ^A gave up anyway and alt+</ctrl+home still provide.
