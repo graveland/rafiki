@@ -3,7 +3,12 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,4 +83,58 @@ func TestCacheDegradesQuietly(t *testing.T) {
 // file because that is the same package — it needs nothing outside it.
 func corruptCacheForTest(kind, endpoint string) error {
 	return os.WriteFile(cachePath(kind, endpoint), []byte("{not json"), 0o600)
+}
+
+// Concurrent completion processes write the same entry at the same time (a
+// shell spawns one per TAB). The final file must always be ONE complete write
+// — never a mix of two writers' bytes — so the temp file must be unique per
+// write, not a shared "<path>.tmp" two processes can truncate and rename over
+// each other. Payloads differ in LENGTH per writer so a mix cannot parse as a
+// valid entry of the right shape.
+func TestCacheWriteSurvivesConcurrentWriters(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	const writers = 8
+	const rounds = 400
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			rows := make([]string, 64+w) // length varies per writer
+			for i := 0; i < rounds; i++ {
+				for j := range rows {
+					rows[j] = fmt.Sprintf("writer-%d-round-%d-token-%03d", w, i, j)
+				}
+				cacheWrite("children", "unix:/x", rows)
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	b, err := os.ReadFile(cachePath("children", "unix:/x"))
+	if err != nil {
+		t.Fatalf("final entry unreadable after concurrent writes: %v", err)
+	}
+	var e cacheEntry
+	if err := json.Unmarshal(b, &e); err != nil {
+		t.Fatalf("final entry is not valid JSON — writers mixed bytes: %v\nraw: %.120s", err, b)
+	}
+	var got []string
+	if err := json.Unmarshal(e.Payload, &got); err != nil {
+		t.Fatalf("final payload is not a valid entry — writers mixed bytes: %v", err)
+	}
+	if len(got) < 64 || len(got) >= 64+writers {
+		t.Fatalf("final payload has %d rows, want one writer's complete payload (64..%d)", len(got), 63+writers)
+	}
+	// No temp litter may survive alongside the entry.
+	entries, err := os.ReadDir(filepath.Dir(cachePath("children", "unix:/x")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range entries {
+		if strings.HasSuffix(f.Name(), ".tmp") {
+			t.Errorf("temp file %s left behind", f.Name())
+		}
+	}
 }
