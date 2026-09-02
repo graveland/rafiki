@@ -181,7 +181,13 @@ func (f *spawnForm) view(width int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(styleMeta.Render("⇥ field   ←/→ kind   ⏎ create   esc cancel"))
+	// The ⏎ hint is contextual because ⏎ genuinely does two things, and a
+	// static footer would be wrong on one row out of four.
+	enter := "⏎ create"
+	if f.focus == fieldModel {
+		enter = "⏎ browse models"
+	}
+	b.WriteString(styleMeta.Render("⇥ field   ←/→ kind   " + enter + "   esc cancel"))
 	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
 }
 
@@ -236,6 +242,18 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if f.busy {
 			return c, nil // a second ⏎ must not submit the same form twice
+		}
+		// ⏎ on the model row BROWSES rather than submits. The asymmetry is
+		// deliberate and signposted in the row's own hint: picking a model is
+		// the one field with hundreds of valid answers, and a key that opens
+		// the list is worth more there than a fourth way to submit.
+		//
+		// Whatever has been typed seeds the picker's filter, so typing "opus"
+		// and pressing ⏎ lands on a list already narrowed to it -- the typed
+		// text is a head start, never discarded work.
+		if f.focus == fieldModel {
+			c.picker = newModelPicker(f.kind(), strings.TrimSpace(f.inputs[fieldModel].Value()))
+			return c, tea.Batch(c.fetchModelsCmd(f.kind()), textinput.Blink)
 		}
 		p, problem := f.params()
 		if problem != "" {
