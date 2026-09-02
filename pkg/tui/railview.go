@@ -66,7 +66,7 @@ func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 		if n.Attention > 0 {
 			w += 2 + len(strconv.Itoa(n.Attention))
 		}
-		if cost := fmtCost(n.Cost, cur); cost != "" {
+		if cost := fmtCost(n.TotalCost(), cur); cost != "" {
 			w += 1 + len(cost)
 		}
 		if w > want {
@@ -110,7 +110,7 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		// anything appended afterwards escapes the pane and bleeds colour into
 		// the transcript.
 		left := cursor + strings.Repeat("  ", n.Depth) + rail.Glyph(n) + " " + name + badge
-		cost := fmtCost(n.Cost, cur)
+		cost := fmtCost(n.TotalCost(), cur)
 		row := clip(left, width)
 		if cost != "" {
 			if gap := width - ansi.StringWidth(clip(left, width-len(cost)-1)) - len(cost); gap >= 1 {
