@@ -691,14 +691,18 @@ func TestCatalogDecodesNameAndInputModalities(t *testing.T) {
 		got.InputModalities[1] != "image" {
 		t.Errorf("InputModalities = %v, want [text image]", got.InputModalities)
 	}
-	if got.ContextLength != 128000 {
-		t.Errorf("ContextLength = %d, want 128000", got.ContextLength)
+	if got.ContextLength == nil || *got.ContextLength != 128000 {
+		t.Errorf("ContextLength = %v, want 128000", got.ContextLength)
 	}
-	if got.Pricing == nil {
-		t.Fatal("Pricing = nil, want parsed prices")
+	if got.PromptUSD == nil || *got.PromptUSD != 0.000005 {
+		t.Errorf("PromptUSD = %v, want 0.000005", got.PromptUSD)
 	}
-	if got.Pricing.PromptUSD != 0.000005 {
-		t.Errorf("PromptUSD = %v, want 0.000005", got.Pricing.PromptUSD)
+	if got.CompletionUSD == nil || *got.CompletionUSD != 0.000015 {
+		t.Errorf("CompletionUSD = %v, want 0.000015", got.CompletionUSD)
+	}
+	// The fixture prices no cache rates: those must be ABSENT, not zero.
+	if got.CacheReadUSD != nil || got.CacheWriteUSD != nil {
+		t.Errorf("cache prices = %v/%v, want nil for a model OpenRouter prices without them", got.CacheReadUSD, got.CacheWriteUSD)
 	}
 
 	// A text-only model reports ["text"] and must stay distinguishable from
@@ -723,8 +727,9 @@ func TestCatalogAbsentArchitectureYieldsNilModalities(t *testing.T) {
 	if rows[0].InputModalities != nil {
 		t.Errorf("InputModalities = %#v, want nil", rows[0].InputModalities)
 	}
-	if rows[0].Pricing != nil {
-		t.Errorf("Pricing = %#v, want nil for an unpriced entry", rows[0].Pricing)
+	if rows[0].PromptUSD != nil || rows[0].CompletionUSD != nil ||
+		rows[0].CacheReadUSD != nil || rows[0].CacheWriteUSD != nil {
+		t.Errorf("prices = %#v, want all-nil for an unpriced entry", rows[0])
 	}
 }
 
@@ -745,8 +750,14 @@ func TestCatalogStaleSnapshotDecodesWithoutNewFields(t *testing.T) {
 	if rows[0].Name != "" || rows[0].InputModalities != nil {
 		t.Errorf("stale row = %+v, want empty Name and nil InputModalities", rows[0])
 	}
-	if rows[0].ContextLength != 128000 {
-		t.Errorf("ContextLength = %d, want the field the old snapshot DID carry", rows[0].ContextLength)
+	// The one field the old snapshot DID carry must decode as present; the
+	// fields it predates must be nil, not zero.
+	if rows[0].ContextLength == nil || *rows[0].ContextLength != 128000 {
+		t.Errorf("ContextLength = %v, want the value the old snapshot carried", rows[0].ContextLength)
+	}
+	if rows[0].MaxCompletionTokens != nil || rows[0].PromptUSD != nil ||
+		rows[0].CompletionUSD != nil || rows[0].CacheReadUSD != nil || rows[0].CacheWriteUSD != nil {
+		t.Errorf("stale row optionals = %+v, want all nil", rows[0])
 	}
 }
 
@@ -759,5 +770,113 @@ func TestRowsSkipsTildeAliases(t *testing.T) {
 		if strings.HasPrefix(r.ID, "~") {
 			t.Errorf("Rows() returned alias id %q", r.ID)
 		}
+	}
+}
+
+// Presence must survive enumeration for ALL SIX optional numeric fields, in
+// both forms: absent (OpenRouter omitted the field) stays nil, and explicitly
+// reported zero stays a pointer to 0. The old shape collapsed absence into
+// ModelPricing zeroes (a priced model with unreported cache rates read as free
+// caching) and dropped reported zeroes with > 0 guards — a table over every
+// field is what catches that class of collapse, and layer-local tests did not.
+//
+// Three fixtures between them cover both forms for all six fields:
+//   - openai/priced: base prices present, everything else absent — the shape
+//     that used to arrive as present-and-zero cache rates.
+//   - openai/unpriced: no pricing object at all — prompt/completion absent.
+//   - openai/zeroed: every optional field explicitly 0 — present-zero.
+func TestRowsPreservePresenceOnEveryOptionalField(t *testing.T) {
+	body := `{"data":[
+	 {"id":"openai/priced","name":"Priced","created":1,
+	  "context_length":128000,
+	  "top_provider":{"max_completion_tokens":16384},
+	  "pricing":{"prompt":"0.000005","completion":"0.000015"}},
+	 {"id":"openai/unpriced","name":"Unpriced","created":2},
+	 {"id":"openai/zeroed","name":"Zeroed","created":3,
+	  "context_length":0,
+	  "top_provider":{"max_completion_tokens":0},
+	  "pricing":{"prompt":"0","completion":"0",
+	             "input_cache_read":"0","input_cache_write":"0"}}
+	]}`
+	c, srv := newTestCatalog(t, body)
+	defer srv.Close()
+
+	rows := c.Rows()
+	byID := map[string]CatalogRow{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+
+	// priced: base prices present with their values; every other optional
+	// ABSENT — including the cache rates, which the old assembly published as
+	// zeroes.
+	priced := byID["openai/priced"]
+	if priced.ID == "" {
+		t.Fatal("priced model missing from Rows()")
+	}
+	if priced.PromptUSD == nil || *priced.PromptUSD != 0.000005 {
+		t.Errorf("priced PromptUSD = %v, want 0.000005", priced.PromptUSD)
+	}
+	if priced.CompletionUSD == nil || *priced.CompletionUSD != 0.000015 {
+		t.Errorf("priced CompletionUSD = %v, want 0.000015", priced.CompletionUSD)
+	}
+	if priced.ContextLength == nil || *priced.ContextLength != 128000 {
+		t.Errorf("priced ContextLength = %v, want 128000", priced.ContextLength)
+	}
+	if priced.MaxCompletionTokens == nil || *priced.MaxCompletionTokens != 16384 {
+		t.Errorf("priced MaxCompletionTokens = %v, want 16384", priced.MaxCompletionTokens)
+	}
+	if priced.CacheReadUSD != nil {
+		t.Errorf("priced CacheReadUSD = %v, want nil — an unreported cache rate must not read as free caching", *priced.CacheReadUSD)
+	}
+	if priced.CacheWriteUSD != nil {
+		t.Errorf("priced CacheWriteUSD = %v, want nil", *priced.CacheWriteUSD)
+	}
+
+	// unpriced: prompt/completion absent too.
+	unpriced := byID["openai/unpriced"]
+	if unpriced.ID == "" {
+		t.Fatal("unpriced model missing from Rows()")
+	}
+	for name, got := range map[string]*float64{
+		"PromptUSD":     unpriced.PromptUSD,
+		"CompletionUSD": unpriced.CompletionUSD,
+		"CacheReadUSD":  unpriced.CacheReadUSD,
+		"CacheWriteUSD": unpriced.CacheWriteUSD,
+	} {
+		if got != nil {
+			t.Errorf("unpriced %s = %v, want nil", name, *got)
+		}
+	}
+	if unpriced.ContextLength != nil {
+		t.Errorf("unpriced ContextLength = %v, want nil", *unpriced.ContextLength)
+	}
+	if unpriced.MaxCompletionTokens != nil {
+		t.Errorf("unpriced MaxCompletionTokens = %v, want nil", *unpriced.MaxCompletionTokens)
+	}
+
+	zeroed := byID["openai/zeroed"]
+	if zeroed.ID == "" {
+		t.Fatal("zeroed model missing from Rows()")
+	}
+	for name, got := range map[string]*float64{
+		"PromptUSD":     zeroed.PromptUSD,
+		"CompletionUSD": zeroed.CompletionUSD,
+		"CacheReadUSD":  zeroed.CacheReadUSD,
+		"CacheWriteUSD": zeroed.CacheWriteUSD,
+	} {
+		if got == nil {
+			t.Errorf("reported-zero %s = nil, want a pointer to 0 — presence is the fact", name)
+			continue
+		}
+		if *got != 0 {
+			t.Errorf("reported-zero %s = %v, want 0", name, *got)
+		}
+	}
+	if zeroed.ContextLength == nil || *zeroed.ContextLength != 0 {
+		t.Errorf("reported-zero ContextLength = %v, want a pointer to 0", zeroed.ContextLength)
+	}
+	if zeroed.MaxCompletionTokens == nil || *zeroed.MaxCompletionTokens != 0 {
+		t.Errorf("reported-zero MaxCompletionTokens = %v, want a pointer to 0", zeroed.MaxCompletionTokens)
 	}
 }

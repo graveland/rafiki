@@ -182,9 +182,9 @@ type orModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Created     int64  `json:"created"`
-	ContextLen  int    `json:"context_length"`
+	ContextLen  *int   `json:"context_length"`
 	TopProvider struct {
-		MaxCompletionTokens int `json:"max_completion_tokens"`
+		MaxCompletionTokens *int `json:"max_completion_tokens"`
 	} `json:"top_provider"`
 	// Architecture carries the only signal for what a model can ACCEPT.
 	// InputModalities is nil for an entry with no architecture block and for
@@ -592,7 +592,17 @@ func (c *ModelCatalog) ContextWindow(model string) (contextLen, maxCompletion in
 	if !found {
 		return 0, 0, false
 	}
-	return m.ContextLen, m.TopProvider.MaxCompletionTokens, m.ContextLen > 0
+	// Same semantics the plain-int decode had: an absent or non-positive
+	// context length is "unknown" for routing (ok=false), and an absent max
+	// completion decodes to 0 exactly as a missing JSON field always did.
+	if m.ContextLen == nil || *m.ContextLen <= 0 {
+		return 0, 0, false
+	}
+	max := 0
+	if m.TopProvider.MaxCompletionTokens != nil {
+		max = *m.TopProvider.MaxCompletionTokens
+	}
+	return *m.ContextLen, max, true
 }
 
 // Pricing returns the OpenRouter list price for a requested model, resolved the
@@ -784,27 +794,47 @@ type CatalogEntry struct {
 
 // CatalogRow is one catalog entry flattened for enumeration.
 //
-// Pricing is a POINTER and InputModalities a possibly-nil slice because absent
-// and zero differ: an entry OpenRouter does not price must stay distinguishable
-// from one it prices at zero, and an entry with no architecture block must stay
-// distinguishable from a model that accepts nothing.
+// Every optional numeric field is a POINTER and InputModalities a possibly-nil
+// slice because absent and zero differ: an entry OpenRouter does not price, or
+// does not report a window for, must stay distinguishable from one it reports
+// as zero — a present-and-zero cache rate reads as free caching, and a
+// present-and-zero window reads as a model that fits nothing. Presence is
+// taken straight from the raw entry: the price strings through optionalPrice
+// (nil when the field is absent or unparseable), the two integers as decoded
+// (nil when the JSON omitted them, a pointer to 0 when it reported 0).
 type CatalogRow struct {
 	ID                  string
 	Name                string
-	ContextLength       int
-	MaxCompletionTokens int
-	Pricing             *ModelPricing
+	ContextLength       *int
+	MaxCompletionTokens *int
+	PromptUSD           *float64
+	CompletionUSD       *float64
+	CacheReadUSD        *float64
+	CacheWriteUSD       *float64
 	InputModalities     []string
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
+//
+// CatalogEntry's plain int fields keep their historical reading of 0 as "not
+// set": a zero ContextLength/MaxCompletionTokens seeds an ABSENT field, and a
+// zero cache price seeds an ABSENT string (optionalPriceString). Present-zero
+// values are reachable only through the raw wire path — a snapshot body —
+// which is what TestRowsPreservePresenceOnEveryOptionalField feeds.
 func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.models = make([]orModel, len(entries))
 	for i, e := range entries {
-		c.models[i] = orModel{ID: e.ID, Name: e.Name, Created: e.Created, ContextLen: e.ContextLength}
-		c.models[i].TopProvider.MaxCompletionTokens = e.MaxCompletionTokens
+		c.models[i] = orModel{ID: e.ID, Name: e.Name, Created: e.Created}
+		if e.ContextLength > 0 {
+			v := e.ContextLength
+			c.models[i].ContextLen = &v
+		}
+		if e.MaxCompletionTokens > 0 {
+			v := e.MaxCompletionTokens
+			c.models[i].TopProvider.MaxCompletionTokens = &v
+		}
 		c.models[i].Architecture.InputModalities = e.InputModalities
 		if e.Pricing != nil {
 			c.models[i].Pricing = orPricing{
@@ -848,10 +878,11 @@ func (c *ModelCatalog) Rows() []CatalogRow {
 			Name:                m.Name,
 			ContextLength:       m.ContextLen,
 			MaxCompletionTokens: m.TopProvider.MaxCompletionTokens,
+			PromptUSD:           optionalPrice(m.Pricing.Prompt),
+			CompletionUSD:       optionalPrice(m.Pricing.Completion),
+			CacheReadUSD:        optionalPrice(m.Pricing.InputCacheRead),
+			CacheWriteUSD:       optionalPrice(m.Pricing.InputCacheWrite),
 			InputModalities:     m.Architecture.InputModalities,
-		}
-		if p, ok := pricingFromOR(m.Pricing); ok {
-			row.Pricing = &p
 		}
 		out = append(out, row)
 	}
