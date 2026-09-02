@@ -1530,8 +1530,8 @@ func (c *Cockpit) costReadout() string {
 	if !ok {
 		return ""
 	}
-	self := fmtCost(n.Cost, c.currency)
-	sub := fmtCost(c.rail.SubtreeCost(f)-n.Cost, c.currency)
+	self := fmtCost(n.TotalCost(), c.currency)
+	sub := fmtCost(c.rail.SubtreeCost(f)-n.TotalCost(), c.currency)
 	switch {
 	case self != "" && sub != "":
 		return self + " +" + sub

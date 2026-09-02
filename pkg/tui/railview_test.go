@@ -131,6 +131,20 @@ func TestRailRowCostCountsAgainstWidth(t *testing.T) {
 	}
 }
 
+// A node with only CostLive set (no Cost) must still show a live number --
+// the rail reads n.TotalCost(), not n.Cost, so spend moves on every LLM
+// reply rather than only once a whole exchange settles.
+func TestRenderRailShowsLiveCost(t *testing.T) {
+	nodes := []rail.Node{
+		{ChildID: "c1", Name: "root", CostLive: 0.42},
+		{ChildID: "c2", Name: "worker", ParentID: "c1", Depth: 1},
+	}
+	out := renderRail(nodes, "", "", 80, false, nil)
+	if !strings.Contains(out, "$0.42") {
+		t.Errorf("render did not show the live cost: %q", out)
+	}
+}
+
 // ── rail width ───────────────────────────────────────────────────────────────
 
 // The rail used to be a fixed 22 columns and amputated real names.
