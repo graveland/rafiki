@@ -71,6 +71,7 @@ func newRootCmd() *cobra.Command {
 		newExecutorCmd(),
 		newDarajaCmd(),
 		newUserCmd(),
+		newConfigCmd(),
 	)
 
 	return root

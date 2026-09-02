@@ -12,6 +12,8 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"golang.org/x/term"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -85,7 +87,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	st.Color = table.ColorOptions{}
 	tw.SetStyle(st)
 
-	colNames := []string{"ID", "NAME", "STATUS", "PROVIDER", "MODEL", "CWD", "STARTED", "LABELS"}
+	colNames := []string{"ID", "NAME", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "LABELS"}
 	headerRow := make(table.Row, len(colNames))
 	for i, name := range colNames {
 		if useColor {
@@ -101,6 +103,9 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		treeRows = flattenTree(children)
 	}
 
+	cur := clientstate.Load().Currency
+	totals := subtreeCosts(children)
+
 	for _, tr := range treeRows {
 		ch := tr.Child
 		started := "-"
@@ -112,12 +117,21 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		if tr.Depth > 0 {
 			idCell = strings.Repeat("  ", tr.Depth) + "└ " + ch.ChildID
 		}
+		var own, total float64
+		if ch.CostUSD != nil {
+			own = *ch.CostUSD
+		}
+		if t := totals[ch.ChildID]; t != nil {
+			total = *t
+		}
 		tw.AppendRow(table.Row{
 			idCell,
 			defaultDash(ch.Name),
 			formatStatus(ch.Status, ch.ExitCode, ch.ExitSignal, useColor),
 			defaultDash(provider),
 			defaultDash(model),
+			costfmt.Format(own, cur),
+			costfmt.Format(total, cur),
 			defaultDash(shortenCwd(ch.Cwd)),
 			started,
 			formatLabels(ch.Labels, 40, false),
@@ -220,6 +234,87 @@ type treeRow struct {
 	Depth int
 }
 
+// effectiveParents maps each child to its parent ID, per the
+// rafiki/parent (falling back to fundi/parent) label -- or "" when the child
+// has no parent label, or its parent is absent from this list (filtered out
+// by --status, or already forgotten). Shared by sortChildrenAsTree and
+// subtreeCosts so the two never disagree about what "descendant" means.
+func effectiveParents(children []protocol.ChildSummary) map[string]string {
+	byID := make(map[string]bool, len(children))
+	for _, ch := range children {
+		byID[ch.ChildID] = true
+	}
+	out := make(map[string]string, len(children))
+	for _, ch := range children {
+		p := ch.Labels["rafiki/parent"]
+		if p == "" {
+			p = ch.Labels["fundi/parent"]
+		}
+		if byID[p] {
+			out[ch.ChildID] = p
+		}
+	}
+	return out
+}
+
+// subtreeCosts sums each child's own CostUSD across its full descendant
+// subtree, walking the same parent/child relationships sortChildrenAsTree
+// renders as a tree. This mirrors pkg/tui/rail.Rail.SubtreeCost's algorithm
+// client-side rather than asking the daemon for a rollup: ctrl_list already
+// returns every child's own cost in one batched round trip, so summing it
+// down the tree costs nothing further.
+//
+// A nil entry means no cost anywhere in that subtree is known (e.g. no agent
+// database configured) -- present-and-zero is a different, reportable fact.
+func subtreeCosts(children []protocol.ChildSummary) map[string]*float64 {
+	parent := effectiveParents(children)
+	kids := make(map[string][]string, len(children))
+	for id, p := range parent {
+		kids[p] = append(kids[p], id)
+	}
+	own := make(map[string]*float64, len(children))
+	for _, ch := range children {
+		own[ch.ChildID] = ch.CostUSD
+	}
+
+	memo := make(map[string]*float64, len(children))
+	var walk func(id string, seen map[string]bool) *float64
+	walk = func(id string, seen map[string]bool) *float64 {
+		if v, ok := memo[id]; ok {
+			return v
+		}
+		if seen[id] {
+			return nil // cycle guard: never re-enter a node on this path
+		}
+		seen[id] = true
+
+		var total float64
+		known := false
+		if c := own[id]; c != nil {
+			total += *c
+			known = true
+		}
+		for _, kid := range kids[id] {
+			if c := walk(kid, seen); c != nil {
+				total += *c
+				known = true
+			}
+		}
+		var out *float64
+		if known {
+			out = &total
+		}
+		memo[id] = out
+		return out
+	}
+
+	out := make(map[string]*float64, len(children))
+	for _, ch := range children {
+		out[ch.ChildID] = walk(ch.ChildID, map[string]bool{})
+	}
+	return out
+}
+
 // sortChildrenAsTree orders children so each parent is immediately followed
 // by its descendants, depth-first, and reports each one's depth.
 //
@@ -228,26 +323,12 @@ type treeRow struct {
 // is treated as a root so it stays visible; silently dropping it would make
 // a filtered list lie about what is running.
 func sortChildrenAsTree(children []protocol.ChildSummary) []treeRow {
-	byID := make(map[string]protocol.ChildSummary, len(children))
-	for _, ch := range children {
-		byID[ch.ChildID] = ch
-	}
-
-	parentOf := func(ch protocol.ChildSummary) string {
-		p := ch.Labels["rafiki/parent"]
-		if p == "" {
-			p = ch.Labels["fundi/parent"]
-		}
-		if _, present := byID[p]; !present {
-			return ""
-		}
-		return p
-	}
+	parents := effectiveParents(children)
 
 	kids := make(map[string][]protocol.ChildSummary, len(children))
 	var roots []protocol.ChildSummary
 	for _, ch := range children {
-		if p := parentOf(ch); p != "" {
+		if p := parents[ch.ChildID]; p != "" {
 			kids[p] = append(kids[p], ch)
 		} else {
 			roots = append(roots, ch)

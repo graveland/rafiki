@@ -25,6 +25,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/charmbracelet/x/ansi"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
@@ -306,6 +307,11 @@ type Cockpit struct {
 	// different agent than the one the confirmation named.
 	endArmed   time.Time
 	endArmedID string
+
+	// currency is the display conversion loaded once at construction, the
+	// same way modelView is -- a `rafiki config set` takes effect on the
+	// next cockpit start, not live.
+	currency *clientstate.Currency
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -354,6 +360,7 @@ func NewCockpit(opts Options) *Cockpit {
 		evCh:      make(chan *rafikiv1.Event, 256),
 		status:    "connecting…",
 		modelView: loadModelView(),
+		currency:  clientstate.Load().Currency,
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
@@ -1438,7 +1445,7 @@ func (c *Cockpit) railCols() int {
 	if c.form != nil || c.picker != nil || c.railHidden || c.rail.Len() < 2 {
 		return 0
 	}
-	return railWidthFor(c.rail.Nodes(), c.width)
+	return railWidthFor(c.rail.Nodes(), c.width, c.currency)
 }
 
 func (c *Cockpit) convWidth() int {
@@ -1511,8 +1518,8 @@ func (c *Cockpit) costReadout() string {
 	if !ok {
 		return ""
 	}
-	self := fmtCost(n.Cost)
-	sub := fmtCost(c.rail.SubtreeCost(f) - n.Cost)
+	self := fmtCost(n.Cost, c.currency)
+	sub := fmtCost(c.rail.SubtreeCost(f)-n.Cost, c.currency)
 	switch {
 	case self != "" && sub != "":
 		return self + " +" + sub
@@ -1652,7 +1659,7 @@ func (c *Cockpit) View() tea.View {
 	railText := ""
 	if railCols > 0 {
 		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railCols,
-			c.focus == focusRail)
+			c.focus == focusRail, c.currency)
 	}
 
 	bodyHeight := c.bodyHeight()

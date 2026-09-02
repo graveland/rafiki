@@ -749,6 +749,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 |---|---|
 | `RAFIKI_SOCKET` | override the controller socket path |
 | `RAFIKI_DEFAULT_MODEL` | model used when `rafiki create` gets no `--model`. Optional: without it (and without a preset model), create falls back to the model you last spawned for that kind, remembered in the client state file |
+| — | other display preferences (e.g. a currency `rafiki list`/the TUI convert cost figures into) live in that same client state file; view or change them with `rafiki config show` / `rafiki config set` |
 | `RAFIKI_DEFAULT_PRESET` | preset used when `--preset` is not given |
 | `RAFIKI_DEFAULT_LABELS` | comma-separated `k=v` label defaults |
 | `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/rafiki/instructions.md`) |

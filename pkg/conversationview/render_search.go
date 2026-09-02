@@ -8,6 +8,8 @@ import (
 
 	"github.com/jedib0t/go-pretty/v6/table"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/insightstypes"
 )
 
@@ -20,6 +22,8 @@ func RenderSearch(w io.Writer, rows []insightstypes.ConversationSummary) error {
 		return err
 	}
 
+	cur := clientstate.Load().Currency
+
 	t := table.NewWriter()
 	t.SetOutputMirror(w)
 	t.SetStyle(table.StyleRounded)
@@ -30,7 +34,7 @@ func RenderSearch(w io.Writer, rows []insightstypes.ConversationSummary) error {
 		t.AppendRow(table.Row{
 			r.ID, r.Name, r.CreatedAt.Local().Format("2006-01-02 15:04"), r.Owner, r.Persona, r.Source, r.Model,
 			r.DrivenBy, r.Status, r.Turns, r.InputTokens, r.OutputTokens,
-			pct(r.CacheHitRatio), dollars(r.TotalCostUSD),
+			pct(r.CacheHitRatio), costfmt.Format(r.TotalCostUSD, cur),
 			truncateCell(r.FirstMessage),
 		})
 	}

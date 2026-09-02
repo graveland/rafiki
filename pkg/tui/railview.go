@@ -9,6 +9,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 )
 
@@ -18,14 +20,16 @@ var (
 	styleRailDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
-// fmtCost renders a spend. Zero renders as nothing: a row of "$0.00" beside
-// every idle agent is noise, and the number is only interesting once there is
-// one.
-func fmtCost(usd float64) string {
+// fmtCost renders a spend, converted through cur when set. Zero renders as
+// nothing: a row of "$0.00" beside every idle agent is noise, and the number
+// is only interesting once there is one. This is the rail's own zero rule
+// layered over costfmt.Format, which otherwise renders zero as "-" (the
+// right call for a data table, the wrong one for a live status rail).
+func fmtCost(usd float64, cur *clientstate.Currency) string {
 	if usd == 0 {
 		return ""
 	}
-	return "$" + strconv.FormatFloat(usd, 'f', 2, 64)
+	return costfmt.Format(usd, cur)
 }
 
 // renderRail draws the tree.
@@ -51,7 +55,7 @@ func fmtCost(usd float64) string {
 // transcript. The budget counts everything renderRail puts in the plain row —
 // cursor, indent, glyph, name, badge and cost — because those are what get
 // clipped.
-func railWidthFor(nodes []rail.Node, total int) int {
+func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 	want := railMin
 	for _, n := range nodes {
 		name := n.Name
@@ -62,7 +66,7 @@ func railWidthFor(nodes []rail.Node, total int) int {
 		if n.Attention > 0 {
 			w += 2 + len(strconv.Itoa(n.Attention))
 		}
-		if cost := fmtCost(n.Cost); cost != "" {
+		if cost := fmtCost(n.Cost, cur); cost != "" {
 			w += 1 + len(cost)
 		}
 		if w > want {
@@ -75,7 +79,7 @@ func railWidthFor(nodes []rail.Node, total int) int {
 	return want
 }
 
-func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocused bool) string {
+func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocused bool, cur *clientstate.Currency) string {
 	if len(nodes) < 2 {
 		return ""
 	}
@@ -106,7 +110,7 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		// anything appended afterwards escapes the pane and bleeds colour into
 		// the transcript.
 		left := cursor + strings.Repeat("  ", n.Depth) + rail.Glyph(n) + " " + name + badge
-		cost := fmtCost(n.Cost)
+		cost := fmtCost(n.Cost, cur)
 		row := clip(left, width)
 		if cost != "" {
 			if gap := width - ansi.StringWidth(clip(left, width-len(cost)-1)) - len(cost); gap >= 1 {

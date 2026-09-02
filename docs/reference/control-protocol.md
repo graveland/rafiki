@@ -460,7 +460,8 @@ Response:
         "exitCode":           null,              // populated when exited
         "exitSignal":         null,
         "contextWindow":      200000,            // omitted when the daemon's
-        "maxCompletionTokens":64000               // model catalog has no entry for "model"
+        "maxCompletionTokens":64000,              // model catalog has no entry for "model"
+        "cost_usd":           0.0234              // omitted when not known
       }
     ]
   }
@@ -475,12 +476,22 @@ of whatever static model list a client-side TUI carries. Both are omitted
 `model` — no catalog configured, a model the catalog hasn't seen, or a
 cold/stale cache.
 
+`cost_usd` is that child's OWN spend (not its subtree's), priced in one
+batched round trip for the whole list — the same rollup the Connect plane's
+`ListChildren`/`GetChild` already use (§7). It is omitted entirely when not
+known (no agent database configured, or the pricing query failed) rather than
+reported as a false zero; present-and-zero means the query ran and found no
+turns yet. A client wanting the "agent + descendants" total sums `cost_usd`
+down the parent/child tree itself (via the `rafiki/parent`/`fundi/parent`
+labels) — the daemon does not compute that rollup for `ctrl_list`.
+
 Default sort: `startedAt` desc. Entries in the grace window (status
 `exited`) are included by default; filter on `status` to narrow.
 
 ### 6.2 `ctrl_get`
 
-Snapshot one child by id. Same shape as a single `ctrl_list` entry.
+Snapshot one child by id. Same shape as a single `ctrl_list` entry, including
+`cost_usd`.
 
 ```jsonc
 { "type": "ctrl_get", "id": "2", "childId": "c_01HX..." }

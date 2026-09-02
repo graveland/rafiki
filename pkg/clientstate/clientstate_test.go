@@ -67,3 +67,23 @@ func TestLoadIsTotalOnAMissingFile(t *testing.T) {
 		t.Errorf("Load on an empty dir = %+v, want a zero State", s)
 	}
 }
+
+// Currency goes through Update like every other section, so it must survive
+// alongside one already set -- the same read-modify-write guarantee
+// TestUpdatePreservesSectionsItDoesNotTouch pins for ModelView/LastModel.
+func TestCurrencySurvivesAlongsideOtherSections(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	clientstate.RememberModel("fundi", "z-ai/glm-5.3-flash")
+	clientstate.Update(func(s *clientstate.State) {
+		s.Currency = &clientstate.Currency{Code: "CAD", Rate: 1.38}
+	})
+
+	got := clientstate.Load()
+	if got.Currency == nil || got.Currency.Code != "CAD" || got.Currency.Rate != 1.38 {
+		t.Errorf("Currency = %+v", got.Currency)
+	}
+	if got.LastModel["fundi"] != "z-ai/glm-5.3-flash" {
+		t.Errorf("setting Currency dropped LastModel: %v", got.LastModel)
+	}
+}

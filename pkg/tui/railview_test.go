@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 )
 
@@ -88,14 +89,26 @@ func TestFmtCost(t *testing.T) {
 		want string
 	}{
 		{0, ""},
-		{0.004, "$0.00"},
+		{0.004, "$0.0040"},
 		{0.42, "$0.42"},
 		{12.5, "$12.50"},
 		{1234.5, "$1234.50"},
 	} {
-		if got := fmtCost(tc.in); got != tc.want {
-			t.Errorf("fmtCost(%v) = %q, want %q", tc.in, got, tc.want)
+		if got := fmtCost(tc.in, nil); got != tc.want {
+			t.Errorf("fmtCost(%v, nil) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// Zero stays blank even with a currency configured -- the rail's "no noise
+// beside idle agents" rule is independent of the conversion.
+func TestFmtCostConverts(t *testing.T) {
+	cur := &clientstate.Currency{Code: "CAD", Rate: 1.38}
+	if got := fmtCost(0, cur); got != "" {
+		t.Errorf("fmtCost(0, cur) = %q, want blank", got)
+	}
+	if got, want := fmtCost(1.0, cur), "$1.38 CAD"; got != want {
+		t.Errorf("fmtCost(1.0, cur) = %q, want %q", got, want)
 	}
 }
 
@@ -107,7 +120,7 @@ func TestRailRowCostCountsAgainstWidth(t *testing.T) {
 		{ChildID: "c1", Name: "root", Cost: 12.34},
 		{ChildID: "c2", Name: "worker", ParentID: "c1", Depth: 1, Cost: 1.0},
 	}
-	out := renderRail(nodes, "c1", "c1", 30, false)
+	out := renderRail(nodes, "c1", "c1", 30, false, nil)
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := ansi.StringWidth(line); w > 30 {
 			t.Errorf("row is %d columns wide, budget is 30: %q", w, line)
@@ -130,12 +143,12 @@ func TestRailGrowsToFitTheLongestName(t *testing.T) {
 		{ChildID: "c_1", Name: "alpha"},
 		{ChildID: "c_2", Name: "executor-integration-reviewer"},
 	}
-	narrow := railWidthFor(short, 200)
-	wide := railWidthFor(long, 200)
+	narrow := railWidthFor(short, 200, nil)
+	wide := railWidthFor(long, 200, nil)
 	if wide <= narrow {
 		t.Errorf("width: short=%d long=%d, want the longer name to widen the rail", narrow, wide)
 	}
-	if got := renderRail(long, "c_1", "c_1", wide, false); !strings.Contains(got, "executor-integration-reviewer") {
+	if got := renderRail(long, "c_1", "c_1", wide, false, nil); !strings.Contains(got, "executor-integration-reviewer") {
 		t.Error("the longest name is still truncated at the width chosen for it")
 	}
 }
@@ -145,14 +158,14 @@ func TestRailGrowsToFitTheLongestName(t *testing.T) {
 // fixed width was chosen to avoid.
 func TestRailWidthIgnoresTheWindowUntilTheClamp(t *testing.T) {
 	nodes := []rail.Node{{ChildID: "c_1", Name: "alpha"}, {ChildID: "c_2", Name: "beta"}}
-	if railWidthFor(nodes, 100) != railWidthFor(nodes, 400) {
+	if railWidthFor(nodes, 100, nil) != railWidthFor(nodes, 400, nil) {
 		t.Error("rail width tracked the window; that reflows the transcript on every drag")
 	}
 }
 
 func TestRailNeverFallsBelowTheOldFixedWidth(t *testing.T) {
 	nodes := []rail.Node{{ChildID: "c_1", Name: "a"}, {ChildID: "c_2", Name: "b"}}
-	if got := railWidthFor(nodes, 200); got != railMin {
+	if got := railWidthFor(nodes, 200, nil); got != railMin {
 		t.Errorf("width = %d, want the floor %d", got, railMin)
 	}
 }
@@ -163,7 +176,7 @@ func TestRailIsClampedToAFractionOfTheWindow(t *testing.T) {
 		{ChildID: "c_1", Name: "a"},
 		{ChildID: "c_2", Name: strings.Repeat("x", 300)},
 	}
-	got := railWidthFor(nodes, 100)
+	got := railWidthFor(nodes, 100, nil)
 	if got > 100*railMaxPct/100 {
 		t.Errorf("width = %d, want it clamped to %d%% of a 100-col window", got, railMaxPct)
 	}
@@ -175,12 +188,12 @@ func TestRailWidthCountsDepthAndCost(t *testing.T) {
 	flat := []rail.Node{{ChildID: "c_1", Name: "alpha"}, {ChildID: "c_2", Name: "reviewer-agent-one"}}
 	deep := []rail.Node{{ChildID: "c_1", Name: "alpha"},
 		{ChildID: "c_2", Name: "reviewer-agent-one", Depth: 3}}
-	if railWidthFor(deep, 400) <= railWidthFor(flat, 400) {
+	if railWidthFor(deep, 400, nil) <= railWidthFor(flat, 400, nil) {
 		t.Error("indentation did not count against the width budget")
 	}
 	costly := []rail.Node{{ChildID: "c_1", Name: "alpha"},
 		{ChildID: "c_2", Name: "reviewer-agent-one", Cost: 12.34}}
-	if railWidthFor(costly, 400) <= railWidthFor(flat, 400) {
+	if railWidthFor(costly, 400, nil) <= railWidthFor(flat, 400, nil) {
 		t.Error("the cost readout did not count against the width budget")
 	}
 }

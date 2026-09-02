@@ -64,6 +64,7 @@ type fakeController struct {
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
 	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
 	contextWindowFn         func(string) (int, int, bool)
+	costsFn                 func([]childstore.Snapshot) map[string]float64
 	modelInfoFn             func(string) protocol.ModelInfoResponseData
 	getStreamsResult        control.GetStreamsResult
 	getStreamsErr           error
@@ -355,6 +356,13 @@ func (f *fakeController) ContextWindow(model string) (contextLen, maxCompletion 
 	return 0, 0, false
 }
 
+func (f *fakeController) Costs(snaps []childstore.Snapshot) map[string]float64 {
+	if f.costsFn != nil {
+		return f.costsFn(snaps)
+	}
+	return nil
+}
+
 func (f *fakeController) ModelInfo(model string) protocol.ModelInfoResponseData {
 	if f.modelInfoFn != nil {
 		return f.modelInfoFn(model)
@@ -611,6 +619,70 @@ func TestDispatch_List_ContextWindow(t *testing.T) {
 	}
 	if len(data.Children) != 1 || data.Children[0].ContextWindow != 1000000 || data.Children[0].MaxCompletionTokens != 32000 {
 		t.Errorf("got %+v", data.Children)
+	}
+}
+
+// TestDispatch_List_CostUSD asserts ctrl_list populates CostUSD from the
+// controller's batched Costs rollup -- previously only the Connect plane's
+// ListChildren/GetChild did this; ctrl_list left it unset entirely.
+func TestDispatch_List_CostUSD(t *testing.T) {
+	snap := makeSnapshot("c_001", protocol.StatusStreaming)
+	c := &fakeController{
+		listFn: func(protocol.ListFilter) []childstore.Snapshot { return []childstore.Snapshot{snap} },
+		costsFn: func(snaps []childstore.Snapshot) map[string]float64 {
+			return map[string]float64{"c_001": 1.5}
+		},
+	}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_list","id":"1"}`)))
+
+	var data protocol.ListResponseData
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Children) != 1 || data.Children[0].CostUSD == nil || *data.Children[0].CostUSD != 1.5 {
+		t.Errorf("got %+v", data.Children)
+	}
+}
+
+// A child absent from the Costs map (no agent database, or the query failed)
+// must leave CostUSD nil rather than publish a false zero.
+func TestDispatch_List_CostUSDUnknown(t *testing.T) {
+	snap := makeSnapshot("c_001", protocol.StatusStreaming)
+	c := &fakeController{
+		listFn: func(protocol.ListFilter) []childstore.Snapshot { return []childstore.Snapshot{snap} },
+	}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_list","id":"1"}`)))
+
+	var data protocol.ListResponseData
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Children) != 1 || data.Children[0].CostUSD != nil {
+		t.Errorf("got %+v, want CostUSD nil when not known", data.Children)
+	}
+}
+
+// TestDispatch_Get_CostUSD is ctrl_get's counterpart to
+// TestDispatch_List_CostUSD.
+func TestDispatch_Get_CostUSD(t *testing.T) {
+	snap := makeSnapshot("c_001", protocol.StatusStreaming)
+	c := &fakeController{
+		getFn: func(id string) (childstore.Snapshot, bool) { return snap, id == "c_001" },
+		costsFn: func(snaps []childstore.Snapshot) map[string]float64 {
+			return map[string]float64{"c_001": 0.75}
+		},
+	}
+	d := control.NewDispatch(c)
+	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_get","id":"1","childId":"c_001"}`)))
+
+	var got protocol.ChildSummary
+	if err := json.Unmarshal(r.Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CostUSD == nil || *got.CostUSD != 0.75 {
+		t.Errorf("got %+v", got)
 	}
 }
 
