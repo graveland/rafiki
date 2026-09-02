@@ -69,6 +69,15 @@ func cacheRead(kind, endpoint string, ttl time.Duration, out any) bool {
 
 // cacheWrite stores v. Best-effort and silent: a cache that cannot be written
 // costs a round trip, which is exactly what the uncached path already pays.
+//
+// Write-then-rename via a UNIQUE temp file in the destination directory
+// (os.CreateTemp): a completion handler reading a half-written file would see
+// a corrupt entry, and these run concurrently by nature (a shell spawns one
+// per TAB) — a shared "<path>.tmp" lets two processes truncate and rename
+// over each other's bytes, publishing a mix. The unique name makes each
+// write-then-rename atomic regardless of who else is writing. CreateTemp
+// creates 0600, the same mode WriteFile 0o600 produced before, and the temp
+// is removed on every failure path.
 func cacheWrite(kind, endpoint string, v any) {
 	payload, err := json.Marshal(v)
 	if err != nil {
@@ -82,15 +91,20 @@ func cacheWrite(kind, endpoint string, v any) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return
 	}
-	// Write-then-rename: a completion handler reading a half-written file
-	// would see a corrupt entry, and these run concurrently by nature (a shell
-	// spawns one per TAB).
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	tmpName := tmp.Name()
+	_, writeErr := tmp.Write(b)
+	if closeErr := tmp.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr == nil {
+		writeErr = os.Rename(tmpName, path)
+	}
+	if writeErr != nil {
+		_ = os.Remove(tmpName)
 	}
 }
 
