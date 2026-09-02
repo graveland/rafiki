@@ -43,3 +43,29 @@ func TestFormat_UnsetRateFallsBackToUSD(t *testing.T) {
 		t.Errorf("Format(1.0, cur) = %q, want %q", got, want)
 	}
 }
+
+func TestToUSD_NoCurrency(t *testing.T) {
+	if got := ToUSD(12.5, nil); got != 12.5 {
+		t.Errorf("ToUSD(12.5, nil) = %v, want 12.5", got)
+	}
+}
+
+func TestToUSD_UnsetRatePassesThrough(t *testing.T) {
+	cur := &clientstate.Currency{Code: "CAD"} // Rate: 0
+	if got := ToUSD(12.5, cur); got != 12.5 {
+		t.Errorf("ToUSD(12.5, cur) = %v, want 12.5 (unset rate passes through)", got)
+	}
+}
+
+func TestToUSD_ConvertsAndRoundTripsWithFormat(t *testing.T) {
+	cur := &clientstate.Currency{Code: "CAD", Rate: 1.38}
+	usd := ToUSD(1.38, cur)
+	if diff := usd - 1.0; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("ToUSD(1.38, cur) = %v, want ~1.0", usd)
+	}
+	// Round-trips through Format: a local-currency amount converted to USD
+	// and displayed back through Format should read as the original amount.
+	if got, want := Format(usd, cur), "$1.38 CAD"; got != want {
+		t.Errorf("Format(ToUSD(1.38, cur), cur) = %q, want %q", got, want)
+	}
+}
