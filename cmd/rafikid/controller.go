@@ -184,6 +184,13 @@ type Controller struct {
 	// breaches bounds the budget sweep to one steer per breach.
 	breaches budgetBreaches
 
+	// heartbeats tracks long-running children's working spells for
+	// sweepHeartbeats. See heartbeat_sweep.go.
+	heartbeats heartbeatState
+	// heartbeatInterval is how long a child must be continuously working
+	// before its parent gets a check-in push. Zero disables the feature.
+	heartbeatInterval time.Duration
+
 	// turnOutcomes remembers the most recent fundi.TurnOutcome per child, so
 	// handleStatusChange's idle-transition settle notification can name the
 	// real reason (a cost budget, an upstream error) instead of a generic
@@ -292,29 +299,36 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 			gw = time.Duration(n * float64(time.Hour))
 		}
 	}
+	hb := 5 * time.Minute
+	if h := paths.Get(paths.HeartbeatInterval); h != "" {
+		if d, err := time.ParseDuration(h); err == nil && d >= 0 {
+			hb = d
+		}
+	}
 	c := &Controller{
-		st:          st,
-		cm:          newChildManager(),
-		dumper:      dumper,
-		startedAt:   time.Now(),
-		socketPath:  socketPath,
-		logsDir:     logsDir,
-		stateDir:    stateDir,
-		graceWindow: gw,
-		pool:        pool,
-		rawTrace:    rawTrace,
-		insights:    local.New(local.Options{Pool: pool}),
-		baseCtx:     baseCtx,
-		tasks:       taskStore(pool),
-		evbuf:       newEventBuffer(),
-		execStore:   execStore,
-		users:       userStore,
-		providers:   prov,
-		heldLeases:  make(map[string]store.Lease),
-		native:      nativebus.New(),
-		evlog:       eventLogStore(pool),
-		inboxBatch:  inboxBatchConfig(),
-		sentFrames:  make(map[string]sentFrame),
+		st:                st,
+		cm:                newChildManager(),
+		dumper:            dumper,
+		startedAt:         time.Now(),
+		socketPath:        socketPath,
+		logsDir:           logsDir,
+		stateDir:          stateDir,
+		graceWindow:       gw,
+		heartbeatInterval: hb,
+		pool:              pool,
+		rawTrace:          rawTrace,
+		insights:          local.New(local.Options{Pool: pool}),
+		baseCtx:           baseCtx,
+		tasks:             taskStore(pool),
+		evbuf:             newEventBuffer(),
+		execStore:         execStore,
+		users:             userStore,
+		providers:         prov,
+		heldLeases:        make(map[string]store.Lease),
+		native:            nativebus.New(),
+		evlog:             eventLogStore(pool),
+		inboxBatch:        inboxBatchConfig(),
+		sentFrames:        make(map[string]sentFrame),
 	}
 	// After the literal: the queue's Validate and Deliver are methods on c.
 	c.inbox = c.newInboxQueue(inboxStore(pool))
@@ -385,17 +399,19 @@ func (c *Controller) startSweeper(ctx context.Context) {
 }
 
 // sweepTick is one pass of the periodic reconciliation: children whose grace
-// window has expired, budget breaches, and the inbox's terminal rows.
+// window has expired, budget breaches, long-running heartbeat check-ins, and
+// the inbox's terminal rows.
 //
-// Budget breaches and the inbox sweep ride the expiry tick rather than timers
-// of their own: all three are periodic reconciliations of stored state, and a
-// second ticker would be a second thing to reason about at shutdown. Extracted
-// from startSweeper so what the tick does is testable without waiting five
-// minutes for one.
+// Budget breaches, heartbeats, and the inbox sweep ride the expiry tick
+// rather than timers of their own: all four are periodic reconciliations of
+// stored state, and a second ticker would be a second thing to reason about
+// at shutdown. Extracted from startSweeper so what the tick does is testable
+// without waiting five minutes for one.
 func (c *Controller) sweepTick(ctx context.Context) {
 	c.sweepExpired()
 	sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
 	c.sweepBudgets(sweepCtx)
+	c.sweepHeartbeats(time.Now())
 	cancel()
 	c.sweepInbox()
 }
@@ -2693,6 +2709,7 @@ func (c *Controller) drainChildStatus(childID string, ch *child.Child) {
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {
+	now := time.Now()
 	storePrev, ok := c.st.SetStatus(childID, newStatus)
 	// Release any event batches deferred while this child was mid-turn.
 	// This is rafiki's turn-end drain; it is why no busy-poller is needed.
@@ -2710,7 +2727,12 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		// round trip.
 		go c.drainInbox(c.inbox, childID)
 	}
-	now := time.Now()
+	if ok && isWorkingStatus(newStatus) {
+		c.heartbeats.startWorking(childID, now)
+	}
+	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
+		c.heartbeats.stopWorking(childID)
+	}
 	evt := protocol.CtrlChildStatus{
 		Type:     protocol.TypeCtrlChildStatus,
 		ChildID:  childID,
