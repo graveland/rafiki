@@ -44,6 +44,89 @@ func (s modelSort) String() string {
 	return "?"
 }
 
+// modelView is HOW model lists are ordered and filtered. It lives on the
+// Cockpit rather than on either view, because the form's typeahead and the full
+// picker are two windows onto one question: sorting by price inline and then
+// opening the browser must not silently reorder under you.
+type modelView struct {
+	sort modelSort
+	// visionOnly drops models KNOWN to be text-only. Models of unknown
+	// capability are KEPT -- see visionKind.
+	visionOnly bool
+}
+
+func (v *modelView) cycleSort()    { v.sort = (v.sort + 1) % modelSortCount }
+func (v *modelView) toggleVision() { v.visionOnly = !v.visionOnly }
+
+// summary names the current view for a hint line. The active sort is otherwise
+// invisible, and an on vision filter looks identical to a catalog that happens
+// to hold no text-only models.
+func (v modelView) summary() string {
+	out := "sort: " + v.sort.String()
+	if v.visionOnly {
+		out += "   vision on"
+	}
+	return out
+}
+
+// selectModels filters and orders a catalog for display.
+//
+// ONE function for both views. They had separate copies of this logic, which is
+// how the typeahead and the browser end up disagreeing about what matches --
+// the drift class this repo already carries several documented instances of.
+func selectModels(all []*rafikiv1.ModelRow, query string, v modelView) []*rafikiv1.ModelRow {
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]*rafikiv1.ModelRow, 0, len(all))
+	for _, r := range all {
+		if v.visionOnly && visionKind(r) == visionNo {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(r.GetId()), q) &&
+			!strings.Contains(strings.ToLower(r.GetName()), q) {
+			continue
+		}
+		out = append(out, r)
+	}
+	sortModels(out, v.sort)
+	return out
+}
+
+// sortModels orders rows in place.
+//
+// An ABSENT price or context sorts LAST in both orders, never as zero. A model
+// the catalog does not know is not the cheapest thing available, and sorting it
+// there is the exact failure the optional wire fields exist to prevent.
+func sortModels(rows []*rafikiv1.ModelRow, by modelSort) {
+	switch by {
+	case sortCost:
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := rows[i].PromptUsd, rows[j].PromptUsd
+			if a == nil || b == nil {
+				return a != nil // known prices first
+			}
+			if *a != *b {
+				return *a < *b
+			}
+			return rows[i].GetId() < rows[j].GetId()
+		})
+	case sortContext:
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := rows[i].ContextWindow, rows[j].ContextWindow
+			if a == nil || b == nil {
+				return a != nil
+			}
+			if *a != *b {
+				return *a > *b
+			}
+			return rows[i].GetId() < rows[j].GetId()
+		})
+	default:
+		sort.SliceStable(rows, func(i, j int) bool {
+			return rows[i].GetId() < rows[j].GetId()
+		})
+	}
+}
+
 // modelPicker browses what the daemon says it can run.
 //
 // The rows come from the Connect ListModels RPC, which is scoped by KIND: a
@@ -60,16 +143,12 @@ type modelPicker struct {
 
 	cursor int
 	offset int
-	sort   modelSort
-	// visionOnly drops models KNOWN to be text-only. Models of unknown
-	// capability are kept -- see visionKind.
-	visionOnly bool
 
 	loading bool
 	err     string
 }
 
-func newModelPicker(kind, seed string, all []*rafikiv1.ModelRow, loaded bool, err string) *modelPicker {
+func newModelPicker(kind, seed string, all []*rafikiv1.ModelRow, loaded bool, err string, v modelView) *modelPicker {
 	in := textinput.New()
 	in.Prompt = ""
 	in.CharLimit = 0
@@ -80,7 +159,7 @@ func newModelPicker(kind, seed string, all []*rafikiv1.ModelRow, loaded bool, er
 	// opened after a failed fetch shows "asking the daemon…" forever, hiding
 	// the one thing that explains why the list is empty.
 	p := &modelPicker{kind: kind, filter: in, all: all, loading: !loaded && err == "", err: err}
-	p.apply()
+	p.apply(v)
 	return p
 }
 
@@ -154,61 +233,13 @@ func visionKind(r *rafikiv1.ModelRow) visionState {
 	return visionNo
 }
 
-// apply recomputes the visible rows from the filter, the vision toggle and the
-// sort. Called on every keystroke; the catalog is a few hundred rows, so a
-// full re-filter costs less than the bookkeeping to avoid it.
-func (p *modelPicker) apply() {
-	q := strings.ToLower(strings.TrimSpace(p.filter.Value()))
-	p.rows = p.rows[:0]
-	for _, r := range p.all {
-		if p.visionOnly && visionKind(r) == visionNo {
-			continue
-		}
-		if q != "" && !strings.Contains(strings.ToLower(r.GetId()), q) &&
-			!strings.Contains(strings.ToLower(r.GetName()), q) {
-			continue
-		}
-		p.rows = append(p.rows, r)
-	}
-	p.sortRows()
+// apply recomputes the visible rows. Called on every keystroke; the catalog is
+// a few hundred rows, so a full re-filter costs less than the bookkeeping to
+// avoid it.
+func (p *modelPicker) apply(v modelView) {
+	p.rows = selectModels(p.all, p.filter.Value(), v)
 	if p.cursor >= len(p.rows) {
 		p.cursor = max(0, len(p.rows)-1)
-	}
-}
-
-// sortRows orders the visible rows.
-//
-// An ABSENT price or context sorts LAST in both orders, never as zero. A model
-// the catalog does not know is not the cheapest thing available, and sorting it
-// there is the exact failure the optional wire fields exist to prevent.
-func (p *modelPicker) sortRows() {
-	switch p.sort {
-	case sortCost:
-		sort.SliceStable(p.rows, func(i, j int) bool {
-			a, b := p.rows[i].PromptUsd, p.rows[j].PromptUsd
-			if a == nil || b == nil {
-				return a != nil // known prices first
-			}
-			if *a != *b {
-				return *a < *b
-			}
-			return p.rows[i].GetId() < p.rows[j].GetId()
-		})
-	case sortContext:
-		sort.SliceStable(p.rows, func(i, j int) bool {
-			a, b := p.rows[i].ContextWindow, p.rows[j].ContextWindow
-			if a == nil || b == nil {
-				return a != nil
-			}
-			if *a != *b {
-				return *a > *b
-			}
-			return p.rows[i].GetId() < p.rows[j].GetId()
-		})
-	default:
-		sort.SliceStable(p.rows, func(i, j int) bool {
-			return p.rows[i].GetId() < p.rows[j].GetId()
-		})
 	}
 }
 
@@ -277,7 +308,7 @@ func visionCellGlyph(r *rafikiv1.ModelRow) string {
 // title, filter, blank, header, blank, footer.
 const pickerChrome = 6
 
-func (p *modelPicker) view(width, height int) string {
+func (p *modelPicker) view(width, height int, v modelView) string {
 	var b strings.Builder
 	b.WriteString(styleRailFocused.Render("model"))
 	b.WriteString(styleMeta.Render("  " + p.kind))
@@ -329,7 +360,7 @@ func (p *modelPicker) view(width, height int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(styleMeta.Render(p.footer()))
+	b.WriteString(styleMeta.Render(p.footer(v)))
 	return b.String()
 }
 
@@ -340,12 +371,12 @@ func (p *modelPicker) view(width, height int) string {
 // unknown-capability models would hide every locally-served model, so they are
 // KEPT and counted -- the number is what tells you the "◉" column is not the
 // whole answer.
-func (p *modelPicker) footer() string {
+func (p *modelPicker) footer(v modelView) string {
 	parts := []string{
 		fmt.Sprintf("%d/%d", len(p.rows), len(p.all)),
-		"⇥ sort: " + p.sort.String(),
+		"^S " + v.sort.String(),
 	}
-	if p.visionOnly {
+	if v.visionOnly {
 		parts = append(parts, "^V vision on")
 	} else {
 		parts = append(parts, "^V vision")
@@ -401,13 +432,17 @@ func (c *Cockpit) handlePickerKey(msg tea.KeyPressMsg, window int) (tea.Model, t
 	case "home":
 		p.cursor, p.offset = 0, 0
 		return c, nil
-	case "tab":
-		p.sort = (p.sort + 1) % modelSortCount
-		p.apply()
+	case "ctrl+s":
+		// ^S rather than ⇥ because the same key must work in the form's inline
+		// typeahead, where ⇥ already means "next field" and cannot be taken.
+		c.modelView.cycleSort()
+		p.cursor, p.offset = 0, 0
+		p.apply(c.modelView)
 		return c, nil
 	case "ctrl+v":
-		p.visionOnly = !p.visionOnly
-		p.apply()
+		c.modelView.toggleVision()
+		p.cursor, p.offset = 0, 0
+		p.apply(c.modelView)
 		return c, nil
 	}
 
@@ -419,7 +454,7 @@ func (c *Cockpit) handlePickerKey(msg tea.KeyPressMsg, window int) (tea.Model, t
 		// selects whatever happens to land under it, which is how you pick the
 		// wrong model without noticing.
 		p.cursor, p.offset = 0, 0
-		p.apply()
+		p.apply(c.modelView)
 	}
 	return c, cmd
 }
@@ -448,9 +483,9 @@ func (c *Cockpit) applyModelsLoaded(m modelsLoadedMsg) {
 		c.picker.loading = false
 		c.picker.err = c.modelsErr[m.kind]
 		c.picker.all = c.models[m.kind]
-		c.picker.apply()
+		c.picker.apply(c.modelView)
 	}
 	if c.form != nil && c.form.kind() == m.kind {
-		c.form.refreshSuggestions(c.models[m.kind])
+		c.form.refreshSuggestions(c.models[m.kind], c.modelView)
 	}
 }

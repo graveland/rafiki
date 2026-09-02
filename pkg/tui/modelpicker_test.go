@@ -121,12 +121,12 @@ func TestTypedModelTextSeedsTheFilter(t *testing.T) {
 }
 
 func TestFilterNarrowsTheRows(t *testing.T) {
-	_, p := loadedPicker(t)
+	c, p := loadedPicker(t)
 	if len(p.rows) != 3 {
 		t.Fatalf("rows = %d, want all 3 before filtering", len(p.rows))
 	}
 	p.filter.SetValue("deep")
-	p.apply()
+	p.apply(c.modelView)
 
 	if len(p.rows) != 1 || p.rows[0].GetId() != "deepseek/chat" {
 		t.Errorf("rows = %v, want just deepseek/chat", p.rows)
@@ -153,9 +153,9 @@ func TestFilterResetsTheCursor(t *testing.T) {
 // An unpriced model is not the cheapest thing available. Sorting an absent
 // price as zero is exactly what the optional wire fields exist to prevent.
 func TestCheapestSortPutsUnpricedModelsLast(t *testing.T) {
-	_, p := loadedPicker(t)
-	p.sort = sortCost
-	p.apply()
+	c, p := loadedPicker(t)
+	c.modelView.sort = sortCost
+	p.apply(c.modelView)
 
 	if got := p.rows[0].GetId(); got != "deepseek/chat" {
 		t.Errorf("first row = %q, want the genuinely cheapest", got)
@@ -166,9 +166,9 @@ func TestCheapestSortPutsUnpricedModelsLast(t *testing.T) {
 }
 
 func TestBiggestContextSortPutsUnknownContextLast(t *testing.T) {
-	_, p := loadedPicker(t)
-	p.sort = sortContext
-	p.apply()
+	c, p := loadedPicker(t)
+	c.modelView.sort = sortContext
+	p.apply(c.modelView)
 
 	if got := p.rows[0].GetId(); got != "openai/gpt-4o" {
 		t.Errorf("first row = %q, want the biggest context", got)
@@ -182,9 +182,9 @@ func TestBiggestContextSortPutsUnknownContextLast(t *testing.T) {
 // NO catalog entry, not "no vision". A filter that dropped them would hide
 // every locally-served model.
 func TestVisionFilterKeepsUnknownsAndDropsOnlyKnownTextOnly(t *testing.T) {
-	_, p := loadedPicker(t)
-	p.visionOnly = true
-	p.apply()
+	c, p := loadedPicker(t)
+	c.modelView.visionOnly = true
+	p.apply(c.modelView)
 
 	ids := map[string]bool{}
 	for _, r := range p.rows {
@@ -204,9 +204,9 @@ func TestVisionFilterKeepsUnknownsAndDropsOnlyKnownTextOnly(t *testing.T) {
 // Keeping unknowns is only honest if the user is told. The count is the thing
 // that says the ◉ column is not the whole answer.
 func TestFooterCountsUnknownCapability(t *testing.T) {
-	_, p := loadedPicker(t)
-	if !strings.Contains(p.footer(), "1 unknown") {
-		t.Errorf("footer = %q, want the unknown-capability count", p.footer())
+	c, p := loadedPicker(t)
+	if !strings.Contains(p.footer(c.modelView), "1 unknown") {
+		t.Errorf("footer = %q, want the unknown-capability count", p.footer(c.modelView))
 	}
 }
 
@@ -235,7 +235,7 @@ func TestZeroPriceRendersAsZeroNotUnknown(t *testing.T) {
 func TestPickingFillsTheFieldAndReturnsToTheForm(t *testing.T) {
 	c, p := loadedPicker(t)
 	p.filter.SetValue("gpt")
-	p.apply()
+	p.apply(c.modelView)
 
 	c.handleKey(keyMsg("enter"))
 
@@ -268,7 +268,7 @@ func TestPickingNothingLeavesTheFieldAlone(t *testing.T) {
 	c, p := loadedPicker(t)
 	c.form.inputs[fieldModel].SetValue("typed/by-hand")
 	p.filter.SetValue("no-such-model")
-	p.apply()
+	p.apply(c.modelView)
 
 	c.handleKey(keyMsg("enter"))
 
@@ -329,22 +329,22 @@ func TestPickerOwnsTheBodyPaneAboveTheForm(t *testing.T) {
 	}
 }
 
-func TestTabCyclesTheSortAndWraps(t *testing.T) {
-	c, p := loadedPicker(t)
-	if p.sort != sortID {
-		t.Fatalf("initial sort = %v, want sortID", p.sort)
+func TestCtrlSCyclesTheSortAndWraps(t *testing.T) {
+	c, _ := loadedPicker(t)
+	if c.modelView.sort != sortID {
+		t.Fatalf("initial sort = %v, want sortID", c.modelView.sort)
 	}
-	seen := map[modelSort]bool{p.sort: true}
+	seen := map[modelSort]bool{c.modelView.sort: true}
 	for i := 0; i < int(modelSortCount)-1; i++ {
-		c.handleKey(keyMsg("tab"))
-		if seen[p.sort] {
-			t.Fatalf("⇥ revisited %v before covering every sort", p.sort)
+		c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+		if seen[c.modelView.sort] {
+			t.Fatalf("^S revisited %v before covering every sort", c.modelView.sort)
 		}
-		seen[p.sort] = true
+		seen[c.modelView.sort] = true
 	}
-	c.handleKey(keyMsg("tab"))
-	if p.sort != sortID {
-		t.Errorf("sort = %v after a full cycle, want it to wrap to sortID", p.sort)
+	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	if c.modelView.sort != sortID {
+		t.Errorf("sort = %v after a full cycle, want it to wrap", c.modelView.sort)
 	}
 }
 
@@ -530,7 +530,7 @@ func TestCyclingKindRebuildsTheSuggestions(t *testing.T) {
 		{Id: "anthropic/claude-opus-5", ContextWindow: i32p(200000)},
 	})
 	focusModelRow(c)
-	c.form.refreshSuggestions(c.models[c.form.kind()])
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 	if len(c.form.suggest) != 3 {
 		t.Fatalf("suggest = %d, want the 3 fundi rows", len(c.form.suggest))
 	}
@@ -638,5 +638,139 @@ func TestSuggestionsShowTheDecidingFacts(t *testing.T) {
 	}
 	if !strings.Contains(out, "?") {
 		t.Error("the unknown-capability model does not render as unknown")
+	}
+}
+
+// ── sort and vision, shared by both views ────────────────────────────────────
+
+// The ask: sorting must work inline, not only after opening the full browser.
+func TestCtrlSSortsTheInlineTypeahead(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	if got := c.form.suggest[0].GetId(); got != "deepseek/chat" {
+		t.Fatalf("first suggestion = %q, want alphabetical order to start", got)
+	}
+
+	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+
+	if c.modelView.sort != sortCost {
+		t.Fatalf("sort = %v, want sortCost", c.modelView.sort)
+	}
+	if got := c.form.suggest[0].GetId(); got != "deepseek/chat" {
+		t.Errorf("first suggestion = %q, want the cheapest", got)
+	}
+	if got := c.form.suggest[len(c.form.suggest)-1].GetId(); got != "ollama/llama3" {
+		t.Errorf("last suggestion = %q, want the unpriced model last", got)
+	}
+}
+
+func TestCtrlVFiltersVisionInTheInlineTypeahead(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+
+	c.handleKey(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+
+	ids := map[string]bool{}
+	for _, r := range c.form.suggest {
+		ids[r.GetId()] = true
+	}
+	if ids["deepseek/chat"] {
+		t.Error("a model known to be text-only survived the vision filter")
+	}
+	if !ids["ollama/llama3"] {
+		t.Error("an UNKNOWN-capability model was dropped; that hides the local fleet")
+	}
+}
+
+// One setting, two windows. Sorting inline and then opening the browser must
+// not silently reorder under you.
+func TestSortCarriesFromTheTypeaheadIntoTheBrowser(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}) // → cheapest
+
+	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl}) // open browser
+
+	if c.picker == nil {
+		t.Fatal("browser did not open")
+	}
+	if c.picker.rows[len(c.picker.rows)-1].GetId() != "ollama/llama3" {
+		t.Error("the browser opened in a different order than the typeahead")
+	}
+}
+
+// ...and back the other way.
+func TestSortCarriesFromTheBrowserBackToTheTypeahead(t *testing.T) {
+	c, _ := loadedPicker(t)
+	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	want := c.modelView.sort
+
+	c.handleKey(keyMsg("esc")) // back to the form
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+
+	if c.modelView.sort != want {
+		t.Errorf("sort = %v after returning to the form, want %v", c.modelView.sort, want)
+	}
+}
+
+// The two views must never disagree about what matches. They had separate
+// copies of this logic, which is exactly how they would drift.
+func TestBothViewsSelectIdenticallyForTheSameQuery(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	c.modelView = modelView{sort: sortCost, visionOnly: true}
+
+	c.form.inputs[fieldModel].SetValue("a")
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	inline := c.form.suggest
+
+	p := newModelPicker(c.form.kind(), "a", c.models[c.form.kind()], true, "", c.modelView)
+
+	if len(inline) != len(p.rows) {
+		t.Fatalf("typeahead %d rows, browser %d — the two disagree", len(inline), len(p.rows))
+	}
+	for i := range inline {
+		if inline[i].GetId() != p.rows[i].GetId() {
+			t.Errorf("row %d: typeahead %q, browser %q", i, inline[i].GetId(), p.rows[i].GetId())
+		}
+	}
+}
+
+// The active sort is otherwise invisible, and an on vision filter looks like a
+// catalog that happens to hold no text-only models.
+func TestHintLineNamesTheActiveView(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	c.modelView = modelView{sort: sortCost, visionOnly: true}
+
+	out := ansi.Strip(c.form.view(90, 24, c.modelView))
+	if !strings.Contains(out, "cheapest") {
+		t.Errorf("hint line does not name the sort:\n%s", out)
+	}
+	if !strings.Contains(out, "vision on") {
+		t.Errorf("hint line does not say the vision filter is on:\n%s", out)
+	}
+}
+
+// Changing sort or filter must drop the highlight: it names a row in the OLD
+// order, and keeping it selects whatever now sits there.
+func TestChangingTheViewClearsTheHighlight(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	c.handleKey(keyMsg("down"))
+	if c.form.suggestCur != 0 {
+		t.Fatal("nothing highlighted to begin with")
+	}
+
+	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+
+	if c.form.suggestCur != -1 {
+		t.Errorf("suggestCur = %d after a re-sort, want -1", c.form.suggestCur)
 	}
 }
