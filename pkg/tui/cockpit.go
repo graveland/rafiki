@@ -260,10 +260,19 @@ type Cockpit struct {
 	// form is the open create modal, nil when none. A modal owns every key
 	// while it is up, so this is checked before the global bindings.
 	form *spawnForm
-	// picker is the model browser opened from the form's model row, nil when
-	// none. It stacks ON TOP of the form -- esc returns to the form rather
-	// than dismissing both, because the other fields are still half filled in.
+	// picker is the full model browser opened from the form's model row, nil
+	// when none. It stacks ON TOP of the form -- esc returns to the form
+	// rather than dismissing both, because the other fields are still half
+	// filled in.
 	picker *modelPicker
+	// models caches the daemon's answer per KIND, so the form's typeahead
+	// filters locally on every keystroke instead of asking per character, and
+	// so the full picker opens instantly rather than re-fetching what the
+	// typeahead already has. Kind is the key because the two kinds have
+	// genuinely different model universes.
+	models     map[string][]*rafikiv1.ModelRow
+	modelsErr  map[string]string
+	modelsBusy map[string]bool
 	// endArmed is when `x` was first pressed, and endArmedID is WHICH row it
 	// was pressed on. The id is not optional bookkeeping: arming on one agent
 	// and then moving the cursor before the repeat would otherwise end a
@@ -793,7 +802,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return c, tea.Batch(cmd, c.leaveRail())
 		case key.Matches(msg, k.NewAgent):
 			c.form = newSpawnForm()
-			return c, textinput.Blink
+			// Fetch the catalog NOW rather than when the model row is
+			// reached: the typeahead has to be instant when it gets there,
+			// and a round trip started on first keystroke is not.
+			c.form.refreshSuggestions(c.models[c.form.kind()])
+			return c, tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
 		case key.Matches(msg, k.EndAgent):
 			return c, c.endSelected()
 		case key.Matches(msg, k.Escape):

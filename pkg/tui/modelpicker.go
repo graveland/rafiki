@@ -69,18 +69,42 @@ type modelPicker struct {
 	err     string
 }
 
-func newModelPicker(kind, seed string) *modelPicker {
+func newModelPicker(kind, seed string, all []*rafikiv1.ModelRow, loaded bool, err string) *modelPicker {
 	in := textinput.New()
 	in.Prompt = ""
 	in.CharLimit = 0
 	in.Placeholder = "filter…"
 	in.SetValue(seed)
 	in.Focus()
-	return &modelPicker{kind: kind, filter: in, loading: true}
+	// A known failure is NOT a loading state. Without the err guard a picker
+	// opened after a failed fetch shows "asking the daemon…" forever, hiding
+	// the one thing that explains why the list is empty.
+	p := &modelPicker{kind: kind, filter: in, all: all, loading: !loaded && err == "", err: err}
+	p.apply()
+	return p
 }
 
-// fetchModelsCmd asks the daemon what it can run for this kind.
+// fetchModelsCmd asks the daemon what it can run for this kind, unless that
+// answer is already cached or already in flight.
+//
+// It returns nil when there is nothing to do, so callers can issue it on every
+// event that might need models (form open, kind change) without tracking state
+// themselves.
 func (c *Cockpit) fetchModelsCmd(kind string) tea.Cmd {
+	if c.models == nil {
+		c.models = map[string][]*rafikiv1.ModelRow{}
+		c.modelsErr = map[string]string{}
+		c.modelsBusy = map[string]bool{}
+	}
+	if _, ok := c.models[kind]; ok {
+		return nil
+	}
+	if c.modelsBusy[kind] {
+		return nil
+	}
+	c.modelsBusy[kind] = true
+	delete(c.modelsErr, kind)
+
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
@@ -92,6 +116,14 @@ func (c *Cockpit) fetchModelsCmd(kind string) tea.Cmd {
 		}
 		return modelsLoadedMsg{kind: kind, rows: resp.Msg.GetModels()}
 	}
+}
+
+// modelsFor returns the cached rows for a kind, plus whether the answer has
+// arrived. Absent rows and an empty catalog are different states: the first
+// still shows "asking the daemon", the second shows "nothing to offer".
+func (c *Cockpit) modelsFor(kind string) ([]*rafikiv1.ModelRow, bool) {
+	rows, ok := c.models[kind]
+	return rows, ok
 }
 
 // visionState is what the catalog claims about a model's inputs.
@@ -255,13 +287,15 @@ func (p *modelPicker) view(width, height int) string {
 	b.WriteString("\n\n")
 
 	switch {
-	case p.loading:
-		b.WriteString(stylePending.Render("⏳ asking the daemon…"))
-		return b.String()
+	// The error is checked FIRST: a picker that knows why it has no rows must
+	// say so rather than claim to still be waiting.
 	case p.err != "":
 		b.WriteString(styleError.Render("✗ " + p.err))
 		b.WriteString("\n\n")
 		b.WriteString(styleMeta.Render("esc back — you can still type an id by hand"))
+		return b.String()
+	case p.loading:
+		b.WriteString(stylePending.Render("⏳ asking the daemon…"))
 		return b.String()
 	}
 
@@ -390,16 +424,33 @@ func (c *Cockpit) handlePickerKey(msg tea.KeyPressMsg, window int) (tea.Model, t
 	return c, cmd
 }
 
-// applyModelsLoaded installs the daemon's answer, if the picker still wants it.
+// applyModelsLoaded caches the daemon's answer and refreshes whatever is
+// showing it.
+//
+// The result is stored on the COCKPIT rather than on the picker, because two
+// things consume it: the form's inline typeahead, which is up before any picker
+// exists, and the picker itself. A late answer for a kind nobody is looking at
+// any more is still cached -- it cost a round trip and it stays true.
 func (c *Cockpit) applyModelsLoaded(m modelsLoadedMsg) {
-	if c.picker == nil || c.picker.kind != m.kind {
-		return // cancelled, or the kind changed while the fetch was in flight
+	if c.models == nil {
+		c.models = map[string][]*rafikiv1.ModelRow{}
+		c.modelsErr = map[string]string{}
+		c.modelsBusy = map[string]bool{}
 	}
-	c.picker.loading = false
+	delete(c.modelsBusy, m.kind)
 	if m.err != nil {
-		c.picker.err = trimRPCError(m.err)
-		return
+		c.modelsErr[m.kind] = trimRPCError(m.err)
+	} else {
+		c.models[m.kind] = m.rows
 	}
-	c.picker.all = m.rows
-	c.picker.apply()
+
+	if c.picker != nil && c.picker.kind == m.kind {
+		c.picker.loading = false
+		c.picker.err = c.modelsErr[m.kind]
+		c.picker.all = c.models[m.kind]
+		c.picker.apply()
+	}
+	if c.form != nil && c.form.kind() == m.kind {
+		c.form.refreshSuggestions(c.models[m.kind])
+	}
 }
