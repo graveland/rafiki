@@ -359,7 +359,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	detached, _ := cmd.Flags().GetBool("detached")
 
 	if wantsCreateForm(cmd, args, isStdinTTY()) {
-		return runCreateForm(cmd, req)
+		return runCreateForm(cmd, c, req, noLocalExecutor)
 	}
 
 	// Only when the caller named no executor of their own. An explicit
