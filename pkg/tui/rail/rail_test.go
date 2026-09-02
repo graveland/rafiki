@@ -175,6 +175,74 @@ func costTurnEnd(childID string, ordinal int32, cost float64) *rafikiv1.Event {
 	}
 }
 
+// assistantMessageWithCost is an assistant_message carrying a running
+// in-flight cost total.
+func assistantMessageWithCost(childID string, ordinal int32, cost float64) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Ordinal: &ordinal,
+		Payload: &rafikiv1.Event_AssistantMessage{AssistantMessage: &rafikiv1.AssistantMessage{CostUsd: &cost}},
+	}
+}
+
+func TestLiveCostMovesOnEveryReplyWithinATurn(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+
+	r.Apply(assistantMessageWithCost("c1", 1, 0.10))
+	if n, _ := r.Get("c1"); n.TotalCost() != 0.10 {
+		t.Errorf("TotalCost after 1 reply = %v, want 0.10", n.TotalCost())
+	}
+
+	r.Apply(assistantMessageWithCost("c1", 2, 0.25))
+	if n, _ := r.Get("c1"); n.TotalCost() != 0.25 {
+		t.Errorf("TotalCost after 2nd reply = %v, want 0.25 (running total, not a sum)", n.TotalCost())
+	}
+}
+
+// TurnEnd folds the live number into the settled total and resets the live
+// counter, so the NEXT turn's first reply does not start from the previous
+// turn's leftover running total.
+func TestTurnEndFoldsLiveCostAndResetsIt(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(assistantMessageWithCost("c1", 1, 0.50))
+	r.Apply(costTurnEnd("c1", 2, 0.60)) // the turn's own final total, slightly
+	// different from the last live reading
+	// (pricing can differ per-component
+	// between a partial and final usage)
+
+	n, _ := r.Get("c1")
+	if n.Cost != 0.60 {
+		t.Errorf("Cost = %v, want 0.60 (the settled TurnEnd total)", n.Cost)
+	}
+	if n.CostLive != 0 {
+		t.Errorf("CostLive = %v, want 0 (reset once the turn settled)", n.CostLive)
+	}
+	if n.TotalCost() != 0.60 {
+		t.Errorf("TotalCost = %v, want 0.60", n.TotalCost())
+	}
+
+	// A second turn's first reply starts its own running total.
+	r.Apply(assistantMessageWithCost("c1", 3, 0.05))
+	n, _ = r.Get("c1")
+	if n.TotalCost() != 0.65 {
+		t.Errorf("TotalCost after 2nd turn's 1st reply = %v, want 0.65 (0.60 settled + 0.05 live)", n.TotalCost())
+	}
+}
+
+func TestSubtreeCostIncludesLiveCost(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(spawned("c2", "c1", "worker", 0))
+	r.Apply(costTurnEnd("c1", 0, 1.0))
+	r.Apply(assistantMessageWithCost("c2", 1, 0.30))
+
+	if got := r.SubtreeCost("c1"); got != 1.30 {
+		t.Errorf("SubtreeCost(c1) = %v, want 1.30 (1.0 settled + 0.30 live worker)", got)
+	}
+}
+
 // TurnEnd carries the cost of ONE turn (Emitter.AgentEnd resets its usage), so
 // costs are summed.
 func TestRailSumsTurnCost(t *testing.T) {
