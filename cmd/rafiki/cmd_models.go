@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func newModelsCmd() *cobra.Command {
@@ -63,20 +66,46 @@ func runModels(cmd *cobra.Command, _ []string) error {
 	// rafiki models is the escape hatch for a stale completion cache: it always
 	// asks the daemon, so it also rewrites what completion reads next. This is
 	// the documented way to pick up a newly-configured provider or a fresh
-	// ollama model without waiting out modelCacheTTL.
+	// ollama model without waiting out modelCacheTTL. Written from the FULL
+	// row set — --source is a display filter, not a cache-shaping one.
 	ids := make([]string, 0, len(rows))
 	for _, r := range rows {
 		ids = append(ids, r.GetId())
 	}
 	cacheWrite("models-fundi", completionEndpointKey(), ids)
 
+	mode, _ := outputOpts(cmd)
+	return renderModelRows(os.Stdout, rows, source, mode)
+}
+
+// renderModelRows renders the daemon's model rows in the resolved output mode:
+// a table for a terminal, JSON otherwise (--output json, or auto on a pipe —
+// the same resolveOutputMode every other list-shaped verb answers to).
+// renderModels used to be lost in the Connect move, which silently turned
+// `rafiki models | jq` and `--output json` into box-drawing output.
+func renderModelRows(w io.Writer, rows []*rafikiv1.ModelRow, source string, mode outputMode) error {
+	if source != "" {
+		filtered := make([]*rafikiv1.ModelRow, 0, len(rows))
+		for _, r := range rows {
+			if r.GetSource() == source {
+				filtered = append(filtered, r)
+			}
+		}
+		rows = filtered
+	}
+
+	if mode == outputJSON {
+		// encoding/json over the generated structs: their json tags spell the
+		// fields snake_case, and omitempty drops an unset OPTIONAL pointer —
+		// "the daemon has no catalog entry" stays absent rather than reading
+		// as a zero, while a real zero (a pointer TO 0) still prints as 0.
+		return writeJSON(w, map[string]any{"models": rows})
+	}
+
 	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
+	t.SetOutputMirror(w)
 	t.AppendHeader(table.Row{"ID", "PROVIDER", "SOURCE", "CONTEXT", "IN $/M", "OUT $/M", "VISION"})
 	for _, r := range rows {
-		if source != "" && r.GetSource() != source {
-			continue
-		}
 		t.AppendRow(table.Row{
 			r.GetId(), r.GetProvider(), r.GetSource(),
 			optInt(r.ContextWindow), perMillion(r.PromptUsd), perMillion(r.CompletionUsd),
