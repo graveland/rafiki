@@ -14,6 +14,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tui"
 )
 
@@ -48,7 +49,27 @@ reattach any time.`,
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the focused session when the cockpit quits (skips the exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep sessions running on exit (skips the exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeChildrenByState(cmd, toComplete, isAttachable), cobra.ShellCompDirectiveNoFileComp
+	}
 	return cmd
+}
+
+// isAttachable reports whether the cockpit can usefully focus on ch: it has
+// to still be running, since there is nothing to steer or watch on a
+// "spawning" child that hasn't produced a session yet or an "exited" one
+// that has none left to attach to. "shutting_down" is excluded for the same
+// reason exited is — the stream is closing, not something to attach into.
+func isAttachable(ch completionChild) bool {
+	switch protocol.Status(ch.Status) {
+	case protocol.StatusIdle,
+		protocol.StatusStreaming,
+		protocol.StatusToolRunning,
+		protocol.StatusCompacting,
+		protocol.StatusBlockedUI:
+		return true
+	}
+	return false
 }
 
 // subjectFor builds the rail subscription for an entry point.

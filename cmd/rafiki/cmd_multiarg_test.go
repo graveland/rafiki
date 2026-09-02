@@ -156,18 +156,12 @@ func TestCompletionPredicate_ResumeExitedOnly(t *testing.T) {
 	}
 }
 
+// TestCompletionPredicate_AttachAttachableStates pins isAttachable itself,
+// not a local copy of its logic — newAttachCmd went a while without wiring
+// ValidArgsFunction to any predicate at all, and a test against a standalone
+// closure passed the whole time without catching that the real command
+// offered no completions whatsoever.
 func TestCompletionPredicate_AttachAttachableStates(t *testing.T) {
-	attachable := func(ch protocol.ChildSummary) bool {
-		switch ch.Status {
-		case string(protocol.StatusIdle),
-			string(protocol.StatusStreaming),
-			string(protocol.StatusToolRunning),
-			string(protocol.StatusCompacting),
-			string(protocol.StatusBlockedUI):
-			return true
-		}
-		return false
-	}
 	cases := []struct {
 		status string
 		want   bool
@@ -182,11 +176,25 @@ func TestCompletionPredicate_AttachAttachableStates(t *testing.T) {
 		{"exited", false},
 	}
 	for _, tc := range cases {
-		ch := protocol.ChildSummary{Status: tc.status}
-		got := attachable(ch)
+		ch := completionChild{Status: tc.status}
+		got := isAttachable(ch)
 		if got != tc.want {
-			t.Errorf("attach predicate(%q) = %v, want %v", tc.status, got, tc.want)
+			t.Errorf("isAttachable(%q) = %v, want %v", tc.status, got, tc.want)
 		}
+	}
+}
+
+// TestAttachCmd_ValidArgsFunctionWired pins that newAttachCmd actually wires
+// a ValidArgsFunction — the regression this file's isAttachable test alone
+// could not catch, since it never called through the real command.
+func TestAttachCmd_ValidArgsFunctionWired(t *testing.T) {
+	cmd := newAttachCmd()
+	if cmd.ValidArgsFunction == nil {
+		t.Fatal("ValidArgsFunction not set — `rafiki attach <TAB>` completes nothing")
+	}
+	_, directive := cmd.ValidArgsFunction(cmd, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
 	}
 }
 
