@@ -16,7 +16,8 @@ const (
 	agentViewDescription = "Read the recent transcript of an agent you spawned: its " +
 		"prompts, what it said, and the tools it called with their results. Use this " +
 		"to check on a worker that seems stuck, or to understand a result before " +
-		"acting on it.\n\n" +
+		"acting on it — not in a loop to poll for completion; you are notified when a " +
+		"subagent settles.\n\n" +
 		"For \"what is it actually working on\", prefer task_list with assignee set — " +
 		"that is one indexed read of what the agent decided, where this is a wall of " +
 		"transcript you have to interpret."

@@ -96,7 +96,9 @@ const (
 		"anything they spawned in turn). Shows each one's id, name, model, current " +
 		"status, working directory and assigned task handle. Takes no arguments — " +
 		"you only ever see your own subtree. Use this before agent_send or " +
-		"agent_kill to find the id you mean."
+		"agent_kill to find the id you mean, or to look something up. Calling it in a " +
+		"loop to detect completion is unnecessary — you are notified when a subagent " +
+		"settles, and pinged periodically while one is still working."
 
 	agentModelsDescription = "List the models you may spawn an agent on. Use this " +
 		"before agent_spawn when you want to put a worker on a cheaper or a stronger " +
