@@ -74,7 +74,20 @@ type Node struct {
 	CostThrough  int32
 	HasCostFloor bool
 
+	// CostLive is the RUNNING total for the turn currently in flight, from
+	// the latest AssistantMessage.cost_usd -- reset to 0 the instant a
+	// TurnEnd for this child lands and folds its final value into Cost. A
+	// human watching the cockpit sees TotalCost() move on every LLM reply
+	// instead of only at the end of a whole exchange.
+	CostLive float64
+
 	Attention int
+}
+
+// TotalCost is what should be DISPLAYED: settled cost from completed turns
+// plus whatever the currently in-flight turn has cost so far.
+func (n Node) TotalCost() float64 {
+	return n.Cost + n.CostLive
 }
 
 // Rail is the tree.
@@ -246,6 +259,13 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 		n.Status = "exited"
 		n.ExitCode = p.ChildExited.ExitCode
 		n.Retrying = false
+	case *rafikiv1.Event_AssistantMessage:
+		// The running total for the in-flight turn -- not accumulated, just
+		// the latest reading, matching how Emitter.events() computes it
+		// (prior completed turns' cost + this turn's cost so far).
+		if c := p.AssistantMessage.CostUsd; c != nil {
+			n.CostLive = *c
+		}
 	case *rafikiv1.Event_TurnEnd:
 		// turn_end carries ONE turn's cost -- Emitter.AgentEnd resets its
 		// usage accumulator -- so these sum. The ordinal guard is what stops
@@ -257,6 +277,10 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 				n.HasCostFloor = true
 			}
 		}
+		// The turn this was tracking has ended either way -- even a
+		// duplicate/rejected-by-ordinal-guard TurnEnd means live tracking
+		// for it is done.
+		n.CostLive = 0
 	}
 
 	r.countAttention(n, ev)
@@ -320,7 +344,7 @@ func (r *Rail) SubtreeCost(childID string) float64 {
 		seen[id] = true
 		total := 0.0
 		if n, ok := r.nodes[id]; ok {
-			total = n.Cost
+			total = n.TotalCost()
 		}
 		for _, kid := range children[id] {
 			total += walk(kid)
