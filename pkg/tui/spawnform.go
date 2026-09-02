@@ -115,7 +115,7 @@ func (f *spawnForm) suggestWindow(height int, q *queryDialog) int {
 	if f.busy {
 		chrome += 2
 	}
-	return max(1, height-chrome-queryRows(q))
+	return max(1, height-chrome-queryHeight(q, height))
 }
 
 // moveSuggest walks the highlight and drags the window with it.
@@ -296,7 +296,7 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog) string 
 	b.WriteString(styleMeta.Render(hints))
 	if q != nil {
 		b.WriteString("\n")
-		b.WriteString(q.view(width, v))
+		b.WriteString(q.view(width, height, v))
 	}
 	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
 }

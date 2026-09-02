@@ -732,8 +732,21 @@
   DIFFERENT axis from `created` — a model listed last week can carry a cutoff
   from a year earlier — so both earn their own field.
 
+- **The filter+sort panel is VERTICAL — one row per field — and that is what
+  removes the wrapping problem rather than managing it.** The first version was
+  two horizontal bands of cells; the filter band alone needed sixteen side by
+  side and overflowed any terminal under ~140 columns. Wrapping it would have
+  made the row count depend on the cell LABELS, so the list resized whenever a
+  value was cycled. Turning the table on its side fixes all of it: height is
+  what terminals have to spare, a field's whole state reads on one line, and
+  the filter/sort split stops being two modes to switch between. `queryWindow`
+  keeps at least a few rows of the list visible — a filter whose effect you
+  cannot see is the thing the panel exists to avoid. Any test asserting the
+  panel fits a width must measure with `ansi.StringWidth`, never `len`: the
+  rule is box-drawing runes at three bytes each.
+
 - **Constraints and ordering are SEPARATE, which is why `^S` opens a
-  filter+sort band and not a multi-key sort.** "context ↓ then price ↑" still
+  filter+sort panel and not a multi-key sort.** "context ↓ then price ↑" still
   lists every 8k model, just lower down; "ctx ≥1M and price ≤$2, ordered by
   intelligence" removes them. Sort priority cannot express a constraint. The
   band sits OVER the list rather than replacing it, so every keystroke

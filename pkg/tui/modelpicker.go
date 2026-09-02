@@ -442,7 +442,7 @@ func (p *modelPicker) view(width, height int, v modelView, q *queryDialog) strin
 	b.WriteString(styleMeta.Render(head + "VIS"))
 	b.WriteString("\n")
 
-	window := max(1, height-pickerChrome-queryRows(q))
+	window := max(1, height-pickerChrome-queryHeight(q, height))
 	if len(p.rows) == 0 {
 		b.WriteString(styleMeta.Render("  nothing matches that filter"))
 		b.WriteString("\n")
@@ -483,7 +483,7 @@ func (p *modelPicker) view(width, height int, v modelView, q *queryDialog) strin
 	b.WriteString(styleMeta.Render(p.footer(v)))
 	if q != nil {
 		b.WriteString("\n")
-		b.WriteString(q.view(width, v))
+		b.WriteString(q.view(width, height, v))
 	}
 	return b.String()
 }

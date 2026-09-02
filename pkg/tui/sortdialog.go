@@ -3,43 +3,45 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
 
-// queryDialog composes the filter and the ordering in one place.
+// queryDialog composes the filter and the ordering in one table.
 //
-// It is a BAND over the bottom of whichever list is showing, not a full-screen
-// modal, so every keystroke re-sorts and re-filters the rows still visible
+// VERTICAL, one row per field. The first version laid the cells out in two
+// horizontal bands and needed sixteen of them side by side, which overflowed
+// any terminal under ~140 columns and would have needed wrapping logic whose
+// row count changed as values were cycled -- resizing the list mid-edit.
+// Turning the table on its side removes the problem rather than managing it:
+// height is what terminals have to spare, a field's whole state reads on one
+// line, and the filter/sort split stops being two modes to switch between.
+//
+// It still sits OVER the list, so every keystroke re-filters the rows visible
 // above it. Choosing a query blind and then discovering what it matched is the
-// interaction this replaces.
+// interaction this exists to replace.
 type queryDialog struct {
-	band queryBand
-	cell int // index within the current band
+	row int
+	col int
+	// off is the first row drawn: the table is taller than a short terminal
+	// can spare, so it windows like every other list here.
+	off int
 }
 
-type queryBand int
-
+// The three columns. A row carries a value in each only where one is
+// meaningful -- a boolean capability has no maximum, and the model id has no
+// numeric bound at all.
 const (
-	bandFilter queryBand = iota
-	bandSort
-	queryBandCount
+	colMinCell = iota
+	colMaxCell
+	colSortCell
+	queryColCount
 )
 
-// filterCells are the filter band's columns: the three capability toggles,
-// then a min and a max cell for every numeric field.
-//
-// Min and max are SEPARATE cells because a single control cannot express the
-// query that motivated this: "paid" and "≤$2" are both constraints on price,
-// and 7 free models pass a bare "≤$2" -- so excluding free needs the low side
-// while capping spend needs the high side, at the same time.
-type filterCell struct {
-	field modelField
-	isMax bool
-	flag  filterFlag
-}
-
+// filterFlag names the boolean capability filters, which have no threshold to
+// cycle and so occupy a single cell.
 type filterFlag int
 
 const (
@@ -49,73 +51,101 @@ const (
 	flagThinking
 )
 
-func filterCells() []filterCell {
-	out := []filterCell{
-		{flag: flagTools}, {flag: flagVision}, {flag: flagThinking},
+// queryRow is one line of the table: either a capability toggle or a field.
+type queryRow struct {
+	flag  filterFlag
+	field modelField
+}
+
+func (r queryRow) label() string {
+	switch r.flag {
+	case flagTools:
+		return "tools"
+	case flagVision:
+		return "vision"
+	case flagThinking:
+		return "thinking"
 	}
+	return r.field.String()
+}
+
+// queryRows lists the table in display order: the three capability toggles
+// first, because they are the coarsest cut and the ones most often changed.
+func queryRowsList() []queryRow {
+	out := []queryRow{{flag: flagTools}, {flag: flagVision}, {flag: flagThinking}}
 	for f := modelField(0); f < modelFieldCount; f++ {
-		if !f.numeric() {
-			continue
-		}
-		if len(minStops(f)) > 1 {
-			out = append(out, filterCell{field: f})
-		}
-		if len(maxStops(f)) > 1 {
-			out = append(out, filterCell{field: f, isMax: true})
-		}
+		out = append(out, queryRow{field: f})
 	}
 	return out
 }
 
-// sortCells is every field, in column order.
-func sortCells() []modelField {
-	out := make([]modelField, 0, modelFieldCount)
-	for f := modelField(0); f < modelFieldCount; f++ {
-		out = append(out, f)
+// available reports whether a cell can hold anything. Navigation skips the
+// ones that cannot, so ←/→ never parks on a cell where space does nothing.
+func (r queryRow) available(col int) bool {
+	if r.flag != flagNone {
+		return col == colMinCell // a toggle occupies the first column only
 	}
-	return out
-}
-
-func (d *queryDialog) cellCount() int {
-	if d.band == bandFilter {
-		return len(filterCells())
+	switch col {
+	case colMinCell:
+		// The stop lists are the single source for whether a field can be
+		// bounded: colModel and colAge declare none, so no separate "is this
+		// numeric" predicate is needed.
+		return len(minStops(r.field)) > 1
+	case colMaxCell:
+		return len(maxStops(r.field)) > 1
+	case colSortCell:
+		return true // every field can be sorted, including the id
 	}
-	return len(sortCells())
+	return false
 }
 
-func (d *queryDialog) move(delta int) {
-	n := d.cellCount()
-	if n == 0 {
-		return
+func (d *queryDialog) moveRow(delta, window int) {
+	rows := queryRowsList()
+	d.row = min(max(d.row+delta, 0), len(rows)-1)
+	if !rows[d.row].available(d.col) {
+		d.col = firstAvailable(rows[d.row], d.col)
 	}
-	d.cell = (d.cell + delta + n) % n
+	if d.row < d.off {
+		d.off = d.row
+	}
+	if window > 0 && d.row >= d.off+window {
+		d.off = d.row - window + 1
+	}
 }
 
-func (d *queryDialog) switchBand() {
-	d.band = (d.band + 1) % queryBandCount
-	d.cell = 0
+func (d *queryDialog) moveCol(delta int) {
+	r := queryRowsList()[d.row]
+	for i := 0; i < queryColCount; i++ {
+		next := (d.col + delta*(i+1) + queryColCount*len(queryRowsList())) % queryColCount
+		if r.available(next) {
+			d.col = next
+			return
+		}
+	}
 }
 
-// cycle advances the selected cell's value.
+// firstAvailable finds a usable column near the one the cursor was in, so a
+// vertical move lands somewhere sensible rather than always snapping left.
+func firstAvailable(r queryRow, want int) int {
+	if r.available(want) {
+		return want
+	}
+	for c := 0; c < queryColCount; c++ {
+		if r.available(c) {
+			return c
+		}
+	}
+	return colMinCell
+}
+
+// cycle advances the selected cell.
 //
-// In the filter band that is the next threshold stop; in the sort band it is
-// the three-way off -> ascending -> descending, which is what makes one key do
-// both "include" and "which way" without a second key.
+// On a bound that is the next threshold stop; on the sort column it is the
+// three-way off -> ascending -> descending, which is what lets one key mean
+// both "include this" and "which way".
 func (d *queryDialog) cycle(v *modelView) {
-	if d.band == bandFilter {
-		d.cycleFilter(v)
-		return
-	}
-	d.cycleSortCell(v)
-}
-
-func (d *queryDialog) cycleFilter(v *modelView) {
-	cells := filterCells()
-	if d.cell >= len(cells) {
-		return
-	}
-	c := cells[d.cell]
-	switch c.flag {
+	r := queryRowsList()[d.row]
+	switch r.flag {
 	case flagTools:
 		v.toggleTools()
 		return
@@ -126,23 +156,27 @@ func (d *queryDialog) cycleFilter(v *modelView) {
 		v.thinkingOnly = !v.thinkingOnly
 		return
 	}
-	b := v.boundFor(c.field)
-	if c.isMax {
-		b.maxIx = (b.maxIx + 1) % len(maxStops(c.field))
-	} else {
-		b.minIx = (b.minIx + 1) % len(minStops(c.field))
+	switch d.col {
+	case colSortCell:
+		d.cycleSortCell(v, r.field)
+	case colMinCell:
+		b := v.boundFor(r.field)
+		b.minIx = (b.minIx + 1) % len(minStops(r.field))
+		v.setBound(r.field, b)
+	case colMaxCell:
+		b := v.boundFor(r.field)
+		b.maxIx = (b.maxIx + 1) % len(maxStops(r.field))
+		v.setBound(r.field, b)
 	}
-	v.setBound(c.field, b)
 }
 
 // cycleSortCell walks one field through off -> asc -> desc -> off.
 //
-// Turning a key ON appends it, so it starts as the LAST priority and cannot
-// silently displace the ordering already chosen. Priority is moved with the
-// arrow keys, deliberately, rather than being a side effect of the order you
-// happened to toggle things in.
-func (d *queryDialog) cycleSortCell(v *modelView) {
-	f := sortCells()[d.cell]
+// Turning a key ON appends it, so it starts LAST in priority and cannot
+// silently displace the ordering already chosen. Priority moves deliberately,
+// with ⇧↑/⇧↓, rather than being a side effect of the order things were
+// toggled in.
+func (d *queryDialog) cycleSortCell(v *modelView, f modelField) {
 	for i, k := range v.keys {
 		if k.field != f {
 			continue
@@ -157,14 +191,14 @@ func (d *queryDialog) cycleSortCell(v *modelView) {
 	v.keys = append(v.keys, sortKey{field: f})
 }
 
-// reprioritize moves the selected sort key up or down the priority list.
+// reprioritize moves the selected field's sort key up or down the list.
 func (d *queryDialog) reprioritize(v *modelView, delta int) {
-	if d.band != bandSort {
+	r := queryRowsList()[d.row]
+	if r.flag != flagNone {
 		return
 	}
-	f := sortCells()[d.cell]
 	for i, k := range v.keys {
-		if k.field != f {
+		if k.field != r.field {
 			continue
 		}
 		j := i + delta
@@ -176,159 +210,144 @@ func (d *queryDialog) reprioritize(v *modelView, delta int) {
 	}
 }
 
-// adjustBound is the filter band's up/down: it steps a threshold rather than
-// cycling it, so a long stop list is reachable in both directions.
-func (d *queryDialog) adjustBound(v *modelView, delta int) {
-	if d.band != bandFilter {
-		return
-	}
-	cells := filterCells()
-	if d.cell >= len(cells) {
-		return
-	}
-	c := cells[d.cell]
-	if c.flag != flagNone {
-		return
-	}
-	b := v.boundFor(c.field)
-	if c.isMax {
-		b.maxIx = clampIx(b.maxIx+delta, len(maxStops(c.field)))
-	} else {
-		b.minIx = clampIx(b.minIx+delta, len(minStops(c.field)))
-	}
-	v.setBound(c.field, b)
-}
-
-func clampIx(i, n int) int {
-	if i < 0 {
-		return 0
-	}
-	if i >= n {
-		return n - 1
-	}
-	return i
-}
-
 // ── rendering ────────────────────────────────────────────────────────────────
 
-// queryDialogHeight is the rows the band always occupies: rule, filter row,
-// sort row, hints. Fixed so the list above does not resize as cells change.
-const queryDialogHeight = 4
+// queryChrome is the rows the panel spends on things that are not fields:
+// a rule, a header, and a hints line.
+const queryChrome = 3
 
-func (d *queryDialog) view(width int, v modelView) string {
+// maxQueryRows caps how much of the panel the table takes, so the list it is
+// filtering never disappears behind it. The table windows when it does not fit.
+const maxQueryRows = 13
+
+// queryHeight is the panel's total height for a body pane of this height.
+func queryHeight(q *queryDialog, bodyHeight int) int {
+	if q == nil {
+		return 0
+	}
+	return queryChrome + queryWindow(bodyHeight)
+}
+
+// queryWindow is how many table rows are drawn. It leaves at least a few rows
+// of the list visible: a filter you cannot see the effect of is the thing this
+// design exists to avoid.
+func queryWindow(bodyHeight int) int {
+	rows := len(queryRowsList())
+	if rows > maxQueryRows {
+		rows = maxQueryRows
+	}
+	if spare := bodyHeight - queryChrome - 4; spare < rows {
+		rows = spare
+	}
+	return max(1, rows)
+}
+
+func (d *queryDialog) view(width, bodyHeight int, v modelView) string {
+	window := queryWindow(bodyHeight)
+	rows := queryRowsList()
+
 	var b strings.Builder
 	b.WriteString(styleMeta.Render(strings.Repeat("─", max(1, width))))
 	b.WriteString("\n")
-
-	b.WriteString(d.bandLabel("FILTER", bandFilter))
-	for i, c := range filterCells() {
-		b.WriteString(" ")
-		b.WriteString(d.cellText(c.label(v), d.band == bandFilter && d.cell == i, c.active(v)))
-	}
-	b.WriteString("\n")
-
-	b.WriteString(d.bandLabel("SORT", bandSort))
-	for i, f := range sortCells() {
-		b.WriteString(" ")
-		lbl, on := sortCellLabel(f, v)
-		b.WriteString(d.cellText(lbl, d.band == bandSort && d.cell == i, on))
-	}
-	b.WriteString("\n")
-
-	adjust := "↑/↓ threshold"
-	if d.band == bandSort {
-		adjust = "↑/↓ priority"
-	}
 	b.WriteString(styleMeta.Render(
-		" ←/→ move   space cycle   " + adjust + "   ⇥ band   esc done"))
+		"  " + padTo("FIELD", 12) + padTo("MIN", 12) + padTo("MAX", 12) + "SORT"))
+	b.WriteString("\n")
+
+	end := min(len(rows), d.off+window)
+	for i := d.off; i < end; i++ {
+		r := rows[i]
+		lead := "  "
+		if i == d.row {
+			lead = styleFocusEdge.Render("▌ ")
+		}
+		b.WriteString(lead)
+		b.WriteString(padTo(styleMeta.Render(r.label()), 12))
+		for c := 0; c < queryColCount; c++ {
+			b.WriteString(padTo(d.cellText(r, c, v, i == d.row && c == d.col), 12))
+		}
+		b.WriteString("\n")
+	}
+
+	hint := " ↑/↓ field   ←/→ column   space cycle   esc done"
+	if d.col == colSortCell {
+		hint = " ↑/↓ field   ←/→ column   space cycle   ⇧↑/⇧↓ priority   esc done"
+	}
+	pos := ""
+	if len(rows) > window {
+		pos = fmt.Sprintf("   %d-%d of %d", d.off+1, end, len(rows))
+	}
+	b.WriteString(styleMeta.Render(hint + pos))
 	return b.String()
 }
 
-func (d *queryDialog) bandLabel(name string, band queryBand) string {
-	if d.band == band {
-		return styleFocusBadge.Render(" " + name + " ")
+// cellText renders one cell, marking SELECTED and ACTIVE separately. Those are
+// different questions -- where the cursor is, and what the query constrains --
+// and one style cannot answer both.
+func (d *queryDialog) cellText(r queryRow, col int, v modelView, selected bool) string {
+	text, active := d.cellValue(r, col, v)
+	if text == "" {
+		return "" // nothing to show; navigation never lands here
 	}
-	return styleMeta.Render(" " + name + " ")
-}
-
-// cellText marks the SELECTED cell and, separately, whether it is ACTIVE.
-// Those are different questions -- where the cursor is, and what the query
-// currently constrains -- and one style cannot answer both.
-func (d *queryDialog) cellText(s string, selected, active bool) string {
 	switch {
 	case selected:
-		return styleFocusBadge.Render("[" + s + "]")
+		return styleFocusBadge.Render("[" + text + "]")
 	case active:
-		return styleRailFocused.Render(" " + s + " ")
+		return styleRailFocused.Render(" " + text + " ")
 	}
-	return styleMeta.Render(" " + s + " ")
+	return styleMeta.Render(" " + text + " ")
 }
 
-func (c filterCell) label(v modelView) string {
-	switch c.flag {
-	case flagTools:
-		return "tools " + onOff(v.toolsOnly)
-	case flagVision:
-		return "vision " + onOff(v.visionOnly)
-	case flagThinking:
-		return "thinking " + onOff(v.thinkingOnly)
+func (d *queryDialog) cellValue(r queryRow, col int, v modelView) (string, bool) {
+	if !r.available(col) {
+		return "", false
 	}
-	b := v.boundFor(c.field)
-	stops, ix, op := minStops(c.field), b.minIx, "≥"
-	if c.isMax {
-		stops, ix, op = maxStops(c.field), b.maxIx, "≤"
-	}
-	if ix >= len(stops) {
-		ix = 0
-	}
-	// The operator rides the CELL, not the stop, so the two cells for one
-	// field are distinguishable when both are unset -- "ctx —  ctx —" does
-	// not say which is the floor.
-	return c.field.String() + " " + stopText(stops[ix], op)
-}
-
-func (c filterCell) active(v modelView) bool {
-	switch c.flag {
-	case flagTools:
-		return v.toolsOnly
-	case flagVision:
-		return v.visionOnly
-	case flagThinking:
-		return v.thinkingOnly
-	}
-	b := v.boundFor(c.field)
-	if c.isMax {
-		return b.maxIx > 0
-	}
-	return b.minIx > 0
-}
-
-// sortCellLabel shows the field, its direction and its PRIORITY NUMBER. The
-// number is the point of multi-key: without it "ctx↓ in$↑" does not say which
-// one wins.
-func sortCellLabel(f modelField, v modelView) (string, bool) {
-	for i, k := range v.keys {
-		if k.field != f {
-			continue
+	if r.flag != flagNone {
+		switch r.flag {
+		case flagTools:
+			return onOffWord(v.toolsOnly), v.toolsOnly
+		case flagVision:
+			return onOffWord(v.visionOnly), v.visionOnly
+		case flagThinking:
+			return onOffWord(v.thinkingOnly), v.thinkingOnly
 		}
-		arrow := "↑"
-		if k.desc {
-			arrow = "↓"
-		}
-		return f.String() + arrow + priorityDigit(i+1), true
 	}
-	return f.String(), false
+	b := v.boundFor(r.field)
+	switch col {
+	case colMinCell:
+		stops := minStops(r.field)
+		ix := min(b.minIx, len(stops)-1)
+		return stopText(stops[ix], "≥"), ix > 0
+	case colMaxCell:
+		stops := maxStops(r.field)
+		ix := min(b.maxIx, len(stops)-1)
+		return stopText(stops[ix], "≤"), ix > 0
+	case colSortCell:
+		for i, k := range v.keys {
+			if k.field != r.field {
+				continue
+			}
+			arrow := "↑"
+			if k.desc {
+				arrow = "↓"
+			}
+			// The priority NUMBER is the point of multi-key: without it
+			// "ctx↓ in$↑" does not say which one wins.
+			return arrow + " " + priorityDigit(i+1), true
+		}
+		return "—", false
+	}
+	return "", false
 }
 
-func onOff(b bool) string {
+func onOffWord(b bool) string {
 	if b {
-		return "●"
+		return "● on"
 	}
-	return "○"
+	return "○ off"
 }
 
-// priorityDigit renders a 1-based priority compactly. Beyond nine keys the
-// exact number stops mattering; "+" says "and more" without widening the cell.
+// priorityDigit renders a 1-based priority compactly. Past nine keys the exact
+// number stops mattering; "+" says "and more" without widening the cell.
 func priorityDigit(i int) string {
 	if i < 10 {
 		return string(rune('0' + i))
@@ -338,31 +357,33 @@ func priorityDigit(i int) string {
 
 // ── keys ─────────────────────────────────────────────────────────────────────
 
-// handleQueryKey routes a keystroke while the filter+sort band is open.
+// handleQueryKey routes a keystroke while the filter+sort panel is open.
 //
-// It is checked before the picker and the form, and swallows everything it
-// does not claim: the band owns the arrows, and letting them reach the list
-// underneath would scroll a list whose ordering you are in the middle of
-// changing.
+// It is checked before the picker and the form, and swallows everything it does
+// not claim: the panel owns the arrows, and letting them through would scroll a
+// list whose ordering is mid-edit.
 func (c *Cockpit) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	d := c.query
+	window := queryWindow(c.bodyHeight())
 	switch msg.String() {
 	case "esc", "enter", "ctrl+s", "ctrl+c":
 		c.query = nil
-	case "left":
-		d.move(-1)
-	case "right":
-		d.move(+1)
-	case "tab", "shift+tab":
-		d.switchBand()
-	case "space":
-		d.cycle(&c.modelView)
 	case "up":
-		d.reprioritize(&c.modelView, -1)
-		d.adjustBound(&c.modelView, +1)
+		d.moveRow(-1, window)
 	case "down":
+		d.moveRow(+1, window)
+	case "left":
+		d.moveCol(-1)
+	case "right", "tab":
+		d.moveCol(+1)
+	case "space":
+		// "space", not " ": KeyPressMsg.String() spells it out, and a case of
+		// " " is a silently dead binding. This repo has shipped that once.
+		d.cycle(&c.modelView)
+	case "shift+up":
+		d.reprioritize(&c.modelView, -1)
+	case "shift+down":
 		d.reprioritize(&c.modelView, +1)
-		d.adjustBound(&c.modelView, -1)
 	default:
 		return c, nil
 	}
@@ -371,7 +392,7 @@ func (c *Cockpit) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // reapplyModelQuery re-runs the query against whichever list is open, so the
-// rows above the band track every keystroke.
+// rows above the panel track every keystroke.
 func (c *Cockpit) reapplyModelQuery() {
 	if c.picker != nil {
 		c.picker.cursor, c.picker.offset = 0, 0
@@ -381,12 +402,4 @@ func (c *Cockpit) reapplyModelQuery() {
 		c.form.suggestCur = -1
 		c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 	}
-}
-
-// queryRows is the height the band costs the list above it, zero when closed.
-func queryRows(q *queryDialog) int {
-	if q == nil {
-		return 0
-	}
-	return queryDialogHeight
 }
