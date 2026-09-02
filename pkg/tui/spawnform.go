@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -76,7 +77,22 @@ type spawnForm struct {
 	// busy is set while a spawn is in flight, so a second Enter cannot submit
 	// the same form twice.
 	busy bool
+
+	// suggest is the live typeahead under the model row, recomputed on every
+	// keystroke from the cockpit's cached catalog. Filtering locally is what
+	// makes it live: asking the daemon per character would put a round trip
+	// between the key and the list.
+	suggest []*rafikiv1.ModelRow
+	// suggestCur is the highlighted suggestion, or -1 for none. The distinction
+	// is load-bearing: with nothing highlighted ⏎ SUBMITS, exactly as it does
+	// on every other row, so the key never means two things at once.
+	suggestCur int
 }
+
+// maxSuggestions bounds the typeahead. Six is enough to recognise the one you
+// meant without the list pushing the cwd row off a short terminal; the full
+// picker is where you go to see all of them.
+const maxSuggestions = 6
 
 // newSpawnForm builds the modal with sensible prefills.
 //
@@ -99,7 +115,49 @@ func newSpawnForm() *spawnForm {
 		f.inputs[fieldCwd].SetValue(wd)
 	}
 	f.inputs[fieldName].Focus()
+	f.suggestCur = -1
 	return f
+}
+
+// refreshSuggestions recomputes the typeahead from the catalog and whatever is
+// typed in the model row.
+//
+// An empty query still lists: ↓ into an untouched field is a legitimate way to
+// browse, and an empty box that answers nothing looks broken.
+func (f *spawnForm) refreshSuggestions(all []*rafikiv1.ModelRow) {
+	q := strings.ToLower(strings.TrimSpace(f.inputs[fieldModel].Value()))
+	f.suggest = f.suggest[:0]
+	for _, r := range all {
+		if len(f.suggest) == maxSuggestions {
+			break
+		}
+		if q != "" && !strings.Contains(strings.ToLower(r.GetId()), q) &&
+			!strings.Contains(strings.ToLower(r.GetName()), q) {
+			continue
+		}
+		f.suggest = append(f.suggest, r)
+	}
+	if f.suggestCur >= len(f.suggest) {
+		f.suggestCur = len(f.suggest) - 1
+	}
+}
+
+// showSuggestions reports whether the typeahead is on screen. It follows FOCUS,
+// so tabbing off the model row hides the list rather than leaving it floating
+// under a field nobody is editing.
+func (f *spawnForm) showSuggestions() bool {
+	return f.focus == fieldModel && len(f.suggest) > 0
+}
+
+// acceptSuggestion fills the field from the highlighted row. false means
+// nothing was highlighted, which is the caller's cue that ⏎ meant submit.
+func (f *spawnForm) acceptSuggestion() bool {
+	if f.suggestCur < 0 || f.suggestCur >= len(f.suggest) {
+		return false
+	}
+	f.inputs[fieldModel].SetValue(f.suggest[f.suggestCur].GetId())
+	f.suggestCur = -1
+	return true
 }
 
 func (f *spawnForm) kind() string { return spawnKinds[f.kindIx] }
@@ -167,6 +225,10 @@ func (f *spawnForm) view(width int) string {
 			b.WriteString(f.inputs[i].View())
 		}
 		b.WriteString("\n")
+
+		if i == fieldModel && f.showSuggestions() {
+			b.WriteString(f.suggestView(width))
+		}
 	}
 
 	if f.err != "" {
@@ -183,12 +245,40 @@ func (f *spawnForm) view(width int) string {
 	b.WriteString("\n")
 	// The ⏎ hint is contextual because ⏎ genuinely does two things, and a
 	// static footer would be wrong on one row out of four.
-	enter := "⏎ create"
+	hints := "⇥ field   ←/→ kind   ⏎ create   esc cancel"
 	if f.focus == fieldModel {
-		enter = "⏎ browse models"
+		// The model row has its own vocabulary and it is worth the line: ↑/↓
+		// mean the list here rather than the field ring, and ^F is the only
+		// route to the sort and vision filters.
+		hints = "↑/↓ pick   ⏎ take   ^F all models   ⇥ field   esc cancel"
 	}
-	b.WriteString(styleMeta.Render("⇥ field   ←/→ kind   " + enter + "   esc cancel"))
+	b.WriteString(styleMeta.Render(hints))
 	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
+}
+
+// suggestView renders the live typeahead under the model row.
+//
+// Each row carries the facts that decide a choice -- context, price, whether it
+// sees images -- because "which of these three opus ids" is not answerable from
+// the id alone. The columns are the picker's, narrowed.
+func (f *spawnForm) suggestView(width int) string {
+	var b strings.Builder
+	for i, r := range f.suggest {
+		lead := "    "
+		id := r.GetId()
+		if i == f.suggestCur {
+			lead = "  " + styleFocusEdge.Render("▌ ")
+			id = styleRailFocused.Render(id)
+		}
+		b.WriteString(lead)
+		b.WriteString(padTo(id, max(20, width-32)))
+		b.WriteString("  ")
+		b.WriteString(styleMeta.Render(padTo(ctxCell(r), 9)))
+		b.WriteString(styleMeta.Render(padTo(priceCell(r.PromptUsd), 8)))
+		b.WriteString(styleMeta.Render(visionCellGlyph(r)))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // kindView renders the choice row as its options, the selected one marked.
@@ -218,42 +308,71 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// what it means everywhere, and esc is right beside it.
 		c.form = nil
 		return c, nil
-	case "tab", "down":
+	case "tab":
+		f.suggestCur = -1
 		f.moveFocus(+1)
-		return c, nil
-	case "shift+tab", "up":
+		return c, c.fetchModelsCmd(f.kind())
+	case "shift+tab":
+		f.suggestCur = -1
 		f.moveFocus(-1)
-		return c, nil
+		return c, c.fetchModelsCmd(f.kind())
+	case "down":
+		// On the model row ↓ walks INTO the typeahead rather than to the next
+		// field. Leaving the row is still ⇥, which is the key that always
+		// means that; ↓ next to a visible list can only sensibly mean the list.
+		if f.showSuggestions() && f.suggestCur < len(f.suggest)-1 {
+			f.suggestCur++
+			return c, nil
+		}
+		if f.showSuggestions() && f.suggestCur >= 0 {
+			return c, nil // already at the bottom; do not fall out of the list
+		}
+		f.suggestCur = -1
+		f.moveFocus(+1)
+		return c, c.fetchModelsCmd(f.kind())
+	case "up":
+		// ↑ off the top returns to the text, not to the previous field: the
+		// way out of a typeahead is back to what you were typing.
+		if f.showSuggestions() && f.suggestCur >= 0 {
+			f.suggestCur--
+			return c, nil
+		}
+		f.suggestCur = -1
+		f.moveFocus(-1)
+		return c, c.fetchModelsCmd(f.kind())
 	case "left":
 		if f.focus == fieldKind {
 			f.cycleKind(-1)
-			return c, nil
+			return c, c.kindChanged()
 		}
 	case "right":
 		if f.focus == fieldKind {
 			f.cycleKind(+1)
-			return c, nil
+			return c, c.kindChanged()
 		}
 	case " ":
 		if f.focus == fieldKind {
 			f.cycleKind(+1)
-			return c, nil
+			return c, c.kindChanged()
 		}
+	case "ctrl+f":
+		// The full browser: sorting by price, the vision filter, and every row
+		// rather than the top six. The typeahead answers "which one was it
+		// called"; this answers "what is the cheapest one that sees images".
+		rows, loaded := c.modelsFor(f.kind())
+		c.picker = newModelPicker(f.kind(), strings.TrimSpace(f.inputs[fieldModel].Value()),
+			rows, loaded, c.modelsErr[f.kind()])
+		return c, tea.Batch(c.fetchModelsCmd(f.kind()), textinput.Blink)
 	case "enter":
 		if f.busy {
 			return c, nil // a second ⏎ must not submit the same form twice
 		}
-		// ⏎ on the model row BROWSES rather than submits. The asymmetry is
-		// deliberate and signposted in the row's own hint: picking a model is
-		// the one field with hundreds of valid answers, and a key that opens
-		// the list is worth more there than a fourth way to submit.
-		//
-		// Whatever has been typed seeds the picker's filter, so typing "opus"
-		// and pressing ⏎ lands on a list already narrowed to it -- the typed
-		// text is a head start, never discarded work.
-		if f.focus == fieldModel {
-			c.picker = newModelPicker(f.kind(), strings.TrimSpace(f.inputs[fieldModel].Value()))
-			return c, tea.Batch(c.fetchModelsCmd(f.kind()), textinput.Blink)
+		// A highlighted suggestion is what ⏎ takes. With nothing highlighted
+		// it submits, exactly as on every other row -- so ⏎ never means two
+		// things at the same moment, only at different ones.
+		if f.acceptSuggestion() {
+			f.refreshSuggestions(c.models[f.kind()])
+			return c, nil
 		}
 		p, problem := f.params()
 		if problem != "" {
@@ -263,7 +382,27 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		f.busy, f.err = true, ""
 		return c, c.spawnCmd(p)
 	}
-	return c, f.update(msg)
+
+	before := f.inputs[fieldModel].Value()
+	cmd := f.update(msg)
+	if f.focus == fieldModel && f.inputs[fieldModel].Value() != before {
+		// Live: every keystroke re-filters. The highlight drops back to the
+		// text, because a cursor left on row 3 of the OLD list selects
+		// whatever now happens to sit there.
+		f.suggestCur = -1
+		f.refreshSuggestions(c.models[f.kind()])
+	}
+	return c, cmd
+}
+
+// kindChanged reacts to the kind row cycling: the two kinds have different
+// model universes, so the typeahead must be rebuilt from the other catalog and
+// that catalog may not be fetched yet.
+func (c *Cockpit) kindChanged() tea.Cmd {
+	kind := c.form.kind()
+	c.form.suggestCur = -1
+	c.form.refreshSuggestions(c.models[kind])
+	return c.fetchModelsCmd(kind)
 }
 
 // applySpawned handles the daemon's answer to a create.
