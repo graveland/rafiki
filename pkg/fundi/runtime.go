@@ -134,6 +134,14 @@ type RuntimeOptions struct {
 	// contract. Nil is legal and means nobody is listening.
 	OnTurnEnded func(TurnOutcome)
 
+	// MaxCost is this child's OWN cost budget in USD (0 = unlimited),
+	// checked after every LLM reply — see Engine.events()'s ShouldStop wiring.
+	// This is distinct from a subtree-wide budget: it only ever sees costs
+	// this engine itself has incurred, not descendants it may have spawned.
+	// A coordinator's subtree-wide enforcement is cmd/rafikid's periodic
+	// sweepBudgets, unaffected by this field.
+	MaxCost float64
+
 	// RawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
@@ -526,6 +534,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		OnConsumed:             opts.OnConsumed,
 		OnTurnEnded:            opts.OnTurnEnded,
 		RawTrace:               opts.RawTrace,
+		MaxCost:                opts.MaxCost,
 	}
 
 	eng, engShutdown, err := cfg.BuildEngine(ctx, fe)

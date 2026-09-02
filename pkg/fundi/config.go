@@ -145,6 +145,14 @@ type Config struct {
 	// listening.
 	OnTurnEnded func(TurnOutcome)
 
+	// MaxCost is this child's OWN cost budget in USD (0 = unlimited),
+	// checked after every LLM reply — see Engine.events()'s ShouldStop wiring.
+	// This is distinct from a subtree-wide budget: it only ever sees costs
+	// this engine itself has incurred, not descendants it may have spawned.
+	// A coordinator's subtree-wide enforcement is cmd/rafikid's periodic
+	// sweepBudgets, unaffected by this field.
+	MaxCost float64
+
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
@@ -243,6 +251,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		NativeSink:  c.NativeSink,
 		OnConsumed:  c.OnConsumed,
 		OnTurnEnded: c.OnTurnEnded,
+		MaxCost:     c.MaxCost,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)
