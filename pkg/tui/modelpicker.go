@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -29,6 +30,7 @@ const (
 	sortID modelSort = iota
 	sortCost
 	sortContext
+	sortNewest
 	modelSortCount
 )
 
@@ -40,8 +42,20 @@ func (s modelSort) String() string {
 		return "cheapest"
 	case sortContext:
 		return "biggest context"
+	case sortNewest:
+		return "newest"
 	}
 	return "?"
+}
+
+// column is the extra field a sort makes worth showing. Sorting by something
+// you cannot see is a list that reorders for no visible reason, and the panel
+// is too narrow to pin every column at once.
+func (s modelSort) column() (title string, width int, ok bool) {
+	if s == sortNewest {
+		return "AGE", 7, true
+	}
+	return "", 0, false // the others sort by a column already pinned
 }
 
 // modelView is HOW model lists are ordered and filtered. It lives on the
@@ -50,6 +64,11 @@ func (s modelSort) String() string {
 // opening the browser must not silently reorder under you.
 type modelView struct {
 	sort modelSort
+	// toolsOnly hides models KNOWN not to tool-call, and defaults to ON: 66 of
+	// the 421 live catalog entries cannot, and one of them makes an agent that
+	// spawns, attaches and does nothing. Models of unknown capability are
+	// KEPT -- see toolsKind.
+	toolsOnly bool
 	// visionOnly drops models KNOWN to be text-only. Models of unknown
 	// capability are KEPT -- see visionKind.
 	visionOnly bool
@@ -57,6 +76,11 @@ type modelView struct {
 
 func (v *modelView) cycleSort()    { v.sort = (v.sort + 1) % modelSortCount }
 func (v *modelView) toggleVision() { v.visionOnly = !v.visionOnly }
+func (v *modelView) toggleTools()  { v.toolsOnly = !v.toolsOnly }
+
+// defaultModelView is what a cockpit starts with. toolsOnly is ON because a
+// model that cannot tool-call is not a candidate for an agent at all.
+func defaultModelView() modelView { return modelView{toolsOnly: true} }
 
 // summary names the current view for a hint line. The active sort is otherwise
 // invisible, and an on vision filter looks identical to a catalog that happens
@@ -65,6 +89,11 @@ func (v modelView) summary() string {
 	out := "sort: " + v.sort.String()
 	if v.visionOnly {
 		out += "   vision on"
+	}
+	if !v.toolsOnly {
+		// The DEFAULT is on, so the notable state is off: a list silently
+		// including models that cannot be agents is the surprising one.
+		out += "   +no-tools"
 	}
 	return out
 }
@@ -79,6 +108,9 @@ func selectModels(all []*rafikiv1.ModelRow, query string, v modelView) []*rafiki
 	out := make([]*rafikiv1.ModelRow, 0, len(all))
 	for _, r := range all {
 		if v.visionOnly && visionKind(r) == visionNo {
+			continue
+		}
+		if v.toolsOnly && toolsKind(r) == toolsNo {
 			continue
 		}
 		if q != "" && !strings.Contains(strings.ToLower(r.GetId()), q) &&
@@ -106,6 +138,17 @@ func sortModels(rows []*rafikiv1.ModelRow, by modelSort) {
 			}
 			if *a != *b {
 				return *a < *b
+			}
+			return rows[i].GetId() < rows[j].GetId()
+		})
+	case sortNewest:
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := rows[i].Created, rows[j].Created
+			if a == nil || b == nil {
+				return a != nil // known dates first
+			}
+			if *a != *b {
+				return *a > *b
 			}
 			return rows[i].GetId() < rows[j].GetId()
 		})
@@ -233,6 +276,79 @@ func visionKind(r *rafikiv1.ModelRow) visionState {
 	return visionNo
 }
 
+// toolState is what the catalog claims about tool calling.
+type toolState int
+
+const (
+	toolsUnknown toolState = iota // no catalog entry at all
+	toolsNo
+	toolsYes
+)
+
+// toolsKind reads the claim, and UNKNOWN is a real answer.
+//
+// A nil parameter list means the daemon has no catalog entry -- three
+// openrouter/* router meta-models, and every locally-served model -- and is NOT
+// the same as "cannot tool-call". Treating nil as no is how a default-on filter
+// hides the entire local fleet.
+func toolsKind(r *rafikiv1.ModelRow) toolState {
+	params := r.GetSupportedParameters()
+	if len(params) == 0 {
+		return toolsUnknown
+	}
+	for _, p := range params {
+		if p == "tools" {
+			return toolsYes
+		}
+	}
+	return toolsNo
+}
+
+// expiryWarning returns a short notice when a model has a removal date close
+// enough to matter.
+//
+// Bounded at a year because some entries carry a sentinel far in the future
+// ("2098-12-31") that means "no planned removal" -- warning on those would put
+// a notice next to models that are in no danger at all.
+func expiryWarning(r *rafikiv1.ModelRow, now time.Time) string {
+	raw := r.GetExpiresAt()
+	if raw == "" {
+		return ""
+	}
+	at, err := time.Parse("2006-01-02", raw)
+	if err != nil {
+		return ""
+	}
+	days := int(at.Sub(now).Hours() / 24)
+	if days < 0 || days > 365 {
+		return ""
+	}
+	if days == 0 {
+		return "removed today"
+	}
+	return fmt.Sprintf("removed in %dd (%s)", days, raw)
+}
+
+// ageCell renders how long ago a model was listed. Absent is an em dash, and
+// the unit is coarse on purpose: the question is which generation it belongs
+// to, not the exact day.
+func ageCell(r *rafikiv1.ModelRow, now time.Time) string {
+	if r.Created == nil || *r.Created <= 0 {
+		return "—"
+	}
+	d := now.Sub(time.Unix(*r.Created, 0))
+	switch days := int(d.Hours() / 24); {
+	case days < 1:
+		return "today"
+	case days < 30:
+		return fmt.Sprintf("%dd", days)
+	case days < 365:
+		return fmt.Sprintf("%dmo", days/30)
+	default:
+		return fmt.Sprintf("%.1fy", float64(days)/365)
+	}
+}
+
 // apply recomputes the visible rows. Called on every keystroke; the catalog is
 // a few hundred rows, so a full re-filter costs less than the bookkeeping to
 // avoid it.
@@ -330,10 +446,18 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 		return b.String()
 	}
 
-	idW := max(20, width-34)
-	b.WriteString(styleMeta.Render(
-		padTo("  MODEL", idW+2) + padTo("CONTEXT", 10) +
-			padTo("IN $/M", 9) + padTo("OUT $/M", 9) + "VIS"))
+	// Pinned columns plus ONE extra: whatever is being sorted by, when that is
+	// not already pinned. Sorting by something you cannot see is a list that
+	// reorders for no visible reason, and the panel cannot hold every column.
+	extraTitle, extraW, hasExtra := v.sort.column()
+	idW := max(20, width-34-extraW)
+
+	head := padTo("  MODEL", idW+2) + padTo("CONTEXT", 10) +
+		padTo("IN $/M", 9) + padTo("OUT $/M", 9)
+	if hasExtra {
+		head += padTo(extraTitle, extraW)
+	}
+	b.WriteString(styleMeta.Render(head + "VIS"))
 	b.WriteString("\n")
 
 	window := max(1, height-pickerChrome)
@@ -341,6 +465,7 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 		b.WriteString(styleMeta.Render("  nothing matches that filter"))
 		b.WriteString("\n")
 	}
+	now := time.Now()
 	for i := p.offset; i < len(p.rows) && i < p.offset+window; i++ {
 		r := p.rows[i]
 		marker := "  "
@@ -355,7 +480,16 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 		b.WriteString(padTo(ctxCell(r), 10))
 		b.WriteString(padTo(priceCell(r.PromptUsd), 9))
 		b.WriteString(padTo(priceCell(r.CompletionUsd), 9))
+		if hasExtra {
+			b.WriteString(padTo(ageCell(r, now), extraW))
+		}
 		b.WriteString(visionCellGlyph(r))
+		b.WriteString("\n")
+	}
+
+	if d := p.detailLine(now); d != "" {
+		b.WriteString("\n")
+		b.WriteString(d)
 		b.WriteString("\n")
 	}
 
@@ -381,6 +515,11 @@ func (p *modelPicker) footer(v modelView) string {
 	} else {
 		parts = append(parts, "^V vision")
 	}
+	if v.toolsOnly {
+		parts = append(parts, "^T tools only")
+	} else {
+		parts = append(parts, styleWarn.Render("^T incl. no-tools"))
+	}
 	var unknown int
 	for _, r := range p.rows {
 		if visionKind(r) == visionUnknown {
@@ -392,6 +531,62 @@ func (p *modelPicker) footer(v modelView) string {
 	}
 	parts = append(parts, "⏎ pick", "esc back")
 	return strings.Join(parts, "   ")
+}
+
+// detailLine describes the HIGHLIGHTED row: the long tail of facts that would
+// each need a column of their own.
+//
+// This is where the sparse fields live. knowledge-cutoff-style data is present
+// for well under half the catalog, and a column that is empty for most rows
+// costs width on every row to inform a few; on one line, for one row, it costs
+// nothing when absent.
+func (p *modelPicker) detailLine(now time.Time) string {
+	if p.cursor < 0 || p.cursor >= len(p.rows) {
+		return ""
+	}
+	r := p.rows[p.cursor]
+	var parts []string
+	if n := r.GetName(); n != "" && n != r.GetId() {
+		parts = append(parts, n)
+	}
+	if r.MaxCompletionTokens != nil {
+		parts = append(parts, fmt.Sprintf("max out %d", *r.MaxCompletionTokens))
+	}
+	if r.CacheReadUsd != nil {
+		// Cache reads dominate the bill for a long-running agent -- the whole
+		// reason ProviderGuard exists -- so an input price alone understates
+		// what an agent actually costs.
+		parts = append(parts, "cache read "+priceCell(r.CacheReadUsd))
+	}
+	switch toolsKind(r) {
+	case toolsYes:
+		parts = append(parts, "tools")
+	case toolsNo:
+		parts = append(parts, styleError.Render("no tools"))
+	default:
+		parts = append(parts, styleMeta.Render("tools unknown"))
+	}
+	if hasParam(r, "reasoning") {
+		parts = append(parts, "reasoning")
+	}
+	if src := r.GetSource(); src != "" {
+		parts = append(parts, src)
+	}
+	line := styleMeta.Render("  " + strings.Join(parts, " · "))
+	if w := expiryWarning(r, now); w != "" {
+		line += "  " + styleWarn.Render("⚠ "+w)
+	}
+	return line
+}
+
+// hasParam reports whether the catalog lists a request parameter for a model.
+func hasParam(r *rafikiv1.ModelRow, want string) bool {
+	for _, p := range r.GetSupportedParameters() {
+		if p == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ── keys ─────────────────────────────────────────────────────────────────────
@@ -441,6 +636,11 @@ func (c *Cockpit) handlePickerKey(msg tea.KeyPressMsg, window int) (tea.Model, t
 		return c, nil
 	case "ctrl+v":
 		c.modelView.toggleVision()
+		p.cursor, p.offset = 0, 0
+		p.apply(c.modelView)
+		return c, nil
+	case "ctrl+t":
+		c.modelView.toggleTools()
 		p.cursor, p.offset = 0, 0
 		p.apply(c.modelView)
 		return c, nil

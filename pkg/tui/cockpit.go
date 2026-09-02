@@ -139,9 +139,13 @@ const (
 	maxInputHeight = 10
 )
 
-// railWidth is fixed rather than proportional: names are short, and a rail that
-// resizes with the window makes the conversation reflow on every drag.
-const railWidth = 22
+// The rail sizes to its content between these bounds -- see railWidthFor for
+// why content and not the window. railMin is the old fixed width, which is
+// still the floor; railMaxPct stops one long name eating the transcript.
+const (
+	railMin    = 22
+	railMaxPct = 40
+)
 
 // maxSessions bounds retained transcripts. An evicted session falls back to a
 // full replay on next focus, which is exactly what `attach` did before the
@@ -320,16 +324,17 @@ func NewCockpit(opts Options) *Cockpit {
 	}
 
 	c := &Cockpit{
-		cfg:      cfg,
-		client:   rafikiv1connect.NewControlClient(httpClient, opts.BaseURL),
-		subject:  subject,
-		rail:     rail.New(),
-		sessions: make(map[string]*session.Session),
-		panes:    map[string]*paneState{},
-		ta:       ta,
-		keys:     defaultKeyMap(),
-		evCh:     make(chan *rafikiv1.Event, 256),
-		status:   "connecting…",
+		cfg:       cfg,
+		client:    rafikiv1connect.NewControlClient(httpClient, opts.BaseURL),
+		subject:   subject,
+		rail:      rail.New(),
+		sessions:  make(map[string]*session.Session),
+		panes:     map[string]*paneState{},
+		ta:        ta,
+		keys:      defaultKeyMap(),
+		evCh:      make(chan *rafikiv1.Event, 256),
+		status:    "connecting…",
+		modelView: defaultModelView(),
 	}
 	if opts.ChildID != "" {
 		c.rail.SetFocus(opts.ChildID)
@@ -1387,10 +1392,22 @@ func (c *Cockpit) bodyHeight() int {
 	return h
 }
 
+// railCols is the rail's current width, or 0 when it is not drawn.
+//
+// A modal takes the WHOLE panel: the create form and the model browser are
+// full-attention tasks, and a rail behind them is a list you cannot act on
+// costing width from a table that needs it.
+func (c *Cockpit) railCols() int {
+	if c.form != nil || c.picker != nil || c.railHidden || c.rail.Len() < 2 {
+		return 0
+	}
+	return railWidthFor(c.rail.Nodes(), c.width)
+}
+
 func (c *Cockpit) convWidth() int {
 	w := c.width
-	if !c.railHidden && c.rail.Len() > 1 {
-		w = c.width - railWidth - 1
+	if rw := c.railCols(); rw > 0 {
+		w = c.width - rw - 1
 	}
 	if w < 10 {
 		return 10
@@ -1594,9 +1611,10 @@ func (c *Cockpit) View() tea.View {
 		return v
 	}
 
+	railCols := c.railCols()
 	railText := ""
-	if !c.railHidden {
-		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railWidth,
+	if railCols > 0 {
+		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railCols,
 			c.focus == focusRail)
 	}
 
@@ -1672,7 +1690,7 @@ func (c *Cockpit) View() tea.View {
 		footer += strings.Repeat(" ", gap) + styleMeta.Render(readout)
 	}
 
-	out := joinColumns(railText, conv, railWidth, convWidth, bodyHeight,
+	out := joinColumns(railText, conv, railCols, convWidth, bodyHeight,
 		c.focus == focusRail)
 	// The task box sits between the transcript and the input, and bodyHeight
 	// already subtracted its height -- the two must move together, which is

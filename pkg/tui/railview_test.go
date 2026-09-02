@@ -117,3 +117,70 @@ func TestRailRowCostCountsAgainstWidth(t *testing.T) {
 		t.Errorf("cost missing from the rail:\n%s", out)
 	}
 }
+
+// ── rail width ───────────────────────────────────────────────────────────────
+
+// The rail used to be a fixed 22 columns and amputated real names.
+func TestRailGrowsToFitTheLongestName(t *testing.T) {
+	short := []rail.Node{
+		{ChildID: "c_1", Name: "alpha"},
+		{ChildID: "c_2", Name: "beta"},
+	}
+	long := []rail.Node{
+		{ChildID: "c_1", Name: "alpha"},
+		{ChildID: "c_2", Name: "executor-integration-reviewer"},
+	}
+	narrow := railWidthFor(short, 200)
+	wide := railWidthFor(long, 200)
+	if wide <= narrow {
+		t.Errorf("width: short=%d long=%d, want the longer name to widen the rail", narrow, wide)
+	}
+	if got := renderRail(long, "c_1", "c_1", wide, false); !strings.Contains(got, "executor-integration-reviewer") {
+		t.Error("the longest name is still truncated at the width chosen for it")
+	}
+}
+
+// It sizes to CONTENT, not to the window: a rail that tracks the window
+// reflows the conversation on every frame of a drag, which is what the old
+// fixed width was chosen to avoid.
+func TestRailWidthIgnoresTheWindowUntilTheClamp(t *testing.T) {
+	nodes := []rail.Node{{ChildID: "c_1", Name: "alpha"}, {ChildID: "c_2", Name: "beta"}}
+	if railWidthFor(nodes, 100) != railWidthFor(nodes, 400) {
+		t.Error("rail width tracked the window; that reflows the transcript on every drag")
+	}
+}
+
+func TestRailNeverFallsBelowTheOldFixedWidth(t *testing.T) {
+	nodes := []rail.Node{{ChildID: "c_1", Name: "a"}, {ChildID: "c_2", Name: "b"}}
+	if got := railWidthFor(nodes, 200); got != railMin {
+		t.Errorf("width = %d, want the floor %d", got, railMin)
+	}
+}
+
+// One absurdly-named agent must not eat the transcript.
+func TestRailIsClampedToAFractionOfTheWindow(t *testing.T) {
+	nodes := []rail.Node{
+		{ChildID: "c_1", Name: "a"},
+		{ChildID: "c_2", Name: strings.Repeat("x", 300)},
+	}
+	got := railWidthFor(nodes, 100)
+	if got > 100*railMaxPct/100 {
+		t.Errorf("width = %d, want it clamped to %d%% of a 100-col window", got, railMaxPct)
+	}
+}
+
+// Indentation and the cost readout are part of the row and so part of the
+// budget -- they are what gets clipped when the width is too small.
+func TestRailWidthCountsDepthAndCost(t *testing.T) {
+	flat := []rail.Node{{ChildID: "c_1", Name: "alpha"}, {ChildID: "c_2", Name: "reviewer-agent-one"}}
+	deep := []rail.Node{{ChildID: "c_1", Name: "alpha"},
+		{ChildID: "c_2", Name: "reviewer-agent-one", Depth: 3}}
+	if railWidthFor(deep, 400) <= railWidthFor(flat, 400) {
+		t.Error("indentation did not count against the width budget")
+	}
+	costly := []rail.Node{{ChildID: "c_1", Name: "alpha"},
+		{ChildID: "c_2", Name: "reviewer-agent-one", Cost: 12.34}}
+	if railWidthFor(costly, 400) <= railWidthFor(flat, 400) {
+		t.Error("the cost readout did not count against the width budget")
+	}
+}

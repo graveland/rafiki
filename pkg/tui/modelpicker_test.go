@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -566,7 +567,7 @@ func TestSuggestionsFillThePanelAndKeepEveryMatch(t *testing.T) {
 	if tall <= short {
 		t.Errorf("window: tall=%d short=%d, want the taller pane to show more", tall, short)
 	}
-	if got := strings.Count(c.form.suggestView(90, tall), "\n"); got != tall {
+	if got := strings.Count(c.form.suggestView(90, tall, c.modelView), "\n"); got != tall {
 		t.Errorf("rendered %d rows, want the window's %d", got, tall)
 	}
 }
@@ -629,7 +630,7 @@ func TestSuggestionsShowTheDecidingFacts(t *testing.T) {
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 
-	out := ansi.Strip(c.form.suggestView(90, 10))
+	out := ansi.Strip(c.form.suggestView(90, 10, c.modelView))
 	if !strings.Contains(out, "128k") {
 		t.Error("no context column in the typeahead")
 	}
@@ -772,5 +773,197 @@ func TestChangingTheViewClearsTheHighlight(t *testing.T) {
 
 	if c.form.suggestCur != -1 {
 		t.Errorf("suggestCur = %d after a re-sort, want -1", c.form.suggestCur)
+	}
+}
+
+// ── tool support, age, expiry ────────────────────────────────────────────────
+
+func toolRows() []*rafikiv1.ModelRow {
+	day := int64(24 * 60 * 60)
+	now := time.Now().Unix()
+	return []*rafikiv1.ModelRow{
+		{Id: "a/agentic", Created: &[]int64{now - 5*day}[0],
+			SupportedParameters: []string{"tools", "reasoning"}},
+		{Id: "b/chat-only", Created: &[]int64{now - 400*day}[0],
+			SupportedParameters: []string{"temperature"}},
+		{Id: "c/unknown"}, // no catalog entry at all
+	}
+}
+
+// The default: a model that cannot tool-call is not a candidate for an agent,
+// so it is hidden without being asked.
+func TestToolsFilterIsOnByDefault(t *testing.T) {
+	c := formCockpit(t)
+	if !c.modelView.toolsOnly {
+		t.Fatal("toolsOnly defaults off; a non-agentic model would be offered")
+	}
+	seedModels(c, c.form.kind(), toolRows())
+	focusModelRow(c)
+
+	ids := map[string]bool{}
+	for _, r := range c.form.suggest {
+		ids[r.GetId()] = true
+	}
+	if ids["b/chat-only"] {
+		t.Error("a model known not to support tools was offered by default")
+	}
+	if !ids["a/agentic"] {
+		t.Error("a tool-capable model was hidden")
+	}
+	// The same trap as vision: nil means no catalog entry, which is every
+	// locally-served model. Reading it as "no tools" hides the local fleet.
+	if !ids["c/unknown"] {
+		t.Fatal("an UNKNOWN-capability model was hidden by the default filter")
+	}
+}
+
+func TestCtrlTRevealsNonToolModels(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), toolRows())
+	focusModelRow(c)
+
+	c.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+
+	if c.modelView.toolsOnly {
+		t.Fatal("^T did not toggle the filter")
+	}
+	found := false
+	for _, r := range c.form.suggest {
+		if r.GetId() == "b/chat-only" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("^T did not reveal the non-tool model")
+	}
+}
+
+// Off is the notable state, because on is the default: a list silently
+// including models that cannot be agents is the surprising one.
+func TestHintLineFlagsWhenNonToolModelsAreIncluded(t *testing.T) {
+	v := defaultModelView()
+	if strings.Contains(v.summary(), "no-tools") {
+		t.Error("the default view advertises a filter that is simply on")
+	}
+	v.toggleTools()
+	if !strings.Contains(v.summary(), "no-tools") {
+		t.Errorf("summary = %q, want it to flag that non-tool models are included", v.summary())
+	}
+}
+
+func TestNewestSortOrdersByListingDateAndPutsUnknownLast(t *testing.T) {
+	c, p := loadedPicker(t)
+	seedModels(c, c.picker.kind, toolRows())
+	c.modelView = modelView{sort: sortNewest}
+	p.all = toolRows()
+	p.apply(c.modelView)
+
+	if got := p.rows[0].GetId(); got != "a/agentic" {
+		t.Errorf("first row = %q, want the newest", got)
+	}
+	if got := p.rows[len(p.rows)-1].GetId(); got != "c/unknown" {
+		t.Errorf("last row = %q, want the undated model last", got)
+	}
+}
+
+// Sorting by something invisible is a list that reorders for no reason, so the
+// AGE column appears exactly when it is the sort key.
+func TestAgeColumnAppearsOnlyWhenSortingByAge(t *testing.T) {
+	if _, _, ok := sortID.column(); ok {
+		t.Error("sortID asked for an extra column; it sorts by a pinned one")
+	}
+	if _, _, ok := sortCost.column(); ok {
+		t.Error("sortCost asked for an extra column; price is already pinned")
+	}
+	title, w, ok := sortNewest.column()
+	if !ok || title != "AGE" || w <= 0 {
+		t.Errorf("sortNewest.column() = (%q,%d,%v), want an AGE column", title, w, ok)
+	}
+}
+
+func TestAgeCellIsCoarseAndAbsenceIsADash(t *testing.T) {
+	now := time.Now()
+	day := int64(24 * 60 * 60)
+	mk := func(off int64) *rafikiv1.ModelRow {
+		v := now.Unix() - off
+		return &rafikiv1.ModelRow{Created: &v}
+	}
+	for _, tc := range []struct {
+		off  int64
+		want string
+	}{
+		{0, "today"}, {5 * day, "5d"}, {90 * day, "3mo"}, {800 * day, "2.2y"},
+	} {
+		if got := ageCell(mk(tc.off), now); got != tc.want {
+			t.Errorf("ageCell(%dd) = %q, want %q", tc.off/day, got, tc.want)
+		}
+	}
+	if got := ageCell(&rafikiv1.ModelRow{}, now); got != "—" {
+		t.Errorf("ageCell(absent) = %q, want an em dash", got)
+	}
+}
+
+// Expiry is a forward warning, and the far-future sentinel is not one.
+func TestExpiryWarnsOnlyWithinAYear(t *testing.T) {
+	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	soon := &rafikiv1.ModelRow{ExpiresAt: "2026-09-08"}
+	if got := expiryWarning(soon, now); !strings.Contains(got, "6d") {
+		t.Errorf("expiryWarning(soon) = %q, want it to count the days", got)
+	}
+	// "2098-12-31" means "no planned removal"; warning on it would put a
+	// notice next to models in no danger at all.
+	sentinel := &rafikiv1.ModelRow{ExpiresAt: "2098-12-31"}
+	if got := expiryWarning(sentinel, now); got != "" {
+		t.Errorf("expiryWarning(sentinel) = %q, want silence", got)
+	}
+	if got := expiryWarning(&rafikiv1.ModelRow{}, now); got != "" {
+		t.Errorf("expiryWarning(none) = %q, want empty", got)
+	}
+	if got := expiryWarning(&rafikiv1.ModelRow{ExpiresAt: "not-a-date"}, now); got != "" {
+		t.Errorf("expiryWarning(garbage) = %q, want empty", got)
+	}
+}
+
+// The detail line is where the sparse facts live, so they cost width on one
+// row rather than on every row.
+func TestDetailLineDescribesTheHighlightedRow(t *testing.T) {
+	c := formCockpit(t)
+	c.modelView.toolsOnly = false
+	seedModels(c, c.form.kind(), toolRows())
+	focusModelRow(c)
+	c.handleKey(keyMsg("down"))
+
+	out := ansi.Strip(c.form.detailLine(time.Now()))
+	if out == "" {
+		t.Fatal("no detail line for a highlighted row")
+	}
+	if !strings.Contains(out, "reasoning") {
+		t.Errorf("detail = %q, want it to report reasoning support", out)
+	}
+}
+
+func TestDetailLineIsEmptyWithNothingHighlighted(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), toolRows())
+	focusModelRow(c)
+
+	if got := c.form.detailLine(time.Now()); got != "" {
+		t.Errorf("detail = %q, want empty with no highlight", got)
+	}
+}
+
+// A no-tools model reachable only via ^T must be labelled where it is picked.
+func TestDetailLineFlagsANoToolsModel(t *testing.T) {
+	c := formCockpit(t)
+	c.modelView.toolsOnly = false
+	seedModels(c, c.form.kind(), []*rafikiv1.ModelRow{
+		{Id: "b/chat-only", SupportedParameters: []string{"temperature"}},
+	})
+	focusModelRow(c)
+	c.handleKey(keyMsg("down"))
+
+	out := ansi.Strip(c.form.detailLine(time.Now()))
+	if !strings.Contains(out, "no tools") {
+		t.Errorf("detail = %q, want it to say the model cannot tool-call", out)
 	}
 }
