@@ -133,7 +133,9 @@ func TestCacheWriteSurvivesConcurrentWriters(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range entries {
-		if strings.HasSuffix(f.Name(), ".tmp") {
+		// os.CreateTemp names are "<base>.tmp-<random>" — the .tmp- marker is
+		// what identifies a leaked temp, a HasSuffix(".tmp") check never would.
+		if strings.Contains(f.Name(), ".tmp-") {
 			t.Errorf("temp file %s left behind", f.Name())
 		}
 	}
