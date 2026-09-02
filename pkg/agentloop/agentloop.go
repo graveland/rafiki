@@ -3,9 +3,9 @@
 // Package agentloop layers tool-use loop primitives on llm.Conversation, so
 // every consumer gets capture + failover + cache hygiene + durability without
 // thinking about it. Ported from sc's diagnose loop: deterministic tool
-// ordering, 50KB tool-result truncation, max-iterations cap, tool results in
-// request order, prompt-too-large trim-retry (via the conversation's
-// TrimPolicy).
+// ordering, 50KB tool-result truncation, an optional per-run iteration cap
+// (off by default — see Events.ShouldStop), tool results in request order,
+// prompt-too-large trim-retry (via the conversation's TrimPolicy).
 //
 // Recovery semantics (design, resolved 2026-07-10): Resume NEVER re-executes
 // a tool whose tool_use has no persisted result — it injects a synthetic
@@ -32,14 +32,7 @@ import (
 )
 
 const (
-	// defaultMaxIterations is the unconditional backstop on tool-calling
-	// iterations per turn, used when Events.MaxIterations is unset. It exists
-	// to bound a pathological loop that costs nothing to keep spinning (e.g. a
-	// tool that fails instantly and gets retried forever) — for anything with
-	// real per-call cost, Events.ShouldStop is the more meaningful guardrail
-	// (see drive).
-	defaultMaxIterations = 250
-	maxConcurrentTools   = 6
+	maxConcurrentTools = 6
 
 	// DefaultResumeCap bounds Resume attempts per conversation.
 	DefaultResumeCap = 3
@@ -81,7 +74,8 @@ type Events struct {
 	// appended as an additional user message — the mid-turn steer seam.
 	PendingUser func() []anthropic.ContentBlockParamUnion
 
-	// MaxIterations overrides defaultMaxIterations for this run when positive.
+	// MaxIterations, when positive, caps this run's tool-calling iterations.
+	// Zero (the default) means unlimited — see maxIterations.
 	MaxIterations int
 	// ShouldStop, when non-nil, is polled once per iteration — after a
 	// tool_use response, before its tools would run — and lets the host end
@@ -128,12 +122,17 @@ func (e *Events) turn(iteration int, resp *anthropic.Message, dur time.Duration,
 	}
 }
 
-// maxIterations resolves the effective iteration backstop for this run.
+// maxIterations resolves the effective iteration backstop for this run. Zero
+// means unlimited: there is no default cap. A caller that wants a hard
+// ceiling sets Events.MaxIterations explicitly (tests do this to keep a
+// scripted loop bounded); production callers are expected to bound a turn
+// via ShouldStop (a cost budget or similar) instead, per the reasoning
+// recorded in docs/plans/2026-09-02-agent-cost-guardrails-design.md.
 func (e *Events) maxIterations() int {
 	if e != nil && e.MaxIterations > 0 {
 		return e.MaxIterations
 	}
-	return defaultMaxIterations
+	return 0
 }
 
 // shouldStop polls the host's own guardrail, if any. A nil Events or a nil
@@ -359,7 +358,7 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 	baseCap := conv.OutputCap()
 	bumped := int64(0) // per-iteration bump; 0 = use conversation default
 
-	for iteration := 1; iteration <= limit; iteration++ {
+	for iteration := 1; limit <= 0 || iteration <= limit; iteration++ {
 		stats.Iterations = iteration
 		start := time.Now()
 		turnOpts := baseOpts
