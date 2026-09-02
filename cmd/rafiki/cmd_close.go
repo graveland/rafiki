@@ -55,10 +55,11 @@ id|name does that.`,
 	cmd.Flags().Duration("older-than", 0, "Only close exited children older than this")
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout when a target must be stopped first (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout when a target must be stopped first (e.g. 30s)")
+	// Any child is a valid target now: close stops a live one first, so
+	// completion is not restricted to already-exited children the way it was
+	// before close learned to do that.
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return completeChildrenByState(cmd, toComplete, func(ch completionChild) bool {
-			return ch.Status == string(protocol.StatusExited)
-		}), cobra.ShellCompDirectiveNoFileComp
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
 	}
 	return cmd
 }
