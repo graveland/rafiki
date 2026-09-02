@@ -273,6 +273,10 @@ type Cockpit struct {
 	models     map[string][]*rafikiv1.ModelRow
 	modelsErr  map[string]string
 	modelsBusy map[string]bool
+	// modelView is the shared sort and vision filter. On the cockpit rather
+	// than either view: the typeahead and the full browser are two windows
+	// onto one question, and sorting in one must hold in the other.
+	modelView modelView
 	// endArmed is when `x` was first pressed, and endArmedID is WHICH row it
 	// was pressed on. The id is not optional bookkeeping: arming on one agent
 	// and then moving the cursor before the repeat would otherwise end a
@@ -805,7 +809,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// Fetch the catalog NOW rather than when the model row is
 			// reached: the typeahead has to be instant when it gets there,
 			// and a round trip started on first keystroke is not.
-			c.form.refreshSuggestions(c.models[c.form.kind()])
+			c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 			return c, tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
 		case key.Matches(msg, k.EndAgent):
 			return c, c.endSelected()
@@ -1602,9 +1606,9 @@ func (c *Cockpit) View() tea.View {
 	var conv string
 	switch f := c.focused(); {
 	case c.picker != nil:
-		conv = c.picker.view(convWidth, bodyHeight)
+		conv = c.picker.view(convWidth, bodyHeight, c.modelView)
 	case c.form != nil:
-		conv = c.form.view(convWidth, bodyHeight)
+		conv = c.form.view(convWidth, bodyHeight, c.modelView)
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
 	case f == "" && c.rail.Len() == 0:

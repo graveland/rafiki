@@ -88,6 +88,9 @@ type spawnForm struct {
 	// is load-bearing: with nothing highlighted ⏎ SUBMITS, exactly as it does
 	// on every other row, so the key never means two things at once.
 	suggestCur int
+	// viewSummary names the active sort and vision filter, set by view from the
+	// cockpit's shared modelView so the hint line and the list cannot disagree.
+	viewSummary string
 	// suggestOff is the first row drawn. The list holds every match and the
 	// panel shows a window onto it, so a filter matching 200 models is
 	// navigable rather than truncated at whatever happened to fit.
@@ -158,16 +161,8 @@ func newSpawnForm() *spawnForm {
 //
 // An empty query still lists: ↓ into an untouched field is a legitimate way to
 // browse, and an empty box that answers nothing looks broken.
-func (f *spawnForm) refreshSuggestions(all []*rafikiv1.ModelRow) {
-	q := strings.ToLower(strings.TrimSpace(f.inputs[fieldModel].Value()))
-	f.suggest = f.suggest[:0]
-	for _, r := range all {
-		if q != "" && !strings.Contains(strings.ToLower(r.GetId()), q) &&
-			!strings.Contains(strings.ToLower(r.GetName()), q) {
-			continue
-		}
-		f.suggest = append(f.suggest, r)
-	}
+func (f *spawnForm) refreshSuggestions(all []*rafikiv1.ModelRow, v modelView) {
+	f.suggest = selectModels(all, f.inputs[fieldModel].Value(), v)
 	if f.suggestCur >= len(f.suggest) {
 		f.suggestCur = len(f.suggest) - 1
 	}
@@ -239,7 +234,8 @@ func (f *spawnForm) update(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 // view renders the modal. width is the body pane's width.
-func (f *spawnForm) view(width, height int) string {
+func (f *spawnForm) view(width, height int, v modelView) string {
+	f.viewSummary = v.summary()
 	var b strings.Builder
 	b.WriteString(styleRailFocused.Render("new agent"))
 	b.WriteString("\n\n")
@@ -294,7 +290,7 @@ func (f *spawnForm) view(width, height int) string {
 				pos = fmt.Sprintf("   %d-%d of %d", f.suggestOff+1, shown, n)
 			}
 		}
-		hints = "↑/↓ pick   ⏎ take   ^F all models   ⇥ field   esc cancel" + pos
+		hints = "↑/↓ pick   ⏎ take   ^S/^V " + f.viewSummary + "   ^F all   ⇥ field   esc" + pos
 	}
 	b.WriteString(styleMeta.Render(hints))
 	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
@@ -406,13 +402,26 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			f.cycleKind(+1)
 			return c, c.kindChanged()
 		}
+	case "ctrl+s":
+		// Sorting works inline, not only in the full browser: "cheapest thing
+		// matching opus" is a question the typeahead should answer without
+		// making you open another panel to ask it.
+		c.modelView.cycleSort()
+		f.suggestCur = -1
+		f.refreshSuggestions(c.models[f.kind()], c.modelView)
+		return c, nil
+	case "ctrl+v":
+		c.modelView.toggleVision()
+		f.suggestCur = -1
+		f.refreshSuggestions(c.models[f.kind()], c.modelView)
+		return c, nil
 	case "ctrl+f":
 		// The full browser: sorting by price, the vision filter, and every row
 		// rather than the top six. The typeahead answers "which one was it
 		// called"; this answers "what is the cheapest one that sees images".
 		rows, loaded := c.modelsFor(f.kind())
 		c.picker = newModelPicker(f.kind(), strings.TrimSpace(f.inputs[fieldModel].Value()),
-			rows, loaded, c.modelsErr[f.kind()])
+			rows, loaded, c.modelsErr[f.kind()], c.modelView)
 		return c, tea.Batch(c.fetchModelsCmd(f.kind()), textinput.Blink)
 	case "enter":
 		if f.busy {
@@ -422,7 +431,7 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 		// it submits, exactly as on every other row -- so ⏎ never means two
 		// things at the same moment, only at different ones.
 		if f.acceptSuggestion() {
-			f.refreshSuggestions(c.models[f.kind()])
+			f.refreshSuggestions(c.models[f.kind()], c.modelView)
 			return c, nil
 		}
 		p, problem := f.params()
@@ -441,7 +450,7 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 		// text, because a cursor left on row 3 of the OLD list selects
 		// whatever now happens to sit there.
 		f.suggestCur = -1
-		f.refreshSuggestions(c.models[f.kind()])
+		f.refreshSuggestions(c.models[f.kind()], c.modelView)
 	}
 	return c, cmd
 }
@@ -452,7 +461,7 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 func (c *Cockpit) kindChanged() tea.Cmd {
 	kind := c.form.kind()
 	c.form.suggestCur = -1
-	c.form.refreshSuggestions(c.models[kind])
+	c.form.refreshSuggestions(c.models[kind], c.modelView)
 	return c.fetchModelsCmd(kind)
 }
 
