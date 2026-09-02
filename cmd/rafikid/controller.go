@@ -404,14 +404,18 @@ func (c *Controller) startSweeper(ctx context.Context) {
 //
 // Budget breaches, heartbeats, and the inbox sweep ride the expiry tick
 // rather than timers of their own: all four are periodic reconciliations of
-// stored state, and a second ticker would be a second thing to reason about
-// at shutdown. Extracted from startSweeper so what the tick does is testable
-// without waiting five minutes for one.
+// stored state, and a separate ticker for any one of them would be a
+// separate thing to reason about at shutdown. Extracted from startSweeper so
+// what the tick does is testable without waiting five minutes for one.
+//
+// sweepHeartbeats shares sweepBudgets' bounded sweepCtx (not
+// context.Background()): both do a subtreeSpend query, and a stalled DB call
+// in either must not hang the shared sweep goroutine indefinitely.
 func (c *Controller) sweepTick(ctx context.Context) {
 	c.sweepExpired()
 	sweepCtx, cancel := context.WithTimeout(ctx, budgetSweepTimeout)
 	c.sweepBudgets(sweepCtx)
-	c.sweepHeartbeats(time.Now())
+	c.sweepHeartbeats(sweepCtx, time.Now())
 	cancel()
 	c.sweepInbox()
 }
@@ -2728,7 +2732,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		go c.drainInbox(c.inbox, childID)
 	}
 	if ok && isWorkingStatus(newStatus) {
-		c.heartbeats.startWorking(childID, now)
+		c.heartbeats.startWorking(childID)
 	}
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
 		c.heartbeats.stopWorking(childID)
