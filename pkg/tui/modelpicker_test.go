@@ -744,7 +744,7 @@ func TestHintLineNamesTheActiveView(t *testing.T) {
 	focusModelRow(c)
 	c.modelView = modelView{keys: []sortKey{{field: colIn}}, visionOnly: true}
 
-	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil))
+	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
 	if !strings.Contains(out, "in$") {
 		t.Errorf("hint line does not name the sort:\n%s", out)
 	}

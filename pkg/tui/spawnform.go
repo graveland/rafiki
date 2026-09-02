@@ -5,6 +5,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -35,6 +37,7 @@ const (
 	fieldKind
 	fieldModel
 	fieldCwd
+	fieldMaxCost
 	spawnFieldCount
 )
 
@@ -48,6 +51,8 @@ func (f spawnField) label() string {
 		return "model"
 	case fieldCwd:
 		return "cwd"
+	case fieldMaxCost:
+		return "max-cost"
 	}
 	return "?"
 }
@@ -55,19 +60,21 @@ func (f spawnField) label() string {
 // spawnParams is what the form produces. A separate type from the wire request
 // so the form owes nothing to the generated package.
 type spawnParams struct {
-	name  string
-	kind  string
-	model string
-	cwd   string
+	name    string
+	kind    string
+	model   string
+	cwd     string
+	maxCost *float64
 }
 
 // spawnForm is the modal shown by `n` on the agents pane.
 //
-// It is deliberately four fields. The Connect SpawnRequest carries labels, an
-// executor selector and three budgets as well, and its own comment says not to
-// grow it without a consumer for each field -- the same reasoning applies to
-// the form: those are `rafiki create` flags, set once in a script, not things
-// anyone fills in by hand between two keystrokes.
+// It is deliberately five fields. The Connect SpawnRequest carries labels, an
+// executor selector and two other budgets (depth, children) as well, and its
+// own comment says not to grow it without a consumer for each field -- those
+// stay `rafiki create` flags, set once in a script. Cost is the one budget
+// field common enough that a person sets it per-spawn rather than once in a
+// preset, so it earns the keystroke the others don't.
 type spawnForm struct {
 	inputs [spawnFieldCount]textinput.Model
 	kindIx int
@@ -99,12 +106,13 @@ type spawnForm struct {
 	suggestOff int
 }
 
-// fieldLabelWidth is the column the row labels occupy.
-const fieldLabelWidth = 8
+// fieldLabelWidth is the column the row labels occupy. Wide enough for
+// "max-cost (CAD)" (15 chars) plus one trailing space.
+const fieldLabelWidth = 16
 
 // formChrome is the rows the form spends on things that are not suggestions:
-// title, blank, four field rows, blank, hints, and the detail block.
-const formChrome = 8 + detailHeight
+// title, blank, five field rows, blank, hints, and the detail block.
+const formChrome = 9 + detailHeight
 
 // suggestWindow is how many suggestion rows fit in a body pane of this height.
 //
@@ -153,6 +161,7 @@ func newSpawnForm() *spawnForm {
 	}
 	f.inputs[fieldName].Placeholder = "(auto)"
 	f.inputs[fieldModel].Placeholder = "(daemon default)"
+	f.inputs[fieldMaxCost].Placeholder = "(unlimited)"
 	if wd, err := os.Getwd(); err == nil {
 		f.inputs[fieldCwd].SetValue(wd)
 	}
@@ -215,18 +224,28 @@ func (f *spawnForm) prefill(d SpawnDefaults) {
 	}
 }
 
-// params returns what to spawn, or an error message if the form is incomplete.
-func (f *spawnForm) params() (spawnParams, string) {
+// params returns what to spawn, or an error message if the form is
+// incomplete or the max-cost field does not parse.
+func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 	cwd := strings.TrimSpace(f.inputs[fieldCwd].Value())
 	if cwd == "" {
 		return spawnParams{}, "cwd is required"
 	}
-	return spawnParams{
+	p := spawnParams{
 		name:  strings.TrimSpace(f.inputs[fieldName].Value()),
 		kind:  f.kind(),
 		model: strings.TrimSpace(f.inputs[fieldModel].Value()),
 		cwd:   cwd,
-	}, ""
+	}
+	if raw := strings.TrimSpace(f.inputs[fieldMaxCost].Value()); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v < 0 {
+			return spawnParams{}, fmt.Sprintf("max-cost: %q is not a non-negative number", raw)
+		}
+		usd := costfmt.ToUSD(v, cur)
+		p.maxCost = &usd
+	}
+	return p, ""
 }
 
 // moveFocus cycles the focused row, wrapping in both directions. Only text
@@ -258,7 +277,7 @@ func (f *spawnForm) update(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 // view renders the modal. width is the body pane's width.
-func (f *spawnForm) view(width, height int, v modelView, q *queryDialog) string {
+func (f *spawnForm) view(width, height int, v modelView, q *queryDialog, cur *clientstate.Currency) string {
 	f.viewSummary = v.summary()
 	var b strings.Builder
 	b.WriteString(styleRailFocused.Render("new agent"))
@@ -282,8 +301,14 @@ func (f *spawnForm) view(width, height int, v modelView, q *queryDialog) string 
 			marker = styleFocusEdge.Render("▌ ")
 		}
 		b.WriteString(marker)
+		label := i.label()
+		if i == fieldMaxCost {
+			if cur != nil && cur.Rate > 0 && cur.Code != "" {
+				label = "max-cost (" + cur.Code + ")"
+			}
+		}
 		// padTo measures with ansi.StringWidth, so the style codes cost no columns.
-		b.WriteString(padTo(styleMeta.Render(i.label()), fieldLabelWidth))
+		b.WriteString(padTo(styleMeta.Render(label), fieldLabelWidth))
 
 		if i == fieldKind {
 			b.WriteString(f.kindView())
@@ -509,7 +534,7 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			f.refreshSuggestions(c.models[f.kind()], c.modelView)
 			return c, nil
 		}
-		p, problem := f.params()
+		p, problem := f.params(c.currency)
 		if problem != "" {
 			f.err = problem
 			return c, nil

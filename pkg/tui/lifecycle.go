@@ -69,6 +69,7 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 			Kind:             p.kind,
 			Model:            p.model,
 			ExecutorSelector: c.executorSelector,
+			MaxCost:          p.maxCost,
 		}))
 		if err != nil {
 			return spawnedMsg{err: err}
