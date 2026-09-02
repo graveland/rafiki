@@ -44,3 +44,19 @@ func Format(usd float64, cur *clientstate.Currency) string {
 		return fmt.Sprintf("$%.2f%s", amount, suffix)
 	}
 }
+
+// ToUSD converts amount, given in the user's display currency, back to USD.
+// It is the inverse of Format: when cur carries a usable rate, amount is
+// divided by it; a nil cur or an unset/non-positive rate passes amount
+// through unchanged, matching Format's own "not configured" fallback.
+//
+// This is the CLI/TUI entry-point conversion for --max-cost and the spawn
+// form's max-cost field: a person types the number they see on screen (their
+// configured currency), and this is what turns that into the USD value the
+// wire protocol and every daemon-side budget check expect.
+func ToUSD(amount float64, cur *clientstate.Currency) float64 {
+	if cur != nil && cur.Rate > 0 {
+		return amount / cur.Rate
+	}
+	return amount
+}
