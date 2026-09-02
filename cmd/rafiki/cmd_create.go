@@ -42,8 +42,8 @@ spawns directly instead; -i opens the form anyway, prefilled.
 Model precedence, strongest first:
   --model
   RAFIKI_DEFAULT_MODEL
-  the model last spawned for this kind (remembered per kind)
   --preset's model
+  the model last spawned for this kind (remembered per kind)
   the daemon's default
 
 The remembered model makes RAFIKI_DEFAULT_MODEL optional rather than obsolete:
@@ -180,21 +180,11 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute (got %q)", cwd)
 	}
 
-	// Model precedence, weakest last: --model, then RAFIKI_DEFAULT_MODEL, then
-	// the last model actually spawned for this kind, then the daemon default.
-	//
-	// The remembered model sits BELOW the environment variable on purpose. The
-	// variable is something a person configured; this is something they merely
-	// did once, and an inference must not override a declaration. A preset,
-	// which is also a declaration, is applied later and only when this whole
-	// chain came back empty.
+	// RAFIKI_DEFAULT_MODEL: fallback when --model not given. The preset and the
+	// remembered model come later, in that order -- see runCreate.
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
 		model = paths.Get(paths.DefaultModel)
-	}
-	if model == "" {
-		kindForModel, _ := cmd.Flags().GetString("kind")
-		model = clientstate.LastModelFor(kindForModel)
 	}
 
 	configDir, _ := cmd.Flags().GetString("config-dir")
@@ -352,6 +342,17 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		if len(preset.Labels) > 0 {
 			req.Labels = mergeLabels(preset.Labels, req.Labels)
 		}
+	}
+
+	// The remembered model is the LAST fallback before the daemon's default,
+	// below the preset as well as the environment variable.
+	//
+	// Both of those are DECLARATIONS -- someone wrote them down -- while this
+	// is an inference from what happened last time, and an inference must
+	// never override a declaration. Applying it earlier is what broke
+	// TestPreset_MergeOrder: the preset's model stopped being reachable at all.
+	if req.Model == "" {
+		req.Model = clientstate.LastModelFor(req.Kind)
 	}
 
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")

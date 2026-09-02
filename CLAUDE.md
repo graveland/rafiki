@@ -747,12 +747,13 @@
   is DROPPED, degrading the query rather than refusing it.
 
 - **A remembered choice must never outrank a declared one.** `create`'s model
-  chain is `--model` > `RAFIKI_DEFAULT_MODEL` > the model last spawned FOR THAT
-  KIND > the preset's model > the daemon default. The remembered value sits
-  below the environment variable deliberately: the variable is something a
-  person configured and this is something they merely did once, so the
-  inference must not override the declaration — which is also what keeps
-  setting the variable behaving exactly as it always did. `LastModel` is keyed
+  chain is `--model` > `RAFIKI_DEFAULT_MODEL` > the preset's model > the model
+  last spawned FOR THAT KIND > the daemon default. The remembered value sits
+  below BOTH the environment variable and the preset deliberately: those are
+  declarations someone wrote down, and this is an inference from what happened
+  last time. Getting that backwards is not theoretical — applying it before the
+  preset made the preset's model unreachable and broke `TestPreset_MergeOrder`,
+  which is the only reason it was caught. `LastModel` is keyed
   by kind because a `claude` child cannot resolve an OpenRouter id, and one
   remembered model across both kinds would eventually prefill a spawn that
   attaches and never answers. An EMPTY model is never recorded: "the daemon's
@@ -767,14 +768,18 @@
   textinput; `pkg/tui` re-sizes them to the pane on each render so long model
   ids scroll inside their own box.
 
-- **`NewCockpit` reads client state at CONSTRUCTION, so `pkg/tui` needs a
-  `TestMain` that isolates `XDG_STATE_HOME`.** Without it every cockpit test
-  reads — and every one that closes the query panel writes — the developer's
-  real `client-state.json`: a test clobbers a live preference, and one test's
-  saved query leaks into the next test's "fresh" cockpit. That is not
-  hypothetical; it made a sort-cycling test fail on a key it never set. The
-  isolation is package-wide because the coupling is in the constructor, so any
-  test that builds a Cockpit is exposed whether it thinks about state or not.
+- **Anything that reads client state needs `XDG_STATE_HOME` isolated in tests,
+  and there are THREE ways it leaks.** `pkg/tui`'s `NewCockpit` reads the
+  remembered query at construction and `cmd/rafiki`'s `buildSpawnRequest` reads
+  the remembered model, so both packages carry a `TestMain` that points
+  `XDG_STATE_HOME` at a temp dir — package-wide, because the coupling is in a
+  constructor and a request builder rather than in any one test. The third is
+  `test/integration`, which execs the real CLI: `rafiki create` RECORDS the
+  model it spawned, so an un-isolated subprocess writes a test daemon's fixture
+  into the developer's real preferences. `cliCmd` sets it alongside the
+  `RAFIKI_URL`/`RAFIKI_TOKEN` blanking. Both failures were observed, not
+  imagined: a leaked query made a sort test fail on a key it never set, and a
+  leaked model made `TestPreset_MergeOrder` fail on a model no fixture mentions.
 
 - **The filter+sort panel is VERTICAL — one row per field — and that is what
   removes the wrapping problem rather than managing it.** The first version was
