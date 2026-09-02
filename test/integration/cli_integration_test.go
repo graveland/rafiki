@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -21,9 +22,32 @@ import (
 //
 // Later entries win for a duplicate exec.Cmd.Env key, so appending after
 // os.Environ() overrides whatever the shell exported.
+// cliStateDir is a scratch XDG_STATE_HOME shared by every CLI invocation in
+// this package. One directory rather than one per call: the tests do not
+// assert on its contents, they only need it to not be the real one.
+func cliStateDir() string {
+	cliStateOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "rafiki-cli-state-")
+		if err != nil {
+			panic(err)
+		}
+		cliState = dir
+	})
+	return cliState
+}
+
+var (
+	cliStateOnce sync.Once
+	cliState     string
+)
+
 func cliCmd(args ...string) *exec.Cmd {
 	cmd := exec.Command(cliPath, args...)
-	cmd.Env = append(os.Environ(), "RAFIKI_URL=", "RAFIKI_TOKEN=")
+	// XDG_STATE_HOME too: `rafiki create` records the model it spawned into
+	// the client state file, so an un-isolated run writes a remembered model
+	// into the DEVELOPER's real preferences from a test daemon's fixture.
+	cmd.Env = append(os.Environ(),
+		"RAFIKI_URL=", "RAFIKI_TOKEN=", "XDG_STATE_HOME="+cliStateDir())
 	return cmd
 }
 
