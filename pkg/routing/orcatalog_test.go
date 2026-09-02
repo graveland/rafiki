@@ -921,3 +921,36 @@ func TestCatalogDecodesToolSupportAndExpiry(t *testing.T) {
 		t.Errorf("Created = %d, want 300", got)
 	}
 }
+
+func TestCatalogDecodesCutoffAndAgenticScore(t *testing.T) {
+	body := `{"data":[
+	 {"id":"a/scored","created":1,"context_length":1000,
+	  "knowledge_cutoff":"2026-02-16",
+	  "benchmarks":{"artificial_analysis":{"intelligence_index":65.7,
+	    "coding_index":81.6,"agentic_index":59.2}}},
+	 {"id":"b/unscored","created":2,"context_length":1000}
+	]}`
+	c, srv := newTestCatalog(t, body)
+	defer srv.Close()
+
+	by := map[string]CatalogRow{}
+	for _, r := range c.Rows() {
+		by[r.ID] = r
+	}
+
+	if got := by["a/scored"].KnowledgeCutoff; got != "2026-02-16" {
+		t.Errorf("KnowledgeCutoff = %q, want 2026-02-16", got)
+	}
+	if got := by["a/scored"].AgenticIndex; got == nil || *got != 59.2 {
+		t.Errorf("AgenticIndex = %v, want 59.2", got)
+	}
+	// Absent is UNSCORED, never zero: 62% of the live catalog carries no
+	// benchmark at all, and a zero would sort as the worst model rather than
+	// as no answer.
+	if got := by["b/unscored"].AgenticIndex; got != nil {
+		t.Errorf("AgenticIndex = %v, want nil for an unscored model", got)
+	}
+	if got := by["b/unscored"].KnowledgeCutoff; got != "" {
+		t.Errorf("KnowledgeCutoff = %q, want empty", got)
+	}
+}

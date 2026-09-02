@@ -718,6 +718,18 @@
   `modelDetail` is ONE function for the form and the picker; they each grew a
   near-copy first, which is the same drift `selectModels` already prevents.
 
+- **`agentic_index` is a third-party CLAIM and is absent for 62% of the
+  catalog.** It lives at `benchmarks.artificial_analysis.agentic_index` (164 of
+  421 live entries, range 0.3-61.3) alongside `intelligence_index` and
+  `coding_index`, which are present for exactly the same entries and are one
+  line each to add. Absent means UNSCORED and sorts LAST under "most agentic",
+  never as a zero — a 0 would rank an unbenchmarked model below one that
+  genuinely scored 0.3, and every locally-served model is unbenchmarked. Treat
+  the number the way `ProviderGuard` treats `supports_implicit_caching`: report
+  what the catalog says, promise nothing. `knowledge_cutoff` (43%) is a
+  DIFFERENT axis from `created` — a model listed last week can carry a cutoff
+  from a year earlier — so both earn their own field.
+
 - **Model columns are pinned plus ONE, chosen by the sort.** The panel cannot
   hold every fact, and sorting by something invisible is a list that reorders
   for no visible reason — so `modelSort.column()` returns the extra column a

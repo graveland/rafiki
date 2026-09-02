@@ -178,3 +178,35 @@ func TestListModelsCarriesToolSupportAgeAndExpiry(t *testing.T) {
 		t.Errorf("ExpiresAt = %q, want empty", got[1].GetExpiresAt())
 	}
 }
+
+func TestListModelsCarriesCutoffAndAgenticScore(t *testing.T) {
+	score := 59.2
+	f := &fakeModelLister{rows: []connectapi.ModelRow{
+		{ID: "a/scored", KnowledgeCutoff: "2026-02-16", AgenticIndex: &score},
+		{ID: "b/unscored"},
+	}}
+	s := connectapi.NewServer(nil)
+	s.SetModelLister(f)
+
+	resp, err := s.ListModels(context.Background(),
+		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	got := resp.Msg.GetModels()
+
+	if got[0].GetKnowledgeCutoff() != "2026-02-16" {
+		t.Errorf("KnowledgeCutoff = %q", got[0].GetKnowledgeCutoff())
+	}
+	if got[0].GetAgenticIndex() != score {
+		t.Errorf("AgenticIndex = %v, want %v", got[0].GetAgenticIndex(), score)
+	}
+	// Absence must survive the wire: a nil score must not arrive as 0, which
+	// would sort as the worst model rather than as no answer.
+	if got[1].AgenticIndex != nil {
+		t.Errorf("AgenticIndex = %v, want nil", got[1].AgenticIndex)
+	}
+	if got[1].GetKnowledgeCutoff() != "" {
+		t.Errorf("KnowledgeCutoff = %q, want empty", got[1].GetKnowledgeCutoff())
+	}
+}

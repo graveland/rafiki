@@ -202,6 +202,24 @@ type orModel struct {
 	// (the openrouter/* router meta-models), and every locally-served model has
 	// no catalog entry whatsoever.
 	SupportedParameters []string `json:"supported_parameters"`
+	// KnowledgeCutoff is when the model's training data ends (YYYY-MM-DD),
+	// present for 183 of 421 live entries. A DIFFERENT axis from Created: a
+	// model listed last week can have a cutoff from a year before that.
+	KnowledgeCutoff string `json:"knowledge_cutoff"`
+	// Benchmarks carries third-party scores. Only agentic_index is decoded --
+	// it measures the thing rafiki picks models FOR. Its siblings
+	// intelligence_index and coding_index sit in the same object and are
+	// present for exactly the same 164 entries, so adding either is one line
+	// if anyone wants it.
+	//
+	// A third-party score is a CLAIM, not a guarantee, and it is absent for
+	// 62% of the catalog — including every locally-served model. Treat it the
+	// way ProviderGuard treats supports_implicit_caching.
+	Benchmarks struct {
+		ArtificialAnalysis struct {
+			AgenticIndex *float64 `json:"agentic_index"`
+		} `json:"artificial_analysis"`
+	} `json:"benchmarks"`
 	// ExpirationDate is a FORWARD warning, verified against the live catalog:
 	// all ten dated entries are in the future and none in the past, because
 	// OpenRouter DELISTS a model rather than leaving it listed and expired.
@@ -807,6 +825,8 @@ type CatalogEntry struct {
 	InputModalities     []string
 	SupportedParameters []string
 	ExpiresAt           string
+	KnowledgeCutoff     string
+	AgenticIndex        *float64
 }
 
 // CatalogRow is one catalog entry flattened for enumeration.
@@ -838,6 +858,10 @@ type CatalogRow struct {
 	SupportedParameters []string
 	// ExpiresAt is OpenRouter's expiration_date verbatim, empty when none.
 	ExpiresAt string
+	// KnowledgeCutoff is YYYY-MM-DD, empty when the catalog does not report it.
+	KnowledgeCutoff string
+	// AgenticIndex is a third-party agentic score (0-100ish), nil when absent.
+	AgenticIndex *float64
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
@@ -864,6 +888,8 @@ func (c *ModelCatalog) SeedForTest(entries []CatalogEntry) {
 		c.models[i].Architecture.InputModalities = e.InputModalities
 		c.models[i].SupportedParameters = e.SupportedParameters
 		c.models[i].ExpirationDate = e.ExpiresAt
+		c.models[i].KnowledgeCutoff = e.KnowledgeCutoff
+		c.models[i].Benchmarks.ArtificialAnalysis.AgenticIndex = e.AgenticIndex
 		if e.Pricing != nil {
 			c.models[i].Pricing = orPricing{
 				Prompt:            formatPrice(e.Pricing.PromptUSD),
@@ -907,6 +933,8 @@ func (c *ModelCatalog) Rows() []CatalogRow {
 			Created:             m.Created,
 			SupportedParameters: m.SupportedParameters,
 			ExpiresAt:           m.ExpirationDate,
+			KnowledgeCutoff:     m.KnowledgeCutoff,
+			AgenticIndex:        m.Benchmarks.ArtificialAnalysis.AgenticIndex,
 			ContextLength:       m.ContextLen,
 			MaxCompletionTokens: m.TopProvider.MaxCompletionTokens,
 			PromptUSD:           optionalPrice(m.Pricing.Prompt),

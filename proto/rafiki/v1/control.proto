@@ -279,6 +279,18 @@ message ModelRow {
   // Some entries carry a far-future sentinel meaning "no planned removal", so
   // a renderer must bound how far ahead it warns.
   string expires_at = 15;
+
+  // knowledge_cutoff is when the model's training data ends (YYYY-MM-DD),
+  // empty when the catalog does not report it (57% of entries, and every
+  // locally-served model). A DIFFERENT axis from created: a model listed last
+  // week can have a cutoff from a year before that.
+  string knowledge_cutoff = 16;
+
+  // agentic_index is a third-party score for agentic capability, absent for
+  // 62% of the catalog. It is a CLAIM, not a guarantee -- present it as what
+  // the catalog reports, never as a promise, and never let absence read as a
+  // low score.
+  optional double agentic_index = 17;
 }
 
 message ListModelsRequest {

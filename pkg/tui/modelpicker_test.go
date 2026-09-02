@@ -1020,6 +1020,7 @@ func TestDetailBlockCellsAreWideEnoughForTheirValues(t *testing.T) {
 		ContextWindow: i32(1000000), MaxCompletionTokens: i32(128000),
 		PromptUsd: f(0.00001), CompletionUsd: f(0.0001),
 		CacheReadUsd: f(0.000001), CacheWriteUsd: f(0.0000125),
+		KnowledgeCutoff: "2026-02-16", AgenticIndex: f(100.0),
 		// no supported_parameters and no modalities: both read "unknown",
 		// which are the longest values these cells ever hold.
 	}
@@ -1028,9 +1029,94 @@ func TestDetailBlockCellsAreWideEnoughForTheirValues(t *testing.T) {
 		t.Errorf("a detail cell clipped its own value:\n%s", body)
 	}
 	for _, want := range []string{"tools unknown", "vision unknown",
-		"source openrouter", "ctx 1.0M", "max out 128k", "in/out 10.00/100.00"} {
+		"source openrouter", "ctx 1.0M", "max out 128k", "in/out 10.00/100.00",
+		"cutoff 2026-02-16", "agentic 100.0", "thinking no"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("%q missing or clipped:\n%s", want, body)
 		}
+	}
+}
+
+// ── agentic score and knowledge cutoff ───────────────────────────────────────
+
+func scoredRows() []*rafikiv1.ModelRow {
+	f := func(v float64) *float64 { return &v }
+	return []*rafikiv1.ModelRow{
+		{Id: "a/mid", AgenticIndex: f(40.0), KnowledgeCutoff: "2025-06-30"},
+		{Id: "b/best", AgenticIndex: f(59.2), KnowledgeCutoff: "2026-02-16"},
+		{Id: "c/unscored"}, // 62% of the live catalog looks like this
+	}
+}
+
+func TestAgenticSortIsHighestFirstAndUnscoredLast(t *testing.T) {
+	c, p := loadedPicker(t)
+	c.modelView = modelView{sort: sortAgentic}
+	p.all = scoredRows()
+	p.apply(c.modelView)
+
+	if got := p.rows[0].GetId(); got != "b/best" {
+		t.Errorf("first row = %q, want the highest score", got)
+	}
+	// Absent is UNSCORED, not zero. Sorting it below a 0.3 would be the same
+	// failure absent pricing would be under "cheapest".
+	if got := p.rows[len(p.rows)-1].GetId(); got != "c/unscored" {
+		t.Errorf("last row = %q, want the unscored model last", got)
+	}
+}
+
+// Sorting by a score you cannot see is a list that reorders for no reason.
+func TestAgenticSortShowsItsOwnColumn(t *testing.T) {
+	title, w, ok := sortAgentic.column()
+	if !ok || title != "AGENTIC" || w <= 0 {
+		t.Fatalf("sortAgentic.column() = (%q,%d,%v), want an AGENTIC column", title, w, ok)
+	}
+	f := 59.2
+	row := &rafikiv1.ModelRow{Id: "b/best", AgenticIndex: &f}
+	if got := extraCell(row, sortAgentic, time.Now()); got != "59.2" {
+		t.Errorf("extraCell = %q, want the score", got)
+	}
+	if got := extraCell(row, sortNewest, time.Now()); got != "—" {
+		t.Errorf("extraCell under sortNewest = %q, want the age cell", got)
+	}
+}
+
+func TestUnscoredAndUncutModelsReadAsAbsentNotZero(t *testing.T) {
+	bare := &rafikiv1.ModelRow{Id: "c/unscored"}
+	if got := agenticCell(bare); got != "—" {
+		t.Errorf("agenticCell = %q, want an em dash, never 0.0", got)
+	}
+	if got := cutoffCell(bare); got != "—" {
+		t.Errorf("cutoffCell = %q, want an em dash", got)
+	}
+	// A genuinely low score is a real value and must not read as absent.
+	low := 0.3
+	if got := agenticCell(&rafikiv1.ModelRow{AgenticIndex: &low}); got != "0.3" {
+		t.Errorf("agenticCell(0.3) = %q, want 0.3", got)
+	}
+}
+
+func TestDetailBlockCarriesCutoffAndAgenticScore(t *testing.T) {
+	f := 59.2
+	row := &rafikiv1.ModelRow{Id: "b/best", AgenticIndex: &f, KnowledgeCutoff: "2026-02-16"}
+	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 140), " "))
+	if !strings.Contains(body, "agentic 59.2") {
+		t.Errorf("no agentic score in the detail block:\n%s", body)
+	}
+	if !strings.Contains(body, "cutoff 2026-02-16") {
+		t.Errorf("no knowledge cutoff in the detail block:\n%s", body)
+	}
+}
+
+// Cutoff and age are different axes and both earn a slot: a model listed last
+// week can have a cutoff from a year before that.
+func TestCutoffAndAgeAreSeparateFields(t *testing.T) {
+	created := time.Now().AddDate(0, 0, -7).Unix()
+	row := &rafikiv1.ModelRow{Id: "x/y", Created: &created, KnowledgeCutoff: "2025-01-31"}
+	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 140), " "))
+	if !strings.Contains(body, "age 7d") {
+		t.Errorf("age missing or wrong:\n%s", body)
+	}
+	if !strings.Contains(body, "cutoff 2025-01-31") {
+		t.Errorf("cutoff missing:\n%s", body)
 	}
 }

@@ -1576,7 +1576,17 @@ type ModelRow struct {
 	// leaving it listed and expired, so a date here is always in the future.
 	// Some entries carry a far-future sentinel meaning "no planned removal", so
 	// a renderer must bound how far ahead it warns.
-	ExpiresAt     string `protobuf:"bytes,15,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	ExpiresAt string `protobuf:"bytes,15,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// knowledge_cutoff is when the model's training data ends (YYYY-MM-DD),
+	// empty when the catalog does not report it (57% of entries, and every
+	// locally-served model). A DIFFERENT axis from created: a model listed last
+	// week can have a cutoff from a year before that.
+	KnowledgeCutoff string `protobuf:"bytes,16,opt,name=knowledge_cutoff,json=knowledgeCutoff,proto3" json:"knowledge_cutoff,omitempty"`
+	// agentic_index is a third-party score for agentic capability, absent for
+	// 62% of the catalog. It is a CLAIM, not a guarantee -- present it as what
+	// the catalog reports, never as a promise, and never let absence read as a
+	// low score.
+	AgenticIndex  *float64 `protobuf:"fixed64,17,opt,name=agentic_index,json=agenticIndex,proto3,oneof" json:"agentic_index,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1714,6 +1724,20 @@ func (x *ModelRow) GetExpiresAt() string {
 		return x.ExpiresAt
 	}
 	return ""
+}
+
+func (x *ModelRow) GetKnowledgeCutoff() string {
+	if x != nil {
+		return x.KnowledgeCutoff
+	}
+	return ""
+}
+
+func (x *ModelRow) GetAgenticIndex() float64 {
+	if x != nil && x.AgenticIndex != nil {
+		return *x.AgenticIndex
+	}
+	return 0
 }
 
 type ListModelsRequest struct {
@@ -1939,7 +1963,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12'\n" +
 	"\x0finclude_dropped\x18\x02 \x01(\bR\x0eincludeDropped\"=\n" +
 	"\x11ListTasksResponse\x12(\n" +
-	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\xa3\x05\n" +
+	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\x8a\x06\n" +
 	"\bModelRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x14\n" +
@@ -1958,7 +1982,9 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\acreated\x18\r \x01(\x03H\x06R\acreated\x88\x01\x01\x121\n" +
 	"\x14supported_parameters\x18\x0e \x03(\tR\x13supportedParameters\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x0f \x01(\tR\texpiresAtB\x11\n" +
+	"expires_at\x18\x0f \x01(\tR\texpiresAt\x12)\n" +
+	"\x10knowledge_cutoff\x18\x10 \x01(\tR\x0fknowledgeCutoff\x12(\n" +
+	"\ragentic_index\x18\x11 \x01(\x01H\aR\fagenticIndex\x88\x01\x01B\x11\n" +
 	"\x0f_context_windowB\x18\n" +
 	"\x16_max_completion_tokensB\r\n" +
 	"\v_prompt_usdB\x11\n" +
@@ -1966,7 +1992,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0f_cache_read_usdB\x12\n" +
 	"\x10_cache_write_usdB\n" +
 	"\n" +
-	"\b_created\"C\n" +
+	"\b_createdB\x10\n" +
+	"\x0e_agentic_index\"C\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +
