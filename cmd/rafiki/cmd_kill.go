@@ -73,7 +73,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 		}
 	}
 	// Children changed state even on a mixed run, so the cache is stale either way.
-	dropChildCompletionCache()
+	dropChildCompletionCache(cmd)
 	if failures > 0 {
 		return fmt.Errorf("%d target(s) failed", failures)
 	}

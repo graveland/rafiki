@@ -353,7 +353,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// The child set changed, so whatever a TAB answered a moment ago is stale.
-	dropChildCompletionCache()
+	dropChildCompletionCache(cmd)
 
 	var data protocol.SpawnResponseData
 	_ = json.Unmarshal(resp.Data, &data)

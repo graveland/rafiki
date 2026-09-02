@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/http2"
 
+	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
 )
@@ -66,6 +68,41 @@ type connectEndpoint struct {
 	// URL remotely. Errors that say only "cannot reach the daemon" send people
 	// to the wrong machine.
 	describe string
+
+	// identity is the stable string naming this endpoint for caching: the URL
+	// remotely, a "unix:"-prefixed socket path locally. The completion cache
+	// keys on it, so reads, writes and drops always name the endpoint that was
+	// actually resolved — one resolver, one identity, no drift.
+	identity string
+}
+
+// framedSocketForCmd resolves the effective FRAMED control socket for cmd, the
+// same precedence the framed verbs dial through client.Dial: the --socket
+// flag when set, else $RAFIKI_SOCKET (client.DefaultSocketPath), else the XDG
+// runtime path. Recovered from the deleted socketFromCmd, whose only caller
+// the completion rewrite removed — the precedence knowledge did not go stale
+// with it.
+func framedSocketForCmd(cmd *cobra.Command) string {
+	if cmd != nil {
+		if s, _ := cmd.Flags().GetString("socket"); s != "" {
+			return s
+		}
+	}
+	return client.DefaultSocketPath()
+}
+
+// connectSocketForCmd names the local Connect socket the command's daemon
+// serves. connect.sock sits BESIDE the framed control socket by construction
+// (pkg/paths pins them as siblings in RuntimeDir), so it moves with any
+// override of that socket: a scratch daemon started with a custom controller
+// socket serves Connect beside it. Nothing overridden means the canonical
+// paths.ConnectSocketPath(), exactly as before.
+func connectSocketForCmd(cmd *cobra.Command) string {
+	framed := framedSocketForCmd(cmd)
+	if framed == paths.SocketPath() && framed == client.DefaultSocketPath() {
+		return paths.ConnectSocketPath()
+	}
+	return filepath.Join(filepath.Dir(framed), "connect.sock")
 }
 
 // newConnectEndpoint resolves where the Connect control plane lives.
@@ -73,19 +110,23 @@ type connectEndpoint struct {
 // The same gate mustDial uses (remoteDialURL — https:// only), for the same
 // reason: `rafiki attach` must reach the daemon every other verb reaches. It
 // used to hardcode the unix socket, so an operator with RAFIKI_URL set got a
-// working `rafiki list` and a cockpit that dialed a socket on their laptop.
+// working `rafiki list` and a cockpit that dialed a socket on their laptop —
+// and, until the --socket fix, the reverse failure too: a --socket override
+// moved the framed verbs but left Connect (and completion) on the default
+// daemon.
 //
 // Remote requires a token. There is no bootstrap mode on this plane — it has
 // no user-create RPC — so an absent credential can only ever produce a 401,
 // and saying so here beats saying so after a round trip.
-func newConnectEndpoint(_ *cobra.Command) (connectEndpoint, error) {
+func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	u := remoteDialURL()
 	if u == "" {
-		sock := paths.ConnectSocketPath()
+		sock := connectSocketForCmd(cmd)
 		return connectEndpoint{
 			httpClient: connectHTTPClient(sock),
 			baseURL:    connectUDSBaseURL,
 			describe:   sock,
+			identity:   "unix:" + sock,
 		}, nil
 	}
 
@@ -109,6 +150,7 @@ func newConnectEndpoint(_ *cobra.Command) (connectEndpoint, error) {
 		}},
 		baseURL:  u,
 		describe: u,
+		identity: u,
 	}, nil
 }
 

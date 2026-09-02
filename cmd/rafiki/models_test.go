@@ -14,7 +14,7 @@ func TestModelCompletionServesFromCache(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://example.invalid")
 	t.Setenv("RAFIKI_TOKEN", "t")
 
-	cacheWrite("models-fundi", completionEndpointKey(),
+	cacheWrite("models-fundi", completionEndpointKey(nil),
 		[]string{"anthropic/claude-opus-5", "openai/gpt-4o"})
 
 	got := completeModel(nil, "fundi", "anthropic/")
@@ -31,7 +31,7 @@ func TestModelCompletionCacheIsKeyedByKind(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://example.invalid")
 	t.Setenv("RAFIKI_TOKEN", "t")
 
-	cacheWrite("models-fundi", completionEndpointKey(), []string{"openai/gpt-4o"})
+	cacheWrite("models-fundi", completionEndpointKey(nil), []string{"openai/gpt-4o"})
 
 	if got := completeModel(nil, "claude", ""); len(got) != 0 {
 		t.Errorf("claude completion read the fundi cache: %v", got)

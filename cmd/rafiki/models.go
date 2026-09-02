@@ -48,7 +48,7 @@ func modelIDs(cmd *cobra.Command, kind string) []string {
 	cacheKind := "models-" + kind
 
 	var ids []string
-	if cacheRead(cacheKind, completionEndpointKey(), modelCacheTTL, &ids) {
+	if cacheRead(cacheKind, completionEndpointKey(cmd), modelCacheTTL, &ids) {
 		return ids
 	}
 	rows, err := fetchModelRows(cmd, "", kind)
@@ -59,7 +59,7 @@ func modelIDs(cmd *cobra.Command, kind string) []string {
 	for _, r := range rows {
 		ids = append(ids, r.GetId())
 	}
-	cacheWrite(cacheKind, completionEndpointKey(), ids)
+	cacheWrite(cacheKind, completionEndpointKey(cmd), ids)
 	return ids
 }
 

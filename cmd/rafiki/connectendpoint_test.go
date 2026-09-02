@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
@@ -122,5 +124,69 @@ func TestBearerTransportDoesNotMutateTheCallersRequest(t *testing.T) {
 	defer resp.Body.Close()
 	if h := req.Header.Get("Authorization"); h != "" {
 		t.Fatalf("the caller's request was mutated: Authorization = %q", h)
+	}
+}
+
+// A --socket override must move the Connect socket with it. connect.sock sits
+// BESIDE the framed control socket by construction (paths pins them as
+// siblings in RuntimeDir), so a command pointed at a scratch daemon's
+// controller.sock must query THAT daemon's Connect plane — not the default
+// runtime path. newConnectEndpoint used to discard its cmd entirely, so
+// `rafiki --socket /scratch/controller.sock models` and every migrated
+// completion silently queried the default daemon.
+func TestEndpointHonorsTheSocketOverride(t *testing.T) {
+	t.Setenv(paths.URL, "")
+	t.Setenv(paths.Socket, "")
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("socket", "", "")
+	if err := cmd.Flags().Set("socket", "/tmp/scratch-1/rafiki/controller.sock"); err != nil {
+		t.Fatal(err)
+	}
+
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		t.Fatalf("newConnectEndpoint: %v", err)
+	}
+	want := "/tmp/scratch-1/rafiki/connect.sock"
+	if ep.describe != want {
+		t.Errorf("describe = %q, want the sibling connect.sock %q", ep.describe, want)
+	}
+	if ep.identity != "unix:"+want {
+		t.Errorf("identity = %q, want %q", ep.identity, "unix:"+want)
+	}
+}
+
+// The env override moves the Connect socket the same way: RAFIKI_SOCKET wins
+// over the XDG default for framed dials (client.DefaultSocketPath), so the
+// Connect plane is its sibling.
+func TestEndpointHonorsTheSocketEnvOverride(t *testing.T) {
+	t.Setenv(paths.URL, "")
+	t.Setenv(paths.Socket, "/tmp/env-scratch/rafiki/controller.sock")
+
+	ep, err := newConnectEndpoint(nil)
+	if err != nil {
+		t.Fatalf("newConnectEndpoint: %v", err)
+	}
+	if ep.describe != "/tmp/env-scratch/rafiki/connect.sock" {
+		t.Errorf("describe = %q, want the sibling of the env-override socket", ep.describe)
+	}
+}
+
+// The default case is unchanged: no RAFIKI_URL, no override — the canonical
+// ConnectSocketPath, and the identity stays the "unix:"-prefixed key the
+// completion cache has always written.
+func TestEndpointIdentityDefaultsToTheCanonicalConnectSocket(t *testing.T) {
+	t.Setenv(paths.URL, "")
+	t.Setenv(paths.Socket, "")
+	ep, err := newConnectEndpoint(nil)
+	if err != nil {
+		t.Fatalf("newConnectEndpoint: %v", err)
+	}
+	if ep.describe != paths.ConnectSocketPath() {
+		t.Fatalf("describe = %q, want %q", ep.describe, paths.ConnectSocketPath())
+	}
+	if ep.identity != "unix:"+paths.ConnectSocketPath() {
+		t.Fatalf("identity = %q, want %q", ep.identity, "unix:"+paths.ConnectSocketPath())
 	}
 }
