@@ -449,6 +449,26 @@ func TestUpOffTheListReturnsToTheText(t *testing.T) {
 	}
 }
 
+// ↑ from the SECOND row lands on the first, not back in the text. Clamping
+// the decrement at 0 and then treating 0 as "leave the list" skips the top row
+// entirely, which makes the first suggestion unreachable with the keyboard.
+func TestUpFromTheSecondRowLandsOnTheFirst(t *testing.T) {
+	c := formCockpit(t)
+	seedModels(c, c.form.kind(), modelRows())
+	focusModelRow(c)
+	c.handleKey(keyMsg("down"))
+	c.handleKey(keyMsg("down"))
+	if c.form.suggestCur != 1 {
+		t.Fatalf("suggestCur = %d, want 1 before the ↑", c.form.suggestCur)
+	}
+
+	c.handleKey(keyMsg("up"))
+
+	if c.form.suggestCur != 0 {
+		t.Errorf("suggestCur = %d, want 0 — the top row must be reachable", c.form.suggestCur)
+	}
+}
+
 // ⏎ takes the highlighted suggestion.
 func TestEnterTakesTheHighlightedSuggestion(t *testing.T) {
 	c := formCockpit(t)
@@ -526,8 +546,9 @@ func TestCyclingKindRebuildsTheSuggestions(t *testing.T) {
 	}
 }
 
-// The list is capped so it cannot push the cwd row off a short terminal.
-func TestSuggestionsAreCapped(t *testing.T) {
+// The list fills the panel rather than a fixed handful, and holds EVERY match
+// so a filter hitting 40 models is navigable instead of silently truncated.
+func TestSuggestionsFillThePanelAndKeepEveryMatch(t *testing.T) {
 	c := formCockpit(t)
 	many := make([]*rafikiv1.ModelRow, 0, 40)
 	for i := 0; i < 40; i++ {
@@ -536,8 +557,68 @@ func TestSuggestionsAreCapped(t *testing.T) {
 	seedModels(c, c.form.kind(), many)
 	focusModelRow(c)
 
-	if len(c.form.suggest) != maxSuggestions {
-		t.Errorf("suggest = %d, want it capped at %d", len(c.form.suggest), maxSuggestions)
+	if len(c.form.suggest) != 40 {
+		t.Errorf("suggest = %d, want every match retained", len(c.form.suggest))
+	}
+	// A tall pane shows more rows than a short one; that is the whole request.
+	tall := c.form.suggestWindow(40)
+	short := c.form.suggestWindow(14)
+	if tall <= short {
+		t.Errorf("window: tall=%d short=%d, want the taller pane to show more", tall, short)
+	}
+	if got := strings.Count(c.form.suggestView(90, tall), "\n"); got != tall {
+		t.Errorf("rendered %d rows, want the window's %d", got, tall)
+	}
+}
+
+// Walking past the bottom of the window scrolls rather than stopping.
+func TestSuggestionListScrolls(t *testing.T) {
+	c := formCockpit(t)
+	many := make([]*rafikiv1.ModelRow, 0, 40)
+	for i := 0; i < 40; i++ {
+		many = append(many, &rafikiv1.ModelRow{Id: fmt.Sprintf("x/model-%02d", i)})
+	}
+	seedModels(c, c.form.kind(), many)
+	focusModelRow(c)
+
+	window := 5
+	for i := 0; i < 12; i++ {
+		c.form.moveSuggest(+1, window)
+	}
+	if c.form.suggestCur != 11 {
+		t.Fatalf("suggestCur = %d, want 11", c.form.suggestCur)
+	}
+	if c.form.suggestOff == 0 {
+		t.Error("the window never scrolled; rows past the first screenful are unreachable")
+	}
+	if c.form.suggestCur < c.form.suggestOff ||
+		c.form.suggestCur >= c.form.suggestOff+window {
+		t.Errorf("cursor %d outside the drawn window [%d,%d)",
+			c.form.suggestCur, c.form.suggestOff, c.form.suggestOff+window)
+	}
+}
+
+// A new filter restarts the window, not just the highlight: scrolled deep into
+// the old list, the new one would otherwise open somewhere arbitrary.
+func TestFilteringResetsTheScrollWindow(t *testing.T) {
+	c := formCockpit(t)
+	many := make([]*rafikiv1.ModelRow, 0, 40)
+	for i := 0; i < 40; i++ {
+		many = append(many, &rafikiv1.ModelRow{Id: fmt.Sprintf("x/model-%02d", i)})
+	}
+	seedModels(c, c.form.kind(), many)
+	focusModelRow(c)
+	for i := 0; i < 20; i++ {
+		c.form.moveSuggest(+1, 5)
+	}
+	if c.form.suggestOff == 0 {
+		t.Fatal("did not scroll")
+	}
+
+	c.handleKey(tea.KeyPressMsg{Code: '3', Text: "3"})
+
+	if c.form.suggestOff != 0 {
+		t.Errorf("suggestOff = %d after retyping, want 0", c.form.suggestOff)
 	}
 }
 
@@ -548,7 +629,7 @@ func TestSuggestionsShowTheDecidingFacts(t *testing.T) {
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 
-	out := ansi.Strip(c.form.suggestView(90))
+	out := ansi.Strip(c.form.suggestView(90, 10))
 	if !strings.Contains(out, "128k") {
 		t.Error("no context column in the typeahead")
 	}

@@ -220,7 +220,7 @@ func TestFormOwnsTheBodyPane(t *testing.T) {
 
 func TestFormShowsEveryFieldAndBothKinds(t *testing.T) {
 	c := formCockpit(t)
-	out := c.form.view(80)
+	out := c.form.view(80, 24)
 	for _, want := range []string{"name", "kind", "model", "cwd"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("form view is missing the %q row", want)
