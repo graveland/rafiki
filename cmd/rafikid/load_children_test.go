@@ -14,9 +14,13 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// TestShouldAutoResume pins the recovery predicate. It is the rule loadOrphans
-// applied and it is easy to invert: a child is resumable when its LAST status
-// says it was alive, and "shutting_down" means a deliberate stop, NOT alive.
+// TestShouldAutoResume pins the recovery predicate. The row's status is the
+// whole question: "exited" means the child ended while a daemon was alive to
+// record it and stays dead; anything else — including "shutting_down", which
+// only older daemons persisted mid-shutdown — means the daemon died first and
+// the child resumes as-is. last_status is observability and must never gate
+// recovery: it lingers stale through a resume (the upsert COALESCE preserves
+// it), and gating on it is what resurrected exited agents after a redeploy.
 // There is no "running" status — see pkg/protocol/types.go.
 func TestShouldAutoResume(t *testing.T) {
 	cases := []struct {
@@ -24,16 +28,18 @@ func TestShouldAutoResume(t *testing.T) {
 		rec  childstore.ChildRecord
 		want bool
 	}{
-		{"idle fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "idle"}, true},
-		{"streaming fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "streaming"}, true},
-		{"tool_running fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "tool_running"}, true},
-		{"compacting fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "compacting"}, true},
-		{"blocked_ui fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "blocked_ui"}, true},
-		{"spawning fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "spawning"}, true},
-		{"exited fundi does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "exited"}, false},
-		{"shutting_down fundi does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "shutting_down"}, false},
-		{"row with neither status does not", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: ""}, false},
-		{"idle claude does not", childstore.ChildRecord{Kind: protocol.KindClaude, LastStatus: "idle"}, false},
+		{"idle fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle"}, true},
+		{"streaming fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "streaming"}, true},
+		{"tool_running fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "tool_running"}, true},
+		{"compacting fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "compacting"}, true},
+		{"blocked_ui fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "blocked_ui"}, true},
+		{"spawning fundi resumes", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "spawning"}, true},
+		{"exited fundi does not", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "exited"}, false},
+		{"shutting_down fundi resumes (daemon died mid-stop)", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "shutting_down"}, true},
+		{"last_status never gates a resume", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "idle"}, false},
+		{"stale last_status does not block one", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle", LastStatus: "exited"}, true},
+		{"row with neither status does not", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "", LastStatus: ""}, false},
+		{"idle claude does not", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "idle"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,7 +71,7 @@ func TestRecoveryActionWorkspaceMode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := childstore.ChildRecord{
-				Kind: protocol.KindFundi, LastStatus: "idle", WorkspaceMode: tc.mode,
+				Kind: protocol.KindFundi, Status: "idle", WorkspaceMode: tc.mode,
 				Labels: map[string]string{"rafiki/workspace": "w1", "rafiki/executor": "e1"},
 			}
 			if got := recoveryAction(rec); got != tc.want {
@@ -76,13 +82,16 @@ func TestRecoveryActionWorkspaceMode(t *testing.T) {
 }
 
 // TestShouldAutoResumeAfterDaemonCrash is the regression test for the defect
-// that broke the design's whole motivating scenario.
+// that broke the design's whole motivating scenario, recast for the write
+// discipline that replaced last_status.
 //
-// last_status is written ONLY by handleChildExit. A daemon killed by SIGKILL,
-// OOM or a node eviction never runs it, so the column stays NULL — and NULL is
-// therefore the STRONGEST evidence the child was alive, not the weakest. The
-// original predicate read NULL as "do not resume", which is exactly backwards
-// and meant a crashed pod recovered nothing.
+// A daemon that dies — SIGKILL, OOM, node eviction, or its own graceful
+// shutdown — writes NOTHING to child rows. So a row that does not say "exited"
+// IS the evidence the child was alive, whatever last_status says: it lingers
+// from a previous life via the upsert's COALESCE (a child that exited once and
+// was resumed carries last_status="exited" forever), and reading it as "do not
+// resume" resurrects nothing and loses running work. Only the exit write,
+// made by a daemon that lived to see the child end, may declare a row terminal.
 func TestShouldAutoResumeAfterDaemonCrash(t *testing.T) {
 	cases := []struct {
 		name string
@@ -110,9 +119,12 @@ func TestShouldAutoResumeAfterDaemonCrash(t *testing.T) {
 			false,
 		},
 		{
-			"recorded exit wins over a stale status",
+			"status wins over a stale last_status",
+			// A child that exited once, was manually resumed, and was alive when
+			// the daemon died. Its last_status still says "exited" from the
+			// previous life; the row's status says idle. Resume.
 			childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle", LastStatus: "exited"},
-			false,
+			true,
 		},
 		{
 			"row with neither status resumes nothing",
@@ -302,7 +314,7 @@ func TestRecoveryStaysExitedResetsRatherThanDrops(t *testing.T) {
 		ChildID: "c_1",
 		Kind:    protocol.KindFundi,
 		Status:  "exited",
-		// LastStatus "exited" -> shouldAutoResume false -> planStayExited.
+		// Status "exited" -> shouldAutoResume false -> planStayExited.
 		LastStatus: "exited",
 	}
 	// nil live set: this record has no DaemonID, so recoveryOwnership returns
@@ -542,7 +554,7 @@ func TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild(t *testing.T) {
 		Kind:           protocol.KindFundi,
 		DaemonID:       "other-daemon",
 		ConversationID: conv,
-		LastStatus:     "idle", // reads as ALIVE, so without the gate it resumes
+		Status:         "idle", // reads as ALIVE, so without the gate it resumes
 		Labels:         map[string]string{"rafiki/daemon": "other-daemon"},
 	}
 
@@ -594,10 +606,10 @@ func TestRecoverOneReleasesInboxForItsOwnExitedChild(t *testing.T) {
 	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
 
 	rec := childstore.ChildRecord{
-		ChildID:    childID,
-		Kind:       protocol.KindFundi,
-		DaemonID:   "me",
-		LastStatus: "exited", // shouldAutoResume false -> planStayExited
+		ChildID:  childID,
+		Kind:     protocol.KindFundi,
+		DaemonID: "me",
+		Status:   "exited", // shouldAutoResume false -> planStayExited
 	}
 
 	c.recoverOne(ctx, rec, nil)

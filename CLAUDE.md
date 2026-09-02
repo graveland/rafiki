@@ -517,26 +517,26 @@
   ticket, evicts the executor) before installing the new one. Without it,
   the incumbent stayed in `Pool.live` for the daemon's lifetime.
 
-- **`status` and `last_status` on `conversations.child` are different
-  questions, and the recovery predicate reads the second one.** `status` is
-  "exited" for every recovered row by construction; `last_status` — written
-  only by the exit path — is what says whether the child was ALIVE when the
-  daemon died. A child resumes when `last_status` is neither `exited` nor
-  `shutting_down`. There is no `running` status (`pkg/protocol/types.go`), and
-  `shutting_down` means a deliberate stop, so a filter written as
-  `status IN ('running','shutting_down')` selects the one state that means
-  "don't resume" and drops every state that means "do". The upsert COALESCEs an
-  empty `last_status` for the same reason: an ordinary status write must never
-  blank the only column recovery reads.
+- **Recovery reads `conversations.child.status`, and `exited` is the only
+  terminal state.** The exit path persists the row AFTER MarkExited, so a
+  child that ended while a daemon was alive to record it — an operator kill,
+  a close, an engine fatal — says `exited` and stays dead across restarts.
+  Anything else means the daemon died first and the child resumes exactly
+  where its row stands: idle resumes as idle, `shutting_down` (writable only
+  by older daemons, which persisted it mid-shutdown) resumes too. There is
+  no `running` status (`pkg/protocol/types.go`).
 
-- **`last_status` is written ONLY by `handleChildExit`, so NULL is the
-  strongest evidence a child was alive.** A child that was alive when the
-  daemon died has its exit path invoked by the recovery loop rather than by a
-  real exit, and the recovery loop does not call `handleChildExit` — so the
-  row stays NULL in `last_status`. That NULL is precisely the signal that says
-  "this child needs resuming", distinct from every deliberate shutdown that
-  `handleChildExit` records. Any other code path setting `last_status` would
-  silently mark a live child as dead and prevent its recovery.
+- **The daemon's own shutdown persists NOTHING to child rows**
+  (`c.stopping`, set by `ShutdownAllChildren`): the process is dying and its
+  children die with it, so the rows keep their live statuses and the next
+  daemon resumes them — that is what makes a redeploy transparent. Do not
+  "fix" the skipped write; writing `exited` there turns every redeploy into
+  mass terminal exit, which is exactly the bug this replaced: the old exit
+  path wrote the PRE-exit status into both `status` and `last_status` (and
+  the predicate read `last_status` first), so exited agents resurrected on
+  every restart. `last_status` is observability only — what the child was
+  doing when it ended — and lingers stale through a resume via the upsert's
+  COALESCE; it must never gate recovery.
 
 - **One writer per conversation, and the guard is in the INSERT statement.**
   Child state on local disk used to provide daemon isolation for free; a shared

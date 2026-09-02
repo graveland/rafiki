@@ -39,35 +39,30 @@ const (
 	planRebindUnbound
 )
 
-// shouldAutoResume reports whether a recovered record is a fundi child that was
-// ALIVE when this daemon stopped writing to it.
+// shouldAutoResume reports whether a recovered record is a fundi child that
+// was ALIVE when this daemon stopped writing to it.
 //
-// It reads last_status when there is one, and falls back to status when there
-// is not. The fallback is the whole point: last_status is written ONLY by
-// handleChildExit, so an empty value means the daemon never got to record an
-// exit — SIGKILL, OOM, a node eviction. That is the strongest possible evidence
-// the child was alive, and it is the case a pod restart actually hits, so
-// reading it as "do not resume" broke recovery for the scenario this design
-// exists for.
+// The row's status is the whole question. "exited" means the child ENDED while
+// a daemon was alive to record it — an operator kill, a close, an engine
+// fatal — and stays dead across restarts. Anything else means the daemon died
+// first: a crash writes nothing, and the daemon's own graceful shutdown writes
+// nothing either (see c.stopping), so the row still says idle/streaming and
+// the child is picked up exactly where it stood. Idle resumes as idle.
 //
-// A child was alive when its effective status is neither "exited" (it stopped
-// on its own) nor "shutting_down" (the daemon stopped it deliberately). Note
-// handleChildExit substitutes PreShutdownStatus for "shutting_down", so a child
-// the daemon gracefully stopped still records "idle"/"streaming" and still
-// resumes — stopping the daemon is not the same as stopping the child.
+// "shutting_down" can still appear on rows written by an older daemon, which
+// persisted it mid-shutdown; it reads as "the daemon died while stopping me",
+// which is a resume, not a terminal state.
+//
+// last_status is observability only (what the child was doing when it ended);
+// it lingers stale through a resume via the upsert's COALESCE and must never
+// gate recovery — that was the bug that resurrected exited agents.
 func shouldAutoResume(rec childstore.ChildRecord) bool {
 	if rec.Kind != protocol.KindFundi {
 		return false
 	}
-	effective := rec.LastStatus
-	if effective == "" {
-		effective = rec.Status
-	}
-	if effective == "" {
-		return false
-	}
-	return effective != string(protocol.StatusExited) &&
-		effective != string(protocol.StatusShuttingDown)
+	// An empty status is a degenerate row (spawn always writes one) and
+	// resumes nothing.
+	return rec.Status != "" && rec.Status != string(protocol.StatusExited)
 }
 
 // ownership is recovery's answer to "may this daemon run this child".

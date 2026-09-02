@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -72,6 +73,16 @@ type Controller struct {
 	// children is the durable child-state store. Nil when pool is nil, which
 	// means children live in memory only and do not survive a restart.
 	children childstore.ChildStore
+
+	// stopping is set once the daemon's own shutdown sequence begins
+	// (ShutdownAllChildren). Child exits handled after that point skip the row
+	// persist on purpose: the process is dying and its children die with it,
+	// so the rows must keep their live statuses for the next daemon's
+	// recovery — writing "exited" here would make every redeploy read as mass
+	// terminal exit. A child that ends while the daemon is healthy (kill,
+	// close, engine fatal) persists status=exited and stays dead across
+	// restarts.
+	stopping atomic.Bool
 
 	// leases gates who may WRITE to a conversation. Nil under the same
 	// condition as children.
@@ -1859,6 +1870,21 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 // Per-child errors are logged and collected; all of them are returned as a
 // joined error so the caller can decide whether to treat them as fatal.
 func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, perChildKill time.Duration) error {
+	// The daemon is dying. From here on, child exits must not persist rows:
+	// recovery on the next daemon reads status, and a row saying "exited"
+	// would keep a child that was merely stopped by its daemon's death from
+	// ever resuming. The latch is one-way and single-writer — the daemon's own
+	// shutdown sequence is the only production caller — so the CAS buys no
+	// race safety (the atomic type already makes the latch torn-read-free and
+	// a duplicate Store would be a harmless no-op); it marks the TRANSITION so
+	// the log fires exactly once even if the sequence is entered twice (its
+	// per-child goroutines can outlive an expired context), and gives any
+	// future one-time work a first-flipper hook. Set before LiveIDs so an
+	// exit racing the start of the sequence is covered too.
+	if c.stopping.CompareAndSwap(false, true) {
+		slog.Info("daemon stopping; child exits will no longer be persisted — rows keep their live statuses for restart recovery")
+	}
+
 	ids := c.cm.LiveIDs()
 	if len(ids) == 0 {
 		return nil
@@ -2774,13 +2800,14 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	res := ch.ExitResult()
 	now := time.Now()
 
-	// Determine last known status before marking exited.
+	// Determine last known status before marking exited. Recorded in the
+	// row's last_status column and the log dump's ExitInfo as observability —
+	// what the child was doing when it ended. The recovery predicate reads
+	// rec.Status, never this.
 	snap, _ := c.st.Get(childID)
 	lastStatus := string(snap.Status)
 	// When the daemon gracefully shut this child down, the store status is
-	// "shutting_down" — but the record's LastStatus must reflect the child's
-	// real pre-exit state (idle, streaming, etc.) so loadOrphans can decide
-	// whether it should be auto-recovered on daemon restart.
+	// "shutting_down"; record the child's real pre-shutdown state instead.
 	if lastStatus == string(protocol.StatusShuttingDown) {
 		if ps := ch.PreShutdownStatus(); ps != "" {
 			lastStatus = string(ps)
@@ -2795,18 +2822,22 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// ExitedRenderRing stays consistent with the live render path.
 	renderEvents := ch.RenderRecent(ring.Query{})
 
-	// Persist the record BEFORE MarkExited so LastStatus reflects the pre-exit
-	// state (idle, streaming, etc.) rather than just "exited". The persisted
-	// LastStatus is what loadOrphans reads to decide whether a fundi child
-	// should be auto-resumed on daemon restart.
-	if err := c.writeRecordLastStatus(childID, lastStatus); err != nil {
-		slog.Warn("write state record on exit", "childId", childID, "error", err)
-	}
-
 	// MarkExited sets Status, ExitedAt, ExitCode, ExitSignal, and ExitedRing
 	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
 	// observe Status=Exited with ExitedRing still nil.
 	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot, renderEvents)
+
+	// Persist AFTER MarkExited so the row records the exit itself: rec.Status
+	// comes off the snapshot as "exited", which is the one durable fact the
+	// recovery predicate reads — "this child ended while a daemon was alive to
+	// record it" — and lastStatus rides along as observability. Skipped during
+	// the daemon's own shutdown (see c.stopping): the rows must keep saying
+	// idle/streaming so the next daemon resumes them.
+	if !c.stopping.Load() {
+		if err := c.writeRecordLastStatus(childID, lastStatus); err != nil {
+			slog.Warn("write state record on exit", "childId", childID, "error", err)
+		}
+	}
 
 	// Dump logs before removing from the manager so per-child subscribers are
 	// still reachable for the exit event delivery below.
@@ -2973,11 +3004,12 @@ func (c *Controller) writeRecord(childID string) error {
 	return c.writeRecordLastStatus(childID, "")
 }
 
-// writeRecordLastStatus persists the child's record. lastStatus, when non-empty,
-// is the pre-exit state recorded by handleChildExit rather than the store's
-// current Status (already "exited" after MarkExited). It is written only on
-// that path; the upsert COALESCEs an empty value so an ordinary status write
-// cannot blank the column the recovery predicate reads.
+// writeRecordLastStatus persists the child's child-state record. lastStatus,
+// when non-empty, is the pre-exit state recorded by handleChildExit rather
+// than the store's Status at the time of an ordinary write. It is written on
+// that path only, and is observability — the recovery predicate reads the
+// row's status column. The upsert COALESCEs an empty value so an ordinary
+// write cannot blank what the last real exit recorded.
 //
 // noteConversationID records a child's resolved conversation id on its store
 // entry so the next writeRecord carries it to conversations.child.
