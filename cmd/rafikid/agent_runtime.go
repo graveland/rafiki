@@ -181,6 +181,12 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		return lease, nil
 	}
 
+	// Coordinator-notification seam: the settle path (handleStatusChange)
+	// reads this back via settleReason at the moment the child goes idle.
+	ro.OnTurnEnded = func(outcome fundi.TurnOutcome) {
+		c.turnOutcomes.set(childID, outcome)
+	}
+
 	// req.Env is buildEnv's second payload for the subprocess path (alongside
 	// the API key handled below) - forwarded-caller-environment, default-on
 	// via `rafiki create --forward-env` (cmd/rafiki/cmd_create.go). An

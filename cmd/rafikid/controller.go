@@ -184,6 +184,12 @@ type Controller struct {
 	// breaches bounds the budget sweep to one steer per breach.
 	breaches budgetBreaches
 
+	// turnOutcomes remembers the most recent fundi.TurnOutcome per child, so
+	// handleStatusChange's idle-transition settle notification can name the
+	// real reason (a cost budget, an upstream error) instead of a generic
+	// "it's idle now". See turn_outcomes.go.
+	turnOutcomes turnOutcomeStore
+
 	// nudgedOnce bounds prompting.md's enforcement ladder to one nudge per
 	// child. Guarded by nudgedMu.
 	nudgedMu   sync.Mutex
@@ -2693,7 +2699,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
 		if c.evbuf != nil {
 			if isWorkingStatus(storePrev) {
-				c.notifySubagentSettled(childID, "settled (idle)")
+				c.notifySubagentSettled(childID, c.settleReason(childID))
 			}
 			c.evbuf.DrainIdle(childID)
 		}

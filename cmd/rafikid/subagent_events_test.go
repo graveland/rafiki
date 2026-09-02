@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
+	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -255,5 +257,54 @@ func TestCleanSettleIsNotNudged(t *testing.T) {
 		if b.childID == "c_w1" {
 			t.Fatalf("a clean settle must not cost a turn: %+v", b)
 		}
+	}
+}
+
+func TestSettleFragmentNamesTheGuardrailReasonWhenPresent(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	c.turnOutcomes.set("c_w1", fundi.TurnOutcome{LimitReason: "agent's own cost budget ($5.00 of $5.00) exhausted"})
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	frag := cap.batches()[0].fragments[0]
+	if !strings.Contains(frag, "cost budget") {
+		t.Errorf("fragment must name the guardrail reason: %q", frag)
+	}
+}
+
+func TestSettleFragmentNamesTheErrorWhenTurnFailed(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	c.turnOutcomes.set("c_w1", fundi.TurnOutcome{Err: errors.New("upstream unavailable")})
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	frag := cap.batches()[0].fragments[0]
+	if !strings.Contains(frag, "upstream unavailable") {
+		t.Errorf("fragment must name the real error: %q", frag)
+	}
+}
+
+func TestSettleFragmentFallsBackToGenericMessageWhenClean(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	c.turnOutcomes.set("c_w1", fundi.TurnOutcome{Clean: true})
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	frag := cap.batches()[0].fragments[0]
+	if !strings.Contains(frag, "settled (idle)") {
+		t.Errorf("a clean outcome must still read as settled (idle): %q", frag)
+	}
+}
+
+func TestSettleFragmentFallsBackWhenNoOutcomeStored(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	// No turnOutcomes.set call: the old behavior, e.g. a claude-kind child
+	// with no fundi Engine behind it to report anything.
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	frag := cap.batches()[0].fragments[0]
+	if !strings.Contains(frag, "settled (idle)") {
+		t.Errorf("no stored outcome must still read as settled (idle): %q", frag)
 	}
 }
