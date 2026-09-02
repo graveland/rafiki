@@ -1133,6 +1133,19 @@
   filter's guarantee is about what a USER is offered, test the rows it
   produces, not the sets it selects.
 
+- **`make check` was not hermetic against an exported `RAFIKI_URL`, and passing
+  `--socket` is not the defence it looks like.** `test/integration`'s CLI tests
+  spawn the real `rafiki` binary, which inherits the shell's environment — and
+  `RAFIKI_URL` OVERRIDES `--socket` outright (`mustDial` consults
+  `remoteDialURL()` first and never reads the flag), so the whole suite aimed
+  at whatever daemon that variable named. The giveaway is a failure naming TCP
+  while a socket path sits right there in the argv. `cliCmd` blanks
+  `RAFIKI_URL`/`RAFIKI_TOKEN` per invocation, the way `noRealProviderEnv` in
+  `db_child_state_test.go` already did for provider credentials; any NEW test
+  that execs the CLI belongs on that helper. It failed safe here only because
+  no token was exported — with one set, `rafiki create --detached` in a test
+  would have spawned real children on the named daemon.
+
 - **`make check` fails with two `test/integration` failures whenever another
   rafiki daemon is running on the machine** — the integration daemons bind the
   default proxy port (`:8035` from `.env`/`service.env`), hit

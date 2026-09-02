@@ -304,11 +304,11 @@ func (d *queryDialog) cellValue(r queryRow, col int, v modelView) (string, bool)
 	if r.flag != flagNone {
 		switch r.flag {
 		case flagTools:
-			return onOffWord(v.toolsOnly), v.toolsOnly
+			return capabilityWord(v.toolsOnly), v.toolsOnly
 		case flagVision:
-			return onOffWord(v.visionOnly), v.visionOnly
+			return capabilityWord(v.visionOnly), v.visionOnly
 		case flagThinking:
-			return onOffWord(v.thinkingOnly), v.thinkingOnly
+			return capabilityWord(v.thinkingOnly), v.thinkingOnly
 		}
 	}
 	b := v.boundFor(r.field)
@@ -339,11 +339,21 @@ func (d *queryDialog) cellValue(r queryRow, col int, v modelView) (string, bool)
 	return "", false
 }
 
-func onOffWord(b bool) string {
+// capabilityWord names what the filter DOES, not whether a switch is flipped.
+//
+// It used to read "● on"/"○ off", which is ambiguous in the one direction that
+// matters: "tools off" reads as "models with tools off" rather than "this
+// filter is not applied". "any" says the second thing and nothing else.
+//
+// Note "required" admits models whose capability is UNKNOWN -- every
+// locally-served model -- because the alternative hides the whole local fleet.
+// The detail block shows "tools unknown" for exactly those rows, which is
+// where that surprise gets explained.
+func capabilityWord(b bool) string {
 	if b {
-		return "● on"
+		return "required"
 	}
-	return "○ off"
+	return "any"
 }
 
 // priorityDigit renders a 1-based priority compactly. Past nine keys the exact

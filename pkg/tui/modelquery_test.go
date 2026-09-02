@@ -465,3 +465,55 @@ func TestEveryAvailableCellHasSomethingToCycle(t *testing.T) {
 		}
 	}
 }
+
+// "off" read as "models with tools off" rather than "this filter is not
+// applied", which is the one misreading that matters. The words now name what
+// the filter DOES.
+func TestCapabilityCellsSayAnyRatherThanOff(t *testing.T) {
+	c := openQuery(t)
+	c.modelView.toolsOnly = false
+	c.modelView.visionOnly = true
+
+	out := ansi.Strip(c.query.view(120, 44, c.modelView))
+	if strings.Contains(out, "off") {
+		t.Errorf("a capability cell still reads \"off\":\n%s", out)
+	}
+	if !strings.Contains(out, "any") {
+		t.Errorf("an unapplied filter should read \"any\":\n%s", out)
+	}
+	if !strings.Contains(out, "required") {
+		t.Errorf("an applied filter should read \"required\":\n%s", out)
+	}
+}
+
+// "any" must genuinely mean unfiltered: a model KNOWN not to tool-call is
+// admitted, which is the whole difference from "required".
+func TestAnyMeansUnfilteredNotExcluded(t *testing.T) {
+	rows := []*rafikiv1.ModelRow{
+		{Id: "a/tools", SupportedParameters: []string{"tools"}},
+		{Id: "b/none", SupportedParameters: []string{"temperature"}},
+		{Id: "c/unknown"},
+	}
+	v := defaultModelView()
+
+	v.toolsOnly = false
+	if got := len(selectModels(rows, "", v)); got != 3 {
+		t.Errorf("with tools=any got %d rows, want all 3", got)
+	}
+
+	v.toolsOnly = true
+	got := selectModels(rows, "", v)
+	if len(got) != 2 {
+		t.Fatalf("with tools=required got %d rows, want 2", len(got))
+	}
+	// ...and "required" still admits UNKNOWN, or the local fleet disappears.
+	var sawUnknown bool
+	for _, r := range got {
+		if r.GetId() == "c/unknown" {
+			sawUnknown = true
+		}
+	}
+	if !sawUnknown {
+		t.Error("required excluded a model of unknown capability")
+	}
+}

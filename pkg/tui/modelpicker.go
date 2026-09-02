@@ -105,12 +105,16 @@ func (v modelView) summary() string {
 		out += "   " + b
 	}
 	if v.visionOnly {
-		out += "   vision on"
+		out += "   vision required"
+	}
+	if v.thinkingOnly {
+		out += "   thinking required"
 	}
 	if !v.toolsOnly {
-		// The DEFAULT is on, so the notable state is off: a list silently
-		// including models that cannot be agents is the surprising one.
-		out += "   +no-tools"
+		// The DEFAULT is required, so the notable state is "any": a list
+		// silently including models that cannot be agents is the surprising
+		// one, and it is worth a word on the hint line.
+		out += "   tools any"
 	}
 	return out
 }

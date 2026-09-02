@@ -748,7 +748,7 @@ func TestHintLineNamesTheActiveView(t *testing.T) {
 	if !strings.Contains(out, "in$") {
 		t.Errorf("hint line does not name the sort:\n%s", out)
 	}
-	if !strings.Contains(out, "vision on") {
+	if !strings.Contains(out, "vision required") {
 		t.Errorf("hint line does not say the vision filter is on:\n%s", out)
 	}
 }
@@ -835,11 +835,11 @@ func TestCtrlTRevealsNonToolModels(t *testing.T) {
 // including models that cannot be agents is the surprising one.
 func TestHintLineFlagsWhenNonToolModelsAreIncluded(t *testing.T) {
 	v := defaultModelView()
-	if strings.Contains(v.summary(), "no-tools") {
+	if strings.Contains(v.summary(), "tools any") {
 		t.Error("the default view advertises a filter that is simply on")
 	}
 	v.toggleTools()
-	if !strings.Contains(v.summary(), "no-tools") {
+	if !strings.Contains(v.summary(), "tools any") {
 		t.Errorf("summary = %q, want it to flag that non-tool models are included", v.summary())
 	}
 }
