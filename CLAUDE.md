@@ -938,3 +938,95 @@
   region (`session.LiveFingerprint`), not just the last block, and
   `Block.Fingerprint` must include `HasResult`/`IsError`/`DurationMs` — a
   tool that succeeds returning nothing moves only `HasResult`.
+
+- **Completion runs in the CLIENT and must ask the DAEMON — three of its
+  helpers used to dial a hardcoded socket, silently.** `completeChildrenByState`,
+  `completeLabelPairs` and `completeLabelKeys` called
+  `client.Dial(socketFromCmd(cmd))`, never consulting `remoteDialURL()`, so with
+  `RAFIKI_URL` set they returned nil and the shell simply offered nothing — a
+  completion handler swallows every error by design, so there was no symptom to
+  chase. They go through `newConnectEndpoint` now, which is the one place the CLI
+  resolves an endpoint, so the bug is closed by construction rather than by
+  remembering. `completeModel` was worse: it ran `models.ListSources` locally,
+  fetching OpenRouter with the client's own credentials and probing ollama and
+  LM Studio on the CLIENT's localhost, so a thin client offered the models on
+  its own laptop. Kind scoping (`sourcesForKind`) lives in `cmd/rafikid` now;
+  the client keeps no copy. Any NEW completion helper belongs on that path —
+  and must never exit, block past `completionDeadline`, or print.
+
+- **The framed protocol is FROZEN: nothing new lands on it.** 37 operational
+  `ctrl_*` verbs serve the whole CLI through `pkg/client`; Connect serves
+  `pkg/tui` and `rafiki attach`. New work goes on Connect. This is why the
+  child-lifecycle verb renamed to `close` everywhere EXCEPT the wire —
+  `ctrl_forget` and `ctrl_forget_all_exited` keep their old spelling forever,
+  because adding a name to a protocol being retired is investment in the wrong
+  direction and the old name would have to be kept for old clients anyway.
+  Two things block deleting the framed listener outright, and both are
+  structural rather than mechanical: `ctrl_auth`'s bootstrap window
+  (`pkg/control/server.go:58` — with no users a TLS connection is admitted with
+  NO token and may send only `ctrl_user_create`; Connect has no such mode), and
+  `ctrl_executor_session`, which is connection-scoped by signature
+  (`dispatch.go:200` takes a `Connection`, and the invariant is one session
+  executor per control connection) where Connect requests are stateless HTTP.
+
+- **`forget` was never forgetting — it is `close`, and it is the point of no
+  return for CONTINUING a conversation, not for reading it.** `Controller.Close`
+  drops the in-memory entry, the `conversations.child` row and the inbox rows,
+  plus the log dump and fundi spill dirs. It does NOT touch
+  `conversation_message`, `event_log`, `conversation_turn` or cost rollups —
+  **no foreign key anywhere references `conversations.child`**, so nothing
+  cascades and `rafiki history` still works afterwards. What it does end is
+  resumption: `resumeInternal` resolves its target from `c.st`, which this
+  deletes. `eventbuf.Buffer.Forget`, `nativebus.Forget` and
+  `Controller.forgetFrames` keep the old word on purpose — they discard
+  in-memory bookkeeping they rebuild on demand, which genuinely is forgetting.
+
+- **`ModelCatalog` throws away most of what OpenRouter sends, and two fields it
+  discarded are the only source for "has vision".** `orModel` now decodes `name`
+  and `architecture.input_modalities`; `output_modalities`, `supported_parameters`
+  and `canonical_slug` are still dropped. **Empty `input_modalities` means
+  UNKNOWN, never "text-only"** — a text-only model reports `["text"]`, and every
+  locally-served model (ollama, LM Studio, a custom provider) has no catalog
+  entry at all, so a vision filter that treats empty as "no vision" silently
+  hides the whole local fleet. Note `saveCache` persists the snapshot, so a
+  cache written before a field was decoded yields it empty until the next
+  refresh — the same caveat `Pricing` carries, and pinned by
+  `TestCatalogStaleSnapshotDecodesWithoutNewFields`. Enumerate with `Rows()`,
+  never per-id `ContextWindow`/`Pricing` calls: each of those runs
+  `ResolveModel` and takes the mutex, so a ~300-model catalog costs 300 of each.
+
+- **The daemon used to run TWO OpenRouter fetchers.** `Controller.ListModels` ->
+  `models.List` -> `loadOpenRouter` did its own HTTP fetch and disk cache
+  alongside the `ModelCatalog` warmed for routing. `Controller.ListModelRows`
+  takes OpenRouter rows from the catalog and asks `models.ListSources` for
+  everything else; `pkg/models` is untouched because `cmd/rafiki` still links
+  it. Re-adding `models.loadOpenRouter` to a daemon path reintroduces a second
+  cache with a different TTL.
+
+- **Kind scoping is a ROW-level contract, not a source-set one — the source
+  set alone is a test at the wrong layer.** `sourcesForKind(claude)` returns
+  `{SourceBuiltin}` exactly as designed, and its test asserted exactly that —
+  yet the claude completion still offered 13 `openrouter/*` ids, because the
+  daemon's **`builtin` source curates across providers** (gemini, gpt and grok
+  sit beside the anthropic ids in `pkg/models/list.go`'s `knownModels`). A
+  claude child can never run those — the "spawns, attaches, never answers"
+  failure the source filter exists to prevent. `filterRowsForKind`
+  (`cmd/rafikid/models_presets.go`) applies the provider filter at the row
+  layer (`claude` keeps only `Provider == "anthropic"`) and
+  `TestListModelRowsClaudeKindAdmitsOnlyAnthropic` pins it end-to-end. When a
+  filter's guarantee is about what a USER is offered, test the rows it
+  produces, not the sets it selects.
+
+- **`make check` fails with two `test/integration` failures whenever another
+  rafiki daemon is running on the machine** — the integration daemons bind the
+  default proxy port (`:8035` from `.env`/`service.env`), hit
+  `listen tcp :8035: bind: address already in use`, and because the Connect
+  UDS is served only when the proxy face comes up (`main.go`'s
+  `if face != nil && face.Control != nil`), the two Connect-plane tests
+  (`TestIntegration_SubtreeIncludeSelfCoversRootAndDescendant`,
+  `TestIntegration_ListChildrenCarriesTheParentLabel`) fail with a missing
+  `connect.sock` — signatures that look like real regressions and are not.
+  Check the daemon stderr for "address already in use", and bypass with
+  `RAFIKI_PROXY_LISTEN=127.0.0.1:18035 make check`. The deeper issue (the
+  Connect socket's availability being silently coupled to the proxy face) is
+  recorded for a future fix, not solved here.
