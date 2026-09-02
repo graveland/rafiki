@@ -732,6 +732,29 @@
   DIFFERENT axis from `created` — a model listed last week can carry a cutoff
   from a year earlier — so both earn their own field.
 
+- **Client-side preferences live in ONE document with named sections
+  (`pkg/clientstate`, `paths.ClientStateFile`), and writers must go through
+  `Update`.** A store that grows a file per setting ends up as a directory
+  nobody can enumerate; `Update` is read-modify-write, so a caller that knows
+  about one section preserves every section it has never heard of — marshalling
+  your own section over the whole document silently drops the others. It is
+  `StateDir`, not `CacheDir`: a cache is disposable and REGENERABLE, and a
+  query someone composed by hand is neither. Not `ConfigDir` either, which is
+  for files a person edits. Everything stored is keyed by NAME — field labels,
+  stop labels — never by enum ordinal, because inserting a column renumbers
+  every field after it and a saved query that silently became a different query
+  after an upgrade is worse than one that failed to load; an unrecognised name
+  is DROPPED, degrading the query rather than refusing it.
+
+- **`NewCockpit` reads client state at CONSTRUCTION, so `pkg/tui` needs a
+  `TestMain` that isolates `XDG_STATE_HOME`.** Without it every cockpit test
+  reads — and every one that closes the query panel writes — the developer's
+  real `client-state.json`: a test clobbers a live preference, and one test's
+  saved query leaks into the next test's "fresh" cockpit. That is not
+  hypothetical; it made a sort-cycling test fail on a key it never set. The
+  isolation is package-wide because the coupling is in the constructor, so any
+  test that builds a Cockpit is exposed whether it thinks about state or not.
+
 - **The filter+sort panel is VERTICAL — one row per field — and that is what
   removes the wrapping problem rather than managing it.** The first version was
   two horizontal bands of cells; the filter band alone needed sixteen side by

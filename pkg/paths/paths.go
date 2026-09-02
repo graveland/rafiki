@@ -139,6 +139,15 @@ func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }
 // ~/.cache/rafiki.
 func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
 
+// ClientStateFile holds the rafiki client's own preferences: things a person
+// chose that should survive a restart, in one document with named sections.
+//
+// StateDir, not CacheDir: a cache is disposable and REGENERABLE, and a
+// preference somebody set by hand is neither — deleting it loses a choice
+// rather than costing a refetch. Not ConfigDir either, which is for files a
+// person edits; this one is written by the UI.
+func ClientStateFile() string { return filepath.Join(StateDir(), "client-state.json") }
+
 // SpillDir is where a standalone `rafikid fundi` writes clipped tool output. Cache
 // rather than data: it is large, disposable, and reconstructible from the
 // conversation. No "fundi-" prefix on the leaf — the directory is already

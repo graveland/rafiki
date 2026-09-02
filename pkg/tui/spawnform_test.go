@@ -318,3 +318,52 @@ func TestModalsHideTheRail(t *testing.T) {
 		t.Error("the rail did not come back when the modal closed")
 	}
 }
+
+// `rafiki create` with nothing to go on opens straight into the form, prefilled
+// with what a bare create would have spawned — so the default case costs one ⏎
+// and shows what it is about to do.
+func TestOpenCreatePrefillsTheForm(t *testing.T) {
+	c := NewCockpit(Options{
+		BaseURL:    "http://127.0.0.1:1",
+		OpenCreate: true,
+		CreateDefaults: SpawnDefaults{
+			Name: "reviewer", Kind: "claude", Model: "anthropic/claude-opus-5", Cwd: "/tmp/x",
+		},
+	})
+	if c.form == nil {
+		t.Fatal("OpenCreate did not open the form")
+	}
+	if got := c.form.inputs[fieldName].Value(); got != "reviewer" {
+		t.Errorf("name = %q", got)
+	}
+	if got := c.form.kind(); got != "claude" {
+		t.Errorf("kind = %q, want claude", got)
+	}
+	if got := c.form.inputs[fieldModel].Value(); got != "anthropic/claude-opus-5" {
+		t.Errorf("model = %q", got)
+	}
+	if got := c.form.inputs[fieldCwd].Value(); got != "/tmp/x" {
+		t.Errorf("cwd = %q", got)
+	}
+}
+
+// Empty defaults keep the form's own, rather than blanking the prefilled cwd.
+func TestOpenCreateWithNoDefaultsKeepsTheFormsOwn(t *testing.T) {
+	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", OpenCreate: true})
+	if c.form == nil {
+		t.Fatal("OpenCreate did not open the form")
+	}
+	if c.form.inputs[fieldCwd].Value() == "" {
+		t.Error("cwd prefill was cleared by an empty default")
+	}
+}
+
+// A form opened at CONSTRUCTION never saw the `n` keypress that normally starts
+// the catalog fetch, so Init has to start it or the typeahead sits empty.
+func TestOpenCreateFetchesTheCatalog(t *testing.T) {
+	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", OpenCreate: true})
+	_ = c.Init()
+	if !c.modelsBusy[c.form.kind()] {
+		t.Error("no catalog fetch was started for a form opened at construction")
+	}
+}

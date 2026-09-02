@@ -192,6 +192,25 @@ func (f *spawnForm) acceptSuggestion() bool {
 
 func (f *spawnForm) kind() string { return spawnKinds[f.kindIx] }
 
+// prefill seeds the form from the caller's defaults, leaving anything empty at
+// the form's own default.
+func (f *spawnForm) prefill(d SpawnDefaults) {
+	if d.Name != "" {
+		f.inputs[fieldName].SetValue(d.Name)
+	}
+	if d.Model != "" {
+		f.inputs[fieldModel].SetValue(d.Model)
+	}
+	if d.Cwd != "" {
+		f.inputs[fieldCwd].SetValue(d.Cwd)
+	}
+	for i, k := range spawnKinds {
+		if k == d.Kind {
+			f.kindIx = i
+		}
+	}
+}
+
 // params returns what to spawn, or an error message if the form is incomplete.
 func (f *spawnForm) params() (spawnParams, string) {
 	cwd := strings.TrimSpace(f.inputs[fieldCwd].Value())
