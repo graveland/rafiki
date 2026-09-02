@@ -81,7 +81,7 @@ func runLabel(cmd *cobra.Command, args []string) error {
 	}
 
 	// Labels feed label completion; what the last TAB showed is now stale.
-	dropChildCompletionCache()
+	dropChildCompletionCache(cmd)
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

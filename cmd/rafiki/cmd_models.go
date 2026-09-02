@@ -72,7 +72,7 @@ func runModels(cmd *cobra.Command, _ []string) error {
 	for _, r := range rows {
 		ids = append(ids, r.GetId())
 	}
-	cacheWrite("models-fundi", completionEndpointKey(), ids)
+	cacheWrite("models-fundi", completionEndpointKey(cmd), ids)
 
 	mode, _ := outputOpts(cmd)
 	return renderModelRows(os.Stdout, rows, source, mode)

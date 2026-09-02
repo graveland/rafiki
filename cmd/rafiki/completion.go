@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // completionDeadline bounds a completion RPC. A shell is blocked while this
@@ -29,21 +28,23 @@ type completionChild struct {
 }
 
 // completionEndpointKey names the endpoint a cached answer came from, so two
-// daemons' answers never share a file. It reads the environment directly
-// rather than resolving a full endpoint: this runs even when
-// newConnectEndpoint would refuse (no token), and a refusal still needs a
-// stable key for the drop path.
-func completionEndpointKey() string {
-	if u := remoteDialURL(); u != "" {
-		return u
+// daemons' answers never share a file. It asks the endpoint resolver rather
+// than recomputing the answer from the environment: reads, writes and drops
+// name the same endpoint that was actually dialed, and a --socket override
+// moves the key with it. When the resolver refuses (a remote URL with no
+// token) the URL itself is still a stable key for the drop path.
+func completionEndpointKey(cmd *cobra.Command) string {
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return remoteDialURL()
 	}
-	return "unix:" + paths.ConnectSocketPath()
+	return ep.identity
 }
 
 // completionChildrenCached returns the cached rows, or nil on any miss.
-func completionChildrenCached(ttl time.Duration) []completionChild {
+func completionChildrenCached(cmd *cobra.Command, ttl time.Duration) []completionChild {
 	var out []completionChild
-	if cacheRead("children", completionEndpointKey(), ttl, &out) {
+	if cacheRead("children", completionEndpointKey(cmd), ttl, &out) {
 		return out
 	}
 	return nil
@@ -53,7 +54,9 @@ func completionChildrenCached(ttl time.Duration) []completionChild {
 // that changes the child set — create, kill, close, label — which is what
 // makes childCacheTTL safe at 15s: the staleness a user notices is the one
 // they just caused.
-func dropChildCompletionCache() { cacheDrop("children", completionEndpointKey()) }
+func dropChildCompletionCache(cmd *cobra.Command) {
+	cacheDrop("children", completionEndpointKey(cmd))
+}
 
 // completionChildren returns every child the daemon knows, cached.
 //
@@ -66,7 +69,7 @@ func dropChildCompletionCache() { cacheDrop("children", completionEndpointKey())
 // Every failure yields no candidates. A completion handler must never exit,
 // never block long, and never print.
 func completionChildren(cmd *cobra.Command) []completionChild {
-	if rows := completionChildrenCached(childCacheTTL); rows != nil {
+	if rows := completionChildrenCached(cmd, childCacheTTL); rows != nil {
 		return rows
 	}
 	ep, err := newConnectEndpoint(cmd)
@@ -90,6 +93,6 @@ func completionChildren(cmd *cobra.Command) []completionChild {
 			Labels:  ch.GetLabels(),
 		})
 	}
-	cacheWrite("children", completionEndpointKey(), out)
+	cacheWrite("children", completionEndpointKey(cmd), out)
 	return out
 }

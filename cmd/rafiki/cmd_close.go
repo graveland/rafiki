@@ -74,7 +74,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 		if !resp.Success {
 			return fmt.Errorf("ctrl_forget_all_exited: %s", client.FormatError(resp))
 		}
-		dropChildCompletionCache()
+		dropChildCompletionCache(cmd)
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(json.RawMessage(resp.Data))
@@ -104,7 +104,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("closed %s\n", childID)
 	}
-	dropChildCompletionCache()
+	dropChildCompletionCache(cmd)
 	if failures > 0 {
 		return fmt.Errorf("%d target(s) failed", failures)
 	}
