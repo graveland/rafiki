@@ -131,6 +131,9 @@ type catalogFacts struct {
 // the client keeps.
 //
 //   - "claude" shells out to Claude Code, which resolves only Anthropic ids.
+//     A source set of {builtin} is still not narrow enough on its own — the
+//     builtin curation is cross-provider — so the claude kind is narrowed
+//     again at the row layer by filterRowsForKind.
 //   - "fundi" (the DEFAULT, and the empty/not-yet-typed case) is rafiki's
 //     native runtime, so it takes what rafiki resolves: the curated ids and
 //     family aliases, plus any OpenRouter slash id.
@@ -203,6 +206,29 @@ func filterByProvider(rows []connectapi.ModelRow, provider string) []connectapi.
 	return out
 }
 
+// filterRowsForKind narrows rows to the ids a child of kind can actually run,
+// at the ROW layer. sourcesForKind decides which SOURCES may answer for a
+// kind, and that is not enough on its own: the builtin source's curation is
+// cross-provider — anthropic ids and openrouter ids share one list — so a
+// claude child whose source set is exactly {builtin} would still be offered
+// openrouter/openai/gpt-4o and friends, which Claude Code can never resolve.
+// That is the exact spawns-attaches-never-answers failure sourcesForKind's
+// comment warns about, invisible to a test that checks the source set rather
+// than the rows. The kind's row-level contract is what the picker serves:
+// claude keeps only provider "anthropic"; every other kind is row-unfiltered.
+func filterRowsForKind(rows []connectapi.ModelRow, kind string) []connectapi.ModelRow {
+	if kind != protocol.KindClaude {
+		return rows
+	}
+	out := make([]connectapi.ModelRow, 0, len(rows))
+	for _, r := range rows {
+		if r.Provider == "anthropic" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // catalogFactsByID flattens the daemon's already-warm catalog into a join
 // table. One Rows() call rather than per-id lookups: each of those resolves
 // and locks, so a ~300-model catalog would cost 300 of each.
@@ -268,7 +294,7 @@ func (c *Controller) ListModelRows(ctx context.Context, provider, kind string) (
 		}
 	}
 
-	rows := filterByProvider(decorateRows(spine, facts), provider)
+	rows := filterRowsForKind(filterByProvider(decorateRows(spine, facts), provider), kind)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	return rows, nil
 }
