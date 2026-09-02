@@ -702,6 +702,22 @@
   track closely enough to sort by, and the distinction only matters if someone
   renders it as "released".
 
+- **The model detail block is FIXED-POSITION, fixed-HEIGHT, and shared by both
+  views.** Every field keeps its column and its label whether or not it has a
+  value (absent reads "—"), because a block whose fields shuffle as the
+  highlight moves cannot be read by glancing at the same spot twice — which is
+  what the first free-form `a · b · c` version got wrong. It always occupies
+  `detailHeight` rows even with nothing highlighted, so the list above it does
+  not grow and shrink as the cursor moves, and that height is part of BOTH
+  `formChrome` and `pickerChrome` or the list overflows its pane. The removal
+  warning rides line ONE: on line two it sat past ~100 columns and was the
+  first thing to clip, which is exactly backwards for the most consequential
+  fact on the row. `TestDetailBlockCellsAreWideEnoughForTheirValues` exists
+  because a too-narrow cell clips its own value ("unknown" → "unkno…") while
+  every field is still technically present — only a rendered check catches it.
+  `modelDetail` is ONE function for the form and the picker; they each grew a
+  near-copy first, which is the same drift `selectModels` already prevents.
+
 - **Model columns are pinned plus ONE, chosen by the sort.** The panel cannot
   hold every fact, and sorting by something invisible is a list that reorders
   for no visible reason — so `modelSort.column()` returns the extra column a

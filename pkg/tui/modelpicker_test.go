@@ -567,8 +567,9 @@ func TestSuggestionsFillThePanelAndKeepEveryMatch(t *testing.T) {
 	if tall <= short {
 		t.Errorf("window: tall=%d short=%d, want the taller pane to show more", tall, short)
 	}
-	if got := strings.Count(c.form.suggestView(90, tall, c.modelView), "\n"); got != tall {
-		t.Errorf("rendered %d rows, want the window's %d", got, tall)
+	// The view renders the window PLUS the fixed-height detail block.
+	if got, want := strings.Count(c.form.suggestView(90, tall, c.modelView), "\n"), tall+detailHeight; got != want {
+		t.Errorf("rendered %d rows, want %d (window %d + detail %d)", got, want, tall, detailHeight)
 	}
 }
 
@@ -907,8 +908,9 @@ func TestAgeCellIsCoarseAndAbsenceIsADash(t *testing.T) {
 func TestExpiryWarnsOnlyWithinAYear(t *testing.T) {
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	soon := &rafikiv1.ModelRow{ExpiresAt: "2026-09-08"}
-	if got := expiryWarning(soon, now); !strings.Contains(got, "6d") {
-		t.Errorf("expiryWarning(soon) = %q, want it to count the days", got)
+	if got := expiryWarning(soon, now); !strings.Contains(got, "6d") ||
+		!strings.Contains(got, "2026-09-08") {
+		t.Errorf("expiryWarning(soon) = %q, want the date and the countdown", got)
 	}
 	// "2098-12-31" means "no planned removal"; warning on it would put a
 	// notice next to models in no danger at all.
@@ -924,46 +926,111 @@ func TestExpiryWarnsOnlyWithinAYear(t *testing.T) {
 	}
 }
 
-// The detail line is where the sparse facts live, so they cost width on one
+// The detail block is where the sparse facts live, so they cost width on one
 // row rather than on every row.
-func TestDetailLineDescribesTheHighlightedRow(t *testing.T) {
+func TestDetailBlockDescribesTheHighlightedRow(t *testing.T) {
 	c := formCockpit(t)
 	c.modelView.toolsOnly = false
 	seedModels(c, c.form.kind(), toolRows())
 	focusModelRow(c)
 	c.handleKey(keyMsg("down"))
 
-	out := ansi.Strip(c.form.detailLine(time.Now()))
-	if out == "" {
-		t.Fatal("no detail line for a highlighted row")
-	}
-	if !strings.Contains(out, "reasoning") {
-		t.Errorf("detail = %q, want it to report reasoning support", out)
+	out := ansi.Strip(c.form.suggestView(100, 6, c.modelView))
+	if !strings.Contains(out, "thinking yes") {
+		t.Errorf("detail does not report reasoning support:\n%s", out)
 	}
 }
 
-func TestDetailLineIsEmptyWithNothingHighlighted(t *testing.T) {
-	c := formCockpit(t)
-	seedModels(c, c.form.kind(), toolRows())
-	focusModelRow(c)
+// Fixed position is the whole point: every label is present whether or not it
+// has a value, so the eye returns to the same column for the same fact.
+func TestDetailBlockLabelsEveryFieldEvenWhenAbsent(t *testing.T) {
+	bare := &rafikiv1.ModelRow{Id: "ollama/llama3"}
+	lines := modelDetail(bare, time.Now(), 140)
+	if len(lines) != detailHeight {
+		t.Fatalf("detail is %d lines, want a fixed %d", len(lines), detailHeight)
+	}
+	body := ansi.Strip(lines[1] + " " + lines[2])
+	for _, label := range []string{"source", "age", "ctx", "max out", "in/out",
+		"cache", "tools", "vision", "thinking"} {
+		if !strings.Contains(body, label) {
+			t.Errorf("label %q missing for a model with no facts:\n%s", label, body)
+		}
+	}
+	if strings.Count(body, "—") < 4 {
+		t.Errorf("absent values should read as em dashes:\n%s", body)
+	}
+}
 
-	if got := c.form.detailLine(time.Now()); got != "" {
-		t.Errorf("detail = %q, want empty with no highlight", got)
+// The block keeps its height with nothing highlighted, so the list above it
+// does not grow and shrink as the cursor moves.
+func TestDetailBlockKeepsItsHeightWhenEmpty(t *testing.T) {
+	if got := len(modelDetail(nil, time.Now(), 80)); got != detailHeight {
+		t.Errorf("empty detail is %d lines, want %d", got, detailHeight)
+	}
+}
+
+// A rule separates the block from the list; without it the two read as one.
+func TestDetailBlockIsSeparatedFromTheList(t *testing.T) {
+	lines := modelDetail(&rafikiv1.ModelRow{Id: "a/b"}, time.Now(), 40)
+	if !strings.Contains(ansi.Strip(lines[0]), "───") {
+		t.Errorf("no rule above the detail block: %q", ansi.Strip(lines[0]))
+	}
+}
+
+// "unknown" is a real answer and must never render as "no": the daemon has no
+// catalog entry for any locally-served model.
+func TestDetailBlockSpellsUnknownRatherThanNo(t *testing.T) {
+	bare := &rafikiv1.ModelRow{Id: "ollama/llama3"}
+	body := ansi.Strip(strings.Join(modelDetail(bare, time.Now(), 140), " "))
+	if !strings.Contains(body, "tools unknown") {
+		t.Errorf("tools rendered as something other than unknown:\n%s", body)
+	}
+	if !strings.Contains(body, "vision unknown") {
+		t.Errorf("vision rendered as something other than unknown:\n%s", body)
 	}
 }
 
 // A no-tools model reachable only via ^T must be labelled where it is picked.
-func TestDetailLineFlagsANoToolsModel(t *testing.T) {
-	c := formCockpit(t)
-	c.modelView.toolsOnly = false
-	seedModels(c, c.form.kind(), []*rafikiv1.ModelRow{
-		{Id: "b/chat-only", SupportedParameters: []string{"temperature"}},
-	})
-	focusModelRow(c)
-	c.handleKey(keyMsg("down"))
+func TestDetailBlockFlagsANoToolsModel(t *testing.T) {
+	row := &rafikiv1.ModelRow{Id: "b/chat-only", SupportedParameters: []string{"temperature"}}
+	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 140), " "))
+	if !strings.Contains(body, "tools NO") {
+		t.Errorf("a model that cannot tool-call is not flagged:\n%s", body)
+	}
+}
 
-	out := ansi.Strip(c.form.detailLine(time.Now()))
-	if !strings.Contains(out, "no tools") {
-		t.Errorf("detail = %q, want it to say the model cannot tool-call", out)
+// The expiry warning rides the block rather than a column of its own.
+func TestDetailBlockCarriesTheExpiryWarning(t *testing.T) {
+	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	row := &rafikiv1.ModelRow{Id: "a/b", ExpiresAt: "2026-09-08"}
+	body := ansi.Strip(strings.Join(modelDetail(row, now, 140), " "))
+	if !strings.Contains(body, "removed 2026-09-08 (6d)") {
+		t.Errorf("no expiry warning in the detail block:\n%s", body)
+	}
+}
+
+// Every value must FIT its cell. A width that clips "unknown" to "unkno…" is
+// worse than the free-form line this block replaced, and only a rendered
+// check catches it -- the fields are all present either way.
+func TestDetailBlockCellsAreWideEnoughForTheirValues(t *testing.T) {
+	i32 := func(v int32) *int32 { return &v }
+	f := func(v float64) *float64 { return &v }
+	worst := &rafikiv1.ModelRow{
+		Id: "x/y", Source: "openrouter",
+		ContextWindow: i32(1000000), MaxCompletionTokens: i32(128000),
+		PromptUsd: f(0.00001), CompletionUsd: f(0.0001),
+		CacheReadUsd: f(0.000001), CacheWriteUsd: f(0.0000125),
+		// no supported_parameters and no modalities: both read "unknown",
+		// which are the longest values these cells ever hold.
+	}
+	body := ansi.Strip(strings.Join(modelDetail(worst, time.Now(), 130), " "))
+	if strings.Contains(body, "…") {
+		t.Errorf("a detail cell clipped its own value:\n%s", body)
+	}
+	for _, want := range []string{"tools unknown", "vision unknown",
+		"source openrouter", "ctx 1.0M", "max out 128k", "in/out 10.00/100.00"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q missing or clipped:\n%s", want, body)
+		}
 	}
 }
