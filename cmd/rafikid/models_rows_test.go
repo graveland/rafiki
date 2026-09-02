@@ -229,7 +229,8 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 	             "input_cache_read":"0","input_cache_write":"0"}},
 	 {"id":"openai/priced","name":"Priced","created":2,
 	  "context_length":128000,
-	  "pricing":{"prompt":"0.000005","completion":"0.000015"}}
+	  "pricing":{"prompt":"0.000005","completion":"0.000015"}},
+	 {"id":"openai/bare","name":"Bare","created":3}
 	]}`
 	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler)).
 		WithCache(&byteSnapshotStore{data: []byte(snapshot)})
@@ -279,5 +280,31 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 	}
 	if priced.MaxCompletionTokens != nil {
 		t.Errorf("priced MaxCompletionTokens = %v, want ABSENT (field not in snapshot)", *priced.MaxCompletionTokens)
+	}
+
+	// bare: every optional field omitted from the snapshot, so ALL SIX must
+	// arrive ABSENT through the full chain — the absent form is a per-field
+	// fact, not something the first missing field can stand in for.
+	bare, ok := byID["openrouter/openai/bare"]
+	if !ok {
+		t.Fatalf("bare model missing from rows (%d rows)", len(rows))
+	}
+	for name, got := range map[string]*int{
+		"ContextWindow":       bare.ContextWindow,
+		"MaxCompletionTokens": bare.MaxCompletionTokens,
+	} {
+		if got != nil {
+			t.Errorf("bare %s = %v, want ABSENT (field not in snapshot)", name, *got)
+		}
+	}
+	for name, got := range map[string]*float64{
+		"PromptUSD":     bare.PromptUSD,
+		"CompletionUSD": bare.CompletionUSD,
+		"CacheReadUSD":  bare.CacheReadUSD,
+		"CacheWriteUSD": bare.CacheWriteUSD,
+	} {
+		if got != nil {
+			t.Errorf("bare %s = %v, want ABSENT (field not in snapshot)", name, *got)
+		}
 	}
 }
