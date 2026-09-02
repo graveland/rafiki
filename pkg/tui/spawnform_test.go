@@ -271,3 +271,31 @@ func TestTypingFollowsTheFocusedField(t *testing.T) {
 		t.Errorf("name field = %q, want empty — the old row kept focus", got)
 	}
 }
+
+// A modal takes the WHOLE panel: a rail behind the create form is a list you
+// cannot act on, costing width from a table that needs it.
+func TestModalsHideTheRail(t *testing.T) {
+	c := railWith(t, "c_1", "c_2")
+	c.width, c.height, c.ready = 100, 30, true
+	if c.railCols() == 0 {
+		t.Fatal("no rail to begin with")
+	}
+	before := c.convWidth()
+
+	c.handleKey(keyMsg("n"))
+
+	if c.railCols() != 0 {
+		t.Error("the rail is still drawn behind the create form")
+	}
+	if c.convWidth() <= before {
+		t.Error("the form did not get the width the rail gave up")
+	}
+	if strings.Contains(ansi.Strip(c.View().Content), "c_2") {
+		t.Error("a rail row rendered behind the modal")
+	}
+
+	c.handleKey(keyMsg("esc"))
+	if c.railCols() == 0 {
+		t.Error("the rail did not come back when the modal closed")
+	}
+}

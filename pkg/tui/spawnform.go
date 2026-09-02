@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -257,7 +258,7 @@ func (f *spawnForm) view(width, height int, v modelView) string {
 		b.WriteString("\n")
 
 		if i == fieldModel && f.showSuggestions() {
-			b.WriteString(f.suggestView(width, f.suggestWindow(height)))
+			b.WriteString(f.suggestView(width, f.suggestWindow(height), v))
 		}
 	}
 
@@ -290,7 +291,7 @@ func (f *spawnForm) view(width, height int, v modelView) string {
 				pos = fmt.Sprintf("   %d-%d of %d", f.suggestOff+1, shown, n)
 			}
 		}
-		hints = "↑/↓ pick   ⏎ take   ^S/^V " + f.viewSummary + "   ^F all   ⇥ field   esc" + pos
+		hints = "↑/↓ pick   ⏎ take   ^S/^V/^T " + f.viewSummary + "   ^F all   ⇥" + pos
 	}
 	b.WriteString(styleMeta.Render(hints))
 	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
@@ -301,8 +302,13 @@ func (f *spawnForm) view(width, height int, v modelView) string {
 // Each row carries the facts that decide a choice -- context, price, whether it
 // sees images -- because "which of these three opus ids" is not answerable from
 // the id alone. The columns are the picker's, narrowed.
-func (f *spawnForm) suggestView(width, window int) string {
+func (f *spawnForm) suggestView(width, window int, v modelView) string {
 	var b strings.Builder
+	extraTitle, extraW, hasExtra := v.sort.column()
+	_ = extraTitle // the inline list has no header row; the hint line names the sort
+	idW := max(20, width-32-extraW)
+
+	now := time.Now()
 	end := min(len(f.suggest), f.suggestOff+window)
 	for i := f.suggestOff; i < end; i++ {
 		r := f.suggest[i]
@@ -313,14 +319,55 @@ func (f *spawnForm) suggestView(width, window int) string {
 			id = styleRailFocused.Render(id)
 		}
 		b.WriteString(lead)
-		b.WriteString(padTo(id, max(20, width-32)))
+		b.WriteString(padTo(id, idW))
 		b.WriteString("  ")
 		b.WriteString(styleMeta.Render(padTo(ctxCell(r), 9)))
 		b.WriteString(styleMeta.Render(padTo(priceCell(r.PromptUsd), 8)))
+		if hasExtra {
+			b.WriteString(styleMeta.Render(padTo(ageCell(r, now), extraW)))
+		}
 		b.WriteString(styleMeta.Render(visionCellGlyph(r)))
 		b.WriteString("\n")
 	}
+	if d := f.detailLine(now); d != "" {
+		b.WriteString(d)
+		b.WriteString("\n")
+	}
 	return b.String()
+}
+
+// detailLine describes the highlighted suggestion. Same reasoning as the
+// picker's: the sparse facts belong on one line for one row rather than in a
+// column that is empty for most of them.
+func (f *spawnForm) detailLine(now time.Time) string {
+	if f.suggestCur < 0 || f.suggestCur >= len(f.suggest) {
+		return ""
+	}
+	r := f.suggest[f.suggestCur]
+	var parts []string
+	if r.MaxCompletionTokens != nil {
+		parts = append(parts, fmt.Sprintf("max out %d", *r.MaxCompletionTokens))
+	}
+	if r.CacheReadUsd != nil {
+		parts = append(parts, "cache read "+priceCell(r.CacheReadUsd))
+	}
+	switch toolsKind(r) {
+	case toolsNo:
+		parts = append(parts, styleError.Render("no tools"))
+	case toolsUnknown:
+		parts = append(parts, "tools unknown")
+	}
+	if hasParam(r, "reasoning") {
+		parts = append(parts, "reasoning")
+	}
+	if src := r.GetSource(); src != "" {
+		parts = append(parts, src)
+	}
+	line := "    " + styleMeta.Render(strings.Join(parts, " · "))
+	if w := expiryWarning(r, now); w != "" {
+		line += "  " + styleWarn.Render("⚠ "+w)
+	}
+	return line
 }
 
 // kindView renders the choice row as its options, the selected one marked.
@@ -412,6 +459,11 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 		return c, nil
 	case "ctrl+v":
 		c.modelView.toggleVision()
+		f.suggestCur = -1
+		f.refreshSuggestions(c.models[f.kind()], c.modelView)
+		return c, nil
+	case "ctrl+t":
+		c.modelView.toggleTools()
 		f.suggestCur = -1
 		f.refreshSuggestions(c.models[f.kind()], c.modelView)
 		return c, nil

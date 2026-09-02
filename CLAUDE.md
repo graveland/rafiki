@@ -667,6 +667,51 @@
   `TestNoGlobalBindingStealsATextareaKey` fails the build on a collision;
   re-check the copy when bubbles is upgraded. `ctrl+b`, `ctrl+g` and `ctrl+d`
   are grandfathered exceptions and are unusable while typing.
+- **The rail sizes to its CONTENT, never to the window, and a modal hides it
+  entirely.** A fixed 22 columns truncated real agent names; making the width a
+  fraction of the window would fix that and reintroduce exactly what the fixed
+  width was chosen to avoid — the conversation reflowing on every frame of a
+  drag. `railWidthFor` measures the longest row (cursor, indent, glyph, name,
+  badge AND cost — everything `renderRail` puts in the plain row, because those
+  are what get clipped), floored at `railMin` and capped at `railMaxPct` of the
+  window so one absurd name cannot eat the transcript. Content changes only
+  when a child spawns, exits or is renamed, so it re-wraps about as often as
+  the rail itself changes. `Cockpit.railCols` is the single answer to "how wide
+  is the rail", returning 0 when `form`/`picker` is up — a modal is a
+  full-attention task and a rail behind it is a list you cannot act on.
+
+- **A model that cannot tool-call is filtered OUT of the cockpit's model lists
+  by default, and "unknown" is not "cannot".** 66 of the 421 live OpenRouter
+  entries omit `tools` from `supported_parameters`, and one of them makes an
+  agent that spawns, attaches and does nothing — the same failure class the
+  kind-scoping exists to prevent. `modelView.toolsOnly` defaults true; `^T`
+  reveals the rest and the hint line then flags `+no-tools`, because ON is the
+  default and OFF is the surprising state. **`toolsKind` returns UNKNOWN for a
+  nil parameter list** — three catalog entries carry none (the `openrouter/*`
+  router meta-models) and every locally-served model has no catalog entry at
+  all — and unknowns are KEPT, exactly as `visionKind`'s are. A filter reading
+  nil as "no tools" hides the entire local fleet.
+
+- **`expiration_date` is a FORWARD warning and needs an upper bound.** Verified
+  against the live catalog: all ten dated entries are in the future and none in
+  the past, because OpenRouter DELISTS a model rather than leaving it listed
+  and expired. Several carry an obvious sentinel (`2098-12-31`) meaning "no
+  planned removal", so `expiryWarning` says nothing beyond a year out —
+  otherwise every glm-* row wears a removal notice it is in no danger from.
+  `created` is OpenRouter's LISTING date, not the model's release date; they
+  track closely enough to sort by, and the distinction only matters if someone
+  renders it as "released".
+
+- **Model columns are pinned plus ONE, chosen by the sort.** The panel cannot
+  hold every fact, and sorting by something invisible is a list that reorders
+  for no visible reason — so `modelSort.column()` returns the extra column a
+  sort makes worth showing (`AGE` for `sortNewest`; the others sort by an
+  already-pinned column and return false). Everything sparse goes on a DETAIL
+  LINE for the highlighted row instead: a column empty for most rows costs
+  width on every row to inform a few, while one line for one row costs nothing
+  when absent. That is where `max out`, cache-read price, tool/reasoning
+  support and the expiry warning live.
+
 - **One renderer per child (`pkg/tui/pane.go`), never one shared.** A shared
   renderer is what painted one child's half-finished paragraph into another
   child's pane in C1b's review, and it is why `hop` used to call `reset()`

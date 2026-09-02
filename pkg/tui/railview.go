@@ -37,6 +37,44 @@ func fmtCost(usd float64) string {
 //
 // Rows are clipped BEFORE styling, so the width budget is measured on plain
 // text and lipgloss escape sequences never count against it.
+// railWidthFor sizes the rail to its CONTENT, clamped.
+//
+// Sizing to content rather than to the window is the point. The rail used to be
+// a fixed 22 columns and truncated real names; making it a fraction of the
+// window would fix that and reintroduce what the fixed width was chosen to
+// avoid — a rail that resizes as you drag makes the conversation reflow on
+// every frame of the drag. Content changes only when a child spawns, exits or
+// is renamed, so this re-wraps about as often as the rail itself changes.
+//
+// The clamp matters in both directions: railMin keeps a two-agent cockpit from
+// a sliver, and railMaxFrac stops one absurdly-named agent eating the
+// transcript. The budget counts everything renderRail puts in the plain row —
+// cursor, indent, glyph, name, badge and cost — because those are what get
+// clipped.
+func railWidthFor(nodes []rail.Node, total int) int {
+	want := railMin
+	for _, n := range nodes {
+		name := n.Name
+		if name == "" {
+			name = n.ChildID
+		}
+		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name)
+		if n.Attention > 0 {
+			w += 2 + len(strconv.Itoa(n.Attention))
+		}
+		if cost := fmtCost(n.Cost); cost != "" {
+			w += 1 + len(cost)
+		}
+		if w > want {
+			want = w
+		}
+	}
+	if cap := total * railMaxPct / 100; cap > railMin && want > cap {
+		want = cap
+	}
+	return want
+}
+
 func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocused bool) string {
 	if len(nodes) < 2 {
 		return ""
