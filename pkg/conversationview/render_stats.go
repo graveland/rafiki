@@ -14,6 +14,8 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/jedib0t/go-pretty/v6/table"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/insightstypes"
 )
 
@@ -25,6 +27,8 @@ func RenderStats(w io.Writer, st *insightstypes.Stats) error {
 		_, err := fmt.Fprintln(w, "no captured turns match the filter")
 		return err
 	}
+
+	cur := clientstate.Load().Currency
 
 	ew := &errWriter{w: w}
 	ew.printf("Conversations: %s    Turns: %s    Cache hit: %s\n",
@@ -67,10 +71,10 @@ func RenderStats(w io.Writer, st *insightstypes.Stats) error {
 		var total float64
 		for _, c := range rows {
 			t.AppendRow(table.Row{c.Model, humanize.Comma(c.Turns), humanize.Comma(c.InputTokens),
-				humanize.Comma(c.OutputTokens), humanize.Comma(c.CacheReadTokens), dollars(c.CostUSD)})
+				humanize.Comma(c.OutputTokens), humanize.Comma(c.CacheReadTokens), costfmt.Format(c.CostUSD, cur)})
 			total += c.CostUSD
 		}
-		t.AppendFooter(table.Row{"TOTAL", "", "", "", "", dollars(total)})
+		t.AppendFooter(table.Row{"TOTAL", "", "", "", "", costfmt.Format(total, cur)})
 		t.Render()
 	}
 
@@ -99,19 +103,6 @@ func tokenRow(label string, ts insightstypes.TokenStats) table.Row {
 
 // pct formats a 0..1 ratio as a percentage with one decimal.
 func pct(r float64) string { return fmt.Sprintf("%.1f%%", r*100) }
-
-// dollars formats a best-effort USD amount; sub-cent amounts keep enough
-// precision to be visible, 0 renders as "-" (unpriced).
-func dollars(v float64) string {
-	switch {
-	case v == 0:
-		return "-"
-	case v < 0.01:
-		return fmt.Sprintf("$%.4f", v)
-	default:
-		return fmt.Sprintf("$%.2f", v)
-	}
-}
 
 // secs renders a millisecond latency as seconds with one decimal.
 func secs(ms float64) string { return fmt.Sprintf("%.1fs", ms/1000) }

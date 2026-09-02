@@ -87,6 +87,14 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 	return sum, true
 }
 
+// Costs satisfies control.Controller for the framed protocol's ctrl_list and
+// ctrl_get -- the same batched rollup ListChildren/GetChild already use for
+// the Connect plane, so cost_usd now populates on both surfaces from one
+// implementation.
+func (c *Controller) Costs(snaps []childstore.Snapshot) map[string]float64 {
+	return c.costsFor(snaps)
+}
+
 // costRollupTimeout bounds the whole batch, not one child. It is a display
 // number: a slow rollup must not hold up the list it decorates.
 const costRollupTimeout = 3 * time.Second

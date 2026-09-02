@@ -48,7 +48,7 @@ func TestRailHiddenForASingleChild(t *testing.T) {
 	// Session-first: create/attach <id> shows no rail at all. The rail grows
 	// out of a normal session -- no cockpit to configure, no empty pane.
 	nodes := []rail.Node{{ChildID: "c_1", Name: "coordinator", Status: "idle"}}
-	if got := renderRail(nodes, "c_1", "c_1", 24, false); got != "" {
+	if got := renderRail(nodes, "c_1", "c_1", 24, false, nil); got != "" {
 		t.Errorf("renderRail with one child = %q, want empty", got)
 	}
 }
@@ -58,7 +58,7 @@ func TestRailAppearsWithTheSecondChild(t *testing.T) {
 		{ChildID: "c_1", Name: "coordinator", Status: "streaming"},
 		{ChildID: "c_2", Name: "scout", ParentID: "c_1", Depth: 1, Status: "idle", Attention: 2},
 	}
-	got := renderRail(nodes, "c_1", "c_1", 24, false)
+	got := renderRail(nodes, "c_1", "c_1", 24, false, nil)
 	if got == "" {
 		t.Fatal("renderRail with two children must render")
 	}
@@ -75,7 +75,7 @@ func TestRailIndentsByDepth(t *testing.T) {
 		{ChildID: "c_2", Name: "kid", ParentID: "c_1", Depth: 1, Status: "idle"},
 		{ChildID: "c_3", Name: "grandkid", ParentID: "c_2", Depth: 2, Status: "idle"},
 	}
-	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30, false), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30, false, nil), "\n"), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("want 3 rows, got %d: %v", len(lines), lines)
 	}
@@ -92,7 +92,7 @@ func TestRailRowsAreClippedToWidth(t *testing.T) {
 		{ChildID: "c_1", Name: "a", Status: "idle"},
 		{ChildID: "c_2", Name: strings.Repeat("verylongname", 20), Status: "idle"},
 	}
-	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20, false), "\n") {
+	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20, false, nil), "\n") {
 		if len([]rune(line)) > 20 {
 			t.Errorf("row is %d runes, want <= 20: %q", len([]rune(line)), line)
 		}

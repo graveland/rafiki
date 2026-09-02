@@ -40,6 +40,24 @@ type State struct {
 	// setting it keeps working exactly as before, and unsetting it falls back
 	// to whatever you last chose instead of to the daemon's default.
 	LastModel map[string]string `json:"lastModel,omitempty"`
+	// Currency is the client's preferred display currency for cost figures
+	// (TUI, `rafiki list`). Costs are still tracked and billed in USD
+	// everywhere else -- this only converts the last-mile string a person
+	// reads. Nil means "show USD", matching today's behavior.
+	Currency *Currency `json:"currency,omitempty"`
+}
+
+// Currency is a manual, personally-maintained conversion rate. There is no
+// live FX lookup: this is a display convenience, not a pricing source, and a
+// stale rate is an acceptable trade for not adding a network dependency to a
+// cosmetic feature.
+type Currency struct {
+	// Code is shown as a suffix on converted amounts (e.g. "CAD"). Not
+	// validated against ISO 4217 -- it is just a label.
+	Code string `json:"code,omitempty"`
+	// Rate is local units per USD (e.g. 1.38 for a USD->CAD rate of 1.38).
+	// Zero or negative means "not set" -- costfmt.Format falls back to USD.
+	Rate float64 `json:"rate,omitempty"`
 }
 
 // Load reads the document, returning a zero State on any failure.

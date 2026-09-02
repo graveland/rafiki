@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -22,6 +23,104 @@ func TestRenderList_Table(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func costPtr(v float64) *float64 { return &v }
+
+// A leaf's COST and TOTAL are the same number; a parent's TOTAL also carries
+// its child's spend.
+func TestRenderList_CostColumns(t *testing.T) {
+	var buf bytes.Buffer
+	children := []protocol.ChildSummary{
+		{ChildID: "parent", Name: "coordinator", CostUSD: costPtr(1.5)},
+		{ChildID: "kid", Name: "worker", Labels: map[string]string{"rafiki/parent": "parent"}, CostUSD: costPtr(0.25)},
+	}
+	if err := renderList(&buf, children, outputTable, false, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "COST") || !strings.Contains(out, "TOTAL") {
+		t.Fatalf("output missing COST/TOTAL headers:\n%s", out)
+	}
+	if !strings.Contains(out, "$1.75") {
+		t.Fatalf("parent's TOTAL should roll up its child's spend ($1.75):\n%s", out)
+	}
+	if !strings.Contains(out, "$0.25") {
+		t.Fatalf("child's own cost missing:\n%s", out)
+	}
+}
+
+// A configured currency converts COST and TOTAL alike -- `rafiki list` reads
+// the same clientstate.Currency section `rafiki config set` writes.
+func TestRenderList_CostColumnsConvertCurrency(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	clientstate.Update(func(s *clientstate.State) {
+		s.Currency = &clientstate.Currency{Code: "CAD", Rate: 1.38}
+	})
+
+	var buf bytes.Buffer
+	children := []protocol.ChildSummary{{ChildID: "c_1", Name: "x", CostUSD: costPtr(1.0)}}
+	if err := renderList(&buf, children, outputTable, false, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "$1.38 CAD") {
+		t.Fatalf("cost was not converted through the configured currency:\n%s", out)
+	}
+}
+
+// No cost known anywhere (no agent database) renders as "-", not "$0.00".
+func TestRenderList_CostColumnsUnknown(t *testing.T) {
+	var buf bytes.Buffer
+	children := []protocol.ChildSummary{{ChildID: "c_1", Name: "x"}}
+	if err := renderList(&buf, children, outputTable, false, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "-") {
+		t.Fatalf("unknown cost should render as \"-\":\n%s", out)
+	}
+}
+
+func TestSubtreeCosts(t *testing.T) {
+	in := []protocol.ChildSummary{
+		{ChildID: "a", CostUSD: costPtr(1)},
+		{ChildID: "b", Labels: map[string]string{"rafiki/parent": "a"}, CostUSD: costPtr(2)},
+		{ChildID: "c", Labels: map[string]string{"rafiki/parent": "b"}, CostUSD: costPtr(4)},
+		{ChildID: "z"}, // no cost known at all
+	}
+	got := subtreeCosts(in)
+	if v := got["a"]; v == nil || *v != 7 {
+		t.Errorf("a's subtree total = %v, want 7 (1+2+4)", v)
+	}
+	if v := got["b"]; v == nil || *v != 6 {
+		t.Errorf("b's subtree total = %v, want 6 (2+4)", v)
+	}
+	if v := got["c"]; v == nil || *v != 4 {
+		t.Errorf("c's subtree total = %v, want 4", v)
+	}
+	if v := got["z"]; v != nil {
+		t.Errorf("z's subtree total = %v, want nil (no cost known)", v)
+	}
+}
+
+// A cyclic parent chain must not hang the rollup, matching
+// sortChildrenAsTree's own cycle guard.
+func TestSubtreeCostsCycleTerminates(t *testing.T) {
+	in := []protocol.ChildSummary{
+		{ChildID: "x", Labels: map[string]string{"rafiki/parent": "y"}, CostUSD: costPtr(1)},
+		{ChildID: "y", Labels: map[string]string{"rafiki/parent": "x"}, CostUSD: costPtr(2)},
+	}
+	done := make(chan map[string]*float64, 1)
+	go func() { done <- subtreeCosts(in) }()
+	select {
+	case got := <-done:
+		if len(got) != 2 {
+			t.Fatalf("got %d entries, want 2", len(got))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subtreeCosts did not terminate on a cyclic parent chain")
 	}
 }
 

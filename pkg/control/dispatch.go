@@ -141,6 +141,13 @@ type Controller interface {
 	// leave those fields unset rather than publish a false zero.
 	ContextWindow(model string) (contextLen, maxCompletion int, ok bool)
 
+	// Costs prices each snapshot's OWN conversation (not its subtree) in one
+	// batched round trip, for ChildSummary.CostUSD. A snapshot absent from the
+	// returned map has no known cost (no agent database configured, or the
+	// pricing query failed) — callers must leave CostUSD unset rather than
+	// publish a false zero.
+	Costs(snaps []childstore.Snapshot) map[string]float64
+
 	// ModelInfo answers ctrl_model_info from the daemon's warm catalog.
 	// Never returns an error: an unknown model and an unconfigured catalog
 	// are both Known=false. AutoCompactWindow is computed daemon-side so
@@ -476,9 +483,13 @@ func (d *dispatcher) list(frame []byte, id string) []byte {
 		filter = *req.Filter
 	}
 	snaps := d.c.List(filter)
+	costs := d.c.Costs(snaps)
 	children := make([]protocol.ChildSummary, len(snaps))
 	for i, s := range snaps {
 		children[i] = SnapshotToSummary(s, d.c.ContextWindow)
+		if cost, ok := costs[s.ChildID]; ok {
+			children[i].CostUSD = &cost
+		}
 	}
 	return okResponse(protocol.TypeCtrlList, id, protocol.ListResponseData{Children: children})
 }
@@ -495,7 +506,11 @@ func (d *dispatcher) get(frame []byte, id string) []byte {
 	if !ok {
 		return errResponse(protocol.TypeCtrlGet, id, protocol.ErrChildNotFound, "child not found: "+req.ChildID)
 	}
-	return okResponse(protocol.TypeCtrlGet, id, SnapshotToSummary(snap, d.c.ContextWindow))
+	sum := SnapshotToSummary(snap, d.c.ContextWindow)
+	if cost, ok := d.c.Costs([]childstore.Snapshot{snap})[req.ChildID]; ok {
+		sum.CostUSD = &cost
+	}
+	return okResponse(protocol.TypeCtrlGet, id, sum)
 }
 
 func (d *dispatcher) getRecent(frame []byte, id string) []byte {
