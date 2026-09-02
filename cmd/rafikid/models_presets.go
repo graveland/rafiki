@@ -110,10 +110,15 @@ func (c *Controller) ListModels(ctx context.Context, provider string) ([]protoco
 // catalogFacts is what the catalog contributes about one model id. Separate
 // from connectapi.ModelRow so decorateRows is testable without building a
 // ModelCatalog and without a network fixture.
+//
+// Every field is a POINTER because absent and zero differ all the way down:
+// the pointers are copied straight from CatalogRow, whose presence comes from
+// the raw OpenRouter entry. No > 0 guards here — a reported zero must survive
+// as present-zero, and an absent field as nil.
 type catalogFacts struct {
 	name            string
-	contextLength   int
-	maxCompletion   int
+	contextLength   *int
+	maxCompletion   *int
 	promptUSD       *float64
 	completionUSD   *float64
 	cacheReadUSD    *float64
@@ -155,9 +160,12 @@ func sourcesForKind(kind string) map[models.Source]bool {
 // decorateRows joins the spine against the catalog by id.
 //
 // The SPINE decides which rows exist and what Source each carries; the catalog
-// only ever contributes optional fields. The catalog never invents a row,
-// because the spine is where kind-scoping is applied and a row that bypassed it
-// would be offered for a child that cannot run it.
+// only ever contributes optional fields, copied through as-is — presence is
+// decided by the catalog entry, never re-derived here (a > 0 guard here would
+// turn a reported zero into absent and break the contract the catalog keeps).
+// The catalog never invents a row, because the spine is where kind-scoping is
+// applied and a row that bypassed it would be offered for a child that cannot
+// run it.
 func decorateRows(spine []models.Model, cat map[string]catalogFacts) []connectapi.ModelRow {
 	out := make([]connectapi.ModelRow, 0, len(spine))
 	for _, m := range spine {
@@ -172,14 +180,8 @@ func decorateRows(spine []models.Model, cat map[string]catalogFacts) []connectap
 			if f.name != "" && row.Name == "" {
 				row.Name = f.name
 			}
-			if f.contextLength > 0 {
-				v := f.contextLength
-				row.ContextWindow = &v
-			}
-			if f.maxCompletion > 0 {
-				v := f.maxCompletion
-				row.MaxCompletionTokens = &v
-			}
+			row.ContextWindow = f.contextLength
+			row.MaxCompletionTokens = f.maxCompletion
 			row.PromptUSD = f.promptUSD
 			row.CompletionUSD = f.completionUSD
 			row.CacheReadUSD = f.cacheReadUSD
@@ -244,13 +246,10 @@ func (c *Controller) catalogFactsByID() map[string]catalogFacts {
 			contextLength:   r.ContextLength,
 			maxCompletion:   r.MaxCompletionTokens,
 			inputModalities: r.InputModalities,
-		}
-		if r.Pricing != nil {
-			p := *r.Pricing
-			f.promptUSD = &p.PromptUSD
-			f.completionUSD = &p.CompletionUSD
-			f.cacheReadUSD = &p.CacheReadUSD
-			f.cacheWriteUSD = &p.CacheWriteUSD
+			promptUSD:       r.PromptUSD,
+			completionUSD:   r.CompletionUSD,
+			cacheReadUSD:    r.CacheReadUSD,
+			cacheWriteUSD:   r.CacheWriteUSD,
 		}
 		out["openrouter/"+r.ID] = f
 		out[r.ID] = f // the spine spells OpenRouter ids both ways
