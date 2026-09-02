@@ -262,3 +262,34 @@ func TestSetCostNeverLowersAnAccumulatedTotal(t *testing.T) {
 		t.Errorf("Cost = %v, want 9.0: a higher seed must win", n.Cost)
 	}
 }
+
+func TestRemoveDropsTheNodeAndClearsFocus(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "alpha", Status: "idle"},
+		{ChildId: "c_2", Name: "beta", Status: "idle"},
+	})
+	r.SetFocus("c_1")
+
+	r.Remove("c_1")
+
+	if _, ok := r.Get("c_1"); ok {
+		t.Error("removed node is still present")
+	}
+	if r.Focus() != "" {
+		t.Errorf("Focus() = %q, want cleared when the focused node is removed", r.Focus())
+	}
+	if _, ok := r.Get("c_2"); !ok {
+		t.Error("Remove took an unrelated node with it")
+	}
+}
+
+func TestRemoveIsIdempotent(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{{ChildId: "c_1", Status: "idle"}})
+	r.Remove("c_1")
+	r.Remove("c_1") // must not panic
+	if r.Len() != 0 {
+		t.Errorf("Len() = %d, want 0", r.Len())
+	}
+}
