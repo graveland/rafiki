@@ -1559,8 +1559,26 @@ type ModelRow struct {
 	// filtering on vision must surface unknowns rather than hide them, or it
 	// silently hides every locally-served model.
 	InputModalities []string `protobuf:"bytes,12,rep,name=input_modalities,json=inputModalities,proto3" json:"input_modalities,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// created is OpenRouter's LISTING date (unix seconds), not the model's
+	// release date. They track closely enough to order by; the distinction
+	// matters only if a client renders it as "released". Optional because a
+	// locally-served model has no catalog entry and 0 is a legal timestamp.
+	Created *int64 `protobuf:"varint,13,opt,name=created,proto3,oneof" json:"created,omitempty"`
+	// supported_parameters is what the model accepts on a request. "tools" is
+	// the one that decides whether it can be an agent at all.
+	//
+	// EMPTY means the daemon has no catalog entry, NEVER "supports nothing" --
+	// the same rule input_modalities follows. A client filtering on tool support
+	// must keep unknowns, or it hides every locally-served model.
+	SupportedParameters []string `protobuf:"bytes,14,rep,name=supported_parameters,json=supportedParameters,proto3" json:"supported_parameters,omitempty"`
+	// expires_at is OpenRouter's expiration_date verbatim (YYYY-MM-DD), empty
+	// when none. It is a FORWARD warning: OpenRouter delists a model rather than
+	// leaving it listed and expired, so a date here is always in the future.
+	// Some entries carry a far-future sentinel meaning "no planned removal", so
+	// a renderer must bound how far ahead it warns.
+	ExpiresAt     string `protobuf:"bytes,15,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ModelRow) Reset() {
@@ -1675,6 +1693,27 @@ func (x *ModelRow) GetInputModalities() []string {
 		return x.InputModalities
 	}
 	return nil
+}
+
+func (x *ModelRow) GetCreated() int64 {
+	if x != nil && x.Created != nil {
+		return *x.Created
+	}
+	return 0
+}
+
+func (x *ModelRow) GetSupportedParameters() []string {
+	if x != nil {
+		return x.SupportedParameters
+	}
+	return nil
+}
+
+func (x *ModelRow) GetExpiresAt() string {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return ""
 }
 
 type ListModelsRequest struct {
@@ -1900,7 +1939,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12'\n" +
 	"\x0finclude_dropped\x18\x02 \x01(\bR\x0eincludeDropped\"=\n" +
 	"\x11ListTasksResponse\x12(\n" +
-	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\xa6\x04\n" +
+	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\xa3\x05\n" +
 	"\bModelRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x14\n" +
@@ -1915,13 +1954,19 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0ecache_read_usd\x18\n" +
 	" \x01(\x01H\x04R\fcacheReadUsd\x88\x01\x01\x12+\n" +
 	"\x0fcache_write_usd\x18\v \x01(\x01H\x05R\rcacheWriteUsd\x88\x01\x01\x12)\n" +
-	"\x10input_modalities\x18\f \x03(\tR\x0finputModalitiesB\x11\n" +
+	"\x10input_modalities\x18\f \x03(\tR\x0finputModalities\x12\x1d\n" +
+	"\acreated\x18\r \x01(\x03H\x06R\acreated\x88\x01\x01\x121\n" +
+	"\x14supported_parameters\x18\x0e \x03(\tR\x13supportedParameters\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x0f \x01(\tR\texpiresAtB\x11\n" +
 	"\x0f_context_windowB\x18\n" +
 	"\x16_max_completion_tokensB\r\n" +
 	"\v_prompt_usdB\x11\n" +
 	"\x0f_completion_usdB\x11\n" +
 	"\x0f_cache_read_usdB\x12\n" +
-	"\x10_cache_write_usd\"C\n" +
+	"\x10_cache_write_usdB\n" +
+	"\n" +
+	"\b_created\"C\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +

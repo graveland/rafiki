@@ -116,6 +116,9 @@ func (c *Controller) ListModels(ctx context.Context, provider string) ([]protoco
 // the raw OpenRouter entry. No > 0 guards here — a reported zero must survive
 // as present-zero, and an absent field as nil.
 type catalogFacts struct {
+	created         int64
+	supportedParams []string
+	expiresAt       string
 	name            string
 	contextLength   *int
 	maxCompletion   *int
@@ -187,6 +190,12 @@ func decorateRows(spine []models.Model, cat map[string]catalogFacts) []connectap
 			row.CacheReadUSD = f.cacheReadUSD
 			row.CacheWriteUSD = f.cacheWriteUSD
 			row.InputModalities = f.inputModalities
+			row.SupportedParameters = f.supportedParams
+			row.ExpiresAt = f.expiresAt
+			if f.created > 0 {
+				v := f.created
+				row.Created = &v
+			}
 		}
 		out = append(out, row)
 	}
@@ -246,6 +255,9 @@ func (c *Controller) catalogFactsByID() map[string]catalogFacts {
 			contextLength:   r.ContextLength,
 			maxCompletion:   r.MaxCompletionTokens,
 			inputModalities: r.InputModalities,
+			created:         r.Created,
+			supportedParams: r.SupportedParameters,
+			expiresAt:       r.ExpiresAt,
 			promptUSD:       r.PromptUSD,
 			completionUSD:   r.CompletionUSD,
 			cacheReadUSD:    r.CacheReadUSD,

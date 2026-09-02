@@ -880,3 +880,44 @@ func TestRowsPreservePresenceOnEveryOptionalField(t *testing.T) {
 		t.Errorf("reported-zero MaxCompletionTokens = %v, want a pointer to 0", zeroed.MaxCompletionTokens)
 	}
 }
+
+func TestCatalogDecodesToolSupportAndExpiry(t *testing.T) {
+	body := `{"data":[
+	 {"id":"a/tools","created":100,"context_length":1000,
+	  "supported_parameters":["tools","tool_choice","temperature"],
+	  "expiration_date":"2026-09-08"},
+	 {"id":"a/no-tools","created":200,"context_length":1000,
+	  "supported_parameters":["temperature"]},
+	 {"id":"a/unknown","created":300,"context_length":1000}
+	]}`
+	c, srv := newTestCatalog(t, body)
+	defer srv.Close()
+
+	by := map[string]CatalogRow{}
+	for _, r := range c.Rows() {
+		by[r.ID] = r
+	}
+
+	if got := by["a/tools"].SupportedParameters; len(got) != 3 || got[0] != "tools" {
+		t.Errorf("SupportedParameters = %v, want the declared three", got)
+	}
+	if got := by["a/tools"].ExpiresAt; got != "2026-09-08" {
+		t.Errorf("ExpiresAt = %q, want 2026-09-08", got)
+	}
+	if got := by["a/no-tools"].SupportedParameters; len(got) != 1 {
+		t.Errorf("SupportedParameters = %v, want the one declared", got)
+	}
+	if got := by["a/no-tools"].ExpiresAt; got != "" {
+		t.Errorf("ExpiresAt = %q, want empty for an entry with no expiry", got)
+	}
+	// An entry with NO list means UNKNOWN, not "supports nothing" -- the same
+	// rule InputModalities follows. Three real catalog entries are like this,
+	// and every locally-served model has no entry at all.
+	if got := by["a/unknown"].SupportedParameters; got != nil {
+		t.Errorf("SupportedParameters = %#v, want nil for unknown", got)
+	}
+	// created carries through so a list can be ordered newest-first.
+	if got := by["a/unknown"].Created; got != 300 {
+		t.Errorf("Created = %d, want 300", got)
+	}
+}
