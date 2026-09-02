@@ -47,6 +47,11 @@ type ModelRow struct {
 	SupportedParameters []string
 	// ExpiresAt is a forward removal date (YYYY-MM-DD), empty when none.
 	ExpiresAt string
+	// KnowledgeCutoff is YYYY-MM-DD, empty when unreported.
+	KnowledgeCutoff string
+	// AgenticIndex is a third-party agentic score; nil when absent, which must
+	// never render as a low score.
+	AgenticIndex *float64
 }
 
 // ModelLister is the narrow slice of the daemon's Controller needed to
@@ -94,6 +99,11 @@ func toProtoModel(r ModelRow) *rafikiv1.ModelRow {
 		InputModalities:     r.InputModalities,
 		SupportedParameters: r.SupportedParameters,
 		ExpiresAt:           r.ExpiresAt,
+		KnowledgeCutoff:     r.KnowledgeCutoff,
+	}
+	if r.AgenticIndex != nil {
+		v := *r.AgenticIndex
+		out.AgenticIndex = &v
 	}
 	if r.Created != nil {
 		v := *r.Created

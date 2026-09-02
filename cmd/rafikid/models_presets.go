@@ -119,6 +119,8 @@ type catalogFacts struct {
 	created         int64
 	supportedParams []string
 	expiresAt       string
+	knowledgeCutoff string
+	agenticIndex    *float64
 	name            string
 	contextLength   *int
 	maxCompletion   *int
@@ -192,6 +194,8 @@ func decorateRows(spine []models.Model, cat map[string]catalogFacts) []connectap
 			row.InputModalities = f.inputModalities
 			row.SupportedParameters = f.supportedParams
 			row.ExpiresAt = f.expiresAt
+			row.KnowledgeCutoff = f.knowledgeCutoff
+			row.AgenticIndex = f.agenticIndex
 			if f.created > 0 {
 				v := f.created
 				row.Created = &v
@@ -258,6 +262,8 @@ func (c *Controller) catalogFactsByID() map[string]catalogFacts {
 			created:         r.Created,
 			supportedParams: r.SupportedParameters,
 			expiresAt:       r.ExpiresAt,
+			knowledgeCutoff: r.KnowledgeCutoff,
+			agenticIndex:    r.AgenticIndex,
 			promptUSD:       r.PromptUSD,
 			completionUSD:   r.CompletionUSD,
 			cacheReadUSD:    r.CacheReadUSD,

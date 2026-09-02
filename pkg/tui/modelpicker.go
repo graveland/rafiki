@@ -32,6 +32,7 @@ const (
 	sortCost
 	sortContext
 	sortNewest
+	sortAgentic
 	modelSortCount
 )
 
@@ -45,6 +46,8 @@ func (s modelSort) String() string {
 		return "biggest context"
 	case sortNewest:
 		return "newest"
+	case sortAgentic:
+		return "most agentic"
 	}
 	return "?"
 }
@@ -53,8 +56,11 @@ func (s modelSort) String() string {
 // you cannot see is a list that reorders for no visible reason, and the panel
 // is too narrow to pin every column at once.
 func (s modelSort) column() (title string, width int, ok bool) {
-	if s == sortNewest {
+	switch s {
+	case sortNewest:
 		return "AGE", 7, true
+	case sortAgentic:
+		return "AGENTIC", 9, true
 	}
 	return "", 0, false // the others sort by a column already pinned
 }
@@ -139,6 +145,21 @@ func sortModels(rows []*rafikiv1.ModelRow, by modelSort) {
 			}
 			if *a != *b {
 				return *a < *b
+			}
+			return rows[i].GetId() < rows[j].GetId()
+		})
+	case sortAgentic:
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := rows[i].AgenticIndex, rows[j].AgenticIndex
+			if a == nil || b == nil {
+				// Absent is UNSCORED, never a zero score: 62% of the catalog
+				// carries no benchmark, including every locally-served model,
+				// and sorting them to the bottom as if they scored 0 is the
+				// same failure absent pricing would be.
+				return a != nil
+			}
+			if *a != *b {
+				return *a > *b
 			}
 			return rows[i].GetId() < rows[j].GetId()
 		})
@@ -482,7 +503,7 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 		b.WriteString(padTo(priceCell(r.PromptUsd), 9))
 		b.WriteString(padTo(priceCell(r.CompletionUsd), 9))
 		if hasExtra {
-			b.WriteString(padTo(ageCell(r, now), extraW))
+			b.WriteString(padTo(extraCell(r, v.sort, now), extraW))
 		}
 		b.WriteString(visionCellGlyph(r))
 		b.WriteString("\n")
@@ -572,7 +593,8 @@ func modelDetail(r *rafikiv1.ModelRow, now time.Time, width int) []string {
 	}
 	right := detailField("tools", toolsWord(r), 15) +
 		detailField("vision", visionWord(r), 16) +
-		detailField("thinking", yesNo(hasParam(r, "reasoning")), 12)
+		detailField("thinking", yesNo(hasParam(r, "reasoning")), 13) +
+		detailField("agentic", agenticCell(r), 13)
 	rightW := ansi.StringWidth(ansi.Strip(right))
 	// The removal warning rides line ONE, not the tail of line two.
 	//
@@ -597,13 +619,22 @@ func modelDetail(r *rafikiv1.ModelRow, now time.Time, width int) []string {
 	// choose on -- go last deliberately.
 	line2 := " " +
 		detailField("ctx", ctxCell(r), 12) +
-		detailField("in/out", priceCell(r.PromptUsd)+"/"+priceCell(r.CompletionUsd), 21) +
-		detailField("cache", priceCell(r.CacheReadUsd)+"/"+priceCell(r.CacheWriteUsd), 21) +
+		detailField("in/out", priceCell(r.PromptUsd)+"/"+priceCell(r.CompletionUsd), 20) +
+		detailField("cache", priceCell(r.CacheReadUsd)+"/"+priceCell(r.CacheWriteUsd), 20) +
 		detailField("max out", tokCell(r.MaxCompletionTokens), 15) +
 		detailField("age", ageCell(r, now), 11) +
+		detailField("cutoff", cutoffCell(r), 18) +
 		detailField("source", orDash(r.GetSource()), 18)
 
 	return []string{rule, line1, clip(line2, width)}
+}
+
+// extraCell renders the value for whichever column the sort asked for.
+func extraCell(r *rafikiv1.ModelRow, by modelSort, now time.Time) string {
+	if by == sortAgentic {
+		return agenticCell(r)
+	}
+	return ageCell(r, now)
 }
 
 // detailField renders one label/value cell at a FIXED width, so the eye can
@@ -651,6 +682,24 @@ func visionWord(r *rafikiv1.ModelRow) string {
 		return "no"
 	}
 	return styleMeta.Render("unknown")
+}
+
+// agenticCell renders the third-party agentic score. Absent is an em dash --
+// unscored, not zero.
+func agenticCell(r *rafikiv1.ModelRow) string {
+	if r.AgenticIndex == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.1f", *r.AgenticIndex)
+}
+
+// cutoffCell renders the training-data cutoff, which is a DIFFERENT axis from
+// age: a model listed last week can have a cutoff from a year before that.
+func cutoffCell(r *rafikiv1.ModelRow) string {
+	if c := r.GetKnowledgeCutoff(); c != "" {
+		return c
+	}
+	return "—"
 }
 
 func yesNo(b bool) string {

@@ -324,7 +324,7 @@ func (f *spawnForm) suggestView(width, window int, v modelView) string {
 		b.WriteString(styleMeta.Render(padTo(ctxCell(r), 9)))
 		b.WriteString(styleMeta.Render(padTo(priceCell(r.PromptUsd), 8)))
 		if hasExtra {
-			b.WriteString(styleMeta.Render(padTo(ageCell(r, now), extraW)))
+			b.WriteString(styleMeta.Render(padTo(extraCell(r, v.sort, now), extraW)))
 		}
 		b.WriteString(styleMeta.Render(visionCellGlyph(r)))
 		b.WriteString("\n")
