@@ -1021,6 +1021,7 @@ func TestDetailBlockCellsAreWideEnoughForTheirValues(t *testing.T) {
 		PromptUsd: f(0.00001), CompletionUsd: f(0.0001),
 		CacheReadUsd: f(0.000001), CacheWriteUsd: f(0.0000125),
 		KnowledgeCutoff: "2026-02-16", AgenticIndex: f(100.0),
+		IntelligenceIndex: f(100.0), CodingIndex: f(100.0),
 		// no supported_parameters and no modalities: both read "unknown",
 		// which are the longest values these cells ever hold.
 	}
@@ -1030,7 +1031,8 @@ func TestDetailBlockCellsAreWideEnoughForTheirValues(t *testing.T) {
 	}
 	for _, want := range []string{"tools unknown", "vision unknown",
 		"source openrouter", "ctx 1.0M", "max out 128k", "in/out 10.00/100.00",
-		"cutoff 2026-02-16", "agentic 100.0", "thinking no"} {
+		"cutoff 2026-02-16", "agentic 100.0", "thinking no",
+		"intel 100.0", "code 100.0"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("%q missing or clipped:\n%s", want, body)
 		}
@@ -1118,5 +1120,42 @@ func TestCutoffAndAgeAreSeparateFields(t *testing.T) {
 	}
 	if !strings.Contains(body, "cutoff 2025-01-31") {
 		t.Errorf("cutoff missing:\n%s", body)
+	}
+}
+
+// All three artificial_analysis scores are shown, because they are only
+// meaningful read against each other: a high coding score beside a low agentic
+// one is the useful shape, and it is invisible if you only render one.
+func TestDetailBlockShowsAllThreeBenchmarkScores(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	row := &rafikiv1.ModelRow{Id: "a/b",
+		IntelligenceIndex: f(65.7), CodingIndex: f(81.6), AgenticIndex: f(59.2)}
+	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 160), " "))
+	for _, want := range []string{"intel 65.7", "code 81.6", "agentic 59.2"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q missing from the detail block:\n%s", want, body)
+		}
+	}
+}
+
+// They arrive and go missing together, and all three must read as unscored
+// rather than as zeros.
+func TestUnbenchmarkedModelShowsThreeDashes(t *testing.T) {
+	body := ansi.Strip(strings.Join(
+		modelDetail(&rafikiv1.ModelRow{Id: "ollama/llama3"}, time.Now(), 160), " "))
+	for _, want := range []string{"intel —", "code —", "agentic —"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q missing; an unscored model must not read as 0.0:\n%s", want, body)
+		}
+	}
+}
+
+func TestScoreCellDistinguishesZeroFromAbsent(t *testing.T) {
+	zero := 0.0
+	if got := scoreCell(&zero); got != "0.0" {
+		t.Errorf("scoreCell(0) = %q, want 0.0 — a real score", got)
+	}
+	if got := scoreCell(nil); got != "—" {
+		t.Errorf("scoreCell(nil) = %q, want an em dash", got)
 	}
 }

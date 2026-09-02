@@ -954,3 +954,24 @@ func TestCatalogDecodesCutoffAndAgenticScore(t *testing.T) {
 		t.Errorf("KnowledgeCutoff = %q, want empty", got)
 	}
 }
+
+// The three artificial_analysis indices arrive together, so a row with one has
+// all three and a row with none has none.
+func TestCatalogDecodesAllThreeBenchmarkScores(t *testing.T) {
+	body := `{"data":[{"id":"a/scored","created":1,"context_length":1000,
+	 "benchmarks":{"artificial_analysis":{"intelligence_index":65.7,
+	   "coding_index":81.6,"agentic_index":59.2}}}]}`
+	c, srv := newTestCatalog(t, body)
+	defer srv.Close()
+
+	r := c.Rows()[0]
+	if r.IntelligenceIndex == nil || *r.IntelligenceIndex != 65.7 {
+		t.Errorf("IntelligenceIndex = %v, want 65.7", r.IntelligenceIndex)
+	}
+	if r.CodingIndex == nil || *r.CodingIndex != 81.6 {
+		t.Errorf("CodingIndex = %v, want 81.6", r.CodingIndex)
+	}
+	if r.AgenticIndex == nil || *r.AgenticIndex != 59.2 {
+		t.Errorf("AgenticIndex = %v, want 59.2", r.AgenticIndex)
+	}
+}

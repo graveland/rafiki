@@ -49,9 +49,11 @@ type ModelRow struct {
 	ExpiresAt string
 	// KnowledgeCutoff is YYYY-MM-DD, empty when unreported.
 	KnowledgeCutoff string
-	// AgenticIndex is a third-party agentic score; nil when absent, which must
-	// never render as a low score.
-	AgenticIndex *float64
+	// The three artificial_analysis scores; nil when absent, which must never
+	// render as a low score. They arrive and go missing together.
+	IntelligenceIndex *float64
+	CodingIndex       *float64
+	AgenticIndex      *float64
 }
 
 // ModelLister is the narrow slice of the daemon's Controller needed to
@@ -104,6 +106,14 @@ func toProtoModel(r ModelRow) *rafikiv1.ModelRow {
 	if r.AgenticIndex != nil {
 		v := *r.AgenticIndex
 		out.AgenticIndex = &v
+	}
+	if r.IntelligenceIndex != nil {
+		v := *r.IntelligenceIndex
+		out.IntelligenceIndex = &v
+	}
+	if r.CodingIndex != nil {
+		v := *r.CodingIndex
+		out.CodingIndex = &v
 	}
 	if r.Created != nil {
 		v := *r.Created

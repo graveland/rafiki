@@ -1586,9 +1586,15 @@ type ModelRow struct {
 	// 62% of the catalog. It is a CLAIM, not a guarantee -- present it as what
 	// the catalog reports, never as a promise, and never let absence read as a
 	// low score.
-	AgenticIndex  *float64 `protobuf:"fixed64,17,opt,name=agentic_index,json=agenticIndex,proto3,oneof" json:"agentic_index,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AgenticIndex *float64 `protobuf:"fixed64,17,opt,name=agentic_index,json=agenticIndex,proto3,oneof" json:"agentic_index,omitempty"`
+	// The other two artificial_analysis scores. All three are present for
+	// exactly the same entries -- a row with one has all three -- and carry the
+	// same caveat: a third-party claim, absent for most of the catalog, and
+	// absence must never read as a low score.
+	IntelligenceIndex *float64 `protobuf:"fixed64,18,opt,name=intelligence_index,json=intelligenceIndex,proto3,oneof" json:"intelligence_index,omitempty"`
+	CodingIndex       *float64 `protobuf:"fixed64,19,opt,name=coding_index,json=codingIndex,proto3,oneof" json:"coding_index,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ModelRow) Reset() {
@@ -1736,6 +1742,20 @@ func (x *ModelRow) GetKnowledgeCutoff() string {
 func (x *ModelRow) GetAgenticIndex() float64 {
 	if x != nil && x.AgenticIndex != nil {
 		return *x.AgenticIndex
+	}
+	return 0
+}
+
+func (x *ModelRow) GetIntelligenceIndex() float64 {
+	if x != nil && x.IntelligenceIndex != nil {
+		return *x.IntelligenceIndex
+	}
+	return 0
+}
+
+func (x *ModelRow) GetCodingIndex() float64 {
+	if x != nil && x.CodingIndex != nil {
+		return *x.CodingIndex
 	}
 	return 0
 }
@@ -1963,7 +1983,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12'\n" +
 	"\x0finclude_dropped\x18\x02 \x01(\bR\x0eincludeDropped\"=\n" +
 	"\x11ListTasksResponse\x12(\n" +
-	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\x8a\x06\n" +
+	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\x8e\a\n" +
 	"\bModelRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x14\n" +
@@ -1984,7 +2004,9 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"expires_at\x18\x0f \x01(\tR\texpiresAt\x12)\n" +
 	"\x10knowledge_cutoff\x18\x10 \x01(\tR\x0fknowledgeCutoff\x12(\n" +
-	"\ragentic_index\x18\x11 \x01(\x01H\aR\fagenticIndex\x88\x01\x01B\x11\n" +
+	"\ragentic_index\x18\x11 \x01(\x01H\aR\fagenticIndex\x88\x01\x01\x122\n" +
+	"\x12intelligence_index\x18\x12 \x01(\x01H\bR\x11intelligenceIndex\x88\x01\x01\x12&\n" +
+	"\fcoding_index\x18\x13 \x01(\x01H\tR\vcodingIndex\x88\x01\x01B\x11\n" +
 	"\x0f_context_windowB\x18\n" +
 	"\x16_max_completion_tokensB\r\n" +
 	"\v_prompt_usdB\x11\n" +
@@ -1993,7 +2015,9 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x10_cache_write_usdB\n" +
 	"\n" +
 	"\b_createdB\x10\n" +
-	"\x0e_agentic_index\"C\n" +
+	"\x0e_agentic_indexB\x15\n" +
+	"\x13_intelligence_indexB\x0f\n" +
+	"\r_coding_index\"C\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +
