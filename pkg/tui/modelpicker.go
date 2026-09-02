@@ -5,7 +5,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -24,53 +23,23 @@ type modelsLoadedMsg struct {
 	err  error
 }
 
-// modelSort is the column the picker orders by.
-type modelSort int
-
-const (
-	sortID modelSort = iota
-	sortCost
-	sortContext
-	sortNewest
-	sortAgentic
-	modelSortCount
-)
-
-func (s modelSort) String() string {
-	switch s {
-	case sortID:
-		return "name"
-	case sortCost:
-		return "cheapest"
-	case sortContext:
-		return "biggest context"
-	case sortNewest:
-		return "newest"
-	case sortAgentic:
-		return "most agentic"
-	}
-	return "?"
-}
-
-// column is the extra field a sort makes worth showing. Sorting by something
-// you cannot see is a list that reorders for no visible reason, and the panel
-// is too narrow to pin every column at once.
-func (s modelSort) column() (title string, width int, ok bool) {
-	switch s {
-	case sortNewest:
-		return "AGE", 7, true
-	case sortAgentic:
-		return "AGENTIC", 9, true
-	}
-	return "", 0, false // the others sort by a column already pinned
-}
-
 // modelView is HOW model lists are ordered and filtered. It lives on the
 // Cockpit rather than on either view, because the form's typeahead and the full
 // picker are two windows onto one question: sorting by price inline and then
 // opening the browser must not silently reorder under you.
 type modelView struct {
-	sort modelSort
+	// keys are the ordering terms in priority order; the first that separates
+	// two rows decides.
+	keys []sortKey
+	// bounds are the numeric constraints, keyed by field; a field absent from
+	// the map is unconstrained.
+	//
+	// Constraints and ordering are SEPARATE because they answer different
+	// questions. "context ↓ then price ↑" still lists every 8k model, just
+	// lower down; "ctx ≥1M and price ≤$2, ordered by intelligence" removes
+	// them. Sort priority cannot express a constraint, which is why this is a
+	// filter+sort dialog rather than a multi-key sort.
+	bounds map[modelField]bound
 	// toolsOnly hides models KNOWN not to tool-call, and defaults to ON: 66 of
 	// the 421 live catalog entries cannot, and one of them makes an agent that
 	// spawns, attaches and does nothing. Models of unknown capability are
@@ -79,21 +48,62 @@ type modelView struct {
 	// visionOnly drops models KNOWN to be text-only. Models of unknown
 	// capability are KEPT -- see visionKind.
 	visionOnly bool
+	// thinkingOnly keeps only models the catalog says accept a reasoning
+	// parameter. Unknown is KEPT, same rule as the other two.
+	thinkingOnly bool
 }
 
-func (v *modelView) cycleSort()    { v.sort = (v.sort + 1) % modelSortCount }
 func (v *modelView) toggleVision() { v.visionOnly = !v.visionOnly }
 func (v *modelView) toggleTools()  { v.toolsOnly = !v.toolsOnly }
 
+// cycleSort rotates the PRIMARY key and drops the rest, which is what ^S has
+// always done. Multi-key and direction live in the dialog; this stays because
+// choosing one obvious ordering should not need a panel.
+//
+// The direction defaults to whichever end of the field is the good end: for a
+// score or a window you want the biggest first, for a price the cheapest.
+func (v *modelView) cycleSort() {
+	next := colModel
+	if len(v.keys) > 0 {
+		next = (v.keys[0].field + 1) % modelFieldCount
+	}
+	v.keys = []sortKey{{field: next, desc: biggerIsBetter(next)}}
+}
+
 // defaultModelView is what a cockpit starts with. toolsOnly is ON because a
 // model that cannot tool-call is not a candidate for an agent at all.
-func defaultModelView() modelView { return modelView{toolsOnly: true} }
+func defaultModelView() modelView {
+	return modelView{
+		keys:      []sortKey{{field: colModel}},
+		bounds:    map[modelField]bound{},
+		toolsOnly: true,
+	}
+}
+
+// boundFor reads a field's constraint, tolerating a nil map.
+func (v modelView) boundFor(f modelField) bound {
+	if v.bounds == nil {
+		return bound{}
+	}
+	return v.bounds[f]
+}
+
+// setBound writes a constraint, creating the map on first use.
+func (v *modelView) setBound(f modelField, b bound) {
+	if v.bounds == nil {
+		v.bounds = map[modelField]bound{}
+	}
+	v.bounds[f] = b
+}
 
 // summary names the current view for a hint line. The active sort is otherwise
 // invisible, and an on vision filter looks identical to a catalog that happens
 // to hold no text-only models.
 func (v modelView) summary() string {
-	out := "sort: " + v.sort.String()
+	out := "sort: " + summarizeKeys(v.keys)
+	if b := boundsSummary(v.bounds); b != "" {
+		out += "   " + b
+	}
 	if v.visionOnly {
 		out += "   vision on"
 	}
@@ -120,76 +130,20 @@ func selectModels(all []*rafikiv1.ModelRow, query string, v modelView) []*rafiki
 		if v.toolsOnly && toolsKind(r) == toolsNo {
 			continue
 		}
+		if v.thinkingOnly && r.GetSupportedParameters() != nil && !hasParam(r, "reasoning") {
+			continue
+		}
+		if !admitsBounds(v.bounds, r) {
+			continue
+		}
 		if q != "" && !strings.Contains(strings.ToLower(r.GetId()), q) &&
 			!strings.Contains(strings.ToLower(r.GetName()), q) {
 			continue
 		}
 		out = append(out, r)
 	}
-	sortModels(out, v.sort)
+	sortModels(out, v.keys)
 	return out
-}
-
-// sortModels orders rows in place.
-//
-// An ABSENT price or context sorts LAST in both orders, never as zero. A model
-// the catalog does not know is not the cheapest thing available, and sorting it
-// there is the exact failure the optional wire fields exist to prevent.
-func sortModels(rows []*rafikiv1.ModelRow, by modelSort) {
-	switch by {
-	case sortCost:
-		sort.SliceStable(rows, func(i, j int) bool {
-			a, b := rows[i].PromptUsd, rows[j].PromptUsd
-			if a == nil || b == nil {
-				return a != nil // known prices first
-			}
-			if *a != *b {
-				return *a < *b
-			}
-			return rows[i].GetId() < rows[j].GetId()
-		})
-	case sortAgentic:
-		sort.SliceStable(rows, func(i, j int) bool {
-			a, b := rows[i].AgenticIndex, rows[j].AgenticIndex
-			if a == nil || b == nil {
-				// Absent is UNSCORED, never a zero score: 62% of the catalog
-				// carries no benchmark, including every locally-served model,
-				// and sorting them to the bottom as if they scored 0 is the
-				// same failure absent pricing would be.
-				return a != nil
-			}
-			if *a != *b {
-				return *a > *b
-			}
-			return rows[i].GetId() < rows[j].GetId()
-		})
-	case sortNewest:
-		sort.SliceStable(rows, func(i, j int) bool {
-			a, b := rows[i].Created, rows[j].Created
-			if a == nil || b == nil {
-				return a != nil // known dates first
-			}
-			if *a != *b {
-				return *a > *b
-			}
-			return rows[i].GetId() < rows[j].GetId()
-		})
-	case sortContext:
-		sort.SliceStable(rows, func(i, j int) bool {
-			a, b := rows[i].ContextWindow, rows[j].ContextWindow
-			if a == nil || b == nil {
-				return a != nil
-			}
-			if *a != *b {
-				return *a > *b
-			}
-			return rows[i].GetId() < rows[j].GetId()
-		})
-	default:
-		sort.SliceStable(rows, func(i, j int) bool {
-			return rows[i].GetId() < rows[j].GetId()
-		})
-	}
 }
 
 // modelPicker browses what the daemon says it can run.
@@ -446,7 +400,7 @@ func visionCellGlyph(r *rafikiv1.ModelRow) string {
 // title, filter, blank, header, footer, and the detail block.
 const pickerChrome = 5 + detailHeight
 
-func (p *modelPicker) view(width, height int, v modelView) string {
+func (p *modelPicker) view(width, height int, v modelView, q *queryDialog) string {
 	var b strings.Builder
 	b.WriteString(styleRailFocused.Render("model"))
 	b.WriteString(styleMeta.Render("  " + p.kind))
@@ -471,18 +425,24 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 	// Pinned columns plus ONE extra: whatever is being sorted by, when that is
 	// not already pinned. Sorting by something you cannot see is a list that
 	// reorders for no visible reason, and the panel cannot hold every column.
-	extraTitle, extraW, hasExtra := v.sort.column()
+	extras := extraColumns(v.keys)
+	extraW := 0
+	for _, f := range extras {
+		_, w := f.header()
+		extraW += w
+	}
 	idW := max(20, width-34-extraW)
 
 	head := padTo("  MODEL", idW+2) + padTo("CONTEXT", 10) +
 		padTo("IN $/M", 9) + padTo("OUT $/M", 9)
-	if hasExtra {
-		head += padTo(extraTitle, extraW)
+	for _, f := range extras {
+		t, w := f.header()
+		head += padTo(t, w)
 	}
 	b.WriteString(styleMeta.Render(head + "VIS"))
 	b.WriteString("\n")
 
-	window := max(1, height-pickerChrome)
+	window := max(1, height-pickerChrome-queryRows(q))
 	if len(p.rows) == 0 {
 		b.WriteString(styleMeta.Render("  nothing matches that filter"))
 		b.WriteString("\n")
@@ -502,8 +462,9 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 		b.WriteString(padTo(ctxCell(r), 10))
 		b.WriteString(padTo(priceCell(r.PromptUsd), 9))
 		b.WriteString(padTo(priceCell(r.CompletionUsd), 9))
-		if hasExtra {
-			b.WriteString(padTo(extraCell(r, v.sort, now), extraW))
+		for _, f := range extras {
+			_, w := f.header()
+			b.WriteString(padTo(cellFor(r, f, now), w))
 		}
 		b.WriteString(visionCellGlyph(r))
 		b.WriteString("\n")
@@ -520,6 +481,10 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 
 	b.WriteString("\n")
 	b.WriteString(styleMeta.Render(p.footer(v)))
+	if q != nil {
+		b.WriteString("\n")
+		b.WriteString(q.view(width, v))
+	}
 	return b.String()
 }
 
@@ -533,7 +498,7 @@ func (p *modelPicker) view(width, height int, v modelView) string {
 func (p *modelPicker) footer(v modelView) string {
 	parts := []string{
 		fmt.Sprintf("%d/%d", len(p.rows), len(p.all)),
-		"^S " + v.sort.String(),
+		"^S " + summarizeKeys(v.keys),
 	}
 	if v.visionOnly {
 		parts = append(parts, "^V vision on")
@@ -633,14 +598,6 @@ func modelDetail(r *rafikiv1.ModelRow, now time.Time, width int) []string {
 		detailField("source", orDash(r.GetSource()), 18)
 
 	return []string{rule, line1, clip(line2, width)}
-}
-
-// extraCell renders the value for whichever column the sort asked for.
-func extraCell(r *rafikiv1.ModelRow, by modelSort, now time.Time) string {
-	if by == sortAgentic {
-		return agenticCell(r)
-	}
-	return ageCell(r, now)
 }
 
 // detailField renders one label/value cell at a FIXED width, so the eye can
@@ -767,8 +724,12 @@ func (c *Cockpit) handlePickerKey(msg tea.KeyPressMsg, window int) (tea.Model, t
 		p.cursor, p.offset = 0, 0
 		return c, nil
 	case "ctrl+s":
-		// ^S rather than ⇥ because the same key must work in the form's inline
-		// typeahead, where ⇥ already means "next field" and cannot be taken.
+		// ^S opens the filter+sort band rather than cycling blind. Cycling is
+		// still reachable -- ^R below -- but composing a query is the thing
+		// this list is for, and it cannot be done one keypress at a time.
+		c.query = &queryDialog{}
+		return c, nil
+	case "ctrl+r":
 		c.modelView.cycleSort()
 		p.cursor, p.offset = 0, 0
 		p.apply(c.modelView)
