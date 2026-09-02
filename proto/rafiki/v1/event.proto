@@ -94,6 +94,13 @@ message AssistantMessage {
   // leaves it empty for user rows.
   StopReason stop_reason = 2;
   string raw_stop_reason = 3;
+  // cost_usd is the RUNNING total for the turn this message belongs to —
+  // every completed prior turn plus every iteration of this one so far,
+  // including this reply — not the final per-turn cost TurnEnd.cost_usd
+  // reports. Optional for the same reason every Usage/cost field in this
+  // proto is: absence and a reported zero are different facts, and a client
+  // (the TUI rail) needs to tell "not yet priced" from "genuinely free".
+  optional double cost_usd = 4;
 }
 
 message TurnStart {
