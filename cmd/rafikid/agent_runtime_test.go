@@ -658,3 +658,37 @@ func TestAgentRuntimeOptionsWiresOnConsumed(t *testing.T) {
 		t.Error("an acked frame must be forgotten")
 	}
 }
+
+func TestAgentRunnerGrantsMaxCostToTheEngine(t *testing.T) {
+	c := newTestController(t)
+	budget := 12.50
+	req := protocol.SpawnRequest{
+		Kind:    protocol.KindFundi,
+		Cwd:     t.TempDir(),
+		Model:   "anthropic/claude-sonnet-4-5",
+		MaxCost: &budget,
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_budgeted", false, "")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.MaxCost != 12.50 {
+		t.Errorf("ro.MaxCost = %v, want 12.50", ro.MaxCost)
+	}
+}
+
+func TestAgentRunnerUnsetMaxCostIsUnlimited(t *testing.T) {
+	c := newTestController(t)
+	req := protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_unbudgeted", false, "")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.MaxCost != 0 {
+		t.Errorf("ro.MaxCost = %v, want 0 (unlimited)", ro.MaxCost)
+	}
+}

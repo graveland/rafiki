@@ -147,6 +147,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
+	ro.MaxCost = grantedCost(req)
 	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
