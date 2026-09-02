@@ -57,11 +57,6 @@ func (f modelField) String() string {
 	return "?"
 }
 
-// numeric reports whether the field can carry a min/max bound. colModel is the
-// only one that cannot: a lexical range is not a filter anyone wants, and the
-// text query already narrows by name.
-func (f modelField) numeric() bool { return f != colModel }
-
 // pinned reports whether the field already has a column in the list, so the
 // sort does not need to add one. Sorting by something invisible is a list that
 // reorders for no visible reason.

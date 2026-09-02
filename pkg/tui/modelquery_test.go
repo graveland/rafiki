@@ -5,7 +5,6 @@ package tui
 import (
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -174,6 +173,19 @@ func TestTwoAbsentValuesFallThroughToTheNextKey(t *testing.T) {
 
 // ── the dialog ───────────────────────────────────────────────────────────────
 
+// seekCell drives the cursor to one field's column, the way a user would.
+func seekCell(t *testing.T, c *Cockpit, want queryRow, col int) {
+	t.Helper()
+	rows := queryRowsList()
+	for i, r := range rows {
+		if r == want {
+			c.query.row, c.query.col = i, col
+			return
+		}
+	}
+	t.Fatalf("no query row for %+v", want)
+}
+
 func openQuery(t *testing.T) *Cockpit {
 	t.Helper()
 	c := formCockpit(t)
@@ -186,38 +198,83 @@ func openQuery(t *testing.T) *Cockpit {
 	return c
 }
 
-func TestCtrlSOpensTheBandOverTheList(t *testing.T) {
+func TestCtrlSOpensThePanelOverTheList(t *testing.T) {
 	c := openQuery(t)
 	if c.form == nil {
-		t.Error("the band replaced the form; it is meant to sit over it")
+		t.Error("the panel replaced the form; it is meant to sit over it")
 	}
-	c.width, c.height, c.ready = 140, 40, true
+	c.width, c.height, c.ready = 120, 44, true
 	out := ansi.Strip(c.View().Content)
-	if !strings.Contains(out, "FILTER") || !strings.Contains(out, "SORT") {
-		t.Errorf("both bands should render:\n%s", out)
+	for _, want := range []string{"FIELD", "MIN", "MAX", "SORT", "tools", "ctx"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q missing from the panel:\n%s", want, out)
+		}
 	}
-	// The list is still visible above the band -- that is the point of a band
-	// rather than a modal: the query's effect is watchable as you compose it.
+	// The list stays visible above it -- that is the point of a panel rather
+	// than a modal: the query's effect is watchable as it is composed.
 	if !strings.Contains(out, "paid/big") {
-		t.Errorf("the list is not visible under the band:\n%s", out)
+		t.Errorf("the list is not visible above the panel:\n%s", out)
 	}
 }
 
-func TestTabSwitchesBand(t *testing.T) {
+// The table is one row per field, so it never needs to wrap: the horizontal
+// version needed sixteen cells side by side and overflowed any terminal under
+// about 140 columns.
+func TestPanelFitsANarrowTerminal(t *testing.T) {
 	c := openQuery(t)
-	if c.query.band != bandFilter {
-		t.Fatalf("band = %v, want filter first", c.query.band)
+	for _, w := range []int{60, 80, 100} {
+		out := ansi.Strip(c.query.view(w, 40, c.modelView))
+		for _, line := range strings.Split(out, "\n") {
+			// DISPLAY columns, not bytes: the rule is box-drawing runes at
+			// three bytes each, and every width helper in this package
+			// measures with ansi.StringWidth for exactly this reason.
+			if got := ansi.StringWidth(line); got > w {
+				t.Errorf("width %d: line is %d columns: %q", w, got, line)
+			}
+		}
 	}
-	c.handleKey(keyMsg("tab"))
-	if c.query.band != bandSort {
-		t.Errorf("band = %v, want sort after ⇥", c.query.band)
+}
+
+// A short terminal windows the table rather than burying the list.
+func TestPanelLeavesRoomForTheList(t *testing.T) {
+	tall := queryWindow(44)
+	short := queryWindow(12)
+	if short >= tall {
+		t.Errorf("window: tall=%d short=%d, want the short pane to show fewer rows", tall, short)
+	}
+	if short < 1 {
+		t.Errorf("window = %d, want at least one row", short)
+	}
+}
+
+// ←/→ walks the columns and SKIPS cells that hold nothing, so space never
+// lands somewhere it does nothing.
+func TestArrowsSkipUnavailableCells(t *testing.T) {
+	c := openQuery(t)
+	seekCell(t, c, queryRow{field: colAgentic}, colMinCell)
+
+	c.handleKey(keyMsg("right"))
+
+	// agentic has a min and a sort but no max stop, so → must jump the max.
+	if c.query.col != colSortCell {
+		t.Errorf("col = %d, want it to skip the empty max cell to sort", c.query.col)
+	}
+}
+
+// A capability toggle occupies one column only.
+func TestToggleRowsHaveOneCell(t *testing.T) {
+	r := queryRow{flag: flagTools}
+	if !r.available(colMinCell) {
+		t.Error("a toggle should live in the first column")
+	}
+	if r.available(colMaxCell) || r.available(colSortCell) {
+		t.Error("a toggle has no max and cannot be sorted by")
 	}
 }
 
 func TestSpaceCyclesASortCellThroughOffAscDesc(t *testing.T) {
 	c := openQuery(t)
-	c.handleKey(keyMsg("tab")) // sort band
-	c.query.cell = int(colIntel)
+	seekCell(t, c, queryRow{field: colIntel}, colSortCell)
 
 	find := func() (sortKey, bool) {
 		for _, k := range c.modelView.keys {
@@ -245,65 +302,73 @@ func TestSpaceCyclesASortCellThroughOffAscDesc(t *testing.T) {
 }
 
 // Turning a key on appends it, so it cannot silently displace the ordering
-// already chosen; priority is moved deliberately with the arrows.
-func TestNewSortKeysAppendAndArrowsReprioritize(t *testing.T) {
+// already chosen; priority moves deliberately with ⇧↑/⇧↓.
+func TestNewSortKeysAppendAndShiftArrowsReprioritize(t *testing.T) {
 	c := openQuery(t)
-	c.handleKey(keyMsg("tab"))
 	c.modelView.keys = []sortKey{{field: colCtx, desc: true}}
+	seekCell(t, c, queryRow{field: colIn}, colSortCell)
 
-	c.query.cell = int(colIn)
 	c.handleKey(keyMsg("space"))
 	if len(c.modelView.keys) != 2 || c.modelView.keys[1].field != colIn {
 		t.Fatalf("keys = %+v, want the new key appended last", c.modelView.keys)
 	}
 
-	c.handleKey(keyMsg("up"))
+	c.handleKey(keyMsg("shift+up"))
 	if c.modelView.keys[0].field != colIn {
-		t.Errorf("keys = %+v, want ↑ to promote in$ to primary", c.modelView.keys)
+		t.Errorf("keys = %+v, want ⇧↑ to promote in$ to primary", c.modelView.keys)
 	}
-	c.handleKey(keyMsg("down"))
+	c.handleKey(keyMsg("shift+down"))
 	if c.modelView.keys[0].field != colCtx {
-		t.Errorf("keys = %+v, want ↓ to demote it again", c.modelView.keys)
+		t.Errorf("keys = %+v, want ⇧↓ to demote it again", c.modelView.keys)
+	}
+	// Plain ↑/↓ move the CURSOR, never the priority.
+	before := append([]sortKey(nil), c.modelView.keys...)
+	c.handleKey(keyMsg("up"))
+	if c.modelView.keys[0].field != before[0].field {
+		t.Error("a plain ↑ reordered the keys; it should only move the cursor")
 	}
 }
 
-func TestArrowsStepAThresholdInTheFilterBand(t *testing.T) {
+func TestSpaceCyclesAThresholdAndWraps(t *testing.T) {
 	c := openQuery(t)
-	cells := filterCells()
-	for i, cell := range cells {
-		if cell.field == colCtx && !cell.isMax {
-			c.query.cell = i
+	seekCell(t, c, queryRow{field: colCtx}, colMinCell)
+	n := len(minStops(colCtx))
+
+	for i := 1; i < n; i++ {
+		c.handleKey(keyMsg("space"))
+		if got := c.modelView.boundFor(colCtx).minIx; got != i {
+			t.Fatalf("minIx = %d, want %d", got, i)
 		}
 	}
-	c.handleKey(keyMsg("up"))
-	if c.modelView.boundFor(colCtx).minIx != 1 {
-		t.Fatalf("minIx = %d, want ↑ to step up one stop", c.modelView.boundFor(colCtx).minIx)
-	}
-	c.handleKey(keyMsg("down"))
-	if c.modelView.boundFor(colCtx).minIx != 0 {
-		t.Errorf("minIx = %d, want ↓ to step back", c.modelView.boundFor(colCtx).minIx)
-	}
-	// It CLAMPS rather than wrapping, so holding a key cannot silently loop
-	// past "any" back to the strictest stop.
-	c.handleKey(keyMsg("down"))
+	c.handleKey(keyMsg("space"))
 	if got := c.modelView.boundFor(colCtx).minIx; got != 0 {
-		t.Errorf("minIx = %d, want it clamped at 0", got)
+		t.Errorf("minIx = %d, want it to wrap back to unset", got)
 	}
 }
 
-// Every keystroke re-applies the query, so the rows above the band track it.
-func TestBandReappliesTheQueryLive(t *testing.T) {
+// Min and max are separate cells on the same row, which is what lets ">free"
+// and "<=$2" both apply to price at once.
+func TestMinAndMaxAreIndependentCells(t *testing.T) {
+	c := openQuery(t)
+	seekCell(t, c, queryRow{field: colIn}, colMinCell)
+	c.handleKey(keyMsg("space"))
+	seekCell(t, c, queryRow{field: colIn}, colMaxCell)
+	c.handleKey(keyMsg("space"))
+
+	b := c.modelView.boundFor(colIn)
+	if b.minIx == 0 || b.maxIx == 0 {
+		t.Errorf("bound = %+v, want both sides set", b)
+	}
+}
+
+// Every keystroke re-applies the query, so the rows above track it live.
+func TestPanelReappliesTheQueryLive(t *testing.T) {
 	c := openQuery(t)
 	before := len(c.form.suggest)
+	seekCell(t, c, queryRow{field: colCtx}, colMinCell)
 
-	cells := filterCells()
-	for i, cell := range cells {
-		if cell.field == colCtx && !cell.isMax {
-			c.query.cell = i
-		}
-	}
-	for i := 0; i < 3; i++ {
-		c.handleKey(keyMsg("up")) // step to the strictest context floor
+	for i := 0; i < len(minStops(colCtx))-1; i++ {
+		c.handleKey(keyMsg("space")) // up to the strictest context floor
 	}
 
 	if len(c.form.suggest) >= before {
@@ -312,16 +377,15 @@ func TestBandReappliesTheQueryLive(t *testing.T) {
 	}
 }
 
-func TestEscapeClosesTheBandAndKeepsTheQuery(t *testing.T) {
+func TestEscapeClosesThePanelAndKeepsTheQuery(t *testing.T) {
 	c := openQuery(t)
-	c.handleKey(keyMsg("tab"))
-	c.query.cell = int(colIntel)
+	seekCell(t, c, queryRow{field: colIntel}, colSortCell)
 	c.handleKey(keyMsg("space"))
 
 	c.handleKey(keyMsg("esc"))
 
 	if c.query != nil {
-		t.Error("esc did not close the band")
+		t.Error("esc did not close the panel")
 	}
 	if c.form == nil {
 		t.Fatal("esc dismissed the form as well")
@@ -333,7 +397,7 @@ func TestEscapeClosesTheBandAndKeepsTheQuery(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("the query was discarded when the band closed")
+		t.Error("the query was discarded when the panel closed")
 	}
 }
 
@@ -341,11 +405,10 @@ func TestEscapeClosesTheBandAndKeepsTheQuery(t *testing.T) {
 // cursor is, and what the query constrains -- and both must be visible.
 func TestDialogMarksSelectionAndActivationSeparately(t *testing.T) {
 	c := openQuery(t)
-	v := c.modelView
-	v.setBound(colCtx, bound{minIx: 1})
+	c.modelView.setBound(colCtx, bound{minIx: 1})
 
-	out := ansi.Strip(c.query.view(160, v))
-	if !strings.Contains(out, "ctx ≥128k") {
+	out := ansi.Strip(c.query.view(120, 44, c.modelView))
+	if !strings.Contains(out, "≥128k") {
 		t.Errorf("an active bound is not shown:\n%s", out)
 	}
 	if !strings.Contains(out, "[") {
@@ -355,27 +418,26 @@ func TestDialogMarksSelectionAndActivationSeparately(t *testing.T) {
 
 func TestSortCellsShowDirectionAndPriority(t *testing.T) {
 	c := openQuery(t)
-	v := c.modelView
-	v.keys = []sortKey{{field: colCtx, desc: true}, {field: colIn}}
+	c.modelView.keys = []sortKey{{field: colCtx, desc: true}, {field: colIn}}
 
-	out := ansi.Strip(c.query.view(160, v))
-	if !strings.Contains(out, "ctx↓1") {
+	out := ansi.Strip(c.query.view(120, 44, c.modelView))
+	if !strings.Contains(out, "↓ 1") {
 		t.Errorf("primary key missing its arrow and priority:\n%s", out)
 	}
-	if !strings.Contains(out, "in$↑2") {
+	if !strings.Contains(out, "↑ 2") {
 		t.Errorf("secondary key missing its arrow and priority:\n%s", out)
 	}
 }
 
-func TestBandCostsTheListItsHeight(t *testing.T) {
+func TestPanelCostsTheListItsHeight(t *testing.T) {
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), queryFixture())
 	focusModelRow(c)
-	open := c.form.suggestWindow(40, nil)
-	closed := c.form.suggestWindow(40, &queryDialog{})
-	if open-closed != queryDialogHeight {
-		t.Errorf("window %d -> %d, want the band to cost exactly %d rows",
-			open, closed, queryDialogHeight)
+	open := c.form.suggestWindow(44, nil)
+	closed := c.form.suggestWindow(44, &queryDialog{})
+	if open-closed != queryHeight(&queryDialog{}, 44) {
+		t.Errorf("window %d -> %d, want the panel to cost exactly its height",
+			open, closed)
 	}
 }
 
@@ -388,19 +450,18 @@ func TestPriorityDigitDegradesPastNine(t *testing.T) {
 	}
 }
 
-func TestEveryFilterCellHasStopsToCycle(t *testing.T) {
-	for _, c := range filterCells() {
-		if c.flag != flagNone {
+// Navigation only lands on cells that can hold something, so every available
+// cell must have somewhere to cycle to.
+func TestEveryAvailableCellHasSomethingToCycle(t *testing.T) {
+	for _, r := range queryRowsList() {
+		if r.flag != flagNone {
 			continue
 		}
-		stops := minStops(c.field)
-		if c.isMax {
-			stops = maxStops(c.field)
+		if r.available(colMinCell) && len(minStops(r.field)) < 2 {
+			t.Errorf("%v min is navigable but has nothing to cycle", r.field)
 		}
-		if len(stops) < 2 {
-			t.Errorf("cell %v (max=%v) has nothing to cycle to", c.field, c.isMax)
+		if r.available(colMaxCell) && len(maxStops(r.field)) < 2 {
+			t.Errorf("%v max is navigable but has nothing to cycle", r.field)
 		}
 	}
 }
-
-var _ = time.Now

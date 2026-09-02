@@ -15,6 +15,10 @@ func keyMsg(s string) tea.KeyPressMsg {
 	switch s {
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "shift+up":
+		return tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift}
+	case "shift+down":
+		return tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift}
 	case "shift+tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
 	case "enter":
