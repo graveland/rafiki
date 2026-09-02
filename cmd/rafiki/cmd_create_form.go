@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tui"
 )
@@ -61,9 +62,15 @@ func wantsCreateForm(cmd *cobra.Command, args []string, isTTY bool) bool {
 // applied.
 //
 // The form spawns through the Connect plane and lands on the new child, which
-// is exactly what create does after a flag-driven spawn; there is no second
-// code path for "created from a form".
-func runCreateForm(cmd *cobra.Command, req protocol.SpawnRequest) error {
+// is exactly what create does after a flag-driven spawn -- including standing
+// up a local session executor first. That step used to exist only on the
+// flag-driven branch: every child created from a bare `rafiki create` (the
+// default, TTY, no-shaping-flags case) went out with no executor selector at
+// all, silently losing the whole workspace tool tier (read/write/edit/bash/
+// etc.) with no error and no "unbound" label to explain why. c and
+// noLocalExecutor let this path apply the same policy runCreate's flag branch
+// does, rather than skipping it.
+func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnRequest, noLocalExecutor bool) error {
 	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
@@ -74,10 +81,27 @@ func runCreateForm(cmd *cobra.Command, req protocol.SpawnRequest) error {
 	}
 	defer restoreLogging()
 
+	// Same policy as runCreate's flag-driven branch: offer this machine as the
+	// workspace unless the caller already named an executor or opted out. One
+	// session executor covers every spawn issued from this cockpit for its
+	// whole lifetime (below), matching runCreate's undetached case -- the TUI
+	// only returns when the user quits, so a deferred stop here never outlives
+	// the children it was serving.
+	executorSelector := req.ExecutorSelector
+	if executorSelector == "" && !noLocalExecutor {
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd)
+		if err != nil {
+			return fmt.Errorf("this machine could not join as a workspace: %w", err)
+		}
+		executorSelector = selector
+		defer stop()
+	}
+
 	m := tui.NewCockpit(tui.Options{
-		HTTPClient: ep.httpClient,
-		BaseURL:    ep.baseURL,
-		OpenCreate: true,
+		HTTPClient:       ep.httpClient,
+		BaseURL:          ep.baseURL,
+		OpenCreate:       true,
+		ExecutorSelector: executorSelector,
 		CreateDefaults: tui.SpawnDefaults{
 			Name: req.Name,
 			Kind: req.Kind,

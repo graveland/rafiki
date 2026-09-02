@@ -347,6 +347,20 @@ func TestOpenCreatePrefillsTheForm(t *testing.T) {
 	}
 }
 
+// ExecutorSelector is not a form field (spawnForm deliberately stays four
+// fields), so the only way to check it survived construction is the private
+// field it lands on.
+func TestOpenCreateCarriesTheExecutorSelector(t *testing.T) {
+	c := NewCockpit(Options{
+		BaseURL:          "http://127.0.0.1:1",
+		OpenCreate:       true,
+		ExecutorSelector: "owner=brent",
+	})
+	if c.executorSelector != "owner=brent" {
+		t.Errorf("executorSelector = %q, want owner=brent", c.executorSelector)
+	}
+}
+
 // Empty defaults keep the form's own, rather than blanking the prefilled cwd.
 func TestOpenCreateWithNoDefaultsKeepsTheFormsOwn(t *testing.T) {
 	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", OpenCreate: true})

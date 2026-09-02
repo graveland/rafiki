@@ -195,6 +195,12 @@ type Options struct {
 	// what it is about to do rather than replacing it with a questionnaire.
 	OpenCreate     bool
 	CreateDefaults SpawnDefaults
+	// ExecutorSelector rides on every spawn this cockpit issues, for its whole
+	// lifetime -- not just the first. It is not a form field: like labels and
+	// the budget fields, it is a `rafiki create` flag set once, not something
+	// anyone fills in by hand between two keystrokes (see spawnForm's own
+	// comment on why the form stays four fields).
+	ExecutorSelector string
 }
 
 // SpawnDefaults prefills the create form. Empty fields keep the form's own
@@ -312,6 +318,10 @@ type Cockpit struct {
 	// same way modelView is -- a `rafiki config set` takes effect on the
 	// next cockpit start, not live.
 	currency *clientstate.Currency
+
+	// executorSelector rides on every spawn issued via the create form. See
+	// Options.ExecutorSelector.
+	executorSelector string
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -349,18 +359,19 @@ func NewCockpit(opts Options) *Cockpit {
 	}
 
 	c := &Cockpit{
-		cfg:       cfg,
-		client:    rafikiv1connect.NewControlClient(httpClient, opts.BaseURL),
-		subject:   subject,
-		rail:      rail.New(),
-		sessions:  make(map[string]*session.Session),
-		panes:     map[string]*paneState{},
-		ta:        ta,
-		keys:      defaultKeyMap(),
-		evCh:      make(chan *rafikiv1.Event, 256),
-		status:    "connecting…",
-		modelView: loadModelView(),
-		currency:  clientstate.Load().Currency,
+		cfg:              cfg,
+		client:           rafikiv1connect.NewControlClient(httpClient, opts.BaseURL),
+		subject:          subject,
+		rail:             rail.New(),
+		sessions:         make(map[string]*session.Session),
+		panes:            map[string]*paneState{},
+		ta:               ta,
+		keys:             defaultKeyMap(),
+		evCh:             make(chan *rafikiv1.Event, 256),
+		status:           "connecting…",
+		modelView:        loadModelView(),
+		currency:         clientstate.Load().Currency,
+		executorSelector: opts.ExecutorSelector,
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()

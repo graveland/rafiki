@@ -64,10 +64,11 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 		defer cancel()
 
 		resp, err := c.client.Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
-			Cwd:   p.cwd,
-			Name:  p.name,
-			Kind:  p.kind,
-			Model: p.model,
+			Cwd:              p.cwd,
+			Name:             p.name,
+			Kind:             p.kind,
+			Model:            p.model,
+			ExecutorSelector: c.executorSelector,
 		}))
 		if err != nil {
 			return spawnedMsg{err: err}
