@@ -9,6 +9,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"go.graveland.dev/rafiki/pkg/clientstate"
 )
 
 func keyMsg(s string) tea.KeyPressMsg {
@@ -239,7 +241,7 @@ func TestFormOwnsTheBodyPane(t *testing.T) {
 
 func TestFormShowsEveryFieldAndBothKinds(t *testing.T) {
 	c := formCockpit(t)
-	out := c.form.view(80, 24, c.modelView, nil)
+	out := c.form.view(80, 24, c.modelView, nil, nil)
 	for _, want := range []string{"name", "kind", "model", "cwd"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("form view is missing the %q row", want)
@@ -347,7 +349,7 @@ func TestOpenCreatePrefillsTheForm(t *testing.T) {
 	}
 }
 
-// ExecutorSelector is not a form field (spawnForm deliberately stays four
+// ExecutorSelector is not a form field (spawnForm deliberately stays five
 // fields), so the only way to check it survived construction is the private
 // field it lands on.
 func TestOpenCreateCarriesTheExecutorSelector(t *testing.T) {
@@ -388,7 +390,7 @@ func TestOpenCreateFetchesTheCatalog(t *testing.T) {
 // the picker's "filter…" as "f", in shipped output nobody read closely.
 func TestPlaceholdersRenderInFull(t *testing.T) {
 	c := formCockpit(t)
-	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil))
+	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
 	for _, want := range []string{"(auto)", "(daemon default)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("placeholder %q is missing or truncated:\n%s", want, out)
@@ -413,8 +415,56 @@ func TestTypedValueSurvivesTheWidthChange(t *testing.T) {
 	for _, r := range "anthropic/claude-opus-5" {
 		c.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
-	out := ansi.Strip(c.form.view(120, 24, c.modelView, nil))
+	out := ansi.Strip(c.form.view(120, 24, c.modelView, nil, nil))
 	if !strings.Contains(out, "anthropic/claude-opus-5") {
 		t.Errorf("the typed model id is not shown in full:\n%s", out)
+	}
+}
+
+func TestFormShowsEveryFieldAndBothKindsIncludingMaxCost(t *testing.T) {
+	c := formCockpit(t)
+	out := c.form.view(80, 24, c.modelView, nil, nil)
+	for _, want := range []string{"name", "kind", "model", "cwd", "max-cost"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("form view is missing the %q row", want)
+		}
+	}
+}
+
+func TestMaxCostFieldEmptyMeansUnlimited(t *testing.T) {
+	c := formCockpit(t)
+	p, problem := c.form.params(nil)
+	if problem != "" {
+		t.Fatalf("params: %v", problem)
+	}
+	if p.maxCost != nil {
+		t.Errorf("maxCost = %v, want nil (empty field = unlimited)", *p.maxCost)
+	}
+}
+
+func TestMaxCostFieldConvertsThroughCurrency(t *testing.T) {
+	c := formCockpit(t)
+	c.form.inputs[fieldMaxCost].SetValue("13.80")
+	cur := &clientstate.Currency{Code: "CAD", Rate: 1.38}
+
+	p, problem := c.form.params(cur)
+	if problem != "" {
+		t.Fatalf("params: %v", problem)
+	}
+	if p.maxCost == nil {
+		t.Fatal("maxCost is nil, want a converted USD value")
+	}
+	if diff := *p.maxCost - 10.0; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("maxCost = %v, want ~10.0", *p.maxCost)
+	}
+}
+
+func TestMaxCostFieldRejectsGarbage(t *testing.T) {
+	c := formCockpit(t)
+	c.form.inputs[fieldMaxCost].SetValue("not-a-number")
+
+	_, problem := c.form.params(nil)
+	if !strings.Contains(problem, "max-cost") {
+		t.Errorf("problem = %q, want it to name max-cost", problem)
 	}
 }

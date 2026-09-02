@@ -197,9 +197,10 @@ type Options struct {
 	CreateDefaults SpawnDefaults
 	// ExecutorSelector rides on every spawn this cockpit issues, for its whole
 	// lifetime -- not just the first. It is not a form field: like labels and
-	// the budget fields, it is a `rafiki create` flag set once, not something
-	// anyone fills in by hand between two keystrokes (see spawnForm's own
-	// comment on why the form stays four fields).
+	// the remaining budget fields (depth, children), it is a `rafiki create`
+	// flag set once, not something anyone fills in by hand between two
+	// keystrokes (see spawnForm's own comment on why the form stays five
+	// fields).
 	ExecutorSelector string
 }
 
@@ -1681,7 +1682,7 @@ func (c *Cockpit) View() tea.View {
 	case c.picker != nil:
 		conv = c.picker.view(convWidth, bodyHeight, c.modelView, c.query)
 	case c.form != nil:
-		conv = c.form.view(convWidth, bodyHeight, c.modelView, c.query)
+		conv = c.form.view(convWidth, bodyHeight, c.modelView, c.query, c.currency)
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
 	case f == "" && c.rail.Len() == 0:
