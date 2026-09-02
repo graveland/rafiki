@@ -21,11 +21,17 @@ func newKillCmd() *cobra.Command {
 		Long: `Stop one or more running children gracefully, escalating to SIGKILL only if necessary.
 
 On a clean exit (exit code 0, no signal, no timeout escalation), the child
-is also closed (removed from the daemon's in-memory store and rafiki list).
-Disk artifacts (logs, state record) are not affected.
+is also closed: it leaves rafiki list and its conversations.child row is
+dropped. The durable record survives — conversation_message, event_log and
+conversation_turn have no reference to the child row, so the conversation
+stays fully readable through 'rafiki history' and 'rafiki conversations'.
+What is removed is the child's per-child log dump directory and, for fundi
+children, its clipped-output spill directory: a clean kill deletes the only
+on-disk diagnostic copy, so capture what you need before killing.
 
-Use --no-close to keep exited children visible in rafiki list even after a
-clean exit (e.g. for /tree navigation or inspection).`,
+Use --no-close to keep exited children visible in rafiki list (and their
+disk artifacts intact) after a clean exit (e.g. for /tree navigation or
+inspection).`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runKill,
 	}

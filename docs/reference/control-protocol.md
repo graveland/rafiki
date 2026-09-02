@@ -970,9 +970,14 @@ is queued instead.
 
 ### 6.13 `ctrl_forget`
 
-Drop an exited child from the controller's in-memory store. Does not
-remove disk artifacts (logs or state record); the user manages those
-out-of-band.
+Close an exited child: it leaves the controller's store and its
+`conversations.child` row is dropped. What is removed from disk is the
+child's per-child log dump directory and, for fundi children, its
+clipped-output spill directory — the only on-disk diagnostic copies. The
+durable record survives: `conversation_message`, `event_log` and
+`conversation_turn` reference the conversation, not the child row, so the
+transcript and analytics stay fully readable after closing. The session
+state record (§11.5) is also left in place.
 
 Naming: the CLI and the Connect plane call this operation `close`
 (`rafiki close`, with `forget` kept as a command alias; the Connect RPC is
