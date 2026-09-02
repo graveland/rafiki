@@ -14,29 +14,27 @@ import (
 // check-in that happened to land in the same debounce window.
 const heartbeatEventSource = "subagents-heartbeat"
 
-// heartbeatState tracks, per child, when its current unbroken working spell
-// began and when it last got a heartbeat pushed to its parent. Guarded by its
-// own mutex, matching budgetBreaches and turnOutcomeStore.
+// heartbeatState tracks, per child, whether it is currently in an unbroken
+// working spell and when it last got a heartbeat pushed to its parent.
+// Guarded by its own mutex, matching budgetBreaches and turnOutcomeStore.
 type heartbeatState struct {
-	mu           sync.Mutex
-	workingSince map[string]time.Time
-	lastSent     map[string]time.Time
+	mu       sync.Mutex
+	working  map[string]struct{}
+	lastSent map[string]time.Time
 }
 
-// startWorking records the beginning of a working spell. Called from
+// startWorking marks a child as being in a working spell. Called from
 // handleStatusChange on a transition INTO a working status; a call for a
 // child already in the map is a no-op (a stray extra transition between two
 // working statuses, e.g. streaming -> tool_running, must not reset the
 // window).
-func (h *heartbeatState) startWorking(childID string, now time.Time) {
+func (h *heartbeatState) startWorking(childID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.workingSince == nil {
-		h.workingSince = make(map[string]time.Time)
+	if h.working == nil {
+		h.working = make(map[string]struct{})
 	}
-	if _, ok := h.workingSince[childID]; !ok {
-		h.workingSince[childID] = now
-	}
+	h.working[childID] = struct{}{}
 }
 
 // stopWorking clears a child's working spell and heartbeat history. Called on
@@ -45,7 +43,7 @@ func (h *heartbeatState) startWorking(childID string, now time.Time) {
 func (h *heartbeatState) stopWorking(childID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.workingSince, childID)
+	delete(h.working, childID)
 	delete(h.lastSent, childID)
 }
 
@@ -53,23 +51,24 @@ func (h *heartbeatState) stopWorking(childID string) {
 // least interval since it was last observed by a sweep — and if so, records
 // now as its new lastSent.
 //
-// workingSince (set by startWorking, from handleStatusChange's own
-// time.Now()) gates only PRESENCE here — "is this child in a spell we are
-// tracking at all" — never the elapsed-time arithmetic. The elapsed
-// comparison is measured entirely in the caller's clock, seeded from the
-// FIRST sweep that notices a tracked child (below): sweepHeartbeats only
-// ever runs on the periodic reconciliation tick, so a heartbeat can never
-// fire more precisely than once per tick regardless, and deriving elapsed
-// from two different clocks (handleStatusChange's real wall time and
-// whatever sweepHeartbeats is driven by) would make the interval math
-// incoherent — the daemon calls both with time.Now() so this is invisible
-// in production, but a test driving sweepHeartbeats off a manual clock while
-// handleStatusChange still calls the real one would see elapsed durations
-// that don't correspond to anything simulated.
+// working (set by startWorking) gates only PRESENCE — "is this child in a
+// spell we are tracking at all." It deliberately carries no timestamp: the
+// elapsed-time arithmetic is measured entirely in sweepHeartbeats' own
+// caller-supplied clock, seeded lazily on the FIRST sweep that notices a
+// newly (re)tracked child (below), rather than from workingSince/whenever
+// handleStatusChange happened to run. This costs real precision — a spell's
+// very first heartbeat fires up to one extra sweep tick later than a true
+// elapsed-since-start design would give it, regardless of how short
+// heartbeatInterval is configured, because that first sweep only starts the
+// clock rather than measuring against it — but it is the only way this stays
+// correct: sweepHeartbeats is driven by whatever `now` its caller passes
+// (real time.Now() from sweepTick in production, a manually-advanced test
+// clock in tests), while handleStatusChange's startWorking has no access to
+// that same clock and must not pretend to.
 func (h *heartbeatState) due(childID string, now time.Time, interval time.Duration) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, tracked := h.workingSince[childID]; !tracked {
+	if _, tracked := h.working[childID]; !tracked {
 		return false
 	}
 	if h.lastSent == nil {
@@ -96,7 +95,12 @@ func (h *heartbeatState) due(childID string, now time.Time, interval time.Durati
 // sweepExpired (see sweepTick) rather than a ticker of its own: all three are
 // periodic reconciliations of stored state, and a fourth ticker would be a
 // fourth thing to reason about at shutdown.
-func (c *Controller) sweepHeartbeats(now time.Time) {
+//
+// ctx bounds the subtreeSpend query below, exactly as sweepBudgets is
+// bounded — sweepTick passes the SAME sweepCtx (budgetSweepTimeout) into
+// both, so a stalled cost query here cannot hang the shared sweep goroutine
+// any more than one in the budget sweep already could.
+func (c *Controller) sweepHeartbeats(ctx context.Context, now time.Time) {
 	if c.heartbeatInterval <= 0 || c.evbuf == nil {
 		return
 	}
@@ -113,7 +117,7 @@ func (c *Controller) sweepHeartbeats(now time.Time) {
 		}
 		spent := 0.0
 		if c.coster != nil {
-			if s, err := c.subtreeSpend(context.Background(), snap.ChildID); err == nil {
+			if s, err := c.subtreeSpend(ctx, snap.ChildID); err == nil {
 				spent = s
 			}
 		}
