@@ -167,14 +167,10 @@ func attachAndDecide(cmd *cobra.Command, ep connectEndpoint, childID string, kil
 	c := mustDial(cmd)
 	defer c.Close()
 
-	// Use the same kill+close policy as `rafiki kill` so a confirmed
-	// terminate also removes the child from `rafiki list` on clean exit.
-	res, err := killAndMaybeClose(cmdCtx(cmd), c, childID, 0, 0, false)
-	if err != nil {
-		return fmt.Errorf("kill: %w", err)
-	}
-	if res.CloseErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: close after kill failed: %v\n", res.CloseErr)
+	// "Terminate" is close's semantics under a different name: stop the
+	// child if still running, then finalize it — unconditionally.
+	if err := closeChild(cmdCtx(cmd), c, childID, 0, 0); err != nil {
+		return fmt.Errorf("close: %w", err)
 	}
 	return nil
 }

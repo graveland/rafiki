@@ -26,16 +26,12 @@ func TestCloseCommandKeepsForgetAsAnAlias(t *testing.T) {
 	}
 }
 
-func TestKillKeepsNoForgetAsADeprecatedFlagAlias(t *testing.T) {
-	cmd := newKillCmd()
-	if cmd.Flags().Lookup("no-close") == nil {
-		t.Error("--no-close missing")
+func TestCloseCmd_HasStopTimeoutFlags(t *testing.T) {
+	cmd := newCloseCmd()
+	if cmd.Flags().Lookup("shutdown-timeout") == nil {
+		t.Error("--shutdown-timeout missing: close must be able to override the stop-first step's timeout")
 	}
-	f := cmd.Flags().Lookup("no-forget")
-	if f == nil {
-		t.Fatal("--no-forget must survive as a deprecated alias")
-	}
-	if f.Deprecated == "" {
-		t.Error("--no-forget should be marked deprecated so --help stops advertising it")
+	if cmd.Flags().Lookup("kill-timeout") == nil {
+		t.Error("--kill-timeout missing: close must be able to override the stop-first step's timeout")
 	}
 }
