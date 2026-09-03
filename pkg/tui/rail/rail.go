@@ -79,6 +79,16 @@ type Node struct {
 	// TurnEnd for this child lands and folds its final value into Cost. A
 	// human watching the cockpit sees TotalCost() move on every LLM reply
 	// instead of only at the end of a whole exchange.
+	//
+	// This only ever moves for whichever child is currently FOCUSED: the
+	// rail-wide subscription (Types(), wired into the rail stream by
+	// pkg/tui/streams) deliberately excludes assistant_message -- see
+	// Types()'s doc -- so it never reaches this field for an unfocused row.
+	// Only the focused child's own dedicated event stream carries
+	// AssistantMessage. Every other row's Cost only advances at TurnEnd,
+	// same as before this field existed. Do not read CostLive on an
+	// unfocused row as "the fleet's live spend" -- it is simply never
+	// updated there.
 	CostLive float64
 
 	Attention int
@@ -260,9 +270,14 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 		n.ExitCode = p.ChildExited.ExitCode
 		n.Retrying = false
 	case *rafikiv1.Event_AssistantMessage:
-		// The running total for the in-flight turn -- not accumulated, just
-		// the latest reading, matching how Emitter.events() computes it
-		// (prior completed turns' cost + this turn's cost so far).
+		// The running total for the in-flight turn ONLY -- not accumulated,
+		// just the latest reading, matching how Engine.events() computes it
+		// (this turn's cost so far, deliberately excluding every completed
+		// PRIOR turn -- see AssistantMessage.cost_usd's proto doc). Adding
+		// this directly to n.Cost (the settled total from completed turns)
+		// in TotalCost() is what makes the number correct; publishing a
+		// conversation-lifetime figure here instead would double-count every
+		// prior turn on every in-flight reply.
 		if c := p.AssistantMessage.CostUsd; c != nil {
 			n.CostLive = *c
 		}
