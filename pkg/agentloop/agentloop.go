@@ -444,9 +444,18 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 			return &Result{Stats: stats}, fmt.Errorf("agentloop: unexpected stop reason %q", resp.StopReason)
 		}
 	}
-	// Unreachable: iteration == limit always forces stop above, which returns
-	// via wrapUp before the loop variable can advance past limit. Kept as a
-	// defensive fallback because Go requires a return after the for-loop.
+	// Unreachable, for one of two reasons depending on limit's sign. When
+	// limit > 0, iteration == limit always forces stop above, which returns
+	// via wrapUp before the loop variable can advance past limit. When
+	// limit <= 0 (unlimited — see Events.ShouldStop's doc), the for-condition
+	// itself (`limit <= 0 || ...`) is always true regardless of iteration, so
+	// the loop can only ever exit through one of the return statements above
+	// it — falling off the bottom is impossible for a completely different
+	// reason than the limit > 0 case. Kept as a defensive fallback because Go
+	// requires a return after the for-loop.
+	if limit <= 0 {
+		return &Result{Stats: stats}, errors.New("agentloop: loop exited without a result despite unlimited iterations")
+	}
 	return &Result{Stats: stats}, fmt.Errorf("agentloop: exceeded maximum tool iterations (%d)", limit)
 }
 
