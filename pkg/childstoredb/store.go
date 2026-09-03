@@ -125,7 +125,7 @@ SELECT child_id, COALESCE(conversation_id::text, ''), COALESCE(owner_user_id::te
        no_session, status, COALESCE(last_status,''),
        spawned_at, last_activity, exited_at, exit_code, COALESCE(exit_signal,''),
        COALESCE(executor_selector,''), COALESCE(workspace_mode,''),
-       max_depth, max_cost, max_children, config, labels
+       max_depth, max_cost, max_children, config, labels, updated_at
   FROM conversations.child`
 
 // List returns every child row.
@@ -159,7 +159,7 @@ func (s *Store) List(ctx context.Context) ([]childstore.ChildRecord, error) {
 			&rec.SpawnedAt, &lastActivity, &exitedAt, &rec.ExitCode, &rec.ExitSignal,
 			&rec.ExecutorSelector, &rec.WorkspaceMode,
 			&rec.MaxDepth, &rec.MaxCost, &rec.MaxChildren,
-			&configJSON, &labelsJSON,
+			&configJSON, &labelsJSON, &rec.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("childstoredb: scan: %w", err)
 		}
