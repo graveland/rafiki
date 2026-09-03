@@ -37,32 +37,30 @@ func newDarajaServeCmd() *cobra.Command {
 		Long: "Hosts exactly one child process and relays its stdio. daraja dies with\n" +
 			"its child and the child dies with daraja: there is no state to keep on\n" +
 			"either side of that pair.\n\n" +
-			"The child is claude, and its command line is built from the typed flags\n" +
-			"below — the same builder the executor's Launch and daraja's Restart use.",
+			"The child's command line is built from the typed flags below rather than\n" +
+			"passed through, so that this and the executor's Launch RPC share one\n" +
+			"builder (pkg/claudeargv) instead of keeping two in step.",
+		Args: cobra.NoArgs,
 		RunE: runDarajaServe,
 	}
 	cmd.Flags().String("socket", "", "unix socket to listen on (required)")
 	cmd.Flags().String("binary", "", "child binary to run (required)")
 	cmd.Flags().String("cwd", "", "working directory for the child")
-	cmd.Flags().String("model", "", "model id for the child")
-	cmd.Flags().String("resume-session", "", "claude session id to continue")
-	cmd.Flags().String("permission-mode", "", "claude permission mode")
+	cmd.Flags().String("kind", "claude", "child protocol to host")
+	cmd.Flags().String("model", "", "model to pass to the child")
+	cmd.Flags().String("resume", "", "session id to resume")
+	cmd.Flags().String("permission-mode", "", "child permission mode")
 	return cmd
 }
 
-func runDarajaServe(cmd *cobra.Command, args []string) error {
-	// The host rebuilds argv from the spec it holds, so raw child arguments no
-	// longer cross this boundary — accepting and silently dropping them would
-	// mislead a caller that still expects the old passthrough.
-	if len(args) > 0 {
-		return errors.New("daraja no longer takes raw child arguments; use --model, --resume-session and --permission-mode")
-	}
+func runDarajaServe(cmd *cobra.Command, _ []string) error {
 	socket, _ := cmd.Flags().GetString("socket")
 	binary, _ := cmd.Flags().GetString("binary")
 	cwd, _ := cmd.Flags().GetString("cwd")
+	kind, _ := cmd.Flags().GetString("kind")
 	model, _ := cmd.Flags().GetString("model")
-	resumeSession, _ := cmd.Flags().GetString("resume-session")
-	permissionMode, _ := cmd.Flags().GetString("permission-mode")
+	resume, _ := cmd.Flags().GetString("resume")
+	permMode, _ := cmd.Flags().GetString("permission-mode")
 	if socket == "" {
 		return errors.New("--socket is required")
 	}
@@ -72,13 +70,13 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 
 	host := daraja.NewHost(daraja.HostOptions{
 		Binary: binary,
+		Cwd:    cwd,
 		Spec: daraja.ChildSpec{
-			Kind:           daraja.KindClaude,
+			Kind:           kind,
 			Model:          model,
-			ResumeSession:  resumeSession,
-			PermissionMode: permissionMode,
+			ResumeSession:  resume,
+			PermissionMode: permMode,
 		},
-		Cwd: cwd,
 	})
 	if err := host.Start(); err != nil {
 		return fmt.Errorf("start child: %w", err)
