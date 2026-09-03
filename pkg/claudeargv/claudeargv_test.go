@@ -65,7 +65,7 @@ func TestBuildReturnsAFreshSlice(t *testing.T) {
 	if slices.Equal(a, b) {
 		t.Fatal("two builds with different models returned equal argv")
 	}
-	a = append(a, "--sentinel")
+	_ = append(a, "--sentinel")
 	if slices.Contains(Build(Params{Model: "m1"}), "--sentinel") {
 		t.Error("appending to a returned slice leaked into a later build")
 	}
