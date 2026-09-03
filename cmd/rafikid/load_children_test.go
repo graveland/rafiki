@@ -465,6 +465,38 @@ func TestRecoveryOwnership(t *testing.T) {
 			childstore.ChildRecord{DaemonID: "other", ConversationID: ""},
 			"me", liveSet, foreignLapsed,
 		},
+		{
+			// The spawn-to-lease window: the row was written moments ago and
+			// the async engine build has not acquired its lease yet. Adoption
+			// here is how a booting daemon stole a live child's conversation
+			// and its resume lost the lease race (verified in the integration
+			// suite before the gate existed).
+			"foreign row written moments ago is not adoptable without a lease",
+			childstore.ChildRecord{
+				DaemonID: "other", ConversationID: conv,
+				UpdatedAt: time.Now().Add(-time.Second),
+			},
+			"me", map[string]bool{}, foreignLive,
+		},
+		{
+			// A row past the grace is adoptable even though its writer was
+			// alive when it wrote: after the grace, absence of a lease is the
+			// only evidence there is.
+			"foreign row older than the grace is adopted",
+			childstore.ChildRecord{
+				DaemonID: "other", ConversationID: conv,
+				UpdatedAt: time.Now().Add(-foreignFreshGrace - time.Minute),
+			},
+			"me", map[string]bool{}, foreignLapsed,
+		},
+		{
+			// A record with no timestamp must not be silently gated: the
+			// missing signal would otherwise widen adoption for every
+			// hand-built record.
+			"foreign row with no timestamp keeps the old behaviour",
+			childstore.ChildRecord{DaemonID: "other", ConversationID: conv},
+			"me", map[string]bool{}, foreignLapsed,
+		},
 	}
 
 	for _, tc := range cases {

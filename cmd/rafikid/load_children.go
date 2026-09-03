@@ -21,6 +21,29 @@ const (
 	leaseRenewInterval = 60 * time.Second
 )
 
+// foreignFreshGrace is how recently a foreign row must have been written for
+// another daemon to decline adopting it, lease or no lease.
+//
+// "No live lease" is not proof of a lapsed lease: a lease can be ABSENT
+// because it was never yet acquired. The row is written at spawn, but the
+// conversation lease is acquired inside the ASYNC engine build (Runner.Start
+// returns before Build completes, and OnConversationResolved is the single
+// acquisition site), so a boot-time recovery scan landing in that window reads
+// a live foreign child as adoptable. Verified live: in the integration suite
+// a parallel daemon adopted a child mid-spawn, won the lease race, and the
+// original daemon's own resume was refused — its child died with
+// "conversation ... is driven by another daemon".
+//
+// updated_at is maintained by the row's own upsert (DEFAULT now() on insert,
+// updated_at = now() on every conflict), so a fresh row is proof its writer
+// was alive when it wrote, not a claim the writer has to renew. The cost of
+// the gate is bounded and conservative: a daemon that crashed within the
+// grace of its last write is adopted on the next boot after the row ages out
+// — and adoption already only happens at boot, so a lease that lapses after
+// a boot's scan waits for the next boot anyway. One minute is ~100x the
+// observed build-to-lease window and a fraction of leaseTTL.
+const foreignFreshGrace = time.Minute
+
 // recoveryPlan is what to do with one recovered child.
 type recoveryPlan int
 
@@ -129,6 +152,13 @@ func recoveryOwnership(rec childstore.ChildRecord, me string, live map[string]bo
 		return foreignLive
 	}
 	if rec.ConversationID != "" && live[rec.ConversationID] {
+		return foreignLive
+	}
+	// Freshness gate — see foreignFreshGrace. A record with no timestamp (a
+	// hand-built test record, a store that does not carry the column) reads as
+	// ancient and keeps the old behaviour, because a missing signal must not
+	// silently widen adoption.
+	if !rec.UpdatedAt.IsZero() && time.Since(rec.UpdatedAt) < foreignFreshGrace {
 		return foreignLive
 	}
 	return foreignLapsed

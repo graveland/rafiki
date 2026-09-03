@@ -49,6 +49,15 @@ type ChildRecord struct {
 	ExitCode     *int
 	ExitSignal   string
 
+	// UpdatedAt is when this row was last written, maintained by the database
+	// itself (DEFAULT now() on insert, updated_at = now() on every upsert). It
+	// is the one liveness signal a reader can trust without trusting the
+	// writer: a fresh row proves its daemon was alive when it wrote, which is
+	// what recovery's adoption gate keys on (see cmd/rafikid's
+	// foreignFreshGrace) — a lease can be absent because it was never yet
+	// acquired, but a row cannot be fresh unless its writer was alive.
+	UpdatedAt time.Time
+
 	ExecutorSelector string
 	WorkspaceMode    string
 
