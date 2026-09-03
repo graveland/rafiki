@@ -188,6 +188,11 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 		Cwd:         h.opts.Cwd,
 		Env:         h.opts.Env,
 		EnvOverride: h.opts.EnvOverride,
+		// claude joins DARAJA's process group rather than leading its own, so
+		// the executor's single kill(-pgid) reaches both — and still reaches
+		// claude if daraja is SIGKILLed and cannot clean up. See
+		// SpawnSpec.InheritProcessGroup.
+		InheritProcessGroup: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("daraja: build runner: %w", err)

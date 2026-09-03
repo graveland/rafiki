@@ -23,7 +23,7 @@ func TestDarajaServeRequiresSocketAndBinary(t *testing.T) {
 	if len(serve) == 0 {
 		t.Fatal("daraja has no subcommands; expected `serve`")
 	}
-	for _, flag := range []string{"socket", "binary", "cwd"} {
+	for _, flag := range []string{"socket", "binary", "cwd", "kind", "model", "resume", "permission-mode"} {
 		if serve[0].Flags().Lookup(flag) == nil {
 			t.Errorf("daraja serve is missing the --%s flag", flag)
 		}
