@@ -79,6 +79,7 @@ var tierByTool = map[string]Tier{
 	"agent_send":   TierDaemon,
 	"agent_kill":   TierDaemon,
 	"agent_models": TierDaemon,
+	"quota_status": TierDaemon,
 
 	// Daemon — `skill` loads from paths.SkillsDirs() as well as from the
 	// project, so it survives with no executor and only loses its

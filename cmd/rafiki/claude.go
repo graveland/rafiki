@@ -49,6 +49,9 @@ func newClaudeCmd() *cobra.Command {
 			"forces your subscription and rejects a non-Anthropic --model outright;\n" +
 			"off always bills the daemon's key. rafiki forwards your credential\n" +
 			"upstream and still captures the conversation.\n\n" +
+			"--limits prints your Anthropic subscription's current rate-limit\n" +
+			"status (5h/7d utilization) instead of launching a session; it only\n" +
+			"has data once a passthrough call has actually happened.\n\n" +
 			"Everything after -- is passed to claude verbatim.\n\n" +
 			"Example:\n" +
 			"  rafiki claude --model glm-5.2 -- --permission-mode plan",
@@ -71,6 +74,8 @@ func newClaudeCmd() *cobra.Command {
 	// the flag's old boolean form — true/1/false/0 remain accepted aliases too,
 	// see parsePassthroughMode.
 	cmd.Flags().Lookup("passthrough-auth").NoOptDefVal = string(passthroughOn)
+	cmd.Flags().Bool("limits", false,
+		"print your Anthropic subscription's current rate-limit status and exit, instead of launching a session")
 	return cmd
 }
 
@@ -131,6 +136,9 @@ func dialDaemon(ctx context.Context) (*client.Client, error) {
 
 // runClaude runs `rafiki claude [flags] [-- claude flags...]`.
 func runClaude(cmd *cobra.Command, args []string) error {
+	if limits, _ := cmd.Flags().GetBool("limits"); limits {
+		return runClaudeLimits(cmd)
+	}
 	url, _ := cmd.Flags().GetString("url")
 	token, _ := cmd.Flags().GetString("token")
 	model, _ := cmd.Flags().GetString("model")

@@ -122,8 +122,20 @@ func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	u := remoteDialURL()
 	if u == "" {
 		sock := connectSocketForCmd(cmd)
+		httpClient := connectHTTPClient(sock)
+		// Attach the user's own token when one is configured, so a per-user
+		// read (GetRateLimitStatus) can resolve identity locally too — see
+		// UserTokenAuth.IdentifyOptional. Optional, unlike the remote branch
+		// below: the socket itself remains the trust boundary for every
+		// other verb, and a local setup with no token configured at all (or
+		// a stale one left over from a different daemon) must keep working
+		// exactly as it always has — the daemon-side resolver never rejects
+		// on this mount, only enriches when it can.
+		if token := paths.TokenFromEnv(); token != "" {
+			httpClient = &http.Client{Transport: &bearerTransport{base: httpClient.Transport, token: token}}
+		}
 		return connectEndpoint{
-			httpClient: connectHTTPClient(sock),
+			httpClient: httpClient,
 			baseURL:    connectUDSBaseURL,
 			describe:   sock,
 			identity:   "unix:" + sock,

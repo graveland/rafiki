@@ -312,6 +312,32 @@ message ListModelsResponse {
   repeated ModelRow models = 1;
 }
 
+// RateLimitWindow is one Anthropic subscription rate-limit window's snapshot
+// (the "5h" or "7d" family of anthropic-ratelimit-unified-* headers).
+// utilization and reset_at are optional because a header Anthropic omits, or
+// sends in an unrecognized shape, must stay distinguishable from a real zero
+// or a real timestamp.
+message RateLimitWindow {
+  optional double utilization = 1; // Anthropic's own units, passed through verbatim
+  optional int64 reset_at = 2;     // unix seconds
+  string status = 3;               // "" = not reported
+}
+
+message GetRateLimitStatusRequest {}
+
+// GetRateLimitStatusResponse answers the CALLER's own latest captured
+// snapshot -- never an arbitrary user's, which is why the request carries no
+// id. A NotFound response (not an empty message) means this user has never
+// made an OAuth-passthrough call; that is expected for anyone who has not
+// used `rafiki claude --passthrough-auth`, not an error.
+message GetRateLimitStatusResponse {
+  string organization_id = 1;
+  RateLimitWindow five_h = 2;
+  RateLimitWindow seven_d = 3;
+  string overall_status = 4;
+  int64 updated_at = 5; // unix seconds
+}
+
 service Control {
   rpc GetHistory(GetHistoryRequest) returns (GetHistoryResponse);
   rpc StreamEvents(StreamEventsRequest) returns (stream Event);
@@ -323,4 +349,5 @@ service Control {
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  rpc GetRateLimitStatus(GetRateLimitStatusRequest) returns (GetRateLimitStatusResponse);
 }

@@ -4,6 +4,17 @@
 
 **Keep documentation in sync with code, always.** Any change to the wire protocol, CLI commands, config/env vars, or public behavior must update the relevant doc in the same change: `docs/reference/control-protocol.md` (wire protocol), `docs/agent-cli.md` (`rafikid agent` verbs), `README.md` (architecture/setup), `.env.example` (env vars). Documentation that drifts from code is worse than no documentation — don't defer doc updates to "later."
 
+- **`docs/plans/*.md` checkbox lists (`- [ ]`) are not a reliable completion
+  signal — this team ships the work and routinely never checks the boxes.**
+  Confirmed on a full sweep (2026-09-03): several plans with 0/N or ~30-100
+  unchecked items had every named artifact already live in the repo
+  (`pkg/nativebus`, `ProjectSkills`, `boundExecutor`, etc.), including one
+  literally titled "Start at Task 5" in its own status note where tasks 1-4
+  were done and unchecked anyway. Trust an explicit prose `**Status:**` line,
+  a cited commit hash, or a `grep`/`git log` check over the checkbox ratio.
+  Completed plans get moved to `docs/plans/complete/` (a gitignored directory
+  except for a handful of pre-gitignore tracked files, which need `git mv`).
+
 - **Two binaries, split by dependency: `rafiki` is a socket client that must
   never open a postgres connection; `rafikid` owns every DSN.** That is the
   whole point of the split and the easiest invariant for a future change to
@@ -1208,3 +1219,32 @@
   `RAFIKI_PROXY_LISTEN=127.0.0.1:18035 make check`. The deeper issue (the
   Connect socket's availability being silently coupled to the proxy face) is
   recorded for a future fix, not solved here.
+
+- **`quota_status` (Anthropic subscription rate-limit capture, `pkg/quota`)
+  only knows a child's owner USER ID at fresh spawn time, never on
+  resume/recovery.** `agentRuntimeOptions`'s `ownerUserID` parameter comes
+  from `owner.UserID` (the authenticated `users.Identity`) at the `Spawn`
+  call site only; the two resume/recovery call sites in `controller.go` pass
+  `""` because a resumed child's snapshot carries only `Labels["owner"]` (a
+  username) and `users.Store` has no username→id lookup to resolve it with.
+  A resumed child's `quota_status` tool call and `RateLimitStatus` therefore
+  always answer "no data captured" even when the daemon has real data for
+  that user — a conservative degrade (no evidence beats false evidence, same
+  rule `ProviderGuard` follows), not a crash, but worth knowing before
+  spending time debugging why a coordinator "lost" its quota visibility
+  across a daemon restart. Fixing it for real needs either a username→id
+  store method or threading `owner_user_id` onto `childstore.Snapshot`
+  itself (it is already a column on `conversations.child`, just not surfaced
+  there).
+- **The proxy's Anthropic rate-limit capture (`MessagesProxy.captureQuota`,
+  `pkg/server/proxy.go`) runs BEFORE the 4xx/5xx branch in
+  `streamAndCapture`, on every response shape (error, malformed, success) —
+  not just the success path the raw-trace capture uses.** This is
+  deliberate: a 429 is exactly the response most worth capturing headers
+  off, and `anthropic-ratelimit-unified-*` headers arrive on every response
+  Anthropic sends, not just 2xx ones. It also runs in a detached goroutine
+  rather than inline, because inline would add a database round trip to
+  time-to-first-byte on every single passthrough turn. If you add a new
+  early-return branch to `streamAndCapture` above the `captureQuota` call,
+  move the call or the new branch loses capture coverage silently — nothing
+  will error, the row just never gets written for that response shape.

@@ -461,6 +461,9 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetTaskLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 			face.Control.SetModelLister(connectModels{c: ctrl})
+			if face.QuotaStore != nil {
+				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
+			}
 		}
 	}
 	// The executor pool no longer owns a listener. It is reached at a PATH on
@@ -497,7 +500,7 @@ func runDaemon(opts runDaemonOpts) error {
 
 	if face != nil && face.Control != nil {
 		connectSock := paths.ConnectSocketPath()
-		if ln, err := serveConnectUDS(ctx, face.Control, connectSock); err != nil {
+		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, connectSock); err != nil {
 			// Fatal. This socket is how `rafiki attach` reaches the daemon; a
 			// daemon serving no local control plane looks alive and answers
 			// nothing the TUI asks for.
