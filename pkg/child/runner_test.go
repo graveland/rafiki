@@ -2,8 +2,10 @@ package child
 
 import (
 	"io"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -266,5 +268,56 @@ func TestSuperviseClosesStdinOnSelfExit(t *testing.T) {
 	if got := r.stdin.count(); got != 2 {
 		t.Errorf("stdin closed %d times after a follow-up Shutdown, want 2 "+
 			"(supervise's close plus Shutdown's own, which must tolerate the already-closed handle)", got)
+	}
+}
+
+// Setpgid is the default because a child that spawns subprocesses must be
+// signallable as a group. daraja needs the opposite: its claude must JOIN
+// daraja's group, so that one kill(-pgid) from the executor reaches both and
+// keeps reaching claude after daraja is SIGKILLed.
+//
+// Nothing else observes this, so a regression is silent — hence a test that
+// reads the real pgid out of the kernel.
+func TestInheritProcessGroupPutsTheChildInOurGroup(t *testing.T) {
+	r, err := newProcessRunner(SpawnSpec{
+		PiBinary:            "/bin/cat",
+		InheritProcessGroup: true,
+	})
+	if err != nil {
+		t.Fatalf("newProcessRunner: %v", err)
+	}
+	stdin, _, _, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = stdin.Close(); _, _ = r.Wait() }()
+
+	got, err := syscall.Getpgid(r.PID())
+	if err != nil {
+		t.Fatalf("Getpgid(%d): %v", r.PID(), err)
+	}
+	if want := syscall.Getpgrp(); got != want {
+		t.Errorf("child pgid = %d, want our own %d", got, want)
+	}
+	_ = os.Getpid()
+}
+
+func TestDefaultStillGivesTheChildItsOwnGroup(t *testing.T) {
+	r, err := newProcessRunner(SpawnSpec{PiBinary: "/bin/cat"})
+	if err != nil {
+		t.Fatalf("newProcessRunner: %v", err)
+	}
+	stdin, _, _, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = stdin.Close(); _, _ = r.Wait() }()
+
+	got, err := syscall.Getpgid(r.PID())
+	if err != nil {
+		t.Fatalf("Getpgid: %v", err)
+	}
+	if got != r.PID() {
+		t.Errorf("child pgid = %d, want its own pid %d", got, r.PID())
 	}
 }
