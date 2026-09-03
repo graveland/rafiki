@@ -30,6 +30,18 @@ type SpawnSpec struct {
 	Env         []string // env vars for the child process; see EnvOverride
 	EnvOverride bool     // if true, Env replaces the parent env entirely; if false, Env is appended to os.Environ()
 
+	// InheritProcessGroup leaves the child in the PARENT's process group
+	// instead of giving it its own.
+	//
+	// The default (its own group) is what lets shutdown signal a child's whole
+	// subprocess tree. daraja needs the inverse: the executor makes daraja a
+	// group leader and daraja's claude joins that group, so one kill(-pgid)
+	// reaches both — and keeps reaching claude after a SIGKILLed daraja orphans
+	// it to launchd, because a process group outlives its leader while any
+	// member remains. darwin has no PR_SET_CHILD_SUBREAPER, so the group is the
+	// only handle that survives that.
+	InheritProcessGroup bool
+
 	// Provider selects the wire protocol. When nil, IdentityProvider is used so
 	// existing callers and tests keep pi behavior unchanged.
 	Provider ProtocolProvider

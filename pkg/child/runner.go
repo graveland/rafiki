@@ -48,10 +48,11 @@ type processRunner struct {
 	cmd *exec.Cmd
 }
 
-// newProcessRunner builds a subprocess runner for spec. The child gets its own
-// process group so subprocesses it spawns can be signalled as a group during
-// shutdown — otherwise an orphan keeps a pipe write end open and blocks our
-// readers.
+// newProcessRunner builds a subprocess runner for spec. By default the child
+// gets its own process group so subprocesses it spawns can be signalled as a
+// group during shutdown — otherwise an orphan keeps a pipe write end open and
+// blocks our readers. spec.InheritProcessGroup opts out, leaving the child in
+// the parent's group (see SpawnSpec for when that is wanted).
 func newProcessRunner(spec SpawnSpec) (*processRunner, error) {
 	if spec.PiBinary == "" {
 		return nil, errors.New("pi binary path required")
@@ -61,7 +62,9 @@ func newProcessRunner(spec SpawnSpec) (*processRunner, error) {
 
 	cmd := exec.Command(spec.PiBinary, argv...)
 	cmd.Dir = spec.Cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if !spec.InheritProcessGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	if len(spec.Env) > 0 {
 		if spec.EnvOverride {
 			cmd.Env = append([]string{}, spec.Env...)
