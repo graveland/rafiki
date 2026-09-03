@@ -55,7 +55,7 @@ func newTestServer(t *testing.T, h *Host) (darajapbconnect.DarajaServiceClient, 
 }
 
 func TestServerHealthReportsTheProcess(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "sleep 30"}})
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestServerHealthReportsTheProcess(t *testing.T) {
 }
 
 func TestServerShutdownEndsTheProcessAndSignalsExit(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "sleep 30"}})
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestServerShutdownEndsTheProcessAndSignalsExit(t *testing.T) {
 }
 
 func TestServerRelayCarriesStdioBothWays(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/cat"})
+	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

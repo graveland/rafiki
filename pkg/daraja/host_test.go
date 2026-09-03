@@ -1,10 +1,34 @@
 package daraja
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// testChildBinary writes a fake child: a shell script with the given body that
+// ignores its arguments. Ignoring them is the point — the host now builds argv
+// through claudeargv.Build, so the fake runs under claude's flags (-p
+// --input-format stream-json ...) and /bin/sh or /bin/cat would die on the
+// first one.
+func testChildBinary(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-child")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// testEchoBinary is the long-lived fake child: it announces itself by echoing
+// its argv and stays up, so a restart test can tell the processes apart by the
+// model the spec names.
+func testEchoBinary(t *testing.T) string {
+	t.Helper()
+	return testChildBinary(t, `echo "$@"; sleep 30`)
+}
 
 // collectStdout drains events until it sees want or the deadline passes.
 func collectStdout(t *testing.T, h *Host, want string, d time.Duration) string {
@@ -31,13 +55,13 @@ func collectStdout(t *testing.T, h *Host, want string, d time.Duration) string {
 
 // The host runs a process and relays what it writes.
 func TestHostRelaysStdout(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "echo hello; sleep 30"}})
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
-	collectStdout(t, h, "hello", 5*time.Second)
+	collectStdout(t, h, "stream-json", 5*time.Second)
 
 	if h.PID() == 0 {
 		t.Error("PID is 0 after a successful Start")
@@ -49,7 +73,7 @@ func TestHostRelaysStdout(t *testing.T) {
 
 // stdin reaches the process.
 func TestHostWritesStdin(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/cat"})
+	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -64,7 +88,10 @@ func TestHostWritesStdin(t *testing.T) {
 // Restart replaces the process and announces the boundary IN the event stream,
 // so a consumer holding per-process state knows exactly where to reset.
 func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "echo first; sleep 30"}})
+	h := NewHost(HostOptions{
+		Binary: testEchoBinary(t),
+		Spec:   ChildSpec{Kind: KindClaude, Model: "first"},
+	})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -72,7 +99,7 @@ func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
 	collectStdout(t, h, "first", 5*time.Second)
 	oldPID := h.PID()
 
-	newPID, err := h.Restart([]string{"-c", "echo second; sleep 30"}, time.Second)
+	newPID, err := h.Restart(ChildSpec{Kind: KindClaude, Model: "second"}, time.Second)
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
@@ -83,6 +110,7 @@ func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
 	// The marker must arrive, and it must arrive BEFORE the new process's bytes.
 	deadline := time.After(5 * time.Second)
 	sawMarker := false
+	var got strings.Builder
 	for {
 		select {
 		case ev := <-h.Events():
@@ -93,7 +121,8 @@ func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
 					t.Fatalf("marker pid = %d, want %d", *ev.Restarted, newPID)
 				}
 			case len(ev.Stdout) > 0:
-				if strings.Contains(string(ev.Stdout), "second") {
+				got.Write(ev.Stdout)
+				if strings.Contains(got.String(), "second") {
 					if !sawMarker {
 						t.Fatal("new process output arrived before the restart marker; " +
 							"a consumer would fold it into the old process's state")
@@ -102,14 +131,40 @@ func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
 				}
 			}
 		case <-deadline:
-			t.Fatal("timeout waiting for restart marker + new output")
+			t.Fatalf("timeout waiting for restart marker + new output; got %q", got.String())
 		}
+	}
+}
+
+// A Restart with no spec must reuse the held one. The alternative — treating an
+// absent spec as an empty one — would relaunch claude with no --output-format
+// and no --resume: a running process that emits nothing parseable and has lost
+// the conversation.
+func TestRestartWithNoSpecReusesTheHeldOne(t *testing.T) {
+	h := NewHost(HostOptions{
+		Binary: testEchoBinary(t),
+		Spec:   ChildSpec{Kind: KindClaude, Model: "m1", ResumeSession: "s1"},
+	})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	if _, err := h.Restart(ChildSpec{}, time.Second); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+
+	h.mu.Lock()
+	got := h.spec
+	h.mu.Unlock()
+	if got.Model != "m1" || got.ResumeSession != "s1" {
+		t.Errorf("after a spec-less Restart the host holds %+v, want the original", got)
 	}
 }
 
 // Shutdown ends the process and reports how it went.
 func TestHostShutdownReportsOutcome(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "sleep 30"}})
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -131,7 +186,10 @@ func TestHostShutdownReportsOutcome(t *testing.T) {
 // os.Process.Wait returns when the process is reaped, NOT when its pipes drain,
 // so the pump is essentially always still live at that moment.
 func TestShutdownWithBlockedPumpDoesNotPanic(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "while :; do echo x; done"}})
+	h := NewHost(HostOptions{
+		Binary: testChildBinary(t, `while :; do echo x; done`),
+		Spec:   ChildSpec{Kind: KindClaude},
+	})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -152,14 +210,17 @@ func TestShutdownWithBlockedPumpDoesNotPanic(t *testing.T) {
 // Restart used to emit the boundary marker while holding h.mu, so a full buffer
 // with no consumer blocked every other method behind it — including Health.
 func TestRestartDoesNotBlockOtherCallsOnASlowConsumer(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "while :; do echo x; done"}})
+	h := NewHost(HostOptions{
+		Binary: testChildBinary(t, `while :; do echo x; done`),
+		Spec:   ChildSpec{Kind: KindClaude},
+	})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 	time.Sleep(300 * time.Millisecond)
 
-	go func() { _, _ = h.Restart([]string{"-c", "sleep 30"}, time.Second) }()
+	go func() { _, _ = h.Restart(ChildSpec{}, time.Second) }()
 
 	done := make(chan struct{})
 	go func() {
@@ -180,7 +241,7 @@ func TestRestartDoesNotBlockOtherCallsOnASlowConsumer(t *testing.T) {
 // A child that dies on its own must say so: nothing else tells the consumer,
 // and Running must stop claiming a process that is gone.
 func TestUnexpectedExitEmitsExitedAndClearsRunning(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "exit 7"}})
+	h := NewHost(HostOptions{Binary: testChildBinary(t, "exit 7"), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -209,7 +270,7 @@ func TestUnexpectedExitEmitsExitedAndClearsRunning(t *testing.T) {
 // A deliberate stop reports through Shutdown's return value and must NOT also
 // arrive as an Exited event; the caller that asked does not need telling twice.
 func TestDeliberateShutdownEmitsNoExitedEvent(t *testing.T) {
-	h := NewHost(HostOptions{Binary: "/bin/sh", Argv: []string{"-c", "sleep 30"}})
+	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

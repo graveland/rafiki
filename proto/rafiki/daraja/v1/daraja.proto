@@ -17,7 +17,8 @@ service DarajaService {
   rpc Relay(stream RelayRequest) returns (stream RelayResponse);
 
   // Restart replaces the child process: signal, wait for exit, launch again
-  // with the supplied argv. ONE verb rather than Stop plus Launch, because the
+  // with the supplied spec — or the one daraja already holds, when none is
+  // given. ONE verb rather than Stop plus Launch, because the
   // invariant that makes a 1:1 host simple is that a daraja always has exactly
   // one child; splitting it creates a childless daraja that then needs
   // representing, timing out and reaping.
@@ -63,10 +64,39 @@ message ProcessExited {
   string signal = 2;
 }
 
+// Kind names the child protocol daraja is hosting. daraja's RELAY is entirely
+// protocol-blind; only its spawn path consults this, to pick an argv builder.
+// A second stdio kind is therefore additive rather than a breaking change.
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  KIND_CLAUDE = 1;
+}
+
+message ClaudeParams {
+  string model = 1;
+  // resume_session is the claude session id to continue. It is the whole
+  // recovery story: a daraja and its child are disposable precisely because
+  // this id is a persisted column on conversations.child, so a replacement can
+  // always pick the conversation back up.
+  string resume_session = 2;
+  string permission_mode = 3;
+}
+
+// ChildSpec is everything needed to (re)build the child's command line.
+//
+// Typed rather than raw argv because the executor's Launch and daraja's Restart
+// would otherwise each need an argv builder, on opposite sides of an RPC. Both
+// call pkg/claudeargv instead.
+message ChildSpec {
+  Kind kind = 1;
+  ClaudeParams claude = 2;
+}
+
 message RestartRequest {
-  // argv excludes the binary itself. The caller owns argv because only it knows
-  // the session to resume; daraja never invents arguments.
-  repeated string argv = 1;
+  // spec replaces the child. When absent, daraja reuses the spec it currently
+  // holds — which is how a caller restarts without restating everything it
+  // already knows.
+  ChildSpec spec = 1;
   // grace_ms to wait after the interrupt before escalating to a hard kill.
   // Zero means the server default.
   int32 grace_ms = 2;

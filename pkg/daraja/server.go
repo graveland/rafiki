@@ -47,11 +47,29 @@ func (s *Server) Health(
 func (s *Server) Restart(
 	ctx context.Context, req *connect.Request[darajapb.RestartRequest],
 ) (*connect.Response[darajapb.RestartResponse], error) {
-	pid, err := s.host.Restart(req.Msg.GetArgv(), time.Duration(req.Msg.GetGraceMs())*time.Millisecond)
+	pid, err := s.host.Restart(
+		specFromProto(req.Msg.GetSpec()),
+		time.Duration(req.Msg.GetGraceMs())*time.Millisecond,
+	)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(&darajapb.RestartResponse{Pid: int32(pid)}), nil
+}
+
+// specFromProto maps the wire spec onto the host's. A nil message yields the
+// zero ChildSpec, which Restart reads as "reuse what you hold".
+func specFromProto(p *darajapb.ChildSpec) ChildSpec {
+	if p == nil || p.GetKind() != darajapb.Kind_KIND_CLAUDE {
+		return ChildSpec{}
+	}
+	c := p.GetClaude()
+	return ChildSpec{
+		Kind:           KindClaude,
+		Model:          c.GetModel(),
+		ResumeSession:  c.GetResumeSession(),
+		PermissionMode: c.GetPermissionMode(),
+	}
 }
 
 func (s *Server) Shutdown(
