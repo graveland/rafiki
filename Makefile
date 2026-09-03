@@ -195,11 +195,11 @@ proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from pr
 	gofmt -w pkg/executorpb
 	mkdir -p pkg/darajapb
 	$(PROTOC) \
-		--proto_path=proto/rafiki/daraja/v1 \
-		--go_out=pkg/darajapb \
-		--go_opt=paths=source_relative \
-		--connect-go_out=pkg/darajapb \
-		--connect-go_opt=paths=source_relative \
+		--plugin=protoc-gen-go=bin/protoc-gen-go \
+		--plugin=protoc-gen-connect-go=bin/protoc-gen-connect-go \
+		--proto_path=proto \
+		--go_out=pkg/darajapb --go_opt=module=go.graveland.dev/rafiki/pkg/darajapb \
+		--connect-go_out=pkg/darajapb --connect-go_opt=module=go.graveland.dev/rafiki/pkg/darajapb \
 		proto/rafiki/daraja/v1/daraja.proto
 	gofmt -w pkg/darajapb
 	rm -rf pkg/gen
