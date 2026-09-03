@@ -2,6 +2,32 @@
 
 package rail
 
+// spinnerFrames is the shared "something is happening" animation -- one
+// braille-dot cycle used for every working status. The rail's AnimatedGlyph
+// and the transcript's tail indicator (pkg/tui) both index into it with the
+// same tick counter, so the two spinners move in lock-step.
+var spinnerFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// SpinnerFrame returns the animation frame for tick.
+func SpinnerFrame(tick int) string {
+	return spinnerFrames[tick%len(spinnerFrames)]
+}
+
+// AnimatedGlyph is Glyph, except a working row (Working(n.Status)) cycles
+// through SpinnerFrame instead of sitting on its static icon. Exited and
+// retrying rows never spin -- Glyph's own precedence (exit beats status, retry
+// beats a live status) already decided those are not "making progress" glyphs.
+//
+// This is deliberately a SEPARATE function from Glyph: Glyph stays exactly
+// what railWidthFor measures, so the glyph column's width is fixed regardless
+// of animation state and never triggers a rail-width recalculation.
+func AnimatedGlyph(n Node, tick int) string {
+	if !n.Exited && !n.Retrying && Working(n.Status) {
+		return SpinnerFrame(tick)
+	}
+	return Glyph(n)
+}
+
 // Glyph is the activity indicator for one row: what this agent is doing right
 // now. It is NOT attention -- a working agent shows a glyph and no badge.
 //

@@ -120,7 +120,7 @@ func TestRailRowCostCountsAgainstWidth(t *testing.T) {
 		{ChildID: "c1", Name: "root", Cost: 12.34},
 		{ChildID: "c2", Name: "worker", ParentID: "c1", Depth: 1, Cost: 1.0},
 	}
-	out := renderRail(nodes, "c1", "c1", 30, false, nil)
+	out := renderRail(nodes, "c1", "c1", 30, false, nil, 0)
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := ansi.StringWidth(line); w > 30 {
 			t.Errorf("row is %d columns wide, budget is 30: %q", w, line)
@@ -139,7 +139,7 @@ func TestRenderRailShowsLiveCost(t *testing.T) {
 		{ChildID: "c1", Name: "root", CostLive: 0.42},
 		{ChildID: "c2", Name: "worker", ParentID: "c1", Depth: 1},
 	}
-	out := renderRail(nodes, "", "", 80, false, nil)
+	out := renderRail(nodes, "", "", 80, false, nil, 0)
 	if !strings.Contains(out, "$0.42") {
 		t.Errorf("render did not show the live cost: %q", out)
 	}
@@ -162,7 +162,7 @@ func TestRailGrowsToFitTheLongestName(t *testing.T) {
 	if wide <= narrow {
 		t.Errorf("width: short=%d long=%d, want the longer name to widen the rail", narrow, wide)
 	}
-	if got := renderRail(long, "c_1", "c_1", wide, false, nil); !strings.Contains(got, "executor-integration-reviewer") {
+	if got := renderRail(long, "c_1", "c_1", wide, false, nil, 0); !strings.Contains(got, "executor-integration-reviewer") {
 		t.Error("the longest name is still truncated at the width chosen for it")
 	}
 }

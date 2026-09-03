@@ -269,6 +269,11 @@ type Cockpit struct {
 	// needs to see once (the quit confirmation) rather than a standing state.
 	notice      string
 	noticeUntil time.Time
+	// frame is the animation tick for the rail and transcript spinners,
+	// advanced once per tickMsg (250ms). It free-runs regardless of whether
+	// anything is actually working -- AnimatedGlyph and the transcript tail
+	// indicator only read it for rows that are -- so it never needs resetting.
+	frame int
 	// focus is the pane taking un-global keys. Zero value focusInput is
 	// correct: a session starts ready to type.
 	focus focusPane
@@ -642,6 +647,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if c.notice != "" && time.Now().After(c.noticeUntil) {
 			c.notice = ""
 		}
+		c.frame++
 		return c, tick()
 
 	case tea.PasteMsg:
@@ -1064,20 +1070,6 @@ func (c *Cockpit) scrollFocused(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 
-// workingStatus reports whether a child is mid-turn.
-//
-// The set of statuses is CLOSED (protocol.Status's eight) and there is no
-// "running" -- a predicate written from intuition as status == "running"
-// matches nothing and silently does nothing, which this repo has shipped once
-// already in the recovery path.
-func workingStatus(s string) bool {
-	switch s {
-	case "streaming", "tool_running", "compacting":
-		return true
-	}
-	return false
-}
-
 // sendModeFor upgrades a PROMPT to a STEER when the target is mid-turn.
 //
 // ModePrompt is debounced and busy-GATED, so a prompt typed at a working agent
@@ -1093,7 +1085,7 @@ func workingStatus(s string) bool {
 // for callers that genuinely want queueing -- a coordinator's agent_send,
 // where the debounce and the per-(child, source) coalescing are the point.
 func sendModeFor(mode rafikiv1.SendMode, status string) rafikiv1.SendMode {
-	if mode == rafikiv1.SendMode_SEND_MODE_PROMPT && workingStatus(status) {
+	if mode == rafikiv1.SendMode_SEND_MODE_PROMPT && rail.Working(status) {
 		return rafikiv1.SendMode_SEND_MODE_STEER
 	}
 	return mode
@@ -1460,6 +1452,51 @@ func (c *Cockpit) railCols() int {
 	return railWidthFor(c.rail.Nodes(), c.width, c.currency)
 }
 
+// agentIdentity renders the focused agent's name and working directory for
+// the status line, styled to stand out from the plain status text beside it.
+// Empty whenever a modal owns the screen (its own view, not a conversation,
+// is what's on screen) or nothing is focused.
+//
+// This is the client's only on-screen confirmation of which agent and
+// directory it's talking to when there's just one child: the rail itself
+// stays hidden below two rows (renderRail), so with a single agent the rail
+// carries no name at all.
+func (c *Cockpit) agentIdentity() string {
+	if c.picker != nil || c.form != nil || c.showHelp {
+		return ""
+	}
+	f := c.focused()
+	if f == "" {
+		return ""
+	}
+	n, ok := c.rail.Get(f)
+	if !ok {
+		return ""
+	}
+	name := n.Name
+	if name == "" {
+		name = n.ChildID
+	}
+	id := styleAgentName.Render(name)
+	if n.Cwd != "" {
+		id += styleAgentPath.Render(" · " + n.Cwd)
+	}
+	return id
+}
+
+// workingLabel is the transcript tail spinner's text for a busy status.
+func workingLabel(status string) string {
+	switch status {
+	case "streaming":
+		return "streaming…"
+	case "tool_running":
+		return "running tool…"
+	case "compacting":
+		return "compacting…"
+	}
+	return "working…"
+}
+
 func (c *Cockpit) convWidth() int {
 	w := c.width
 	if rw := c.railCols(); rw > 0 {
@@ -1671,7 +1708,7 @@ func (c *Cockpit) View() tea.View {
 	railText := ""
 	if railCols > 0 {
 		railText = renderRail(c.rail.Nodes(), c.focused(), c.selected, railCols,
-			c.focus == focusRail, c.currency)
+			c.focus == focusRail, c.currency, c.frame)
 	}
 
 	bodyHeight := c.bodyHeight()
@@ -1710,13 +1747,31 @@ func (c *Cockpit) View() tea.View {
 	default:
 		conv = styleMeta.Render("loading…")
 	}
-	if c.pending != "" {
+	switch f := c.focused(); {
+	case c.pending != "":
+		// A message just sent takes priority over the working spinner: the
+		// two would otherwise flicker between each other for the instant
+		// between send and the first status event confirming the turn started.
 		conv += "\n" + stylePending.Render("⏳ "+c.pending)
+	case c.picker == nil && c.form == nil && !c.showHelp && c.sessions[f] != nil:
+		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
+			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
+		}
 	}
 
 	statusLine := c.status
 	if c.notice != "" {
 		statusLine = c.notice
+	}
+	if id := c.agentIdentity(); id != "" {
+		if avail := c.width - ansi.StringWidth(statusLine) - 1; avail > 0 {
+			id = clip(id, avail)
+			gap := c.width - ansi.StringWidth(statusLine) - ansi.StringWidth(id) - 1
+			if gap < 1 {
+				gap = 1
+			}
+			statusLine += strings.Repeat(" ", gap) + id
+		}
 	}
 
 	// The focused pane is NAMED and MARKED, always. Naming it in the footer was

@@ -70,6 +70,43 @@ func TestSeedAcceptsEveryLiveStatus(t *testing.T) {
 	}
 }
 
+func TestSeedPopulatesCwd(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle", Cwd: "/work/scout", Labels: map[string]string{}},
+	})
+	n, ok := r.Get("c_1")
+	if !ok {
+		t.Fatal("c_1 not seeded")
+	}
+	if n.Cwd != "/work/scout" {
+		t.Errorf("Cwd = %q, want /work/scout", n.Cwd)
+	}
+
+	// A re-seed refreshes Cwd the same way it refreshes Name and SessionID --
+	// it is daemon-authoritative, not client reading history.
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle", Cwd: "/work/scout-renamed", Labels: map[string]string{}},
+	})
+	n, _ = r.Get("c_1")
+	if n.Cwd != "/work/scout-renamed" {
+		t.Errorf("Cwd after re-seed = %q, want /work/scout-renamed", n.Cwd)
+	}
+}
+
+func TestWorkingMatchesTheMidTurnStatuses(t *testing.T) {
+	for _, st := range []string{"streaming", "tool_running", "compacting"} {
+		if !rail.Working(st) {
+			t.Errorf("Working(%q) = false, want true", st)
+		}
+	}
+	for _, st := range []string{"spawning", "idle", "blocked_ui", "shutting_down", "exited", "running", ""} {
+		if rail.Working(st) {
+			t.Errorf("Working(%q) = true, want false", st)
+		}
+	}
+}
+
 func TestChildSpawnedAddsARow(t *testing.T) {
 	r := rail.New()
 	r.Seed([]*rafikiv1.ChildSummary{summary("c_root", "coordinator", "", "idle", 0)})
