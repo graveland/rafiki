@@ -317,6 +317,18 @@ var (
 	styleToolResult = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))              // grey
 	styleToolArg    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))              // arg summary
 
+	// styleWorking marks the transcript's tail spinner -- the only on-screen
+	// cue that an agent is mid-turn during a stretch (composing a reply,
+	// compacting) that streams no incremental content to render.
+	styleWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true) // cyan bold
+
+	// styleAgentName/styleAgentPath give the status line's focused-agent
+	// identity emphasis of its own rather than blending into the plain
+	// status text beside it -- same cyan family as styleRunning/styleUser,
+	// with weight instead of colour telling the name from its path.
+	styleAgentName = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)   // cyan bold
+	styleAgentPath = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Italic(true) // cyan italic
+
 	// A failed tool call is the thing you are scrolling to find. It gets a red
 	// bar down its ENTIRE height — the call line and every row of output — so
 	// it is findable at a glance rather than by reading for a ✗ among the ✓s.

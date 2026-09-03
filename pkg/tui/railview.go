@@ -79,7 +79,7 @@ func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 	return want
 }
 
-func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocused bool, cur *clientstate.Currency) string {
+func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocused bool, cur *clientstate.Currency, tick int) string {
 	if len(nodes) < 2 {
 		return ""
 	}
@@ -109,7 +109,7 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		// like the cursor and the badge. Rows are clipped before styling, so
 		// anything appended afterwards escapes the pane and bleeds colour into
 		// the transcript.
-		left := cursor + strings.Repeat("  ", n.Depth) + rail.Glyph(n) + " " + name + badge
+		left := cursor + strings.Repeat("  ", n.Depth) + rail.AnimatedGlyph(n, tick) + " " + name + badge
 		cost := fmtCost(n.TotalCost(), cur)
 		row := clip(left, width)
 		if cost != "" {

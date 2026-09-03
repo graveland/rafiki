@@ -48,7 +48,7 @@ func TestRailHiddenForASingleChild(t *testing.T) {
 	// Session-first: create/attach <id> shows no rail at all. The rail grows
 	// out of a normal session -- no cockpit to configure, no empty pane.
 	nodes := []rail.Node{{ChildID: "c_1", Name: "coordinator", Status: "idle"}}
-	if got := renderRail(nodes, "c_1", "c_1", 24, false, nil); got != "" {
+	if got := renderRail(nodes, "c_1", "c_1", 24, false, nil, 0); got != "" {
 		t.Errorf("renderRail with one child = %q, want empty", got)
 	}
 }
@@ -58,14 +58,121 @@ func TestRailAppearsWithTheSecondChild(t *testing.T) {
 		{ChildID: "c_1", Name: "coordinator", Status: "streaming"},
 		{ChildID: "c_2", Name: "scout", ParentID: "c_1", Depth: 1, Status: "idle", Attention: 2},
 	}
-	got := renderRail(nodes, "c_1", "c_1", 24, false, nil)
+	got := renderRail(nodes, "c_1", "c_1", 24, false, nil, 0)
 	if got == "" {
 		t.Fatal("renderRail with two children must render")
 	}
-	for _, want := range []string{"coordinator", "scout", "2", rail.Glyph(nodes[0])} {
+	for _, want := range []string{"coordinator", "scout", "2", rail.AnimatedGlyph(nodes[0], 0)} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rail missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// ── status line identity & working spinner ──────────────────────────────────
+
+func TestStatusLineShowsFocusedAgentIdentity(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle", Cwd: "/work/scout", Labels: map[string]string{}},
+	})
+
+	got := ansi.Strip(c.View().Content)
+	if !strings.Contains(got, "scout") {
+		t.Errorf("status line missing the agent name:\n%s", got)
+	}
+	if !strings.Contains(got, "/work/scout") {
+		t.Errorf("status line missing the agent path:\n%s", got)
+	}
+}
+
+// A bare `rafiki attach` has nothing focused (NewCockpit starts the rail
+// focused instead), so there is no identity to show and no " · " separator
+// should appear at all.
+func TestStatusLineIdentityAbsentWithoutAFocusedChild(t *testing.T) {
+	c := newTestCockpit("")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	got := ansi.Strip(c.View().Content)
+	if strings.Contains(got, " · ") {
+		t.Errorf("no agent is focused, but the identity separator showed up:\n%s", got)
+	}
+}
+
+// The identity must clip rather than overflow -- a long cwd on a narrow
+// terminal must not push the status line past the window width.
+func TestStatusLineIdentityClipsToWidth(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle",
+			Cwd: "/very/long/path/that/will/not/fit/on/a/narrow/terminal", Labels: map[string]string{}},
+	})
+
+	// Only the status line itself is under test here -- the footer's key
+	// hints are a separate, pre-existing overflow this change does not touch.
+	got := ansi.Strip(c.View().Content)
+	found := false
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.Contains(line, "scout") {
+			continue
+		}
+		found = true
+		if w := ansi.StringWidth(line); w > 40 {
+			t.Errorf("status line is %d columns wide, budget is 40: %q", w, line)
+		}
+	}
+	if !found {
+		t.Fatal("no line contained the agent name at all -- identity was dropped, not clipped")
+	}
+}
+
+func TestTranscriptShowsWorkingSpinnerWhenBusy(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "streaming", Labels: map[string]string{}},
+	})
+
+	got := ansi.Strip(c.View().Content)
+	if !strings.Contains(got, "streaming…") {
+		t.Errorf("transcript missing the working spinner line:\n%s", got)
+	}
+}
+
+func TestTranscriptHasNoWorkingSpinnerWhenIdle(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle", Labels: map[string]string{}},
+	})
+
+	got := ansi.Strip(c.View().Content)
+	for _, label := range []string{"streaming…", "running tool…", "compacting…", "working…"} {
+		if strings.Contains(got, label) {
+			t.Errorf("idle transcript should not show a working spinner, found %q:\n%s", label, got)
+		}
+	}
+}
+
+// A pending send takes priority over the working spinner so the two do not
+// flicker between each other in the instant before the first status event
+// confirms the turn started.
+func TestPendingSuppressesTheWorkingSpinner(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "streaming", Labels: map[string]string{}},
+	})
+	c.pending = "hello"
+
+	got := ansi.Strip(c.View().Content)
+	if strings.Contains(got, "streaming…") {
+		t.Error("pending send did not suppress the working spinner")
+	}
+	if !strings.Contains(got, "⏳ hello") {
+		t.Errorf("pending line missing:\n%s", got)
 	}
 }
 
@@ -75,7 +182,7 @@ func TestRailIndentsByDepth(t *testing.T) {
 		{ChildID: "c_2", Name: "kid", ParentID: "c_1", Depth: 1, Status: "idle"},
 		{ChildID: "c_3", Name: "grandkid", ParentID: "c_2", Depth: 2, Status: "idle"},
 	}
-	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30, false, nil), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30, false, nil, 0), "\n"), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("want 3 rows, got %d: %v", len(lines), lines)
 	}
@@ -92,7 +199,7 @@ func TestRailRowsAreClippedToWidth(t *testing.T) {
 		{ChildID: "c_1", Name: "a", Status: "idle"},
 		{ChildID: "c_2", Name: strings.Repeat("verylongname", 20), Status: "idle"},
 	}
-	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20, false, nil), "\n") {
+	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20, false, nil, 0), "\n") {
 		if len([]rune(line)) > 20 {
 			t.Errorf("row is %d runes, want <= 20: %q", len([]rune(line)), line)
 		}

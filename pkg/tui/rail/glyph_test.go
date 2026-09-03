@@ -75,3 +75,50 @@ func TestGlyphOfAnUnknownStatusIsNeverEmpty(t *testing.T) {
 		t.Error("an unrecognised status must still render a glyph, not a hole in the rail")
 	}
 }
+
+func TestAnimatedGlyphSpinsOnlyWhileWorking(t *testing.T) {
+	for _, status := range []string{"streaming", "tool_running", "compacting"} {
+		n := rail.Node{Status: status}
+		f0, f1 := rail.AnimatedGlyph(n, 0), rail.AnimatedGlyph(n, 1)
+		if f0 == f1 {
+			t.Errorf("status %q: AnimatedGlyph did not change between ticks (%q both)", status, f0)
+		}
+		if f0 == rail.Glyph(n) {
+			t.Errorf("status %q: AnimatedGlyph(tick=0) = %q, same as the static Glyph -- "+
+				"want the spinner's own first frame", status, f0)
+		}
+	}
+}
+
+func TestAnimatedGlyphIsStaticForNonWorkingStatuses(t *testing.T) {
+	for _, status := range []string{"spawning", "idle", "blocked_ui", "shutting_down"} {
+		n := rail.Node{Status: status}
+		if got, want := rail.AnimatedGlyph(n, 3), rail.Glyph(n); got != want {
+			t.Errorf("status %q: AnimatedGlyph = %q, want the static Glyph %q", status, got, want)
+		}
+	}
+}
+
+// Exit and retry must keep winning over a busy status, exactly as Glyph
+// already decides -- a signalled-but-still-"streaming" row must not spin.
+func TestAnimatedGlyphNeverSpinsAnExitedOrRetryingRow(t *testing.T) {
+	code := int32(0)
+	exited := rail.Node{Status: "streaming", Exited: true, ExitCode: &code}
+	if got, want := rail.AnimatedGlyph(exited, 5), rail.Glyph(exited); got != want {
+		t.Errorf("exited row spun: AnimatedGlyph = %q, want static %q", got, want)
+	}
+	retrying := rail.Node{Status: "streaming", Retrying: true}
+	if got, want := rail.AnimatedGlyph(retrying, 5), rail.Glyph(retrying); got != want {
+		t.Errorf("retrying row spun: AnimatedGlyph = %q, want static %q", got, want)
+	}
+}
+
+func TestSpinnerFrameLoops(t *testing.T) {
+	if rail.SpinnerFrame(0) == rail.SpinnerFrame(1) {
+		t.Error("consecutive frames must differ")
+	}
+	const frameCount = 10 // len(spinnerFrames) in glyph.go
+	if got := rail.SpinnerFrame(0); got != rail.SpinnerFrame(frameCount) {
+		t.Errorf("SpinnerFrame did not loop after %d frames: %q != %q", frameCount, got, rail.SpinnerFrame(frameCount))
+	}
+}

@@ -34,6 +34,19 @@ func LiveStatuses() []string {
 	}
 }
 
+// Working reports whether a child is mid-turn: streaming a reply, executing a
+// tool, or compacting its context. The set of statuses is CLOSED
+// (protocol.Status's eight) and there is NO "running" status -- a predicate
+// written from intuition as status == "running" matches nothing and silently
+// does nothing, which this repo has shipped once already in the recovery path.
+func Working(status string) bool {
+	switch status {
+	case "streaming", "tool_running", "compacting":
+		return true
+	}
+	return false
+}
+
 // Node is one child's row.
 type Node struct {
 	ChildID  string
@@ -50,6 +63,12 @@ type Node struct {
 	// SessionID is the child's session/conversation id from ListChildren, so
 	// the task box can address the ledger by conversation without another RPC.
 	SessionID string
+
+	// Cwd is the child's working directory, from ListChildren. It has no
+	// event-stream source -- ChildSpawned carries no cwd -- so a freshly
+	// spawned child shows it only once the cockpit's reseed-on-unknown-child
+	// path re-seeds from ListChildren.
+	Cwd string
 
 	// Latest is the highest ordinal known to exist for this child; it drives the
 	// activity indicator. RailCursor is the highest ordinal RECEIVED on the rail
@@ -183,6 +202,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 				existing.ParentID = p
 			}
 			existing.SessionID = s.GetSessionId()
+			existing.Cwd = s.GetCwd()
 			continue
 		}
 		n := &Node{
@@ -191,6 +211,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			ParentID:  s.GetLabels()[ParentLabel],
 			Status:    s.GetStatus(),
 			SessionID: s.GetSessionId(),
+			Cwd:       s.GetCwd(),
 		}
 		// Seeding is a CLEAN BOARD: everything that happened before you attached
 		// counts as read. Attaching is not a claim to have read anything; it is
