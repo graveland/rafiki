@@ -468,3 +468,22 @@ func TestMaxCostFieldRejectsGarbage(t *testing.T) {
 		t.Errorf("problem = %q, want it to name max-cost", problem)
 	}
 }
+
+// grantedCost (cmd/rafikid/limits.go) treats a zero MaxCost as UNLIMITED, so
+// typing "0" into this field must be rejected rather than silently granting
+// unlimited spend — the opposite of what someone typing a budget means.
+func TestMaxCostFieldRejectsZero(t *testing.T) {
+	c := formCockpit(t)
+	c.form.inputs[fieldMaxCost].SetValue("0")
+
+	p, problem := c.form.params(nil)
+	if problem == "" {
+		t.Fatalf("params accepted 0 as a max-cost: %+v", p)
+	}
+	if !strings.Contains(problem, "max-cost") || !strings.Contains(problem, "0") {
+		t.Errorf("problem = %q, want it to name max-cost and explain 0 means unlimited", problem)
+	}
+	if p.maxCost != nil {
+		t.Errorf("maxCost = %v, want nil on a rejected value", *p.maxCost)
+	}
+}
