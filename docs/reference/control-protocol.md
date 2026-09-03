@@ -273,6 +273,21 @@ Every event payload is classified into a tier:
 It is a string rather than an enum so a new daemon status does not require
 regenerating every client.
 
+`AssistantMessage.cost_usd` and `TurnEnd.cost_usd` carry **different**
+meanings despite sharing a name and a stream. `AssistantMessage.cost_usd` is
+the RUNNING total for the CURRENT turn only, so far — every iteration of that
+turn up to and including this reply, deliberately excluding every completed
+prior turn. It fires once per LLM reply, before the turn ends, and is what
+lets a live viewer (the TUI rail) show a cost figure moving during a
+still-running turn. `TurnEnd.cost_usd` is that same turn's FINAL cost, fired
+once when the turn actually ends. A client that wants a running
+conversation-lifetime total sums settled `TurnEnd.cost_usd` values across
+prior turns and adds the latest `AssistantMessage.cost_usd` — summing
+`AssistantMessage.cost_usd` figures directly double-counts, since each one
+already includes every earlier iteration of the same turn. Both fields are
+`optional`: absence means "not yet priced" (no catalog entry for the model),
+distinct from a reported zero (priced and genuinely free).
+
 ## 3. Framing
 
 JSON Lines (`application/jsonl`).
