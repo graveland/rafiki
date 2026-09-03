@@ -46,6 +46,11 @@ type Runner interface {
 // the Runner seam existed.
 type processRunner struct {
 	cmd *exec.Cmd
+
+	// inheritGroup mirrors spec.InheritProcessGroup: the child did NOT get its
+	// own process group, so signalGroup must target the pid rather than -pid.
+	// Set once at construction and never written again.
+	inheritGroup bool
 }
 
 // newProcessRunner builds a subprocess runner for spec. By default the child
@@ -72,7 +77,7 @@ func newProcessRunner(spec SpawnSpec) (*processRunner, error) {
 			cmd.Env = append(os.Environ(), spec.Env...)
 		}
 	}
-	return &processRunner{cmd: cmd}, nil
+	return &processRunner{cmd: cmd, inheritGroup: spec.InheritProcessGroup}, nil
 }
 
 // NewProcessRunner exposes the subprocess runner to other packages.
@@ -142,11 +147,23 @@ func (p *processRunner) Interrupt() error { return p.signalGroup(syscall.SIGINT)
 // child spawned are signalled too. A process that exited between the caller's
 // liveness check and here yields ESRCH — that is the no-op the caller asked
 // for, not an error.
+//
+// A child that INHERITED its parent's group is the exception: no group's id is
+// its pid, so -pid is always ESRCH and the signal would silently stop nothing —
+// daraja's stopLocked would block forever on the exit it was waiting for. The
+// group the child actually belongs to is daraja's own, and signalling that
+// would kill daraja too, so the pid itself is the only target that reaches the
+// child without suiciding the host. The executor's Reap remains the
+// group-level backstop for the child's subprocesses.
 func (p *processRunner) signalGroup(sig syscall.Signal) error {
 	if p.cmd.Process == nil {
 		return fmt.Errorf("signal: no process handle")
 	}
-	if err := syscall.Kill(-p.cmd.Process.Pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+	target := -p.cmd.Process.Pid
+	if p.inheritGroup {
+		target = p.cmd.Process.Pid
+	}
+	if err := syscall.Kill(target, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
 	return nil
