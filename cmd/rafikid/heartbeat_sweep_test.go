@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,69 @@ func TestHeartbeatFiresOnceThePastTheInterval(t *testing.T) {
 	}
 	if !strings.Contains(batches[0].fragments[0], "$2.50") {
 		t.Errorf("heartbeat fragment must name running cost: %q", batches[0].fragments[0])
+	}
+	// The sweep fires exactly 6 minutes (clk-time) after the child was first
+	// observed working — see heartbeatState.since's doc — so the fragment
+	// must name that elapsed time too, not just cost: cost alone conveys
+	// nothing for an unpriced local model, which always reads $0.00.
+	if !strings.Contains(batches[0].fragments[0], "6m0s so far") {
+		t.Errorf("heartbeat fragment must name elapsed time: %q", batches[0].fragments[0])
+	}
+}
+
+// When no coster is configured, the fragment must not assert a false
+// "$0.00" — it should simply omit the cost clause, mirroring sweepBudgets'
+// own best-effort handling of the identical situation. Elapsed time, which
+// does not depend on the coster, must still be reported.
+func TestHeartbeatOmitsCostClauseWithNoCoster(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	c.heartbeatInterval = 5 * time.Minute
+	c.coster = nil
+
+	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
+	c.sweepHeartbeats(context.Background(), clk.Now())
+	clk.Advance(6 * time.Minute)
+	c.sweepHeartbeats(context.Background(), clk.Now())
+	clk.Advance(6 * time.Second)
+
+	batches := cap.batches()
+	if len(batches) != 1 {
+		t.Fatalf("want 1 heartbeat, got %d: %+v", len(batches), batches)
+	}
+	frag := batches[0].fragments[0]
+	if strings.Contains(frag, "$") {
+		t.Errorf("heartbeat asserted a cost figure with no coster configured: %q", frag)
+	}
+	if !strings.Contains(frag, "so far") {
+		t.Errorf("heartbeat must still name elapsed time: %q", frag)
+	}
+}
+
+// A coster that errors on the query must degrade the same way as a missing
+// coster: no cost clause, no false $0.00.
+func TestHeartbeatOmitsCostClauseOnQueryError(t *testing.T) {
+	c, clk, cap := settleFixture(t)
+	c.heartbeatInterval = 5 * time.Minute
+	c.coster = fakeCoster{err: errors.New("db unreachable")}
+
+	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
+	c.sweepHeartbeats(context.Background(), clk.Now())
+	clk.Advance(6 * time.Minute)
+	c.sweepHeartbeats(context.Background(), clk.Now())
+	clk.Advance(6 * time.Second)
+
+	batches := cap.batches()
+	if len(batches) != 1 {
+		t.Fatalf("want 1 heartbeat, got %d: %+v", len(batches), batches)
+	}
+	frag := batches[0].fragments[0]
+	if strings.Contains(frag, "$0.00") {
+		t.Errorf("heartbeat asserted $0.00 on a failed cost query: %q", frag)
+	}
+	// due()'s lastSent bookkeeping must still have advanced despite the
+	// failed cost query — only the message content degrades.
+	if !strings.Contains(frag, "so far") {
+		t.Errorf("heartbeat must still fire and name elapsed time: %q", frag)
 	}
 }
 

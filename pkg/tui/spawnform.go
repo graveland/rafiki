@@ -107,7 +107,7 @@ type spawnForm struct {
 }
 
 // fieldLabelWidth is the column the row labels occupy. Wide enough for
-// "max-cost (CAD)" (15 chars) plus one trailing space.
+// "max-cost (CAD)" (14 chars) plus two trailing spaces of headroom.
 const fieldLabelWidth = 16
 
 // formChrome is the rows the form spends on things that are not suggestions:
@@ -241,6 +241,14 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		v, err := strconv.ParseFloat(raw, 64)
 		if err != nil || v < 0 {
 			return spawnParams{}, fmt.Sprintf("max-cost: %q is not a non-negative number", raw)
+		}
+		// 0 is not "spend nothing" — grantedCost (cmd/rafikid/limits.go)
+		// treats a zero MaxCost as UNLIMITED, matching SpawnRequest.MaxCost's
+		// documented zero-value convention. Typing "0" into a field labeled
+		// "max-cost" is the opposite of what a person typing a budget means,
+		// so reject it explicitly rather than silently granting no limit.
+		if v == 0 {
+			return spawnParams{}, "max-cost: 0 means unlimited — leave the field blank instead"
 		}
 		usd := costfmt.ToUSD(v, cur)
 		p.maxCost = &usd

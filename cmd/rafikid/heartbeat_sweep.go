@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,12 +16,22 @@ import (
 const heartbeatEventSource = "subagents-heartbeat"
 
 // heartbeatState tracks, per child, whether it is currently in an unbroken
-// working spell and when it last got a heartbeat pushed to its parent.
-// Guarded by its own mutex, matching budgetBreaches and turnOutcomeStore.
+// working spell, when it last got a heartbeat pushed to its parent, and when
+// the current spell was first observed. Guarded by its own mutex, matching
+// budgetBreaches and turnOutcomeStore.
 type heartbeatState struct {
-	mu       sync.Mutex
-	working  map[string]struct{}
+	mu      sync.Mutex
+	working map[string]struct{}
+
+	// lastSent advances on every real fire — see due().
 	lastSent map[string]time.Time
+
+	// spellSince is seeded at the SAME moment as lastSent's first entry for a
+	// child (due()'s lazy-seed branch) but, unlike lastSent, is NEVER
+	// overwritten again for that spell — it stays fixed at the spell's start
+	// until stopWorking clears it. sweepHeartbeats reads it to report elapsed
+	// time in the check-in fragment.
+	spellSince map[string]time.Time
 }
 
 // startWorking marks a child as being in a working spell. Called from
@@ -45,6 +56,7 @@ func (h *heartbeatState) stopWorking(childID string) {
 	defer h.mu.Unlock()
 	delete(h.working, childID)
 	delete(h.lastSent, childID)
+	delete(h.spellSince, childID)
 }
 
 // due reports whether childID, currently tracked as working, has gone at
@@ -77,6 +89,13 @@ func (h *heartbeatState) due(childID string, now time.Time, interval time.Durati
 	last, sent := h.lastSent[childID]
 	if !sent {
 		h.lastSent[childID] = now
+		// Seeded once, at this same first-observation moment, and never
+		// touched again until stopWorking clears it alongside lastSent —
+		// see spellSince's doc.
+		if h.spellSince == nil {
+			h.spellSince = make(map[string]time.Time)
+		}
+		h.spellSince[childID] = now
 		return false
 	}
 	if now.Sub(last) < interval {
@@ -84,6 +103,17 @@ func (h *heartbeatState) due(childID string, now time.Time, interval time.Durati
 	}
 	h.lastSent[childID] = now
 	return true
+}
+
+// since reports when childID's current working spell was first observed —
+// see spellSince's doc. Returns the zero Time if childID has no tracked
+// spell (never seen by due(), or one that has already gone idle). Callers
+// must diff it against their OWN caller-supplied clock, never time.Now(),
+// for the same reason due() takes now as a parameter.
+func (h *heartbeatState) since(childID string) time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.spellSince[childID]
 }
 
 // sweepHeartbeats pushes one coalesced check-in fragment to each working
@@ -115,19 +145,34 @@ func (c *Controller) sweepHeartbeats(ctx context.Context, now time.Time) {
 		if !c.heartbeats.due(snap.ChildID, now, c.heartbeatInterval) {
 			continue
 		}
-		spent := 0.0
+
+		// Build the parenthetical from whatever data is actually available.
+		// Elapsed time comes from the sweep's OWN clock (now), never
+		// time.Now() — see heartbeatState.since's doc. A failed or
+		// unconfigured cost query OMITS the cost clause entirely rather than
+		// asserting a false "$0.00", mirroring sweepBudgets' own
+		// best-effort handling of the identical situation (budget_sweep.go).
+		var parts []string
+		if since := c.heartbeats.since(snap.ChildID); !since.IsZero() {
+			parts = append(parts, now.Sub(since).Round(time.Minute).String()+" so far")
+		}
 		if c.coster != nil {
-			if s, err := c.subtreeSpend(ctx, snap.ChildID); err == nil {
-				spent = s
+			if spent, err := c.subtreeSpend(ctx, snap.ChildID); err == nil {
+				parts = append(parts, fmt.Sprintf("this agent and its subagents have spent $%.2f", spent))
 			}
 		}
+		var detail string
+		if len(parts) > 0 {
+			detail = " (" + strings.Join(parts, "; ") + ")"
+		}
+
 		name := snap.Name
 		if name == "" {
 			name = "unnamed"
 		}
 		frag := fmt.Sprintf(
-			"agent %s (%s) is still working (spent $%.2f so far). No action needed unless you want to check in.",
-			snap.ChildID, name, spent)
+			"agent %s (%s) is still working%s. No action needed unless you want to check in.",
+			snap.ChildID, name, detail)
 		c.evbuf.Push(parent, heartbeatEventSource, snap.ChildID, frag)
 	}
 }
