@@ -150,10 +150,16 @@ func bootDaemon(t *testing.T) *daemon {
 		// A developer's ambient RAFIKI_DB would otherwise point this throwaway
 		// daemon at their real conversations database.
 		"RAFIKI_DB="+os.Getenv("RAFIKI_TEST_DSN"),
+		// Each daemon binds its OWN ephemeral proxy port. A fixed
+		// RAFIKI_PROXY_LISTEN (or the :8035 default) makes the suite's parallel
+		// daemons collide with each other — the first to bind wins, the rest
+		// log "address already in use" and come up degraded, and the two
+		// Connect-plane tests fail because the Connect UDS is served only when
+		// the proxy face comes up. Port 0 lets the kernel pick, and the face
+		// resolves the real port for its children's URLs.
+		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
-	// Uncomment to stream daemon logs during debugging:
-	// cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(homeDir)
