@@ -321,3 +321,38 @@ func TestDefaultStillGivesTheChildItsOwnGroup(t *testing.T) {
 		t.Errorf("child pgid = %d, want its own pid %d", got, r.PID())
 	}
 }
+
+// A child that inherited our group must still be signallable.
+//
+// signalGroup targeted -pid, which names a process group only when the child
+// LEADS one. daraja's claude joins daraja's group (see SpawnSpec), so -pid was
+// ESRCH on every stop and the signal silently stopped nothing — daraja's
+// stopLocked then blocked forever on the exit it was waiting for, hanging its
+// Shutdown and Restart RPCs. The group the child belongs to is daraja's own
+// and must not be signalled, so the pid itself is the only remaining target.
+func TestInheritProcessGroupChildIsStillSignallable(t *testing.T) {
+	r, err := newProcessRunner(SpawnSpec{
+		PiBinary:            "/bin/sh",
+		Argv:                []string{"-c", "sleep 30"},
+		InheritProcessGroup: true,
+	})
+	if err != nil {
+		t.Fatalf("newProcessRunner: %v", err)
+	}
+	if _, _, _, err := r.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := r.Terminate(); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+
+	// Without the pid fallback this never returns: SIGTERM went to a group
+	// that does not exist, and /bin/sh outlives the test.
+	reaped := make(chan struct{})
+	go func() { _, _ = r.Wait(); close(reaped) }()
+	select {
+	case <-reaped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("child survived SIGTERM; an inherited-group child is not signallable")
+	}
+}
