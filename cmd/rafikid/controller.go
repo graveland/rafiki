@@ -2713,6 +2713,11 @@ func (c *Controller) drainChildStatus(childID string, ch *child.Child) {
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {
+	// now feeds only the ctrl_child_status event's timestamp below (At); it
+	// is NOT threaded into startWorking/heartbeats, which track elapsed time
+	// entirely on sweepHeartbeats' own caller-supplied clock (see
+	// heartbeatState.due's doc) — hoisted here only because that is where
+	// every other status-change timestamp in this function is captured.
 	now := time.Now()
 	storePrev, ok := c.st.SetStatus(childID, newStatus)
 	// Release any event batches deferred while this child was mid-turn.
@@ -2730,12 +2735,10 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		// monitorChild's status path and must not be held up by a database
 		// round trip.
 		go c.drainInbox(c.inbox, childID)
+		c.heartbeats.stopWorking(childID)
 	}
 	if ok && isWorkingStatus(newStatus) {
 		c.heartbeats.startWorking(childID)
-	}
-	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
-		c.heartbeats.stopWorking(childID)
 	}
 	evt := protocol.CtrlChildStatus{
 		Type:     protocol.TypeCtrlChildStatus,
@@ -2993,6 +2996,13 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	c.nudgedMu.Lock()
 	delete(c.nudgedOnce, childID)
 	c.nudgedMu.Unlock()
+
+	// Clear tracked heartbeat/turn-outcome state too, or both leak forever
+	// for a child that exits without going through a clean idle transition
+	// first (an engine fatal, an operator kill) — handleStatusChange's own
+	// idle-transition cleanup never runs for those.
+	c.heartbeats.stopWorking(childID)
+	c.turnOutcomes.take(childID)
 
 	// Sweep this child's unfinished work to orphaned BEFORE cm.Remove.
 	// cm.Remove is the observable "kill complete" signal (waitForChildRemoval
