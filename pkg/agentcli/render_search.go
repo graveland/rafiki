@@ -9,6 +9,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 
 	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 )
 
 // RenderSearch renders search results as a rounded table: identity columns,
@@ -29,7 +30,8 @@ func RenderSearch(w io.Writer, rows []insights.ConversationSummary) error {
 	for _, r := range rows {
 		t.AppendRow(table.Row{
 			r.ID, r.Name, r.CreatedAt.Local().Format("2006-01-02 15:04"), r.Owner, r.Persona, r.Source, r.Model,
-			r.DrivenBy, r.Status, r.Turns, r.InputTokens, r.OutputTokens,
+			r.DrivenBy, r.Status, insightstypes.CompactTokens(int64(r.Turns)),
+			insightstypes.CompactTokens(r.InputTokens), insightstypes.CompactTokens(r.OutputTokens),
 			pct(r.CacheHitRatio), dollars(r.TotalCostUSD),
 			truncateCell(r.FirstMessage),
 		})
