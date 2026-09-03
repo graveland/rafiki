@@ -40,11 +40,6 @@ go.work.sum
 # Local runtime state (belongs under ~/.local/state, not the repo)
 /run/
 
-# TypeScript / bun
-/attach/node_modules/
-/attach/*.bun-build
-/attach/.*.bun-build
-
 # Handoffs and task scratch are never committed. Note that some files under
 # tasks/ predate this rule and are still tracked; untracking them is a
 # deliberate call, not a drive-by.
