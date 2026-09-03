@@ -11,10 +11,10 @@ import (
 	"io"
 	"slices"
 
-	"github.com/dustin/go-humanize"
 	"github.com/jedib0t/go-pretty/v6/table"
 
 	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 )
 
 // RenderStats renders a stats bundle as a designed, human-first layout:
@@ -28,7 +28,7 @@ func RenderStats(w io.Writer, st *insights.Stats) error {
 
 	ew := &errWriter{w: w}
 	ew.printf("Conversations: %s    Turns: %s    Cache hit: %s\n",
-		humanize.Comma(st.Volume.Conversations), humanize.Comma(st.Volume.Turns), pct(st.Tokens.CacheHitRatio))
+		insightstypes.CompactTokens(st.Volume.Conversations), insightstypes.CompactTokens(st.Volume.Turns), pct(st.Tokens.CacheHitRatio))
 
 	if len(st.Adoption.PerOwner) > 0 {
 		t := newAgentTable(w, "Owners")
@@ -38,7 +38,7 @@ func RenderStats(w io.Writer, st *insights.Stats) error {
 			if owner == "" {
 				owner = "(unattributed)"
 			}
-			t.AppendRow(table.Row{owner, humanize.Comma(o.Conversations), humanize.Comma(o.Turns)})
+			t.AppendRow(table.Row{owner, insightstypes.CompactTokens(o.Conversations), insightstypes.CompactTokens(o.Turns)})
 		}
 		t.Render()
 	}
@@ -66,8 +66,8 @@ func RenderStats(w io.Writer, st *insights.Stats) error {
 		})
 		var total float64
 		for _, c := range rows {
-			t.AppendRow(table.Row{c.Model, humanize.Comma(c.Turns), humanize.Comma(c.InputTokens),
-				humanize.Comma(c.OutputTokens), humanize.Comma(c.CacheReadTokens), dollars(c.CostUSD)})
+			t.AppendRow(table.Row{c.Model, insightstypes.CompactTokens(c.Turns), insightstypes.CompactTokens(c.InputTokens),
+				insightstypes.CompactTokens(c.OutputTokens), insightstypes.CompactTokens(c.CacheReadTokens), dollars(c.CostUSD)})
 			total += c.CostUSD
 		}
 		t.AppendFooter(table.Row{"TOTAL", "", "", "", "", dollars(total)})
@@ -75,12 +75,12 @@ func RenderStats(w io.Writer, st *insights.Stats) error {
 	}
 
 	ew.printf("Reliability    %s errors / %s turns (%s) · failover %s · cache waste %s turns / %s tokens\n",
-		humanize.Comma(st.Failures.Errors), humanize.Comma(st.Failures.Turns), pct(st.Failures.ErrorRate),
-		pct(st.Failures.FailoverRate), humanize.Comma(st.CacheWaste.WastedTurns), humanize.Comma(st.CacheWaste.WastedInputTokens))
+		insightstypes.CompactTokens(st.Failures.Errors), insightstypes.CompactTokens(st.Failures.Turns), pct(st.Failures.ErrorRate),
+		pct(st.Failures.FailoverRate), insightstypes.CompactTokens(st.CacheWaste.WastedTurns), insightstypes.CompactTokens(st.CacheWaste.WastedInputTokens))
 	ew.printf("Latency        p50 %s · p95 %s · p99 %s\n", secs(st.Latency.P50), secs(st.Latency.P95), secs(st.Latency.P99))
 	ew.printf("Prefix cache   %s distinct · reuse %.1f× · %s drifted convs · %s cross-user\n",
-		humanize.Comma(st.Prefix.DistinctPrefixes), st.Prefix.ReuseRatio,
-		humanize.Comma(st.Prefix.DriftedConversations), humanize.Comma(st.Prefix.CrossUserPrefixes))
+		insightstypes.CompactTokens(st.Prefix.DistinctPrefixes), st.Prefix.ReuseRatio,
+		insightstypes.CompactTokens(st.Prefix.DriftedConversations), insightstypes.CompactTokens(st.Prefix.CrossUserPrefixes))
 	return ew.err
 }
 
@@ -93,8 +93,8 @@ func newAgentTable(w io.Writer, title string) table.Writer {
 }
 
 func tokenRow(label string, ts insights.TokenStats) table.Row {
-	return table.Row{label, humanize.Comma(ts.InputTokens), humanize.Comma(ts.OutputTokens),
-		humanize.Comma(ts.CacheReadTokens), humanize.Comma(ts.CacheCreationTokens), pct(ts.CacheHitRatio)}
+	return table.Row{label, insightstypes.CompactTokens(ts.InputTokens), insightstypes.CompactTokens(ts.OutputTokens),
+		insightstypes.CompactTokens(ts.CacheReadTokens), insightstypes.CompactTokens(ts.CacheCreationTokens), pct(ts.CacheHitRatio)}
 }
 
 // pct formats a 0..1 ratio as a percentage with one decimal.
