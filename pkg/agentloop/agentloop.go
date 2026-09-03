@@ -377,6 +377,24 @@ func drive(ctx context.Context, conv *llm.Conversation, tools ToolSet, ev *Event
 
 		switch resp.StopReason {
 		case "end_turn":
+			// A steer buffered while THIS call was in flight has had no
+			// tool-call boundary to land on yet — the tool_use/max_tokens
+			// branches below both poll PendingUser, but a turn that ends
+			// cleanly on its very first (or only remaining) iteration never
+			// reaches either. Without this poll, such a steer sits unread
+			// until runTurn's own post-loop cleanup requeues it as an
+			// entirely separate, later-bracketed turn: from the outside,
+			// steering a plain conversational reply looks like it does
+			// nothing until the reply is completely finished. Draining here
+			// closes that gap the same way the other two branches already do.
+			if ev != nil && ev.PendingUser != nil {
+				if extra := ev.PendingUser(); len(extra) > 0 {
+					if err := conv.AppendUser(ctx, extra); err != nil {
+						return &Result{Stats: stats}, fmt.Errorf("agentloop: appending steer content after end_turn: %w", err)
+					}
+					continue
+				}
+			}
 			text, _ := firstText(resp.Content)
 			ev.text(text)
 			return &Result{Text: text, Stats: stats}, nil
