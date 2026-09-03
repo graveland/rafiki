@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/claudeargv"
 )
 
 // defaultGrace is how long Restart and Shutdown wait after the first signal
@@ -51,10 +52,38 @@ type ExitInfo struct {
 	Signal   string
 }
 
+// ChildSpec is the typed description of the child process, held so daraja can
+// rebuild the command line without being told it again — on a caller's Restart
+// that omits one, and on its own respawn after an unexpected exit.
+type ChildSpec struct {
+	Kind           string
+	Model          string
+	ResumeSession  string
+	PermissionMode string
+}
+
+// KindClaude is the only child protocol daraja hosts today.
+const KindClaude = "claude"
+
+// argv builds the child's command line for this spec. An unknown kind returns
+// nil, which startLocked reports as an error rather than launching a bare
+// binary with no arguments — a claude with no --output-format runs, and emits
+// something nothing downstream can parse.
+func (s ChildSpec) argv() []string {
+	if s.Kind != KindClaude {
+		return nil
+	}
+	return claudeargv.Build(claudeargv.Params{
+		Model:          s.Model,
+		ResumeSession:  s.ResumeSession,
+		PermissionMode: s.PermissionMode,
+	})
+}
+
 // HostOptions describes the process to host.
 type HostOptions struct {
 	Binary string
-	Argv   []string
+	Spec   ChildSpec
 	Cwd    string
 	Env    []string
 
@@ -75,6 +104,10 @@ type HostOptions struct {
 // service serves Restart, Shutdown and Health on the same connection as Relay.
 type Host struct {
 	opts HostOptions
+
+	// spec is the child description currently hosted, updated by every
+	// successful startLocked so a spec-less Restart reuses it. Guarded by mu.
+	spec ChildSpec
 
 	mu      sync.Mutex
 	runner  child.Runner
@@ -99,6 +132,7 @@ type Host struct {
 func NewHost(opts HostOptions) *Host {
 	return &Host{
 		opts:   opts,
+		spec:   opts.Spec,
 		events: make(chan Event, eventBuffer),
 		done:   make(chan struct{}),
 	}
@@ -124,7 +158,7 @@ func (h *Host) emit(ev Event) bool {
 // Start launches the process.
 func (h *Host) Start() error {
 	h.mu.Lock()
-	stdout, err := h.startLocked(h.opts.Argv)
+	stdout, err := h.startLocked(h.spec)
 	h.mu.Unlock()
 	if err != nil {
 		return err
@@ -139,10 +173,15 @@ func (h *Host) Start() error {
 // before the replacement's first byte can reach the consumer — and it cannot
 // emit while holding h.mu. Returning the pipe unread is what lets it do both.
 // h.mu must be held.
-func (h *Host) startLocked(argv []string) (io.ReadCloser, error) {
+func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 	if h.running {
 		return nil, errors.New("daraja: already running")
 	}
+	argv := spec.argv()
+	if argv == nil {
+		return nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
+	}
+	h.spec = spec
 	runner, err := child.NewProcessRunner(child.SpawnSpec{
 		PiBinary:    h.opts.Binary,
 		Argv:        argv,
@@ -239,12 +278,18 @@ func (h *Host) WriteStdin(p []byte) error {
 }
 
 // Restart signals the process, waits for it, and launches a replacement.
-func (h *Host) Restart(argv []string, grace time.Duration) (int, error) {
+//
+// A zero spec means "reuse the one I am holding", which is what a caller
+// restarting for any reason other than changing the child's parameters wants.
+func (h *Host) Restart(spec ChildSpec, grace time.Duration) (int, error) {
 	h.mu.Lock()
+	if spec == (ChildSpec{}) {
+		spec = h.spec
+	}
 	if h.running {
 		h.stopLocked(grace, true)
 	}
-	stdout, err := h.startLocked(argv)
+	stdout, err := h.startLocked(spec)
 	if err != nil {
 		h.mu.Unlock()
 		return 0, err

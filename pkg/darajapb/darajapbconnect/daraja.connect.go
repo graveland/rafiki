@@ -51,7 +51,8 @@ type DarajaServiceClient interface {
 	// discard it.
 	Relay(context.Context) *connect.BidiStreamForClient[darajapb.RelayRequest, darajapb.RelayResponse]
 	// Restart replaces the child process: signal, wait for exit, launch again
-	// with the supplied argv. ONE verb rather than Stop plus Launch, because the
+	// with the supplied spec — or the one daraja already holds, when none is
+	// given. ONE verb rather than Stop plus Launch, because the
 	// invariant that makes a 1:1 host simple is that a daraja always has exactly
 	// one child; splitting it creates a childless daraja that then needs
 	// representing, timing out and reaping.
@@ -136,7 +137,8 @@ type DarajaServiceHandler interface {
 	// discard it.
 	Relay(context.Context, *connect.BidiStream[darajapb.RelayRequest, darajapb.RelayResponse]) error
 	// Restart replaces the child process: signal, wait for exit, launch again
-	// with the supplied argv. ONE verb rather than Stop plus Launch, because the
+	// with the supplied spec — or the one daraja already holds, when none is
+	// given. ONE verb rather than Stop plus Launch, because the
 	// invariant that makes a 1:1 host simple is that a daraja always has exactly
 	// one child; splitting it creates a childless daraja that then needs
 	// representing, timing out and reaping.
