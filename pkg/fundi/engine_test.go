@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -445,21 +446,32 @@ func TestHandlePromptReturnsWhileTurnInFlight(t *testing.T) {
 	}
 }
 
-// TestEngineRequeuesLateSteersAsOneTurn covers runTurn's own invention (the
-// orphaned-steer requeue) and the fix to it: a steer that lands after the
-// loop's LAST PendingUser poll must still surface, as exactly one extra
-// bracketed turn — and when multiple steers land late, they must be joined
-// into that ONE turn (mirroring drainSteers), not replayed as N separate
-// turns.
-func TestEngineRequeuesLateSteersAsOneTurn(t *testing.T) {
+// TestEngineFoldsSteersArrivingDuringTheFinalCallIntoTheSameTurn covers the
+// gap that used to make runTurn's orphaned-steer requeue reachable on every
+// ordinary end_turn: agentloop.drive's end_turn branch did not poll
+// PendingUser at all, so a steer buffered while the turn's LAST Continue call
+// was already in flight had no boundary left to land on inside that turn —
+// runTurn's tail could only requeue it as an entirely separate, later
+// agent_start/agent_end bracket. Confirmed live against a real fundi
+// conversation: a steer sent mid-reply (no further tool call in that turn)
+// sat unread until the whole reply finished, then landed as what looked like
+// a brand new prompt rather than a continuation.
+//
+// drive's end_turn branch now polls PendingUser too (matching tool_use and
+// max_tokens), so this exact window — a steer buffered before that response
+// is treated as final — is caught IN-TURN: the model's now-not-actually-final
+// reply still renders, then the steer's echo, then one more Continue, all
+// inside the SAME bracket.
+func TestEngineFoldsSteersArrivingDuringTheFinalCallIntoTheSameTurn(t *testing.T) {
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
 		return "file.txt", nil
 	}}
 	bs := &blockingSender{
 		// Body 1: tool_use (the turn's only tool iteration; its PendingUser
 		// poll fires here, before body 2 is requested, and finds steerBuf
-		// empty). Body 2: end_turn, the call we pause. Body 3: end_turn for
-		// the requeued turn.
+		// empty). Body 2: end_turn, the call we pause -- both steers land
+		// while it is still in flight. Body 3: end_turn, the genuinely final
+		// reply once the steer has been folded in.
 		inner:   scriptedSender(t, sampleResp, sampleEndTurn, sampleEndTurn),
 		blockAt: 2,
 		started: make(chan struct{}),
@@ -468,8 +480,8 @@ func TestEngineRequeuesLateSteersAsOneTurn(t *testing.T) {
 	eng, out := newTestEngineWithSender(t, ts, bs)
 
 	eng.HandlePrompt("go")
-	<-bs.started // the end_turn call is blocked; PendingUser already ran and
-	// found nothing buffered, so anything queued now is provably late.
+	<-bs.started // body 2 (end_turn) is in flight; steers sent now arrive
+	// before drive() has polled PendingUser for that response.
 
 	eng.HandleSteer("line one")
 	eng.HandleSteer("line two")
@@ -480,25 +492,19 @@ func TestEngineRequeuesLateSteersAsOneTurn(t *testing.T) {
 	assertFrameTypes(t, out.String(), []string{
 		"message_start", "message_end", // user echo: "go"
 		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn 1 (tool_use)
+		"message_start", "message_update", "message_end", // assistant iter 1 (tool_use)
 		"tool_execution_start", "tool_execution_end",
-		"message_start", "message_update", "message_end", // assistant turn 1 (end_turn)
-		"agent_end", "agent_settled",
-		"message_start", "message_end", // user echo: requeued, joined steer
-		"agent_start",
-		"message_start", "message_update", "message_end", // assistant turn 2 (end_turn)
+		"message_start", "message_update", "message_end", // assistant iter 2 (end_turn, no longer final)
+		"message_start", "message_end", // user echo: "line one"
+		"message_start", "message_end", // user echo: "line two"
+		"message_start", "message_update", "message_end", // assistant iter 3 (end_turn, genuinely final)
 		"agent_end", "agent_settled",
 	})
 
 	texts := userMessageTexts(t, out.String())
-	if len(texts) != 2 {
-		t.Fatalf("got %d user-echoed messages, want 2 (prompt + one joined requeue): %v", len(texts), texts)
-	}
-	if texts[0] != "go" {
-		t.Fatalf("first user message = %q, want %q", texts[0], "go")
-	}
-	if want := "line one\nline two"; texts[1] != want {
-		t.Fatalf("requeued turn's user message = %q, want %q (one turn, both lines joined)", texts[1], want)
+	if want := []string{"go", "line one", "line two"}; !slices.Equal(texts, want) {
+		t.Fatalf("user messages = %v, want %v -- both steers echoed inside the one turn, "+
+			"not requeued as a separate one", texts, want)
 	}
 }
 

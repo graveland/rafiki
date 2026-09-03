@@ -3,6 +3,7 @@ package fundi
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -170,21 +171,21 @@ func TestEngineDoesNotAckWhatFatalDiscards(t *testing.T) {
 	}
 }
 
-// TestEngineCarriesOrphanedSteerIDsIntoTheRequeuedPrompt covers runTurn's
-// tail. A steer that lands after the loop's last PendingUser poll is requeued,
-// joined into ONE prompt — and it must be requeued UNACKED, carrying every id
-// in the join, because it still has not entered a turn. Dropping the ids there
-// loses those messages silently: the rows are never retired, and nothing ever
-// retires them later either, because the text has moved on without them.
-func TestEngineCarriesOrphanedSteerIDsIntoTheRequeuedPrompt(t *testing.T) {
+// TestEngineAcksSteersThatArriveDuringTheFinalCall covers the same fix as
+// TestEngineFoldsSteersArrivingDuringTheFinalCallIntoTheSameTurn from the ack
+// side: two steers buffered while the turn's last Continue call (end_turn) is
+// still in flight must be retired via drainSteers's normal ack -- e.consume,
+// called with every buffered id -- inside this SAME turn, not left unacked
+// for a requeue that no longer happens.
+func TestEngineAcksSteersThatArriveDuringTheFinalCall(t *testing.T) {
 	var acked ackLog
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
 		return "file.txt", nil
 	}}
 	bs := &blockingSender{
 		// Body 1: tool_use (its PendingUser poll fires here and finds nothing).
-		// Body 2: end_turn, the call we pause — anything steered now is late.
-		// Body 3: end_turn for the requeued turn.
+		// Body 2: end_turn, the call we pause -- both steers land while it is
+		// still in flight. Body 3: end_turn, the genuinely final reply.
 		inner:   scriptedSender(t, sampleResp, sampleEndTurn, sampleEndTurn),
 		blockAt: 2,
 		started: make(chan struct{}),
@@ -198,17 +199,17 @@ func TestEngineCarriesOrphanedSteerIDsIntoTheRequeuedPrompt(t *testing.T) {
 	eng.HandleSteerID("F2", "line one")
 	eng.HandleSteerID("F3", "line two")
 	if got := acked.joined(); got != "F1" {
-		t.Fatalf("acked %q, want only F1: two late steers are buffered and neither has run", got)
+		t.Fatalf("acked %q, want only F1: two buffered steers are not yet injected", got)
 	}
 	close(bs.release)
 	eng.Wait()
 
 	if got := acked.joined(); got != "F1,F2,F3" {
-		t.Fatalf("acked %q, want F1,F2,F3 — both orphaned steer ids must survive the join "+
-			"into the requeued prompt and be retired when it runs", got)
+		t.Fatalf("acked %q, want F1,F2,F3 -- both steer ids must be retired once "+
+			"drainSteers injects them into the running turn", got)
 	}
 	texts := userMessageTexts(t, out.String())
-	if len(texts) != 2 || texts[1] != "line one\nline two" {
-		t.Fatalf("user messages = %v, want the two late steers joined into one requeued prompt", texts)
+	if want := []string{"go", "line one", "line two"}; !slices.Equal(texts, want) {
+		t.Fatalf("user messages = %v, want %v", texts, want)
 	}
 }

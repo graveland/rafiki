@@ -845,6 +845,42 @@ func TestPendingUserInjectedBetweenIterations(t *testing.T) {
 	assertHistoryContainsUserText(t, hist, "steer!")
 }
 
+// TestPendingUserInjectedAtEndTurnContinuesTheLoop reproduces a real steer
+// stall: a steer sent while the model is composing a plain end_turn reply
+// (no tool call at all) was buffered but never drained, because drive()'s
+// end_turn branch returns immediately without ever polling PendingUser --
+// unlike the tool_use and max_tokens branches, which both poll it before
+// their next Continue call. Confirmed live against a real fundi conversation:
+// a steer sent mid-essay (no tool boundary in that turn) sat unread until the
+// entire essay finished, then landed as a brand new, separately-bracketed
+// turn instead of extending the one already running.
+//
+// The fix: end_turn must also drain PendingUser before actually ending the
+// turn, and if something is buffered, treat it as a reason to keep going
+// (one more Continue) instead of returning.
+func TestPendingUserInjectedAtEndTurnContinuesTheLoop(t *testing.T) {
+	conv := newMemConv(t, &scriptedSender{scripts: []string{respEndTurn, respEndTurn}})
+	injected := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("steer!")}
+	ev := &Events{PendingUser: func() []anthropic.ContentBlockParamUnion {
+		out := injected
+		injected = nil // fire once
+		return out
+	}}
+	result, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserText("hi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stats.Iterations != 2 {
+		t.Fatalf("Iterations = %d, want 2 -- the steer must force a second Continue "+
+			"call rather than ending on the first end_turn", result.Stats.Iterations)
+	}
+	hist, err := conv.History(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHistoryContainsUserText(t, hist, "steer!")
+}
+
 // assertHistoryContainsUserText fails unless some user row's text content
 // contains want.
 func assertHistoryContainsUserText(t *testing.T, hist []store.Message, want string) {
