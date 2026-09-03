@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/server"
 )
 
 // serveConnectUDS serves the Connect control plane to local clients over a
@@ -23,14 +24,25 @@ import (
 // that a second code path routed around. The socket changes who can reach the
 // daemon, never what the daemon will accept.
 //
-// No token: the interceptor is constructed with an empty token, which disables
-// the check. Trust here is the 0600 socket inside the 0700 directory, matching
-// the framed-JSON control socket.
+// No token required: the interceptor is constructed with an empty token,
+// which disables the ADMISSION check. Trust here is the 0600 socket inside
+// the 0700 directory, matching the framed-JSON control socket — auth is who
+// may connect, never gated by a credential over UDS.
+//
+// auth, when non-nil, still OPTIONALLY resolves identity for a request that
+// happens to carry a credential (see UserTokenAuth.IdentifyOptional) — a
+// caller presenting no token is unaffected, and one presenting an
+// unrecognized token is treated exactly the same as one presenting none
+// (never rejected, since the socket already decided admission). This is what
+// lets a per-user Connect read like GetRateLimitStatus resolve "who is
+// asking" over the local socket the cockpit and CLI dial by default, without
+// weakening the socket's own trust-by-filesystem-permissions model for every
+// other verb that never looks at identity at all.
 //
 // h2c rather than TLS: there is no TLS on a unix socket, and Connect's
 // server-streaming (StreamEvents) wants HTTP/2. The client half is in
 // cmd/rafiki/connectclient.go and must match.
-func serveConnectUDS(ctx context.Context, srv *connectapi.Server, path string) (net.Listener, error) {
+func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.UserTokenAuth, path string) (net.Listener, error) {
 	// Refuse rather than clobber. Two daemons serving one path means the
 	// second bind silently wins and the first's clients connect into a void.
 	if c, err := net.DialTimeout("unix", path, 500*time.Millisecond); err == nil {
@@ -54,8 +66,9 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, path string) (
 	}
 
 	mux := http.NewServeMux()
-	// Empty token: the socket IS the credential.
-	mux.Handle(srv.Routes(connectapi.NewAuthInterceptor("")))
+	// Empty token: the socket IS the credential for ADMISSION.
+	routePath, handler := srv.Routes(connectapi.NewAuthInterceptor(""))
+	mux.Handle(routePath, optionalIdentity(auth, handler))
 
 	// Unencrypted HTTP/2 (h2c) via the standard library's Protocols field,
 	// rather than the deprecated x/net/http2/h2c wrapper. Connect's
@@ -80,4 +93,24 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, path string) (
 		}
 	}()
 	return ln, nil
+}
+
+// optionalIdentity sets caller identity on the request context when auth is
+// configured AND the request carries a credential that resolves — otherwise
+// it changes nothing and the request proceeds exactly as it always has
+// (anonymous, admitted by the socket alone). It never rejects a request:
+// IdentifyOptional already swallows "no credential", "unrecognized
+// credential" and "store unavailable" into the same nil, so this stays a
+// pure enrichment step, never a second admission gate layered on top of the
+// one the socket already is.
+func optionalIdentity(auth *server.UserTokenAuth, next http.Handler) http.Handler {
+	if auth == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := auth.IdentifyOptional(r.Context(), r); id != nil {
+			r = r.WithContext(server.WithIdentity(r.Context(), id))
+		}
+		next.ServeHTTP(w, r)
+	})
 }

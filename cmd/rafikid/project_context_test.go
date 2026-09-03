@@ -57,7 +57,7 @@ func TestAgentRuntimeOptionsNoExecutorLeavesProjectContextNil(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_noexec", false, "")
+	ro, err := c.agentRuntimeOptions(req, "c_noexec", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}

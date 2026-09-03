@@ -109,11 +109,11 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 // Runner (and nil error) for every other kind, which leaves SpawnSpec on the
 // subprocess path unchanged. autoResume asks the engine to call
 // agentloop.Resume before accepting inbound prompts.
-func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName string) (child.Runner, error) {
+func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (child.Runner, error) {
 	if req.Kind != protocol.KindFundi {
 		return nil, nil
 	}
-	ro, err := c.agentRuntimeOptions(req, childID, autoResume, ownerName)
+	ro, err := c.agentRuntimeOptions(req, childID, autoResume, ownerName, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +133,7 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 // source of per-child agent config) and then parsed back with parseAgentFlags
 // — see toRuntimeOptions' doc comment for why this is not a hand-written
 // SpawnRequest-to-RuntimeOptions mapping.
-func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName string) (fundi.RuntimeOptions, error) {
+func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (fundi.RuntimeOptions, error) {
 	if agentSpawnHasExplicitDB(req.ExtraArgs) {
 		return fundi.RuntimeOptions{}, errors.New("--db is not supported for an in-process agent child: the daemon's shared database pool is always used instead; drop --db from ExtraArgs")
 	}
@@ -232,6 +232,26 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// because the binding is what makes a self id unspoofable — a shared
 	// spawner would have to take one as an argument.
 	ro.Agents = newControllerSpawner(c, childID)
+	// Bound to the resolved owner, same reasoning. ownerUserID is only ever
+	// known at spawn time (from the authenticated caller's users.Identity);
+	// the two recovery/resume call sites into agentRunner currently pass ""
+	// because a resumed child's snapshot carries only its owner's USERNAME
+	// (Labels["owner"]), not their id, and users.Store has no
+	// username-to-id lookup to resolve it with. quota_status simply reports
+	// "no data captured" for those children rather than guessing — no
+	// evidence beats false evidence, same rule ProviderGuard follows.
+	//
+	// Guarded on c.pool != nil, and NOT folded into newControllerQuotaReader
+	// itself: that constructor returning a typed-nil *controllerQuotaReader
+	// would still produce a non-nil tools.QuotaReader interface value here
+	// (the classic nil-pointer-in-non-nil-interface trap), which is exactly
+	// what would make quota_status materialize on a DB-less daemon and
+	// permanently answer "no data captured" — the useless-tool anti-pattern
+	// Materialize's nil-decline contract exists to prevent. Only an actual
+	// nil assignment to ro.Quota (skipping this line) leaves opts.Quota nil.
+	if c.pool != nil {
+		ro.Quota = newControllerQuotaReader(c, ownerUserID)
+	}
 	// A child with a selector gets a boundExecutor, ALWAYS non-nil.
 	//
 	// This bypasses MaterializeAll's `opts.Executor == nil` check, which is a

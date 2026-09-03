@@ -286,6 +286,15 @@ type ToolOpts struct {
 	// for agents running on a remote executor. nil means the tool declines
 	// to materialize (agent is running in-process, nothing to annotate).
 	ExecutorAnnotator ExecutorAnnotator
+
+	// Quota, when non-nil, gives this agent the quota_status tool -- its own
+	// captured Anthropic subscription rate-limit snapshot, so it can inform a
+	// spawn or model choice (e.g. prefer OpenRouter once utilization is high)
+	// without a human in the loop. nil means no quota source is configured
+	// (a DB-less daemon); the tool also declines when Agents is nil, since
+	// its whole purpose is informing a spawn decision an agent with no
+	// subtree has no use for.
+	Quota QuotaReader
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the

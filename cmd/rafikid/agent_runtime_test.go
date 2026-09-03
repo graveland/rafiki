@@ -23,7 +23,7 @@ func TestAgentRunnerKind(t *testing.T) {
 	c := newTestController(t)
 	for _, kind := range []string{protocol.KindClaude} {
 		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
-		runner, err := c.agentRunner(req, "c_"+kind, false, "")
+		runner, err := c.agentRunner(req, "c_"+kind, false, "", "")
 		if err != nil {
 			t.Fatalf("agentRunner(kind=%s): %v", kind, err)
 		}
@@ -33,7 +33,7 @@ func TestAgentRunnerKind(t *testing.T) {
 	}
 
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5"}
-	runner, err := c.agentRunner(req, "c_agent", false, "")
+	runner, err := c.agentRunner(req, "c_agent", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRunner(kind=agent): %v", err)
 	}
@@ -57,12 +57,34 @@ func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 		Model:     "anthropic/claude-sonnet-4-5",
 		ExtraArgs: []string{"--ref", "spoofed-child-id"},
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_authoritative", false, "")
+	ro, err := c.agentRuntimeOptions(req, "c_authoritative", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
 	if ro.Ref != "c_authoritative" {
 		t.Errorf("Ref = %q, want the daemon's child id to win over a competing ExtraArgs --ref", ro.Ref)
+	}
+}
+
+// TestAgentRuntimeOptionsQuotaNilOnDBLessDaemon guards against the classic Go
+// nil-pointer-in-non-nil-interface trap: ro.Quota must be a true nil
+// tools.QuotaReader (opts.Quota == nil) on a DB-less daemon, or quota_status
+// would materialize into every spawn-capable agent's tools[] and permanently
+// answer "no data captured" instead of declining outright, per its
+// Materialize doc comment.
+func TestAgentRuntimeOptionsQuotaNilOnDBLessDaemon(t *testing.T) {
+	c := newTestController(t) // pool == nil
+	req := protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_no_db", false, "brent", "user-id-123")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.Quota != nil {
+		t.Errorf("Quota = %#v, want nil on a DB-less daemon", ro.Quota)
 	}
 }
 
@@ -80,7 +102,7 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		Model:  "anthropic/claude-sonnet-4-5",
 		APIKey: "sk-ant-test-key",
 	}
-	ro, err := c.agentRuntimeOptions(anthropicReq, "c_key_anthropic", false, "")
+	ro, err := c.agentRuntimeOptions(anthropicReq, "c_key_anthropic", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -94,7 +116,7 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		Model:  "openrouter/deepseek/deepseek-chat",
 		APIKey: "sk-or-test-key",
 	}
-	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter", false, "")
+	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -117,7 +139,7 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 		ExtraArgs: []string{"--model", "openrouter/deepseek/y"},
 		APIKey:    "sk-test-key",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_model_override_key", false, "")
+	ro, err := c.agentRuntimeOptions(req, "c_model_override_key", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -144,7 +166,7 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 			"http_proxy":        "http://example.invalid:8080",
 		},
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_env_overlay", false, "")
+	ro, err := c.agentRuntimeOptions(req, "c_env_overlay", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -161,7 +183,7 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 
 	// An explicit req.APIKey must be forwarded as APIKeyOverride.
 	req.APIKey = "explicit-key"
-	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins", false, "")
+	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -203,7 +225,7 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 			Model:     "anthropic/claude-sonnet-4-5",
 			ExtraArgs: extraArgs,
 		}
-		if _, err := c.agentRuntimeOptions(req, "c_explicit_db", false, ""); err == nil {
+		if _, err := c.agentRuntimeOptions(req, "c_explicit_db", false, "", ""); err == nil {
 			t.Errorf("agentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
 		}
 	}
@@ -223,7 +245,7 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	if _, err := c.agentRuntimeOptions(req, "c_env_default_db", false, ""); err != nil {
+	if _, err := c.agentRuntimeOptions(req, "c_env_default_db", false, "", ""); err != nil {
 		t.Errorf("agentRuntimeOptions with only $RAFIKI_DB set (no explicit --db): got error %v, want nil", err)
 	}
 }
@@ -482,7 +504,7 @@ func TestTopLevelSpawnWithAnUnmatchedSelectorIsRefused(t *testing.T) {
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest()
 	req.ExecutorSelector = "env=nowhere"
-	_, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	_, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
 	if err == nil {
 		t.Fatal("a top-level spawn whose selector matches nothing must be refused")
 	}
@@ -502,7 +524,7 @@ func TestParentedSpawnWithNoLiveExecutorStartsUnbound(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
-	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
 	if err != nil {
 		t.Fatalf("a parented spawn must be allowed to start unbound: %v", err)
 	}
@@ -521,7 +543,7 @@ func TestAutoResumeWithNoLiveExecutorStartsUnbound(t *testing.T) {
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest()
 	req.ExecutorSelector = "env=nowhere"
-	ro, err := c.agentRuntimeOptions(req, "c1", true, "brent")
+	ro, err := c.agentRuntimeOptions(req, "c1", true, "brent", "")
 	if err != nil {
 		t.Fatalf("an auto-resumed spawn must be allowed to start unbound: %v", err)
 	}
@@ -541,7 +563,7 @@ func TestAnUnboundChildSaysSoInItsLabels(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
-	_, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	_, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +598,7 @@ func TestABoundChildGetsTheWorkspaceBlock(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=home"
-	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +622,7 @@ func TestUnboundChildWithNoCandidatesGetsNilWorkspace(t *testing.T) {
 	req := baseRequest()
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
-	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent")
+	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +648,7 @@ func TestAgentRuntimeOptionsWiresOnConsumed(t *testing.T) {
 	c.inbox = c.newInboxQueue(mem)
 
 	req := baseRequest()
-	ro, err := c.agentRuntimeOptions(req, "c_1", false, "")
+	ro, err := c.agentRuntimeOptions(req, "c_1", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -668,7 +690,7 @@ func TestAgentRunnerGrantsMaxCostToTheEngine(t *testing.T) {
 		Model:   "anthropic/claude-sonnet-4-5",
 		MaxCost: &budget,
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_budgeted", false, "")
+	ro, err := c.agentRuntimeOptions(req, "c_budgeted", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}
@@ -684,7 +706,7 @@ func TestAgentRunnerUnsetMaxCostIsUnlimited(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	ro, err := c.agentRuntimeOptions(req, "c_unbudgeted", false, "")
+	ro, err := c.agentRuntimeOptions(req, "c_unbudgeted", false, "", "")
 	if err != nil {
 		t.Fatalf("agentRuntimeOptions: %v", err)
 	}

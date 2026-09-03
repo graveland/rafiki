@@ -114,6 +114,29 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// IdentifyOptional resolves the caller's identity when a credential is
+// presented, and returns nil — never an error — otherwise: no credential, an
+// unrecognized one, or a store that could not be checked. This is for a mount
+// whose trust model is NOT the credential (a unix socket's filesystem
+// permissions, for the Connect UDS listener) but that can still enrich a
+// request with identity when one happens to be attached, e.g. so a per-user
+// read like GetRateLimitStatus resolves locally too. Unlike Middleware, this
+// must never reject the request — swallowing every failure into "proceed
+// anonymously" is what keeps it safe to call on a mount other verbs still
+// reach with no credential at all, and keeps a stale/rotated token from
+// silently locking someone out of a socket that used to admit them.
+func (a *UserTokenAuth) IdentifyOptional(ctx context.Context, r *http.Request) *Identity {
+	token, _ := credential(r)
+	if token == "" {
+		return nil
+	}
+	id, err := a.resolve(ctx, token)
+	if err != nil {
+		return nil
+	}
+	return &id
+}
+
 // resolve returns the identity for token, consulting the cache first.
 func (a *UserTokenAuth) resolve(ctx context.Context, token string) (Identity, error) {
 	// The child secret never reaches the store: it is a daemon-internal

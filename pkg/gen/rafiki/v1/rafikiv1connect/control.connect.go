@@ -53,6 +53,9 @@ const (
 	ControlListTasksProcedure = "/rafiki.v1.Control/ListTasks"
 	// ControlListModelsProcedure is the fully-qualified name of the Control's ListModels RPC.
 	ControlListModelsProcedure = "/rafiki.v1.Control/ListModels"
+	// ControlGetRateLimitStatusProcedure is the fully-qualified name of the Control's
+	// GetRateLimitStatus RPC.
+	ControlGetRateLimitStatusProcedure = "/rafiki.v1.Control/GetRateLimitStatus"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
@@ -67,6 +70,7 @@ type ControlClient interface {
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
+	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -140,21 +144,28 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("ListModels")),
 			connect.WithClientOptions(opts...),
 		),
+		getRateLimitStatus: connect.NewClient[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse](
+			httpClient,
+			baseURL+ControlGetRateLimitStatusProcedure,
+			connect.WithSchema(controlMethods.ByName("GetRateLimitStatus")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // controlClient implements ControlClient.
 type controlClient struct {
-	getHistory   *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
-	streamEvents *connect.Client[v1.StreamEventsRequest, v1.Event]
-	send         *connect.Client[v1.SendRequest, v1.SendResponse]
-	listChildren *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
-	getChild     *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
-	spawn        *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
-	kill         *connect.Client[v1.KillRequest, v1.KillResponse]
-	close        *connect.Client[v1.CloseRequest, v1.CloseResponse]
-	listTasks    *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
-	listModels   *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
+	getHistory         *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
+	streamEvents       *connect.Client[v1.StreamEventsRequest, v1.Event]
+	send               *connect.Client[v1.SendRequest, v1.SendResponse]
+	listChildren       *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
+	getChild           *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
+	spawn              *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
+	kill               *connect.Client[v1.KillRequest, v1.KillResponse]
+	close              *connect.Client[v1.CloseRequest, v1.CloseResponse]
+	listTasks          *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
+	listModels         *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
+	getRateLimitStatus *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -207,6 +218,11 @@ func (c *controlClient) ListModels(ctx context.Context, req *connect.Request[v1.
 	return c.listModels.CallUnary(ctx, req)
 }
 
+// GetRateLimitStatus calls rafiki.v1.Control.GetRateLimitStatus.
+func (c *controlClient) GetRateLimitStatus(ctx context.Context, req *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error) {
+	return c.getRateLimitStatus.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -219,6 +235,7 @@ type ControlHandler interface {
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
+	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -288,6 +305,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("ListModels")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlGetRateLimitStatusHandler := connect.NewUnaryHandler(
+		ControlGetRateLimitStatusProcedure,
+		svc.GetRateLimitStatus,
+		connect.WithSchema(controlMethods.ByName("GetRateLimitStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -310,6 +333,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListTasksHandler.ServeHTTP(w, r)
 		case ControlListModelsProcedure:
 			controlListModelsHandler.ServeHTTP(w, r)
+		case ControlGetRateLimitStatusProcedure:
+			controlGetRateLimitStatusHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -357,4 +382,8 @@ func (UnimplementedControlHandler) ListTasks(context.Context, *connect.Request[v
 
 func (UnimplementedControlHandler) ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListModels is not implemented"))
+}
+
+func (UnimplementedControlHandler) GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetRateLimitStatus is not implemented"))
 }

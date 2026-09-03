@@ -13,6 +13,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -260,4 +261,32 @@ func spawnOwner(ctx context.Context) users.Identity {
 		return users.Identity{}
 	}
 	return users.Identity{UserID: id.UserID, Username: id.Username}
+}
+
+// connectQuota adapts *quota.Store to connectapi.QuotaReader, resolving the
+// caller's own user id from ctx rather than taking one as an argument — the
+// same reasoning as spawnOwner: a caller-supplied id would let anyone read
+// anyone else's usage.
+type connectQuota struct{ store *quota.Store }
+
+func (q connectQuota) RateLimitStatus(ctx context.Context) (connectapi.RateLimitStatus, bool, error) {
+	id := server.IdentityFromContext(ctx)
+	if id == nil || id.UserID == "" {
+		return connectapi.RateLimitStatus{}, false, nil
+	}
+	st, ok, err := q.store.Get(ctx, id.UserID)
+	if err != nil || !ok {
+		return connectapi.RateLimitStatus{}, ok, err
+	}
+	return connectapi.RateLimitStatus{
+		OrganizationID: st.OrganizationID,
+		FiveH: connectapi.RateLimitWindow{
+			Utilization: st.FiveH.Utilization, ResetAt: st.FiveH.ResetAt, Status: st.FiveH.Status,
+		},
+		SevenD: connectapi.RateLimitWindow{
+			Utilization: st.SevenD.Utilization, ResetAt: st.SevenD.ResetAt, Status: st.SevenD.Status,
+		},
+		OverallStatus: st.OverallStatus,
+		UpdatedAt:     st.UpdatedAt,
+	}, true, nil
 }

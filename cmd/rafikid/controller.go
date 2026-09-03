@@ -949,7 +949,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// top-level spawn outright.
 	ownerName := attestOwner(c.st, req, owner)
 
-	runner, err := c.agentRunner(req, childID, false, ownerName)
+	runner, err := c.agentRunner(req, childID, false, ownerName, owner.UserID)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1634,8 +1634,11 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	// Spawn's ownerName computation) and lives on in snap.Labels; a resume
 	// re-derives nothing, it reuses that value so chooseExecutor's admission
 	// check (for an ExecutorSelector carried over from snap) sees the same
-	// owner the executor's row was minted to admit.
-	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"])
+	// owner the executor's row was minted to admit. The trailing "" is the
+	// owner's USER ID, not carried in snap.Labels (only the username is) —
+	// quota_status simply reports "no data captured" for a resumed child
+	// rather than guessing.
+	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], "")
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1750,7 +1753,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	// See Resume's identical call: the owner was attested at the child's
 	// original spawn and lives on in snap.Labels.
-	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"])
+	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], "")
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,

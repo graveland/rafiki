@@ -60,6 +60,7 @@ type Server struct {
 	lifecycle   atomic.Pointer[ChildLifecycle]
 	taskLister  atomic.Pointer[TaskLister]
 	modelLister atomic.Pointer[ModelLister]
+	quota       atomic.Pointer[QuotaReader]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }

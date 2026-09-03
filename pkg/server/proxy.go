@@ -21,6 +21,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
@@ -68,6 +69,8 @@ type MessagesProxy struct {
 	guard *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
 
 	set *providers.Set // the provider registry; nil = routing via the old slash rule
+
+	quotaStore *quota.Store // nil = no agent database; quota capture disabled
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -79,6 +82,11 @@ func (p *MessagesProxy) SetRawTrace(s *rawtrace.RawTraceStore, recordAll bool) {
 	p.rawTrace = s
 	p.rawTraceAll = recordAll
 }
+
+// SetQuotaStore enables capture of Anthropic's per-account subscription
+// rate-limit headers off OAuth-passthrough responses. Pass nil to disable
+// (the default) -- a nil store is inert at the call site.
+func (p *MessagesProxy) SetQuotaStore(s *quota.Store) { p.quotaStore = s }
 
 // SetProviderGuard attaches the provider cache guard, which ejects an
 // OpenRouter provider from routing after it stops serving prompt-cache hits.
@@ -819,7 +827,41 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 // error fails it; a clean stream completes it with the reassembled canonical
 // response. The per-turn "llm turn" log fires regardless of whether DB capture
 // is on, so a log-based consumer still sees every proxied turn.
+// captureQuota records the caller's Anthropic subscription rate-limit
+// snapshot off resp's anthropic-ratelimit-unified-* headers, when present.
+// Fire-and-forget on a detached context: it must never add latency to
+// time-to-first-byte (this runs before headers are written to the client) and
+// must never fail the turn. OpenRouter-routed traffic never carries these
+// headers, so this silently no-ops there; ParseHeaders' own ok=false does the
+// same for any other upstream that doesn't emit them.
+func (p *MessagesProxy) captureQuota(r *http.Request, resp *http.Response, upstream, convID string) {
+	if p.quotaStore == nil || upstream != "anthropic" {
+		return
+	}
+	st, ok := quota.ParseHeaders(resp.Header)
+	if !ok {
+		return
+	}
+	var id *Identity
+	if p.auth != nil {
+		id = p.auth.Identify(r)
+	}
+	if id == nil || id.UserID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := p.quotaStore.Upsert(ctx, id.UserID, st); err != nil {
+			p.logger.Warn("proxy: quota upsert failed", "conversation", convID, "user", id.Username, "error", err)
+		}
+	}()
+}
+
 func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time, stream bool) {
+	// Runs on every branch below (error, malformed, success) — a 429 is
+	// exactly the response most worth capturing quota data off.
+	p.captureQuota(r, resp, upstream, cr.convID)
 	// A 4xx/5xx is a small, non-streamed error body — handle it before touching
 	// the streaming path so we can buffer, surface the provider's real message
 	// to the client, and capture it. (The Messages API never responds 3xx, so

@@ -306,3 +306,58 @@ func TestPassthroughSelfForwardGuardFailsClosedOnStoreOutage(t *testing.T) {
 		t.Fatalf("store error text leaked to the caller: %q", rec.Body.String())
 	}
 }
+
+// IdentifyOptional backs the Connect UDS mount's identity enrichment: unlike
+// Middleware, it must never turn into a rejection — a missing, unrecognized,
+// or unresolvable-because-the-store-is-down credential all collapse to the
+// same "proceed anonymously" nil, because the mount's admission decision is
+// the socket itself and this only ever adds information on top of that.
+func TestIdentifyOptionalResolvesAPresentedCredential(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1", Username: "brent"}}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+
+	req := httptest.NewRequest("POST", "/rafiki.v1.Control/GetRateLimitStatus", nil)
+	req.Header.Set("Authorization", "Bearer rfk_good")
+
+	id := a.IdentifyOptional(context.Background(), req)
+	if id == nil || id.UserID != "u1" || id.Username != "brent" {
+		t.Fatalf("IdentifyOptional = %+v, want the resolved identity", id)
+	}
+}
+
+func TestIdentifyOptionalNilWithNoCredential(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1"}}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+
+	req := httptest.NewRequest("POST", "/rafiki.v1.Control/ListChildren", nil)
+	if id := a.IdentifyOptional(context.Background(), req); id != nil {
+		t.Fatalf("IdentifyOptional with no credential = %+v, want nil", id)
+	}
+	if st.calls.Load() != 0 {
+		t.Errorf("store was consulted for a request with no credential at all")
+	}
+}
+
+func TestIdentifyOptionalNilOnUnrecognizedCredential(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+
+	req := httptest.NewRequest("POST", "/rafiki.v1.Control/GetRateLimitStatus", nil)
+	req.Header.Set("Authorization", "Bearer rfk_stale_or_wrong_daemon")
+
+	if id := a.IdentifyOptional(context.Background(), req); id != nil {
+		t.Fatalf("IdentifyOptional with an unrecognized token = %+v, want nil (never a rejection)", id)
+	}
+}
+
+func TestIdentifyOptionalNilOnStoreOutage(t *testing.T) {
+	st := &stubStore{err: errors.New("connection refused")}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+
+	req := httptest.NewRequest("POST", "/rafiki.v1.Control/GetRateLimitStatus", nil)
+	req.Header.Set("Authorization", "Bearer rfk_good")
+
+	if id := a.IdentifyOptional(context.Background(), req); id != nil {
+		t.Fatalf("IdentifyOptional during a store outage = %+v, want nil, not an error", id)
+	}
+}

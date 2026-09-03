@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
@@ -105,6 +106,20 @@ type proxyFace struct {
 	// can't be a constructor argument. Nil when there is no capture pool (no
 	// Connect plane mounted at all).
 	Control *connectapi.Server
+
+	// QuotaStore is the same store instance the proxy captures into, exposed
+	// so main.go can wire Control.SetQuotaReader onto it — one store, read by
+	// GetRateLimitStatus and written by the proxy's capture path. Nil when
+	// there is no pool.
+	QuotaStore *quota.Store
+
+	// TokenAuth is the same identity resolver the TCP/TLS face requires a
+	// credential through, exposed so the UDS Connect listener can OPTIONALLY
+	// resolve identity too (see UserTokenAuth.IdentifyOptional) — the socket
+	// remains the trust boundary for admission; this only enriches a request
+	// with identity when a credential happens to be attached, which is what
+	// lets a per-user read like GetRateLimitStatus work locally.
+	TokenAuth *server.UserTokenAuth
 }
 
 // defaultProxyListen is where the face binds unless RAFIKI_PROXY_LISTEN says
@@ -194,6 +209,9 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	} else {
 		logger.Warn("no agent database; proxied turns will be routed but NOT captured", "env", paths.DB)
 	}
+	// nil-safe: quota.NewStore(nil) returns nil, and every *quota.Store method
+	// no-ops on a nil receiver.
+	quotaStore := quota.NewStore(pool)
 
 	llmOpts := []llm.ClientOption{
 		llm.WithProviders(providersOrDefault(opts.Providers)),
@@ -247,6 +265,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	if opts.RawTrace != nil {
 		messages.SetRawTrace(opts.RawTrace, opts.RawTraceAll)
 	}
+	messages.SetQuotaStore(quotaStore)
 	messages.SetProviderGuard(guard)
 
 	var metrics *server.Metrics
@@ -360,11 +379,13 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		return nil, fmt.Errorf("resolve proxy port from %s: %w", ln.Addr(), err)
 	}
 	f := &proxyFace{
-		URL:     "http://127.0.0.1:" + port,
-		Token:   token,
-		srv:     srv,
-		Handler: mux,
-		Control: connectServer,
+		URL:        "http://127.0.0.1:" + port,
+		Token:      token,
+		srv:        srv,
+		Handler:    mux,
+		Control:    connectServer,
+		QuotaStore: quotaStore,
+		TokenAuth:  tokenAuth,
 	}
 	logger.Info("proxy face listening",
 		"addr", ln.Addr().String(), "children_use", f.URL, "captured", pool != nil)

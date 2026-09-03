@@ -153,6 +153,12 @@ type RuntimeOptions struct {
 	// subtree to steer.
 	Agents tools.AgentSpawner
 
+	// Quota, when non-nil, gives this child the quota_status tool -- its own
+	// captured Anthropic subscription rate-limit snapshot. Supplied by the
+	// daemon as a per-user adapter; nil when no quota source is configured
+	// (a DB-less daemon) or for the standalone `rafikid fundi` process.
+	Quota tools.QuotaReader
+
 	// Executor, when non-nil, runs the filesystem and shell tools in a
 	// separate process. nil means no workspace tier at all: the workspace
 	// tools are not registered, so the child reasons over the daemon tier
@@ -476,6 +482,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Tasks:           taskStore,
 		ChildID:         opts.Ref,
 		Agents:          opts.Agents,
+		Quota:           opts.Quota,
 		Executor:        opts.Executor,
 		ExecutorTools:   executorToolSet(opts.ExecutorTools),
 		RemoteSkillBody: opts.RemoteSkillBody,

@@ -1008,6 +1008,18 @@ Consequences worth knowing:
   `true` as aliases for `on` and `0` / `false` / `no` as aliases for `off`,**
   for compatibility with the old boolean-only env var.
 
+Every passthrough response carries Anthropic's own
+`anthropic-ratelimit-unified-*` headers — your subscription's 5h/7d rolling
+utilization, reset time, and status. The proxy captures these (best-effort,
+never at the cost of the response itself) into a latest-only per-user
+snapshot. `rafiki claude --limits` prints it and exits without launching a
+session; the cockpit's status line shows a live-polled summary once data has
+been captured, and a `quota_status` tool is available to any agent that can
+also spawn subagents, so a coordinator can check its own headroom before
+deciding whether to put more work on the subscription or fail over to
+another provider. This is scoped to passthrough traffic only — API-token
+usage is a separate billing relationship with its own usage endpoint.
+
 One client-side caveat when pointing Claude Code at any proxy by hand: it
 attaches its byte watchdog — the mechanism that lets SSE keep-alive pings feed
 the 300s stream idle watchdog — only when the base URL host is exactly

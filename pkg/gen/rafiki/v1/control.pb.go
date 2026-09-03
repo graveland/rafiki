@@ -1859,6 +1859,188 @@ func (x *ListModelsResponse) GetModels() []*ModelRow {
 	return nil
 }
 
+// RateLimitWindow is one Anthropic subscription rate-limit window's snapshot
+// (the "5h" or "7d" family of anthropic-ratelimit-unified-* headers).
+// utilization and reset_at are optional because a header Anthropic omits, or
+// sends in an unrecognized shape, must stay distinguishable from a real zero
+// or a real timestamp.
+type RateLimitWindow struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Utilization   *float64               `protobuf:"fixed64,1,opt,name=utilization,proto3,oneof" json:"utilization,omitempty"`       // Anthropic's own units, passed through verbatim
+	ResetAt       *int64                 `protobuf:"varint,2,opt,name=reset_at,json=resetAt,proto3,oneof" json:"reset_at,omitempty"` // unix seconds
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`                         // "" = not reported
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RateLimitWindow) Reset() {
+	*x = RateLimitWindow{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RateLimitWindow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RateLimitWindow) ProtoMessage() {}
+
+func (x *RateLimitWindow) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RateLimitWindow.ProtoReflect.Descriptor instead.
+func (*RateLimitWindow) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *RateLimitWindow) GetUtilization() float64 {
+	if x != nil && x.Utilization != nil {
+		return *x.Utilization
+	}
+	return 0
+}
+
+func (x *RateLimitWindow) GetResetAt() int64 {
+	if x != nil && x.ResetAt != nil {
+		return *x.ResetAt
+	}
+	return 0
+}
+
+func (x *RateLimitWindow) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+type GetRateLimitStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRateLimitStatusRequest) Reset() {
+	*x = GetRateLimitStatusRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRateLimitStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRateLimitStatusRequest) ProtoMessage() {}
+
+func (x *GetRateLimitStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRateLimitStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetRateLimitStatusRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{25}
+}
+
+// GetRateLimitStatusResponse answers the CALLER's own latest captured
+// snapshot -- never an arbitrary user's, which is why the request carries no
+// id. A NotFound response (not an empty message) means this user has never
+// made an OAuth-passthrough call; that is expected for anyone who has not
+// used `rafiki claude --passthrough-auth`, not an error.
+type GetRateLimitStatusResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	OrganizationId string                 `protobuf:"bytes,1,opt,name=organization_id,json=organizationId,proto3" json:"organization_id,omitempty"`
+	FiveH          *RateLimitWindow       `protobuf:"bytes,2,opt,name=five_h,json=fiveH,proto3" json:"five_h,omitempty"`
+	SevenD         *RateLimitWindow       `protobuf:"bytes,3,opt,name=seven_d,json=sevenD,proto3" json:"seven_d,omitempty"`
+	OverallStatus  string                 `protobuf:"bytes,4,opt,name=overall_status,json=overallStatus,proto3" json:"overall_status,omitempty"`
+	UpdatedAt      int64                  `protobuf:"varint,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // unix seconds
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GetRateLimitStatusResponse) Reset() {
+	*x = GetRateLimitStatusResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRateLimitStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRateLimitStatusResponse) ProtoMessage() {}
+
+func (x *GetRateLimitStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRateLimitStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetRateLimitStatusResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *GetRateLimitStatusResponse) GetOrganizationId() string {
+	if x != nil {
+		return x.OrganizationId
+	}
+	return ""
+}
+
+func (x *GetRateLimitStatusResponse) GetFiveH() *RateLimitWindow {
+	if x != nil {
+		return x.FiveH
+	}
+	return nil
+}
+
+func (x *GetRateLimitStatusResponse) GetSevenD() *RateLimitWindow {
+	if x != nil {
+		return x.SevenD
+	}
+	return nil
+}
+
+func (x *GetRateLimitStatusResponse) GetOverallStatus() string {
+	if x != nil {
+		return x.OverallStatus
+	}
+	return ""
+}
+
+func (x *GetRateLimitStatusResponse) GetUpdatedAt() int64 {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return 0
+}
+
 var File_rafiki_v1_control_proto protoreflect.FileDescriptor
 
 const file_rafiki_v1_control_proto_rawDesc = "" +
@@ -2022,7 +2204,21 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +
 	"\x12ListModelsResponse\x12+\n" +
-	"\x06models\x18\x01 \x03(\v2\x13.rafiki.v1.ModelRowR\x06models*S\n" +
+	"\x06models\x18\x01 \x03(\v2\x13.rafiki.v1.ModelRowR\x06models\"\x8d\x01\n" +
+	"\x0fRateLimitWindow\x12%\n" +
+	"\vutilization\x18\x01 \x01(\x01H\x00R\vutilization\x88\x01\x01\x12\x1e\n" +
+	"\breset_at\x18\x02 \x01(\x03H\x01R\aresetAt\x88\x01\x01\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06statusB\x0e\n" +
+	"\f_utilizationB\v\n" +
+	"\t_reset_at\"\x1b\n" +
+	"\x19GetRateLimitStatusRequest\"\xf3\x01\n" +
+	"\x1aGetRateLimitStatusResponse\x12'\n" +
+	"\x0forganization_id\x18\x01 \x01(\tR\x0eorganizationId\x121\n" +
+	"\x06five_h\x18\x02 \x01(\v2\x1a.rafiki.v1.RateLimitWindowR\x05fiveH\x123\n" +
+	"\aseven_d\x18\x03 \x01(\v2\x1a.rafiki.v1.RateLimitWindowR\x06sevenD\x12%\n" +
+	"\x0eoverall_status\x18\x04 \x01(\tR\roverallStatus\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\x05 \x01(\x03R\tupdatedAt*S\n" +
 	"\tEventTier\x12\x1a\n" +
 	"\x16EVENT_TIER_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12EVENT_TIER_DURABLE\x10\x01\x12\x12\n" +
@@ -2031,7 +2227,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x15SEND_MODE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10SEND_MODE_PROMPT\x10\x01\x12\x13\n" +
 	"\x0fSEND_MODE_STEER\x10\x02\x12\x13\n" +
-	"\x0fSEND_MODE_ABORT\x10\x032\xab\x05\n" +
+	"\x0fSEND_MODE_ABORT\x10\x032\x8e\x06\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -2044,7 +2240,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x05Close\x12\x17.rafiki.v1.CloseRequest\x1a\x18.rafiki.v1.CloseResponse\x12F\n" +
 	"\tListTasks\x12\x1b.rafiki.v1.ListTasksRequest\x1a\x1c.rafiki.v1.ListTasksResponse\x12I\n" +
 	"\n" +
-	"ListModels\x12\x1c.rafiki.v1.ListModelsRequest\x1a\x1d.rafiki.v1.ListModelsResponseB4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
+	"ListModels\x12\x1c.rafiki.v1.ListModelsRequest\x1a\x1d.rafiki.v1.ListModelsResponse\x12a\n" +
+	"\x12GetRateLimitStatus\x12$.rafiki.v1.GetRateLimitStatusRequest\x1a%.rafiki.v1.GetRateLimitStatusResponseB4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
 
 var (
 	file_rafiki_v1_control_proto_rawDescOnce sync.Once
@@ -2059,79 +2256,86 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_rafiki_v1_control_proto_goTypes = []any{
-	(EventTier)(0),               // 0: rafiki.v1.EventTier
-	(SendMode)(0),                // 1: rafiki.v1.SendMode
-	(*GetHistoryRequest)(nil),    // 2: rafiki.v1.GetHistoryRequest
-	(*GetHistoryResponse)(nil),   // 3: rafiki.v1.GetHistoryResponse
-	(*EventSubject)(nil),         // 4: rafiki.v1.EventSubject
-	(*EventCursor)(nil),          // 5: rafiki.v1.EventCursor
-	(*StreamEventsRequest)(nil),  // 6: rafiki.v1.StreamEventsRequest
-	(*SendRequest)(nil),          // 7: rafiki.v1.SendRequest
-	(*SendResponse)(nil),         // 8: rafiki.v1.SendResponse
-	(*ChildSummary)(nil),         // 9: rafiki.v1.ChildSummary
-	(*ListChildrenRequest)(nil),  // 10: rafiki.v1.ListChildrenRequest
-	(*ListChildrenResponse)(nil), // 11: rafiki.v1.ListChildrenResponse
-	(*GetChildRequest)(nil),      // 12: rafiki.v1.GetChildRequest
-	(*GetChildResponse)(nil),     // 13: rafiki.v1.GetChildResponse
-	(*SpawnRequest)(nil),         // 14: rafiki.v1.SpawnRequest
-	(*SpawnResponse)(nil),        // 15: rafiki.v1.SpawnResponse
-	(*KillRequest)(nil),          // 16: rafiki.v1.KillRequest
-	(*KillResponse)(nil),         // 17: rafiki.v1.KillResponse
-	(*CloseRequest)(nil),         // 18: rafiki.v1.CloseRequest
-	(*CloseResponse)(nil),        // 19: rafiki.v1.CloseResponse
-	(*TaskRow)(nil),              // 20: rafiki.v1.TaskRow
-	(*ListTasksRequest)(nil),     // 21: rafiki.v1.ListTasksRequest
-	(*ListTasksResponse)(nil),    // 22: rafiki.v1.ListTasksResponse
-	(*ModelRow)(nil),             // 23: rafiki.v1.ModelRow
-	(*ListModelsRequest)(nil),    // 24: rafiki.v1.ListModelsRequest
-	(*ListModelsResponse)(nil),   // 25: rafiki.v1.ListModelsResponse
-	nil,                          // 26: rafiki.v1.EventCursor.OrdinalsEntry
-	nil,                          // 27: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                          // 28: rafiki.v1.SpawnRequest.LabelsEntry
-	(*Event)(nil),                // 29: rafiki.v1.Event
-	(*ContentBlock)(nil),         // 30: rafiki.v1.ContentBlock
+	(EventTier)(0),                     // 0: rafiki.v1.EventTier
+	(SendMode)(0),                      // 1: rafiki.v1.SendMode
+	(*GetHistoryRequest)(nil),          // 2: rafiki.v1.GetHistoryRequest
+	(*GetHistoryResponse)(nil),         // 3: rafiki.v1.GetHistoryResponse
+	(*EventSubject)(nil),               // 4: rafiki.v1.EventSubject
+	(*EventCursor)(nil),                // 5: rafiki.v1.EventCursor
+	(*StreamEventsRequest)(nil),        // 6: rafiki.v1.StreamEventsRequest
+	(*SendRequest)(nil),                // 7: rafiki.v1.SendRequest
+	(*SendResponse)(nil),               // 8: rafiki.v1.SendResponse
+	(*ChildSummary)(nil),               // 9: rafiki.v1.ChildSummary
+	(*ListChildrenRequest)(nil),        // 10: rafiki.v1.ListChildrenRequest
+	(*ListChildrenResponse)(nil),       // 11: rafiki.v1.ListChildrenResponse
+	(*GetChildRequest)(nil),            // 12: rafiki.v1.GetChildRequest
+	(*GetChildResponse)(nil),           // 13: rafiki.v1.GetChildResponse
+	(*SpawnRequest)(nil),               // 14: rafiki.v1.SpawnRequest
+	(*SpawnResponse)(nil),              // 15: rafiki.v1.SpawnResponse
+	(*KillRequest)(nil),                // 16: rafiki.v1.KillRequest
+	(*KillResponse)(nil),               // 17: rafiki.v1.KillResponse
+	(*CloseRequest)(nil),               // 18: rafiki.v1.CloseRequest
+	(*CloseResponse)(nil),              // 19: rafiki.v1.CloseResponse
+	(*TaskRow)(nil),                    // 20: rafiki.v1.TaskRow
+	(*ListTasksRequest)(nil),           // 21: rafiki.v1.ListTasksRequest
+	(*ListTasksResponse)(nil),          // 22: rafiki.v1.ListTasksResponse
+	(*ModelRow)(nil),                   // 23: rafiki.v1.ModelRow
+	(*ListModelsRequest)(nil),          // 24: rafiki.v1.ListModelsRequest
+	(*ListModelsResponse)(nil),         // 25: rafiki.v1.ListModelsResponse
+	(*RateLimitWindow)(nil),            // 26: rafiki.v1.RateLimitWindow
+	(*GetRateLimitStatusRequest)(nil),  // 27: rafiki.v1.GetRateLimitStatusRequest
+	(*GetRateLimitStatusResponse)(nil), // 28: rafiki.v1.GetRateLimitStatusResponse
+	nil,                                // 29: rafiki.v1.EventCursor.OrdinalsEntry
+	nil,                                // 30: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                                // 31: rafiki.v1.SpawnRequest.LabelsEntry
+	(*Event)(nil),                      // 32: rafiki.v1.Event
+	(*ContentBlock)(nil),               // 33: rafiki.v1.ContentBlock
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	29, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	26, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	32, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	29, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
 	4,  // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
 	0,  // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
 	5,  // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
 	1,  // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	30, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	27, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	33, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	30, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
 	9,  // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
 	9,  // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	28, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	31, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
 	20, // 11: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
 	23, // 12: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
-	2,  // 13: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	6,  // 14: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	7,  // 15: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	10, // 16: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	12, // 17: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	14, // 18: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	16, // 19: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	18, // 20: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
-	21, // 21: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	24, // 22: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	3,  // 23: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	29, // 24: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	8,  // 25: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	11, // 26: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	13, // 27: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	15, // 28: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	17, // 29: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	19, // 30: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
-	22, // 31: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	25, // 32: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	23, // [23:33] is the sub-list for method output_type
-	13, // [13:23] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	26, // 13: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
+	26, // 14: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
+	2,  // 15: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	6,  // 16: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	7,  // 17: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	10, // 18: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	12, // 19: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	14, // 20: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	16, // 21: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	18, // 22: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	21, // 23: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	24, // 24: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	27, // 25: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
+	3,  // 26: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	32, // 27: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	8,  // 28: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	11, // 29: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	13, // 30: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	15, // 31: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	17, // 32: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	19, // 33: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	22, // 34: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	25, // 35: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	28, // 36: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
+	26, // [26:37] is the sub-list for method output_type
+	15, // [15:26] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -2151,13 +2355,14 @@ func file_rafiki_v1_control_proto_init() {
 	file_rafiki_v1_control_proto_msgTypes[12].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[15].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[21].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[24].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   27,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/quotafmt"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 	"go.graveland.dev/rafiki/pkg/tui/streams"
@@ -157,6 +158,20 @@ const maxSessions = 12
 
 type eventMsg struct{ ev *rafikiv1.Event }
 type tickMsg time.Time
+
+// quotaTickMsg drives the periodic quota poll, separate from tickMsg's 250ms
+// animation cadence -- this data changes slowly and a poll is a network round
+// trip, not a local frame counter increment.
+type quotaTickMsg time.Time
+
+// quotaMsg carries a poll result. resp is nil on any error (unreachable
+// daemon, older daemon with no such RPC, NotFound because this user has
+// never made a passthrough call) -- every one of those cases means "show
+// nothing", so the error itself is not worth threading further.
+type quotaMsg struct {
+	resp *rafikiv1.GetRateLimitStatusResponse
+}
+
 type seedMsg struct {
 	children []*rafikiv1.ChildSummary
 	err      error
@@ -265,6 +280,12 @@ type Cockpit struct {
 	// quitArmed is when the first ^C/^D landed. A single stray one must not
 	// throw away an attached session, so the key arms and the repeat quits.
 	quitArmed time.Time
+	// quota is the last polled Anthropic subscription rate-limit snapshot, or
+	// nil before the first poll returns (or on a daemon too old to serve the
+	// RPC, or when this user has no passthrough usage). quotaReadout() gates
+	// display on staleness too -- absence and staleness are the same "don't
+	// show a possibly-wrong number" decision, just two different reasons.
+	quota *rafikiv1.GetRateLimitStatusResponse
 	// notice is a transient line shown instead of status, for things the user
 	// needs to see once (the quit confirmation) rather than a standing state.
 	notice      string
@@ -411,7 +432,7 @@ func (c *Cockpit) setNotice(s string) {
 
 // Init seeds the rail from ListChildren and starts the event pump.
 func (c *Cockpit) Init() tea.Cmd {
-	cmds := []tea.Cmd{c.seedCmd(), waitForEvent(c.evCh), tick(), textarea.Blink}
+	cmds := []tea.Cmd{c.seedCmd(), waitForEvent(c.evCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick()}
 	if c.form != nil {
 		// A form opened at CONSTRUCTION never saw the `n` keypress that
 		// normally starts the catalog fetch, so its typeahead would sit empty
@@ -649,6 +670,13 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		c.frame++
 		return c, tick()
+
+	case quotaTickMsg:
+		return c, tea.Batch(c.fetchQuotaCmd(), quotaTick())
+
+	case quotaMsg:
+		c.quota = msg.resp
+		return c, nil
 
 	case tea.PasteMsg:
 		return c, c.handlePaste(msg.Content)
@@ -1763,7 +1791,15 @@ func (c *Cockpit) View() tea.View {
 	if c.notice != "" {
 		statusLine = c.notice
 	}
-	if id := c.agentIdentity(); id != "" {
+	id := c.agentIdentity()
+	if q := c.quotaReadout(); q != "" {
+		if id != "" {
+			id = styleMeta.Render(q) + "  " + id
+		} else {
+			id = styleMeta.Render(q)
+		}
+	}
+	if id != "" {
 		if avail := c.width - ansi.StringWidth(statusLine) - 1; avail > 0 {
 			id = clip(id, avail)
 			gap := c.width - ansi.StringWidth(statusLine) - ansi.StringWidth(id) - 1
@@ -1880,4 +1916,59 @@ func tick() tea.Cmd {
 	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// quotaPollInterval is deliberately slow: the underlying data is a 5h/7d
+// rolling window that does not move quickly, and this is a network round
+// trip, not a local counter increment.
+const quotaPollInterval = 60 * time.Second
+
+// quotaStaleAfter gates display: a snapshot older than this reads as "the
+// poll stopped working" rather than "current status", so it hides instead of
+// showing a possibly-wrong number.
+const quotaStaleAfter = 15 * time.Minute
+
+func quotaTick() tea.Cmd {
+	return tea.Tick(quotaPollInterval, func(t time.Time) tea.Msg {
+		return quotaTickMsg(t)
+	})
+}
+
+// fetchQuotaCmd polls the caller's own rate-limit snapshot. Every failure
+// (unreachable daemon, a daemon predating this RPC, NotFound because this
+// user has never made a passthrough call) collapses to resp=nil, which
+// quotaReadout renders as "show nothing" -- this is ambient status, not
+// something worth surfacing an error for.
+func (c *Cockpit) fetchQuotaCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		resp, err := c.client.GetRateLimitStatus(ctx, connect.NewRequest(&rafikiv1.GetRateLimitStatusRequest{}))
+		if err != nil {
+			return quotaMsg{}
+		}
+		return quotaMsg{resp: resp.Msg}
+	}
+}
+
+// quotaReadout is the status line's Anthropic subscription rate-limit
+// segment. Empty hides it entirely: no poll has landed yet, the daemon
+// reported nothing (never used passthrough, or predates the RPC), or the
+// last good snapshot is stale enough that showing it would mislead rather
+// than inform.
+func (c *Cockpit) quotaReadout() string {
+	if c.quota == nil || c.quota.GetUpdatedAt() == 0 {
+		return ""
+	}
+	if time.Since(time.Unix(c.quota.GetUpdatedAt(), 0)) > quotaStaleAfter {
+		return ""
+	}
+	return quotaWindowReadout("5h", c.quota.GetFiveH()) + " " + quotaWindowReadout("7d", c.quota.GetSevenD())
+}
+
+func quotaWindowReadout(label string, w *rafikiv1.RateLimitWindow) string {
+	if w == nil {
+		return label + " —"
+	}
+	return label + " " + quotafmt.Utilization(w.Utilization)
 }
