@@ -640,10 +640,13 @@ type AssistantMessage struct {
 	// leaves it empty for user rows.
 	StopReason    StopReason `protobuf:"varint,2,opt,name=stop_reason,json=stopReason,proto3,enum=rafiki.v1.StopReason" json:"stop_reason,omitempty"`
 	RawStopReason string     `protobuf:"bytes,3,opt,name=raw_stop_reason,json=rawStopReason,proto3" json:"raw_stop_reason,omitempty"`
-	// cost_usd is the RUNNING total for the turn this message belongs to —
-	// every completed prior turn plus every iteration of this one so far,
-	// including this reply — not the final per-turn cost TurnEnd.cost_usd
-	// reports. Optional for the same reason every Usage/cost field in this
+	// cost_usd is the RUNNING total for the CURRENT TURN only, so far —
+	// every iteration of THIS turn up to and including this reply, but
+	// deliberately excluding every completed prior turn. It is NOT the final
+	// per-turn cost TurnEnd.cost_usd reports (that is this same turn's cost
+	// once it ends), and it is NOT a conversation-lifetime total: a client
+	// that wants the lifetime figure sums settled TurnEnd.cost_usd values and
+	// adds this. Optional for the same reason every Usage/cost field in this
 	// proto is: absence and a reported zero are different facts, and a client
 	// (the TUI rail) needs to tell "not yet priced" from "genuinely free".
 	CostUsd       *float64 `protobuf:"fixed64,4,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`

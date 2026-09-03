@@ -765,12 +765,24 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 	var acc anthropic.Message
 	var streamed bool
 	var lastFlush time.Time
-	// runningTotal is this turn's cost-so-far (prior completed turns plus
-	// every iteration of THIS turn), refreshed by OnTurn on every LLM reply.
-	// ShouldStop reads it — agentloop calls OnTurn before ShouldStop within
-	// the same iteration (see drive's ordering), so by the time ShouldStop
-	// runs it always reflects the reply that was just received.
+	// runningTotal is the CONVERSATION-LIFETIME cost-so-far (every completed
+	// prior turn plus every iteration of THIS turn), refreshed by OnTurn on
+	// every LLM reply. ShouldStop reads it — agentloop calls OnTurn before
+	// ShouldStop within the same iteration (see drive's ordering), so by the
+	// time ShouldStop runs it always reflects the reply that was just
+	// received. This is deliberately the lifetime figure: a per-agent cost
+	// budget (maxCost) is meant to bound everything the agent has ever spent,
+	// not reset every turn.
+	//
+	// turnCost is the companion TURN-LOCAL figure — everything THIS turn has
+	// cost so far, deliberately excluding priorCost — and is what gets
+	// published to the wire (publishAssistant) for the TUI rail to render.
+	// The two must stay separate: rail.Node.CostLive is added to the child's
+	// already-settled Cost (TotalCost() = Cost + CostLive), so publishing the
+	// lifetime total there would double-count every prior turn on every
+	// in-flight reply.
 	var runningTotal float64
+	var turnCost float64
 
 	handler := func(ev anthropic.MessageStreamEventUnion) {
 		llm.FixEmptyToolInput(&ev)
@@ -836,6 +848,12 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 				iterCost := costOf(e.em.pricer, string(resp.Model), resp.Usage)
 				conversationTotal := priorCost + e.em.usage.Cost.Total + iterCost.Total
 				runningTotal = conversationTotal
+				// turnCost excludes priorCost deliberately — see its declaration
+				// above. e.em.usage.Cost.Total already holds every PRIOR iteration
+				// of this same turn (folded in by addUsage inside
+				// StreamEnd/AssistantTurn, which run before publishAssistant below);
+				// iterCost.Total is this iteration's own contribution.
+				turnCost = e.em.usage.Cost.Total + iterCost.Total
 				cachePct := cacheHitPct(resp.Usage)
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
@@ -871,7 +889,7 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			} else {
 				e.em.AssistantTurn(resp)
 			}
-			e.em.publishAssistant(resp, runningTotal)
+			e.em.publishAssistant(resp, turnCost)
 		},
 		// OnToolStart/OnToolEnd are the only callbacks here that do NOT run on
 		// the turn goroutine: agentloop invokes them from inside its per-tool
