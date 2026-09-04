@@ -209,6 +209,11 @@ type Controller struct {
 	// "it's idle now". See turn_outcomes.go.
 	turnOutcomes turnOutcomeStore
 
+	// selfKilled marks children a coordinator killed itself via agent_kill,
+	// so handleChildExit can suppress the redundant "exited" notification.
+	// See self_kill.go.
+	selfKilled selfKillStore
+
 	// nudgedOnce bounds prompting.md's enforcement ladder to one nudge per
 	// child. Guarded by nudgedMu.
 	nudgedMu   sync.Mutex
@@ -2966,7 +2971,18 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// Tell the parent its worker is gone. This runs before Forget (which
 	// clears batches aimed AT this child, not at its parent) and before
 	// cm.Remove, which is the observable "teardown complete" signal.
-	c.notifySubagentSettled(childID, "exited")
+	//
+	// Suppressed for a clean kill the coordinator initiated itself via
+	// agent_kill: that call already blocks until cm.Remove, so its tool
+	// result already confirmed termination — this notification would tell it
+	// nothing new. checkTaskResidue still runs either way: killing a
+	// subagent with unresolved tasks is itself worth surfacing to the
+	// coordinator, self-initiated or not.
+	if c.suppressExitNotice(childID, res.ExitCode, res.Signal) {
+		c.checkTaskResidue(childID)
+	} else {
+		c.notifySubagentSettled(childID, "exited")
+	}
 
 	// Drop any buffered events aimed at this child. It will never transition
 	// to idle again, so DrainIdle can never clear them.
