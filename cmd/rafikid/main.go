@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -493,6 +494,19 @@ func runDaemon(opts runDaemonOpts) error {
 	// Wire the controller's reach-through callbacks on connect/disconnect.
 	if darajaPool != nil {
 		ctrl.WireDaraja(darajaPool, darajaPool.Reg())
+		// Daraja RPCs on Connect: also wire them to the control plane.
+		if execPool != nil && face != nil && face.Control != nil {
+			dialAddr := paths.ExecutorSocketPath() // local default
+			if controlAddr != "" {
+				dialAddr = controlAddr // TCP address for remote launches
+			}
+			face.Control.SetDaraja(connectapi.DarajaDependencies{
+				ExecPool:   execPool,
+				DarajaReg:  darajaPool.Reg(),
+				DarajaPool: darajaPool,
+				DialAddr:   dialAddr,
+			})
+		}
 	}
 
 	if execPool != nil {

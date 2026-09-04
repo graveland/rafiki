@@ -14,6 +14,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/adminpb/adminpbconnect"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -72,6 +73,7 @@ type liveConn struct {
 	executor executors.Executor
 	describe *executorpb.DescribeResponse
 	client   *executorClient
+	httpCli  *http.Client // shared inverted-h2 client; also backs AdminServiceClient
 	draining bool
 	// remoteAddr is the peer address, kept for the log line when a second
 	// connection is refused: two different addresses for one credential is the
@@ -355,6 +357,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 		executor:    e,
 		describe:    desc.Msg,
 		client:      &executorClient{inner: cl},
+		httpCli:     httpClient,
 		remoteAddr:  remote,
 		connectedAt: time.Now(),
 		done:        make(chan struct{}),
@@ -474,6 +477,26 @@ func (p *Pool) connectClientFor(executorID string) (executorpbconnect.ExecutorSe
 		return nil, fmt.Errorf("executor %s: %w", executorID, ErrDraining)
 	}
 	return lc.client.inner, nil
+}
+
+// AdminClientFor returns an AdminServiceClient for executorID. It builds the
+// client from the same inverted-h2 http.Client that backs the executor service,
+// so calls reach the same live connection. Nil is returned when the executor
+// is not connected, parked, or draining — matching ClientFor's semantics.
+func (p *Pool) AdminClientFor(executorID string) (adminpbconnect.AdminServiceClient, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	lc, ok := p.live[executorID]
+	if !ok {
+		if _, parked := p.parked[executorID]; parked {
+			return nil, fmt.Errorf("executor %s: %w", executorID, ErrParked)
+		}
+		return nil, fmt.Errorf("executor %s: %w", executorID, ErrExecutorLost)
+	}
+	if lc.draining || lc.httpCli == nil {
+		return nil, fmt.Errorf("executor %s: %w", executorID, ErrDraining)
+	}
+	return adminpbconnect.NewAdminServiceClient(lc.httpCli, "http://executor"), nil
 }
 
 // ClientForWorkspace returns a tools.ExecutorClient for executorID whose

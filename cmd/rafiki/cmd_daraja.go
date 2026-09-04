@@ -11,9 +11,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/daraja"
+	darajapb "go.graveland.dev/rafiki/pkg/darajapb"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 // newDarajaCmd builds `rafiki daraja`, the per-child process host.
@@ -27,6 +30,7 @@ func newDarajaCmd() *cobra.Command {
 		Short: "Host a single child process for a remote rafikid",
 	}
 	cmd.AddCommand(newDarajaServeCmd())
+	cmd.AddCommand(newDarajaLaunchCmd())
 	return cmd
 }
 
@@ -158,4 +162,70 @@ func resolveDarajaConnectFlags(connect, connectSocket string) (string, string, e
 func mustGetString(cmd *cobra.Command, name string) string {
 	s, _ := cmd.Flags().GetString(name)
 	return s
+}
+
+// newDarajaLaunchCmd builds `rafiki daraja launch`. It resolves an executor,
+// calls DarajaLaunch on the daemon's Connect control plane (through
+// newConnectEndpoint so RAFIKI_URL is honoured), and waits for the daraja to
+// reverse-dial back before returning.
+func newDarajaLaunchCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "launch",
+		Short: "Launch a daraja-hosted child through a remote or local daemon",
+		Long: "Launches a claude child via daraja on a matching executor:\n" +
+			"  1. Resolves an executor that admits the selector and supports launching claude.\n" +
+			"  2. Calls AdminService.Launch on the executor with a one-shot ticket.\n" +
+			"  3. Waits for the daraja's reverse dial into the daemon's pool.\n" +
+			"  4. Returns the child id once connected.\n\n" +
+			"Through newConnectEndpoint — respects $RAFIKI_URL for remote daemons.\n" +
+			"A launch that matches no executor is refused with a per-candidate diagnostic.",
+		Args: cobra.NoArgs,
+		RunE: runDarajaLaunch,
+	}
+	cmd.Flags().String("executor", "", "label selector over executor labels")
+	cmd.Flags().String("cwd", "", "working directory for the hosted child")
+	cmd.Flags().String("model", "", "model id for the claude child")
+	cmd.Flags().String("resume", "", "session id to resume (optional)")
+	return cmd
+}
+
+func runDarajaLaunch(cmd *cobra.Command, _ []string) error {
+	endpoint, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return fmt.Errorf("resolve endpoint: %w", err)
+	}
+	client := endpoint.control()
+
+	cwd := mustGetString(cmd, "cwd")
+	if cwd == "" {
+		return errors.New("--cwd is required")
+	}
+	model := mustGetString(cmd, "model")
+	if model == "" {
+		return errors.New("--model is required")
+	}
+	resume := mustGetString(cmd, "resume")
+	selector := mustGetString(cmd, "executor")
+
+	req := &rafikiv1.DarajaLaunchRequest{
+		ExecutorSelector: selector,
+		Cwd:              cwd,
+		Spec: &darajapb.ChildSpec{
+			Kind: darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{
+				Model:         model,
+				ResumeSession: resume,
+			},
+		},
+	}
+
+	resp, err := client.DarajaLaunch(context.Background(), connect.NewRequest(req))
+	if err != nil {
+		return diagnoseConnectError(err, endpoint.describe)
+	}
+
+	fmt.Fprintf(os.Stdout, "child_id=%s pid=%d pgid=%d connected_at=%d\n",
+		resp.Msg.GetChildId(), resp.Msg.GetPid(), resp.Msg.GetPgid(),
+		resp.Msg.GetConnectedUnixMs())
+	return nil
 }

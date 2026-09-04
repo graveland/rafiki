@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // daraja is a SUBCOMMAND of rafiki, not a third binary: this repo ships exactly
@@ -19,17 +21,23 @@ func TestDarajaIsRegisteredOnRoot(t *testing.T) {
 
 func TestDarajaServeRequiresConnectAndBinary(t *testing.T) {
 	cmd := newDarajaCmd()
-	serve := cmd.Commands()
-	if len(serve) == 0 {
-		t.Fatal("daraja has no subcommands; expected `serve`")
+	var serve *cobra.Command
+	for _, c := range cmd.Commands() {
+		if c.Use == "serve" {
+			serve = c
+			break
+		}
+	}
+	if serve == nil {
+		t.Fatal("darja has no `serve` subcommand")
 	}
 	for _, flag := range []string{"connect-socket", "binary", "child-id"} {
-		if serve[0].Flags().Lookup(flag) == nil {
+		if serve.Flags().Lookup(flag) == nil {
 			t.Errorf("daraja serve is missing the --%s flag", flag)
 		}
 	}
 	// The old --socket flag must be gone.
-	if serve[0].Flags().Lookup("socket") != nil {
+	if serve.Flags().Lookup("socket") != nil {
 		t.Error("daraja serve still has the deprecated --socket flag")
 	}
 }
