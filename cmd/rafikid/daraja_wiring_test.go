@@ -19,6 +19,11 @@ var _ = strings.Builder{}
 // disconnects, the controller sets `rafiki/daraja-state=unreachable` on the
 // child's labels. This lets operators see that a child whose executor ran away
 // is unreachable without guessing from its still-`streaming` status.
+//
+// Driven end-to-end through the real registration path: WireDaraja wires the
+// controller's callbacks onto the pool; FireConnect/FireDisconnect then exercise
+// the registered callback path (not the internal handleConn internals), proving
+// that the callbacks wired at startup are actually what fire on state changes.
 func TestDisconnectMarksTheChildUnreachable(t *testing.T) {
 	t.Parallel()
 
@@ -35,11 +40,14 @@ func TestDisconnectMarksTheChildUnreachable(t *testing.T) {
 		Labels:    make(map[string]string),
 	})
 
+	// Build a real pool + registry and wire the controller into it — exactly
+	// the main() path.
 	darajaPool := darajapool.New(darajapool.NewRegistry())
 	ctrl.WireDaraja(darajaPool, darajaPool.Reg())
 
-	// Simulate the daraja disconnecting for this child.
-	ctrl.onDarajaDisconnect(childID)
+	// Fire the connect callback first (as installLive would), then disconnect.
+	darajaPool.FireConnect(childID)
+	darajaPool.FireDisconnect(childID)
 
 	snap, ok := st.Get(childID)
 	if !ok {
@@ -53,6 +61,11 @@ func TestDisconnectMarksTheChildUnreachable(t *testing.T) {
 // TestReconnectClearsTheUnreachableLabel verifies that a reconnect clears the
 // unreachable label. If the label were sticky, every reconnect would leave the
 // child marked unreachable forever, which is noise rather than signal.
+//
+// Driven end-to-end through the real registration path: WireDaraja wires the
+// callbacks; FireDisconnect then FireConnect exercise both sides of the
+// registered callback path — proving that main()'s WireDaraja call actually
+// connects the right functions (not that onDarajaConnect/disconnect are stubs).
 func TestReconnectClearsTheUnreachableLabel(t *testing.T) {
 	t.Parallel()
 
@@ -69,17 +82,19 @@ func TestReconnectClearsTheUnreachableLabel(t *testing.T) {
 	})
 
 	darajaPool := darajapool.New(darajapool.NewRegistry())
-	ctrl.WireDaraja(darajaPool, darajaPool.Reg())
+	reg := darajaPool.Reg()
+	_ = reg // wire path uses it via Reg()
+	ctrl.WireDaraja(darajaPool, reg)
 
-	// Simulate disconnect → label set.
-	ctrl.onDarajaDisconnect(childID)
+	// Disconnect → OnDisconnect sets label.
+	darajaPool.FireDisconnect(childID)
 	snap, _ := st.Get(childID)
 	if got := snap.Labels[darajaStateLabel]; got != "unreachable" {
 		t.Fatalf("after disconnect: label = %q, want %q", got, "unreachable")
 	}
 
-	// Simulate reconnect → label cleared.
-	ctrl.onDarajaConnect(childID)
+	// Connect → OnConnect clears label.
+	darajaPool.FireConnect(childID)
 	snap, _ = st.Get(childID)
 	if got := snap.Labels[darajaStateLabel]; got != "" {
 		t.Errorf("after reconnect: label = %q, want empty", got)
