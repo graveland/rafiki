@@ -301,7 +301,7 @@ func enrollOnce(connect, connectSocket string, cmd *cobra.Command, token, creden
 			SelfReported: map[string]string{
 				"os": runtime.GOOS, "arch": runtime.GOARCH, "version": version.String(),
 			},
-			Handler: executorHandler(srv),
+			Handler: executorHandler(srv, nil),
 		}
 		if connectSocket != "" {
 			opts.SocketPath = connectSocket

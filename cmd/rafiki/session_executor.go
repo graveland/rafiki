@@ -222,7 +222,7 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string) (s
 			SelfReported: map[string]string{
 				"version": version.String(),
 			},
-			Handler: executorHandler(srv),
+			Handler: executorHandler(srv, nil),
 		})
 		switch {
 		case err == nil, errors.Is(err, context.Canceled):
