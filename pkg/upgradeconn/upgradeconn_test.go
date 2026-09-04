@@ -218,3 +218,20 @@ func TestConcurrentCloseIsSafe(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Each protocol needs its own path, or two diallers reach the same handler and
+// the mismatch surfaces as garbage in the first frame rather than as a readable
+// HTTP status — which is the whole reason this indirection exists.
+func TestEveryProtocolHasItsOwnPath(t *testing.T) {
+	seen := map[string]Protocol{}
+	for _, p := range []Protocol{Control, Executor, Daraja} {
+		path := PathFor(p)
+		if path == "/" {
+			t.Errorf("PathFor(%q) fell through to the default", p)
+		}
+		if prev, dup := seen[path]; dup {
+			t.Errorf("PathFor(%q) == PathFor(%q) == %q", p, prev, path)
+		}
+		seen[path] = p
+	}
+}

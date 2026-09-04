@@ -80,6 +80,10 @@ const (
 	// Executor is the reverse-dialled executor link: a hello frame, then
 	// HTTP/2 with the roles inverted.
 	Executor Protocol = "rafiki-executor"
+	// Daraja is the reverse-dialled per-child host link: a hello frame, then
+	// HTTP/2 with the roles inverted, exactly as Executor. Its own path because
+	// the two carry different hello frames and reach different registries.
+	Daraja Protocol = "rafiki-daraja"
 )
 
 // Handler returns an http.Handler that upgrades a matching request and hands
@@ -112,53 +116,60 @@ func Handler(proto Protocol, serve func(*Conn)) http.Handler {
 			return
 		}
 
-		// Written by hand rather than through the ResponseWriter: it has been
-		// hijacked and no longer writes anything.
-		if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
+		// Write the 101 Switching Protocols by hand, because Hijack does not.
+		// The header is required; a missing 101 makes net/http's client hang
+		// waiting for a response that never arrives.
+		resp := "HTTP/1.1 101 Switching Protocols\r\n" +
 			"Upgrade: " + string(proto) + "\r\n" +
-			"Connection: Upgrade\r\n\r\n"); err != nil {
-			conn.Close()
+			"Connection: Upgrade\r\n\r\n"
+		if _, err := brw.WriteString(resp); err != nil {
+			_ = conn.Close()
 			return
 		}
 		if err := brw.Flush(); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 
-		// brw.Reader, not conn: see the Conn doc comment.
+		// The buffer contains anything pipelined behind the request — exactly
+		// the bytes we need to preserve. Hand it to serve as the connection's
+		// reader.
 		serve(&Conn{Conn: conn, r: brw.Reader})
 	})
 }
 
-// Dial performs the client half: it sends the upgrade request on an
-// already-established connection and consumes the 101 response, returning a
-// Conn positioned at the first byte of the upgraded protocol.
+// Dial upgrades a raw TCP connection to the given protocol. It writes the HTTP
+// request, waits for the 101 Switching Protocols, and returns a Conn that reads
+// through the hijack buffer.
 //
-// The response is read with a bufio.Reader that is then CARRIED FORWARD in the
-// returned Conn. A server that pipelines its first bytes behind the 101 — which
-// the executor link does not, but a future protocol might — would otherwise
-// have them read into a buffer that is thrown away.
-func Dial(conn net.Conn, proto Protocol, host string) (*Conn, error) {
-	req, err := http.NewRequest(http.MethodGet, "http://"+host+PathFor(proto), nil)
-	if err != nil {
+// addr is the host:port part for the Host header; it does not affect where
+// the connection is dialled.
+func Dial(raw net.Conn, proto Protocol, addr string) (*Conn, error) {
+	req := "GET " + PathFor(proto) + " HTTP/1.1\r\n" +
+		"Host: " + addr + "\r\n" +
+		"Upgrade: " + string(proto) + "\r\n" +
+		"Connection: Upgrade\r\n\r\n"
+	if _, err := raw.Write([]byte(req)); err != nil {
+		_ = raw.Close()
 		return nil, err
 	}
-	req.Header.Set("Upgrade", string(proto))
-	req.Header.Set("Connection", "Upgrade")
 
-	if err := req.Write(conn); err != nil {
-		return nil, fmt.Errorf("upgrade: write request: %w", err)
-	}
-
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, req)
+	br := bufio.NewReader(raw)
+	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
-		return nil, fmt.Errorf("upgrade: read response: %w", err)
+		_ = raw.Close()
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
-		return nil, fmt.Errorf("upgrade: server answered %s, want 101 Switching Protocols", resp.Status)
+		_ = raw.Close()
+		return nil, fmt.Errorf("upgrade refused: %s", resp.Status)
 	}
-	return &Conn{Conn: conn, r: br}, nil
+	if !strings.EqualFold(resp.Header.Get("Upgrade"), string(proto)) {
+		_ = raw.Close()
+		return nil, fmt.Errorf("server switched to %q, not %q", resp.Header.Get("Upgrade"), proto)
+	}
+
+	return &Conn{Conn: raw, r: br}, nil
 }
 
 // PathFor is the single source of truth for each protocol's path, so the dialler
@@ -169,6 +180,8 @@ func PathFor(proto Protocol) string {
 		return "/control"
 	case Executor:
 		return "/executor/connect"
+	case Daraja:
+		return "/daraja/connect"
 	default:
 		return "/"
 	}
