@@ -26,6 +26,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
@@ -483,9 +484,15 @@ func runDaemon(opts runDaemonOpts) error {
 		execPool.StartSweeper(ctx)
 	}
 
+	// Daraja pool: accepts per-child reverse-dialled connections.
+	var darajaPool *darajapool.Pool
+	if execStore != nil {
+		darajaPool = darajapool.New(darajapool.NewRegistry())
+	}
+
 	if execPool != nil {
 		execSock := paths.ExecutorSocketPath()
-		if ln, err := serveExecutorUDS(ctx, execPool, execSock); err != nil {
+		if ln, err := serveExecutorUDS(ctx, execPool, darajaPool, execSock); err != nil {
 			// Not fatal. A daemon whose TLS listener serves a whole fleet must
 			// not fail to start because a stale local socket is held by
 			// something else; local enrollment is a convenience and the remote
@@ -586,6 +593,9 @@ func runDaemon(opts runDaemonOpts) error {
 		if execPool != nil {
 			mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), execPool.UpgradeHandler())
 		}
+		if darajaPool != nil {
+			mux.Handle(upgradeconn.PathFor(upgradeconn.Daraja), darajaPool.UpgradeHandler())
+		}
 
 		// Everything else on this listener is the proxy face: /v1/messages,
 		// /v1/chat/completions, /healthz, /metrics and its unrouted-request
@@ -613,6 +623,7 @@ func runDaemon(opts runDaemonOpts) error {
 		slog.Info("rafiki daemon listening (TCP/TLS)", "addr", addr,
 			"control", upgradeconn.PathFor(upgradeconn.Control),
 			"executor", upgradeconn.PathFor(upgradeconn.Executor),
+			"daraja", upgradeconn.PathFor(upgradeconn.Daraja),
 			"executorEnabled", execPool != nil)
 	}
 
