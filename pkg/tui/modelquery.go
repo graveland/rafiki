@@ -3,64 +3,42 @@
 package tui
 
 import (
-	"sort"
 	"strings"
 	"time"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/modelquery"
 )
 
 // modelField names a column that can be sorted or bounded.
 //
-// One enum for both, because they are the same set: anything worth ordering by
-// is worth constraining, and the dialog puts a sort cell and a bound cell
-// against the same column name.
-type modelField int
+// It is an alias for modelquery.Field: the ordering and absence semantics are
+// shared with the daemon's agent_models tool, and only the presentation --
+// which columns are pinned, what their headers say, the named stops below --
+// is the picker's own.
+type modelField = modelquery.Field
 
 const (
-	colModel modelField = iota
-	colCtx
-	colIn
-	colOut
-	colCache
-	colMaxOut
-	colAge
-	colIntel
-	colCode
-	colAgentic
-	modelFieldCount
+	colModel        = modelquery.FieldModel
+	colCtx          = modelquery.FieldContext
+	colIn           = modelquery.FieldPromptUSD
+	colOut          = modelquery.FieldCompletionUSD
+	colCache        = modelquery.FieldCacheReadUSD
+	colMaxOut       = modelquery.FieldMaxCompletion
+	colAge          = modelquery.FieldAge
+	colIntel        = modelquery.FieldIntelligence
+	colCode         = modelquery.FieldCoding
+	colAgentic      = modelquery.FieldAgentic
+	modelFieldCount = modelquery.FieldCount
 )
 
-func (f modelField) String() string {
-	switch f {
-	case colModel:
-		return "model"
-	case colCtx:
-		return "ctx"
-	case colIn:
-		return "in$"
-	case colOut:
-		return "out$"
-	case colCache:
-		return "cache"
-	case colMaxOut:
-		return "max out"
-	case colAge:
-		return "age"
-	case colIntel:
-		return "intel"
-	case colCode:
-		return "code"
-	case colAgentic:
-		return "agentic"
-	}
-	return "?"
-}
-
-// pinned reports whether the field already has a column in the list, so the
-// sort does not need to add one. Sorting by something invisible is a list that
-// reorders for no visible reason.
-func (f modelField) pinned() bool {
+// pinnedField reports whether the field already has a column in the list, so
+// the sort does not need to add one. Sorting by something invisible is a list
+// that reorders for no visible reason.
+//
+// A function rather than a method because modelField is an alias for a type
+// this package does not own.
+func pinnedField(f modelField) bool {
 	switch f {
 	case colModel, colCtx, colIn, colOut:
 		return true
@@ -68,7 +46,8 @@ func (f modelField) pinned() bool {
 	return false
 }
 
-func (f modelField) header() (string, int) {
+// headerFor returns the column title and width for a field that is not pinned.
+func headerFor(f modelField) (string, int) {
 	switch f {
 	case colCache:
 		return "CACHE", 9
@@ -84,60 +63,6 @@ func (f modelField) header() (string, int) {
 		return "AGENTIC", 9
 	}
 	return "", 0
-}
-
-// value returns the field's numeric value for one row. ok=false means the
-// catalog has no answer -- NOT zero. Every locally-served model answers false
-// for nearly all of these.
-func (f modelField) value(r *rafikiv1.ModelRow) (float64, bool) {
-	switch f {
-	case colCtx:
-		if r.ContextWindow == nil {
-			return 0, false
-		}
-		return float64(*r.ContextWindow), true
-	case colIn:
-		if r.PromptUsd == nil {
-			return 0, false
-		}
-		return *r.PromptUsd * 1e6, true // per MILLION, the unit bounds are in
-	case colOut:
-		if r.CompletionUsd == nil {
-			return 0, false
-		}
-		return *r.CompletionUsd * 1e6, true
-	case colCache:
-		if r.CacheReadUsd == nil {
-			return 0, false
-		}
-		return *r.CacheReadUsd * 1e6, true
-	case colMaxOut:
-		if r.MaxCompletionTokens == nil {
-			return 0, false
-		}
-		return float64(*r.MaxCompletionTokens), true
-	case colAge:
-		if r.Created == nil || *r.Created <= 0 {
-			return 0, false
-		}
-		return float64(*r.Created), true
-	case colIntel:
-		if r.IntelligenceIndex == nil {
-			return 0, false
-		}
-		return *r.IntelligenceIndex, true
-	case colCode:
-		if r.CodingIndex == nil {
-			return 0, false
-		}
-		return *r.CodingIndex, true
-	case colAgentic:
-		if r.AgenticIndex == nil {
-			return 0, false
-		}
-		return *r.AgenticIndex, true
-	}
-	return 0, false
 }
 
 // sortKey is one ordering term. Keys apply in slice order, the first that
@@ -209,39 +134,49 @@ func maxStops(f modelField) []boundStop {
 	return []boundStop{{label: "—"}}
 }
 
-// admits reports whether a row satisfies this field's bounds.
+// query maps this bound's stop indices onto the shared constraint type.
 //
 // A row the catalog cannot answer for is ADMITTED by a bound, never rejected.
-// That is the same rule toolsKind and visionKind follow, and it matters most
-// here: every locally-served model has no price, no context and no score, so a
-// bound that rejected unknowns would silently empty the local fleet out of
-// every filtered list.
-func (b bound) admits(f modelField, r *rafikiv1.ModelRow) bool {
+// That is the same rule Tools and Vision follow, and it matters most here:
+// every locally-served model has no price, no context and no score, so a bound
+// that rejected unknowns would silently empty the local fleet out of every
+// filtered list.
+//
+// The "scored" stop is the ONE exception, and it is the only way to ask for
+// "benchmarked models only" -- a numeric minimum cannot express it, because
+// "intel >= 55" admits unscored rows by the rule above
+// (TestBoundsAdmitModelsTheCatalogCannotAnswerFor pins exactly that). The stop
+// is declared special: true precisely because it is a presence predicate
+// rather than a threshold. It previously mapped to no constraint at all: the
+// old admits() tested "value absent" before it reached the scored branch, so
+// the stop filtered nothing while the panel displayed a constraint -- worse
+// than having no control, because it misreported.
+func (b bound) query(f modelField) modelquery.Bound {
 	mins, maxs := minStops(f), maxStops(f)
-	v, ok := f.value(r)
-
+	var out modelquery.Bound
 	if b.minIx > 0 && b.minIx < len(mins) {
 		s := mins[b.minIx]
 		switch {
-		case !ok:
-			// unknown: admitted
 		case s.paidOnly:
-			if v <= 0 {
-				return false
-			}
+			out.PaidOnly = true
 		case s.special && s.label == "scored":
-			// presence alone; ok is already true here
-		case v < s.value:
-			return false
+			out.RequirePresent = true
+		default:
+			v := s.value
+			out.Min = &v
 		}
 	}
 	if b.maxIx > 0 && b.maxIx < len(maxs) {
-		s := maxs[b.maxIx]
-		if ok && v > s.value {
-			return false
-		}
+		v := maxs[b.maxIx].value
+		out.Max = &v
 	}
-	return true
+	return out
+}
+
+// admits reports whether a row satisfies this field's bounds. A row the
+// catalog cannot answer for is ADMITTED, never rejected -- see modelquery.
+func (b bound) admits(f modelField, r *rafikiv1.ModelRow) bool {
+	return b.query(f).Admits(f, r)
 }
 
 func (b bound) set() bool { return b.minIx > 0 || b.maxIx > 0 }
@@ -268,58 +203,17 @@ func stopText(s boundStop, op string) string {
 	return op + s.label
 }
 
-// compareField orders two rows on one field.
-//
-// It returns byPresence=true when the answer came from one side being ABSENT.
-// The caller must NOT flip that verdict for a descending key -- an absent value
-// is not "the largest", it is no answer, and it sorts last in both directions.
-// Flipping it puts every unscored model at the top of "smartest descending",
-// and 47 of the 104 models passing a typical query have no score at all.
-//
-// Two absent values TIE (0, false), which is what lets the next key decide.
-func compareField(a, b *rafikiv1.ModelRow, f modelField) (order int, byPresence bool) {
-	if f == colModel {
-		return strings.Compare(a.GetId(), b.GetId()), false
-	}
-	av, aok := f.value(a)
-	bv, bok := f.value(b)
-	switch {
-	case !aok && !bok:
-		return 0, false
-	case !aok:
-		return +1, true
-	case !bok:
-		return -1, true
-	case av < bv:
-		return -1, false
-	case av > bv:
-		return +1, false
-	}
-	return 0, false
-}
-
 // sortModels orders rows by every key in turn, the first that separates two
 // rows deciding. The id is the final tiebreak so the order is total and a
 // re-render never reshuffles equal rows.
+// sortModels orders rows by every key in turn. The presence rule -- an absent
+// value sorts last in BOTH directions -- lives in modelquery.Sort.
 func sortModels(rows []*rafikiv1.ModelRow, keys []sortKey) {
-	sort.SliceStable(rows, func(i, j int) bool {
-		for _, k := range keys {
-			c, byPresence := compareField(rows[i], rows[j], k.field)
-			if c == 0 {
-				continue
-			}
-			// Presence is NOT subject to direction. Only a comparison between
-			// two KNOWN values flips.
-			if byPresence {
-				return c < 0
-			}
-			if k.desc {
-				c = -c
-			}
-			return c < 0
-		}
-		return rows[i].GetId() < rows[j].GetId()
-	})
+	mq := make([]modelquery.SortKey, 0, len(keys))
+	for _, k := range keys {
+		mq = append(mq, modelquery.SortKey{Field: k.field, Desc: k.desc})
+	}
+	modelquery.Sort(rows, mq)
 }
 
 // summarizeKeys names the active ordering for a hint line.
@@ -344,7 +238,7 @@ func extraColumns(keys []sortKey) []modelField {
 	var out []modelField
 	seen := map[modelField]bool{}
 	for _, k := range keys {
-		if k.field.pinned() || seen[k.field] {
+		if pinnedField(k.field) || seen[k.field] {
 			continue
 		}
 		seen[k.field] = true
@@ -400,10 +294,8 @@ func admitsBounds(bounds map[modelField]bound, r *rafikiv1.ModelRow) bool {
 
 // biggerIsBetter says which end of a field you usually want first. Context,
 // scores and output limits read best descending; prices and names ascending.
+// biggerIsBetter says which end of a field you usually want first. Context,
+// scores and output limits read best descending; prices and names ascending.
 func biggerIsBetter(f modelField) bool {
-	switch f {
-	case colCtx, colMaxOut, colIntel, colCode, colAgentic, colAge:
-		return true
-	}
-	return false
+	return modelquery.BiggerIsBetter(f)
 }

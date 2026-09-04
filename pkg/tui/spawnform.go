@@ -381,7 +381,7 @@ func (f *spawnForm) suggestView(width, window int, v modelView) string {
 	extras := extraColumns(v.keys)
 	extraW := 0
 	for _, f := range extras {
-		_, w := f.header()
+		_, w := headerFor(f)
 		extraW += w
 	}
 	idW := max(20, width-32-extraW)
@@ -402,7 +402,7 @@ func (f *spawnForm) suggestView(width, window int, v modelView) string {
 		b.WriteString(styleMeta.Render(padTo(ctxCell(r), 9)))
 		b.WriteString(styleMeta.Render(padTo(priceCell(r.PromptUsd), 8)))
 		for _, f := range extras {
-			_, w := f.header()
+			_, w := headerFor(f)
 			b.WriteString(styleMeta.Render(padTo(cellFor(r, f, now), w)))
 		}
 		b.WriteString(styleMeta.Render(visionCellGlyph(r)))

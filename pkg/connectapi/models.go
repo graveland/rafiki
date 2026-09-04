@@ -83,15 +83,15 @@ func (s *Server) ListModels(
 	}
 	out := make([]*rafikiv1.ModelRow, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, toProtoModel(r))
+		out = append(out, ToProtoModel(r))
 	}
 	return connect.NewResponse(&rafikiv1.ListModelsResponse{Models: out}), nil
 }
 
-// toProtoModel maps one row onto the wire type, preserving absence on every
+// ToProtoModel maps one row onto the wire type, preserving absence on every
 // optional field. A value copy is taken per field because &r.Field would alias
 // the loop variable's storage.
-func toProtoModel(r ModelRow) *rafikiv1.ModelRow {
+func ToProtoModel(r ModelRow) *rafikiv1.ModelRow {
 	out := &rafikiv1.ModelRow{
 		Id:                  r.ID,
 		Provider:            r.Provider,

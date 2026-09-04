@@ -870,8 +870,8 @@ func TestOnlyUnpinnedFieldsAddAColumn(t *testing.T) {
 	if len(got) != 1 || got[0] != colAge {
 		t.Errorf("extraColumns = %v, want [age]", got)
 	}
-	if title, w := colAge.header(); title != "AGE" || w <= 0 {
-		t.Errorf("colAge.header() = (%q,%d), want an AGE column", title, w)
+	if title, w := headerFor(colAge); title != "AGE" || w <= 0 {
+		t.Errorf("headerFor(colAge) = (%q,%d), want an AGE column", title, w)
 	}
 }
 
@@ -1073,8 +1073,8 @@ func TestAgenticSortShowsItsOwnColumn(t *testing.T) {
 	if len(got) != 1 || got[0] != colAgentic {
 		t.Fatalf("extraColumns = %v, want [agentic]", got)
 	}
-	if title, w := colAgentic.header(); title != "AGENTIC" || w <= 0 {
-		t.Errorf("colAgentic.header() = (%q,%d), want an AGENTIC column", title, w)
+	if title, w := headerFor(colAgentic); title != "AGENTIC" || w <= 0 {
+		t.Errorf("headerFor(colAgentic) = (%q,%d), want an AGENTIC column", title, w)
 	}
 	f := 59.2
 	row := &rafikiv1.ModelRow{Id: "b/best", AgenticIndex: &f}

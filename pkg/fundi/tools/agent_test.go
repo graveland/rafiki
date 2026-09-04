@@ -32,7 +32,7 @@ func (f *fakeSpawner) List(context.Context) ([]AgentInfo, error) {
 	return f.children, f.listErr
 }
 
-func (f *fakeSpawner) Models(context.Context) ([]ModelInfo, error) {
+func (f *fakeSpawner) Models(context.Context, ModelQuery) ([]ModelInfo, error) {
 	return f.models, nil
 }
 
@@ -134,13 +134,17 @@ func TestAgentListSurfacesStoreErrors(t *testing.T) {
 	}
 }
 
+// TestAgentModelsRendersCatalog: a NARROWED call renders rows. A bare call
+// deliberately does not -- it answers with a summary, because the live catalog
+// is several hundred models and dumping it fills the agent's context. See
+// TestNoArgsReturnsASummaryNotAList.
 func TestAgentModelsRendersCatalog(t *testing.T) {
 	sp := &fakeSpawner{models: []ModelInfo{
 		{ID: "anthropic/claude-opus-4", Provider: "anthropic"},
 		{ID: "openai/gpt-5", Provider: "openai"},
 	}}
 	reg, ctx := newAgentTools(t, sp)
-	out, err := reg.Execute(ctx, "agent_models", json.RawMessage(`{}`))
+	out, err := reg.Execute(ctx, "agent_models", json.RawMessage(`{"limit":10}`))
 	if err != nil {
 		t.Fatalf("agent_models: %v", err)
 	}

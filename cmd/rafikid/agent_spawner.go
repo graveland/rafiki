@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -112,16 +115,126 @@ func sortAgents(a []tools.AgentInfo) {
 	})
 }
 
-func (s *controllerSpawner) Models(ctx context.Context) ([]tools.ModelInfo, error) {
-	models, err := s.c.ListModels(ctx, "")
+// Models answers agent_models.
+//
+// It reads ListModelRows, not ListModels: the row path is served from the
+// daemon's already-warm routing catalog, carries price/context/score, and
+// applies filterRowsForKind -- so a claude child is never offered an
+// OpenRouter id it cannot resolve. ListModels would instead run a SECOND
+// OpenRouter fetch with its own cache and TTL in the same process, and hand
+// back bare ids.
+//
+// Filtering and ordering go through pkg/modelquery, shared with the cockpit's
+// picker, so both surfaces agree on the three absence rules: a bound admits a
+// row the catalog cannot answer for, an absent value sorts last in BOTH
+// directions, and unknown capability is kept rather than read as "no".
+func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
+	rows, err := s.c.ListModelRows(ctx, "", q.Kind)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]tools.ModelInfo, 0, len(models))
-	for _, m := range models {
-		out = append(out, tools.ModelInfo{ID: m.ID, Provider: m.Provider})
+
+	pb := make([]*rafikiv1.ModelRow, 0, len(rows))
+	for _, r := range rows {
+		pb = append(pb, connectapi.ToProtoModel(r))
+	}
+
+	bounds := modelBounds(q)
+	keep := pb[:0]
+	for _, r := range pb {
+		if !modelquery.AdmitsAll(bounds, r) {
+			continue
+		}
+		if !admitsNeeds(r, q.Needs) {
+			continue
+		}
+		keep = append(keep, r)
+	}
+	pb = keep
+
+	if q.Sort != "" {
+		f, ok := modelquery.ParseField(q.Sort)
+		if !ok {
+			return nil, fmt.Errorf("unknown sort %q", q.Sort)
+		}
+		modelquery.Sort(pb, []modelquery.SortKey{{Field: f, Desc: modelquery.BiggerIsBetter(f)}})
+	}
+
+	out := make([]tools.ModelInfo, 0, len(pb))
+	for _, r := range pb {
+		out = append(out, toolModelInfo(r))
 	}
 	return out, nil
+}
+
+// modelBounds turns the tool's plain numeric limits into shared constraints.
+// Prices arrive per MILLION tokens, which is the unit modelquery works in.
+func modelBounds(q tools.ModelQuery) map[modelquery.Field]modelquery.Bound {
+	bounds := map[modelquery.Field]modelquery.Bound{}
+	if q.MaxInUSD != nil {
+		v := *q.MaxInUSD
+		bounds[modelquery.FieldPromptUSD] = modelquery.Bound{Max: &v}
+	}
+	if q.MaxOutUSD != nil {
+		v := *q.MaxOutUSD
+		bounds[modelquery.FieldCompletionUSD] = modelquery.Bound{Max: &v}
+	}
+	if q.MinContext != nil {
+		v := float64(*q.MinContext)
+		bounds[modelquery.FieldContext] = modelquery.Bound{Min: &v}
+	}
+	return bounds
+}
+
+// admitsNeeds applies the capability requirements. A model the catalog cannot
+// answer for is KEPT: unknown is not "no", and treating it as no hides every
+// locally-served model, none of which has a catalog entry.
+func admitsNeeds(r *rafikiv1.ModelRow, needs []string) bool {
+	for _, n := range needs {
+		var got modelquery.Support
+		switch strings.ToLower(n) {
+		case "tools":
+			got = modelquery.Tools(r)
+		case "vision":
+			got = modelquery.Vision(r)
+		case "reasoning":
+			got = modelquery.Reasoning(r)
+		default:
+			return false // validated in the tool; refuse rather than ignore
+		}
+		if got == modelquery.SupportNo {
+			return false
+		}
+	}
+	return true
+}
+
+// toolModelInfo copies a row onto the tool-facing type. Pointers are copied
+// through as-is: presence is decided by the catalog, never re-derived, and a
+// > 0 guard here would turn a reported zero into absent.
+func toolModelInfo(r *rafikiv1.ModelRow) tools.ModelInfo {
+	m := tools.ModelInfo{
+		ID:       r.GetId(),
+		Provider: r.GetProvider(),
+		Name:     r.GetName(),
+		Tools:    modelquery.Tools(r).String(),
+		Vision:   modelquery.Vision(r).String(),
+	}
+	if r.ContextWindow != nil {
+		v := int(*r.ContextWindow)
+		m.ContextWindow = &v
+	}
+	if r.MaxCompletionTokens != nil {
+		v := int(*r.MaxCompletionTokens)
+		m.MaxCompletionTokens = &v
+	}
+	m.PromptUSD = r.PromptUsd
+	m.CompletionUSD = r.CompletionUsd
+	m.CacheReadUSD = r.CacheReadUsd
+	m.IntelligenceIndex = r.IntelligenceIndex
+	m.CodingIndex = r.CodingIndex
+	m.AgenticIndex = r.AgenticIndex
+	return m
 }
 
 func (s *controllerSpawner) View(ctx context.Context, childID string, limit int) (string, error) {

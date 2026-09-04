@@ -648,3 +648,57 @@ func TestClosingThePanelSavesTheQuery(t *testing.T) {
 		t.Error("the query was not persisted when the panel closed")
 	}
 }
+
+// TestScoredStopExcludesUnscoredModels pins the ONE exception to the
+// admit-unknowns rule.
+//
+// This stop shipped as a no-op: the old admits() tested "value absent" before
+// it reached the scored branch, so selecting it filtered nothing while the
+// panel displayed a constraint. Nothing caught it because no test built a
+// bound from this stop. A numeric minimum cannot substitute -- "intel >= 55"
+// admits unscored rows deliberately, which
+// TestBoundsAdmitModelsTheCatalogCannotAnswerFor pins -- so this is the only
+// way to ask for benchmarked models only.
+func TestScoredStopExcludesUnscoredModels(t *testing.T) {
+	v := defaultModelView()
+	v.setBound(colIntel, bound{minIx: stopIndex(t, minStops(colIntel), "scored")})
+
+	rows := selectModels(scoredQueryRows(), "", v)
+	if len(rows) == 0 {
+		t.Fatal("the scored stop excluded everything, including scored models")
+	}
+	for _, r := range rows {
+		if r.IntelligenceIndex == nil {
+			t.Errorf("row %q has no intelligence score but survived the scored stop; "+
+				"the stop is a no-op again", r.GetId())
+		}
+	}
+}
+
+// TestScoredStopIsNotAppliedToOtherFields guards the blast radius: the
+// exception belongs to the score fields that declare it, and must not leak
+// into a price or context bound, where rejecting unknowns would hide every
+// locally-served model.
+func TestScoredStopIsNotAppliedToOtherFields(t *testing.T) {
+	v := defaultModelView()
+	v.setBound(colCtx, bound{minIx: stopIndex(t, minStops(colCtx), "128k")})
+
+	var found bool
+	for _, r := range selectModels(scoredQueryRows(), "", v) {
+		if r.GetId() == "local/unknown" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a context bound rejected a model the catalog cannot answer for")
+	}
+}
+
+func scoredQueryRows() []*rafikiv1.ModelRow {
+	return []*rafikiv1.ModelRow{
+		{Id: "or/scored-high", IntelligenceIndex: f64q(61.0), ContextWindow: i32q(200_000)},
+		{Id: "or/scored-low", IntelligenceIndex: f64q(30.0), ContextWindow: i32q(200_000)},
+		{Id: "or/unscored", ContextWindow: i32q(200_000)},
+		{Id: "local/unknown"}, // no catalog facts at all
+	}
+}
