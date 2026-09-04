@@ -427,7 +427,10 @@ re-provisioned workspace can only ever answer "gone", and a background poll
 must not be able to trigger a migration behind the agent's back. Killing a
 job with `bash_kill` drops its watch silently: the agent resolved it on
 purpose, and a "finished" fragment would cost a turn to deliver news it
-already has.
+already has. Watches live in the daemon's memory and are not re-armed on
+recovery, so a job still running when the daemon restarts notifies nothing —
+its workspace is re-provisioned and the job is gone with it, but the agent is
+not told, and `bash_output` is how it finds out.
 
 They are parent-side tools implemented as RPCs, and they **do not exist**
 when no executor is configured — a tool that can only answer "not configured"

@@ -158,9 +158,18 @@ func (w *jobWatcher) remove(k jobKey, e *watchedJob) {
 // definitive answer ends it — exited, gone, or a child that can no longer
 // receive the news. An error keeps the watch: an executor blip must not
 // silently drop a notification the agent is now waiting for (the same
-// transient/terminal split refreshRow applies), and a permanently dead
-// executor resolves itself when the child fails and its row goes terminal.
+// transient/terminal split refreshRow applies).
 func (w *jobWatcher) pollOnce(k jobKey, e *watchedJob) bool {
+	// BEFORE the poll, not only after a successful one. A child that can no
+	// longer receive the news ends its watch on EVERY path, because the two
+	// conditions arrive together: Close drops the binding pollJob resolves
+	// through, so from that moment every poll errors and a liveness check
+	// reachable only past a successful poll is never reached at all. That
+	// left a closed child's loop ticking for the daemon's lifetime.
+	if !w.alive(k.childID) {
+		return false
+	}
+
 	ctx, cancel := context.WithTimeout(w.baseCtx, jobPollTimeout)
 	snap, err := w.poll(ctx, k.childID, k.handle)
 	cancel()
@@ -177,6 +186,8 @@ func (w *jobWatcher) pollOnce(k jobKey, e *watchedJob) bool {
 		return true
 	}
 
+	// Again after the poll: the RPC can take jobPollTimeout, and a child that
+	// exited inside that window must not be pushed to.
 	if !w.alive(k.childID) {
 		return false
 	}
@@ -187,13 +198,16 @@ func (w *jobWatcher) pollOnce(k jobKey, e *watchedJob) bool {
 			k.handle, e.command, snap.ExitCode, k.handle))
 		return false
 	case !snap.Found:
-		// The executor no longer knows the handle: its workspace was released
-		// (budget eviction only touches finished jobs, so a job last seen
-		// running is GONE, not done) or the executor restarted and lost its
-		// in-memory registry.
+		// The executor no longer knows the handle. Three things produce that
+		// answer — the workspace was released, the executor restarted and lost
+		// its in-memory registry, or the job finished and enforceBudget evicted
+		// it (which deletes the registry entry, not just the output file) — and
+		// a poll cannot tell them apart, so the fragment names none of them.
+		// Whichever it was, the exit code and the output are unrecoverable and
+		// the advice is the same.
 		w.push(k.childID, jobEventSource, k.handle, fmt.Sprintf(
-			"background job %s (%s) is gone from its executor — the workspace was released or the executor restarted, "+
-				"so its output is unreadable. Re-run the command if you still need the result.",
+			"background job %s (%s) is no longer on its executor: neither what it printed nor "+
+				"how it ended can be recovered. Re-run the command if you still need the result.",
 			k.handle, e.command))
 		return false
 	}
