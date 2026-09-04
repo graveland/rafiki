@@ -34,7 +34,7 @@ type liveConn struct {
 	httpCli *http.Client // inverted h2 client for speaking to daraja
 
 	done   chan struct{} // closed when the connection ends
-closed sync.Once     // ensures done closes only once
+	closed sync.Once     // ensures done closes only once
 }
 
 // shutdown closes done if it isn't already, making teardown idempotent.

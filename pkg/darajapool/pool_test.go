@@ -52,7 +52,7 @@ func TestPoolConnectionStaysUp(t *testing.T) {
 
 	// Set a tight deadline so we read ONLY the hello response, not
 	// anything the relay goroutine pipes in afterward.
-	clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_ = clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	buf := make([]byte, 512)
 	n, err := io.ReadFull(clientConn, buf[:256]) // hello resp fits well under 256
 	if err != nil && n == 0 {
