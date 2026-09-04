@@ -130,19 +130,6 @@ func (s *Server) DarajaLaunch(
 			errors.New("dial address not set"))
 	}
 
-	// Finding 3: refuse UDS dial_addr outright.
-	// When no TCP control listener exists, dialAddr is a Unix socket path.
-	// A remote executor cannot reach a daemon-local socket. Instead of
-	// attempting full advertised-URL infrastructure (out of scope for 1b-ii),
-	// refuse with a clear diagnostic naming RAFIKI_CONTROL_LISTEN.
-	isUDS := !strings.Contains(h.dialAddr, ":") && strings.HasPrefix(h.dialAddr, "/")
-	if isUDS {
-		return nil, connect.NewError(connect.CodeUnavailable,
-			errors.New("daraja launch requires a TCP control address so the daraja "+
-				"process can reverse-dial back; set RAFIKI_CONTROL_LISTEN on this "+
-				"daemon and restart"))
-	}
-
 	spec := req.Msg.GetSpec()
 	if spec == nil || spec.Claude == nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
@@ -173,6 +160,33 @@ func (s *Server) DarajaLaunch(
 			}
 		}
 		candidates = narrowed
+	}
+
+	// Dial transport check. When dialAddr names a Unix socket, daraja must be
+	// local — only an executor that connected over UDS can reach the same path.
+	// A TCP-enrolled remote executor's launch would fail silently.
+	isUDS := !strings.Contains(h.dialAddr, ":") && strings.HasPrefix(h.dialAddr, "/")
+	if isUDS {
+		var udsCandidates []execpoolv1.LiveExecutor
+		for _, le := range candidates {
+			if h.execPool.IsEnrolledViaUDS(le.Executor.ID) {
+				udsCandidates = append(udsCandidates, le)
+			}
+		}
+		candidates = udsCandidates
+		if len(candidates) == 0 && len(withLaunchKind) > 0 {
+			// All executors had the launch kind but none enrolled via UDS.
+			// explainNoMatch would mislead by listing them; produce a
+			// transport-specific diagnostic instead.
+			var b strings.Builder
+			fmt.Fprintf(&b, "launch refused: no executor satisfies %q.\n", selStr)
+			fmt.Fprintf(&b, "  %d live executor(s), %d with launch kind,\n",
+				len(allLive), len(withLaunchKind))
+			fmt.Fprintf(&b, "  none enrolled over unix domain socket (needed when "+
+				"dial address is a local path). Set RAFIKI_CONTROL_LISTEN on this "+
+				"daemon to advertise a TCP address instead.\n")
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New(b.String()))
+		}
 	}
 
 	if len(candidates) == 0 {

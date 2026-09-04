@@ -79,6 +79,10 @@ type liveConn struct {
 	// connection is refused: two different addresses for one credential is the
 	// shape of a credential on two machines.
 	remoteAddr string
+	// network is the transport this connection used — "unix" for UDS or "tcp"
+	// for TCP/TLS. Used by DarajaLaunch to decide whether a UDS dial address
+	// is reachable: an executor that connected over UDS is local by definition.
+	network string
 	// connectedAt is when THIS connection joined the pool — not the
 	// executor's row-level EnrolledAt/LastSeenAt, which survive reconnects.
 	// A client watching `rafiki executor list` wants to know how long the
@@ -359,6 +363,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 		client:      &executorClient{inner: cl},
 		httpCli:     httpClient,
 		remoteAddr:  remote,
+		network:     conn.RemoteAddr().Network(),
 		connectedAt: time.Now(),
 		done:        make(chan struct{}),
 		transient:   transient,
@@ -401,6 +406,36 @@ func (p *Pool) Live() []LiveExecutor {
 		})
 	}
 	return out
+}
+
+// HasUDSEnrolled reports whether at least one live executor enrolled via Unix
+// domain socket. An UDS-enrolled executor is local by definition — it dialed
+// a filesystem socket — so a daraja launched for it can reach the same UDS
+// path that the executor used to enroll. When dialAddr names a UDS socket,
+// this method tells DarajaLaunch whether that socket is actually reachable:
+// only when at least one UDS executor lives.
+func (p *Pool) HasUDSEnrolled() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, lc := range p.live {
+		if lc.network == "unix" {
+			return true
+		}
+	}
+	return false
+}
+
+// IsEnrolledViaUDS reports whether the given executor ID is currently held on a
+// connection that arrived over Unix domain socket. Used by DarajaLaunch to
+// filter candidates to ones whose transport matches a UDS dial address.
+func (p *Pool) IsEnrolledViaUDS(id string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	lc := p.live[id]
+	if lc == nil {
+		return false
+	}
+	return lc.network == "unix"
 }
 
 // LiveExecutor carries a connected executor's current state.
