@@ -103,7 +103,14 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 	protos := new(http.Protocols)
 	protos.SetUnencryptedHTTP2(true)
 	httpSrv := &http.Server{Handler: mux, Protocols: protos}
+	return serveLoop(host, srv, httpSrv, ln)
+}
 
+// serveLoop blocks until one of the serve process's exit conditions fires and
+// tears the server down. Separated from runDarajaServe so a test can drive the
+// real select: the host.Done() arm is the fix, and no flag-level test reaches
+// it because serve exposes no respawn tuning to shorten the give-up window.
+func serveLoop(host *daraja.Host, srv *daraja.Server, httpSrv *http.Server, ln net.Listener) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -112,6 +119,12 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 
 	select {
 	case <-srv.ShutdownRequested():
+	case <-host.Done():
+		// The host gave up on respawning (RespawnStopsAtTheLimit): a daraja
+		// whose child cannot be kept alive has nothing left to host. Exiting
+		// here is what makes that promise true -- leaving the socket bound
+		// and the Relay clean leaves a zombie the controller would
+		// reconnect-loop against forever.
 	case <-sigCh:
 		_, _, _ = host.Shutdown(0)
 	case err := <-errCh:
