@@ -37,6 +37,11 @@ type relayHolder struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
+	// onDone fires exactly once when the recvLoop exits (either from stream
+	// error or context cancellation). Used by the pool to signal that the
+	// underlying connection lifecycle has ended.
+	onDone func()
+
 	mu     sync.Mutex // protects closing and fanOut
 	closed bool       // true after shutdown; no new ops
 	fanOut map[chan *fanEvent]struct{}
@@ -65,6 +70,27 @@ func newRelayHolder(childID string, cli darajapbconnect.DarajaServiceClient) *re
 	}
 }
 
+// newRelayHolderWithCtx creates a holder whose ctx/cancel are supplied by the
+// caller. Used by pool.handleConn so teardown cancels the holder's context.
+// onDone can be nil.
+func newRelayHolderWithCtx(
+	childID string,
+	cli darajapbconnect.DarajaServiceClient,
+	ctx context.Context,
+	cancel context.CancelFunc,
+	onDone func(),
+) *relayHolder {
+	return &relayHolder{
+		childID: childID,
+		client:  cli,
+		ctx:     ctx,
+		cancel:  cancel,
+		fanOut:  make(map[chan *fanEvent]struct{}),
+		onDone:  onDone,
+		closed:  false,
+	}
+}
+
 // subscribe returns a channel that receives every RelayResponse as it arrives,
 // plus an unsubscribe func. Must be called while the caller already holds a
 // valid ClientFor (the holder validates client identity at every call site).
@@ -87,8 +113,16 @@ func (h *relayHolder) subscribe() (<-chan *fanEvent, func()) {
 // start launches the receive loop on the holder's OWN bidi stream. Returns
 // an error if the initial attach (stream open) fails.
 func (h *relayHolder) start() error {
-	stream := h.client.Relay(h.ctx)
+	return h.startIn(h.ctx)
+}
+
+// startIn is like start but accepts an explicit context for the stream open.
+// Used by handleConn to bind the open attempt to a cancellable context.
+func (h *relayHolder) startIn(ctx context.Context) error {
+	stream := h.client.Relay(ctx)
+	h.mu.Lock()
 	h.stream = stream
+	h.mu.Unlock()
 	go h.recvLoop(stream)
 	return nil
 }
@@ -96,7 +130,12 @@ func (h *relayHolder) start() error {
 // recvLoop reads from the daemon→daraja RelayResponse side and fans out.
 // Runs on a dedicated goroutine started by start().
 func (h *relayHolder) recvLoop(stream *connect.BidiStreamForClient[darajapb.RelayRequest, darajapb.RelayResponse]) {
-	defer h.shutdown()
+	defer func() {
+		h.shutdown()
+		if h.onDone != nil {
+			h.onDone()
+		}
+	}()
 
 	for {
 		resp, err := stream.Receive()
@@ -140,11 +179,12 @@ func (h *relayHolder) shutdown() {
 		close(ch)
 		delete(h.fanOut, ch)
 	}
+	stream := h.stream // capture under lock
 	h.mu.Unlock()
 
-	if h.stream != nil {
-		_ = h.stream.CloseRequest()
-		_ = h.stream.CloseResponse()
+	if stream != nil {
+		_ = stream.CloseRequest()
+		_ = stream.CloseResponse()
 	}
 	h.cancel()
 }

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,17 +33,13 @@ type liveConn struct {
 	childID string
 	httpCli *http.Client // inverted h2 client for speaking to daraja
 
-	done chan struct{} // closed when the connection ends
+	done   chan struct{} // closed when the connection ends
+closed sync.Once     // ensures done closes only once
 }
 
 // shutdown closes done if it isn't already, making teardown idempotent.
 func (lc *liveConn) shutdown() {
-	select {
-	case <-lc.done:
-		// already closed — idempotent
-	default:
-		close(lc.done)
-	}
+	lc.closed.Do(func() { close(lc.done) })
 }
 
 // ─── Pool ───────────────────────────────────────────────────────────────────
@@ -306,11 +303,69 @@ func (p *Pool) handleConn(conn net.Conn) {
 
 	p.installLive(childID, lc)
 
+	// Start the Relay bidi stream so traffic flows on this connection.
+	// Without an active stream daraja's HTTP/2 server sees zero requests and
+	// closes the connection — exactly the ~1ms-drop symptom. This mirrors
+	// execpool's post-install drive (health loop + Describe): we drive
+	// activity on the accepted conn so the peer knows we're alive.
+	//
+	// Two mechanisms keep the connection alive:
+	// 1. The relay driver opens a bidi stream; when it exits (stream error),
+	//    h.onDone fires lc.shutdown() and unblocks handleProc.
+	// 2. A background watcher detects raw-conn closure (EOF) and calls
+	//    lc.shutdown() as a backup, covering cases where the stream driver
+	//    hasn't launched yet or is stuck in handshake.
+	cli := darajapbconnect.NewDarajaServiceClient(lc.httpCli, "http://daraja")
+	relayCtx, relayCancel := context.WithCancel(context.Background())
+	holder := newRelayHolderWithCtx(childID, cli, relayCtx, relayCancel, func() {
+		lc.shutdown()
+	})
+	p.mu.Lock()
+	p.relayHolders[childID] = holder
+	p.mu.Unlock()
+
+	// Background watcher: close lc.done when the raw connection drops.
+	// Only triggers on permanent errors (EOF); timeout means "still alive, keep watching".
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+			n, err := conn.Read(buf)
+			if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
+				// Permanent read error (including EOF) — connection broken.
+				lc.shutdown()
+				return
+			}
+			// n > 0 with no error: peer sent data — this is normal h2 traffic,
+			// ignore it and keep watching.
+			// n == 0 && err == nil (timeout): keep polling.
+			_ = n
+		}
+	}()
+
+	go func() {
+		startCtx, startCancel := context.WithTimeout(relayCtx, 5*time.Second)
+		defer startCancel()
+		if err := holder.startIn(startCtx); err != nil {
+			slog.Warn("darajapool: relay start failed",
+				"childId", childID, "error", err)
+		}
+	}()
+
 	// Block until the connection is done.
 	<-lc.done
 
 	p.removeLive(childID, lc)
 	slog.Info("darajapool: daraja left", "childId", childID)
+
+	// Tear down the relay holder for this connection.
+	p.mu.Lock()
+	relayHolder := p.relayHolders[childID]
+	delete(p.relayHolders, childID)
+	p.mu.Unlock()
+	if relayHolder != nil {
+		relayHolder.stop()
+	}
 
 	// Only fire OnDisconnect if WE were the ones who removed it — i.e., this
 	// was truly the last (and only) connection for this child. Displacement
