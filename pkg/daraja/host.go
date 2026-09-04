@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -22,6 +23,14 @@ import (
 // defaultGrace is how long Restart and Shutdown wait after the first signal
 // before escalating to a hard kill.
 const defaultGrace = 3 * time.Second
+
+// defaultRespawnLimit bounds consecutive respawns after unexpected exits. A
+// deterministically-failing child — a bad --resume, a binary that is gone —
+// would otherwise be forked forever.
+const defaultRespawnLimit = 5
+
+// defaultRespawnBackoff paces those respawns.
+const defaultRespawnBackoff = 2 * time.Second
 
 // stdoutChunk bounds one read from the child's stdout.
 const stdoutChunk = 32 * 1024
@@ -98,6 +107,11 @@ type HostOptions struct {
 	// first behaviour, dropping HOME, PATH and the credential store the child
 	// needs.
 	EnvOverride bool
+
+	// RespawnLimit and RespawnBackoff bound recovery from unexpected exits.
+	// Zero means the package default.
+	RespawnLimit   int
+	RespawnBackoff time.Duration
 }
 
 // Host owns one child process. Its methods are safe for concurrent use: the
@@ -127,6 +141,11 @@ type Host struct {
 	// and the consumer select on removes the whole class.
 	done     chan struct{}
 	doneOnce sync.Once
+
+	// respawns counts consecutive respawns after unexpected exits. A caller
+	// driven Restart clears it — a deliberate restart is evidence the child is
+	// wanted — so it tracks the crash streak, not the host's age. Guarded by mu.
+	respawns int
 }
 
 func NewHost(opts HostOptions) *Host {
@@ -229,8 +248,50 @@ func (h *Host) watch(runner child.Runner, exitCh chan ExitInfo) {
 	}
 	h.mu.Unlock()
 
-	if unexpected {
-		h.emit(Event{Exited: &info})
+	if !unexpected {
+		return
+	}
+	h.emit(Event{Exited: &info})
+	h.respawn()
+}
+
+// respawn brings the child back after it died on its own.
+//
+// It runs on the watcher's goroutine, after the Exited event, so a consumer
+// sees the death before the replacement. Giving up closes done: a daraja whose
+// child cannot be kept alive has nothing left to host, and the invariant is
+// that a daraja always has exactly one child.
+func (h *Host) respawn() {
+	limit, backoff := h.opts.RespawnLimit, h.opts.RespawnBackoff
+	if limit <= 0 {
+		limit = defaultRespawnLimit
+	}
+	if backoff <= 0 {
+		backoff = defaultRespawnBackoff
+	}
+
+	h.mu.Lock()
+	h.respawns++
+	over := h.respawns > limit
+	count := h.respawns
+	h.mu.Unlock()
+	if over {
+		slog.Error("daraja: child kept exiting; giving up", "respawns", count)
+		h.doneOnce.Do(func() { close(h.done) })
+		return
+	}
+
+	select {
+	case <-time.After(backoff):
+	case <-h.done:
+		return
+	}
+
+	// restart, not Restart: a crash-respawn must not reset its own crash
+	// streak, or the cap could never be reached.
+	if _, err := h.restart(ChildSpec{}, 0); err != nil {
+		slog.Error("daraja: respawn failed", "error", err)
+		h.doneOnce.Do(func() { close(h.done) })
 	}
 }
 
@@ -286,7 +347,19 @@ func (h *Host) WriteStdin(p []byte) error {
 //
 // A zero spec means "reuse the one I am holding", which is what a caller
 // restarting for any reason other than changing the child's parameters wants.
+// A deliberate restart is evidence the child is wanted, so it clears the crash
+// streak: the replacement must not inherit a respawn count it did nothing to
+// earn.
 func (h *Host) Restart(spec ChildSpec, grace time.Duration) (int, error) {
+	h.mu.Lock()
+	h.respawns = 0
+	h.mu.Unlock()
+	return h.restart(spec, grace)
+}
+
+// restart is Restart's body without the counter reset — respawn's path, which
+// must not clear the streak it is in the middle of extending.
+func (h *Host) restart(spec ChildSpec, grace time.Duration) (int, error) {
 	h.mu.Lock()
 	if spec == (ChildSpec{}) {
 		spec = h.spec
