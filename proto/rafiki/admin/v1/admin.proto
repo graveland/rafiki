@@ -33,6 +33,16 @@ message LaunchRequest {
   // spec is typed rather than argv: the executor and daraja both build the
   // child's command line through pkg/claudeargv, so neither side invents one.
   rafiki.daraja.v1.ChildSpec spec = 3;
+  // dial_addr is a host:port or a Unix socket path that the daraja dials back
+  // to the raﬁkid that asked for it. Phase 1b-i shipped socket on the response
+  // (field 3) as a direct-connect handle; 1b-ii replaces that with a reverse
+  // dial whose address arrives here on the request.
+  string dial_addr = 4;
+  // ticket is a one-shot credential the daraja presents on connect. It must not
+  // travel in argv because every process on the machine can read it via ps —
+  // arrive instead by environment (set from the server). Replaced by a durable
+  // credential on first successful hello.
+  string ticket = 5;
 }
 
 message LaunchResponse {
@@ -43,9 +53,8 @@ message LaunchResponse {
   // life: restarts stay in the group, and the group outlives daraja itself, so
   // it still reaches a claude orphaned by a SIGKILLed daraja.
   int32 pgid = 2;
-  // socket is the unix socket daraja serves DarajaService on. Phase 1b-ii
-  // replaces this with a reverse dial; until then the caller dials it directly.
-  string socket = 3;
+  reserved 3;
+  reserved "socket";
 }
 
 message ReapRequest {

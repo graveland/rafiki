@@ -31,7 +31,17 @@ type LaunchRequest struct {
 	Cwd string `protobuf:"bytes,2,opt,name=cwd,proto3" json:"cwd,omitempty"`
 	// spec is typed rather than argv: the executor and daraja both build the
 	// child's command line through pkg/claudeargv, so neither side invents one.
-	Spec          *darajapb.ChildSpec `protobuf:"bytes,3,opt,name=spec,proto3" json:"spec,omitempty"`
+	Spec *darajapb.ChildSpec `protobuf:"bytes,3,opt,name=spec,proto3" json:"spec,omitempty"`
+	// dial_addr is a host:port or a Unix socket path that the daraja dials back
+	// to the raﬁkid that asked for it. Phase 1b-i shipped socket on the response
+	// (field 3) as a direct-connect handle; 1b-ii replaces that with a reverse
+	// dial whose address arrives here on the request.
+	DialAddr string `protobuf:"bytes,4,opt,name=dial_addr,json=dialAddr,proto3" json:"dial_addr,omitempty"`
+	// ticket is a one-shot credential the daraja presents on connect. It must not
+	// travel in argv because every process on the machine can read it via ps —
+	// arrive instead by environment (set from the server). Replaced by a durable
+	// credential on first successful hello.
+	Ticket        string `protobuf:"bytes,5,opt,name=ticket,proto3" json:"ticket,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -87,6 +97,20 @@ func (x *LaunchRequest) GetSpec() *darajapb.ChildSpec {
 	return nil
 }
 
+func (x *LaunchRequest) GetDialAddr() string {
+	if x != nil {
+		return x.DialAddr
+	}
+	return ""
+}
+
+func (x *LaunchRequest) GetTicket() string {
+	if x != nil {
+		return x.Ticket
+	}
+	return ""
+}
+
 type LaunchResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// pid of the daraja process.
@@ -95,10 +119,7 @@ type LaunchResponse struct {
 	// the reaping handle, and unlike a pid it is stable for the child's whole
 	// life: restarts stay in the group, and the group outlives daraja itself, so
 	// it still reaches a claude orphaned by a SIGKILLed daraja.
-	Pgid int32 `protobuf:"varint,2,opt,name=pgid,proto3" json:"pgid,omitempty"`
-	// socket is the unix socket daraja serves DarajaService on. Phase 1b-ii
-	// replaces this with a reverse dial; until then the caller dials it directly.
-	Socket        string `protobuf:"bytes,3,opt,name=socket,proto3" json:"socket,omitempty"`
+	Pgid          int32 `protobuf:"varint,2,opt,name=pgid,proto3" json:"pgid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -145,13 +166,6 @@ func (x *LaunchResponse) GetPgid() int32 {
 		return x.Pgid
 	}
 	return 0
-}
-
-func (x *LaunchResponse) GetSocket() string {
-	if x != nil {
-		return x.Socket
-	}
-	return ""
 }
 
 type ReapRequest struct {
@@ -260,15 +274,16 @@ var File_rafiki_admin_v1_admin_proto protoreflect.FileDescriptor
 
 const file_rafiki_admin_v1_admin_proto_rawDesc = "" +
 	"\n" +
-	"\x1brafiki/admin/v1/admin.proto\x12\x0frafiki.admin.v1\x1a\x1drafiki/daraja/v1/daraja.proto\"m\n" +
+	"\x1brafiki/admin/v1/admin.proto\x12\x0frafiki.admin.v1\x1a\x1drafiki/daraja/v1/daraja.proto\"\xa2\x01\n" +
 	"\rLaunchRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x10\n" +
 	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12/\n" +
-	"\x04spec\x18\x03 \x01(\v2\x1b.rafiki.daraja.v1.ChildSpecR\x04spec\"N\n" +
+	"\x04spec\x18\x03 \x01(\v2\x1b.rafiki.daraja.v1.ChildSpecR\x04spec\x12\x1b\n" +
+	"\tdial_addr\x18\x04 \x01(\tR\bdialAddr\x12\x16\n" +
+	"\x06ticket\x18\x05 \x01(\tR\x06ticket\"D\n" +
 	"\x0eLaunchResponse\x12\x10\n" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\x12\x12\n" +
-	"\x04pgid\x18\x02 \x01(\x05R\x04pgid\x12\x16\n" +
-	"\x06socket\x18\x03 \x01(\tR\x06socket\"C\n" +
+	"\x04pgid\x18\x02 \x01(\x05R\x04pgidJ\x04\b\x03\x10\x04R\x06socket\"C\n" +
 	"\vReapRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x19\n" +
 	"\bgrace_ms\x18\x02 \x01(\x05R\agraceMs\"&\n" +

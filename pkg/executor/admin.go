@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"sync"
 	"syscall"
@@ -48,9 +47,9 @@ type AdminOptions struct {
 // Every reader must treat nil cmd as "nothing to signal yet" — the pgid field
 // is still zero, and kill(-0, ...) targets the caller's own group.
 type launched struct {
-	cmd    *exec.Cmd
-	pgid   int
-	socket string
+	cmd     *exec.Cmd
+	pgid    int
+	supDone chan struct{} // closed when supervise exits
 }
 
 // AdminServer launches, supervises and reaps darajas.
@@ -73,8 +72,14 @@ func (a *AdminServer) Routes() (string, http.Handler) {
 	return adminpbconnect.NewAdminServiceHandler(a)
 }
 
-// Close reaps everything still running. The executor's own shutdown must not
-// strand a daraja: nothing else on this machine knows the pgid.
+// Close reaps everything still running and waits for the supervise goroutine
+// to settle, so this process never leaves a stray daraja behind.
+//
+// Without waiting, supervise may still be executing its delete+syscall.Kill
+// when Close returns, and TestLaunchGivesDarajaItsOwnGroup can strand a daraja
+// whose group the executor cannot reach. The supervised goroutine holds no locks,
+// so it proceeds without blocking on Close's own lock; we just wait for it to
+// finish before returning.
 func (a *AdminServer) Close() {
 	a.mu.Lock()
 	ids := make([]string, 0, len(a.m))
@@ -88,6 +93,10 @@ func (a *AdminServer) Close() {
 	for _, id := range ids {
 		a.reap(id, defaultReapGrace)
 	}
+	// Wait until every supervise goroutine has finished. supervise runs outside
+	// the lock (delete+syscall/Kill), so it makes progress regardless of who
+	// calls Close; we join it here rather than dropping untracked goroutines.
+	a.waitSupervise()
 }
 
 func (a *AdminServer) Launch(
@@ -118,17 +127,26 @@ func (a *AdminServer) Launch(
 	a.m[childID] = claim
 	a.mu.Unlock()
 
-	socket := filepath.Join(a.opts.SocketDir, "daraja-"+childID+".sock")
-	_ = os.Remove(socket)
-
 	c := req.Msg.GetSpec().GetClaude()
 	argv := []string{
 		"daraja", "serve",
-		"--socket", socket,
-		"--binary", a.opts.ChildBinary,
-		"--cwd", req.Msg.GetCwd(),
-		"--kind", kind,
 	}
+	// Pass the dial address: either a host:port (--connect) or a Unix path
+	// (--connect-socket). The reverse-dialled connection replaces the old
+	// direct-connect socket handle.
+	if addr := req.Msg.GetDialAddr(); addr != "" {
+		// If it looks like a path (starts with /), use --connect-socket;
+		// otherwise treat it as host:port.
+		if len(addr) > 0 && addr[0] == '/' {
+			argv = append(argv, "--connect-socket", addr)
+		} else {
+			argv = append(argv, "--connect", addr)
+		}
+	}
+	argv = append(argv, "--child-id", childID)
+	argv = append(argv, "--binary", a.opts.ChildBinary)
+	argv = append(argv, "--cwd", req.Msg.GetCwd())
+	argv = append(argv, "--kind", kind)
 	if c.GetModel() != "" {
 		argv = append(argv, "--model", c.GetModel())
 	}
@@ -139,7 +157,14 @@ func (a *AdminServer) Launch(
 		argv = append(argv, "--permission-mode", c.GetPermissionMode())
 	}
 
+	// The ticket is one-shot auth for the daraja's reverse dial. It must not
+	// travel in argv because every process on the machine can read it via ps —
+	// set it in the child's environment instead. Replaced by a credential on
+	// first successful hello.
+	envVar := "RAFIKI_DARAJA_TICKET=" + req.Msg.GetTicket()
+
 	cmd := exec.Command(a.opts.SelfBinary, argv...)
+	cmd.Env = append(os.Environ(), envVar)
 	// daraja LEADS a new group and its claude joins it, so this pgid is the one
 	// handle that reaches the whole child — and keeps reaching claude after a
 	// SIGKILLed daraja orphans it to launchd. Without Setpgid, daraja would sit
@@ -161,18 +186,18 @@ func (a *AdminServer) Launch(
 	// enters the map and is never mutated after, so reap's read of l.pgid
 	// outside the lock is race-free; overwriting is safe because the claim
 	// itself is what blocked any other claimant to this childID.
-	l := &launched{cmd: cmd, pgid: pid, socket: socket}
+	done := make(chan struct{})
+	l := &launched{cmd: cmd, pgid: pid, supDone: done}
 	a.mu.Lock()
 	a.m[childID] = l
 	a.mu.Unlock()
 
 	go a.supervise(childID, l)
 
-	slog.Info("admin: launched daraja", "childID", childID, "pid", pid, "pgid", pid, "socket", socket)
+	slog.Info("admin: launched daraja", "childID", childID, "pid", pid, "pgid", pid)
 	return connect.NewResponse(&adminpb.LaunchResponse{
-		Pid:    int32(pid),
-		Pgid:   int32(pid),
-		Socket: socket,
+		Pid:  int32(pid),
+		Pgid: int32(pid),
 	}), nil
 }
 
@@ -253,7 +278,20 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 		delete(a.m, childID)
 	}
 	a.mu.Unlock()
-	_ = os.Remove(l.socket)
+	close(l.supDone)
+}
+
+// waitSupervise blocks until every supervise goroutine has exited.
+// Called by Close after all reaps have been issued; joins goroutines that hold
+// no locks, so they complete promptly. Skips nil entries (launch claims).
+func (a *AdminServer) waitSupervise() {
+	a.mu.Lock()
+	for _, l := range a.m {
+		if l != nil && l.supDone != nil {
+			<-l.supDone
+		}
+	}
+	a.mu.Unlock()
 }
 
 // kindFor validates the requested kind against the operator's declaration.
