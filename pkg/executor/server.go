@@ -61,6 +61,10 @@ type Options struct {
 	// --proxy flags. Empty means this executor forwards nothing, which is the
 	// default and the right one — relaying is opt-in per machine.
 	Proxies map[string]string
+
+	// LaunchKinds are the child protocols this executor will host, from
+	// --launch. Empty means none, deliberately: hosting is opt-in.
+	LaunchKinds []string
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -198,7 +202,13 @@ func (s *Server) Describe(
 		Version:            s.opts.Version,
 		SelfReportedLabels: s.labels,
 		Proxies:            s.ProxyNames(),
+		LaunchKinds:        s.LaunchKinds(),
 	}), nil
+}
+
+// LaunchKinds returns the declared launchable kinds, for DescribeResponse.
+func (s *Server) LaunchKinds() []string {
+	return append([]string(nil), s.opts.LaunchKinds...)
 }
 
 // servedTools returns the tool names this executor's registry actually holds.

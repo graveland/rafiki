@@ -388,6 +388,10 @@ No certificate is involved: a single-machine install should not need one.
 - `--concurrency` — maximum concurrent tool calls (default 6)
 - `--proxy name=base_url` — declare an LLM endpoint this executor will forward
   to (repeatable). See "The executor relay" below.
+- `--launch kind` — declare a child protocol this executor will host for the
+  daemon via AdminService.Launch (repeatable, e.g. `--launch claude`). Opt-in:
+  with no `--launch` this executor hosts nothing. Safe to self-report for the
+  same reason `--proxy` is — it only ever narrows what this machine will do.
 
 **Language servers run on the executor**, because that is where the files are. With no
 `--lsp-config`, the executor auto-detects what is installed on its own `PATH`; a config

@@ -69,6 +69,13 @@ message DescribeResponse {
   // daemon's, and a missing or wrong entry costs a failed request rather than
   // opening a machine.
   repeated string proxies = 10;
+  // launch_kinds are the child protocols this executor will host via
+  // AdminService.Launch, declared by its operator with --launch at startup.
+  // Safe to self-report for the same reason as proxies: it only ever NARROWS
+  // what this executor will do. The daemon still requires the child's ordinary
+  // executor selector to match, so a wrong entry costs a failed launch rather
+  // than admitting anyone.
+  repeated string launch_kinds = 11;
 }
 
 message HealthRequest {}
