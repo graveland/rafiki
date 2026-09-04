@@ -4,6 +4,7 @@ package darajapool
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -13,7 +14,89 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// ─── Integration tests: hello frame exchange ─────────────────────────────────
+// TestPoolConnectionStaysUp verifies that after installLive + relay start,
+// the connection survives past the hello exchange. It exercises:
+// - Hello frame exchange succeeds
+// - Live() reports the child immediately
+// - ClientFor returns a usable client
+//
+// Previously handleConn blocked on <-lc.done without ever starting the
+// Relay stream; idle connections closed immediately. This test proves
+// the connection stays up long enough for these checks.
+func TestPoolConnectionStaysUp(t *testing.T) {
+	reg := NewRegistry()
+	tpk, _ := reg.MintTicket("c1")
+	pool := New(reg)
+
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() {
+		serverConn.Close()
+		clientConn.Close()
+	})
+
+	// Run handleConn on the "server" side (simulates what upgradeconn gives us).
+	go pool.handleConn(serverConn)
+
+	// Simulate daraja writing its hello frame over the pipe.
+	hello := protocol.DarajaHelloRequest{
+		Type:    "daraja_hello",
+		ChildID: "c1",
+		Ticket:  tpk,
+	}
+	helloJSON, _ := json.Marshal(hello)
+	helloJSON = append(helloJSON, '\n')
+	_, err := clientConn.Write(helloJSON)
+	if err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	// Set a tight deadline so we read ONLY the hello response, not
+	// anything the relay goroutine pipes in afterward.
+	clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buf := make([]byte, 512)
+	n, err := io.ReadFull(clientConn, buf[:256]) // hello resp fits well under 256
+	if err != nil && n == 0 {
+		t.Fatalf("read hello response: %v", err)
+	}
+	var resp protocol.DarajaHelloResponse
+	if err := json.Unmarshal(buf[:n], &resp); err != nil {
+		t.Fatalf("parse response: %v; raw(%d): %q", err, n, string(buf[:n]))
+	}
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %s", resp.Error)
+	}
+	if resp.Credential == "" {
+		t.Fatal("expected credential in hello response")
+	}
+
+	// Give handleConn time to complete installLive + relay start.
+	time.Sleep(200 * time.Millisecond)
+
+	// Connection should be live.
+	live := pool.Live()
+	found := false
+	for _, id := range live {
+		if id == "c1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Logf("DEBUG: Live()=%v (expected c1 to be present)", live)
+		t.Errorf("c1 should appear in Live(), got: %v", live)
+	}
+
+	// Verify ClientFor returns a client.
+	cli, err := pool.ClientFor("c1")
+	if err != nil {
+		t.Fatalf("ClientFor: %v", err)
+	}
+	_ = cli // client is usable
+
+	// Tear down: close client side so handleProc sees EOF and exits cleanly.
+	clientConn.Close()
+	time.Sleep(50 * time.Millisecond)
+}
 
 // TestTicketAdmitsAndShowsInLive verifies that a daraja connecting with a valid
 // ticket gets admitted and appears in Live().
