@@ -490,6 +490,9 @@ func runDaemon(opts runDaemonOpts) error {
 		darajaPool = darajapool.New(darajapool.NewRegistry())
 	}
 
+	// Wire the controller's reach-through callbacks on connect/disconnect.
+	ctrl.WireDaraja(darajaPool, darajaPool.Reg())
+
 	if execPool != nil {
 		execSock := paths.ExecutorSocketPath()
 		if ln, err := serveExecutorUDS(ctx, execPool, darajaPool, execSock); err != nil {

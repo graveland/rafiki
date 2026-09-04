@@ -74,6 +74,11 @@ func New(reg *Registry) *Pool {
 	}
 }
 
+// Reg returns the pool's backing Registry for callers that need to revoke
+// credentials (e.g. the controller's Close/Kill paths). The pointer is safe:
+// the registry lives exactly as long as the pool and is never replaced.
+func (p *Pool) Reg() *Registry { return p.reg }
+
 // UpgradeHandler is the daraja endpoint as an http.Handler, for mounting on a
 // mux alongside anything else. The daraja DIALS rafikid and then SERVES HTTP/2;
 // rafikid ACCEPTS and is the HTTP client.
