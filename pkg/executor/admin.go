@@ -42,6 +42,11 @@ type AdminOptions struct {
 }
 
 // launched is one daraja this executor started and is responsible for.
+//
+// A zero value (nil cmd) is a LAUNCH CLAIM in flight: Launch inserts it under
+// the dup-check lock before cmd.Start and swaps in the real entry afterwards.
+// Every reader must treat nil cmd as "nothing to signal yet" — the pgid field
+// is still zero, and kill(-0, ...) targets the caller's own group.
 type launched struct {
 	cmd    *exec.Cmd
 	pgid   int
@@ -77,6 +82,9 @@ func (a *AdminServer) Close() {
 		ids = append(ids, id)
 	}
 	a.mu.Unlock()
+	// reap's nil-cmd guard covers entries that are still launch claims: Close
+	// must never signal one, because its pgid is zero and kill(-0, ...) would
+	// signal this process's OWN group.
 	for _, id := range ids {
 		a.reap(id, defaultReapGrace)
 	}
@@ -95,12 +103,20 @@ func (a *AdminServer) Launch(
 	}
 
 	a.mu.Lock()
-	_, dup := a.m[childID]
-	a.mu.Unlock()
-	if dup {
+	if _, dup := a.m[childID]; dup {
+		a.mu.Unlock()
 		return nil, connect.NewError(connect.CodeAlreadyExists,
 			fmt.Errorf("child %s is already hosted here", childID))
 	}
+	// Claim the slot BEFORE starting the process. The dup check and the insert
+	// used to be two separate lock acquisitions, so two concurrent Launches of
+	// one child could both pass, both start a daraja, and the second's insert
+	// would overwrite the first — leaving the first daraja running untracked
+	// (Close would never signal it) while its supervise unlinked the second's
+	// live socket. The claim makes the second Launch see AlreadyExists.
+	claim := &launched{}
+	a.m[childID] = claim
+	a.mu.Unlock()
 
 	socket := filepath.Join(a.opts.SocketDir, "daraja-"+childID+".sock")
 	_ = os.Remove(socket)
@@ -130,10 +146,21 @@ func (a *AdminServer) Launch(
 	// in the EXECUTOR's group and a reap would signal the executor itself.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
+		// Release the claim: the slot must not outlive a failed start, or every
+		// later Launch of this child is refused with AlreadyExists forever.
+		a.mu.Lock()
+		if a.m[childID] == claim {
+			delete(a.m, childID)
+		}
+		a.mu.Unlock()
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("start daraja: %w", err))
 	}
 	pid := cmd.Process.Pid
 
+	// Swap the claim for the real entry. The entry is fully built BEFORE it
+	// enters the map and is never mutated after, so reap's read of l.pgid
+	// outside the lock is race-free; overwriting is safe because the claim
+	// itself is what blocked any other claimant to this childID.
 	l := &launched{cmd: cmd, pgid: pid, socket: socket}
 	a.mu.Lock()
 	a.m[childID] = l
@@ -149,37 +176,61 @@ func (a *AdminServer) Launch(
 	}), nil
 }
 
-// Reap arrives in Task 11. The generated AdminServiceHandler interface requires
-// the method; until then it refuses, so a caller gets an explicit "not yet"
-// rather than a silent no-op.
+// Reap ends one launched daraja and its child, on demand.
 func (a *AdminServer) Reap(
-	_ context.Context, _ *connect.Request[adminpb.ReapRequest],
+	ctx context.Context, req *connect.Request[adminpb.ReapRequest],
 ) (*connect.Response[adminpb.ReapResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Reap is not implemented yet"))
+	grace := time.Duration(req.Msg.GetGraceMs()) * time.Millisecond
+	if grace <= 0 {
+		grace = defaultReapGrace
+	}
+	return connect.NewResponse(&adminpb.ReapResponse{
+		Reaped: a.reap(req.Msg.GetChildId(), grace),
+	}), nil
 }
 
-// reap ends one launched daraja and its child.
+// reap signals the child's process group: SIGTERM, wait out grace, then
+// SIGKILL. It mirrors daraja's own stopLocked rather than inventing a second
+// escalation policy.
 //
-// Task 10 ships the SIGKILL-only form, so Close() compiles and is correct from
-// day one: an executor's own shutdown must not strand a daraja, and SIGKILL to
-// the group reaches daraja and the claude that joined it immediately — the
-// direct-child cmd.Wait in supervise reaps the corpse. Task 11 replaces this
-// wholesale with the SIGTERM→grace→SIGKILL version the Reap RPC wants; the
-// signature is already final so that replacement is drop-in.
+// It resolves the pgid from this executor's own launch table and never from the
+// request, because a pgid is recycled once its group empties — signalling a
+// number a peer supplied could reach an unrelated group. An unknown child_id is
+// not an error: reaping something already gone is the normal case.
 func (a *AdminServer) reap(childID string, grace time.Duration) bool {
-	_ = grace // consumed by Task 11's SIGTERM window; SIGKILL-only has none
 	a.mu.Lock()
-	l, ok := a.m[childID]
+	l := a.m[childID]
 	a.mu.Unlock()
-	if !ok {
+	if l == nil {
 		return false
 	}
-	// Negative pid: the whole process group, daraja plus the claude that joined
-	// it. ESRCH means the group is already gone, which is success for us.
-	if err := syscall.Kill(-l.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		slog.Warn("admin: reap could not signal the group",
-			"childID", childID, "pgid", l.pgid, "error", err)
+	// A nil cmd is a launch claim still in flight (see Launch): its pgid is
+	// the zero value, and kill(-0, ...) would signal this process's OWN group —
+	// never signal it. Close and Reap both arrive here; refusing is the honest
+	// answer (nothing has been signalled) and the in-flight launch either
+	// fills its entry moments later or fails and releases the claim.
+	if l.cmd == nil {
+		slog.Warn("admin: reap arrived while the launch was still in flight; nothing signalled",
+			"childID", childID)
 		return false
+	}
+
+	if err := syscall.Kill(-l.pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Warn("admin: SIGTERM to child group failed", "childID", childID, "pgid", l.pgid, "error", err)
+	}
+
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-l.pgid, 0); errors.Is(err, syscall.ESRCH) {
+			slog.Info("admin: child group ended on SIGTERM", "childID", childID, "pgid", l.pgid)
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	slog.Warn("admin: child group outlived its grace; escalating", "childID", childID, "pgid", l.pgid)
+	if err := syscall.Kill(-l.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Error("admin: SIGKILL to child group failed", "childID", childID, "pgid", l.pgid, "error", err)
 	}
 	return true
 }
