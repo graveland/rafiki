@@ -11,12 +11,13 @@ import (
 	"syscall"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
-// serveExecutorUDS accepts executor connections from this machine over a unix
-// socket, using the same upgrade handler the TLS listener mounts.
+// serveExecutorUDS accepts executor and daraja connections from this machine over a unix
+// socket, using the same upgrade handlers the TLS listener mounts.
 //
 // The same handler, deliberately: this repo has twice shipped a correct guard
 // that a second code path routed around, and two accept paths for one
@@ -31,7 +32,7 @@ import (
 //
 // p may be nil in tests that only exercise the socket's lifecycle; the route is
 // then simply not mounted.
-func serveExecutorUDS(ctx context.Context, p *execpool.Pool, path string) (net.Listener, error) {
+func serveExecutorUDS(ctx context.Context, p *execpool.Pool, d *darajapool.Pool, path string) (net.Listener, error) {
 	// Refuse rather than clobber. Two daemons serving one path means the second
 	// bind silently wins and the first's executors connect into a void.
 	if c, err := net.DialTimeout("unix", path, 500*time.Millisecond); err == nil {
@@ -58,6 +59,9 @@ func serveExecutorUDS(ctx context.Context, p *execpool.Pool, path string) (net.L
 	mux := http.NewServeMux()
 	if p != nil {
 		mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), p.UpgradeHandler())
+	}
+	if d != nil {
+		mux.Handle(upgradeconn.PathFor(upgradeconn.Daraja), d.UpgradeHandler())
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 

@@ -16,7 +16,7 @@ func TestExecutorUDSIsPrivateFromCreation(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "s")
 
-	ln, err := serveExecutorUDS(context.Background(), nil, sock)
+	ln, err := serveExecutorUDS(context.Background(), nil, nil, sock)
 	if err != nil {
 		t.Fatalf("serveExecutorUDS: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestExecutorUDSReplacesAStaleSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ln, err := serveExecutorUDS(context.Background(), nil, sock)
+	ln, err := serveExecutorUDS(context.Background(), nil, nil, sock)
 	if err != nil {
 		t.Fatalf("serveExecutorUDS refused a stale socket: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestExecutorUDSRefusesALiveSocket(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "s")
 
-	first, err := serveExecutorUDS(context.Background(), nil, sock)
+	first, err := serveExecutorUDS(context.Background(), nil, nil, sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestExecutorUDSRefusesALiveSocket(t *testing.T) {
 	}
 	c.Close()
 
-	if _, err := serveExecutorUDS(context.Background(), nil, sock); err == nil {
+	if _, err := serveExecutorUDS(context.Background(), nil, nil, sock); err == nil {
 		t.Error("a second listener bound over a live socket")
 	}
 }
