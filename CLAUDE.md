@@ -1209,6 +1209,65 @@
   never per-id `ContextWindow`/`Pricing` calls: each of those runs
   `ResolveModel` and takes the mutex, so a ~300-model catalog costs 300 of each.
 
+- **`pkg/modelquery` is the ONE home for the catalog's three absence rules, and
+  the tool-to-daemon seam that bypasses it is held by two tests, not by types.**
+  The cockpit's picker and the daemon's `agent_models` filter and order the same
+  OpenRouter catalog, and each rule is easy to reverse: a bound ADMITS a row the
+  catalog cannot answer for (every locally-served model has no price, no context
+  and no score, so rejecting unknowns empties the local fleet out of every
+  filtered list); an absent value sorts LAST IN BOTH DIRECTIONS (it is not "the
+  largest", it is no answer -- this shipped wrong once with a comment claiming it
+  was right); and unknown tool/vision support is KEPT, never read as "no".
+  `pkg/tui/modelquery.go` keeps only presentation -- the named bound stops,
+  headers, cells -- and delegates the rest; `modelField`, `toolState` and
+  `visionState` are ALIASES for `modelquery.Field`/`Support`, which is why
+  `pinned()`/`header()` are now the functions `pinnedField`/`headerFor` (you
+  cannot hang a method on an aliased foreign type).
+  **`pkg/fundi/tools` deliberately does NOT import `pkg/modelquery`** -- that
+  would drag protobuf into every binary linking a tool registry -- so the tool
+  keeps its own copy of two things the daemon also knows: the accepted sort keys
+  (`tools.ModelSortKeys`) and which end of each sort comes first
+  (`tools.SortDirectionWord`). Nothing in the type system keeps those in step;
+  `TestEveryToolSortKeyResolves` and `TestSortDirectionWordMatchesBiggerIsBetter`
+  in `cmd/rafikid` are the entire guard. Add a sort key and you must touch both.
+
+- **`agent_models` with NO arguments returns a SUMMARY, not a list -- that is the
+  design, not a stub.** The live catalog is 300+ models; the old tool flattened
+  every row to a bare id and returned all of them, which filled the agent's
+  context and still told it nothing about cost. A bare call now reports the count
+  plus the DISTRIBUTION (price range and median, context range, tools/vision
+  tri-state counts, how many carry scores) so the next call can be aimed; rows
+  come only from a narrowed query, capped by `limit` (default 20, max 50) with
+  the pre-cap match count always stated. A constrained query matching ZERO rows
+  gets that same distribution plus a diagnostic naming the bound that excluded
+  everything -- the daemon is asked a second time with only `Kind` set, because
+  describing the empty slice would tell the agent nothing to re-aim with.
+  Note a filter can rarely return zero while any unpriced or free model is in
+  range, since unknowns are admitted by design: a test wanting a zero-match case
+  needs an all-priced fixture.
+
+- **`controllerSpawner.Models` reads `ListModelRows`, never `ListModels`.** The
+  row path is served from the already-warm routing catalog, carries
+  price/context/scores, and applies `filterRowsForKind` -- so a `claude` child is
+  no longer offered OpenRouter ids it cannot resolve (the
+  spawns-attaches-never-answers failure). `Controller.ListModels` survives ONLY
+  for the frozen framed verb `ctrl_list_models`; putting a daemon agent path back
+  on it reintroduces the second OpenRouter fetcher with its own cache and TTL,
+  and loses cost and kind-scoping in the same move.
+
+- **The picker's `scored` bound stop is the ONE exception to admit-unknowns, and
+  it shipped as a no-op for months.** The old `bound.admits` tested "value
+  absent" before it reached the scored branch, so selecting it filtered nothing
+  while the panel displayed a constraint -- worse than no control, because it
+  misreported. It maps to `modelquery.Bound.RequirePresent` now. A numeric
+  minimum cannot substitute: `intel >= 55` admits unscored rows deliberately
+  (`TestBoundsAdmitModelsTheCatalogCannotAnswerFor` pins exactly that), so this
+  stop is the only way to ask for benchmarked models only -- about 164 of 421
+  live entries. `TestScoredStopExcludesUnscoredModels` fails if it reverts to a
+  no-op; the sibling test keeps the exception from leaking into price or context
+  bounds.
+
+
 - **The daemon used to run TWO OpenRouter fetchers.** `Controller.ListModels` ->
   `models.List` -> `loadOpenRouter` did its own HTTP fetch and disk cache
   alongside the `ModelCatalog` warmed for routing. `Controller.ListModelRows`

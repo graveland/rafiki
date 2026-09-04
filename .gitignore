@@ -11,6 +11,7 @@
 
 # Isolated worktrees for multi-task feature work
 /.worktrees/
+/.claude/worktrees/
 
 # Go build artifacts
 *.test

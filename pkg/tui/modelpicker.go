@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/modelquery"
 )
 
 // modelsLoadedMsg carries the daemon's model catalog back to the picker.
@@ -232,60 +233,37 @@ func (c *Cockpit) modelsFor(kind string) ([]*rafikiv1.ModelRow, bool) {
 	return rows, ok
 }
 
-// visionState is what the catalog claims about a model's inputs.
-type visionState int
+// visionState is what the catalog claims about a model's inputs. Unknown is a
+// real answer and is never the same as No; the rule is shared with the
+// daemon's agent_models tool, so it lives in modelquery.
+type visionState = modelquery.Support
 
 const (
-	visionUnknown visionState = iota // no catalog entry at all
-	visionNo
-	visionYes
+	visionUnknown = modelquery.SupportUnknown // no catalog entry at all
+	visionNo      = modelquery.SupportNo
+	visionYes     = modelquery.SupportYes
 )
 
-// visionKind reads the claim, and UNKNOWN is a real answer.
-//
-// Empty modalities means the daemon has no catalog entry for this id -- which
-// is every locally-served model (ollama, LM Studio, a custom provider) -- and
-// is NOT the same as "no vision". Treating empty as no is how a vision filter
-// silently hides the entire local fleet.
+// visionKind reads the claim, and UNKNOWN is a real answer. See
+// modelquery.Vision for why empty modalities is not "no vision".
 func visionKind(r *rafikiv1.ModelRow) visionState {
-	mods := r.GetInputModalities()
-	if len(mods) == 0 {
-		return visionUnknown
-	}
-	for _, m := range mods {
-		if m == "image" {
-			return visionYes
-		}
-	}
-	return visionNo
+	return modelquery.Vision(r)
 }
 
-// toolState is what the catalog claims about tool calling.
-type toolState int
+// toolState is what the catalog claims about tool calling. Same tri-state as
+// visionState, and the same shared rule.
+type toolState = modelquery.Support
 
 const (
-	toolsUnknown toolState = iota // no catalog entry at all
-	toolsNo
-	toolsYes
+	toolsUnknown = modelquery.SupportUnknown // no catalog entry at all
+	toolsNo      = modelquery.SupportNo
+	toolsYes     = modelquery.SupportYes
 )
 
-// toolsKind reads the claim, and UNKNOWN is a real answer.
-//
-// A nil parameter list means the daemon has no catalog entry -- three
-// openrouter/* router meta-models, and every locally-served model -- and is NOT
-// the same as "cannot tool-call". Treating nil as no is how a default-on filter
-// hides the entire local fleet.
+// toolsKind reads the claim, and UNKNOWN is a real answer. See
+// modelquery.Tools for why a nil parameter list is not "cannot tool-call".
 func toolsKind(r *rafikiv1.ModelRow) toolState {
-	params := r.GetSupportedParameters()
-	if len(params) == 0 {
-		return toolsUnknown
-	}
-	for _, p := range params {
-		if p == "tools" {
-			return toolsYes
-		}
-	}
-	return toolsNo
+	return modelquery.Tools(r)
 }
 
 // expiryWarning returns a short notice when a model has a removal date close
@@ -437,7 +415,7 @@ func (p *modelPicker) view(width, height int, v modelView, q *queryDialog) strin
 	extras := extraColumns(v.keys)
 	extraW := 0
 	for _, f := range extras {
-		_, w := f.header()
+		_, w := headerFor(f)
 		extraW += w
 	}
 	idW := max(20, width-34-extraW)
@@ -445,7 +423,7 @@ func (p *modelPicker) view(width, height int, v modelView, q *queryDialog) strin
 	head := padTo("  MODEL", idW+2) + padTo("CONTEXT", 10) +
 		padTo("IN $/M", 9) + padTo("OUT $/M", 9)
 	for _, f := range extras {
-		t, w := f.header()
+		t, w := headerFor(f)
 		head += padTo(t, w)
 	}
 	b.WriteString(styleMeta.Render(head + "VIS"))
@@ -472,7 +450,7 @@ func (p *modelPicker) view(width, height int, v modelView, q *queryDialog) strin
 		b.WriteString(padTo(priceCell(r.PromptUsd), 9))
 		b.WriteString(padTo(priceCell(r.CompletionUsd), 9))
 		for _, f := range extras {
-			_, w := f.header()
+			_, w := headerFor(f)
 			b.WriteString(padTo(cellFor(r, f, now), w))
 		}
 		b.WriteString(visionCellGlyph(r))
@@ -686,12 +664,7 @@ func yesNo(b bool) string {
 
 // hasParam reports whether the catalog lists a request parameter for a model.
 func hasParam(r *rafikiv1.ModelRow, want string) bool {
-	for _, p := range r.GetSupportedParameters() {
-		if p == want {
-			return true
-		}
-	}
-	return false
+	return modelquery.HasParam(r, want)
 }
 
 // ── keys ─────────────────────────────────────────────────────────────────────
