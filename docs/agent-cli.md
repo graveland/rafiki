@@ -300,3 +300,42 @@ corresponding `RAFIKI_*` env var default; an explicit flag always wins.
 | `--system-prompt` | — | override the base system prompt |
 | `--append-system-prompt` | — | append to the system prompt |
 | `--fake-turns` | — | replay a recorded turn file for testing |
+
+## `rafiki daraja`
+
+Per-child process host for remote executor-launched children. Subcommands:
+`serve` (run the daraja binary on an executor) and `launch` (from the operator's
+machine, request a child launch through the daemon).
+
+### `rafiki daraja launch`
+
+```
+rafiki daraja launch --cwd /path/to/workspace --model claude-sonnet-5 \
+  [--executor "env=prod"] [--resume session-id]
+```
+
+Launches a claude child via daraja on a matching executor:
+
+1. Resolves an executor whose labels satisfy the `--executor` selector AND that
+   declares "claude" in its `LaunchKinds`. A zero-match returns a per-candidate
+   refusal reason.
+2. Calls `AdminService.Launch` on the selected executor with a one-shot ticket.
+3. Waits for the daraja process to reverse-dial back into the daemon's pool
+   (up to 30 seconds).
+4. Prints `child_id`, `pid`, `pgid`, and `connected_at` (Unix ms epoch).
+
+Through `newConnectEndpoint` — honours `$RAFIKI_URL` for remote daemons. Requires
+a TCP control address on the target daemon (`RAFIKI_CONTROL_LISTEN` must be set);
+UDS-only daemons refuse with a clear diagnostic.
+
+**Flags:**
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--cwd` | yes | Working directory for the hosted child |
+| `--model` | yes | Provider-qualified model id for the claude child |
+| `--executor` | no | Label selector; defaults to the first available executor |
+| `--resume` | no | Claude session id to continue from |
+
+Output format: `child_id=<id> pid=<n> pgid=<n> connected_at=<epoch_ms>`
+on stdout; errors go to stderr.
