@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package rafiki.admin.v1;
+
+import "rafiki/daraja/v1/daraja.proto";
+
+option go_package = "go.graveland.dev/rafiki/pkg/adminpb;adminpb";
+
+// AdminService is the machine-admin surface on a rafiki executor host.
+//
+// It is deliberately NOT part of ExecutorService. The executor is the executor:
+// a data path for one child's filesystem and shell tools, with its own
+// lifecycle hazards. Launching a daraja is a different concern with a different
+// lifetime — a daraja outlives both the turn and the connection that asked for
+// it — and it merely shares the executor's process and its reverse-dialled
+// connection. Future admin verbs belong here, not there.
+service AdminService {
+  // Launch starts one daraja hosting one child and returns the handles needed
+  // to reach and to reap it.
+  rpc Launch(LaunchRequest) returns (LaunchResponse);
+
+  // Reap ends a launched daraja and its child: SIGTERM to the process group,
+  // wait, then SIGKILL.
+  rpc Reap(ReapRequest) returns (ReapResponse);
+}
+
+message LaunchRequest {
+  // child_id is the daemon-stamped id this daraja hosts. It scopes the socket
+  // path and is the key the executor tracks the launch under.
+  string child_id = 1;
+  // cwd is the working directory for the hosted child.
+  string cwd = 2;
+  // spec is typed rather than argv: the executor and daraja both build the
+  // child's command line through pkg/claudeargv, so neither side invents one.
+  rafiki.daraja.v1.ChildSpec spec = 3;
+}
+
+message LaunchResponse {
+  // pid of the daraja process.
+  int32 pid = 1;
+  // pgid is the process GROUP that daraja leads and its child joins. This is
+  // the reaping handle, and unlike a pid it is stable for the child's whole
+  // life: restarts stay in the group, and the group outlives daraja itself, so
+  // it still reaches a claude orphaned by a SIGKILLed daraja.
+  int32 pgid = 2;
+  // socket is the unix socket daraja serves DarajaService on. Phase 1b-ii
+  // replaces this with a reverse dial; until then the caller dials it directly.
+  string socket = 3;
+}
+
+message ReapRequest {
+  // child_id names a launch this executor is still tracking. It is deliberately
+  // NOT a bare pgid: a process group id is recycled once its group empties, so
+  // signalling a number supplied by a peer could reach an unrelated group.
+  string child_id = 1;
+  // grace_ms between SIGTERM and SIGKILL. Zero means the server default.
+  int32 grace_ms = 2;
+}
+
+message ReapResponse {
+  // reaped is false when child_id named no tracked launch, which is the normal
+  // answer for something already gone. Reaping is idempotent.
+  bool reaped = 1;
+}
