@@ -7,6 +7,7 @@
 package rafikiv1
 
 import (
+	darajapb "go.graveland.dev/rafiki/pkg/darajapb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -1859,6 +1860,505 @@ func (x *ListModelsResponse) GetModels() []*ModelRow {
 	return nil
 }
 
+// DarajaLaunch selects an executor that admits the request's label selector
+// AND declares "claude" among its LaunchKinds, launches a daraja there, and
+// waits for the daraja's reverse dial through the pool. A match that yields
+// zero candidates is refused with a diagnostic naming the excluding predicate
+// per candidate (explainNoMatch shape).
+//
+// The launch uses the daemon's internal AdminService on the resolved executor
+// to start daraja. The daraja then reverse-dials back to the pool, where it
+// is accepted once its ticket authenticates. This method blocks until that
+// connection arrives.
+type DarajaLaunchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// label_selector over executor labels. Intersected with the executor's own
+	// admission rules; both must match or the launch is refused.
+	ExecutorSelector string `protobuf:"bytes,1,opt,name=executor_selector,json=executorSelector,proto3" json:"executor_selector,omitempty"`
+	// cwd for the hosted child process. Passed verbatim to AdminService.Launch.
+	Cwd string `protobuf:"bytes,2,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	// ChildSpec (typed) so the executor and daraja both build the child's argv
+	// through pkg/claudeargv instead of each side inventing one.
+	Spec *darajapb.ChildSpec `protobuf:"bytes,3,opt,name=spec,proto3" json:"spec,omitempty"`
+	// resume_session (optional) for a claude child to continue an existing
+	// session. Absent means a fresh session.
+	ResumeSession *string `protobuf:"bytes,4,opt,name=resume_session,json=resumeSession,proto3,oneof" json:"resume_session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DarajaLaunchRequest) Reset() {
+	*x = DarajaLaunchRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaLaunchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaLaunchRequest) ProtoMessage() {}
+
+func (x *DarajaLaunchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaLaunchRequest.ProtoReflect.Descriptor instead.
+func (*DarajaLaunchRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *DarajaLaunchRequest) GetExecutorSelector() string {
+	if x != nil {
+		return x.ExecutorSelector
+	}
+	return ""
+}
+
+func (x *DarajaLaunchRequest) GetCwd() string {
+	if x != nil {
+		return x.Cwd
+	}
+	return ""
+}
+
+func (x *DarajaLaunchRequest) GetSpec() *darajapb.ChildSpec {
+	if x != nil {
+		return x.Spec
+	}
+	return nil
+}
+
+func (x *DarajaLaunchRequest) GetResumeSession() string {
+	if x != nil && x.ResumeSession != nil {
+		return *x.ResumeSession
+	}
+	return ""
+}
+
+type DarajaLaunchResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChildId string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	Pid     int32                  `protobuf:"varint,2,opt,name=pid,proto3" json:"pid,omitempty"`
+	Pgid    int32                  `protobuf:"varint,3,opt,name=pgid,proto3" json:"pgid,omitempty"`
+	// connected_unix_ms marks when the daraja completed its reverse dial and
+	// the pool registered the connection.
+	ConnectedUnixMs int64 `protobuf:"varint,4,opt,name=connected_unix_ms,json=connectedUnixMs,proto3" json:"connected_unix_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *DarajaLaunchResponse) Reset() {
+	*x = DarajaLaunchResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaLaunchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaLaunchResponse) ProtoMessage() {}
+
+func (x *DarajaLaunchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaLaunchResponse.ProtoReflect.Descriptor instead.
+func (*DarajaLaunchResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *DarajaLaunchResponse) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+func (x *DarajaLaunchResponse) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+func (x *DarajaLaunchResponse) GetPgid() int32 {
+	if x != nil {
+		return x.Pgid
+	}
+	return 0
+}
+
+func (x *DarajaLaunchResponse) GetConnectedUnixMs() int64 {
+	if x != nil {
+		return x.ConnectedUnixMs
+	}
+	return 0
+}
+
+// DarajaSend writes bytes to a live child's stdin via the connected daraja.
+// Unary rather than a bidi half because the HTTP/1.1 remote plane cannot
+// carry the BidirectionalRelay that the in-process daraja service uses.
+type DarajaSendRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DarajaSendRequest) Reset() {
+	*x = DarajaSendRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaSendRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaSendRequest) ProtoMessage() {}
+
+func (x *DarajaSendRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaSendRequest.ProtoReflect.Descriptor instead.
+func (*DarajaSendRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *DarajaSendRequest) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+func (x *DarajaSendRequest) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+type DarajaSendResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Acknowledged  bool                   `protobuf:"varint,1,opt,name=acknowledged,proto3" json:"acknowledged,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DarajaSendResponse) Reset() {
+	*x = DarajaSendResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaSendResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaSendResponse) ProtoMessage() {}
+
+func (x *DarajaSendResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaSendResponse.ProtoReflect.Descriptor instead.
+func (*DarajaSendResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *DarajaSendResponse) GetAcknowledged() bool {
+	if x != nil {
+		return x.Acknowledged
+	}
+	return false
+}
+
+// DarajaWatch streams stdout and lifecycle markers from a connected daraja.
+// Server-streaming only (no client messages) because HTTP/1.1 remote plane
+// splits bidirectional relay into separate send + watch verbs.
+//
+// Events include ProcessRestarted (pid change after restart) and ProcessExited
+// (exit_code, signal). These let a caller distinguish normal output from
+// process-boundary events that reset any per-process consumer state.
+type DarajaWatchRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DarajaWatchRequest) Reset() {
+	*x = DarajaWatchRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaWatchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaWatchRequest) ProtoMessage() {}
+
+func (x *DarajaWatchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaWatchRequest.ProtoReflect.Descriptor instead.
+func (*DarajaWatchRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *DarajaWatchRequest) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+type DarajaWatchResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Event:
+	//
+	//	*DarajaWatchResponse_Stdout
+	//	*DarajaWatchResponse_Restarted
+	//	*DarajaWatchResponse_Exited
+	Event         isDarajaWatchResponse_Event `protobuf_oneof:"event"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DarajaWatchResponse) Reset() {
+	*x = DarajaWatchResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaWatchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaWatchResponse) ProtoMessage() {}
+
+func (x *DarajaWatchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaWatchResponse.ProtoReflect.Descriptor instead.
+func (*DarajaWatchResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *DarajaWatchResponse) GetEvent() isDarajaWatchResponse_Event {
+	if x != nil {
+		return x.Event
+	}
+	return nil
+}
+
+func (x *DarajaWatchResponse) GetStdout() []byte {
+	if x != nil {
+		if x, ok := x.Event.(*DarajaWatchResponse_Stdout); ok {
+			return x.Stdout
+		}
+	}
+	return nil
+}
+
+func (x *DarajaWatchResponse) GetRestarted() *DarajaProcessRestarted {
+	if x != nil {
+		if x, ok := x.Event.(*DarajaWatchResponse_Restarted); ok {
+			return x.Restarted
+		}
+	}
+	return nil
+}
+
+func (x *DarajaWatchResponse) GetExited() *DarajaProcessExited {
+	if x != nil {
+		if x, ok := x.Event.(*DarajaWatchResponse_Exited); ok {
+			return x.Exited
+		}
+	}
+	return nil
+}
+
+type isDarajaWatchResponse_Event interface {
+	isDarajaWatchResponse_Event()
+}
+
+type DarajaWatchResponse_Stdout struct {
+	Stdout []byte `protobuf:"bytes,1,opt,name=stdout,proto3,oneof"`
+}
+
+type DarajaWatchResponse_Restarted struct {
+	Restarted *DarajaProcessRestarted `protobuf:"bytes,2,opt,name=restarted,proto3,oneof"`
+}
+
+type DarajaWatchResponse_Exited struct {
+	Exited *DarajaProcessExited `protobuf:"bytes,3,opt,name=exited,proto3,oneof"`
+}
+
+func (*DarajaWatchResponse_Stdout) isDarajaWatchResponse_Event() {}
+
+func (*DarajaWatchResponse_Restarted) isDarajaWatchResponse_Event() {}
+
+func (*DarajaWatchResponse_Exited) isDarajaWatchResponse_Event() {}
+
+type DarajaProcessRestarted struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Pid           int32                  `protobuf:"varint,1,opt,name=pid,proto3" json:"pid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DarajaProcessRestarted) Reset() {
+	*x = DarajaProcessRestarted{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaProcessRestarted) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaProcessRestarted) ProtoMessage() {}
+
+func (x *DarajaProcessRestarted) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaProcessRestarted.ProtoReflect.Descriptor instead.
+func (*DarajaProcessRestarted) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *DarajaProcessRestarted) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+type DarajaProcessExited struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	Signal        string                 `protobuf:"bytes,2,opt,name=signal,proto3" json:"signal,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DarajaProcessExited) Reset() {
+	*x = DarajaProcessExited{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DarajaProcessExited) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DarajaProcessExited) ProtoMessage() {}
+
+func (x *DarajaProcessExited) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DarajaProcessExited.ProtoReflect.Descriptor instead.
+func (*DarajaProcessExited) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *DarajaProcessExited) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *DarajaProcessExited) GetSignal() string {
+	if x != nil {
+		return x.Signal
+	}
+	return ""
+}
+
 // RateLimitWindow is one Anthropic subscription rate-limit window's snapshot
 // (the "5h" or "7d" family of anthropic-ratelimit-unified-* headers).
 // utilization and reset_at are optional because a header Anthropic omits, or
@@ -1875,7 +2375,7 @@ type RateLimitWindow struct {
 
 func (x *RateLimitWindow) Reset() {
 	*x = RateLimitWindow{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[24]
+	mi := &file_rafiki_v1_control_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1887,7 +2387,7 @@ func (x *RateLimitWindow) String() string {
 func (*RateLimitWindow) ProtoMessage() {}
 
 func (x *RateLimitWindow) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[24]
+	mi := &file_rafiki_v1_control_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1900,7 +2400,7 @@ func (x *RateLimitWindow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RateLimitWindow.ProtoReflect.Descriptor instead.
 func (*RateLimitWindow) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{24}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *RateLimitWindow) GetUtilization() float64 {
@@ -1932,7 +2432,7 @@ type GetRateLimitStatusRequest struct {
 
 func (x *GetRateLimitStatusRequest) Reset() {
 	*x = GetRateLimitStatusRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[25]
+	mi := &file_rafiki_v1_control_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1944,7 +2444,7 @@ func (x *GetRateLimitStatusRequest) String() string {
 func (*GetRateLimitStatusRequest) ProtoMessage() {}
 
 func (x *GetRateLimitStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[25]
+	mi := &file_rafiki_v1_control_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1957,7 +2457,7 @@ func (x *GetRateLimitStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRateLimitStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetRateLimitStatusRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{25}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{33}
 }
 
 // GetRateLimitStatusResponse answers the CALLER's own latest captured
@@ -1978,7 +2478,7 @@ type GetRateLimitStatusResponse struct {
 
 func (x *GetRateLimitStatusResponse) Reset() {
 	*x = GetRateLimitStatusResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[26]
+	mi := &file_rafiki_v1_control_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1990,7 +2490,7 @@ func (x *GetRateLimitStatusResponse) String() string {
 func (*GetRateLimitStatusResponse) ProtoMessage() {}
 
 func (x *GetRateLimitStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[26]
+	mi := &file_rafiki_v1_control_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2003,7 +2503,7 @@ func (x *GetRateLimitStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRateLimitStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetRateLimitStatusResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{26}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GetRateLimitStatusResponse) GetOrganizationId() string {
@@ -2045,7 +2545,7 @@ var File_rafiki_v1_control_proto protoreflect.FileDescriptor
 
 const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\n" +
-	"\x17rafiki/v1/control.proto\x12\trafiki.v1\x1a\x15rafiki/v1/event.proto\"j\n" +
+	"\x17rafiki/v1/control.proto\x12\trafiki.v1\x1a\x15rafiki/v1/event.proto\x1a\x1drafiki/daraja/v1/daraja.proto\"j\n" +
 	"\x11GetHistoryRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12(\n" +
 	"\rafter_ordinal\x18\x02 \x01(\x05H\x00R\fafterOrdinal\x88\x01\x01B\x10\n" +
@@ -2204,7 +2704,35 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +
 	"\x12ListModelsResponse\x12+\n" +
-	"\x06models\x18\x01 \x03(\v2\x13.rafiki.v1.ModelRowR\x06models\"\x8d\x01\n" +
+	"\x06models\x18\x01 \x03(\v2\x13.rafiki.v1.ModelRowR\x06models\"\xc4\x01\n" +
+	"\x13DarajaLaunchRequest\x12+\n" +
+	"\x11executor_selector\x18\x01 \x01(\tR\x10executorSelector\x12\x10\n" +
+	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12/\n" +
+	"\x04spec\x18\x03 \x01(\v2\x1b.rafiki.daraja.v1.ChildSpecR\x04spec\x12*\n" +
+	"\x0eresume_session\x18\x04 \x01(\tH\x00R\rresumeSession\x88\x01\x01B\x11\n" +
+	"\x0f_resume_session\"\x83\x01\n" +
+	"\x14DarajaLaunchResponse\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x10\n" +
+	"\x03pid\x18\x02 \x01(\x05R\x03pid\x12\x12\n" +
+	"\x04pgid\x18\x03 \x01(\x05R\x04pgid\x12*\n" +
+	"\x11connected_unix_ms\x18\x04 \x01(\x03R\x0fconnectedUnixMs\"B\n" +
+	"\x11DarajaSendRequest\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"8\n" +
+	"\x12DarajaSendResponse\x12\"\n" +
+	"\facknowledged\x18\x01 \x01(\bR\facknowledged\"/\n" +
+	"\x12DarajaWatchRequest\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\"\xb5\x01\n" +
+	"\x13DarajaWatchResponse\x12\x18\n" +
+	"\x06stdout\x18\x01 \x01(\fH\x00R\x06stdout\x12A\n" +
+	"\trestarted\x18\x02 \x01(\v2!.rafiki.v1.DarajaProcessRestartedH\x00R\trestarted\x128\n" +
+	"\x06exited\x18\x03 \x01(\v2\x1e.rafiki.v1.DarajaProcessExitedH\x00R\x06exitedB\a\n" +
+	"\x05event\"*\n" +
+	"\x16DarajaProcessRestarted\x12\x10\n" +
+	"\x03pid\x18\x01 \x01(\x05R\x03pid\"J\n" +
+	"\x13DarajaProcessExited\x12\x1b\n" +
+	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +
+	"\x06signal\x18\x02 \x01(\tR\x06signal\"\x8d\x01\n" +
 	"\x0fRateLimitWindow\x12%\n" +
 	"\vutilization\x18\x01 \x01(\x01H\x00R\vutilization\x88\x01\x01\x12\x1e\n" +
 	"\breset_at\x18\x02 \x01(\x03H\x01R\aresetAt\x88\x01\x01\x12\x16\n" +
@@ -2227,7 +2755,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x15SEND_MODE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10SEND_MODE_PROMPT\x10\x01\x12\x13\n" +
 	"\x0fSEND_MODE_STEER\x10\x02\x12\x13\n" +
-	"\x0fSEND_MODE_ABORT\x10\x032\x8e\x06\n" +
+	"\x0fSEND_MODE_ABORT\x10\x032\xfa\a\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -2241,7 +2769,11 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\tListTasks\x12\x1b.rafiki.v1.ListTasksRequest\x1a\x1c.rafiki.v1.ListTasksResponse\x12I\n" +
 	"\n" +
 	"ListModels\x12\x1c.rafiki.v1.ListModelsRequest\x1a\x1d.rafiki.v1.ListModelsResponse\x12a\n" +
-	"\x12GetRateLimitStatus\x12$.rafiki.v1.GetRateLimitStatusRequest\x1a%.rafiki.v1.GetRateLimitStatusResponseB4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
+	"\x12GetRateLimitStatus\x12$.rafiki.v1.GetRateLimitStatusRequest\x1a%.rafiki.v1.GetRateLimitStatusResponse\x12O\n" +
+	"\fDarajaLaunch\x12\x1e.rafiki.v1.DarajaLaunchRequest\x1a\x1f.rafiki.v1.DarajaLaunchResponse\x12I\n" +
+	"\n" +
+	"DarajaSend\x12\x1c.rafiki.v1.DarajaSendRequest\x1a\x1d.rafiki.v1.DarajaSendResponse\x12N\n" +
+	"\vDarajaWatch\x12\x1d.rafiki.v1.DarajaWatchRequest\x1a\x1e.rafiki.v1.DarajaWatchResponse0\x01B4Z2go.graveland.dev/rafiki/pkg/gen/rafiki/v1;rafikiv1b\x06proto3"
 
 var (
 	file_rafiki_v1_control_proto_rawDescOnce sync.Once
@@ -2256,7 +2788,7 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_rafiki_v1_control_proto_goTypes = []any{
 	(EventTier)(0),                     // 0: rafiki.v1.EventTier
 	(SendMode)(0),                      // 1: rafiki.v1.SendMode
@@ -2284,58 +2816,76 @@ var file_rafiki_v1_control_proto_goTypes = []any{
 	(*ModelRow)(nil),                   // 23: rafiki.v1.ModelRow
 	(*ListModelsRequest)(nil),          // 24: rafiki.v1.ListModelsRequest
 	(*ListModelsResponse)(nil),         // 25: rafiki.v1.ListModelsResponse
-	(*RateLimitWindow)(nil),            // 26: rafiki.v1.RateLimitWindow
-	(*GetRateLimitStatusRequest)(nil),  // 27: rafiki.v1.GetRateLimitStatusRequest
-	(*GetRateLimitStatusResponse)(nil), // 28: rafiki.v1.GetRateLimitStatusResponse
-	nil,                                // 29: rafiki.v1.EventCursor.OrdinalsEntry
-	nil,                                // 30: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                                // 31: rafiki.v1.SpawnRequest.LabelsEntry
-	(*Event)(nil),                      // 32: rafiki.v1.Event
-	(*ContentBlock)(nil),               // 33: rafiki.v1.ContentBlock
+	(*DarajaLaunchRequest)(nil),        // 26: rafiki.v1.DarajaLaunchRequest
+	(*DarajaLaunchResponse)(nil),       // 27: rafiki.v1.DarajaLaunchResponse
+	(*DarajaSendRequest)(nil),          // 28: rafiki.v1.DarajaSendRequest
+	(*DarajaSendResponse)(nil),         // 29: rafiki.v1.DarajaSendResponse
+	(*DarajaWatchRequest)(nil),         // 30: rafiki.v1.DarajaWatchRequest
+	(*DarajaWatchResponse)(nil),        // 31: rafiki.v1.DarajaWatchResponse
+	(*DarajaProcessRestarted)(nil),     // 32: rafiki.v1.DarajaProcessRestarted
+	(*DarajaProcessExited)(nil),        // 33: rafiki.v1.DarajaProcessExited
+	(*RateLimitWindow)(nil),            // 34: rafiki.v1.RateLimitWindow
+	(*GetRateLimitStatusRequest)(nil),  // 35: rafiki.v1.GetRateLimitStatusRequest
+	(*GetRateLimitStatusResponse)(nil), // 36: rafiki.v1.GetRateLimitStatusResponse
+	nil,                                // 37: rafiki.v1.EventCursor.OrdinalsEntry
+	nil,                                // 38: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                                // 39: rafiki.v1.SpawnRequest.LabelsEntry
+	(*Event)(nil),                      // 40: rafiki.v1.Event
+	(*ContentBlock)(nil),               // 41: rafiki.v1.ContentBlock
+	(*darajapb.ChildSpec)(nil),         // 42: rafiki.daraja.v1.ChildSpec
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	32, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	29, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	40, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	37, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
 	4,  // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
 	0,  // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
 	5,  // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
 	1,  // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	33, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	30, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	41, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	38, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
 	9,  // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
 	9,  // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	31, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	39, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
 	20, // 11: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
 	23, // 12: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
-	26, // 13: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
-	26, // 14: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
-	2,  // 15: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	6,  // 16: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	7,  // 17: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	10, // 18: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	12, // 19: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	14, // 20: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	16, // 21: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	18, // 22: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
-	21, // 23: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	24, // 24: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	27, // 25: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
-	3,  // 26: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	32, // 27: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	8,  // 28: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	11, // 29: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	13, // 30: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	15, // 31: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	17, // 32: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	19, // 33: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
-	22, // 34: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	25, // 35: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	28, // 36: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
-	26, // [26:37] is the sub-list for method output_type
-	15, // [15:26] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	42, // 13: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	32, // 14: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
+	33, // 15: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
+	34, // 16: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
+	34, // 17: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
+	2,  // 18: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	6,  // 19: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	7,  // 20: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	10, // 21: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	12, // 22: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	14, // 23: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	16, // 24: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	18, // 25: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	21, // 26: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	24, // 27: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	35, // 28: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
+	26, // 29: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
+	28, // 30: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
+	30, // 31: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
+	3,  // 32: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	40, // 33: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	8,  // 34: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	11, // 35: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	13, // 36: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	15, // 37: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	17, // 38: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	19, // 39: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	22, // 40: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	25, // 41: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	36, // 42: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
+	27, // 43: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
+	29, // 44: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
+	31, // 45: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
+	32, // [32:46] is the sub-list for method output_type
+	18, // [18:32] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -2356,13 +2906,19 @@ func file_rafiki_v1_control_proto_init() {
 	file_rafiki_v1_control_proto_msgTypes[15].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[21].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[24].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[29].OneofWrappers = []any{
+		(*DarajaWatchResponse_Stdout)(nil),
+		(*DarajaWatchResponse_Restarted)(nil),
+		(*DarajaWatchResponse_Exited)(nil),
+	}
+	file_rafiki_v1_control_proto_msgTypes[32].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   30,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

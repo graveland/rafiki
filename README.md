@@ -256,6 +256,33 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 | `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself; `claude` children remain subprocesses. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
 
+## Daraja
+
+**`rafiki daraja launch`** launches a claude child via daraja on a remote executor.
+It resolves an executor that matches the selector AND supports launching claude,
+calls `AdminService.Launch` with a one-shot ticket, then waits for the daraja to
+reverse-dial back into the daemon's pool before returning the child id. A launch
+that matches no executor is refused with a per-candidate diagnostic naming which
+executor was excluded and why.
+
+```
+rafiki daraja launch --cwd <dir> --model <provider/model> [--executor <selector>] [--resume <session-id>]
+```
+
+The command goes through `newConnectEndpoint`, so `$RAFIKI_URL` is honoured —
+it reaches a remote daemon the same way every other `rafiki` verb does.
+The launched daraja dials back to either the TCP address (`$RAFIKI_CONTROL_LISTEN`)
+or the local Unix socket path, depending on whether the daemon has a TCP listener.
+
+### RPCs
+
+Three Connect RPCs on the Control service implement this flow:
+- **DarajaLaunch** (unary) — selects executor, mints ticket, calls AdminService.Launch, waits for reverse dial
+- **DarajaSend** (unary) — writes bytes to child stdin via the connected daraja  
+- **DarajaWatch** (server-streaming) — streams stdout + lifecycle markers (ProcessRestarted, ProcessExited)
+
+None may be bidi: the remote plane is HTTP/1.1 and connect-go refuses bidi below HTTP/2.
+
 ## Executor
 
 **By default, `rafiki create` makes your own machine the workspace.** The client asks the

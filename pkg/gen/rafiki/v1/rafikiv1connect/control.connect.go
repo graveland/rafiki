@@ -56,6 +56,12 @@ const (
 	// ControlGetRateLimitStatusProcedure is the fully-qualified name of the Control's
 	// GetRateLimitStatus RPC.
 	ControlGetRateLimitStatusProcedure = "/rafiki.v1.Control/GetRateLimitStatus"
+	// ControlDarajaLaunchProcedure is the fully-qualified name of the Control's DarajaLaunch RPC.
+	ControlDarajaLaunchProcedure = "/rafiki.v1.Control/DarajaLaunch"
+	// ControlDarajaSendProcedure is the fully-qualified name of the Control's DarajaSend RPC.
+	ControlDarajaSendProcedure = "/rafiki.v1.Control/DarajaSend"
+	// ControlDarajaWatchProcedure is the fully-qualified name of the Control's DarajaWatch RPC.
+	ControlDarajaWatchProcedure = "/rafiki.v1.Control/DarajaWatch"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
@@ -71,6 +77,9 @@ type ControlClient interface {
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
+	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
+	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
+	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest]) (*connect.ServerStreamForClient[v1.DarajaWatchResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -150,6 +159,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("GetRateLimitStatus")),
 			connect.WithClientOptions(opts...),
 		),
+		darajaLaunch: connect.NewClient[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse](
+			httpClient,
+			baseURL+ControlDarajaLaunchProcedure,
+			connect.WithSchema(controlMethods.ByName("DarajaLaunch")),
+			connect.WithClientOptions(opts...),
+		),
+		darajaSend: connect.NewClient[v1.DarajaSendRequest, v1.DarajaSendResponse](
+			httpClient,
+			baseURL+ControlDarajaSendProcedure,
+			connect.WithSchema(controlMethods.ByName("DarajaSend")),
+			connect.WithClientOptions(opts...),
+		),
+		darajaWatch: connect.NewClient[v1.DarajaWatchRequest, v1.DarajaWatchResponse](
+			httpClient,
+			baseURL+ControlDarajaWatchProcedure,
+			connect.WithSchema(controlMethods.ByName("DarajaWatch")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -166,6 +193,9 @@ type controlClient struct {
 	listTasks          *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
 	listModels         *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
 	getRateLimitStatus *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
+	darajaLaunch       *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
+	darajaSend         *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
+	darajaWatch        *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -223,6 +253,21 @@ func (c *controlClient) GetRateLimitStatus(ctx context.Context, req *connect.Req
 	return c.getRateLimitStatus.CallUnary(ctx, req)
 }
 
+// DarajaLaunch calls rafiki.v1.Control.DarajaLaunch.
+func (c *controlClient) DarajaLaunch(ctx context.Context, req *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {
+	return c.darajaLaunch.CallUnary(ctx, req)
+}
+
+// DarajaSend calls rafiki.v1.Control.DarajaSend.
+func (c *controlClient) DarajaSend(ctx context.Context, req *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error) {
+	return c.darajaSend.CallUnary(ctx, req)
+}
+
+// DarajaWatch calls rafiki.v1.Control.DarajaWatch.
+func (c *controlClient) DarajaWatch(ctx context.Context, req *connect.Request[v1.DarajaWatchRequest]) (*connect.ServerStreamForClient[v1.DarajaWatchResponse], error) {
+	return c.darajaWatch.CallServerStream(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -236,6 +281,9 @@ type ControlHandler interface {
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
+	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
+	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
+	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -311,6 +359,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("GetRateLimitStatus")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlDarajaLaunchHandler := connect.NewUnaryHandler(
+		ControlDarajaLaunchProcedure,
+		svc.DarajaLaunch,
+		connect.WithSchema(controlMethods.ByName("DarajaLaunch")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDarajaSendHandler := connect.NewUnaryHandler(
+		ControlDarajaSendProcedure,
+		svc.DarajaSend,
+		connect.WithSchema(controlMethods.ByName("DarajaSend")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDarajaWatchHandler := connect.NewServerStreamHandler(
+		ControlDarajaWatchProcedure,
+		svc.DarajaWatch,
+		connect.WithSchema(controlMethods.ByName("DarajaWatch")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -335,6 +401,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListModelsHandler.ServeHTTP(w, r)
 		case ControlGetRateLimitStatusProcedure:
 			controlGetRateLimitStatusHandler.ServeHTTP(w, r)
+		case ControlDarajaLaunchProcedure:
+			controlDarajaLaunchHandler.ServeHTTP(w, r)
+		case ControlDarajaSendProcedure:
+			controlDarajaSendHandler.ServeHTTP(w, r)
+		case ControlDarajaWatchProcedure:
+			controlDarajaWatchHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -386,4 +458,16 @@ func (UnimplementedControlHandler) ListModels(context.Context, *connect.Request[
 
 func (UnimplementedControlHandler) GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetRateLimitStatus is not implemented"))
+}
+
+func (UnimplementedControlHandler) DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DarajaLaunch is not implemented"))
+}
+
+func (UnimplementedControlHandler) DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DarajaSend is not implemented"))
+}
+
+func (UnimplementedControlHandler) DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DarajaWatch is not implemented"))
 }

@@ -61,6 +61,7 @@ type Server struct {
 	taskLister  atomic.Pointer[TaskLister]
 	modelLister atomic.Pointer[ModelLister]
 	quota       atomic.Pointer[QuotaReader]
+	daraja      atomic.Pointer[*darajaHandlers]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
