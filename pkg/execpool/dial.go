@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -117,7 +118,7 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	// From here everything reads through upConn. The hello frame and the HTTP/2
 	// preface that follows it arrive in one stream, and the upgrade's buffer is
 	// part of that stream rather than something to be discarded.
-	hello, credential, err := writeHello(upConn, o)
+	rd, hello, credential, err := writeHello(upConn, o)
 	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
 		return err
@@ -136,7 +137,7 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 		slog.Info("executor: enrolled", "id", hello.ExecutorID, "credentialFile", o.CredentialFile)
 	}
 
-	return ServeInverted(upConn, o.Handler)
+	return ServeInverted(readerConn{Conn: upConn, r: rd}, o.Handler)
 }
 
 // dialDaemon opens the transport under the executor link and returns it with
@@ -232,21 +233,31 @@ func buildHello(o ConnectOptions) (protocol.ExecutorHelloRequest, error) {
 	return req, nil
 }
 
-func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse, string, error) {
+// writeHello sends the hello and reads the response, returning the READER it
+// used along with the outcome.
+//
+// The reader must be returned, not discarded. rafikid answers and then, as the
+// HTTP/2 client, sends its connection preface — commonly in the same segment,
+// so those bytes are already inside this bufio.Reader by the time Decode
+// returns. Serving on the bare net.Conn drops them and http2.Server.ServeConn
+// starts mid-frame. Same rule as pkg/control's authHandshake, from the other
+// side of the connection.
+func writeHello(conn net.Conn, o ConnectOptions) (io.Reader, protocol.ExecutorHelloResponse, string, error) {
 	req, err := buildHello(o)
 	if err != nil {
-		return protocol.ExecutorHelloResponse{}, "", err
+		return nil, protocol.ExecutorHelloResponse{}, "", err
 	}
 
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(req); err != nil {
-		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("write hello: %w", err)
+		return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("write hello: %w", err)
 	}
 
-	dec := json.NewDecoder(bufio.NewReaderSize(conn, 4096))
+	br := bufio.NewReaderSize(conn, 4096)
+	dec := json.NewDecoder(br)
 	var resp protocol.ExecutorHelloResponse
 	if err := dec.Decode(&resp); err != nil {
-		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("read hello response: %w", err)
+		return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("read hello response: %w", err)
 	}
 	if resp.Error != "" {
 		// Retryable means rafikid could not CHECK the credential, not that it
@@ -256,12 +267,31 @@ func writeHello(conn net.Conn, o ConnectOptions) (protocol.ExecutorHelloResponse
 		// into an outage — across a fleet reconnecting together, the whole
 		// fleet's.
 		if resp.Retryable {
-			return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("rafikid could not verify the credential: %s", resp.Error)
+			return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("rafikid could not verify the credential: %s", resp.Error)
 		}
-		return protocol.ExecutorHelloResponse{}, "", fmt.Errorf("%w: %s", ErrEnrollmentRejected, resp.Error)
+		return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("%w: %s", ErrEnrollmentRejected, resp.Error)
 	}
 
-	return resp, resp.Credential, nil
+	// json.Decoder buffers too. Anything it read past the response's newline is
+	// in its Buffered() reader, ahead of whatever is still in br.
+	mr := io.MultiReader(dec.Buffered(), br)
+
+	// Consume the '\n' delimiter that terminates the hello response.
+	// Since json.Decoder parses the JSON object, it leaves the trailing newline
+	// in the buffer. We must consume up to and including that newline so the
+	// returned reader starts exactly at the next frame (the HTTP/2 preface).
+	var singleByte [1]byte
+	for {
+		_, err := mr.Read(singleByte[:])
+		if err != nil {
+			break
+		}
+		if singleByte[0] == '\n' {
+			break
+		}
+	}
+
+	return mr, resp, resp.Credential, nil
 }
 
 func readCredential(path string) (string, error) {
