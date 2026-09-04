@@ -388,14 +388,21 @@ session-executor surfaces, which host nothing by construction.
 ### Launch
 
 ```
-Launch(childId, cwd, spec: rafiki.daraja.v1.ChildSpec)
-  → { pid, pgid, socket }
+Launch(childId, cwd, spec: rafiki.daraja.v1.ChildSpec, dialAddr, ticket string)
+  → { pid, pgid }
 ```
 
 Starts one `rafiki daraja serve`, re-executed from the executor's own binary,
 hosting one child. `spec` is typed rather than raw argv because the executor
 and daraja would otherwise each need an argv builder on opposite sides of an
 RPC; both call `pkg/claudeargv` instead.
+
+`dialAddr` is a host:port or Unix socket path that daraja dials back to the
+rafikid that asked for it — the reverse-dial pattern replaces the 1b-i direct
+connect where the caller dialled a socket path returned by the response.
+`ticket` is a one-shot credential delivered via environment variable
+(`RAFIKI_DARAJA_TICKET`, never argv — `ps` visibility is why). It is replaced
+by a durable credential on first successful hello.
 
 `Setpgid` makes daraja a group leader and claude joins the group (daraja spawns
 its child with `SpawnSpec.InheritProcessGroup`, opting out of the runner's
@@ -432,11 +439,12 @@ Ends one launched daraja and its child: SIGTERM to the process group, wait out
 the group. An unknown `childId` returns `reaped=false`, NOT an error —
 reaping something already gone is the normal case, so Reap is idempotent.
 
-### The `socket` field is transitional
+### The `socket` field is retired
 
-`LaunchResponse.socket` is the unix path daraja serves `DarajaService` on, and
-in 1b-i the caller dials it directly. 1b-ii replaces it with the reverse dial,
-and the field goes away with the direct dial.
+1b-i returned `LaunchResponse.socket` — a Unix path for the caller to dial
+directly into `DarajaService`. 1b-ii replaces that with a reverse-dial pattern:
+the caller passes its own address as `dialAddr` on the request, and daraja dials
+back. The `socket` field (number 3) is reserved and no longer served.
 
 ### Wire break in 1b: `RestartRequest`
 

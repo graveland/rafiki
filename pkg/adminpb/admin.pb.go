@@ -33,7 +33,7 @@ type LaunchRequest struct {
 	// child's command line through pkg/claudeargv, so neither side invents one.
 	Spec *darajapb.ChildSpec `protobuf:"bytes,3,opt,name=spec,proto3" json:"spec,omitempty"`
 	// dial_addr is a host:port or a Unix socket path that the daraja dials back
-	// to the raﬁkid that asked for it. Phase 1b-i shipped socket on the response
+	// to the rafikid that asked for it. Phase 1b-i shipped socket on the response
 	// (field 3) as a direct-connect handle; 1b-ii replaces that with a reverse
 	// dial whose address arrives here on the request.
 	DialAddr string `protobuf:"bytes,4,opt,name=dial_addr,json=dialAddr,proto3" json:"dial_addr,omitempty"`
