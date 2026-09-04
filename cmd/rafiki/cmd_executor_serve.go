@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -55,10 +56,19 @@ func resolveRoot(root string) (string, error) {
 	return wd, nil
 }
 
-func executorHandler(srv *executor.Server) http.Handler {
+func executorHandler(srv *executor.Server, admin *executor.AdminServer) http.Handler {
 	mux := http.NewServeMux()
 	interceptor := executor.NewRPCInterceptor()
 	mux.Handle(executorpbconnect.NewExecutorServiceHandler(srv, connect.WithInterceptors(interceptor)))
+	// A second service on the SAME mux and the same reverse-dialled connection.
+	// The executor stays the executor; this is the machine-admin surface.
+	//
+	// admin is nil on the surfaces that host nothing by construction — the
+	// short-lived enroll executor and a session executor — and those mount no
+	// admin service, matching --launch's opt-in rule.
+	if admin != nil {
+		mux.Handle(admin.Routes())
+	}
 	return mux
 }
 
@@ -194,7 +204,23 @@ Two transports, exactly one of which is used:
 				LaunchKinds:     launchKinds,
 			})
 			defer func() { _ = srv.Close() }()
-			handler := executorHandler(srv)
+
+			self, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolve own binary: %w", err)
+			}
+			childBin, err := exec.LookPath("claude")
+			if err != nil && len(launchKinds) > 0 {
+				return fmt.Errorf("--launch claude given but claude is not on PATH: %w", err)
+			}
+			admin := executor.NewAdminServer(executor.AdminOptions{
+				SelfBinary:  self,
+				ChildBinary: childBin,
+				LaunchKinds: launchKinds,
+				SocketDir:   os.TempDir(),
+			})
+			defer admin.Close()
+			handler := executorHandler(srv, admin)
 
 			// resolveExecutorConnectFlags already guarantees exactly one of
 			// these is set, or returned an error above.
