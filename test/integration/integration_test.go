@@ -160,6 +160,8 @@ func bootDaemon(t *testing.T) *daemon {
 		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
+	// Uncomment to stream daemon logs during debugging:
+	// cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(homeDir)

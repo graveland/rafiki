@@ -1244,19 +1244,15 @@
   no token was exported — with one set, `rafiki create --detached` in a test
   would have spawned real children on the named daemon.
 
-- **`make check` fails with two `test/integration` failures whenever another
-  rafiki daemon is running on the machine** — the integration daemons bind the
-  default proxy port (`:8035` from `.env`/`service.env`), hit
-  `listen tcp :8035: bind: address already in use`, and because the Connect
-  UDS is served only when the proxy face comes up (`main.go`'s
-  `if face != nil && face.Control != nil`), the two Connect-plane tests
-  (`TestIntegration_SubtreeIncludeSelfCoversRootAndDescendant`,
-  `TestIntegration_ListChildrenCarriesTheParentLabel`) fail with a missing
-  `connect.sock` — signatures that look like real regressions and are not.
-  Check the daemon stderr for "address already in use", and bypass with
-  `RAFIKI_PROXY_LISTEN=127.0.0.1:18035 make check`. The deeper issue (the
-  Connect socket's availability being silently coupled to the proxy face) is
-  recorded for a future fix, not solved here.
+- **The Connect UDS is served only when the proxy face comes up** (`main.go`'s
+  `if face != nil && face.Control != nil`), so ANY proxy-listener failure
+  surfaces as Connect-plane tests failing on a missing `connect.sock` — a
+  signature that reads like a real regression and is not. Read the daemon's
+  stderr before believing the test name. The port collision that used to
+  trigger it is gone (`test/integration` gives every daemon
+  `RAFIKI_PROXY_LISTEN=127.0.0.1:0`, so parallel daemons cannot fight each
+  other or a developer's running daemon over `:8035`), but the coupling is
+  still there and any other bind failure reproduces it.
 
 - **`quota_status` (Anthropic subscription rate-limit capture, `pkg/quota`)
   only knows a child's owner USER ID at fresh spawn time, never on
