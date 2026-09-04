@@ -415,6 +415,20 @@ that plain `bash` cannot offer, because plain `bash` is synchronous with a
 | `bash_output` | read everything the job has printed; reports running/exited and the exit code |
 | `bash_kill` | stop the job and its whole process group |
 
+**Completion is pushed, not polled.** The daemon watches every job a child
+starts: when the job exits (or its handle disappears from the executor), a
+fragment is injected into that child's next turn through the same coalescing
+event buffer subagent settlements ride (`cmd/rafikid/jobwatch.go`, source
+`jobs`, keyed per handle). An agent starts a job and settles; it reads output
+with `bash_output` when it wants it, and it is TOLD when the job finished.
+The watcher polls the child's CURRENT executor binding and deliberately skips
+the rebind machinery — a job lives on the workspace it started on, so a
+re-provisioned workspace can only ever answer "gone", and a background poll
+must not be able to trigger a migration behind the agent's back. Killing a
+job with `bash_kill` drops its watch silently: the agent resolved it on
+purpose, and a "finished" fragment would cost a turn to deliver news it
+already has.
+
 They are parent-side tools implemented as RPCs, and they **do not exist**
 when no executor is configured — a tool that can only answer "not configured"
 costs a turn to learn nothing. Output is written to a file on the executor,
@@ -632,7 +646,10 @@ as the child is registered. When a descendant settles, one coalesced digest is
 injected into its parent's next turn: five workers finishing together cost one
 turn, not five. The digest names who finished; *what they did* is read from the
 task ledger with `task_list(assignee=…)`, which is one indexed query rather
-than a transcript replay.
+than a transcript replay. Background jobs (`bash_start`) ride the same
+machinery: a job's exit — or its handle vanishing — is injected into the
+starting child's next turn, keyed per handle and coalesced, so an agent that
+starts work in the background settles instead of polling.
 
 **Unresolved work is caught, not prompted for.** An agent that settles holding
 non-terminal tasks is told once, naming the handles. A second settle with the
