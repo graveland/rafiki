@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -204,5 +205,108 @@ func TestDisplacedConnectionDoesNotReportDisconnect(t *testing.T) {
 	_, ok := pool.conns["c1"]
 	if ok {
 		t.Error("entry still present after removing live connection")
+	}
+}
+
+// ─── Relay holder tests ────────────────────────────────────────────────────────
+
+// TestRelayHolderFanOutLifecycle verifies subscribe/unsubscribe lifecycle
+// on a holder with no active stream (nil client). The channel stays open but
+// delivers no events until start() is called and the recvLoop begins receiving.
+func TestRelayHolderFanOutLifecycle(t *testing.T) {
+	holder := newRelayHolder("c1", nil) // nil client — no stream
+
+	subCh, unsub := holder.subscribe()
+	defer unsub()
+
+	// No events before shutdown.
+	select {
+	case ev := <-subCh:
+		t.Fatalf("should not have received event: %+v", ev)
+	default:
+	}
+
+	// Double-unsubscribe is safe.
+	unsub()
+	unsub()
+
+	// Still nothing.
+	select {
+	case ev := <-subCh:
+		t.Fatalf("after double unsubscribe should get nothing: %+v", ev)
+	default:
+	}
+}
+
+// TestRelayHolderBroadcastToMultipleSubscribers verifies that broadcast sends
+// to all subscriber channels simultaneously (with backpressure via drop).
+func TestRelayHolderBroadcastToMultipleSubscribers(t *testing.T) {
+	holder := newRelayHolder("c1", nil)
+
+	ch1, unsub1 := holder.subscribe()
+	ch2, unsub2 := holder.subscribe()
+	defer unsub1()
+	defer unsub2()
+
+	testResp := &fanEvent{resp: &darajapb.RelayResponse{
+		Event: &darajapb.RelayResponse_Stdout{Stdout: []byte("hello")},
+	}}
+	holder.broadcast(*testResp)
+
+	// Both should receive.
+	var got1, got2 *fanEvent
+	select {
+	case e := <-ch1:
+		got1 = e
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("subscriber 1 did not receive")
+	}
+	select {
+	case e := <-ch2:
+		got2 = e
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("subscriber 2 did not receive")
+	}
+	if got1.Response().GetStdout() == nil || got2.Response().GetStdout() == nil {
+		t.Error("both subscribers should have received the stdout response")
+	}
+}
+
+// TestRelayHolderClosedRejectsNewSubscribers verifies that after shutdown,
+// subscribe returns immediately without adding to fanOut.
+func TestRelayHolderClosedRejectsNewSubscribers(t *testing.T) {
+	holder := newRelayHolder("c1", nil)
+	holder.shutdown()
+
+	_, unsub := holder.subscribe()
+	// Must be no-op; unsub is safe to call.
+	unsub()
+
+	// Verify fanOut is empty.
+	holder.mu.Lock()
+	n := len(holder.fanOut)
+	holder.mu.Unlock()
+	if n != 0 {
+		t.Errorf("fanOut should be empty after shutdown, got %d entries", n)
+	}
+}
+
+// TestPoolEvictCleansUpRelayHolder verifies Evict tears down the relay holder too.
+func TestPoolEvictCleansUpRelayHolder(t *testing.T) {
+	reg := NewRegistry()
+	pool := New(reg)
+
+	_cred, _ := reg.IssueCredential("c1")
+	_ = _cred
+	pool.conns["c1"] = &liveConn{done: make(chan struct{})}
+	holder := newRelayHolder("c1", nil)
+	pool.relayHolders["c1"] = holder
+
+	pool.Evict("c1")
+	if _, ok := pool.conns["c1"]; ok {
+		t.Error("conns entry not removed by Evict")
+	}
+	if _, ok := pool.relayHolders["c1"]; ok {
+		t.Error("relayHolders entry not removed by Evict")
 	}
 }
