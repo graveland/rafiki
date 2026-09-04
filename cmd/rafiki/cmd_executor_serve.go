@@ -143,6 +143,7 @@ func newExecutorServeCmd() *cobra.Command {
 		lspConfig         string
 		noLSP             bool
 		proxyArgs         []string
+		launchKinds       []string
 	)
 
 	cmd := &cobra.Command{
@@ -190,6 +191,7 @@ Two transports, exactly one of which is used:
 				LSPConfig:       lspConfig,
 				NoLSP:           noLSP,
 				Proxies:         proxies,
+				LaunchKinds:     launchKinds,
 			})
 			defer func() { _ = srv.Close() }()
 			handler := executorHandler(srv)
@@ -223,6 +225,9 @@ Two transports, exactly one of which is used:
 		"path to an lsp.json describing language servers this executor may start (default: auto-detect what is on PATH)")
 	cmd.Flags().BoolVar(&noLSP, "no-lsp", false, "disable language servers on this executor entirely")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
+	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
+		"child protocol this executor will host for the daemon, e.g. --launch claude "+
+			"(repeatable). Opt-in: with no --launch this executor hosts nothing")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",

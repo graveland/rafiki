@@ -184,7 +184,8 @@ All ten RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
 
 ```
 Describe() → { executorId, platform, roots[], concurrency, isolation,
-               workspaceMode, tools[], version, selfReportedLabels }
+               workspaceMode, tools[], version, selfReportedLabels,
+               proxies[], launchKinds[] }
 ```
 
 Unary. Called at startup and periodically to discover the executor's
@@ -194,6 +195,20 @@ child's `tools[]` from at spawn, so a name that isn't here never reaches the
 child's envelope. It includes the `lsp_*` verbs only when a language server is
 installed (or `--lsp-config` names one), and never the parent-side
 `bash_start`/`bash_output`/`bash_kill` RPCs, which the daemon implements itself.
+
+`proxies[]` and `launchKinds[]` are the two things an executor self-reports, and
+both are safe to self-report for the same reason: each only ever NARROWS what
+the executor will do. `proxies[]` names the LLM endpoints its operator declared
+with `--proxy` and the relay enforces on this side — a name that is not declared
+never reaches the network. `launchKinds[]` names the child protocols its
+operator declared with `--launch` that the daemon may host here via
+`AdminService.Launch`; the daemon still requires the child's ordinary executor
+selector to match, so a wrong entry costs a failed launch rather than admitting
+anyone. Both default to EMPTY: with no flag the executor forwards nothing and
+hosts nothing. A machine volunteering to host other people's children because
+someone forgot a flag is the self-report-gates-placement shape the isolation and
+workspace_mode rules exist to forbid — unlike those two fields, which the
+executor does not report at all.
 
 ### Health
 

@@ -129,7 +129,14 @@ type DescribeResponse struct {
 	// executor will do, it is enforced on this side rather than trusted on the
 	// daemon's, and a missing or wrong entry costs a failed request rather than
 	// opening a machine.
-	Proxies       []string `protobuf:"bytes,10,rep,name=proxies,proto3" json:"proxies,omitempty"`
+	Proxies []string `protobuf:"bytes,10,rep,name=proxies,proto3" json:"proxies,omitempty"`
+	// launch_kinds are the child protocols this executor will host via
+	// AdminService.Launch, declared by its operator with --launch at startup.
+	// Safe to self-report for the same reason as proxies: it only ever NARROWS
+	// what this executor will do. The daemon still requires the child's ordinary
+	// executor selector to match, so a wrong entry costs a failed launch rather
+	// than admitting anyone.
+	LaunchKinds   []string `protobuf:"bytes,11,rep,name=launch_kinds,json=launchKinds,proto3" json:"launch_kinds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -230,6 +237,13 @@ func (x *DescribeResponse) GetSelfReportedLabels() map[string]string {
 func (x *DescribeResponse) GetProxies() []string {
 	if x != nil {
 		return x.Proxies
+	}
+	return nil
+}
+
+func (x *DescribeResponse) GetLaunchKinds() []string {
+	if x != nil {
+		return x.LaunchKinds
 	}
 	return nil
 }
@@ -2156,7 +2170,7 @@ var File_executor_proto protoreflect.FileDescriptor
 const file_executor_proto_rawDesc = "" +
 	"\n" +
 	"\x0eexecutor.proto\x12\x12rafiki.executor.v1\"\x11\n" +
-	"\x0fDescribeRequest\"\xcd\x03\n" +
+	"\x0fDescribeRequest\"\xf0\x03\n" +
 	"\x10DescribeResponse\x12\x1f\n" +
 	"\vexecutor_id\x18\x01 \x01(\tR\n" +
 	"executorId\x12\x1a\n" +
@@ -2169,7 +2183,8 @@ const file_executor_proto_rawDesc = "" +
 	"\aversion\x18\b \x01(\tR\aversion\x12n\n" +
 	"\x14self_reported_labels\x18\t \x03(\v2<.rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntryR\x12selfReportedLabels\x12\x18\n" +
 	"\aproxies\x18\n" +
-	" \x03(\tR\aproxies\x1aE\n" +
+	" \x03(\tR\aproxies\x12!\n" +
+	"\flaunch_kinds\x18\v \x03(\tR\vlaunchKinds\x1aE\n" +
 	"\x17SelfReportedLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x0f\n" +
