@@ -145,6 +145,30 @@ func (p *Pool) OnDisconnect(fn func(childID string)) {
 	p.onDisconnect = append(p.onDisconnect, fn)
 }
 
+// FireConnect fires all registered OnConnect callbacks for childID.
+// Only exported for testing — callers outside the package should exercise
+// the real connection path (HandleConn / UpgradeHandler) instead.
+func (p *Pool) FireConnect(childID string) {
+	p.onConnectMu.Lock()
+	fns := p.onConnect
+	p.onConnectMu.Unlock()
+	for _, fn := range fns {
+		fn(childID)
+	}
+}
+
+// FireDisconnect fires all registered OnDisconnect callbacks for childID.
+// Only exported for testing — callers outside the package should exercise
+// the real connection path (HandleConn / UpgradeHandler) instead.
+func (p *Pool) FireDisconnect(childID string) {
+	p.onDisconnectMu.Lock()
+	fns := p.onDisconnect
+	p.onDisconnectMu.Unlock()
+	for _, fn := range fns {
+		fn(childID)
+	}
+}
+
 // installLive publishes lc as THE connection for childID, tearing down whatever
 // it displaces.
 //
