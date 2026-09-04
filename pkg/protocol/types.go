@@ -870,6 +870,47 @@ type ExecutorHelloResponse struct {
 	Retryable bool `json:"retryable,omitempty"`
 }
 
+// DarajaHelloRequest is a daraja's first frame on a reverse-dialled connection.
+//
+// Exactly one of Ticket or Credential is set. Ticket is the one-shot the daemon
+// minted and passed through AdminService.Launch; Credential is the in-memory
+// reconnect credential the daemon returned in the hello response, presented on
+// every dial after the first.
+type DarajaHelloRequest struct {
+	Type    string `json:"type"`
+	ChildID string `json:"childId"`
+	Ticket  string `json:"ticket,omitempty"`
+	// Credential is held in daraja's MEMORY only and never written to disk.
+	// That is the correct scope: it authenticates this daraja, and claude dies
+	// with this daraja, so a credential outliving the process would name
+	// something that no longer exists.
+	Credential string `json:"credential,omitempty"`
+	// PID is daraja's own, for the daemon's logs. It is NOT the reaping handle
+	// — that is the process group AdminService.Launch returned — and nothing
+	// gating may be derived from it.
+	PID int `json:"pid,omitempty"`
+}
+
+// DarajaHelloResponse answers it.
+type DarajaHelloResponse struct {
+	Type string `json:"type"`
+	// Credential is the reconnect credential, returned on the TICKET exchange
+	// and empty thereafter. daraja keeps it in memory for the life of the
+	// process.
+	Credential string `json:"credential,omitempty"`
+	Error      string `json:"error,omitempty"`
+	// Retryable discriminates "I could not check this" from "this is not
+	// valid", exactly as ExecutorHelloResponse does and for the same reason.
+	//
+	// One difference matters here: a daemon RESTART empties the in-memory
+	// credential registry, so a reconnecting daraja is answered terminally and
+	// exits, taking claude with it. That is intended — the daemon relaunches
+	// with --resume — but it means a rafikid restart ends every live daraja,
+	// and anyone surprised by that should read this comment rather than hunt a
+	// bug.
+	Retryable bool `json:"retryable,omitempty"`
+}
+
 // ─── ctrl_executor_* constants ─────────────────────────────────────────────────
 
 const (

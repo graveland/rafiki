@@ -517,3 +517,23 @@ func TestChildSummary_NullPID(t *testing.T) {
 		t.Errorf("expected exitCode:null in %s", raw)
 	}
 }
+
+// The wire names are the contract between two processes that upgrade
+// independently; a rename here is a silent handshake failure, not a compile
+// error.
+func TestDarajaHelloWireNames(t *testing.T) {
+	b, err := json.Marshal(protocol.DarajaHelloRequest{
+		Type: "daraja_hello", ChildID: "c1", Ticket: "t", PID: 42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"type"`, `"childId"`, `"ticket"`, `"pid"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("marshalled %s, missing %s", b, want)
+		}
+	}
+	if strings.Contains(string(b), `"credential"`) {
+		t.Error("an unset credential must be omitted, not sent empty")
+	}
+}
