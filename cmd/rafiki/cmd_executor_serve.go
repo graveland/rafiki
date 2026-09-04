@@ -213,11 +213,20 @@ Two transports, exactly one of which is used:
 			if err != nil && len(launchKinds) > 0 {
 				return fmt.Errorf("--launch claude given but claude is not on PATH: %w", err)
 			}
+			// daraja's Relay carries the child's stdio both ways, so its socket
+			// must not sit in the world-readable temp dir: on a multi-user
+			// executor host any local user could connect and read the
+			// conversation's stdout or write its stdin. 0700 under the
+			// executor's root keeps it to this process's owner.
+			darajaSockets := filepath.Join(wd, "daraja-sockets")
+			if err := os.MkdirAll(darajaSockets, 0o700); err != nil {
+				return fmt.Errorf("create daraja socket dir: %w", err)
+			}
 			admin := executor.NewAdminServer(executor.AdminOptions{
 				SelfBinary:  self,
 				ChildBinary: childBin,
 				LaunchKinds: launchKinds,
-				SocketDir:   os.TempDir(),
+				SocketDir:   darajaSockets,
 			})
 			defer admin.Close()
 			handler := executorHandler(srv, admin)
