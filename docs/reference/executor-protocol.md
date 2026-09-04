@@ -179,6 +179,8 @@ it must never be the store's own text for the same DSN reason.
 ## RPCs
 
 All ten RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
+`rafiki.admin.v1.AdminService` adds two more (`Launch`, `Reap`) on the same
+connection — see [AdminService: Launch and Reap](#adminservice-launch-and-reap).
 
 ### Describe
 
@@ -369,6 +371,77 @@ One-shot poll of a background job. Never blocks.
 | `found` | ← | false when the handle is unknown, or its output was evicted by the workspace's byte budget |
 
 `Attach` remains the streaming path. Use `JobOutput` when you want a snapshot.
+
+## AdminService: Launch and Reap
+
+`rafiki.admin.v1.AdminService` is the machine-admin surface: starting and
+ending daraja hosts. It is deliberately NOT part of `ExecutorService` — the
+executor is a data path for one child's filesystem and shell tools, with its
+own lifecycle hazards, while a daraja outlives both the turn and the
+connection that asked for it. The two services share the executor's process
+and its reverse-dialled connection and nothing else: AdminService mounts on
+the SAME mux as ExecutorService, so one connection reaches both. Like the
+capability it serves it is opt-in — an executor started without `--launch`
+mounts no AdminService at all, and neither do the short-lived enroll and
+session-executor surfaces, which host nothing by construction.
+
+### Launch
+
+```
+Launch(childId, cwd, spec: rafiki.daraja.v1.ChildSpec)
+  → { pid, pgid, socket }
+```
+
+Starts one `rafiki daraja serve`, re-executed from the executor's own binary,
+hosting one child. `spec` is typed rather than raw argv because the executor
+and daraja would otherwise each need an argv builder on opposite sides of an
+RPC; both call `pkg/claudeargv` instead.
+
+`Setpgid` makes daraja a group leader and claude joins the group (daraja spawns
+its child with `SpawnSpec.InheritProcessGroup`, opting out of the runner's
+default own-group). `pgid` is therefore the one handle that reaches the whole
+child for its whole life: restarts stay in the group, and one `kill(-pgid)`
+still reaches a claude orphaned by a SIGKILLed daraja — darwin has no
+subreaper, so the orphan reparents to launchd and the group is what covers it,
+not any wait by this executor.
+
+Refusals:
+
+| Condition | Code |
+|---|---|
+| empty `childId` | `InvalidArgument` |
+| kind other than claude | `InvalidArgument` |
+| kind not declared with `--launch` | `FailedPrecondition` — the operator's declaration wins |
+| `childId` already hosted here | `AlreadyExists` |
+
+`pgid` is NEVER taken from the request: a process group id is recycled once its
+group empties, so signalling a number a peer handed over could reach an
+unrelated group. Reap resolves the pgid from this executor's own launch table,
+and drops the entry when daraja exits — which is what makes a later Reap
+against a recycled pgid answer `reaped=false` instead of signalling a stranger.
+
+### Reap
+
+```
+Reap(childId, graceMs) → { reaped }
+```
+
+Ends one launched daraja and its child: SIGTERM to the process group, wait out
+`graceMs` (zero means the server default, 3s — matching daraja's own
+`stopLocked` rather than inventing a second escalation policy), then SIGKILL
+the group. An unknown `childId` returns `reaped=false`, NOT an error —
+reaping something already gone is the normal case, so Reap is idempotent.
+
+### The `socket` field is transitional
+
+`LaunchResponse.socket` is the unix path daraja serves `DarajaService` on, and
+in 1b-i the caller dials it directly. 1b-ii replaces it with the reverse dial,
+and the field goes away with the direct dial.
+
+### Wire break in 1b: `RestartRequest`
+
+`RestartRequest.spec` (typed `ChildSpec`) replaced `RestartRequest.argv` in 1b.
+A 1a client speaking raw argv is incompatible with a 1b daraja.
 
 ## Not implemented: MCP servers on an executor
 
