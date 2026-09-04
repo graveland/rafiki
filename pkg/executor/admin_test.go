@@ -4,12 +4,14 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"syscall"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -76,6 +78,22 @@ func TestLaunchGivesDarajaItsOwnGroup(t *testing.T) {
 	if pgid == syscall.Getpgrp() {
 		t.Fatal("daraja was left in the executor's process group; a reap would signal us")
 	}
+
+	// The response arithmetic is hardcoded (Pgid: int32(pid)), so the two
+	// checks above pass even with Setpgid missing. Ask the kernel what group
+	// daraja actually leads: that is the assertion a missing Setpgid fails.
+	kernelPgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		t.Fatalf("Getpgid(%d): %v", pid, err)
+	}
+	if kernelPgid != pid {
+		t.Errorf("kernel pgid of daraja (pid %d) = %d, want %d; Setpgid was not applied",
+			pid, kernelPgid, pid)
+	}
+	if kernelPgid == syscall.Getpgrp() {
+		t.Fatal("daraja sits in the executor's real process group; a reap would signal us")
+	}
+
 	if resp.Msg.GetSocket() == "" {
 		t.Error("Launch returned no socket path")
 	}
@@ -101,6 +119,126 @@ func TestLaunchRefusesAnUndeclaredKind(t *testing.T) {
 	}
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+}
+
+// Reap must end daraja AND the child that joined its group. The stub sleeps
+// until signalled, so a surviving process is an observable failure.
+func TestReapEndsTheWholeGroup(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c1",
+		Cwd:     t.TempDir(),
+		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	pgid := int(resp.Msg.GetPgid())
+
+	rr, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{
+		ChildId: "c1", GraceMs: 500,
+	}))
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if !rr.Msg.GetReaped() {
+		t.Error("Reap reported nothing reaped for a live launch")
+	}
+
+	// The group must be gone. ESRCH from a zero-signal probe is the proof.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("process group %d still alive after Reap", pgid)
+}
+
+// Reaping something already gone is the normal case — the daemon reaps on kill
+// without knowing whether the machine already cleaned up — and must not error.
+func TestReapIsIdempotent(t *testing.T) {
+	a := NewAdminServer(AdminOptions{SocketDir: t.TempDir()})
+	defer a.Close()
+
+	resp, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{ChildId: "ghost"}))
+	if err != nil {
+		t.Fatalf("Reap of an unknown child errored: %v", err)
+	}
+	if resp.Msg.GetReaped() {
+		t.Error("Reap claimed to reap a child it never launched")
+	}
+}
+
+// A launch claim still in flight must never be signalled: its pgid field is
+// still the zero value, and kill(-0, SIGTERM) would signal THIS process's own
+// group — the exact suicide the pgid resolution exists to prevent. With the
+// guard missing, this test does not merely fail, the test binary dies.
+func TestReapOfAnInFlightClaimSignalsNothing(t *testing.T) {
+	a := NewAdminServer(AdminOptions{SocketDir: t.TempDir()})
+	defer a.Close()
+
+	a.mu.Lock()
+	a.m["c1"] = &launched{} // a Launch still between its dup check and cmd.Start
+	a.mu.Unlock()
+
+	resp, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{ChildId: "c1"}))
+	if err != nil {
+		t.Fatalf("Reap of an in-flight claim errored: %v", err)
+	}
+	if resp.Msg.GetReaped() {
+		t.Error("Reap claimed to signal a launch that had not started")
+	}
+}
+
+// A claim must not outlive a failed start, or every later Launch of that child
+// is refused with AlreadyExists forever — a poisoned slot no launch can clear.
+func TestFailedStartReleasesItsClaim(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  filepath.Join(t.TempDir(), "does-not-exist"), // Start fails
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c1",
+		Cwd:     t.TempDir(),
+		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	if err == nil || connect.CodeOf(err) != connect.CodeInternal {
+		t.Fatalf("Launch with a missing binary: err = %v, want Internal", err)
+	}
+
+	a.mu.Lock()
+	slotTaken := a.m["c1"] != nil
+	a.mu.Unlock()
+	if slotTaken {
+		t.Fatal("a failed start left its claim in the launch table")
+	}
+
+	// The slot is free again: a retry with a working binary must launch.
+	a.opts.SelfBinary = buildSelfStub(t)
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c1",
+		Cwd:     t.TempDir(),
+		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	if err != nil {
+		t.Fatalf("retry Launch after a failed start: %v", err)
+	}
+	if resp.Msg.GetPid() == 0 {
+		t.Error("retry Launch returned no pid")
 	}
 }
 
