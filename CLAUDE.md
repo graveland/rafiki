@@ -430,7 +430,21 @@
   is judged on `baseCtx.Err()`, never the per-poll `ctx` — `cancel()` after the
   poll has already made `ctx.Err()` non-nil, so reading it classifies every
   transient error as shutdown (shipped wrong for exactly one test iteration).
-  `bash_start`'s description/result text promising the notification is pinned
+  **The liveness check runs BEFORE the poll, not only after a successful one,
+  and that ordering is the whole reason a closed child's watch ever ends.** The
+  two conditions arrive together: `Close` (and `handleChildExit`) drop the
+  child's retained `boundExecutor`, so `pollJob` answers `no executor bound for
+  child …` on every subsequent tick and a liveness check reachable only past a
+  successful poll is never reached at all — the loop ticked for the daemon's
+  lifetime, one goroutine and one debug line per 5s per closed child that had a
+  live job. Pinned by
+  `TestJobWatchEndsWhenItsChildIsGoneAndPollsKeepFailing`; the post-poll check
+  stays too, because the RPC itself can outlive the child. Watches are
+  in-memory and are NOT re-armed on recovery, so a job running across a daemon
+  restart notifies nothing — the workspace is re-provisioned and the job is
+  gone, but the agent was promised a notification and gets neither that nor the
+  "no longer on its executor" fragment. `bash_start`'s description/result text
+  promising the notification is pinned
   by `TestBashStartDescriptionPromisesNotificationNotPolling` in
   `pkg/fundi/tools` — if you change the wording, keep the "notified" + "do not
   poll" pair, and note the standalone `rafikid agent` CLI (its own workspace,

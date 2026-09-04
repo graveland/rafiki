@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,7 +172,7 @@ func TestJobWatchNotifiesOnceForAGoneJob(t *testing.T) {
 
 	batches := waitBatches(t, cap, 1)
 	frag := batches[0].fragments[0]
-	if !strings.Contains(frag, "gone from its executor") {
+	if !strings.Contains(frag, "no longer on its executor") {
 		t.Fatalf("fragment must say the job is gone, not finished: %q", frag)
 	}
 	if strings.Contains(frag, "exit code") {
@@ -296,5 +297,80 @@ func TestPeekJobNeverRecovers(t *testing.T) {
 	}
 	if fb.provisions != 0 {
 		t.Fatalf("peekJob provisioned %d workspaces; a poll must never rebind", fb.provisions)
+	}
+}
+
+// A child that can no longer receive the news ends its watch even when the
+// poll never succeeds again — which is exactly the state Close leaves behind,
+// since it drops the binding pollJob resolves through. Checking alive only
+// after a successful poll left the loop ticking forever: 199 polls in 200ms
+// at the test interval, one every 5s in production, for the daemon's life.
+func TestJobWatchEndsWhenItsChildIsGoneAndPollsKeepFailing(t *testing.T) {
+	c, _, cap, _ := jobWatchFixture(t)
+
+	var polls atomic.Int64
+	c.jobs.poll = func(context.Context, string, string) (tools.JobSnapshot, error) {
+		polls.Add(1)
+		// Verbatim what Controller.pollJob answers once the binding is gone.
+		return tools.JobSnapshot{}, errors.New("no executor bound for child c_run")
+	}
+	c.jobs.watch("c_run", "job-1", "make check")
+
+	// The child exits and the operator closes it: store entry deleted, and
+	// with it every future poll's chance of succeeding.
+	c.st.SetStatus("c_run", protocol.StatusExited)
+	c.st.Delete("c_run")
+	c.forgetBoundExecutor("c_run")
+
+	waitJobGone(t, c.jobs, "c_run", "job-1")
+	before := polls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if after := polls.Load(); after != before {
+		t.Fatalf("the loop kept polling after it dropped its entry: %d -> %d", before, after)
+	}
+	if got := cap.batches(); len(got) != 0 {
+		t.Fatalf("a child that is gone must not be pushed to: %+v", got)
+	}
+}
+
+// The pre-poll check must not cost a live child its notification: a child
+// still able to receive a turn is polled and told, as before.
+func TestJobWatchStillNotifiesALiveChild(t *testing.T) {
+	c, clk, cap, polls := jobWatchFixture(t)
+	c.jobs.watch("c_run", "job-1", "make check")
+	polls <- jobPoll{snap: tools.JobSnapshot{Found: true, Exited: true, ExitCode: 7}}
+
+	waitJobGone(t, c.jobs, "c_run", "job-1")
+	clk.Advance(6 * time.Second)
+	batches := waitBatches(t, cap, 1)
+	if len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exit code 7") {
+		t.Fatalf("a live child must still be notified: %+v", batches)
+	}
+}
+
+// A child's binding must not outlive the child. Close already dropped it, but
+// Close is OPTIONAL — a child that exits and is never closed would otherwise
+// hold its boundExecutor, and the executor client it references, for the
+// daemon's lifetime. This drives the real exit path (Kill waits for cm.Remove,
+// the final step of handleChildExit) rather than calling handleChildExit by
+// hand, because the drop has to sit on that path to be worth anything.
+func TestExitDropsTheChildsBoundExecutor(t *testing.T) {
+	ctrl := newTestController(t)
+	childID := spawnTestChild(t, ctrl, nil)
+	ctrl.noteBoundExecutor(childID, newBoundExecutor(childID, newFakeBinder()))
+
+	if ctrl.boundExecutorFor(childID) == nil {
+		t.Fatal("the fixture did not retain a binding to begin with")
+	}
+
+	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := ctrl.Kill(killCtx, childID, 2000, 500); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitForExited(t, ctrl.st, childID, 5*time.Second)
+
+	if be := ctrl.boundExecutorFor(childID); be != nil {
+		t.Fatal("an exited child still holds its boundExecutor; nothing will ever drop it")
 	}
 }

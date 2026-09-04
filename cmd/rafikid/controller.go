@@ -2974,6 +2974,13 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		c.evbuf.Forget(childID)
 	}
 
+	// And its retained boundExecutor, for the same reason: exited is terminal
+	// (pkg/protocol/types.go), so nothing will poll a binding whose child can
+	// no longer be told anything. Close does this too, but Close is optional —
+	// a child that exits and is never closed would otherwise hold its binding,
+	// and the executor client it references, for the daemon's lifetime.
+	c.forgetBoundExecutor(childID)
+
 	// Return this child's unconfirmed inbox rows to pending. A RESET, not a
 	// drop: the child can be resumed and its queue is exactly what a resume
 	// should run. Before cm.Remove for the same reason as the task sweep
