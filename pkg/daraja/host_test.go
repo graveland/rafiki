@@ -285,3 +285,82 @@ func TestDeliberateShutdownEmitsNoExitedEvent(t *testing.T) {
 	default:
 	}
 }
+
+// testShortLivedBinary returns a binary that exits immediately and
+// successfully, standing in for a claude that dies on its own.
+func testShortLivedBinary(t *testing.T) string {
+	t.Helper()
+	return "/usr/bin/true"
+}
+
+// A child that dies on its own must come back: when the controller's connection
+// is also down, nothing else can restart it, and the alternative is a daraja
+// hosting nothing.
+func TestUnexpectedExitRespawnsTheChild(t *testing.T) {
+	h := NewHost(HostOptions{
+		Binary:         testShortLivedBinary(t),
+		Spec:           ChildSpec{Kind: KindClaude},
+		RespawnBackoff: time.Millisecond,
+	})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	// The first exit is reported, then a replacement is announced.
+	var sawExit, sawRestart bool
+	deadline := time.After(10 * time.Second)
+	for !sawRestart {
+		select {
+		case ev := <-h.Events():
+			switch {
+			case ev.Exited != nil:
+				sawExit = true
+			case ev.Restarted != nil:
+				sawRestart = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out; sawExit=%v sawRestart=%v", sawExit, sawRestart)
+		}
+	}
+	if !sawExit {
+		t.Error("a respawn was announced without the exit that caused it")
+	}
+}
+
+// A child that dies instantly and forever — a bad --resume, a missing binary —
+// must stop being respawned, or daraja forks at whatever rate the kernel
+// allows for as long as it lives.
+func TestRespawnStopsAtTheLimit(t *testing.T) {
+	h := NewHost(HostOptions{
+		Binary:         testShortLivedBinary(t),
+		Spec:           ChildSpec{Kind: KindClaude},
+		RespawnBackoff: time.Millisecond,
+		RespawnLimit:   2,
+	})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	var restarts int
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev := <-h.Events():
+			if ev.Restarted != nil {
+				restarts++
+				if restarts > 2 {
+					t.Fatalf("respawned %d times, want at most 2", restarts)
+				}
+			}
+		case <-h.Done():
+			if restarts != 2 {
+				t.Errorf("host finished after %d respawns, want 2", restarts)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("host never gave up; restarts=%d", restarts)
+		}
+	}
+}
