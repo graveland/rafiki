@@ -112,6 +112,11 @@ type fakeBinder struct {
 	migrations int
 	lastSteer  string
 
+	// watched/forgetJobs record WatchJob/ForgetJob calls, as "childID|handle|command"
+	// triples in call order.
+	watched    []string
+	forgetJobs []string
+
 	// failWith/failTimes script a failure returned by a freshly synthesized
 	// executor's client (Execute/StartJob), for tests that want a scripted
 	// failure without wiring up a fakeExec by hand -- the id ChooseFor
@@ -248,6 +253,18 @@ func (f *fakeBinder) NotifyMigrated(_, _, _ string) {
 	defer f.mu.Unlock()
 	f.migrations++
 	f.lastSteer = rescheduleSteer
+}
+
+func (f *fakeBinder) WatchJob(childID, handle, command string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.watched = append(f.watched, childID+"|"+handle+"|"+command)
+}
+
+func (f *fakeBinder) ForgetJob(childID, handle string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forgetJobs = append(f.forgetJobs, childID+"|"+handle)
 }
 
 func TestBoundExecutorBindsLazilyAndSticks(t *testing.T) {
@@ -479,4 +496,81 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// A successful bash_start is what arms the exit notification; the tool
+// description's promise ("you are notified when the job finishes") rests on
+// this call landing.
+func TestStartJobArmsAWatchThroughTheBinder(t *testing.T) {
+	fb := newFakeBinder()
+	b := newBoundExecutor("child-1", fb)
+
+	handle, err := b.StartJob(context.Background(), "npm run dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if len(fb.watched) != 1 || fb.watched[0] != "child-1|"+handle+"|npm run dev" {
+		t.Fatalf("watched = %v, want exactly [child-1|%s|npm run dev]", fb.watched, handle)
+	}
+}
+
+// A failed start started nothing: a watch on a handle that does not exist
+// would poll forever and eventually report a job gone that never ran.
+func TestFailedStartJobArmsNothing(t *testing.T) {
+	fb := newFakeBinder()
+	fb.failWith = errors.New("no such executor")
+	b := newBoundExecutor("child-1", fb)
+
+	if _, err := b.StartJob(context.Background(), "npm run dev"); err == nil {
+		t.Fatal("expected the scripted failure")
+	}
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if len(fb.watched) != 0 {
+		t.Fatalf("watched = %v; a failed start must arm no watch", fb.watched)
+	}
+}
+
+// bash_kill resolved the job on purpose: the watch is dropped so the exit
+// never injects a turn's worth of old news.
+func TestKillJobForgetsTheWatch(t *testing.T) {
+	fb := newFakeBinder()
+	b := newBoundExecutor("child-1", fb)
+
+	handle, err := b.StartJob(context.Background(), "npm run dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.KillJob(context.Background(), handle); err != nil {
+		t.Fatal(err)
+	}
+
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if len(fb.forgetJobs) != 1 || fb.forgetJobs[0] != "child-1|"+handle {
+		t.Fatalf("forgetJobs = %v, want exactly [child-1|%s]", fb.forgetJobs, handle)
+	}
+	if len(fb.watched) != 1 {
+		t.Fatalf("watched = %v; the kill must not disturb the record of the start", fb.watched)
+	}
+}
+
+// A kill that never landed (the stream broke) drops nothing: the job may
+// still be running, and its exit is still news.
+func TestFailedKillJobKeepsTheWatch(t *testing.T) {
+	fb := newFakeBinder()
+	fb.failWith = errors.New("stream broken")
+	b := newBoundExecutor("child-1", fb)
+
+	if err := b.KillJob(context.Background(), "job-1"); err == nil {
+		t.Fatal("expected the scripted failure")
+	}
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	if len(fb.forgetJobs) != 0 {
+		t.Fatalf("forgetJobs = %v; a failed kill must not drop the watch", fb.forgetJobs)
+	}
 }

@@ -17,15 +17,20 @@ const (
 		"return a handle immediately. Use this for anything that outlives a single " +
 		"tool call — dev servers, log tails, watch modes, test suites longer than ten " +
 		"minutes — all of which plain `bash` cannot run, because it is synchronous " +
-		"with a 600s ceiling. Poll with bash_output; stop it with bash_kill. The job " +
-		"survives a dropped connection: it is not tied to this turn."
+		"with a 600s ceiling. Do not poll bash_output in a loop to detect " +
+		"completion — you are notified when the job finishes, so end your turn (or " +
+		"do other work) and read the notification when it arrives; call bash_output " +
+		"only when you actually want the output so far. Stop a job with bash_kill. " +
+		"The job survives a dropped connection: it is not tied to this turn."
 
 	bashOutputDescription = "Read what a background job has printed. Pass the handle " +
 		"from bash_start. Reports whether the job is still running and, once it has " +
-		"finished, its exit code. Safe to call repeatedly. A job that has printed more " +
-		"than fits in one result is clipped to the most recent output, and the reply " +
-		"names a file on the executor holding the fuller record — read or grep that " +
-		"file rather than assuming the earlier output is gone."
+		"finished, its exit code. Safe to call repeatedly, but it is for READING " +
+		"output, not for waiting on it: you are notified when a job finishes, so " +
+		"calling this in a loop to detect completion is unnecessary. A job that has " +
+		"printed more than fits in one result is clipped to the most recent output, " +
+		"and the reply names a file on the executor holding the fuller record — " +
+		"read or grep that file rather than assuming the earlier output is gone."
 
 	bashKillDescription = "Stop a background job and everything it spawned. Pass the " +
 		"handle from bash_start. A job left running holds a process on the machine " +
@@ -73,6 +78,18 @@ type bashStartTool struct {
 	client ExecutorClient
 }
 
+// bashStartResultText is the reply to a successful start. A function rather
+// than an inline Sprintf so the description test can pin its wording beside
+// the description's — this text reaches the model on EVERY start, and "no
+// need to poll" is the whole reason the daemon watches the job.
+func bashStartResultText(handle string) string {
+	return fmt.Sprintf(
+		"Started background job %s\n"+
+			"You will be notified when it finishes; no need to poll. "+
+			"bash_output {\"handle\":%q} reads its output so far; bash_kill stops it.",
+		handle, handle)
+}
+
 func (t *bashStartTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var params struct {
 		Command string `json:"command"`
@@ -87,9 +104,7 @@ func (t *bashStartTool) Execute(ctx context.Context, input ToolInput) (ToolResul
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("bash_start: %w", err)
 	}
-	return NewTextResult(fmt.Sprintf(
-		"Started background job %s\nPoll it with bash_output {\"handle\":%q}; stop it with bash_kill.",
-		handle, handle)), nil
+	return NewTextResult(bashStartResultText(handle)), nil
 }
 
 // --- bash_output ---

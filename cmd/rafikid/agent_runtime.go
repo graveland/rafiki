@@ -267,6 +267,10 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if req.ExecutorSelector != "" && c.execPool != nil {
 		be := newBoundExecutor(childID, c.binderFor(req, ownerName))
 		exec = be
+		// Retain for the job watcher: a watch needs to poll JobOutput through
+		// the binding that started the job, and this is the only place the
+		// binding exists to be retained.
+		c.noteBoundExecutor(childID, be)
 
 		// Bind eagerly: the project tier and skills below need a live
 		// workspace, and a child that CAN bind should start bound.

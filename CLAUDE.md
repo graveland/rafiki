@@ -411,6 +411,32 @@
   would treat 32 `git status` jobs and 32 saturated build logs as equal, and a
   running job is never evictable because its output is a live stream.
 
+- **Background jobs notify on exit, the way subagent settlements do — the
+  tool descriptions promise it, so the watcher is not optional.**
+  `cmd/rafikid/jobwatch.go` polls every job a child started through
+  `boundExecutor.StartJob` (which arms the watch via
+  `executorBinder.WatchJob`; `bash_kill` drops it via `ForgetJob`) and pushes
+  the exit into the child's eventbuf under source `jobs`, keyed per handle —
+  the same coalescing injection path as `notifySubagentSettled`. Before this,
+  polling `bash_output` was the ONLY completion signal, and small models
+  tight-looped it, re-sending a 20k-char unchanged tail per call. Three
+  invariants: the watcher polls through `boundExecutor.peekJob`, which reads
+  the CURRENT binding and deliberately never runs `recover` — a re-provisioned
+  workspace cannot hold the job, so recovering for a poll would spend a
+  migration to learn the job is gone (an agent's own `bash_output` keeps the
+  recover path); a watch ends on a definitive answer only (exited, Found=false,
+  child gone/terminal) — an RPC error is transient and the watch must survive
+  it, or one executor blip silently strands every notification; and shutdown
+  is judged on `baseCtx.Err()`, never the per-poll `ctx` — `cancel()` after the
+  poll has already made `ctx.Err()` non-nil, so reading it classifies every
+  transient error as shutdown (shipped wrong for exactly one test iteration).
+  `bash_start`'s description/result text promising the notification is pinned
+  by `TestBashStartDescriptionPromisesNotificationNotPolling` in
+  `pkg/fundi/tools` — if you change the wording, keep the "notified" + "do not
+  poll" pair, and note the standalone `rafikid agent` CLI (its own workspace,
+  no daemon) never sees a notification because there is no eventbuf to inject
+  through.
+
 - **`tools.RTKMode("")` is NOT `RTKOff`** — `rtkRewrite` short-circuits only on
   the literal `"off"`, so a zero value behaves like `auto`. The executor built
   its registry with no `RTK` field at all, which meant every executor silently

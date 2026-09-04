@@ -150,6 +150,18 @@ type Controller struct {
 	// cost one model turn instead of N. Nil means the buffer is disabled.
 	evbuf *eventbuf.Buffer
 
+	// jobs watches the background jobs children start through their bound
+	// executor and pushes an exit fragment into the starting child's buffer,
+	// the same injection path subagent settles ride. Nil only in tests that
+	// build a Controller by hand and never bind an executor.
+	jobs *jobWatcher
+
+	// bound retains each child's boundExecutor for the job watcher: the
+	// executor client handed to the fundi runtime at spawn is otherwise held
+	// nowhere the daemon can reach, and a watch needs it to poll JobOutput.
+	boundMu sync.Mutex
+	bound   map[string]*boundExecutor
+
 	// native fans rafiki-native events out per child, for the Connect
 	// control plane's StreamEvents.
 	native *nativebus.Registry
@@ -332,6 +344,8 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 	}
 	// After the literal: the queue's Validate and Deliver are methods on c.
 	c.inbox = c.newInboxQueue(inboxStore(pool))
+	c.bound = make(map[string]*boundExecutor)
+	c.jobs = c.newControllerJobWatcher()
 
 	if id, source, err := paths.DaemonID(); err != nil {
 		// Not fatal: a daemon with no writable data dir and no env var can
@@ -2046,6 +2060,9 @@ func (c *Controller) Close(childID string) error {
 	}
 
 	c.st.Delete(childID)
+	// Its watcher entry goes with it: nothing else will poll a binding whose
+	// child cannot receive the news.
+	c.forgetBoundExecutor(childID)
 	// After the store delete, so a message accepted concurrently cannot slip
 	// in behind the drop: validateSendTarget refuses an unknown child.
 	//

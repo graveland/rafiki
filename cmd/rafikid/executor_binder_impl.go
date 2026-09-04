@@ -147,3 +147,18 @@ func (b *controllerBinder) NotifyMigrated(childID, fromExec, toExec string) {
 		"child", childID, "from", shortID(fromExec), "to", shortID(toExec))
 	b.c.sendSteer(childID, rescheduleSteer)
 }
+
+// WatchJob arms the background-job exit notification. Nil-safe like every
+// evbuf consumer: a hand-built Controller (tests, a bufferless daemon) simply
+// gets no job notifications, which is today's behaviour.
+func (b *controllerBinder) WatchJob(childID, handle, command string) {
+	if b.c.jobs != nil {
+		b.c.jobs.watch(childID, handle, command)
+	}
+}
+
+func (b *controllerBinder) ForgetJob(childID, handle string) {
+	if b.c.jobs != nil {
+		b.c.jobs.forget(childID, handle)
+	}
+}

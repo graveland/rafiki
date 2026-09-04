@@ -51,6 +51,17 @@ type executorBinder interface {
 	// executor. Without this the child keeps believing its files are where it
 	// left them and reports work as done that no longer exists.
 	NotifyMigrated(childID, fromExec, toExec string)
+
+	// WatchJob arranges for childID to be NOTIFIED when the background job
+	// it just started finishes, the same injected-frame path subagent
+	// settlements ride. command is retained only to name the job in the
+	// fragment — a handle alone reads as nothing.
+	WatchJob(childID, handle, command string)
+
+	// ForgetJob drops the watch for a job the agent's bash_kill just
+	// resolved. The agent knows; a "finished" fragment would be news it
+	// already has, costing a turn to read.
+	ForgetJob(childID, handle string)
 }
 
 // boundExecutor is a child's handle on "an executor", as opposed to a handle
@@ -334,11 +345,17 @@ func (b *boundExecutor) Execute(ctx context.Context, tool string, input json.Raw
 }
 
 // StartJob is never retried after a stream break: retrying it launches the
-// job twice.
+// job twice. A successful start is what arms the job watcher, whose exit
+// notification is the reason bash_start's description may promise one.
 func (b *boundExecutor) StartJob(ctx context.Context, command string) (string, error) {
-	return callBound(ctx, b, false, func(cl tools.ExecutorClient) (string, error) {
+	handle, err := callBound(ctx, b, false, func(cl tools.ExecutorClient) (string, error) {
 		return cl.StartJob(ctx, command)
 	})
+	if err != nil {
+		return "", err
+	}
+	b.binder.WatchJob(b.childID, handle, command)
+	return handle, nil
 }
 
 func (b *boundExecutor) JobOutput(ctx context.Context, handle string, since int64) (tools.JobSnapshot, error) {
@@ -347,13 +364,36 @@ func (b *boundExecutor) JobOutput(ctx context.Context, handle string, since int6
 	})
 }
 
+// peekJob reads a job's state from the CURRENT binding and nothing else.
+// The job watcher polls through this deliberately rather than through
+// JobOutput: recover machinery would turn a background poll into a workspace
+// re-provision — heavy, and useless here, because a job lives on the executor
+// workspace it started on and a freshly provisioned one can only ever answer
+// Found=false. An agent's own bash_output keeps the recover path; a watcher
+// that exists to save the agent a turn must not be able to trigger a
+// migration behind its back.
+func (b *boundExecutor) peekJob(ctx context.Context, handle string) (tools.JobSnapshot, error) {
+	b.mu.Lock()
+	cl := b.cl
+	b.mu.Unlock()
+	if cl == nil {
+		return tools.JobSnapshot{}, execpool.ErrExecutorGone
+	}
+	return cl.JobOutput(ctx, handle, 0)
+}
+
 // KillJob is never retried after a stream break: the kill signal may already
 // have landed, and there is no way to tell that apart from the stream just
-// dying.
+// dying. A successful kill also drops the job's watcher entry: the agent
+// resolved the job on purpose, so an exit notification would be a turn spent
+// learning nothing.
 func (b *boundExecutor) KillJob(ctx context.Context, handle string) error {
 	_, err := callBound(ctx, b, false, func(cl tools.ExecutorClient) (struct{}, error) {
 		return struct{}{}, cl.KillJob(ctx, handle)
 	})
+	if err == nil {
+		b.binder.ForgetJob(b.childID, handle)
+	}
 	return err
 }
 
