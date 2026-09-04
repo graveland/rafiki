@@ -235,8 +235,9 @@ func (p *Pool) handleConn(conn net.Conn) {
 
 	default:
 		writeDarajaHello(conn, protocol.DarajaHelloResponse{
-			Type:  "daraja_hello",
-			Error: "no ticket or credential in hello",
+			Type:      "daraja_hello",
+			Error:     "no ticket or credential in hello",
+			Retryable: false,
 		})
 		return
 	}
