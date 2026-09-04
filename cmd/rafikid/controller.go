@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	"go.graveland.dev/rafiki/pkg/eventlogdb"
@@ -255,6 +256,10 @@ type Controller struct {
 
 	sessionExecMu sync.Mutex
 	sessionExecs  map[control.Connection]sessionExecutor
+
+	// darajaReg holds the in-memory credential registry, recorded by WireDaraja
+	// so Close and Kill can revoke credentials before the row vanishes.
+	darajaReg *darajapool.Registry
 }
 
 type workspaceLabels struct {
@@ -1852,6 +1857,12 @@ func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration)
 }
 
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (control.KillResult, error) {
+	// Revoke the daraja's reconnect credential so a dead child cannot
+	// re-authenticate on a later port scan or stale-connection replay.
+	if c.darajaReg != nil {
+		c.darajaReg.Forget(childID)
+	}
+
 	ch, ok := c.cm.Get(childID)
 	if !ok {
 		if snap, ok2 := c.st.Get(childID); ok2 && snap.Status == protocol.StatusExited {
@@ -2062,6 +2073,13 @@ func (c *Controller) Close(childID string) error {
 	}
 	if snap.Status != protocol.StatusExited {
 		return &control.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
+	}
+
+	// Revoke the daraja's ability to reconnect — the row is going away.
+	// Must run before st.Delete; once the row is gone the OnDisconnect handler
+	// (fired if the daraja was still connected) has no child to label.
+	if c.darajaReg != nil {
+		c.darajaReg.Forget(childID)
 	}
 
 	c.st.Delete(childID)
