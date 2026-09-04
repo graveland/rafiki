@@ -132,7 +132,13 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 		_, _, _ = host.Shutdown(0)
 	case err := <-errCh:
 		_, _, _ = host.Shutdown(0)
-		if err != nil && !errors.Is(err, daraja.ErrRejected) {
+		// Log the reason darja exited so operators can diagnose whether
+		// it was authentication failure, connection loss, or a terminal
+		// rejection from rafikid.
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "daraja: %v\n", err)
+		}
+		if !errors.Is(err, daraja.ErrRejected) && err != nil {
 			return err
 		}
 	}
