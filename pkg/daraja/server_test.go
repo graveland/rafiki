@@ -97,6 +97,47 @@ func TestServerShutdownEndsTheProcessAndSignalsExit(t *testing.T) {
 	}
 }
 
+// An event pulled off the host's channel and not delivered must be redelivered
+// on the next stream. Without this, a reconnecting controller silently loses
+// whatever was in flight when its connection broke — and nothing errors.
+func TestUndeliveredEventSurvivesAFailedSend(t *testing.T) {
+	h := NewHost(HostOptions{Binary: "/bin/cat", Spec: ChildSpec{Kind: KindClaude}})
+	s := NewServer(h)
+
+	s.stash(&darajapb.RelayResponse{
+		Event: &darajapb.RelayResponse_Stdout{Stdout: []byte("in flight")},
+	})
+
+	got := s.takePending()
+	if got == nil {
+		t.Fatal("stashed event was not returned")
+	}
+	if string(got.GetStdout()) != "in flight" {
+		t.Errorf("got %q, want %q", got.GetStdout(), "in flight")
+	}
+	if s.takePending() != nil {
+		t.Error("pending event was returned twice")
+	}
+}
+
+// Two Relay streams would split one event channel between them, giving each
+// consumer a random half of the child's output.
+func TestSecondRelayIsRefused(t *testing.T) {
+	h := NewHost(HostOptions{Binary: "/bin/cat", Spec: ChildSpec{Kind: KindClaude}})
+	s := NewServer(h)
+
+	if !s.attach() {
+		t.Fatal("first attach was refused")
+	}
+	if s.attach() {
+		t.Error("second attach was admitted; one Relay at a time is the contract")
+	}
+	s.detach()
+	if !s.attach() {
+		t.Error("attach was refused after detach")
+	}
+}
+
 func TestServerRelayCarriesStdioBothWays(t *testing.T) {
 	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})
 	if err := h.Start(); err != nil {

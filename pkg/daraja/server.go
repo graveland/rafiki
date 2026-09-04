@@ -19,6 +19,10 @@ import (
 type Server struct {
 	host *Host
 
+	mu       sync.Mutex
+	pending  *darajapb.RelayResponse
+	attached bool
+
 	shutdownOnce sync.Once
 	shutdownCh   chan struct{}
 }
@@ -83,6 +87,45 @@ func (s *Server) Shutdown(
 	return connect.NewResponse(&darajapb.ShutdownResponse{ExitCode: int32(code), Signal: sig}), nil
 }
 
+// attach claims the single Relay slot. Two streams consuming one event channel
+// would split the child's output between them at random.
+func (s *Server) attach() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attached {
+		return false
+	}
+	s.attached = true
+	return true
+}
+
+func (s *Server) detach() {
+	s.mu.Lock()
+	s.attached = false
+	s.mu.Unlock()
+}
+
+// stash keeps an event that was taken off the host's channel and not
+// delivered, so the next stream sends it first.
+//
+// This is what keeps the backpressure guarantee honest across a reconnect. The
+// host blocks rather than dropping output (see Host.emit), but that protects
+// only events still IN the channel; one already dequeued is the server's
+// responsibility and was previously discarded on a failed send.
+func (s *Server) stash(resp *darajapb.RelayResponse) {
+	s.mu.Lock()
+	s.pending = resp
+	s.mu.Unlock()
+}
+
+func (s *Server) takePending() *darajapb.RelayResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending
+	s.pending = nil
+	return p
+}
+
 // Relay pumps stdin in one goroutine and events out on this one.
 //
 // The receive side runs concurrently because a bidi stream's Receive blocks;
@@ -92,6 +135,12 @@ func (s *Server) Relay(
 	ctx context.Context,
 	stream *connect.BidiStream[darajapb.RelayRequest, darajapb.RelayResponse],
 ) error {
+	if !s.attach() {
+		return connect.NewError(connect.CodeAlreadyExists,
+			errors.New("daraja: a relay stream is already attached"))
+	}
+	defer s.detach()
+
 	go func() {
 		for {
 			req, err := stream.Receive()
@@ -105,6 +154,13 @@ func (s *Server) Relay(
 			}
 		}
 	}()
+
+	if p := s.takePending(); p != nil {
+		if err := stream.Send(p); err != nil {
+			s.stash(p)
+			return err
+		}
+	}
 
 	for {
 		select {
@@ -120,6 +176,9 @@ func (s *Server) Relay(
 				return err
 			}
 			if err := stream.Send(resp); err != nil {
+				// Taken off the channel and not delivered: hold it for the
+				// next stream rather than dropping it on the floor.
+				s.stash(resp)
 				return err
 			}
 		}
