@@ -130,6 +130,19 @@ func (s *Server) DarajaLaunch(
 			errors.New("dial address not set"))
 	}
 
+	// Finding 3: refuse UDS dial_addr outright.
+	// When no TCP control listener exists, dialAddr is a Unix socket path.
+	// A remote executor cannot reach a daemon-local socket. Instead of
+	// attempting full advertised-URL infrastructure (out of scope for 1b-ii),
+	// refuse with a clear diagnostic naming RAFIKI_CONTROL_LISTEN.
+	isUDS := !strings.Contains(h.dialAddr, ":") && strings.HasPrefix(h.dialAddr, "/")
+	if isUDS {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("daraja launch requires a TCP control address so the daraja "+
+				"process can reverse-dial back; set RAFIKI_CONTROL_LISTEN on this "+
+				"daemon and restart"))
+	}
+
 	spec := req.Msg.GetSpec()
 	if spec == nil || spec.Claude == nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
@@ -167,6 +180,7 @@ func (s *Server) DarajaLaunch(
 	}
 
 	le := candidates[0]
+
 	childID := "c_" + fmt.Sprintf("%x", uint64(time.Now().UnixNano()%999999999999999999))
 
 	ticket, err := h.darajaReg.MintTicket(childID)
@@ -243,29 +257,13 @@ func (s *Server) DarajaSend(
 			errors.New("child_id is required"))
 	}
 
-	cli, err := h.darajaPool.ClientFor(childID)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound,
-			fmt.Errorf("daraja %s: %w", childID, err))
-	}
-
-	stream := cli.Relay(ctx)
-	if err := stream.Send(&darajapb.RelayRequest{Stdin: data}); err != nil {
-		_ = stream.CloseRequest()
+	// Use the pool's Relay holder — one stream per child, shared between
+	// Send and Watch. No drain goroutine: the holder's receive loop already
+	// consumes everything from the stream.
+	if err := h.darajaPool.Send(childID, data); err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
-			fmt.Errorf("relay send: %w", err))
+			fmt.Errorf("send to daraja %s: %w", childID, err))
 	}
-	_ = stream.CloseRequest()
-
-	go func() {
-		defer func() { _ = stream.CloseResponse() }()
-		for {
-			_, err := stream.Receive()
-			if err != nil {
-				return
-			}
-		}
-	}()
 
 	return connect.NewResponse(&rafikiv1.DarajaSendResponse{Acknowledged: true}), nil
 }
@@ -289,43 +287,50 @@ func (s *Server) DarajaWatch(
 			errors.New("child_id is required"))
 	}
 
-	cli, err := h.darajaPool.ClientFor(childID)
+	subCh, unsub, err := h.darajaPool.Watch(childID)
 	if err != nil {
 		return connect.NewError(connect.CodeNotFound,
-			fmt.Errorf("daraja %s: %w", childID, err))
+			fmt.Errorf("watch daraja %s: %w", childID, err))
 	}
-
-	rStream := cli.Relay(ctx)
-	defer func() { _ = rStream.CloseResponse() }()
+	defer unsub()
 
 	for {
-		resp, err := rStream.Receive()
-		if err != nil {
-			return connect.NewError(connect.CodeUnavailable,
-				fmt.Errorf("relay receive: %w", err))
-		}
-
-		watchResp := &rafikiv1.DarajaWatchResponse{}
-		switch ev := resp.GetEvent().(type) {
-		case *darajapb.RelayResponse_Stdout:
-			watchResp.Event = &rafikiv1.DarajaWatchResponse_Stdout{Stdout: ev.Stdout}
-		case *darajapb.RelayResponse_Restarted:
-			watchResp.Event = &rafikiv1.DarajaWatchResponse_Restarted{
-				Restarted: &rafikiv1.DarajaProcessRestarted{Pid: ev.Restarted.Pid},
+		select {
+		case ev, ok := <-subCh:
+			if !ok {
+				// Holder was torn down (disconnection).
+				return connect.NewError(connect.CodeUnavailable,
+					errors.New("daraja connection lost"))
 			}
-		case *darajapb.RelayResponse_Exited:
-			watchResp.Event = &rafikiv1.DarajaWatchResponse_Exited{
-				Exited: &rafikiv1.DarajaProcessExited{
-					ExitCode: ev.Exited.ExitCode,
-					Signal:   ev.Exited.Signal,
-				},
+			if ev.Err() != nil {
+				return connect.NewError(connect.CodeUnavailable,
+					fmt.Errorf("relay error: %w", ev.Err()))
 			}
-		default:
-			continue
-		}
 
-		if err := stream.Send(watchResp); err != nil {
-			return err
+			watchResp := &rafikiv1.DarajaWatchResponse{}
+			switch respEv := ev.Response().GetEvent().(type) {
+			case *darajapb.RelayResponse_Stdout:
+				watchResp.Event = &rafikiv1.DarajaWatchResponse_Stdout{Stdout: respEv.Stdout}
+			case *darajapb.RelayResponse_Restarted:
+				watchResp.Event = &rafikiv1.DarajaWatchResponse_Restarted{
+					Restarted: &rafikiv1.DarajaProcessRestarted{Pid: respEv.Restarted.Pid},
+				}
+			case *darajapb.RelayResponse_Exited:
+				watchResp.Event = &rafikiv1.DarajaWatchResponse_Exited{
+					Exited: &rafikiv1.DarajaProcessExited{
+						ExitCode: respEv.Exited.ExitCode,
+						Signal:   respEv.Exited.Signal,
+					},
+				}
+			default:
+				continue
+			}
+
+			if err := stream.Send(watchResp); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }

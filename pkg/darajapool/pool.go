@@ -53,10 +53,16 @@ func (lc *liveConn) shutdown() {
 // Deliberately NOT execpool.Pool. No rows, no health polling, no park windows,
 // no workspace provisioning. A daraja is one-to-one with a child the daemon
 // already knows and is replaced rather than repaired.
+//
+// Per-child relay holders (relayHolders map) own ONE Relay stream per child:
+// the send direction is serialized through the holder's stdin mutex, and the
+// receive loop fans events to Watch subscribers. See relay.go for details.
 type Pool struct {
 	mu    sync.RWMutex
 	reg   *Registry
 	conns map[string]*liveConn // childID → live connection
+
+	relayHolders map[string]*relayHolder // childID → relay holder (owned here)
 
 	onConnectMu    sync.Mutex
 	onConnect      []func(childID string)
@@ -69,6 +75,7 @@ func New(reg *Registry) *Pool {
 	return &Pool{
 		reg:          reg,
 		conns:        make(map[string]*liveConn),
+		relayHolders: make(map[string]*relayHolder),
 		onConnect:    make([]func(childID string), 0),
 		onDisconnect: make([]func(childID string), 0),
 	}
@@ -122,10 +129,17 @@ func (p *Pool) Evict(childID string) {
 	if ok {
 		delete(p.conns, childID)
 	}
+	holder := p.relayHolders[childID]
+	if holder != nil {
+		delete(p.relayHolders, childID)
+	}
 	p.mu.Unlock()
 
 	if ok && lc != nil {
 		lc.shutdown()
+	}
+	if holder != nil {
+		holder.stop()
 	}
 }
 
