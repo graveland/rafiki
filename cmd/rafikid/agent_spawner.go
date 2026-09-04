@@ -269,7 +269,16 @@ func (s *controllerSpawner) Kill(ctx context.Context, childID string) error {
 	if err := s.authorize(childID); err != nil {
 		return err
 	}
+	// Marked before Kill is called, not after: handleChildExit can run on
+	// monitorChild's goroutine at any point during Kill's blocking wait for
+	// cm.Remove, so the marker must already be visible before that race
+	// window opens. See suppressExitNotice (self_kill.go) for what reads it.
+	s.c.selfKilled.set(childID)
 	if _, err := s.c.Kill(ctx, childID, 0, 0); err != nil {
+		// No shutdown completed (child not found/already exited, or Shutdown
+		// itself failed) — no exit is coming from this attempt, so the
+		// marker must not linger to suppress some later, unrelated one.
+		s.c.selfKilled.take(childID)
 		return err
 	}
 	// Kill already waits for cm.Remove internally, but a caller that reads
