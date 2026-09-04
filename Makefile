@@ -184,7 +184,7 @@ bin/protoc-gen-connect-go:
 	go build -o bin/protoc-gen-connect-go connectrpc.com/connect/cmd/protoc-gen-connect-go
 
 .PHONY: proto
-proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from proto/ definitions (executorpb + pkg/gen).
+proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from proto/ definitions (executorpb + darajapb + adminpb + pkg/gen).
 	$(PROTOC) \
 		--proto_path=proto/rafiki/executor/v1 \
 		--go_out=pkg/executorpb \
@@ -202,6 +202,15 @@ proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from pr
 		--connect-go_out=pkg/darajapb --connect-go_opt=module=go.graveland.dev/rafiki/pkg/darajapb \
 		proto/rafiki/daraja/v1/daraja.proto
 	gofmt -w pkg/darajapb
+	mkdir -p pkg/adminpb
+	$(PROTOC) \
+		--plugin=protoc-gen-go=bin/protoc-gen-go \
+		--plugin=protoc-gen-connect-go=bin/protoc-gen-connect-go \
+		--proto_path=proto \
+		--go_out=pkg/adminpb --go_opt=module=go.graveland.dev/rafiki/pkg/adminpb \
+		--connect-go_out=pkg/adminpb --connect-go_opt=module=go.graveland.dev/rafiki/pkg/adminpb \
+		proto/rafiki/admin/v1/admin.proto
+	gofmt -w pkg/adminpb
 	rm -rf pkg/gen
 	mkdir -p pkg/gen
 	$(PROTOC) \
