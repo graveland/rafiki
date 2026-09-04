@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-1.0
 
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,17 +33,22 @@ func newDarajaCmd() *cobra.Command {
 func newDarajaServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run one child process and serve its stdio over a socket",
-		Long: "Hosts exactly one child process and relays its stdio. daraja dies with\n" +
-			"its child and the child dies with daraja: there is no state to keep on\n" +
-			"either side of that pair.\n\n" +
-			"The child's command line is built from the typed flags below rather than\n" +
-			"passed through, so that this and the executor's Launch RPC share one\n" +
-			"builder (pkg/claudeargv) instead of keeping two in step.",
+		Short: "Run one child process and serve its stdio over a reverse-dialled connection",
+		Long: "Hosts exactly one child process and relays its stdio. daraja dials\n" +
+			"rafikid and then serves DarajaService on the connection it dialled —\n" +
+			"the same inversion the executor uses, so a laptop behind NAT can reach\n" +
+			"an operator's daemon. daraja dies with its child and the child dies\n" +
+			"with daraja: there is no state to keep on either side of that pair.\n\n" +
+			"The ticket arrives from the environment (RAFIKI_DARAJA_TICKET), never\n" +
+			"from argv: 1b-i's Launch builds a command line anyone on the machine\n" +
+			"can read with ps. The ticket is replaced by a reconnect credential on\n" +
+			"the first successful hello, which is held in memory only.",
 		Args: cobra.NoArgs,
 		RunE: runDarajaServe,
 	}
-	cmd.Flags().String("socket", "", "unix socket to listen on (required)")
+	cmd.Flags().String("connect", "", "rafi kID address to connect to (host:port)")
+	cmd.Flags().String("connect-socket", "", "rafi kID Unix socket path")
+	cmd.Flags().String("child-id", "", "child ID for authentication")
 	cmd.Flags().String("binary", "", "child binary to run (required)")
 	cmd.Flags().String("cwd", "", "working directory for the child")
 	cmd.Flags().String("kind", "claude", "child protocol to host")
@@ -54,19 +59,25 @@ func newDarajaServeCmd() *cobra.Command {
 }
 
 func runDarajaServe(cmd *cobra.Command, _ []string) error {
-	socket, _ := cmd.Flags().GetString("socket")
-	binary, _ := cmd.Flags().GetString("binary")
-	cwd, _ := cmd.Flags().GetString("cwd")
-	kind, _ := cmd.Flags().GetString("kind")
-	model, _ := cmd.Flags().GetString("model")
-	resume, _ := cmd.Flags().GetString("resume")
-	permMode, _ := cmd.Flags().GetString("permission-mode")
-	if socket == "" {
-		return errors.New("--socket is required")
+	connect, connectSocket, err := resolveDarajaConnectFlags(
+		mustGetString(cmd, "connect"),
+		mustGetString(cmd, "connect-socket"))
+	if err != nil {
+		return err
 	}
+	childID := mustGetString(cmd, "child-id")
+	if childID == "" {
+		return errors.New("--child-id is required")
+	}
+	binary := mustGetString(cmd, "binary")
 	if binary == "" {
 		return errors.New("--binary is required")
 	}
+	cwd := mustGetString(cmd, "cwd")
+	kind := mustGetString(cmd, "kind")
+	model := mustGetString(cmd, "model")
+	resume := mustGetString(cmd, "resume")
+	permMode := mustGetString(cmd, "permission-mode")
 
 	host := daraja.NewHost(daraja.HostOptions{
 		Binary: binary,
@@ -82,56 +93,69 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("start child: %w", err)
 	}
 
-	// A stale socket from a previous daraja would make Listen fail. Removing it
-	// is safe precisely because a daraja never outlives its child: a live one
-	// holding this path cannot exist without the child that owns this id.
-	_ = os.Remove(socket)
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", socket, err)
-	}
-	defer os.Remove(socket)
-
 	srv := daraja.NewServer(host)
-	path, handler := srv.Routes()
-	mux := http.NewServeMux()
-	mux.Handle(path, handler)
+	_ = srv // used only for its Routes() and ShutdownRequested() below — keep to preserve interface stability
 
-	// Unencrypted HTTP/2: connect-go refuses BIDI streaming below HTTP/2, and
-	// Relay is bidi. Both ends of a unix socket are ours, so there is nothing
-	// for TLS to prove.
-	protos := new(http.Protocols)
-	protos.SetUnencryptedHTTP2(true)
-	httpSrv := &http.Server{Handler: mux, Protocols: protos}
-	return serveLoop(host, srv, httpSrv, ln)
-}
+	opts := daraja.ConnectOptions{
+		ChildID: childID,
+		Handler: http.NewServeMux(),
+		PID:     os.Getpid(),
+	}
+	if connect != "" {
+		opts.Addr = connect
+	}
+	if connectSocket != "" {
+		opts.SocketPath = connectSocket
+	}
+	// Ticket comes from the environment, never argv: argv is world-readable
+	// in ps, and 1b-i's AdminService.Launch already builds an argv that
+	// anyone on the machine can read.
+	opts.Ticket = os.Getenv("RAFIKI_DARAJA_TICKET")
 
-// serveLoop blocks until one of the serve process's exit conditions fires and
-// tears the server down. Separated from runDarajaServe so a test can drive the
-// real select: the host.Done() arm is the fix, and no flag-level test reaches
-// it because serve exposes no respawn tuning to shorten the give-up window.
-func serveLoop(host *daraja.Host, srv *daraja.Server, httpSrv *http.Server, ln net.Listener) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpSrv.Serve(ln) }()
+	go func() { errCh <- daraja.Connect(context.Background(), opts) }()
 
 	select {
 	case <-srv.ShutdownRequested():
 	case <-host.Done():
 		// The host gave up on respawning (RespawnStopsAtTheLimit): a daraja
 		// whose child cannot be kept alive has nothing left to host. Exiting
-		// here is what makes that promise true -- leaving the socket bound
-		// and the Relay clean leaves a zombie the controller would
-		// reconnect-loop against forever.
+		// here is what makes that promise true.
 	case <-sigCh:
 		_, _, _ = host.Shutdown(0)
 	case err := <-errCh:
 		_, _, _ = host.Shutdown(0)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err != nil && !errors.Is(err, daraja.ErrRejected) {
 			return err
 		}
 	}
-	return httpSrv.Close()
+	return nil
+}
+
+// resolveDarajaConnectFlags applies the same mutual-exclusion validation as
+// executor's resolveExecutorConnectFlags. Unlike the executor, daraja does NOT
+// derive defaults from RAFIKI_URL — a per-child process knows exactly where
+// its raﬁkid is (it was launched by the daemon on that specific machine).
+func resolveDarajaConnectFlags(connect, connectSocket string) (string, string, error) {
+	modes := 0
+	for _, set := range []bool{connect != "", connectSocket != ""} {
+		if set {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return "", "", fmt.Errorf("--connect and --connect-socket are mutually exclusive")
+	}
+	if modes == 0 {
+		return "", "", fmt.Errorf("one of --connect or --connect-socket is required")
+	}
+	return connect, connectSocket, nil
+}
+
+func mustGetString(cmd *cobra.Command, name string) string {
+	s, _ := cmd.Flags().GetString(name)
+	return s
 }
