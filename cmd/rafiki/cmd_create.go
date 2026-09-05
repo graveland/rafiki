@@ -67,9 +67,16 @@ Environment variable defaults (applied before explicit flags; lowest priority):
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from <config dir>/presets.json (also settable via RAFIKI_DEFAULT_PRESET)")
-	_ = cmd.RegisterFlagCompletionFunc("preset", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		// Best-effort: silently empty list when presets file is missing or malformed.
-		pf, err := loadPresets()
+	_ = cmd.RegisterFlagCompletionFunc("preset", func(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		// Best-effort: silently empty list when the profile fails to resolve or
+		// its presets file is missing or malformed. A completion handler must
+		// never exit or print, so this deliberately uses resolveProfile rather
+		// than mustProfile — a misconfigured profile must not break tab-completion.
+		p, err := resolveProfile(cmd)
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		pf, err := loadPresets(p.Name)
 		if err != nil || pf == nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
@@ -329,12 +336,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	p := mustProfile(cmd)
+
 	// Apply preset (lowest priority: preset < env-var defaults < explicit flags).
 	// buildSpawnRequest has already merged env-var defaults and --label flags;
 	// preset fills in any keys/model that weren't set by higher-priority sources.
 	presetName := resolvePresetName(cmd)
 	if presetName != "" {
-		pf, err := loadPresets()
+		pf, err := loadPresets(p.Name)
 		if err != nil {
 			return fmt.Errorf("--preset: %w", err)
 		}
@@ -359,7 +368,6 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// is an inference from what happened last time, and an inference must
 	// never override a declaration. Applying it earlier is what broke
 	// TestPreset_MergeOrder: the preset's model stopped being reachable at all.
-	p := mustProfile(cmd)
 	if req.Model == "" {
 		req.Model = clientstate.LastModelFor(p.Name, req.Kind)
 	}
@@ -407,7 +415,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// an alias may have supplied it, and replaying the resolved choice is what
 	// makes the next bare create land on the same model.
 	clientstate.RememberModel(p.Name, req.Kind, req.Model)
-	if err := setActive(data.ChildID); err != nil {
+	if err := setActive(p.Name, data.ChildID); err != nil {
 		// Best effort — log to stderr but don't fail.
 		fmt.Fprintln(os.Stderr, "warning: could not update active marker:", err)
 	}

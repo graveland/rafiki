@@ -44,7 +44,7 @@ func runSend(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		input = args[0]
 	}
-	childID, err := resolveTarget(ctx, c, input)
+	childID, err := resolveTarget(ctx, c, mustProfile(cmd).Name, input)
 	if err != nil {
 		return err
 	}

@@ -5,16 +5,16 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
-func activeFilePath() string { return paths.ActiveFile() }
+func activeFilePath(profileName string) string { return profile.ActiveFile(profileName) }
 
-// setActive writes childID to the active file atomically (best-effort).
-// Callers should ignore the returned error — this is a UX convenience,
-// not a correctness requirement.
-func setActive(childID string) error {
-	path := activeFilePath()
+// setActive writes childID to the profile's active-file atomically
+// (best-effort). Callers should ignore the returned error — this is a UX
+// convenience, not a correctness requirement.
+func setActive(profileName, childID string) error {
+	path := activeFilePath(profileName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -25,10 +25,10 @@ func setActive(childID string) error {
 	return os.Rename(tmp, path)
 }
 
-// getActive reads the active childID from the marker file.
+// getActive reads the profile's active childID.
 // Returns "" if the file is absent, unreadable, or empty.
-func getActive() string {
-	b, err := os.ReadFile(activeFilePath())
+func getActive(profileName string) string {
+	b, err := os.ReadFile(activeFilePath(profileName))
 	if err != nil {
 		return ""
 	}

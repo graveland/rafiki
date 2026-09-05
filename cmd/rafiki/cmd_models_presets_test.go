@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -80,10 +81,7 @@ func TestRenderPresets_EmptySlice(t *testing.T) {
 func TestRafikiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 	// Write a minimal presets file into a temp home dir's rafiki config dir.
 	dir := t.TempDir()
-	configDir := setPresetsHome(t, dir)
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	setPresetsHome(t, dir)
 	content := map[string]any{
 		"presets": map[string]any{
 			"mypreset": map[string]any{
@@ -93,7 +91,11 @@ func TestRafikiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(content)
-	if err := os.WriteFile(filepath.Join(configDir, "presets.json"), b, 0o600); err != nil {
+	path := profile.PresetsFile("test")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("RAFIKI_DEFAULT_PRESET", "mypreset")
@@ -117,7 +119,7 @@ func TestRafikiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 		t.Fatalf("presetName = %q, want mypreset", presetName)
 	}
 
-	pf, err := loadPresets()
+	pf, err := loadPresets("test")
 	if err != nil {
 		t.Fatalf("loadPresets: %v", err)
 	}

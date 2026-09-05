@@ -126,7 +126,7 @@ func runTail(cmd *cobra.Command, args []string) error {
 		defer cancelSub()
 		return runTailLabeled(ctx, c, events, labels, hasLabels, profile, include, exclude, mode, useColor, verbose)
 	}
-	return runTailChild(ctx, c, args, tailN, raw, profile, include, exclude, mode, useColor, verbose)
+	return runTailChild(ctx, c, args, tailN, raw, mustProfile(cmd).Name, profile, include, exclude, mode, useColor, verbose)
 }
 
 // runTailLabeled handles the label-filtered subscription mode.  It subscribes
@@ -200,6 +200,7 @@ func runTailChild(
 	c *client.Client,
 	args []string,
 	tailN int, raw bool,
+	profileName string,
 	profile string, include, exclude []string,
 	mode outputMode, useColor, verbose bool,
 ) error {
@@ -207,13 +208,13 @@ func runTailChild(
 	if len(args) > 0 {
 		target = args[0]
 	}
-	childID, err := resolveTarget(ctx, c, target)
+	childID, err := resolveTarget(ctx, c, profileName, target)
 	if err != nil {
 		return err
 	}
 	// Best-effort: update the active marker so subsequent no-arg commands
 	// default to this child.
-	_ = setActive(childID)
+	_ = setActive(profileName, childID)
 	return runHistoryOut(ctx, c, childID, historyOpts{
 		follow:   true,
 		tailN:    tailN,

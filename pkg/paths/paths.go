@@ -131,10 +131,6 @@ func ServiceLogPath() string { return filepath.Join(StateDir(), "controller.log"
 // be alone.
 func ExecutorServiceLogPath() string { return filepath.Join(StateDir(), "executor.log") }
 
-// ActiveFile records the child id `fundi` treats as the current one. Runtime
-// state, so it sits beside the socket rather than with the persisted records.
-func ActiveFile() string { return filepath.Join(RuntimeDir(), "active") }
-
 // CacheDir is disposable, regenerable data: $XDG_CACHE_HOME/rafiki, else
 // ~/.cache/rafiki.
 func CacheDir() string { return base("XDG_CACHE_HOME", ".cache") }
