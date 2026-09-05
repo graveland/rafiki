@@ -116,10 +116,26 @@ func (h *relayHolder) start() error {
 	return h.startIn(h.ctx)
 }
 
-// startIn is like start but accepts an explicit context for the stream open.
-// Used by handleConn to bind the open attempt to a cancellable context.
+// startIn is like start but accepts an explicit context bounding how long the
+// initial open may take. The stream itself runs on h.ctx, not this one — this
+// one gets cancelled by the caller as soon as startIn returns, and a bidi
+// stream's context is its whole lifetime, not just its opening.
+//
+// connect-go's CallBidiStream does not send request headers until the first
+// Send; Send(nil) is the same idiom its own CallServerStream and
+// CallBidiStreamSimple use to open a stream with no initial payload.
 func (h *relayHolder) startIn(ctx context.Context) error {
-	stream := h.client.Relay(ctx)
+	stream := h.client.Relay(h.ctx)
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- stream.Send(nil) }()
+	select {
+	case err := <-sendErr:
+		if err != nil {
+			return fmt.Errorf("open relay stream: %w", err)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("open relay stream: %w", ctx.Err())
+	}
 	h.mu.Lock()
 	h.stream = stream
 	h.mu.Unlock()

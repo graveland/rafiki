@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,7 +30,8 @@ var ErrDarajaLost = errors.New("darajapool: daraja connection not found")
 // liveConn is a single active daraja reverse-dialled connection.
 type liveConn struct {
 	childID string
-	httpCli *http.Client // inverted h2 client for speaking to daraja
+	httpCli *http.Client                        // inverted h2 client for speaking to daraja
+	daraja  darajapbconnect.DarajaServiceClient // built ONCE from httpCli; see ClientFor
 
 	done   chan struct{} // closed when the connection ends
 	closed sync.Once     // ensures done closes only once
@@ -94,6 +94,12 @@ func (p *Pool) UpgradeHandler() http.Handler {
 
 // ClientFor returns a daraja Connect client for childID, or an error if the
 // daraja is not currently connected.
+//
+// Must return the SAME client value for the life of one connection: RelayFor
+// compares client identity with ==, and NewDarajaServiceClient allocates a
+// new pointer per call, so minting one here per call would never compare
+// equal to the one the holder was built with. lc.daraja is built once, in
+// handleConn.
 func (p *Pool) ClientFor(childID string) (darajapbconnect.DarajaServiceClient, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -104,7 +110,7 @@ func (p *Pool) ClientFor(childID string) (darajapbconnect.DarajaServiceClient, e
 	if lc.httpCli == nil {
 		return nil, fmt.Errorf("daraja %s: unready connection", childID)
 	}
-	return darajapbconnect.NewDarajaServiceClient(lc.httpCli, "http://daraja"), nil
+	return lc.daraja, nil
 }
 
 // Live returns all currently connected child IDs.
@@ -197,14 +203,19 @@ func (p *Pool) installLive(childID string, lc *liveConn) {
 	if displaced != nil && displaced != lc {
 		slog.Info("darajapool: daraja reconnected; tearing down the previous connection",
 			"childId", childID)
-		// Signal on CONNECT for the NEW connection
-		p.onConnectMu.Lock()
-		fns := p.onConnect
-		p.onConnectMu.Unlock()
-		for _, fn := range fns {
-			fn(childID)
-		}
 		displaced.shutdown()
+	}
+
+	// Fires on EVERY successful install, first connect included — not just a
+	// displacing reconnect. DarajaLaunch waits on this to learn its brand-new
+	// daraja arrived, which is never a displacement; scoping the fire to
+	// "displaced != nil" left that wait permanently unsatisfied, so it always
+	// ran out its 30s and evicted the very connection it was waiting on.
+	p.onConnectMu.Lock()
+	fns := p.onConnect
+	p.onConnectMu.Unlock()
+	for _, fn := range fns {
+		fn(childID)
 	}
 }
 
@@ -298,50 +309,27 @@ func (p *Pool) handleConn(conn net.Conn) {
 	lc := &liveConn{
 		childID: childID,
 		httpCli: httpClient,
+		daraja:  darajapbconnect.NewDarajaServiceClient(httpClient, "http://daraja"),
 		done:    make(chan struct{}),
 	}
 
 	p.installLive(childID, lc)
 
-	// Start the Relay bidi stream so traffic flows on this connection.
-	// Without an active stream daraja's HTTP/2 server sees zero requests and
-	// closes the connection — exactly the ~1ms-drop symptom. This mirrors
-	// execpool's post-install drive (health loop + Describe): we drive
-	// activity on the accepted conn so the peer knows we're alive.
-	//
-	// Two mechanisms keep the connection alive:
-	// 1. The relay driver opens a bidi stream; when it exits (stream error),
-	//    h.onDone fires lc.shutdown() and unblocks handleProc.
-	// 2. A background watcher detects raw-conn closure (EOF) and calls
-	//    lc.shutdown() as a backup, covering cases where the stream driver
-	//    hasn't launched yet or is stuck in handshake.
-	cli := darajapbconnect.NewDarajaServiceClient(lc.httpCli, "http://daraja")
+	// Connection death is learned from the relay stream failing (onDone
+	// below), backstopped by the http2.Transport's own ReadIdleTimeout/
+	// PingTimeout — never from a second goroutine reading conn directly.
+	// net/http's connReader stays in "hijacked" state for as long as this
+	// handler runs (i.e. the connection's whole life), and a second reader
+	// racing the http2.Transport's own internal reader on it panics with
+	// "invalid Body.Read call. After hijacked, the original Request must not
+	// be used".
 	relayCtx, relayCancel := context.WithCancel(context.Background())
-	holder := newRelayHolderWithCtx(childID, cli, relayCtx, relayCancel, func() {
+	holder := newRelayHolderWithCtx(childID, lc.daraja, relayCtx, relayCancel, func() {
 		lc.shutdown()
 	})
 	p.mu.Lock()
 	p.relayHolders[childID] = holder
 	p.mu.Unlock()
-
-	// Background watcher: close lc.done when the raw connection drops.
-	// Only triggers on permanent errors (EOF); timeout means "still alive, keep watching".
-	go func() {
-		buf := make([]byte, 1)
-		for {
-			_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-			n, err := conn.Read(buf)
-			if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
-				// Permanent read error (including EOF) — connection broken.
-				lc.shutdown()
-				return
-			}
-			// n > 0 with no error: peer sent data — this is normal h2 traffic,
-			// ignore it and keep watching.
-			// n == 0 && err == nil (timeout): keep polling.
-			_ = n
-		}
-	}()
 
 	go func() {
 		startCtx, startCancel := context.WithTimeout(relayCtx, 5*time.Second)
@@ -349,6 +337,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 		if err := holder.startIn(startCtx); err != nil {
 			slog.Warn("darajapool: relay start failed",
 				"childId", childID, "error", err)
+			lc.shutdown()
 		}
 	}()
 
