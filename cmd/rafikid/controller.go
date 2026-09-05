@@ -273,6 +273,11 @@ type workspaceLabels struct {
 	executorID    string
 	mode          string // "ephemeral" or "pinned"
 	executorState string // "unbound" until the first successful NoteBinding
+	// pgid is set only by claudeRunner's stashDarajaBinding — the daraja
+	// process group's pid from the Launch result, recorded as
+	// rafiki/daraja-pgid. Zero for every fundi tool-binding use of this
+	// struct.
+	pgid int32
 }
 
 // NewController constructs a Controller. Call loadOrphans() after construction
@@ -900,14 +905,21 @@ func (c *Controller) ConversationExport(ctx context.Context, id string) (*insigh
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {
 	// Validate cwd exists on THIS machine (dispatch already checks it's
 	// absolute) — but only for kinds the daemon itself forks a subprocess
-	// for (pi, claude; cmd.Dir = req.Cwd in pkg/child/runner.go). A fundi
-	// child never touches the daemon's own filesystem: its tools, if any,
-	// run against whichever executor gets bound after this point, and that
-	// executor validates its own root independently. Stat-ing req.Cwd here
-	// for fundi checks the wrong machine — wrongly rejecting a valid path
-	// that exists only on a remote executor, or wrongly accepting a
-	// coincidentally-existing but unrelated path on the daemon host.
-	if req.Kind != protocol.KindFundi {
+	// for. A fundi child never touches the daemon's own filesystem: its
+	// tools, if any, run against whichever executor gets bound after this
+	// point, and that executor validates its own root independently. A
+	// claude child is the same story once an executor pool is configured —
+	// its daraja (and the claude process it hosts) run on the EXECUTOR's
+	// machine, not this one, so cwd lives there too. Stat-ing req.Cwd here
+	// for either case checks the wrong machine — wrongly rejecting a valid
+	// path that exists only on a remote executor, or wrongly accepting a
+	// coincidentally-existing but unrelated path on the daemon host. Only a
+	// claude child with NO executor pool configured actually forks locally
+	// (claudeRunner's local-subprocess fallback), so that is the only
+	// remaining case this check applies to.
+	checksCwdLocally := req.Kind != protocol.KindFundi &&
+		(req.Kind != protocol.KindClaude || c.execPoolConn == nil)
+	if checksCwdLocally {
 		if _, err := os.Stat(req.Cwd); err != nil {
 			return control.SpawnResult{}, &control.ControllerError{
 				Code:    protocol.ErrInvalidArgs,
@@ -965,7 +977,12 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	}
 
 	env := c.buildEnv(req, childID, c.socketPath)
-	if req.Kind == protocol.KindClaude {
+	// claudeEnv is only meaningful for the local-subprocess path — once
+	// claudeRunner returns a non-nil daraja-backed Runner, child.Spawn never
+	// reads spec.Env at all (see the "if runner != nil" branch below), so
+	// building it for the executor-routed case is dead weight that invites a
+	// future reader to think it does something.
+	if req.Kind == protocol.KindClaude && c.execPoolConn == nil {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
@@ -979,7 +996,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// top-level spawn outright.
 	ownerName := attestOwner(c.st, req, owner)
 
-	runner, err := c.agentRunner(req, childID, false, ownerName, owner.UserID)
+	runner, err := c.agentRunner(req, childID, false, ownerName, owner.UserID, nil)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1048,12 +1065,28 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	}
 	// Merge the binding agentRuntimeOptions made before this record existed.
 	// A binding made AFTER it exists goes straight to the store — see NoteBinding.
+	//
+	// Guarded on non-empty rather than written unconditionally: a claude
+	// child's daraja binding (stashDarajaBinding) has no workspaceID at all —
+	// claude has no workspace concept — and writing rafiki/workspace="" would
+	// be misleading noise on every daraja-hosted claude child. Every fundi
+	// tool-binding call into this stash always sets workspaceID/executorID/
+	// mode, so this guard is a no-op for that path.
 	if wl, ok := c.takeWorkspaceLabels(childID); ok {
-		initLabels["rafiki/workspace"] = wl.workspaceID
-		initLabels["rafiki/executor"] = wl.executorID
-		initLabels["rafiki/workspace-mode"] = wl.mode
+		if wl.workspaceID != "" {
+			initLabels["rafiki/workspace"] = wl.workspaceID
+		}
+		if wl.executorID != "" {
+			initLabels["rafiki/executor"] = wl.executorID
+		}
+		if wl.mode != "" {
+			initLabels["rafiki/workspace-mode"] = wl.mode
+		}
 		if wl.executorState != "" {
 			initLabels["rafiki/executor-state"] = wl.executorState
+		}
+		if wl.pgid != 0 {
+			initLabels["rafiki/daraja-pgid"] = strconv.Itoa(int(wl.pgid))
 		}
 	}
 
@@ -1656,7 +1689,12 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	}
 
 	env := c.buildEnv(req, childID, c.socketPath)
-	if kind == protocol.KindClaude {
+	// claudeEnv is only meaningful for the local-subprocess path — once
+	// claudeRunner returns a non-nil daraja-backed Runner, child.Spawn never
+	// reads spec.Env at all (see the "if runner != nil" branch below), so
+	// building it for the executor-routed case is dead weight that invites a
+	// future reader to think it does something.
+	if kind == protocol.KindClaude && c.execPoolConn == nil {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
@@ -1668,7 +1706,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	// owner's USER ID, not carried in snap.Labels (only the username is) —
 	// quota_status simply reports "no data captured" for a resumed child
 	// rather than guessing.
-	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], "")
+	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], "", &snap)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -1777,13 +1815,16 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	}
 
 	env := c.buildEnv(req, childID, c.socketPath)
-	if kind == protocol.KindClaude {
+	// See Resume's identical guard: claudeEnv is dead weight once
+	// claudeRunner returns a daraja-backed Runner (child.Spawn never reads
+	// spec.Env in that case).
+	if kind == protocol.KindClaude && c.execPoolConn == nil {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 
 	// See Resume's identical call: the owner was attested at the child's
 	// original spawn and lives on in snap.Labels.
-	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], "")
+	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], "", &snap)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
