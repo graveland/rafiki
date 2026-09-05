@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -9,7 +8,6 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -17,9 +15,13 @@ func newPresetsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "presets",
 		Aliases: []string{"preset"},
-		Short:   "List presets from <config dir>/presets.json",
-		Long: `List named presets from <config dir>/presets.json (default $XDG_CONFIG_HOME/rafiki/presets.json,
-or ~/.config/rafiki/presets.json).
+		Short:   "List presets from the resolved profile's presets.json",
+		Long: `List named presets from the resolved profile's own presets file
+(profile.PresetsFile(name) -- <config dir>/profiles/<name>/presets.json).
+
+This reads the same file 'rafiki create --preset' reads, so the two always
+agree on what presets exist. Presets are a client-side, per-profile concept:
+switching -P/--profile switches which presets.json is read.
 
 Presets bundle a model and label defaults that can be applied at spawn time
 with --preset NAME or a profile's 'preset' field (see 'rafiki profile add --help').
@@ -42,8 +44,7 @@ and every --has-label key must be present.`,
 }
 
 func runPresets(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	p := mustProfile(cmd)
 
 	var labels map[string]string
 	var hasLabel []string
@@ -63,25 +64,13 @@ func runPresets(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	resp, err := c.Request(cmdCtx(cmd), protocol.ListPresetsRequest{
-		Type:     protocol.TypeCtrlListPresets,
-		Labels:   labels,
-		HasLabel: hasLabel,
-	})
+	pf, err := presetsForListing(p.Name)
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_list_presets: %s", client.FormatError(resp))
-	}
-
-	var data protocol.ListPresetsResponseData
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return fmt.Errorf("decode presets response: %w", err)
-	}
 
 	mode, useColor := outputOpts(cmd)
-	return renderPresets(os.Stdout, data.Presets, mode, useColor)
+	return renderPresets(os.Stdout, presetInfos(pf, labels, hasLabel), mode, useColor)
 }
 
 func renderPresets(w io.Writer, presets []protocol.PresetInfo, mode outputMode, useColor bool) error {

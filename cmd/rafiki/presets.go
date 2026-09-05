@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // Preset defines default model and label values applied by rafiki create --preset NAME.
@@ -58,6 +59,24 @@ func loadPresets(profileName string) (*PresetsFile, error) {
 	return &pf, nil
 }
 
+// presetsForListing reads a profile's presets file for `rafiki presets`,
+// treating an absent file as zero presets rather than an error -- matching
+// the behavior ctrl_list_presets always had ("An absent or empty presets
+// file returns an empty slice (not an error)"). loadPresets itself keeps
+// erroring on a missing file, because there the caller named a specific
+// --preset and the file genuinely ought to exist.
+func presetsForListing(profileName string) (*PresetsFile, error) {
+	pf, err := loadPresets(profileName)
+	if err != nil {
+		path := profile.PresetsFile(profileName)
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			return &PresetsFile{}, nil
+		}
+		return nil, err
+	}
+	return pf, nil
+}
+
 // missingPresetsError reports the absent presets file, naming any pre-move file
 // still on disk. Failing with a bare "not found" while the user's presets sit
 // at the old path would look like data loss.
@@ -83,4 +102,48 @@ func availablePresets(pf *PresetsFile) string {
 	}
 	sort.Strings(names)
 	return strings.Join(names, ", ")
+}
+
+// matchesPresetLabelFilter returns true when a preset's labels satisfy both
+// the AND-match required map and the key-presence hasLabels list. Mirrors
+// cmd/rafikid/models_presets.go's matchesPresetLabelFilter -- presets are a
+// client-side concept now (see loadPresets), so this package keeps its own
+// copy rather than importing the daemon.
+func matchesPresetLabelFilter(presetLabels, required map[string]string, hasLabels []string) bool {
+	for k, v := range required {
+		if presetLabels[k] != v {
+			return false
+		}
+	}
+	for _, k := range hasLabels {
+		if _, ok := presetLabels[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// presetInfos converts a parsed presets file into sorted, filtered
+// protocol.PresetInfo rows -- the same shape `rafiki presets` has always
+// rendered, now built from the client's own per-profile file instead of the
+// daemon's ctrl_list_presets response.
+func presetInfos(pf *PresetsFile, labels map[string]string, hasLabel []string) []protocol.PresetInfo {
+	if pf == nil {
+		return nil
+	}
+	names := make([]string, 0, len(pf.Presets))
+	for name := range pf.Presets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]protocol.PresetInfo, 0, len(names))
+	for _, name := range names {
+		p := pf.Presets[name]
+		if !matchesPresetLabelFilter(p.Labels, labels, hasLabel) {
+			continue
+		}
+		out = append(out, protocol.PresetInfo{Name: name, Model: p.Model, Labels: p.Labels})
+	}
+	return out
 }
