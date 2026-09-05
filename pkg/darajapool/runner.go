@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
@@ -67,6 +68,15 @@ type Runner struct {
 
 	waitOnce sync.Once
 	waitInfo exitInfo
+
+	// resetPending is set when a RelayResponse_Restarted event arrives (either
+	// from daraja's own crash-respawn, or — once Controller.handleClaudeAbort
+	// calls Pool.Restart directly for an interrupt — a deliberate one) and
+	// cleared by TakeResetPending. child.Child polls it from the SAME
+	// goroutine that owns the claude translator's state (readStdout), so the
+	// reset itself never needs its own lock: it is ordered by the pipe, not by
+	// a mutex. See TakeResetPending's doc comment.
+	resetPending atomic.Bool
 }
 
 // NewRunner returns a Runner for a daraja already connected in pool under
@@ -175,17 +185,15 @@ func (r *Runner) drain(events <-chan *fanEvent) bool {
 				r.reportExit(int(e.Exited.ExitCode), e.Exited.Signal)
 				return true
 			case *darajapb.RelayResponse_Restarted:
-				// 1c-ii: reset the claude translator's per-process state here
-				// (the ProcessRestarted boundary marker). Not reachable by any
-				// code path this Runner adds on purpose (Interrupt refuses
-				// rather than calling Restart) but daraja's own crash-loop
-				// recovery can still emit this spontaneously if claude dies on
-				// its own. Log it so a spontaneous crash is at least visible;
-				// keep relaying stdout on the same pipe without resetting
-				// anything. A translator confused by stale state after a
-				// spontaneous crash is the known, accepted gap 1c-i leaves
-				// open — see the plan's "Why this is scoped the way it is".
-				slog.Warn("daraja: child process was replaced (spontaneous restart); translator state not reset — see 1c-ii",
+				// Mark a reset due. child.Child's readStdout polls
+				// TakeResetPending once per frame and resets the claude
+				// translator's state before handing the NEXT frame to it —
+				// see TakeResetPending's doc comment for why that ordering
+				// needs no lock. Reached both by a deliberate interrupt
+				// (Controller.handleClaudeAbort calling Pool.Restart) and by
+				// daraja's own spontaneous crash-respawn.
+				r.resetPending.Store(true)
+				slog.Warn("daraja: child process was replaced",
 					"childId", r.childID, "newPid", e.Restarted.Pid)
 			}
 		case <-r.done:
@@ -240,5 +248,15 @@ func (r *Runner) shutdown(graceMs int32) error {
 }
 
 func (r *Runner) Interrupt() error { return ErrInterruptNotSupported }
+
+// TakeResetPending reports whether the child process was replaced since the
+// last call and clears the flag — an atomic test-and-clear, so exactly one
+// caller observes true per restart. child.Child's readStdout calls this once
+// per frame, on the same goroutine that owns the claude translator's state,
+// so acting on a true result there needs no additional lock: the Restarted
+// event is read from the SAME ordered event stream that stdout bytes come
+// from (case order in the switch above), so by the time any post-restart
+// stdout reaches the pipe this flag is already set.
+func (r *Runner) TakeResetPending() bool { return r.resetPending.Swap(false) }
 
 var _ child.Runner = (*Runner)(nil)

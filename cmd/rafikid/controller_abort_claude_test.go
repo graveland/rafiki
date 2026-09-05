@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -135,5 +137,86 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 	}
 	if gotSession != "got-fresh" {
 		t.Fatalf("resumed session id = %q, want got-fresh (proves --resume <id> was threaded)", gotSession)
+	}
+}
+
+// TestBuildDarajaAbortSpec_UsesFreshSessionNotOriginalLaunch proves the whole
+// reason handleDarajaClaudeAbort cannot pass spec=nil to Pool.Restart: nil
+// tells daraja to reuse the ORIGINAL launch's ChildSpec, whose
+// resume_session is empty for a fresh conversation. This spec must carry the
+// freshly-sniffed session id instead, or the restarted process silently
+// starts a brand-new conversation and discards history.
+func TestBuildDarajaAbortSpec_UsesFreshSessionNotOriginalLaunch(t *testing.T) {
+	snap := childstore.Snapshot{
+		Model:         "claude-sonnet-5",
+		ResumeSession: "", // the ORIGINAL launch's spec — empty for a fresh spawn
+	}
+	spec := buildDarajaAbortSpec(snap, "sess-live-sniffed")
+
+	if spec.Kind != darajapb.Kind_KIND_CLAUDE {
+		t.Fatalf("Kind = %v, want KIND_CLAUDE", spec.Kind)
+	}
+	if spec.Claude == nil {
+		t.Fatal("Claude params must not be nil")
+	}
+	if spec.Claude.Model != "claude-sonnet-5" {
+		t.Errorf("Model = %q, want the child's own model preserved across the restart", spec.Claude.Model)
+	}
+	if spec.Claude.ResumeSession != "sess-live-sniffed" {
+		t.Errorf("ResumeSession = %q, want the freshly sniffed session id, not the original launch's (empty)", spec.Claude.ResumeSession)
+	}
+	if spec.Claude.PermissionMode != "bypassPermissions" {
+		t.Errorf("PermissionMode = %q, want the same default claudeRunner launches with", spec.Claude.PermissionMode)
+	}
+}
+
+// TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch proves the branch
+// predicate: a child whose snapshot carries rafiki/executor (set only by
+// claudeRunner's daraja path, never the local-subprocess fallback) must be
+// refused for lack of a wired daraja pool rather than silently falling
+// through to the local-subprocess Interrupt()+wait+Resume dance, which would
+// hang forever waiting on a process that will never report Exited the way a
+// daraja-routed child's relay stream does.
+func TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch(t *testing.T) {
+	ctrl := newTestController(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fakeclaude.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/bash\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\",\"model\":\"claude-sonnet-5\"}'\ncat >/dev/null\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	req := protocol.SpawnRequest{Kind: "claude", Cwd: t.TempDir(), PiBinary: script, NoSession: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := ctrl.Spawn(ctx, req, users.Identity{})
+	if err != nil {
+		t.Fatalf("spawn claude: %v", err)
+	}
+	// Stamp the label a real daraja launch would have set (claudeRunner), on
+	// a child that is actually a local subprocess — sufficient to drive the
+	// branch predicate without standing up a real executor+daraja stack.
+	if err := ctrl.st.Update(res.ChildID, func(s *childstore.Session) {
+		if s.Labels == nil {
+			s.Labels = map[string]string{}
+		}
+		s.Labels["rafiki/executor"] = "01test0000000000000000000"
+	}); err != nil {
+		t.Fatalf("stamp label: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ch, ok := ctrl.cm.Get(res.ChildID); ok && ch.Metadata().SessionID != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	err = ctrl.Send(res.ChildID, []byte(`{"type":"abort"}`))
+	if err == nil {
+		t.Fatal("want an error: no daraja pool is wired in this test controller")
+	}
+	if got := err.Error(); got != "daraja pool not wired" {
+		t.Fatalf("err = %q, want the daraja-pool-not-wired refusal (proves the label routed to handleDarajaClaudeAbort, not the local-subprocess path)", got)
 	}
 }

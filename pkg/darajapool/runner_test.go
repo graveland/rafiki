@@ -62,6 +62,12 @@ func exited(code int32, signal string) *darajapb.RelayResponse {
 	}}
 }
 
+func restarted(pid int32) *darajapb.RelayResponse {
+	return &darajapb.RelayResponse{Event: &darajapb.RelayResponse_Restarted{
+		Restarted: &darajapb.ProcessRestarted{Pid: pid},
+	}}
+}
+
 func TestRunnerRelaysStdoutFromWatchEvents(t *testing.T) {
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)
@@ -82,6 +88,45 @@ func TestRunnerRelaysStdoutFromWatchEvents(t *testing.T) {
 	}
 	if string(got) != "hello world" {
 		t.Fatalf("got %q, want %q", got, "hello world")
+	}
+}
+
+// TestRunnerMarksResetPendingOnRestartedEvent proves the wiring
+// Controller.handleDarajaClaudeAbort's Pool.Restart call and daraja's own
+// spontaneous crash-respawn both rely on: a RelayResponse_Restarted event
+// sets the flag, TakeResetPending clears it exactly once, and — the part
+// that would silently reopen the "translator state not reset" gap — the
+// flag stays false absent any restart, and false again after being taken.
+func TestRunnerMarksResetPendingOnRestartedEvent(t *testing.T) {
+	stub := newScriptedDaraja()
+	pool, childID, teardown := connectFakeDaraja(t, stub)
+	defer teardown()
+
+	r := NewRunner(pool, childID)
+	_, stdoutR, _, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if r.TakeResetPending() {
+		t.Fatal("reset pending before any Restarted event")
+	}
+
+	stub.send <- restarted(4242)
+	// Stdout after the marker proves the pump kept relaying rather than
+	// treating Restarted like Exited; it also gives the test a synchronization
+	// point so the read below cannot race the switch case above.
+	stub.send <- stdout([]byte("after-restart"))
+	got := make([]byte, len("after-restart"))
+	if _, err := io.ReadFull(stdoutR, got); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+
+	if !r.TakeResetPending() {
+		t.Fatal("want reset pending true after a Restarted event")
+	}
+	if r.TakeResetPending() {
+		t.Fatal("TakeResetPending must clear the flag, not just read it")
 	}
 }
 
