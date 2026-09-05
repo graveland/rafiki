@@ -253,10 +253,16 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 
 | Binary | Role |
 |---|---|
-| `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself; `claude` children remain subprocesses. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
+| `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself. `claude` children route through daraja on an executor when the daemon has an executor pool configured (see "Daraja" below); with no executor pool at all, they remain local subprocesses of the daemon. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
 
 ## Daraja
+
+An ordinary `rafiki create --kind claude` routes through daraja automatically
+whenever the daemon has an executor pool configured and one of its executors
+declares `claude` in `--launch` — no operator action needed. `rafiki daraja
+launch`, below, is the manual entry point to the same machinery, useful for
+debugging the launch path directly without going through a full spawn.
 
 **`rafiki daraja launch`** launches a claude child via daraja on a remote executor.
 It resolves an executor that matches the selector AND supports launching claude,
