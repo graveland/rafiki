@@ -313,8 +313,6 @@ func (p *Pool) handleConn(conn net.Conn) {
 		done:    make(chan struct{}),
 	}
 
-	p.installLive(childID, lc)
-
 	// Connection death is learned from the relay stream failing (onDone
 	// below), backstopped by the http2.Transport's own ReadIdleTimeout/
 	// PingTimeout — never from a second goroutine reading conn directly.
@@ -327,19 +325,31 @@ func (p *Pool) handleConn(conn net.Conn) {
 	holder := newRelayHolderWithCtx(childID, lc.daraja, relayCtx, relayCancel, func() {
 		lc.shutdown()
 	})
+
+	// Open the relay stream BEFORE publishing the connection as live.
+	// OnConnect (fired by installLive, below) is the signal callers —
+	// darajapool.Launch chief among them — use to mean "safe to Send/Watch
+	// now". Firing it before the holder's stream had actually opened let a
+	// caller race ahead of this open and land on RelayFor's fast path, which
+	// finds this holder already present in p.relayHolders (inserted next)
+	// and, correctly, does not call start() on it a second time — so the
+	// caller got a holder whose stream was still nil. Opening synchronously
+	// here, before installLive, closes that window: by the time OnConnect
+	// fires the stream is already usable.
+	startCtx, startCancel := context.WithTimeout(relayCtx, 5*time.Second)
+	err = holder.startIn(startCtx)
+	startCancel()
+	if err != nil {
+		slog.Warn("darajapool: relay start failed", "childId", childID, "error", err)
+		relayCancel()
+		return
+	}
+
 	p.mu.Lock()
 	p.relayHolders[childID] = holder
 	p.mu.Unlock()
 
-	go func() {
-		startCtx, startCancel := context.WithTimeout(relayCtx, 5*time.Second)
-		defer startCancel()
-		if err := holder.startIn(startCtx); err != nil {
-			slog.Warn("darajapool: relay start failed",
-				"childId", childID, "error", err)
-			lc.shutdown()
-		}
-	}()
+	p.installLive(childID, lc)
 
 	// Block until the connection is done.
 	<-lc.done
