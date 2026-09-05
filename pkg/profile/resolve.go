@@ -95,7 +95,32 @@ func Resolve(sel Selection) (Resolved, error) {
 			"unknown profile %q (known: %s); see `rafiki profile list`",
 			name, strings.Join(set.Names(), ", "))
 	}
+	p.Proxy = EffectiveProxy(p)
 	return Resolved{Profile: p, Token: ReadToken(name)}, nil
+}
+
+// EffectiveProxy returns the proxy URL that will actually be used for p: its
+// own `proxy` field, or -- for a url profile with none set -- the url itself.
+// One TLS listener serves both the control plane and the LLM proxy face, so
+// a remote profile that never set --proxy still has a working default.
+//
+// This is deliberately resolve-time-only derivation, not a mutation of the
+// stored Profile: it never gets written back to profiles.toml, so an
+// explicit --proxy (a genuine user choice) always wins over it, and a
+// profile with no `proxy` line keeps meaning "derive it" rather than
+// freezing whatever the url happened to be when the profile was added.
+//
+// Exported so `rafiki profile show` can render the SAME value `rafiki
+// claude` will actually use, rather than showing a bare "-" that implies no
+// proxy is configured when one will in fact be derived.
+func EffectiveProxy(p Profile) string {
+	if p.Proxy != "" {
+		return p.Proxy
+	}
+	if p.URL != "" {
+		return p.URL
+	}
+	return ""
 }
 
 // Bootstrap creates the default profile on a machine that has none.

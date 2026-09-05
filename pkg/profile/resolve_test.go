@@ -229,6 +229,68 @@ func TestCheckRetiredEnvIsQuietWhenNoneAreSet(t *testing.T) {
 	}
 }
 
+// TestResolveDerivesProxyFromURL pins Fix 5 (design spec: "For a url profile
+// it defaults to that same URL -- one TLS listener serves the control plane
+// and the proxy face"). No task implemented this, so `rafiki claude` against
+// a freshly-added url profile with no --proxy errored "profile has no proxy
+// URL" even though docs/MIGRATING.md's worked example for a remote profile
+// never passes --proxy.
+func TestResolveDerivesProxyFromURL(t *testing.T) {
+	setXDG(t)
+	if err := Save(Set{Profiles: map[string]Profile{
+		"personal": {Name: "personal", URL: "https://rafiki.example.net"},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := Resolve(Selection{Flag: "personal"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Proxy != "https://rafiki.example.net" {
+		t.Fatalf("Proxy = %q, want the derived url", got.Proxy)
+	}
+}
+
+// TestResolveExplicitProxyWinsOverDerivation checks that a genuine --proxy
+// choice is never overridden by the url-derivation default.
+func TestResolveExplicitProxyWinsOverDerivation(t *testing.T) {
+	setXDG(t)
+	if err := Save(Set{Profiles: map[string]Profile{
+		"personal": {Name: "personal", URL: "https://rafiki.example.net", Proxy: "https://proxy.example.net"},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := Resolve(Selection{Flag: "personal"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Proxy != "https://proxy.example.net" {
+		t.Fatalf("Proxy = %q, want the explicit proxy unchanged", got.Proxy)
+	}
+}
+
+// TestResolveDoesNotDeriveProxyForASocketProfile checks that a local daemon
+// with no `proxy` set stays proxy-less: there is no url to derive one from,
+// and deriving from the socket path would be nonsense.
+func TestResolveDoesNotDeriveProxyForASocketProfile(t *testing.T) {
+	setXDG(t)
+	if err := Save(Set{Profiles: map[string]Profile{
+		"work": {Name: "work", Socket: "/tmp/work.sock"},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := Resolve(Selection{Flag: "work"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Proxy != "" {
+		t.Fatalf("Proxy = %q, want empty for a socket profile with none set", got.Proxy)
+	}
+}
+
 func TestDescribeNamesTheEndpoint(t *testing.T) {
 	local := Resolved{Profile: Profile{Name: "work", Socket: "/tmp/ctl.sock"}}
 	if got := local.Describe(); !strings.Contains(got, "work") || !strings.Contains(got, "/tmp/ctl.sock") {
