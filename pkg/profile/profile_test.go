@@ -90,6 +90,11 @@ func TestParseRejectsBadProfiles(t *testing.T) {
 			toml: "[profile.\"\"]\nsocket = \"/a\"\n",
 			want: "empty",
 		},
+		{
+			name: "traversal name",
+			toml: "[profile.\"..\"]\nsocket = \"/a\"\n",
+			want: "reserved",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,5 +119,40 @@ func TestParseAcceptsAnEmptyFile(t *testing.T) {
 	}
 	if _, ok := s.Get("anything"); ok {
 		t.Fatal("Get on an empty Set returned ok")
+	}
+}
+
+// TestValidNameRejectsTraversal pins the guard that stops `rafiki profile
+// remove ..` from deleting the whole config directory: filepath.Join(dir, "..")
+// cleans to dir itself, so a profile literally named ".." must never reach
+// profile.Dir at all.
+func TestValidNameRejectsTraversal(t *testing.T) {
+	cases := []struct {
+		name    string
+		wantErr bool
+	}{
+		{"", true},
+		{".", true},
+		{"..", true},
+		{"a/b", true},
+		{"../etc", true},
+		{"/etc", true},
+		{"work", false},
+		{"my-profile", false},
+		{"personal_2", false},
+	}
+	for _, tc := range cases {
+		t.Run("name="+tc.name, func(t *testing.T) {
+			err := ValidName(tc.name)
+			if tc.wantErr && err == nil {
+				t.Fatalf("ValidName(%q) = nil error, want one", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidName(%q) = %v, want nil", tc.name, err)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), tc.name) && tc.name != "" {
+				t.Fatalf("ValidName error %q does not name the rejected name %q", err, tc.name)
+			}
+		})
 	}
 }

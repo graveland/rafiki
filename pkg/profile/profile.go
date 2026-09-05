@@ -18,6 +18,7 @@ package profile
 import (
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -99,8 +100,11 @@ func Parse(b []byte) (Set, error) {
 		if strings.TrimSpace(name) == "" {
 			return Set{}, fmt.Errorf("profiles: a profile name may not be empty")
 		}
+		if err := ValidName(name); err != nil {
+			return Set{}, fmt.Errorf("profiles: %w", err)
+		}
 		p.Name = name
-		if err := validate(p); err != nil {
+		if err := Validate(p); err != nil {
 			return Set{}, err
 		}
 		out.Profiles[name] = p
@@ -108,9 +112,36 @@ func Parse(b []byte) (Set, error) {
 	return out, nil
 }
 
-// validate enforces the rules a malformed profile would otherwise fail on much
-// later, against a real daemon, with a worse message.
-func validate(p Profile) error {
+// ValidName rejects a profile name that could reach outside its own directory
+// once joined with filepath.Join in Dir. filepath.Join CLEANS its result, so
+// Dir("..") resolves to the config directory itself — a profile literally
+// named ".." lets `rafiki profile remove ..` delete the whole config tree.
+//
+// Rejects: empty, ".", "..", any name containing a path separator, and any
+// name that filepath.Base does not return unchanged (which also catches
+// "a/../../etc"-style traversal segments).
+func ValidName(name string) error {
+	if name == "" {
+		return fmt.Errorf("profile name must not be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("profile name %q is reserved and cannot be used (it would resolve to the config directory itself)", name)
+	}
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
+		return fmt.Errorf("profile name %q must not contain a path separator", name)
+	}
+	if filepath.Base(name) != name {
+		return fmt.Errorf("profile name %q is not a valid single path component", name)
+	}
+	return nil
+}
+
+// Validate enforces the rules a malformed profile would otherwise fail on much
+// later, against a real daemon, with a worse message. Exported so callers that
+// construct a Profile by hand (e.g. `rafiki profile add`) can validate it
+// BEFORE writing it to disk, rather than writing first and finding out on the
+// next load.
+func Validate(p Profile) error {
 	switch {
 	case p.Socket != "" && p.URL != "":
 		return fmt.Errorf("profiles: %q sets both socket and url; exactly one of them is required", p.Name)
