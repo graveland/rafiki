@@ -35,6 +35,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringP("socket", "s", "", "controller socket path (default: $RAFIKI_SOCKET, else the XDG runtime path)")
 	root.PersistentFlags().StringP("output", "o", "auto", "output format for list/tail/conversations: auto|json|table (other commands always emit JSON)")
 	root.PersistentFlags().StringP("color", "c", "auto", "color output: auto|always|never")
+	root.PersistentFlags().StringP("profile", "P", "", "profile naming the daemon to use (default: $RAFIKI_PROFILE, else the current-profile file)")
 
 	_ = root.RegisterFlagCompletionFunc("output", cobra.FixedCompletions(
 		[]string{"auto", "json", "table"},
@@ -44,6 +45,9 @@ func newRootCmd() *cobra.Command {
 		[]string{"auto", "always", "never"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
+	_ = root.RegisterFlagCompletionFunc("profile", func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeProfileNames(toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
 
 	root.AddCommand(
 		newListCmd(),
@@ -72,6 +76,7 @@ func newRootCmd() *cobra.Command {
 		newDarajaCmd(),
 		newUserCmd(),
 		newConfigCmd(),
+		newProfileCmd(),
 	)
 
 	return root

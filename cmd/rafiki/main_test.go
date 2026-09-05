@@ -22,7 +22,11 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	// XDG_CONFIG_HOME too, not just STATE: profile resolution reads
+	// profiles.toml and BOOTSTRAP WRITES ONE. Without this, running the unit
+	// tests creates a profiles.toml in the developer's real ~/.config/rafiki.
 	os.Setenv("XDG_STATE_HOME", dir)
+	os.Setenv("XDG_CONFIG_HOME", dir)
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
