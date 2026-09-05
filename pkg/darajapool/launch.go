@@ -1,0 +1,130 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package darajapool
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"connectrpc.com/connect"
+
+	adminpb "go.graveland.dev/rafiki/pkg/adminpb"
+	"go.graveland.dev/rafiki/pkg/adminpb/adminpbconnect"
+	"go.graveland.dev/rafiki/pkg/darajapb"
+)
+
+// defaultLaunchTimeout bounds how long Launch waits for the daraja's reverse
+// dial to land. 30s leaves headroom for a cold `docker run`-backed executor
+// without leaving a caller (an RPC handler or a spawn request) hanging
+// indefinitely on a machine that never dials back.
+const defaultLaunchTimeout = 30 * time.Second
+
+// adminLauncher is the slice of *execpool.Pool that Launch needs — an
+// interface for the same reason cmd/rafikid/executor_select.go's
+// executorPool is one: testable without a listener, a database, or a
+// dialling executor. *execpool.Pool satisfies this with no changes.
+type adminLauncher interface {
+	AdminClientFor(executorID string) (adminpbconnect.AdminServiceClient, error)
+}
+
+// LaunchParams is everything Launch needs. The executor is already CHOSEN by
+// the caller — see this file's doc comment on why selection stays out of
+// Launch itself.
+type LaunchParams struct {
+	ExecPool   adminLauncher
+	Pool       *Pool
+	Registry   *Registry
+	DialAddr   string
+	ExecutorID string
+	ChildID    string
+	Cwd        string
+	Spec       *darajapb.ChildSpec
+	// Timeout overrides defaultLaunchTimeout. Zero means the default; tests
+	// set this short to avoid a real 30s wait on the failure path.
+	Timeout time.Duration
+}
+
+type LaunchResult struct {
+	Pid  int32
+	Pgid int32
+}
+
+// Launch mints a one-shot ticket, asks the chosen executor's AdminService to
+// start a daraja, and blocks until that daraja's reverse dial lands in Pool.
+//
+// The executor itself is already chosen by the caller. DarajaLaunch's
+// operator-facing selection (bare label match, no admission/lineage
+// narrowing) and rafikid's own confinement-aware chooseLaunchExecutor pick
+// executors by two genuinely different algorithms; baking either one into
+// Launch would force the other caller onto the wrong one. Launch only does
+// the mechanical part both callers need identically: ticket,
+// AdminService.Launch, wait for the reverse dial.
+func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
+	if p.ExecPool == nil || p.Pool == nil || p.Registry == nil {
+		return LaunchResult{}, errors.New("darajapool: Launch requires ExecPool, Pool and Registry")
+	}
+	if p.DialAddr == "" {
+		return LaunchResult{}, errors.New("darajapool: Launch requires a non-empty DialAddr")
+	}
+	if p.Spec == nil || p.Spec.GetClaude() == nil {
+		return LaunchResult{}, errors.New("darajapool: Launch requires spec.claude")
+	}
+
+	ticket, err := p.Registry.MintTicket(p.ChildID)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("mint ticket: %w", err)
+	}
+
+	adminCLI, err := p.ExecPool.AdminClientFor(p.ExecutorID)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("no admin client for executor %s: %w", p.ExecutorID, err)
+	}
+
+	launchResp, err := adminCLI.Launch(ctx, connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  p.ChildID,
+		Cwd:      p.Cwd,
+		Spec:     p.Spec,
+		DialAddr: p.DialAddr,
+		Ticket:   ticket,
+	}))
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("AdminService.Launch on executor %s: %w", p.ExecutorID, err)
+	}
+
+	timeout := p.Timeout
+	if timeout <= 0 {
+		timeout = defaultLaunchTimeout
+	}
+
+	// KNOWN, ACCEPTED LEAK: Pool.OnConnect has no unregister — this closure
+	// stays in the pool's permanent callback list forever, doing nothing
+	// once fired. It was already the shape of the pre-1c DarajaLaunch RPC
+	// handler; Launch does not make it worse in kind, only in RATE (every
+	// claude spawn now registers one, not just a manual `rafiki daraja
+	// launch`). Bounding this needs OnConnect to support unregistration,
+	// which is a real API change touching WireDaraja's two permanent
+	// callbacks too — out of scope here; tracked as a follow-up.
+	connected := make(chan struct{})
+	var fired bool
+	p.Pool.OnConnect(func(cid string) {
+		if cid == p.ChildID && !fired {
+			fired = true
+			close(connected)
+		}
+	})
+
+	select {
+	case <-connected:
+		return LaunchResult{
+			Pid:  int32(launchResp.Msg.GetPid()),
+			Pgid: int32(launchResp.Msg.GetPgid()),
+		}, nil
+	case <-time.After(timeout):
+		p.Pool.Evict(p.ChildID)
+		return LaunchResult{}, fmt.Errorf("daraja for child %s did not connect within %s", p.ChildID, timeout)
+	case <-ctx.Done():
+		return LaunchResult{}, ctx.Err()
+	}
+}
