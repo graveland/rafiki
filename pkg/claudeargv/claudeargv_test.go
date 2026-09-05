@@ -71,6 +71,29 @@ func TestBuildReturnsAFreshSlice(t *testing.T) {
 	}
 }
 
+// AskUserQuestion has no headless renderer and burns a turn if left callable
+// — this must be true regardless of what else the caller asks to disallow.
+func TestBuildAlwaysDisallowsAskUserQuestion(t *testing.T) {
+	assertPair(t, Build(Params{}), "--disallowedTools", "AskUserQuestion")
+	assertPair(t, Build(Params{DisallowedTools: []string{"Bash"}}), "--disallowedTools", "AskUserQuestion,Bash")
+}
+
+// A daemon-managed child has no human to answer an interactive permission
+// prompt, so the empty (unset) PermissionMode must default to bypass, not to
+// "ask and hang forever".
+func TestBuildDefaultsToBypassPermissions(t *testing.T) {
+	if !slices.Contains(Build(Params{}), "--dangerously-skip-permissions") {
+		t.Fatalf("Build(zero) = %v, want --dangerously-skip-permissions by default", Build(Params{}))
+	}
+}
+
+func TestBuildAppendsExtraArgsLast(t *testing.T) {
+	argv := Build(Params{Model: "claude-sonnet-5", ExtraArgs: []string{"--foo", "bar"}})
+	if len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar" {
+		t.Fatalf("want ExtraArgs last, got %v", argv)
+	}
+}
+
 func assertPair(t *testing.T, argv []string, flag, value string) {
 	t.Helper()
 	for i, a := range argv {
