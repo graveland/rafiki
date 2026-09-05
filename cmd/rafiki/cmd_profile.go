@@ -124,7 +124,15 @@ func newProfileShowCmd() *cobra.Command {
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "name:     %s\n", p.Name)
 			fmt.Fprintf(w, "endpoint: %s\n", endpointOf(p))
-			fmt.Fprintf(w, "proxy:    %s\n", defaultDash(p.Proxy))
+			// The derived value (profile.EffectiveProxy), not the bare field: for
+			// a url profile with no explicit --proxy, `rafiki claude` will use the
+			// url itself, and showing "-" here would claim no proxy is configured
+			// when one will in fact be used.
+			if proxy := profile.EffectiveProxy(p); proxy != p.Proxy {
+				fmt.Fprintf(w, "proxy:    %s (derived from url)\n", proxy)
+			} else {
+				fmt.Fprintf(w, "proxy:    %s\n", defaultDash(p.Proxy))
+			}
 			if profile.ReadToken(name) == "" {
 				// Legal, and it degrades in ways worth naming rather than
 				// leaving to be discovered: the control socket admits without
