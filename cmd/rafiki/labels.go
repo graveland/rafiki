@@ -96,22 +96,6 @@ func parseLabelFilterKeys(keys []string) ([]string, error) {
 	return keys, nil
 }
 
-// parseEnvLabels parses a comma-separated "k=v,k2=v2" string (e.g. RAFIKI_DEFAULT_LABELS).
-// Empty parts are silently skipped.
-func parseEnvLabels(s string) (map[string]string, error) {
-	if s == "" {
-		return nil, nil
-	}
-	var pairs []string
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			pairs = append(pairs, part)
-		}
-	}
-	return parseLabelPairs(pairs)
-}
-
 // mergeLabels merges multiple label maps left-to-right; later maps win on key conflicts.
 // Returns nil when the combined result is empty.
 func mergeLabels(maps ...map[string]string) map[string]string {

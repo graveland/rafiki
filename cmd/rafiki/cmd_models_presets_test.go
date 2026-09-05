@@ -72,16 +72,16 @@ func TestRenderPresets_EmptySlice(t *testing.T) {
 	}
 }
 
-// ─── RAFIKI_DEFAULT_PRESET ───────────────────────────────────────────────────────
+// ─── profile's `preset` field ────────────────────────────────────────────────
+//
+// RAFIKI_DEFAULT_PRESET is retired client-side (profile.CheckRetiredEnv
+// rejects it via mustProfile); a profile's `preset` field replaces it.
 
-// TestRafikiDefaultPreset_AppliedWhenFlagUnset checks that RAFIKI_DEFAULT_PRESET
-// is read in runCreate when --preset is not passed.  We test this by calling
-// the preset-resolution block inline (as runCreate does) rather than spinning
-// up a real daemon.
-func TestRafikiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
-	// Write a minimal presets file into a temp home dir's rafiki config dir.
-	dir := t.TempDir()
-	setPresetsHome(t, dir)
+// TestProfilePreset_AppliedWhenFlagUnset checks that the resolved profile's
+// `preset` field is read (via resolvePresetName) when --preset is not passed.
+func TestProfilePreset_AppliedWhenFlagUnset(t *testing.T) {
+	localProfileForTest(t, profile.Profile{Preset: "mypreset"})
+
 	content := map[string]any{
 		"presets": map[string]any{
 			"mypreset": map[string]any{
@@ -98,12 +98,9 @@ func TestRafikiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("RAFIKI_DEFAULT_PRESET", "mypreset")
-	os.Unsetenv("RAFIKI_DEFAULT_MODEL")
-	os.Unsetenv("RAFIKI_DEFAULT_LABELS")
 
 	// Simulate what runCreate does: read --preset flag (unset → ""), then
-	// fall back to RAFIKI_DEFAULT_PRESET.
+	// fall back to the profile's `preset` field.
 	cmd := newCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -127,9 +124,7 @@ func TestRafikiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 	if !ok {
 		t.Fatalf("preset %q not found", presetName)
 	}
-	if req.Model == "" && preset.Model != "" {
-		req.Model = preset.Model
-	}
+	req.Model = resolveModel(req.Model, preset.Model, "", "")
 	if len(preset.Labels) > 0 {
 		req.Labels = mergeLabels(preset.Labels, req.Labels)
 	}
@@ -142,13 +137,13 @@ func TestRafikiDefaultPreset_AppliedWhenFlagUnset(t *testing.T) {
 	}
 }
 
-func TestRafikiDefaultPreset_FlagWinsOverEnvVar(t *testing.T) {
-	// When --preset is set explicitly, RAFIKI_DEFAULT_PRESET should be ignored.
-	t.Setenv("RAFIKI_DEFAULT_PRESET", "envpreset")
+func TestProfilePreset_FlagWinsOverProfile(t *testing.T) {
+	// When --preset is set explicitly, the profile's `preset` field should be ignored.
+	localProfileForTest(t, profile.Profile{Preset: "profpreset"})
 
 	cmd := newCreateCmd()
-	// Read the flag value — should be the default (empty), not the env var.
-	// The env var is only consulted in runCreate, not in flag parsing.
+	// Read the flag value — should be the default (empty), not the profile's.
+	// The profile is only consulted in resolvePresetName, not in flag parsing.
 	flagVal, _ := cmd.Flags().GetString("preset")
 	if flagVal != "" {
 		t.Errorf("unexpected flag default: %q", flagVal)
@@ -158,9 +153,9 @@ func TestRafikiDefaultPreset_FlagWinsOverEnvVar(t *testing.T) {
 	if err := cmd.Flags().Set("preset", "flagpreset"); err != nil {
 		t.Fatal(err)
 	}
-	// The flag wins and the env var is skipped — asserted through the real
-	// resolution rather than a copy of it.
+	// The flag wins and the profile default is skipped — asserted through the
+	// real resolution rather than a copy of it.
 	if presetName := resolvePresetName(cmd); presetName != "flagpreset" {
-		t.Errorf("presetName = %q, want flagpreset (flag wins over env var)", presetName)
+		t.Errorf("presetName = %q, want flagpreset (flag wins over profile default)", presetName)
 	}
 }
