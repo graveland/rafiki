@@ -216,3 +216,50 @@ pi-controller alongside rafiki, a stale copy may remain in your extensions
 directory; it is inert, and you can delete it. rafiki no longer installs a
 `rafiki-helpers/` extension at all — the pi extension system was retired with
 the pi kind (Phase C0).
+
+## Client profiles (2026-09)
+
+The `rafiki` client no longer reads `RAFIKI_URL`, `RAFIKI_TOKEN`,
+`RAFIKI_SOCKET`, `RAFIKI_DEFAULT_MODEL`, `RAFIKI_DEFAULT_PRESET` or
+`RAFIKI_DEFAULT_LABELS`, and `--socket` is gone. Setting any of them is now an
+error, deliberately: the failure they replaced was silent (an exported
+`RAFIKI_URL` used to outrank a local `--socket` with no message).
+
+Each of those was a global, and a global cannot serve two daemons. A profile
+names one daemon and the credential it needs, together.
+
+```sh
+rafiki profile add work     --socket ~/.local/state/rafiki/controller.sock \
+                             --proxy http://localhost:8035 --kind claude
+rafiki profile add personal --url https://rafiki.example.net --token "$TOKEN"
+rafiki profile use work
+```
+
+One manual step, once: move your existing credential into the profile that
+should own it.
+
+```sh
+mv ~/.config/rafiki/token ~/.config/rafiki/profiles/work/token
+```
+
+Nothing reads the old path any more, so leaving it there is harmless and also
+useless. Presets move the same way, per profile:
+
+```sh
+mv ~/.config/rafiki/presets.json ~/.config/rafiki/profiles/work/presets.json
+```
+
+There is no automatic migration of either file — a machine with no
+`profiles.toml` at all gets a bare `default` profile bootstrapped on first
+use, pointing at the local socket with no token and no presets, and it is up
+to you to `mv` your old credential and presets into it (or into whichever
+profile you `add` by hand).
+
+`rafikid` is unaffected. It still reads `RAFIKI_URL`, `RAFIKI_TOKEN` and
+`RAFIKI_DEFAULT_MODEL` from its own service environment, where one operator
+wrote one file and they cannot drift apart. `rafiki executor serve` and
+`rafiki executor service install` are exempt too, but for a different,
+structural reason: those two commands never resolve a client profile at
+all — they never call `mustDial`/`newConnectEndpoint` — because a headless
+executor box has no profile to select and still needs `--connect` derivable
+from `RAFIKI_URL`.

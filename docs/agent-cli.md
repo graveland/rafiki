@@ -50,34 +50,35 @@ rafiki user rm <name>       # tombstone a user; its token stops working at once
 zero active users exist, the daemon is in bootstrap mode and `ctrl_user_create`
 is the only command any listener accepts (see README's "First user" section).
 
-- **`--no-write`** (create only): print the token but skip writing it to
-  `~/.config/rafiki/token` (mode 0600). Without it, `rafiki user create` both
-  mints the user AND logs this machine in as them — the plaintext token is
-  shown exactly once either way, since the daemon stores only its digest and
-  cannot show it again.
+- **`--no-write`** (create only): print the token but skip writing it to the
+  current profile's token file (`~/.config/rafiki/profiles/<name>/token`,
+  mode 0600). Without it, `rafiki user create` both mints the user AND logs
+  this machine in as them — the plaintext token is shown exactly once either
+  way, since the daemon stores only its digest and cannot show it again.
 - **`--all`** (list only): include tombstoned (removed) users. Without it,
   `list` shows only active users — the ones a token could still authenticate
   as. A tombstoned user still resolves in historical conversation/turn
   attribution (`user rm` never deletes the row), so `--all` is what makes that
   history's names explicable.
 
-`~/.config/rafiki/token` is distinct from the older, now-unread
-`~/.config/rafiki/control.token`: nothing resolves the old path any more, so a
-leftover file there is inert, not a fallback.
+Token storage moved to per-profile files with client profiles (2026-09): the
+old global `~/.config/rafiki/token` (and the even older, already-unread
+`~/.config/rafiki/control.token`) are no longer read at all — see README's
+"Profiles" section for the schema and resolution order.
 
 **This only bites on a remote (`https://`) daemon, not the local dev loop.**
-`mustDial` (`cmd/rafiki/cli_helpers.go`) reads `~/.config/rafiki/token`
-(`paths.TokenFromEnv()`) ONLY on the branch that dials a remote `RAFIKI_URL`
-over TLS; the default local path (`client.Dial(socket)`, no `RAFIKI_URL` set)
-reads no token at all, because UDS connections skip auth entirely and are
-never bootstrap-restricted. So a stale token file cannot be why a *local*
-`rafiki user create` fails on a fresh daemon — that path is structurally
-unaffected by the file's contents. It genuinely bites during the
-`kubectl port-forward` first-user sequence: a token file left over from a
-different (or wiped) remote daemon turns what should be a no-credential
-bootstrap dial into an authenticated one, which then fails `auth_invalid`. If
-`rafiki user create` unexpectedly refuses against a remote daemon you know is
-fresh, check that file before suspecting the daemon.
+`mustDial` (`cmd/rafiki/cli_helpers.go`) resolves the client's one profile
+(`pkg/profile`) and dials it: a profile with a `url` presents that profile's
+token file over TLS, a profile with a `socket` reads no token at all, because
+UDS connections skip auth entirely and are never bootstrap-restricted. So a
+stale token file cannot be why a *local* `rafiki user create` fails on a
+fresh daemon — that path is structurally unaffected by the file's contents.
+It genuinely bites during the `kubectl port-forward` first-user sequence: a
+token file left over from a different (or wiped) remote daemon turns what
+should be a no-credential bootstrap dial into an authenticated one, which
+then fails `auth_invalid`. If `rafiki user create` unexpectedly refuses
+against a remote daemon you know is fresh, check that profile's token file
+before suspecting the daemon.
 
 ## `stats`
 
@@ -172,6 +173,11 @@ serve concrete Anthropic ids — any OpenRouter-native id (a `provider/model`
 slash id, or a `~`-prefixed catalog alias) fails fast with an actionable
 error *before* any per-conversation work starts, rather than mid-batch.
 
+`rafikid agent` is a daemon-side CLI — it reads `RAFIKI_URL`/`RAFIKI_TOKEN`
+straight from `os.Getenv` (`cmd/rafikid/agent_cli.go`) and is unaffected by
+client profiles; the two variables are retired only for the `rafiki`
+**client** binary (see README's "Profiles" section).
+
 **Other flags:** `--force` (re-analyze even if already analyzed under this
 exact configuration), `--limit N` (cap conversations analyzed; 0 = profile
 default), `--out DIR` (write per-conversation JSON+markdown artifacts, plus
@@ -235,6 +241,10 @@ status to `dismissed`/`actioned`.
 
 None of these are required for `analyze --corpus DIR --compact` — that path
 needs no DSN, no proxy, and no API key.
+
+`RAFIKI_URL` and `RAFIKI_TOKEN` here are read directly by this daemon-side
+process from its own environment and are unaffected by client profiles —
+they are retired only for the `rafiki` client, not for `rafikid agent`.
 
 ## The dev loop
 
@@ -333,7 +343,8 @@ Launches a claude child via daraja on a matching executor:
    (up to 30 seconds).
 4. Prints `child_id`, `pid`, `pgid`, and `connected_at` (Unix ms epoch).
 
-Through `newConnectEndpoint` — honours `$RAFIKI_URL` for remote daemons. Requires
+Through `newConnectEndpoint` — honours the resolved profile for remote
+daemons (a profile with a `url`; see README's "Profiles" section). Requires
 a TCP control address on the target daemon (`RAFIKI_CONTROL_LISTEN` must be set);
 UDS-only daemons refuse with a clear diagnostic.
 

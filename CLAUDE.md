@@ -137,21 +137,43 @@
   not just the highest file on your branch. This has bitten once already, when
   `main` and `agent-platform` both claimed 13.
 
-- **Isolating a scratch daemon takes more than its own XDG dirs and DSN — `RAFIKI_URL`
-  overrides `--socket`.** `mustDial` (`cmd/rafiki/cli_helpers.go`) routes through
-  `remoteDialURL()` first: any **https://** `RAFIKI_URL` is treated as a remote control
-  plane and dialled over TLS, and the `-s`/`--socket` flag is never consulted. That
-  variable is commonly set in an interactive shell, so scratch-daemon work silently aims
-  at the production daemon; the giveaway is an error naming *TCP* while you are passing a
-  socket path, and the only thing stopping writes is that daemon's auth. `unset RAFIKI_URL`
-  belongs in every scratch recipe alongside `XDG_*` and `RAFIKI_DB`. Two related traps in
-  the same workflow: **the daemon does not migrate on startup**, so a freshly created
-  database is not usable — it logs `relation "conversations.child" does not exist` and
-  carries on degraded; and **`make check` reads the working tree**, so nothing may edit it
-  concurrently (a review subagent's scratch file produced a phantom
-  `pkg/tui [build failed]`). Capture the gate's status directly — `make check > log; echo $?`
-  — because `make check | tail` reports *tail's* exit code and will hide a lint failure
-  completely.
+- **Isolating a scratch daemon now means isolating a PROFILE, not an env var —
+  `RAFIKI_URL`/`--socket` no longer exist as ways to aim the client.** The
+  `RAFIKI_URL`-overrides-`--socket` footgun this entry used to describe is
+  gone along with the mechanism: `--socket` was deleted from `cmd/rafiki`
+  entirely, and `RAFIKI_URL` (with `RAFIKI_TOKEN`/`RAFIKI_SOCKET`/the three
+  `RAFIKI_DEFAULT_*` variables) is now a hard client-side error
+  (`profile.CheckRetiredEnv`) rather than a silently-winning override. A
+  client resolves exactly one profile (`pkg/profile`) — `-P` >
+  `$RAFIKI_PROFILE` > the `current-profile` pointer > bootstrap — so reaching
+  a scratch daemon now means giving it its own profile under an isolated
+  `XDG_CONFIG_HOME`, not exporting a variable:
+  `XDG_CONFIG_HOME=<scratch dir> rafiki profile add scratch --socket
+  <scratch-socket-path>` (then `-P scratch` or `RAFIKI_PROFILE=scratch` for
+  the rest of the session). Two still-true traps in the same workflow: **the
+  daemon does not migrate on startup**, so a freshly created database is not
+  usable — it logs `relation "conversations.child" does not exist` and
+  carries on degraded; and **`make check` reads the working tree**, so nothing
+  may edit it concurrently (a review subagent's scratch file produced a
+  phantom `pkg/tui [build failed]`). Capture the gate's status directly —
+  `make check > log; echo $?` — because `make check | tail` reports *tail's*
+  exit code and will hide a lint failure completely.
+
+- **The client resolves exactly one profile, and `pkg/profile` is the only
+  resolver.** `-P` > `RAFIKI_PROFILE` > the `current-profile` pointer > a
+  bootstrap that writes a `default` profile the first time. There is no
+  fallback chain past that: `RAFIKI_URL`, `RAFIKI_TOKEN`, `RAFIKI_SOCKET` and
+  the three `RAFIKI_DEFAULT_*` variables are hard errors client-side
+  (`profile.CheckRetiredEnv`), because each was a global and a global cannot
+  serve two daemons — which is how `rafiki user create` used to clobber the
+  other daemon's token. **`rafiki executor serve` is exempt and the exemption
+  is structural, not coded:** it never calls `mustDial`/`newConnectEndpoint`,
+  so it never resolves a profile and never hits the guard, and it keeps
+  deriving `--connect` from `RAFIKI_URL` on a headless box that has no profile.
+  Do not add the guard to the root command's `PersistentPreRunE` — that breaks
+  the executor. Scoping rule for new settings: **per-profile is the default;
+  global is for properties of the person that no daemon influences**
+  (`configKey.global`, and only currency qualifies today).
 
 - **No `Co-Authored-By` trailers in commit messages.**
 - **`make check` (vet + golangci-lint + unit tests, `-race`) is the only gate — there is no CI on this repo.** Run it before considering anything done.
@@ -1290,18 +1312,27 @@
   filter's guarantee is about what a USER is offered, test the rows it
   produces, not the sets it selects.
 
-- **`make check` was not hermetic against an exported `RAFIKI_URL`, and passing
-  `--socket` is not the defence it looks like.** `test/integration`'s CLI tests
-  spawn the real `rafiki` binary, which inherits the shell's environment — and
-  `RAFIKI_URL` OVERRIDES `--socket` outright (`mustDial` consults
-  `remoteDialURL()` first and never reads the flag), so the whole suite aimed
-  at whatever daemon that variable named. The giveaway is a failure naming TCP
-  while a socket path sits right there in the argv. `cliCmd` blanks
-  `RAFIKI_URL`/`RAFIKI_TOKEN` per invocation, the way `noRealProviderEnv` in
-  `db_child_state_test.go` already did for provider credentials; any NEW test
-  that execs the CLI belongs on that helper. It failed safe here only because
-  no token was exported — with one set, `rafiki create --detached` in a test
-  would have spawned real children on the named daemon.
+- **`make check` was not hermetic against an exported `RAFIKI_URL` — that gap
+  is closed differently now than it looks from this entry's original title.**
+  `test/integration`'s CLI tests spawn the real `rafiki` binary, which
+  inherits the shell's environment. Before client profiles, `RAFIKI_URL`
+  silently OVERRODE `--socket` (`mustDial` consulted `remoteDialURL()` first
+  and never read the flag), so an exported `RAFIKI_URL` aimed the whole suite
+  at whatever daemon it named, with a TCP failure as the only giveaway.
+  `RAFIKI_URL` is a hard client-side error now (`profile.CheckRetiredEnv`), so
+  a missing blank in a test harness FAILS LOUDLY — every `rafiki` invocation
+  in the suite dies immediately naming the stray variable — rather than
+  silently redirecting to the wrong daemon. The isolation helper is `cliCmd`
+  (`test/integration/cli_integration_test.go`), which blanks
+  `RAFIKI_URL`/`RAFIKI_TOKEN`/`RAFIKI_SOCKET`/the three `RAFIKI_DEFAULT_*`
+  variables AND `RAFIKI_PROFILE` (live, not retired — an ambient value naming
+  a profile absent from the scratch manifest would kill the subprocess via
+  `mustProfile`'s `os.Exit(2)`), then points `XDG_CONFIG_HOME` at a fresh
+  per-call scratch profile naming the test daemon's socket; unit tests use the
+  sibling `isolateProfiles` helper (`cmd/rafiki/cmd_profile_test.go`) for the
+  same isolation without a subprocess. Any NEW test that execs the CLI belongs
+  on `cliCmd`; any new in-process `cmd/rafiki` test belongs on
+  `isolateProfiles`.
 
 - **The Connect UDS is served only when the proxy face comes up** (`main.go`'s
   `if face != nil && face.Control != nil`), so ANY proxy-listener failure
