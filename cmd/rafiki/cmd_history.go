@@ -5,13 +5,11 @@ package main
 import (
 	"fmt"
 	"io"
-	"net/http"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 )
 
 // renderHistory writes durable-tier events as plain text. It is separated from
@@ -54,33 +52,24 @@ func newHistoryCmd() *cobra.Command {
 }
 
 func runHistory(cmd *cobra.Command, args []string) error {
-	p, err := resolveProfile(cmd)
+	// newConnectEndpoint is the same resolver every other Connect-based
+	// command (attach, tui) uses: it correctly handles both socket profiles
+	// (dials the profile's own Connect UDS) and URL profiles (dials the
+	// remote TLS endpoint), with the bearer credential attached via
+	// bearerTransport. Building the endpoint here by hand (reading p.URL
+	// directly and falling back to a hardcoded :8035) meant a socket
+	// profile's `history` silently queried whatever daemon happened to be
+	// listening on :8035 instead of the profile's own daemon.
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
-	// The Connect control plane is mounted INSIDE the proxy face's handler
-	// tree (cmd/rafikid/proxy.go), and that tree is served on the shared TLS
-	// listener too — so a remote profile's URL reaches the same handlers the
-	// local face serves, and no local/remote distinction is needed. TLS trust
-	// is the system root CA pool (net/http's default, same as
-	// pkg/client.DialURL's).
-	base := p.URL
-	if base == "" {
-		base = defaultControlURL
-	}
-	controlClient := rafikiv1connect.NewControlClient(http.DefaultClient, base)
 
 	req := connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: args[0]})
-	if p.Token != "" {
-		req.Header().Set("Authorization", "Bearer "+p.Token)
-	}
-
-	resp, err := controlClient.GetHistory(cmd.Context(), req)
+	resp, err := ep.control().GetHistory(cmd.Context(), req)
 	if err != nil {
-		return fmt.Errorf("get history: %w", err)
+		return diagnoseConnectError(err, ep.describe)
 	}
 	renderHistory(cmd.OutOrStdout(), resp.Msg.Events)
 	return nil
 }
-
-const defaultControlURL = "http://127.0.0.1:8035"
