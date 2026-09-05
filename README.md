@@ -209,8 +209,8 @@ process stays resident.
 
 The kinds have **different model universes**, and `--model` completion is scoped
 to the one you picked. The scoping lives daemon-side now (`sourcesForKind` in
-`cmd/rafikid`), and completion asks the daemon the CLI is actually pointed at
-(`RAFIKI_URL` included), so against a remote daemon it offers that daemon's
+`cmd/rafikid`), and completion asks the daemon named by the resolved profile,
+so against a remote daemon (a profile with a `url`) it offers that daemon's
 models, not the ones resolvable on your laptop. A `fundi` child routes
 through this module, so it takes
 concrete Anthropic ids, `<family>-latest` aliases and any OpenRouter slash id. A
@@ -275,8 +275,9 @@ executor was excluded and why.
 rafiki daraja launch --cwd <dir> --model <provider/model> [--executor <selector>] [--resume <session-id>]
 ```
 
-The command goes through `newConnectEndpoint`, so `$RAFIKI_URL` is honoured —
-it reaches a remote daemon the same way every other `rafiki` verb does.
+The command goes through `newConnectEndpoint`, so the resolved profile is
+honoured — it reaches a remote daemon the same way every other `rafiki` verb
+does (see [Profiles](#profiles)).
 The launched daraja dials back to either the TCP address (`$RAFIKI_CONTROL_LISTEN`)
 or the local Unix socket path, depending on whether the daemon has a TCP listener.
 
@@ -779,10 +780,15 @@ rafiki follows the XDG base directories:
 
 | | Default | Override |
 |---|---|---|
-| socket | `~/.local/state/rafiki/controller.sock` | `$XDG_RUNTIME_DIR`, or `$RAFIKI_SOCKET` |
+| socket | `~/.local/state/rafiki/controller.sock` | `$XDG_RUNTIME_DIR` |
 | records | `~/.local/share/rafiki/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
-| config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `presets.json`) | `$XDG_CONFIG_HOME` |
+| config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `presets.json`, `profiles.toml`) | `$XDG_CONFIG_HOME` |
+
+This is where the **daemon** binds and reads from. A client reaches a
+different daemon by naming it in a profile (`rafiki profile add <name>
+--socket <path>` or `--url <https-url>`), not by overriding these paths —
+see [Profiles](#profiles).
 
 **Instruction files come from two machines.** The user-global instructions file
 (`$RAFIKI_INSTRUCTIONS`, else `~/.config/rafiki/instructions.md`) belongs to
@@ -794,6 +800,70 @@ rather than reading a path that does not exist there.
 
 Its launchd/systemd service identity is `dev.graveland.rafiki` / `rafiki`.
 
+## Profiles
+
+The `rafiki` client resolves exactly one **profile** per invocation — a name
+bound to the one daemon it should talk to and the credential that daemon
+needs. Before profiles, the endpoint (`--socket`/`RAFIKI_URL`) and the
+credential (`RAFIKI_TOKEN`/`~/.config/rafiki/token`) were independent
+globals, so aiming at a second daemon meant coordinating both by hand — and
+`rafiki user create` would clobber whichever token file the other daemon's
+client happened to be using. **`--socket` is gone**: there is no client-side
+flag or environment variable left that names a daemon, only profiles.
+
+A profile is a `[profile.<name>]` table in `~/.config/rafiki/profiles.toml`
+(hand-edited, or written by `rafiki profile add`):
+
+```toml
+[profile.work]
+socket = "/run/user/1000/rafiki/controller.sock"  # a local daemon...
+# url    = "https://rafiki.example.net"           # ...or a remote one (needs a token)
+proxy  = "http://localhost:8035"                  # rafiki claude's proxy face
+kind   = "fundi"                                   # rafiki create's defaults
+model  = "anthropic/claude-sonnet-4-5"
+preset = "quick"
+labels = { team = "infra" }
+```
+
+Exactly one of `socket`/`url` is required; everything else is optional. Each
+profile also owns its own token file
+(`~/.config/rafiki/profiles/<name>/token`, 0600) and its own presets
+(`~/.config/rafiki/profiles/<name>/presets.json`) — two daemons' model
+universes and credentials need not overlap.
+
+**Resolution order**, first match wins:
+
+1. `-P`/`--profile <name>` — for one command.
+2. `$RAFIKI_PROFILE` — for one shell. This variable is still live (unlike the
+   retired ones below); it's the environment-variable spelling of `-P`.
+3. The `current-profile` pointer file, written by `rafiki profile use <name>`.
+4. **Bootstrap.** A machine with no `profiles.toml` at all gets one written
+   automatically on first use — a `default` profile pointing at the local XDG
+   socket (`http://localhost:8035` as its proxy) — with a one-line notice on
+   stderr. An explicit `-P`/`$RAFIKI_PROFILE` bypasses bootstrap: naming a
+   profile before any manifest exists is an error pointing at `rafiki profile
+   add`, not an autocreated `default` that might not be the daemon you meant.
+
+```bash
+rafiki profile add work --socket ~/.local/state/rafiki/controller.sock --proxy http://localhost:8035
+rafiki profile add prod --url https://rafiki.example.net --token "$TOKEN"
+rafiki profile use work
+rafiki profile list
+rafiki profile show prod
+rafiki -P prod status              # override for one command
+RAFIKI_PROFILE=prod rafiki status  # override for one shell
+```
+
+`RAFIKI_URL`, `RAFIKI_TOKEN`, `RAFIKI_SOCKET`, `RAFIKI_DEFAULT_MODEL`,
+`RAFIKI_DEFAULT_PRESET` and `RAFIKI_DEFAULT_LABELS` no longer configure the
+**client** at all — each is a hard error naming the offending variable
+(`profile.CheckRetiredEnv`) if it's set while running `rafiki`, rather than
+being silently ignored or (worse) silently outranking the profile. They keep
+their old meaning for `rafikid` itself, which reads them from its own service
+environment, and for the two headless, profile-exempt commands `rafiki
+executor serve` / `rafiki executor service install` — see
+[Environment](#environment).
+
 ## Environment
 
 rafiki's variables are `RAFIKI_`-prefixed. Older spellings (`FUNDI_*`, and
@@ -804,11 +874,9 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 
 | | |
 |---|---|
-| `RAFIKI_SOCKET` | override the controller socket path |
-| `RAFIKI_DEFAULT_MODEL` | model used when `rafiki create` gets no `--model`. Optional: without it (and without a preset model), create falls back to the model you last spawned for that kind, remembered in the client state file |
+| `RAFIKI_PROFILE` | client-side: selects a profile for one shell (see [Profiles](#profiles)); `-P`/`--profile` overrides it for one command |
+| — | `rafiki create`'s defaults for a bare invocation, in order: `--model`/`--preset`/`--label`, then the resolved profile's `model`/`preset`/`labels`, then (model only) the model you last spawned for that kind, remembered in the client state file, then the daemon's own default |
 | — | other display preferences (e.g. a currency `rafiki list`/the TUI convert cost figures into) live in that same client state file; view or change them with `rafiki config show` / `rafiki config set` |
-| `RAFIKI_DEFAULT_PRESET` | preset used when `--preset` is not given |
-| `RAFIKI_DEFAULT_LABELS` | comma-separated `k=v` label defaults |
 | `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/rafiki/instructions.md`) |
 | `RAFIKI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/rafiki/skills`). Entries may be symlinks (e.g. into `~/.claude/skills` or a plugin cache); discovery follows them |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
@@ -820,8 +888,9 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only. **Requires `RAFIKI_DB`** — control-plane identity is row-backed, and a listener without a user table is fatal at startup |
 | `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
 | `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
-| `RAFIKI_URL` | client-side: the one dial target, `https://host[:port]` (port defaults to 443 when omitted). Reaches the LLM proxy and, over TLS, the control plane's `/control` upgrade (`client.IsRemoteURL` — `https://` only). Unset or `http://` means local: the loopback proxy face and, for control-plane commands, the UDS. Wins over `RAFIKI_SOCKET` when it names a remote control plane. `tls://` is retired — always spell a remote daemon as `https://`. `rafiki create --kind claude` requires an explicit `--cwd` against a remote `RAFIKI_URL`: claude is a literal subprocess of `rafikid` itself (`cmd.Dir = cwd`), so the default (this process's own working directory) names a path on the CLIENT that almost certainly doesn't exist on the remote daemon's filesystem — `Controller.Spawn` stats `cwd` server-side for that kind only. `--kind fundi` (the default) has no such requirement: its filesystem access, if any, always goes through whichever executor gets bound — by default the session executor `rafiki create` starts on the CLIENT's own machine, rooted at `--cwd` (or the client's `os.Getwd()` when omitted) — so `cwd` is never checked against the daemon's own disk. |
-| `RAFIKI_TOKEN` | client-side: the one bearer credential, presented as the proxy's `Authorization`/`X-Rafiki-Token` and the control plane's `ctrl_auth` token. Unset falls back to `~/.config/rafiki/token` (0600), written by `rafiki user create` |
+| `RAFIKI_URL` | **daemon-side.** Points an `rafikid`-spawned `claude`/`pi` child at an external rafiki instance instead of the embedded proxy face — useful for aiming a whole machine's children at a shared capture server. Read from the daemon's own service environment; its token comes from `RAFIKI_TOKEN` alongside it. Client-side this name is **retired**: setting it while running `rafiki` is a hard error (`profile.CheckRetiredEnv`) — a profile's `url` or `socket` names the daemon a client dials. Exempt: `rafiki executor serve`/`rafiki executor service install`, which still derive `--connect` from it (see [Executor](#executor)) |
+| `RAFIKI_TOKEN` | **daemon-side.** The bearer credential `rafikid` presents to the `RAFIKI_URL` proxy above. Client-side this name is **retired**: a profile's own token file (`~/.config/rafiki/profiles/<name>/token`) supplies the client's credential instead |
+| `RAFIKI_DEFAULT_MODEL` | **daemon-side.** The model `rafikid`'s own proxy face falls back to when a request names none. Client-side this name is **retired**: `rafiki create`'s default now comes from the resolved profile's `model` (see the defaults chain above), never from this variable |
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
@@ -987,11 +1056,12 @@ in another shell, while `make run` is still up:
 go run ./cmd/rafiki user create dev
 ```
 
-That mints a token and writes it to `~/.config/rafiki/token` (0600); `make
-claude`'s default `RAFIKI_TOKEN` falls back to that file with nothing further
-to export. A busy port is a hard error rather than a fallback — the address is
-a contract, and silently landing elsewhere would mean talking to whatever
-*did* claim it.
+That mints a token and writes it to the resolved profile's token file
+(`rafiki profile show` names the path; a bare `go run ./cmd/rafiki` with no
+profiles yet bootstraps a `default` one first); `rafiki claude` (and so `make
+claude`) picks it up from there with nothing further to export. A busy port
+is a hard error rather than a fallback — the address is a contract, and
+silently landing elsewhere would mean talking to whatever *did* claim it.
 
 Because `make run` is now the daemon, it and the installed `rafiki service`
 cannot both hold the port. Use one or the other.
@@ -1005,9 +1075,10 @@ psql 'postgres://postgres:postgres@localhost:5433/rafiki_live' \
 ```
 
 `make claude` is a thin wrapper over `rafiki claude`, which preflights
-`/healthz` and fails with a hint if the server isn't up. `RAFIKI_URL` /
-`RAFIKI_TOKEN` / `RAFIKI_MODEL` retarget it, and everything after `--` is passed
-to claude verbatim.
+`/healthz` and fails with a hint if the server isn't up. It targets the
+resolved profile's `proxy` and token by default; `--url`/`--token` override
+those for one invocation, and `RAFIKI_MODEL` still sets the default `--model`.
+Everything after `--` is passed to claude verbatim.
 
 `--model` accepts anything the proxy can resolve: a concrete id, a
 `<family>-latest` alias, or an OpenRouter slash id. That works because the
@@ -1105,12 +1176,18 @@ The cockpit is a bubbletea program living in `pkg/tui/`, built into the `rafiki`
 binary itself — there is no separate `rafiki-attach` artifact. It speaks Connect,
 so no bun, submodule, or separate build step is involved.
 
-It reaches the same daemon every other `rafiki` verb does: an **https://**
-`RAFIKI_URL` attaches to that remote daemon over TLS (authenticated with
-`RAFIKI_TOKEN`, or `<ConfigDir>/token`), and anything else uses the local unix
-socket at `<RuntimeDir>/connect.sock`, whose 0600 mode inside a 0700 directory
-is its credential. A remote endpoint with no token is refused up front rather
-than after a round trip — the cockpit's plane has no bootstrap mode.
+It reaches the same daemon every other `rafiki` verb does: the resolved
+profile. A profile with a `url` attaches to that remote daemon over TLS
+(authenticated with the profile's token), and one with a `socket` uses the
+local unix socket at `<RuntimeDir>/connect.sock`, whose 0600 mode inside a
+0700 directory is its credential. A remote profile with no token is refused
+up front rather than after a round trip — the cockpit's plane has no
+bootstrap mode. To attach to a second, remote daemon:
+
+```bash
+rafiki profile add prod --url https://rafiki.example.net --token "$TOKEN"
+rafiki -P prod attach
+```
 
 ```bash
 make build          # builds rafikid + rafiki, including the in-process cockpit

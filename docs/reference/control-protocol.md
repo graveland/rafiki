@@ -88,26 +88,29 @@ the same HTTP listener as the proxy faces, **and on a dedicated local unix
 socket**. The JSON-Lines frame protocol in the rest of this document is
 unchanged and remains the path `rafiki attach` and the existing CLI use.
 
-Reachable at whatever `RAFIKI_URL` already names — the local loopback proxy
-face (`http://127.0.0.1:8035` by default) or a remote daemon's TLS listener
-(`https://...`), since `cmd/rafikid` mounts the same handler tree on both.
+Reachable at whatever the resolved client profile names — the local loopback
+proxy face (`http://127.0.0.1:8035` by default) for a profile with a
+`socket`, or a remote daemon's TLS listener (`https://...`) for one with a
+`url`, since `cmd/rafikid` mounts the same handler tree on both.
 
 **Which one the cockpit picks:** `rafiki attach` resolves its endpoint through
-`newConnectEndpoint` (`cmd/rafiki/connectclient.go`), which applies the same
-`remoteDialURL()` gate `mustDial` does — an **https://** `RAFIKI_URL` is a
-remote daemon and anything else (an http:// loopback face URL, or none) is the
-local socket. It used to hardcode the socket, so an operator with `RAFIKI_URL`
-set got a working `rafiki list` and a cockpit that dialled a socket on their
-own laptop.
+`newConnectEndpoint` (`cmd/rafiki/connectclient.go`), which resolves the
+client's one profile (`pkg/profile`) exactly as `mustDial` does — a profile
+with a `url` is a remote daemon, one with a `socket` is local. There is no
+`RAFIKI_URL`/`--socket` fallback any more: both are hard errors client-side
+(`profile.CheckRetiredEnv`), because the failure they used to allow was
+silent — an exported `RAFIKI_URL` used to outrank a local `--socket` with no
+message, so `rafiki list` and the cockpit could resolve to two different
+daemons in the same shell with nothing to say so.
 
-Remote calls carry `Authorization: Bearer <RAFIKI_TOKEN>`, attached by a
-`RoundTripper` on the client's transport rather than per call site — the
-cockpit's `*http.Client` is handed to `pkg/tui` and never seen again, so a
-per-call header would authenticate the pre-flight and leave `StreamEvents`
-unauthenticated, failing only once the alt screen is already up. A remote
-endpoint with no token fails before the round trip: this plane has no
-bootstrap mode (no user-create RPC), so an absent credential can only ever
-produce a 401.
+Remote calls carry `Authorization: Bearer <token>` — the resolved profile's
+own token — attached by a `RoundTripper` on the client's transport rather
+than per call site — the cockpit's `*http.Client` is handed to `pkg/tui` and
+never seen again, so a per-call header would authenticate the pre-flight and
+leave `StreamEvents` unauthenticated, failing only once the alt screen is
+already up. A profile naming a remote daemon with no token fails before the
+round trip: this plane has no bootstrap mode (no user-create RPC), so an
+absent credential can only ever produce a 401.
 
 **Transport, remote:** HTTP/1.1. The shared TLS listener advertises `http/1.1`
 only in ALPN (`execpool.ALPNProtocols`) because net/http can hijack an
