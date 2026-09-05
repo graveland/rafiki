@@ -632,13 +632,19 @@ func TestCorruptOrMissingStateFallsBackToDefaults(t *testing.T) {
 func TestClosingThePanelSavesTheQuery(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	c := openQuery(t)
+	// openQuery's cockpit is built with no ProfileName (unreachable in
+	// production -- both real NewCockpit call sites always set one), and
+	// saveModelView/loadModelView are now no-ops for an empty profile name:
+	// writing per-profile state into the GLOBAL document on an unset name
+	// would be exactly the leak Scope's own doc comment claims can never
+	// happen. Give it a name here so this test exercises the real,
+	// production-reachable path.
+	c.profileName = "test"
 	seekCell(t, c, queryRow{field: colAgentic}, colSortCell)
 	c.handleKey(keyMsg("space"))
 
 	c.handleKey(keyMsg("esc"))
 
-	// openQuery's cockpit was built with no ProfileName, so it saved to the
-	// global document (Scope{Profile: ""}) -- match that here.
 	got := loadModelView(c.profileName)
 	var found bool
 	for _, k := range got.keys {
@@ -648,6 +654,26 @@ func TestClosingThePanelSavesTheQuery(t *testing.T) {
 	}
 	if !found {
 		t.Error("the query was not persisted when the panel closed")
+	}
+}
+
+// TestModelViewStoreIsANoOpForAnEmptyProfileName pins Fix 8: an empty
+// profileName must never read or write the GLOBAL clientstate document.
+// saveModelView must no-op, and loadModelView must fall back to the default
+// view rather than whatever (unrelated) data happens to live in the global
+// document's ModelView section.
+func TestModelViewStoreIsANoOpForAnEmptyProfileName(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	v := defaultModelView()
+	v.keys = []sortKey{{field: colAgentic, desc: true}}
+	saveModelView("", v)
+
+	got := loadModelView("")
+	for _, k := range got.keys {
+		if k.field == colAgentic {
+			t.Fatal("saveModelView(\"\", ...) persisted state despite the empty profile name")
+		}
 	}
 }
 
