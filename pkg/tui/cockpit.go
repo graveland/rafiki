@@ -222,6 +222,12 @@ type Options struct {
 	// so a remembered choice from one profile is a wrong answer for another.
 	// Currency is unaffected: it stays global regardless of profile.
 	ProfileName string
+	// ShowProfileBadge names ProfileName in the footer. Decided by the caller,
+	// not here: this package must not read the client's profile manifest to
+	// count how many are configured (the same "2+ profiles" threshold
+	// cmd/rafiki's profileIndicator applies to table output) -- it only knows
+	// what it is told.
+	ShowProfileBadge bool
 }
 
 // SpawnDefaults prefills the create form. Empty fields keep the form's own
@@ -358,6 +364,9 @@ type Cockpit struct {
 	// profileName scopes ModelView/LastModel reads and writes. See
 	// Options.ProfileName.
 	profileName string
+	// showProfileBadge names profileName in the footer. See
+	// Options.ShowProfileBadge.
+	showProfileBadge bool
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -409,6 +418,7 @@ func NewCockpit(opts Options) *Cockpit {
 		currency:         clientstate.LoadScoped(clientstate.Scope{}).Currency,
 		executorSelector: opts.ExecutorSelector,
 		profileName:      opts.ProfileName,
+		showProfileBadge: opts.ShowProfileBadge,
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
@@ -1826,7 +1836,11 @@ func (c *Cockpit) View() tea.View {
 	// response. The badge is reversed out so it reads as a state rather than as
 	// more footer text, and each pane carries an accent edge (below) so the
 	// answer is also where you are looking.
-	footer := styleFocusBadge.Render(" "+c.focus.String()+" ") + "  " + c.footerHints()
+	footer := styleFocusBadge.Render(" " + c.focus.String() + " ")
+	if c.showProfileBadge {
+		footer += "  " + styleFocusBadge.Render(" "+c.profileName+" ")
+	}
+	footer += "  " + c.footerHints()
 	// Position goes bottom-RIGHT, on its own end of the line: a scroll readout
 	// that shares the left edge with the key hints moves every time the hints
 	// change, and a number that moves is a number you have to hunt for. The

@@ -72,6 +72,20 @@ func tailDisplayWidth() int {
 	return 100
 }
 
+// profileIndicator returns a one-line header naming the profile, or "" when
+// there is nothing to disambiguate.
+//
+// Only when TWO OR MORE profiles are configured: one profile means no
+// ambiguity, and a noise line above every table for someone who will never
+// switch costs something and buys nothing. Never emitted into JSON — a
+// machine-readable shape must not carry a human-readable hint.
+func profileIndicator(name string) string {
+	if !multipleProfilesConfigured() {
+		return ""
+	}
+	return "profile: " + name + "\n"
+}
+
 // renderList writes a list of ChildSummary either as JSON or as a table.
 func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, useColor bool, flat bool) error {
 	if mode == outputJSON {

@@ -63,6 +63,9 @@ func runList(cmd *cobra.Command, _ []string) error {
 	}
 
 	mode, useColor := outputOpts(cmd)
+	if mode == outputTable {
+		fmt.Fprint(os.Stdout, profileIndicator(mustProfile(cmd).Name))
+	}
 	flat, _ := cmd.Flags().GetBool("flat")
 	return renderList(os.Stdout, children, mode, useColor, flat)
 }

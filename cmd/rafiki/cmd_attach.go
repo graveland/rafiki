@@ -172,11 +172,12 @@ func runTUIForChild(cmd *cobra.Command, ep connectEndpoint, childID string) erro
 	}
 	defer restoreLogging()
 	m := tui.NewCockpit(tui.Options{
-		HTTPClient:  ep.httpClient,
-		BaseURL:     ep.baseURL,
-		ChildID:     childID,
-		Subject:     subjectFor(childID),
-		ProfileName: mustProfile(cmd).Name,
+		HTTPClient:       ep.httpClient,
+		BaseURL:          ep.baseURL,
+		ChildID:          childID,
+		Subject:          subjectFor(childID),
+		ProfileName:      mustProfile(cmd).Name,
+		ShowProfileBadge: multipleProfilesConfigured(),
 	})
 	// Run returns the final model too; the cockpit holds all state worth
 	// keeping, so it is discarded.

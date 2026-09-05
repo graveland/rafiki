@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -134,6 +135,37 @@ func TestRenderList_JSON(t *testing.T) {
 	// Pretty-printed JSON has a space after the colon.
 	if !strings.Contains(out, `"childId": "c_1"`) {
 		t.Fatalf("JSON output: %s", out)
+	}
+}
+
+func TestProfileIndicatorOnlyAppearsWhenThereIsAChoice(t *testing.T) {
+	isolateProfiles(t)
+
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"only": {Name: "only", Socket: "/s"},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if got := profileIndicator("only"); got != "" {
+		t.Fatalf("indicator with one profile = %q, want empty", got)
+	}
+
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"work":     {Name: "work", Socket: "/s"},
+		"personal": {Name: "personal", URL: "https://h"},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got := profileIndicator("work")
+	if !strings.Contains(got, "work") {
+		t.Fatalf("indicator with two profiles = %q, want it to name the profile", got)
+	}
+}
+
+func TestProfileIndicatorIsSilentWithNoManifest(t *testing.T) {
+	isolateProfiles(t)
+	if got := profileIndicator("anything"); got != "" {
+		t.Fatalf("indicator with no manifest = %q, want empty", got)
 	}
 }
 

@@ -74,6 +74,16 @@ func completeProfileNames(toComplete string) []string {
 	return out
 }
 
+// multipleProfilesConfigured reports whether 2+ profiles exist -- the
+// threshold both profileIndicator (table output) and the TUI footer badge use
+// to decide whether naming the active profile disambiguates anything. A
+// missing or unreadable manifest is "no", the same as one profile: nothing to
+// choose between.
+func multipleProfilesConfigured() bool {
+	set, err := profile.Load()
+	return err == nil && len(set.Profiles) >= 2
+}
+
 // resetProfileCache clears the once-per-process resolution. Tests only: each
 // test case supplies its own manifest, and a sync.Once shared across them
 // would make the first case's profile win for the whole package.
