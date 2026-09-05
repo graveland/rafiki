@@ -122,6 +122,53 @@ func TestLaunchTimesOutAndEvictsIfNoReverseDialArrives(t *testing.T) {
 	}
 }
 
+// TestLaunchUnregistersItsOnConnectCallback proves Launch's one-shot
+// registration does not accumulate: without unsubscribing, every claude spawn
+// registers one closure on Pool.onConnect that lives forever after firing,
+// growing the list by one per spawn and costing every SUBSEQUENT daraja
+// connect one dead call per prior spawn — see the KNOWN, ACCEPTED LEAK note
+// launch.go used to carry. Covers both exit paths: a successful connect and a
+// timeout.
+func TestLaunchUnregistersItsOnConnectCallback(t *testing.T) {
+	reg := NewRegistry()
+	pool := New(reg)
+
+	connecting := &fakeExecPool{client: &fakeAdminClient{
+		launchFn: func(ctx context.Context, req *connect.Request[adminpb.LaunchRequest]) (*connect.Response[adminpb.LaunchResponse], error) {
+			go pool.FireConnect(req.Msg.GetChildId())
+			return connect.NewResponse(&adminpb.LaunchResponse{Pid: 1, Pgid: 1}), nil
+		},
+	}}
+	timingOut := &fakeExecPool{client: &fakeAdminClient{
+		launchFn: func(ctx context.Context, req *connect.Request[adminpb.LaunchRequest]) (*connect.Response[adminpb.LaunchResponse], error) {
+			return connect.NewResponse(&adminpb.LaunchResponse{Pid: 1, Pgid: 1}), nil
+		},
+	}}
+
+	for i, execPool := range []*fakeExecPool{connecting, connecting, timingOut, connecting} {
+		if _, err := Launch(context.Background(), LaunchParams{
+			ExecPool:   execPool,
+			Pool:       pool,
+			Registry:   reg,
+			DialAddr:   "/tmp/whatever.sock",
+			ExecutorID: "exec-1",
+			ChildID:    "c1",
+			Cwd:        "/tmp",
+			Spec:       validSpec(),
+			Timeout:    100 * time.Millisecond,
+		}); err != nil && execPool != timingOut {
+			t.Fatalf("Launch #%d: %v", i, err)
+		}
+	}
+
+	pool.onConnectMu.Lock()
+	got := len(pool.onConnect)
+	pool.onConnectMu.Unlock()
+	if got != 0 {
+		t.Fatalf("Pool.onConnect holds %d callbacks after 4 Launch calls all returned, want 0", got)
+	}
+}
+
 func TestLaunchRejectsASpecWithNoClaudeParams(t *testing.T) {
 	reg := NewRegistry()
 	pool := New(reg)

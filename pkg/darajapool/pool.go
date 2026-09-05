@@ -62,7 +62,8 @@ type Pool struct {
 	relayHolders map[string]*relayHolder // childID → relay holder (owned here)
 
 	onConnectMu    sync.Mutex
-	onConnect      []func(childID string)
+	onConnect      map[uint64]func(childID string)
+	nextOnConnect  uint64
 	onDisconnectMu sync.Mutex
 	onDisconnect   []func(childID string)
 }
@@ -73,7 +74,7 @@ func New(reg *Registry) *Pool {
 		reg:          reg,
 		conns:        make(map[string]*liveConn),
 		relayHolders: make(map[string]*relayHolder),
-		onConnect:    make([]func(childID string), 0),
+		onConnect:    make(map[uint64]func(childID string)),
 		onDisconnect: make([]func(childID string), 0),
 	}
 }
@@ -146,11 +147,28 @@ func (p *Pool) Evict(childID string) {
 	}
 }
 
-// OnConnect registers a callback invoked when a daraja connects.
-func (p *Pool) OnConnect(fn func(childID string)) {
+// OnConnect registers a callback invoked when a daraja connects, and returns
+// an unsubscribe function that removes it.
+//
+// WireDaraja's two callbacks are permanent (the daemon's whole lifetime) and
+// may ignore the return value. Launch's registration is the reason this
+// exists: it needs the callback for exactly one childID, for exactly as long
+// as one Launch call is in flight, and every claude spawn registers one — a
+// permanent, unremovable list would grow by one per spawn forever and cost
+// FireConnect/installLive one dead call per PRIOR spawn on every subsequent
+// connect. Launch defers the returned unsubscribe immediately, regardless of
+// which of its three outcomes (connected, timeout, ctx done) it hits.
+func (p *Pool) OnConnect(fn func(childID string)) (unsubscribe func()) {
 	p.onConnectMu.Lock()
 	defer p.onConnectMu.Unlock()
-	p.onConnect = append(p.onConnect, fn)
+	id := p.nextOnConnect
+	p.nextOnConnect++
+	p.onConnect[id] = fn
+	return func() {
+		p.onConnectMu.Lock()
+		defer p.onConnectMu.Unlock()
+		delete(p.onConnect, id)
+	}
 }
 
 // OnDisconnect registers a callback invoked when a daraja disconnects.
@@ -167,7 +185,10 @@ func (p *Pool) OnDisconnect(fn func(childID string)) {
 // the real connection path (HandleConn / UpgradeHandler) instead.
 func (p *Pool) FireConnect(childID string) {
 	p.onConnectMu.Lock()
-	fns := p.onConnect
+	fns := make([]func(string), 0, len(p.onConnect))
+	for _, fn := range p.onConnect {
+		fns = append(fns, fn)
+	}
 	p.onConnectMu.Unlock()
 	for _, fn := range fns {
 		fn(childID)
@@ -212,7 +233,10 @@ func (p *Pool) installLive(childID string, lc *liveConn) {
 	// "displaced != nil" left that wait permanently unsatisfied, so it always
 	// ran out its 30s and evicted the very connection it was waiting on.
 	p.onConnectMu.Lock()
-	fns := p.onConnect
+	fns := make([]func(string), 0, len(p.onConnect))
+	for _, fn := range p.onConnect {
+		fns = append(fns, fn)
+	}
 	p.onConnectMu.Unlock()
 	for _, fn := range fns {
 		fn(childID)
