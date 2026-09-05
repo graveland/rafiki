@@ -43,11 +43,12 @@ func runResume(cmd *cobra.Command, args []string) error {
 	defer c.Close()
 
 	ctx := cmdCtx(cmd)
+	p := mustProfile(cmd)
 	var input string
 	if len(args) > 0 {
 		input = args[0]
 	}
-	childID, err := resolveTarget(ctx, c, input)
+	childID, err := resolveTarget(ctx, c, p.Name, input)
 	if err != nil {
 		return err
 	}
@@ -66,7 +67,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ctrl_resume: %s", client.FormatError(resp))
 	}
 
-	_ = setActive(childID)
+	_ = setActive(p.Name, childID)
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

@@ -8,15 +8,19 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
-// writePresetsFile writes a presets.json into dir and returns the path.
-func writePresetsFile(t *testing.T, dir string, content any) string {
+// writePresetsFile writes a profile's presets.json and returns the path.
+func writePresetsFile(t *testing.T, profileName string, content any) string {
 	t.Helper()
-	path := filepath.Join(dir, "presets.json")
+	path := profile.PresetsFile(profileName)
 	b, err := json.Marshal(content)
 	if err != nil {
 		t.Fatalf("marshal presets: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatalf("write presets: %v", err)
@@ -25,8 +29,11 @@ func writePresetsFile(t *testing.T, dir string, content any) string {
 }
 
 // setPresetsHome points HOME at dir and clears XDG_CONFIG_HOME so
-// paths.PresetsFile() resolves deterministically to dir/.config/rafiki/presets.json,
-// same as TestDefaultsFollowXDGSpec in internal/paths.
+// profile.PresetsFile(name) resolves deterministically under
+// dir/.config/rafiki/profiles/<name>/, same as TestDefaultsFollowXDGSpec in
+// internal/paths. The returned dir is rafiki's own config directory (still
+// needed by callers checking the legacy-file report, which reads
+// paths.PresetsFile() directly).
 func setPresetsHome(t *testing.T, dir string) string {
 	t.Helper()
 	t.Setenv("HOME", dir)
@@ -40,7 +47,7 @@ func TestLoadPresets_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	setPresetsHome(t, dir)
 
-	_, err := loadPresets()
+	_, err := loadPresets("test")
 	if err == nil {
 		t.Fatal("expected error for missing presets file")
 	}
@@ -84,7 +91,7 @@ func TestMissingPresets_ReportsLegacyPiLocation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := loadPresets()
+	_, err := loadPresets("test")
 	if err == nil {
 		t.Fatal("expected an error for a missing presets file")
 	}
@@ -116,12 +123,12 @@ func TestLoadPresets_LegacyFileIsNotReadButIsReported(t *testing.T) {
 			setPresetsHome(t, dir)
 
 			// The legacy file must not be loaded.
-			pf, err := loadPresets()
+			pf, err := loadPresets("test")
 			if err == nil {
 				t.Fatalf("legacy presets file was read; got %+v, want an error", pf)
 			}
 			// But the error must point at it, and at the fix.
-			if !containsAll(err.Error(), legacy, paths.PresetsFile(), "mv ") {
+			if !containsAll(err.Error(), legacy, profile.PresetsFile("test"), "mv ") {
 				t.Errorf("error %q should name the legacy file, the new file, and the mv to run", err.Error())
 			}
 		})
@@ -131,15 +138,16 @@ func TestLoadPresets_LegacyFileIsNotReadButIsReported(t *testing.T) {
 // TestLoadPresets_MalformedJSON checks that bad JSON returns a helpful error.
 func TestLoadPresets_MalformedJSON(t *testing.T) {
 	dir := t.TempDir()
-	configDir := setPresetsHome(t, dir)
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
+	setPresetsHome(t, dir)
+	path := profile.PresetsFile("test")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "presets.json"), []byte("{not valid json"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := loadPresets()
+	_, err := loadPresets("test")
 	if err == nil {
 		t.Fatal("expected parse error for malformed JSON")
 	}
@@ -148,10 +156,7 @@ func TestLoadPresets_MalformedJSON(t *testing.T) {
 // TestLoadPresets_ValidFile checks normal load.
 func TestLoadPresets_ValidFile(t *testing.T) {
 	dir := t.TempDir()
-	configDir := setPresetsHome(t, dir)
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	setPresetsHome(t, dir)
 	content := map[string]any{
 		"presets": map[string]any{
 			"cheap": map[string]any{
@@ -163,9 +168,9 @@ func TestLoadPresets_ValidFile(t *testing.T) {
 			},
 		},
 	}
-	writePresetsFile(t, configDir, content)
+	writePresetsFile(t, "test", content)
 
-	pf, err := loadPresets()
+	pf, err := loadPresets("test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,6 +182,40 @@ func TestLoadPresets_ValidFile(t *testing.T) {
 	}
 	if pf.Presets["smart"].Model != "anthropic/claude-opus-4-7" {
 		t.Errorf("smart.Model = %q", pf.Presets["smart"].Model)
+	}
+}
+
+// TestPresetsAreScopedToTheProfile checks that two profiles' presets files
+// never answer for each other.
+func TestPresetsAreScopedToTheProfile(t *testing.T) {
+	isolateProfiles(t)
+
+	writeJSON := func(path string, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeJSON(profile.PresetsFile("work"), `{"presets":{"fast":{"model":"claude-opus-5"}}}`)
+	writeJSON(profile.PresetsFile("personal"), `{"presets":{"fast":{"model":"openrouter/cheap"}}}`)
+
+	w, err := loadPresets("work")
+	if err != nil {
+		t.Fatalf("loadPresets(work): %v", err)
+	}
+	if got := w.Presets["fast"].Model; got != "claude-opus-5" {
+		t.Fatalf("work fast model = %q", got)
+	}
+
+	p, err := loadPresets("personal")
+	if err != nil {
+		t.Fatalf("loadPresets(personal): %v", err)
+	}
+	if got := p.Presets["fast"].Model; got != "openrouter/cheap" {
+		t.Fatalf("personal fast model = %q — one profile's presets answered for the other", got)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
 // Preset defines default model and label values applied by rafiki create --preset NAME.
@@ -26,7 +26,7 @@ type PresetsFile struct {
 // presets file" into an error that says what to do; they are never read and
 // never deleted. ~/.pi/agent held rafiki's own presets file inside pi's
 // directory; the pic- spelling predates the binary rename. Neither may equal
-// paths.PresetsFile(), or the "legacy file still exists" branch would fire
+// profile.PresetsFile(name), or the "legacy file still exists" branch would fire
 // against the user's actual current file and report their own presets as
 // stale — TestLoadPresets_LegacyFileIsNotReadButIsReported guards this.
 func legacyPresetsPaths() []string {
@@ -40,10 +40,10 @@ func legacyPresetsPaths() []string {
 	}
 }
 
-// loadPresets reads the presets file at paths.PresetsFile().
+// loadPresets reads the presets file at profile.PresetsFile(profileName).
 // Returns a specific error when the file is missing; otherwise wraps read/parse errors.
-func loadPresets() (*PresetsFile, error) {
-	path := paths.PresetsFile()
+func loadPresets(profileName string) (*PresetsFile, error) {
+	path := profile.PresetsFile(profileName)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
