@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -227,23 +226,20 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
-		// For --kind claude, cwd names a directory the DAEMON itself must
-		// fork a real subprocess in (cmd.Dir, pkg/child/runner.go) — defaulting
-		// to this process's cwd only makes sense against the local daemon; for
-		// a remote profile (one with a `url`) that's a different machine entirely, and left
-		// unchecked this silently ships a path that exists on the client and
-		// fails server-side with a "no such file or directory" that gives no
-		// hint the path was ever local.
-		//
-		// --kind fundi never forks a daemon-local process: its filesystem
-		// access, if any, goes through whichever executor gets bound — by
-		// default the session executor this same command starts below,
-		// rooted at exactly this cwd on THIS machine. So the client's own
-		// os.Getwd() is always the right default for fundi, local daemon or
-		// remote.
-		if kind != protocol.KindFundi && p.URL != "" {
-			return protocol.SpawnRequest{}, errors.New("--cwd is required when the profile names a remote daemon (there is no local directory to default to on that machine)")
-		}
+		// --kind claude used to fork a real subprocess ON THE DAEMON ITSELF
+		// (cmd.Dir, pkg/child/runner.go), so defaulting to this process's cwd
+		// only made sense against a local daemon — against a remote profile
+		// that path exists on the wrong machine entirely. daraja changed
+		// that: once the daemon has an executor pool, --kind claude routes
+		// through whichever executor gets bound — by default the session
+		// executor this same command starts below, rooted at exactly this
+		// cwd on THIS machine — exactly like --kind fundi already works, and
+		// for the same reason. The client's own os.Getwd() is now the right
+		// default for both kinds, local daemon or remote. It only misses for
+		// a remote daemon with NO executor pool at all, where claude still
+		// falls back to a subprocess on the daemon's own machine — a real but
+		// now-uncommon case, and the daemon's own spawn error names the
+		// missing path clearly rather than failing silently.
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {

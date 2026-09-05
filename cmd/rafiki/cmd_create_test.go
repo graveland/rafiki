@@ -83,33 +83,43 @@ func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
 	}
 }
 
-// A claude child is a literal subprocess of rafikid (cmd.Dir = req.Cwd,
-// pkg/child/runner.go) — its cwd genuinely must exist on the daemon's own
-// machine, so defaulting it from the CLIENT's cwd against a remote daemon
-// would silently ship a path valid only here.
-func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForClaude(t *testing.T) {
+// A claude child used to be a literal subprocess of rafikid (cmd.Dir =
+// req.Cwd, pkg/child/runner.go), so defaulting its cwd from the CLIENT
+// against a remote daemon would silently ship a path valid only here — this
+// was true before daraja existed. It no longer is: once the daemon has an
+// executor pool, --kind claude routes through whichever executor gets
+// bound — by default the session executor `rafiki create` starts on the
+// CLIENT's own machine, rooted at exactly this cwd — exactly like fundi
+// below. So the client's own os.Getwd() must default for claude too, remote
+// daemon or not, and buildSpawnRequest must NOT require an explicit --cwd
+// the way it used to.
+func TestBuildSpawnRequest_RemoteDefaultsCwdForClaude(t *testing.T) {
 	remoteProfileForTest(t, "https://rafiki.example.dev")
+
+	wantCwd, err := os.Getwd()
+	if err != nil {
+		t.Skip("os.Getwd() failed — skipping:", err)
+	}
 
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("kind", protocol.KindClaude); err != nil {
 		t.Fatal(err)
 	}
-	// cwd left at its zero value ("") intentionally: there is no local
-	// directory to default to on a remote daemon's filesystem.
+	// cwd left at its zero value ("") intentionally.
 
-	_, err := buildSpawnRequest(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error defaulting --cwd against a remote RAFIKI_URL, got nil")
+	req, err := buildSpawnRequest(cmd, nil)
+	if err != nil {
+		t.Fatalf("unexpected error defaulting --cwd for a claude child against a remote daemon: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--cwd") {
-		t.Errorf("error = %q, want it to mention --cwd", err.Error())
+	if req.Cwd != wantCwd {
+		t.Errorf("Cwd = %q, want %q", req.Cwd, wantCwd)
 	}
 
-	// An explicit --cwd is still honored against a remote daemon.
+	// An explicit --cwd still wins.
 	if err := cmd.Flags().Set("cwd", "/remote/project"); err != nil {
 		t.Fatal(err)
 	}
-	req, err := buildSpawnRequest(cmd, nil)
+	req, err = buildSpawnRequest(cmd, nil)
 	if err != nil {
 		t.Fatalf("unexpected error with explicit --cwd: %v", err)
 	}
@@ -122,7 +132,7 @@ func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForClaude(t *testing.T) {
 // any, goes through whichever executor gets bound — by default the session
 // executor `rafiki create` starts on the CLIENT's own machine, rooted at
 // exactly this cwd. So the client's own os.Getwd() is always a valid default,
-// remote daemon or not, and this must NOT error the way the claude case does.
+// remote daemon or not — the same reasoning the claude case above now shares.
 func TestBuildSpawnRequest_RemoteDefaultsCwdForFundi(t *testing.T) {
 	remoteProfileForTest(t, "https://rafiki.example.dev")
 
