@@ -23,7 +23,7 @@ func TestAgentRunnerKind(t *testing.T) {
 	c := newTestController(t)
 	for _, kind := range []string{protocol.KindClaude} {
 		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
-		runner, err := c.agentRunner(req, "c_"+kind, false, "", "")
+		runner, err := c.agentRunner(req, "c_"+kind, false, "", "", nil)
 		if err != nil {
 			t.Fatalf("agentRunner(kind=%s): %v", kind, err)
 		}
@@ -33,7 +33,7 @@ func TestAgentRunnerKind(t *testing.T) {
 	}
 
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5"}
-	runner, err := c.agentRunner(req, "c_agent", false, "", "")
+	runner, err := c.agentRunner(req, "c_agent", false, "", "", nil)
 	if err != nil {
 		t.Fatalf("agentRunner(kind=agent): %v", err)
 	}

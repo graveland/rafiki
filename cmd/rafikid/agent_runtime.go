@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/darajapb"
+	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -105,23 +109,126 @@ func agentSpawnHasExplicitDB(extraArgs []string) bool {
 	return false
 }
 
-// agentRunner builds the in-process runner for an agent child. Returns a nil
-// Runner (and nil error) for every other kind, which leaves SpawnSpec on the
-// subprocess path unchanged. autoResume asks the engine to call
-// agentloop.Resume before accepting inbound prompts.
-func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string) (child.Runner, error) {
-	if req.Kind != protocol.KindFundi {
+// agentRunner builds the in-process runner for a fundi child, or a
+// daraja-backed one for a claude child with an executor pool configured (see
+// claudeRunner). Returns a nil Runner (and nil error) for every other case,
+// which leaves SpawnSpec on the local-subprocess path unchanged. autoResume
+// asks the engine to call agentloop.Resume before accepting inbound prompts.
+// snap is non-nil for Resume/RespawnChild, nil for a fresh Spawn — see
+// darajaLaunchExecutor's doc comment for why that distinction matters.
+func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, autoResume bool, ownerName, ownerUserID string, snap *childstore.Snapshot) (child.Runner, error) {
+	switch req.Kind {
+	case protocol.KindFundi:
+		ro, err := c.agentRuntimeOptions(req, childID, autoResume, ownerName, ownerUserID)
+		if err != nil {
+			return nil, err
+		}
+		return inproc.New(inproc.Options{
+			ChildID: childID,
+			Parent:  c.baseCtx,
+			Runtime: ro,
+		}), nil
+	case protocol.KindClaude:
+		return c.claudeRunner(req, childID, ownerName, snap)
+	default:
 		return nil, nil
 	}
-	ro, err := c.agentRuntimeOptions(req, childID, autoResume, ownerName, ownerUserID)
+}
+
+// claudeRunner returns a daraja-backed Runner for a claude child, or (nil,
+// nil) to fall back to the local-subprocess path when this daemon has no
+// executor pool configured at all (the common case for a lone developer's
+// laptop with no RAFIKI_EXECUTORS_ENABLED). Once an executor pool exists,
+// every claude spawn goes through daraja — see the 1c plan's "Why this is
+// scoped the way it is" for what that deliberately does not yet cover
+// (mid-conversation interrupt, a parented spawn starting unbound,
+// passthrough billing).
+func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName string, snap *childstore.Snapshot) (child.Runner, error) {
+	if c.execPoolConn == nil || c.darajaPool == nil {
+		return nil, nil
+	}
+	exec, err := c.darajaLaunchExecutor(req, ownerName, snap)
 	if err != nil {
 		return nil, err
 	}
-	return inproc.New(inproc.Options{
-		ChildID: childID,
-		Parent:  c.baseCtx,
-		Runtime: ro,
-	}), nil
+	spec := &darajapb.ChildSpec{
+		Kind: darajapb.Kind_KIND_CLAUDE,
+		Claude: &darajapb.ClaudeParams{
+			Model:         req.Model,
+			ResumeSession: req.ResumeSession,
+			// Always bypass: a daemon-managed child has no human to answer an
+			// interactive permission prompt (see pkg/claudeargv's identical
+			// default for the local-subprocess path). No typed field carries
+			// a caller override yet — nothing has needed one.
+			PermissionMode: "bypassPermissions",
+		},
+	}
+	result, err := darajapool.Launch(c.baseCtx, darajapool.LaunchParams{
+		ExecPool:   c.execPoolConn,
+		Pool:       c.darajaPool,
+		Registry:   c.darajaReg,
+		DialAddr:   c.darajaDialAddr,
+		ExecutorID: exec.ID,
+		ChildID:    childID,
+		Cwd:        req.Cwd,
+		Spec:       spec,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("launch daraja on executor %s: %w", exec.ID, err)
+	}
+	c.stashDarajaBinding(childID, exec.ID, result.Pgid)
+	return darajapool.NewRunner(c.darajaPool, childID), nil
+}
+
+// darajaLaunchExecutor picks the executor to launch a claude child's daraja
+// on. A resumed child (snap != nil) MUST return to the executor recorded at
+// its original launch — claude's --resume depends on the session transcript
+// living on that machine's filesystem, which a fresh selector match cannot
+// guarantee lands on the same one twice, since two live executors can
+// satisfy the same selector. A fresh spawn (snap == nil) selects normally.
+func (c *Controller) darajaLaunchExecutor(req protocol.SpawnRequest, ownerName string, snap *childstore.Snapshot) (executors.Executor, error) {
+	if snap == nil {
+		return c.chooseLaunchExecutor(req, ownerName, "claude")
+	}
+	pinnedID := snap.Labels["rafiki/executor"]
+	if pinnedID == "" {
+		return executors.Executor{}, fmt.Errorf(
+			"cannot resume claude child %s: no rafiki/executor label was recorded at its original launch", snap.ChildID)
+	}
+	for _, le := range c.execPool.Live() {
+		if le.Executor.ID != pinnedID {
+			continue
+		}
+		if le.Describe == nil || !slices.Contains(le.Describe.LaunchKinds, "claude") {
+			return executors.Executor{}, fmt.Errorf(
+				"executor %s (pinned for this child's session) no longer advertises claude launch support", pinnedID)
+		}
+		return le.Executor, nil
+	}
+	return executors.Executor{}, fmt.Errorf(
+		"claude child %s is pinned to executor %s, which is not currently connected — its session cannot resume elsewhere",
+		snap.ChildID, pinnedID)
+}
+
+// stashDarajaBinding records which executor a claude child's daraja landed
+// on, through the same pre-spawn label stash markUnbound uses (the child's
+// childstore row does not exist yet at this point in Spawn) — so Spawn's
+// existing takeWorkspaceLabels consumption picks it up with no further
+// change. mode is "pinned": a daraja-hosted claude can never migrate, per the
+// design doc's "Claude is inherently pinned" note. Only relevant for a fresh
+// spawn (snap == nil in claudeRunner) — a resume/respawn reuses the label
+// already on the row and never calls this.
+func (c *Controller) stashDarajaBinding(childID, executorID string, pgid int32) {
+	c.wsLabelsMu.Lock()
+	defer c.wsLabelsMu.Unlock()
+	if c.wsLabels == nil {
+		c.wsLabels = make(map[string]workspaceLabels)
+	}
+	wl := c.wsLabels[childID]
+	wl.executorID = executorID
+	wl.mode = "pinned"
+	wl.pgid = pgid
+	c.wsLabels[childID] = wl
 }
 
 // agentRuntimeOptions builds the RuntimeOptions for an agent-kind req, and is
