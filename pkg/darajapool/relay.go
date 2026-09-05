@@ -302,3 +302,37 @@ func (p *Pool) Watch(childID string) (<-chan *fanEvent, func(), error) {
 	subCh, unsub := holder.subscribe()
 	return subCh, unsub, nil
 }
+
+// Restart asks the connected daraja to replace its child process: signal,
+// wait, relaunch. spec nil means daraja reuses the spec it already holds.
+func (p *Pool) Restart(ctx context.Context, childID string, spec *darajapb.ChildSpec, graceMs int32) (pid int32, err error) {
+	cli, err := p.ClientFor(childID)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := cli.Restart(ctx, connect.NewRequest(&darajapb.RestartRequest{
+		Spec:    spec,
+		GraceMs: graceMs,
+	}))
+	if err != nil {
+		return 0, err
+	}
+	return resp.Msg.GetPid(), nil
+}
+
+// Shutdown ends the child gracefully (or immediately, at graceMs=0) and takes
+// daraja down with it. The exit info in the response is authoritative — the
+// relay stream may simply be torn down afterward rather than emitting a
+// separate ProcessExited event, so callers should not wait on the Watch
+// channel for this outcome.
+func (p *Pool) Shutdown(ctx context.Context, childID string, graceMs int32) (exitCode int32, signal string, err error) {
+	cli, err := p.ClientFor(childID)
+	if err != nil {
+		return 0, "", err
+	}
+	resp, err := cli.Shutdown(ctx, connect.NewRequest(&darajapb.ShutdownRequest{GraceMs: graceMs}))
+	if err != nil {
+		return 0, "", err
+	}
+	return resp.Msg.GetExitCode(), resp.Msg.GetSignal(), nil
+}

@@ -12,7 +12,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	adminpb "go.graveland.dev/rafiki/pkg/adminpb"
 	darajapb "go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	execpoolv1 "go.graveland.dev/rafiki/pkg/execpool"
@@ -197,57 +196,24 @@ func (s *Server) DarajaLaunch(
 
 	childID := "c_" + fmt.Sprintf("%x", uint64(time.Now().UnixNano()%999999999999999999))
 
-	ticket, err := h.darajaReg.MintTicket(childID)
+	result, err := darajapool.Launch(ctx, darajapool.LaunchParams{
+		ExecPool:   h.execPool,
+		Pool:       h.darajaPool,
+		Registry:   h.darajaReg,
+		DialAddr:   h.dialAddr,
+		ExecutorID: le.Executor.ID,
+		ChildID:    childID,
+		Cwd:        req.Msg.GetCwd(),
+		Spec:       spec,
+	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal,
-			fmt.Errorf("mint ticket: %w", err))
-	}
-
-	adminCLI, err := h.execPool.AdminClientFor(le.Executor.ID)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable,
-			fmt.Errorf("no admin client for executor %s: %w", le.Executor.ID, err))
-	}
-
-	launchReq := &adminpb.LaunchRequest{
-		ChildId:  childID,
-		Cwd:      req.Msg.GetCwd(),
-		Spec:     spec,
-		DialAddr: h.dialAddr,
-		Ticket:   ticket,
-	}
-
-	launchResp, err := adminCLI.Launch(ctx, connect.NewRequest(launchReq))
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal,
-			fmt.Errorf("AdminService.Launch on executor %s: %w", le.Executor.ID, err))
-	}
-
-	// Wait for the daraja to reverse-dial back into the pool.
-	connected := make(chan struct{})
-	done := false
-	cb := func(cid string) {
-		if cid == childID && !done {
-			done = true
-			close(connected)
-		}
-	}
-	h.darajaPool.OnConnect(cb)
-
-	select {
-	case <-connected:
-	case <-time.After(30 * time.Second):
-		h.darajaPool.Evict(childID)
-		return nil, connect.NewError(connect.CodeDeadlineExceeded,
-			errors.New("daraja did not connect within 30s"))
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 
 	return connect.NewResponse(&rafikiv1.DarajaLaunchResponse{
 		ChildId:         childID,
-		Pid:             int32(launchResp.Msg.GetPid()),
-		Pgid:            int32(launchResp.Msg.GetPgid()),
+		Pid:             result.Pid,
+		Pgid:            result.Pgid,
 		ConnectedUnixMs: time.Now().UnixMilli(),
 	}), nil
 }
