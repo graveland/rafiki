@@ -100,6 +100,31 @@ func TestStatusLineIdentityAbsentWithoutAFocusedChild(t *testing.T) {
 	}
 }
 
+// The footer names the active profile only when the caller says to -- this
+// package must not decide that for itself (see Options.ShowProfileBadge).
+func TestFooterShowsProfileBadgeWhenToldTo(t *testing.T) {
+	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", ProfileName: "work", ShowProfileBadge: true})
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	got := ansi.Strip(c.View().Content)
+	if !strings.Contains(got, "work") {
+		t.Errorf("footer missing the profile badge:\n%s", got)
+	}
+}
+
+// A single profile is unambiguous, so ShowProfileBadge is false and the
+// footer must not mention the profile at all -- a noise badge for someone
+// who never switches costs something for nothing.
+func TestFooterOmitsProfileBadgeWhenNotToldTo(t *testing.T) {
+	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", ProfileName: "work", ShowProfileBadge: false})
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	got := ansi.Strip(c.View().Content)
+	if strings.Contains(got, "work") {
+		t.Errorf("profile badge shown despite ShowProfileBadge=false:\n%s", got)
+	}
+}
+
 // The identity must clip rather than overflow -- a long cwd on a narrow
 // terminal must not push the status line past the window width.
 func TestStatusLineIdentityClipsToWidth(t *testing.T) {

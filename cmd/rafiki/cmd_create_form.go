@@ -104,6 +104,7 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 		OpenCreate:       true,
 		ExecutorSelector: executorSelector,
 		ProfileName:      p.Name,
+		ShowProfileBadge: multipleProfilesConfigured(),
 		CreateDefaults: tui.SpawnDefaults{
 			Name: req.Name,
 			Kind: req.Kind,
