@@ -264,6 +264,12 @@ declares `claude` in `--launch` — no operator action needed. `rafiki daraja
 launch`, below, is the manual entry point to the same machinery, useful for
 debugging the launch path directly without going through a full spawn.
 
+A daraja-routed claude child is proxied through the daemon (capture, cost
+accounting, routing visibility) while still billing the user's own Claude
+subscription by default — `--passthrough-auth auto|on|off` (default `auto`,
+or `$RAFIKI_CLAUDE_PASSTHROUGH`) controls who gets billed, mirroring `rafiki
+claude --passthrough-auth`.
+
 **`rafiki daraja launch`** launches a claude child via daraja on a remote executor.
 It resolves an executor that matches the selector AND supports launching claude,
 calls `AdminService.Launch` with a one-shot ticket, then waits for the daraja to

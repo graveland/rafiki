@@ -108,6 +108,19 @@ type HostOptions struct {
 	// needs.
 	EnvOverride bool
 
+	// ProxyModelArgs, when non-nil, replaces the plain `--model X` argv()
+	// would otherwise add. Set from proxyenv.Claude's own returned args when
+	// this daraja is proxied and a model is configured: a proxied model's
+	// selection travels through Claude Code's custom-model-option mechanism
+	// (ANTHROPIC_CUSTOM_MODEL_OPTION + a matching --model, both required
+	// together), which is what makes an OpenRouter slash id or any other
+	// non-Anthropic model acceptable to Claude Code's own client-side
+	// allowlist at all. A second, PLAIN --model from claudeargv.Build here
+	// would risk that allowlist rejecting the model before the custom
+	// option's env vars are even consulted, so argv() is told to omit its own
+	// --model whenever this is set — see startLocked.
+	ProxyModelArgs []string
+
 	// RespawnLimit and RespawnBackoff bound recovery from unexpected exits.
 	// Zero means the package default.
 	RespawnLimit   int
@@ -196,10 +209,18 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 	if h.running {
 		return nil, errors.New("daraja: already running")
 	}
-	argv := spec.argv()
+	argvSpec := spec
+	if h.opts.ProxyModelArgs != nil {
+		// Suppress claudeargv.Build's own --model: ProxyModelArgs supplies
+		// the one that matches its custom-model-option env vars instead. See
+		// HostOptions.ProxyModelArgs's doc comment.
+		argvSpec.Model = ""
+	}
+	argv := argvSpec.argv()
 	if argv == nil {
 		return nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
 	}
+	argv = append(argv, h.opts.ProxyModelArgs...)
 	h.spec = spec
 	runner, err := child.NewProcessRunner(child.SpawnSpec{
 		PiBinary:    h.opts.Binary,

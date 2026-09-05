@@ -71,6 +71,57 @@ func TestHostRelaysStdout(t *testing.T) {
 	}
 }
 
+// TestProxyModelArgsReplacesPlainModelFlag proves the suppression startLocked
+// applies: with ProxyModelArgs set, the spawned process's argv carries the
+// proxy's own --model pair (matching its custom-model-option env vars) and
+// does NOT also carry a second, plain --model from claudeargv.Build — which
+// would risk Claude Code's client-side allowlist rejecting the model before
+// the custom option is even consulted (see HostOptions.ProxyModelArgs).
+func TestProxyModelArgsReplacesPlainModelFlag(t *testing.T) {
+	h := NewHost(HostOptions{
+		Binary: testEchoBinary(t),
+		Spec:   ChildSpec{Kind: KindClaude, Model: "openai/gpt-4o"},
+		ProxyModelArgs: []string{
+			"--model", "rafiki: openai/gpt-4o",
+		},
+	})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	argv := collectStdout(t, h, "stream-json", 5*time.Second)
+
+	if got := strings.Count(argv, "--model"); got != 1 {
+		t.Fatalf("argv %q contains %d occurrences of --model, want exactly 1", argv, got)
+	}
+	if !strings.Contains(argv, "rafiki: openai/gpt-4o") {
+		t.Fatalf("argv %q missing the proxy's own --model value", argv)
+	}
+	if strings.Contains(argv, "--model openai/gpt-4o") {
+		t.Fatalf("argv %q carries the PLAIN --model claudeargv.Build would add unsuppressed", argv)
+	}
+}
+
+// TestNilProxyModelArgsLeavesPlainModelFlagAlone is the control case: with no
+// ProxyModelArgs (every caller before Phase 2, and any unproxied daraja
+// today), Model must still produce claudeargv.Build's ordinary --model.
+func TestNilProxyModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
+	h := NewHost(HostOptions{
+		Binary: testEchoBinary(t),
+		Spec:   ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
+	})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	argv := collectStdout(t, h, "stream-json", 5*time.Second)
+	if !strings.Contains(argv, "--model claude-sonnet-5") {
+		t.Fatalf("argv %q missing the plain --model claude-sonnet-5", argv)
+	}
+}
+
 // stdin reaches the process.
 func TestHostWritesStdin(t *testing.T) {
 	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})

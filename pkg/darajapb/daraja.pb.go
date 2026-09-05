@@ -329,6 +329,28 @@ type ClaudeParams struct {
 	// always pick the conversation back up.
 	ResumeSession  string `protobuf:"bytes,2,opt,name=resume_session,json=resumeSession,proto3" json:"resume_session,omitempty"`
 	PermissionMode string `protobuf:"bytes,3,opt,name=permission_mode,json=permissionMode,proto3" json:"permission_mode,omitempty"`
+	// proxy_url points the child at rafiki's proxy face instead of Anthropic
+	// directly. Empty means unproxied — daraja passes the environment through
+	// unmodified, exactly as before these fields existed.
+	ProxyUrl string `protobuf:"bytes,4,opt,name=proxy_url,json=proxyUrl,proto3" json:"proxy_url,omitempty"`
+	// proxy_token authenticates to proxy_url. Travels here (an authenticated
+	// RPC, unlike argv) but must never reach the daraja subprocess's OWN argv —
+	// AdminService.Launch puts it in that process's environment instead, the
+	// same treatment the launch ticket already gets, for the same reason (ps
+	// is world-readable).
+	ProxyToken string `protobuf:"bytes,5,opt,name=proxy_token,json=proxyToken,proto3" json:"proxy_token,omitempty"`
+	// passthrough_auth omits ANTHROPIC_AUTH_TOKEN so Claude Code's own OAuth
+	// subscription credential is used instead of rafiki's proxy token. rafikid
+	// resolves the auto/on/off tri-state to this single bool before sending it
+	// — daraja stays dumb and carries no policy of its own.
+	PassthroughAuth bool `protobuf:"varint,6,opt,name=passthrough_auth,json=passthroughAuth,proto3" json:"passthrough_auth,omitempty"`
+	// auto_compact_window overrides Claude Code's assumed context size for a
+	// proxied model it cannot otherwise verify. Zero leaves its default alone.
+	AutoCompactWindow int32 `protobuf:"varint,7,opt,name=auto_compact_window,json=autoCompactWindow,proto3" json:"auto_compact_window,omitempty"`
+	// record_requests asks the proxy to persist this conversation's raw HTTP
+	// traffic (X-Rafiki-Record-Requests), mirroring the local-subprocess path's
+	// same request-level opt-in.
+	RecordRequests bool `protobuf:"varint,8,opt,name=record_requests,json=recordRequests,proto3" json:"record_requests,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -382,6 +404,41 @@ func (x *ClaudeParams) GetPermissionMode() string {
 		return x.PermissionMode
 	}
 	return ""
+}
+
+func (x *ClaudeParams) GetProxyUrl() string {
+	if x != nil {
+		return x.ProxyUrl
+	}
+	return ""
+}
+
+func (x *ClaudeParams) GetProxyToken() string {
+	if x != nil {
+		return x.ProxyToken
+	}
+	return ""
+}
+
+func (x *ClaudeParams) GetPassthroughAuth() bool {
+	if x != nil {
+		return x.PassthroughAuth
+	}
+	return false
+}
+
+func (x *ClaudeParams) GetAutoCompactWindow() int32 {
+	if x != nil {
+		return x.AutoCompactWindow
+	}
+	return 0
+}
+
+func (x *ClaudeParams) GetRecordRequests() bool {
+	if x != nil {
+		return x.RecordRequests
+	}
+	return false
 }
 
 // ChildSpec is everything needed to (re)build the child's command line.
@@ -742,11 +799,17 @@ const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\"D\n" +
 	"\rProcessExited\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +
-	"\x06signal\x18\x02 \x01(\tR\x06signal\"t\n" +
+	"\x06signal\x18\x02 \x01(\tR\x06signal\"\xb6\x02\n" +
 	"\fClaudeParams\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12%\n" +
 	"\x0eresume_session\x18\x02 \x01(\tR\rresumeSession\x12'\n" +
-	"\x0fpermission_mode\x18\x03 \x01(\tR\x0epermissionMode\"o\n" +
+	"\x0fpermission_mode\x18\x03 \x01(\tR\x0epermissionMode\x12\x1b\n" +
+	"\tproxy_url\x18\x04 \x01(\tR\bproxyUrl\x12\x1f\n" +
+	"\vproxy_token\x18\x05 \x01(\tR\n" +
+	"proxyToken\x12)\n" +
+	"\x10passthrough_auth\x18\x06 \x01(\bR\x0fpassthroughAuth\x12.\n" +
+	"\x13auto_compact_window\x18\a \x01(\x05R\x11autoCompactWindow\x12'\n" +
+	"\x0frecord_requests\x18\b \x01(\bR\x0erecordRequests\"o\n" +
 	"\tChildSpec\x12*\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x16.rafiki.daraja.v1.KindR\x04kind\x126\n" +
 	"\x06claude\x18\x02 \x01(\v2\x1e.rafiki.daraja.v1.ClaudeParamsR\x06claude\"\\\n" +

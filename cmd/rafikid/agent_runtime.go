@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -139,10 +140,8 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 // nil) to fall back to the local-subprocess path when this daemon has no
 // executor pool configured at all (the common case for a lone developer's
 // laptop with no RAFIKI_EXECUTORS_ENABLED). Once an executor pool exists,
-// every claude spawn goes through daraja — see the 1c plan's "Why this is
-// scoped the way it is" for what that deliberately does not yet cover
-// (mid-conversation interrupt, a parented spawn starting unbound,
-// passthrough billing).
+// every claude spawn goes through daraja, proxied and passthrough-billed per
+// darajaClaudeParams (Phase 2).
 func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName string, snap *childstore.Snapshot) (child.Runner, error) {
 	if c.execPoolConn == nil || c.darajaPool == nil {
 		return nil, nil
@@ -152,16 +151,8 @@ func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName 
 		return nil, err
 	}
 	spec := &darajapb.ChildSpec{
-		Kind: darajapb.Kind_KIND_CLAUDE,
-		Claude: &darajapb.ClaudeParams{
-			Model:         req.Model,
-			ResumeSession: req.ResumeSession,
-			// Always bypass: a daemon-managed child has no human to answer an
-			// interactive permission prompt (see pkg/claudeargv's identical
-			// default for the local-subprocess path). No typed field carries
-			// a caller override yet — nothing has needed one.
-			PermissionMode: "bypassPermissions",
-		},
+		Kind:   darajapb.Kind_KIND_CLAUDE,
+		Claude: c.darajaClaudeParams(req),
 	}
 	result, err := darajapool.Launch(c.baseCtx, darajapool.LaunchParams{
 		ExecPool:   c.execPoolConn,
@@ -178,6 +169,51 @@ func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName 
 	}
 	c.stashDarajaBinding(childID, exec.ID, result.Pgid)
 	return darajapool.NewRunner(c.darajaPool, childID), nil
+}
+
+// darajaClaudeParams builds the ClaudeParams a daraja-hosted claude child
+// launches with, including Phase 2's passthrough-billing fields. Unlike the
+// local-subprocess path's proxyChildEnv (which only ever APPENDS to the
+// daemon's own inherited env and so can never unset ANTHROPIC_API_KEY), daraja
+// builds a COMPLETE environment on the executor's own machine — see
+// proxyenv.Claude's doc comment — which is what makes passthrough actually
+// achievable here.
+func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest) *darajapb.ClaudeParams {
+	p := &darajapb.ClaudeParams{
+		Model:         req.Model,
+		ResumeSession: req.ResumeSession,
+		// Always bypass: a daemon-managed child has no human to answer an
+		// interactive permission prompt (see pkg/claudeargv's identical
+		// default for the local-subprocess path). No typed field carries
+		// a caller override yet — nothing has needed one.
+		PermissionMode: "bypassPermissions",
+		RecordRequests: req.RecordRequests,
+	}
+
+	url, token := c.proxyEndpoint()
+	if url == "" || !proxyRoutesKind(req.Kind) {
+		// No proxy configured (or claude not in RAFIKI_PROXY_KINDS): daraja
+		// leaves the environment alone and this child talks to Anthropic (or
+		// whatever base URL is already ambient on the executor) directly,
+		// same as before these fields existed.
+		return p
+	}
+	p.ProxyUrl = url
+	p.ProxyToken = token
+
+	mode, err := proxyenv.ParsePassthroughMode(req.PassthroughAuth)
+	if err != nil {
+		// Already validated client-side by `rafiki create`; an invalid value
+		// reaching here (a hand-built request, an older client) degrades to
+		// auto rather than failing a spawn over a billing preference.
+		mode = proxyenv.PassthroughAuto
+	}
+	p.PassthroughAuth = proxyenv.PassthroughAuthFor(mode, req.Model)
+
+	if info := c.ModelInfo(req.Model); info.Known {
+		p.AutoCompactWindow = int32(info.AutoCompactWindow)
+	}
+	return p
 }
 
 // darajaLaunchExecutor picks the executor to launch a claude child's daraja

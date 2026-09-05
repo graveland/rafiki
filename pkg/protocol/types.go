@@ -274,6 +274,17 @@ type SpawnRequest struct {
 	// RAFIKI_RECORD_REQUESTS=1 at daemon startup).
 	RecordRequests bool `json:"recordRequests,omitempty"`
 
+	// PassthroughAuth is kind=claude's tri-state billing choice: ""/"auto"
+	// bills the user's own Claude subscription when Model resolves to an
+	// Anthropic id (proxyenv.AnthropicModel) and the daemon's key otherwise,
+	// "on" always bills the subscription, "off" always bills the daemon's
+	// key. Mirrors `rafiki claude --passthrough-auth` exactly
+	// (proxyenv.ParsePassthroughMode/PassthroughAuthFor parse and resolve
+	// both) — only meaningful for a daraja-routed claude child; the
+	// local-subprocess claude path has no passthrough support at all (see
+	// proxyChildEnv's own doc comment for why).
+	PassthroughAuth string `json:"passthroughAuth,omitempty"`
+
 	// ExecutorSelector is a label selector for picking an executor from the
 	// live pool — the path the daemon can audit.
 	ExecutorSelector string `json:"executorSelector,omitempty"`

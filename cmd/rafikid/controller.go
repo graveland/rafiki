@@ -3582,14 +3582,23 @@ func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath str
 // The agent kind is never routed: it reaches rafiki in-process through pkg/llm
 // and pkg/routing, so there is no HTTP face to point it at, and doing so would
 // put a network hop in front of a library call.
-func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []string {
-	url, token := c.proxyURL, c.proxyToken
-	// An explicit RAFIKI_URL points children at an external rafiki
-	// instead of the embedded face — useful for aiming a whole machine at a
-	// shared capture server. Its token comes from the environment file.
+// proxyEndpoint resolves the URL/token a child should be pointed at: the
+// embedded proxy face, unless an explicit RAFIKI_URL names an external rafiki
+// instead (useful for aiming a whole machine at a shared capture server, whose
+// token then comes from the environment file rather than this daemon's own).
+// Shared by proxyChildEnv (the local-subprocess path) and claudeRunner's
+// daraja path so the two cannot resolve a different endpoint for the same
+// daemon.
+func (c *Controller) proxyEndpoint() (url, token string) {
+	url, token = c.proxyURL, c.proxyToken
 	if v := paths.Get(paths.URL); v != "" {
 		url, token = v, paths.Get(paths.Token)
 	}
+	return url, token
+}
+
+func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []string {
+	url, token := c.proxyEndpoint()
 	if url == "" || req.Kind == protocol.KindFundi || !proxyRoutesKind(req.Kind) {
 		return nil
 	}

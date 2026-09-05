@@ -17,6 +17,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/daraja"
 	darajapb "go.graveland.dev/rafiki/pkg/darajapb"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
 // newDarajaCmd builds `rafiki daraja`, the per-child process host.
@@ -59,6 +60,10 @@ func newDarajaServeCmd() *cobra.Command {
 	cmd.Flags().String("model", "", "model to pass to the child")
 	cmd.Flags().String("resume", "", "session id to resume")
 	cmd.Flags().String("permission-mode", "", "child permission mode")
+	cmd.Flags().String("proxy-url", "", "rafiki proxy URL to point the child at (empty: talk to Anthropic directly)")
+	cmd.Flags().Bool("passthrough", false, "omit ANTHROPIC_AUTH_TOKEN so the child's own Claude subscription bills instead of rafiki's proxy token")
+	cmd.Flags().Int("auto-compact-window", 0, "override Claude Code's assumed context window for a proxied model (0: leave its default)")
+	cmd.Flags().Bool("record-requests", false, "ask the proxy to record this conversation's raw HTTP traffic")
 	return cmd
 }
 
@@ -82,10 +87,45 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 	model := mustGetString(cmd, "model")
 	resume := mustGetString(cmd, "resume")
 	permMode := mustGetString(cmd, "permission-mode")
+	proxyURL := mustGetString(cmd, "proxy-url")
+	passthrough, _ := cmd.Flags().GetBool("passthrough")
+	autoCompact, _ := cmd.Flags().GetInt("auto-compact-window")
+	recordRequests, _ := cmd.Flags().GetBool("record-requests")
+
+	// The proxy token travels by environment, never argv, for the same
+	// reason RAFIKI_DARAJA_TICKET does: ps is world-readable on this machine.
+	proxyToken := os.Getenv("RAFIKI_DARAJA_PROXY_TOKEN")
+
+	headers := map[string]string{
+		"X-Rafiki-Session": childID,
+		"X-Rafiki-Source":  "claude",
+	}
+	if recordRequests {
+		headers["X-Rafiki-Record-Requests"] = "1"
+	}
+
+	// daraja builds a COMPLETE environment here, once, for its whole process
+	// lifetime — this is what makes passthrough billing possible at all: the
+	// local-subprocess daemon path can only ever APPEND to its own inherited
+	// env (proxyChildEnv), which can never unset ANTHROPIC_API_KEY. See
+	// proxyenv.Claude's own doc comment.
+	env, proxyModelArgs := proxyenv.Claude(os.Environ(), proxyenv.ClaudeOptions{
+		URL:               proxyURL,
+		Token:             proxyToken,
+		PassthroughAuth:   passthrough,
+		Model:             model,
+		AutoCompactWindow: autoCompact,
+		Headers:           headers,
+	})
+	// proxyModelArgs is already nil when proxyURL == "" (proxyenv.Claude's own
+	// early return), so ChildSpec.argv()'s plain --model is used unproxied.
 
 	host := daraja.NewHost(daraja.HostOptions{
-		Binary: binary,
-		Cwd:    cwd,
+		Binary:         binary,
+		Cwd:            cwd,
+		Env:            env,
+		EnvOverride:    true,
+		ProxyModelArgs: proxyModelArgs,
 		Spec: daraja.ChildSpec{
 			Kind:           kind,
 			Model:          model,

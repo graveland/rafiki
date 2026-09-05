@@ -554,6 +554,12 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   "model":               "claude-sonnet-4",
   "thinking":            "medium",         // off|minimal|low|medium|high|xhigh
   "apiKey":              "sk-...",         // not persisted in state record
+  "passthroughAuth":     null,             // kind=claude, daraja-routed only: ""/"auto"
+                                            // (default) bills the user's own Claude
+                                            // subscription when model resolves to
+                                            // Anthropic, "on" always bills it, "off"
+                                            // always bills the daemon's key. No effect
+                                            // on the local-subprocess claude fallback.
 
   // Session (all optional)
   "noSession":           false,            // --no-session

@@ -16,6 +16,68 @@ import (
 	"go.graveland.dev/rafiki/pkg/providers"
 )
 
+// TestDarajaClaudeParams_NoProxyConfiguredLeavesFieldsEmpty proves the
+// unproxied case (no daemon proxy face, or claude not in RAFIKI_PROXY_KINDS)
+// degrades to exactly the pre-Phase-2 ClaudeParams: no proxy fields set, so
+// daraja's env stays untouched, matching before these fields existed.
+func TestDarajaClaudeParams_NoProxyConfiguredLeavesFieldsEmpty(t *testing.T) {
+	c := newTestController(t)
+	// c.proxyURL is "" by default in newTestController — no proxy face wired.
+	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "claude-sonnet-5"})
+	if p.ProxyUrl != "" || p.ProxyToken != "" || p.PassthroughAuth {
+		t.Errorf("darajaClaudeParams with no proxy configured = %+v, want no proxy fields set", p)
+	}
+	if p.Model != "claude-sonnet-5" || p.PermissionMode != "bypassPermissions" {
+		t.Errorf("darajaClaudeParams = %+v, want Model/PermissionMode preserved unchanged", p)
+	}
+}
+
+// TestDarajaClaudeParams_PassthroughTriState proves the auto/on/off resolution
+// against model — the whole point of exposing this as a request field rather
+// than a daemon-wide default.
+func TestDarajaClaudeParams_PassthroughTriState(t *testing.T) {
+	cases := []struct {
+		name            string
+		passthroughAuth string
+		model           string
+		want            bool
+	}{
+		{"auto + anthropic model bills subscription", "", "claude-sonnet-5", true},
+		{"auto + non-anthropic model bills daemon key", "", "openai/gpt-4o", false},
+		{"auto + no model bills subscription", "", "", true},
+		{"explicit off overrides anthropic model", "off", "claude-sonnet-5", false},
+		{"explicit on overrides non-anthropic model", "on", "openai/gpt-4o", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestController(t)
+			c.proxyURL, c.proxyToken = "http://127.0.0.1:1/", "tok"
+			p := c.darajaClaudeParams(protocol.SpawnRequest{
+				Kind: protocol.KindClaude, Model: tc.model, PassthroughAuth: tc.passthroughAuth,
+			})
+			if p.PassthroughAuth != tc.want {
+				t.Errorf("PassthroughAuth = %v, want %v", p.PassthroughAuth, tc.want)
+			}
+			if p.ProxyUrl != c.proxyURL || p.ProxyToken != c.proxyToken {
+				t.Errorf("ProxyUrl/ProxyToken = %q/%q, want %q/%q", p.ProxyUrl, p.ProxyToken, c.proxyURL, c.proxyToken)
+			}
+		})
+	}
+}
+
+// TestDarajaClaudeParams_RecordRequestsThreadsThrough is a narrow regression
+// guard: a request-level opt-in silently dropped costs a debugging session
+// with no error anywhere, the same failure class proxyChildEnv's own
+// RecordRequests threading already had to get right once.
+func TestDarajaClaudeParams_RecordRequestsThreadsThrough(t *testing.T) {
+	c := newTestController(t)
+	c.proxyURL = "http://127.0.0.1:1/"
+	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, RecordRequests: true})
+	if !p.RecordRequests {
+		t.Error("RecordRequests did not thread through darajaClaudeParams")
+	}
+}
+
 // TestAgentRunnerKind proves agentRunner only builds an in-process Runner for
 // Kind: "fundi" and leaves every other kind on the subprocess path (nil
 // Runner, nil error) unchanged.
