@@ -32,27 +32,116 @@ type executorPool interface {
 // is made, so selectExecutor (client) and selectExecutorID (provisioning,
 // prompt visibility) can never disagree about which executor won.
 func (c *Controller) chooseExecutor(req protocol.SpawnRequest, ownerName string) (executors.Executor, error) {
-	sel, err := executors.ParseSelector(req.ExecutorSelector)
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, ownerName)
 	if err != nil {
-		return executors.Executor{}, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
+		return executors.Executor{}, err
+	}
+	if len(candidates) == 0 {
+		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels)
+	}
+	return candidates[0], nil
+}
+
+// narrowedExecutorCandidates computes chooseExecutor's candidate list without
+// picking a winner or explaining a failure — chooseLaunchExecutor narrows
+// this further by launch kind before doing either, so a change to admission
+// or lineage narrowing can never happen in only one of the two callers.
+func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, ownerName string) (
+	candidates []executors.Executor, parentSet []executors.Executor, childLabels map[string]string, sel executors.Selector, err error,
+) {
+	sel, err = executors.ParseSelector(req.ExecutorSelector)
+	if err != nil {
+		return nil, nil, nil, executors.Selector{}, fmt.Errorf("invalid executor selector %q: %w", req.ExecutorSelector, err)
 	}
 
 	// The child does not exist yet, so evaluate the PARENT's set and narrow
 	// with the request's selector — which is exactly what
 	// effectiveExecutorSet will compute for the child once it is stored.
-	childLabels := c.admissionLabels(req, ownerName)
-	parentSet, err := c.effectiveExecutorSetFor(req.ParentChildID, childLabels)
+	childLabels = c.admissionLabels(req, ownerName)
+	parentSet, err = c.effectiveExecutorSetFor(req.ParentChildID, childLabels)
+	if err != nil {
+		return nil, nil, nil, executors.Selector{}, err
+	}
+
+	candidates = executors.Narrow(parentSet, sel)
+	candidates = narrowByWorkspaceMode(candidates, req.WorkspaceMode)
+	sortCandidates(candidates)
+	return candidates, parentSet, childLabels, sel, nil
+}
+
+// chooseLaunchExecutor is chooseExecutor's sibling for a kind that must be
+// LAUNCHED (currently only "claude") rather than reached as an already-running
+// executor's tool surface. It runs the SAME admission/lineage/workspace-mode
+// pipeline chooseExecutor does, then further requires the executor to
+// advertise launchKind among the DescribeResponse.LaunchKinds it self-reported
+// at connect time. Self-reporting is safe here for the same reason it is safe
+// for pkg/connectapi/daraja_handlers.go's DarajaLaunch RPC (and for
+// LiveExecutor.Proxies more generally): it only ever NARROWS what the
+// executor will accept, so a lying executor can only be chosen from a set its
+// admission selector already admitted — never a way to widen it.
+func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, ownerName, launchKind string) (executors.Executor, error) {
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, ownerName)
 	if err != nil {
 		return executors.Executor{}, err
 	}
-
-	candidates := executors.Narrow(parentSet, sel)
-	candidates = narrowByWorkspaceMode(candidates, req.WorkspaceMode)
-	sortCandidates(candidates)
-	if len(candidates) == 0 {
-		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels)
+	launchable := launchKindSet(c.execPool.Live(), launchKind)
+	var kept []executors.Executor
+	for _, e := range candidates {
+		if launchable[e.ID] {
+			kept = append(kept, e)
+		}
 	}
-	return candidates[0], nil
+	if len(kept) == 0 {
+		return executors.Executor{}, c.explainNoLaunchMatch(req, sel, parentSet, childLabels, launchKind)
+	}
+	return kept[0], nil
+}
+
+// launchKindSet returns the set of executor IDs whose live Describe
+// advertises launchKind among LaunchKinds.
+func launchKindSet(live []execpool.LiveExecutor, launchKind string) map[string]bool {
+	out := make(map[string]bool)
+	for _, le := range live {
+		if le.Describe == nil {
+			continue
+		}
+		if slices.Contains(le.Describe.LaunchKinds, launchKind) {
+			out[le.Executor.ID] = true
+		}
+	}
+	return out
+}
+
+// explainNoLaunchMatch mirrors explainNoMatch, adding "does not support
+// launching <kind>" as a fourth exclusion reason alongside disabled/
+// admission/workspace-mode/selector.
+func (c *Controller) explainNoLaunchMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor, childLabels map[string]string, launchKind string) error {
+	launchable := launchKindSet(c.execPool.Live(), launchKind)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "spawn refused: no executor can launch a %q child for selector %q.\n", launchKind, req.ExecutorSelector)
+	fmt.Fprintf(&sb, "  %d live executor(s), %d in your parent's set:\n", len(c.execPool.Live()), len(parentSet))
+	for _, le := range c.execPool.Live() {
+		e := le.Executor
+		var reason string
+		switch {
+		case !e.Enabled:
+			reason = "disabled"
+		case !launchable[e.ID]:
+			reason = fmt.Sprintf("does not support launching %q children", launchKind)
+		default:
+			if admitsSel, aerr := executors.ParseSelector(e.Admits); aerr != nil {
+				reason = fmt.Sprintf("unparseable admission selector %q", e.Admits)
+			} else if !admitsSel.Matches(childLabels) {
+				reason = fmt.Sprintf("excluded by ITS admission selector %q", e.Admits)
+			} else if explain := childSel.Explain(e.Labels); explain != "" {
+				reason = fmt.Sprintf("excluded by your selector:   %s", explain)
+			} else {
+				reason = "excluded by your selector or your parent's set"
+			}
+		}
+		fmt.Fprintf(&sb, "    %-12s  %s\n", shortID(e.ID), reason)
+	}
+	return errors.New(sb.String())
 }
 
 // admissionLabels returns the labels an executor's Admits selector should be
