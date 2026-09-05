@@ -9,6 +9,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // writePresetsFile writes a profile's presets.json and returns the path.
@@ -244,53 +245,64 @@ func TestAvailablePresets_Empty(t *testing.T) {
 	}
 }
 
-// TestPreset_MergeOrder checks that the merge precedence is
-// preset < env-var defaults < explicit flags.
-//
-// We test this via buildSpawnRequest + manual preset merge (as runCreate does it).
-func TestPreset_MergeOrder(t *testing.T) {
-	// Preset: model=preset-model, labels: tier=smart, env=from-preset
-	// RAFIKI_DEFAULT_LABELS: env=from-env (overrides preset env)
-	// --label: tier=override (overrides preset tier)
-	t.Setenv("RAFIKI_DEFAULT_LABELS", "env=from-env")
-	os.Unsetenv("RAFIKI_DEFAULT_MODEL")
+// TestModelPrecedence pins the full chain. Read the plan's Task 10 before
+// changing any row: the preset sitting ABOVE the profile default is a
+// deliberate departure from the old RAFIKI_DEFAULT_MODEL ordering.
+func TestModelPrecedence(t *testing.T) {
+	cases := []struct {
+		name        string
+		flagModel   string
+		presetModel string
+		profModel   string
+		remembered  string
+		want        string
+	}{
+		{"flag wins over everything", "flag-m", "preset-m", "prof-m", "remembered-m", "flag-m"},
+		{"preset beats the profile default", "", "preset-m", "prof-m", "remembered-m", "preset-m"},
+		{"profile default beats the remembered model", "", "", "prof-m", "remembered-m", "prof-m"},
+		{"remembered is the last resort", "", "", "", "remembered-m", "remembered-m"},
+		{"nothing set leaves it to the daemon", "", "", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveModel(tc.flagModel, tc.presetModel, tc.profModel, tc.remembered)
+			if got != tc.want {
+				t.Fatalf("resolveModel(%q,%q,%q,%q) = %q, want %q",
+					tc.flagModel, tc.presetModel, tc.profModel, tc.remembered, got, tc.want)
+			}
+		})
+	}
+}
 
-	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
+func TestKindDefaultsToTheProfilesKind(t *testing.T) {
+	cases := []struct {
+		name     string
+		flagKind string
+		profKind string
+		want     string
+	}{
+		{"flag wins", protocol.KindClaude, protocol.KindFundi, protocol.KindClaude},
+		{"profile supplies it", "", protocol.KindClaude, protocol.KindClaude},
+		{"neither falls back to fundi", "", "", protocol.KindFundi},
 	}
-	if err := cmd.Flags().Set("label", "tier=override"); err != nil {
-		t.Fatal(err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveKind(tc.flagKind, tc.profKind); got != tc.want {
+				t.Fatalf("resolveKind(%q,%q) = %q, want %q", tc.flagKind, tc.profKind, got, tc.want)
+			}
+		})
 	}
+}
 
-	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("buildSpawnRequest: %v", err)
+func TestProfileLabelsMergeUnderFlagLabels(t *testing.T) {
+	prof := map[string]string{"env": "work", "team": "core"}
+	flags := map[string]string{"env": "override"}
+	got := mergeLabels(prof, flags)
+	if got["env"] != "override" {
+		t.Fatalf("env = %q, want the flag to win", got["env"])
 	}
-
-	// Simulate preset application (as runCreate does).
-	preset := Preset{
-		Model:  "preset-model",
-		Labels: map[string]string{"tier": "smart", "env": "from-preset"},
-	}
-	if req.Model == "" {
-		req.Model = preset.Model
-	}
-	if len(preset.Labels) > 0 {
-		req.Labels = mergeLabels(preset.Labels, req.Labels)
-	}
-
-	// Preset model should be used (nothing higher-priority set it).
-	if req.Model != "preset-model" {
-		t.Errorf("Model = %q, want preset-model", req.Model)
-	}
-	// RAFIKI_DEFAULT_LABELS wins over preset for 'env'.
-	if req.Labels["env"] != "from-env" {
-		t.Errorf("Labels[env] = %q, want from-env (env-var wins over preset)", req.Labels["env"])
-	}
-	// --label wins over preset for 'tier'.
-	if req.Labels["tier"] != "override" {
-		t.Errorf("Labels[tier] = %q, want override (flag wins over preset)", req.Labels["tier"])
+	if got["team"] != "core" {
+		t.Fatalf("team = %q, want the profile's value to survive", got["team"])
 	}
 }
 

@@ -276,42 +276,47 @@ func TestBuildSpawnRequest_LabelFlag(t *testing.T) {
 	}
 }
 
-func TestBuildSpawnRequest_PICDefaultModel(t *testing.T) {
-	t.Setenv("RAFIKI_DEFAULT_MODEL", "anthropic/claude-haiku-4-5")
+// localProfileForTest seeds an isolated profile manifest naming a local
+// socket, with the given spawn defaults, and points the process at it.
+// RAFIKI_DEFAULT_MODEL/PRESET/LABELS are retired client-side (profile.CheckRetiredEnv
+// errors on them via mustProfile), so any test that used to exercise a
+// default via those variables seeds a profile field instead.
+func localProfileForTest(t *testing.T, p profile.Profile) {
+	t.Helper()
+	isolateProfiles(t)
+	resetProfileCache()
+	p.Name = "test"
+	p.Socket = "/tmp/rafiki-test.sock"
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{"test": p}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := profile.SavePointer("test"); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
+}
+
+// TestBuildSpawnRequest_ModelNotDefaultedFromProfile confirms Step 4.3: the
+// profile's model is no longer applied inside buildSpawnRequest at all —
+// req.Model carries only the --model flag. The full chain (preset > profile >
+// remembered) is finished off in runCreate via resolveModel, pinned by
+// TestModelPrecedence.
+func TestBuildSpawnRequest_ModelNotDefaultedFromProfile(t *testing.T) {
+	localProfileForTest(t, profile.Profile{Model: "prof-model"})
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
 	}
-	// --model not set; should fall back to env var.
 	req, err := buildSpawnRequest(cmd, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Model != "anthropic/claude-haiku-4-5" {
-		t.Errorf("Model = %q, want anthropic/claude-haiku-4-5", req.Model)
+	if req.Model != "" {
+		t.Errorf("Model = %q, want empty (buildSpawnRequest must not apply the profile default)", req.Model)
 	}
 }
 
-func TestBuildSpawnRequest_PICDefaultModelOverriddenByFlag(t *testing.T) {
-	t.Setenv("RAFIKI_DEFAULT_MODEL", "env-model")
-	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("model", "flag-model"); err != nil {
-		t.Fatal(err)
-	}
-	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Model != "flag-model" {
-		t.Errorf("Model = %q, want flag-model (flag wins over env)", req.Model)
-	}
-}
-
-func TestBuildSpawnRequest_PICDefaultLabels(t *testing.T) {
-	t.Setenv("RAFIKI_DEFAULT_LABELS", "context=work,env=prod")
+func TestBuildSpawnRequest_ProfileDefaultLabels(t *testing.T) {
+	localProfileForTest(t, profile.Profile{Labels: map[string]string{"context": "work", "env": "prod"}})
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -322,13 +327,13 @@ func TestBuildSpawnRequest_PICDefaultLabels(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if req.Labels["context"] != "work" || req.Labels["env"] != "prod" {
-		t.Errorf("Labels from RAFIKI_DEFAULT_LABELS: %v", req.Labels)
+		t.Errorf("Labels from the profile's default labels: %v", req.Labels)
 	}
 }
 
-func TestBuildSpawnRequest_FlagLabelWinsOverEnv(t *testing.T) {
-	// Explicit --label should override RAFIKI_DEFAULT_LABELS on the same key.
-	t.Setenv("RAFIKI_DEFAULT_LABELS", "env=staging")
+func TestBuildSpawnRequest_FlagLabelWinsOverProfile(t *testing.T) {
+	// Explicit --label should override the profile's labels on the same key.
+	localProfileForTest(t, profile.Profile{Labels: map[string]string{"env": "staging"}})
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
 		t.Fatal(err)
@@ -342,7 +347,7 @@ func TestBuildSpawnRequest_FlagLabelWinsOverEnv(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if req.Labels["env"] != "prod" {
-		t.Errorf("Labels[env] = %q, want prod (flag wins over env)", req.Labels["env"])
+		t.Errorf("Labels[env] = %q, want prod (flag wins over profile default)", req.Labels["env"])
 	}
 }
 

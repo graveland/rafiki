@@ -110,35 +110,6 @@ func TestParseLabelPairs_ReservedKey(t *testing.T) {
 	}
 }
 
-// ─── parseEnvLabels ───────────────────────────────────────────────────────────
-
-func TestParseEnvLabels_Basic(t *testing.T) {
-	got, err := parseEnvLabels("context=work,env=prod")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got["context"] != "work" || got["env"] != "prod" {
-		t.Errorf("got %v", got)
-	}
-}
-
-func TestParseEnvLabels_WithSpaces(t *testing.T) {
-	got, err := parseEnvLabels("  key=val , key2=val2  ")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got["key"] != "val" || got["key2"] != "val2" {
-		t.Errorf("got %v", got)
-	}
-}
-
-func TestParseEnvLabels_Empty(t *testing.T) {
-	got, err := parseEnvLabels("")
-	if err != nil || got != nil {
-		t.Errorf("empty: got (%v, %v), want (nil, nil)", got, err)
-	}
-}
-
 // ─── mergeLabels ─────────────────────────────────────────────────────────────
 
 func TestMergeLabels_LaterWins(t *testing.T) {

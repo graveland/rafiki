@@ -22,7 +22,7 @@ func newPresetsCmd() *cobra.Command {
 or ~/.config/rafiki/presets.json).
 
 Presets bundle a model and label defaults that can be applied at spawn time
-with --preset NAME or the RAFIKI_DEFAULT_PRESET environment variable.
+with --preset NAME or a profile's 'preset' field (see 'rafiki profile add --help').
 
 Label filters narrow the output using the same AND-match semantics as
 'rafiki list --label': every --label k=v pair must appear in the preset's labels,

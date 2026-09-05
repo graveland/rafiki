@@ -30,14 +30,20 @@ const (
 	// disables the feature entirely.
 	HeartbeatInterval = "RAFIKI_HEARTBEAT_INTERVAL"
 
-	// DefaultModel supplies the model when `rafiki create` gets no --model.
+	// DefaultModel supplies the model for rafikid's own proxy face
+	// (cmd/rafikid/proxy.go). CLIENT-side it is retired: `rafiki create` takes
+	// its default from the resolved profile's `model`, because one global
+	// default cannot serve two daemons with different catalogs.
 	DefaultModel = "RAFIKI_DEFAULT_MODEL"
 
-	// DefaultPreset supplies the preset name when --preset is not given.
+	// DefaultPreset is RETIRED. Use a profile's `preset` field. Kept as a
+	// const so profile.CheckRetiredEnv can name it when someone still has it
+	// exported.
 	DefaultPreset = "RAFIKI_DEFAULT_PRESET"
 
-	// DefaultLabels is a comma-separated "k=v,k2=v2" set of label defaults,
-	// merged before any --label flags.
+	// DefaultLabels is RETIRED. Use a profile's `labels` field. Kept as a
+	// const so profile.CheckRetiredEnv can name it when someone still has it
+	// exported.
 	DefaultLabels = "RAFIKI_DEFAULT_LABELS"
 
 	// DB is the conversations database. One DSN: the daemon opens a single

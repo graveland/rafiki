@@ -40,21 +40,25 @@ spawned, so pressing enter is the same as not using it. Pass anything that
 shapes the child -- a name, --model, --kind, --cwd, --preset, -d -- and create
 spawns directly instead; -i opens the form anyway, prefilled.
 
+Kind precedence, strongest first:
+  --kind
+  the resolved profile's kind
+  fundi (default)
+
 Model precedence, strongest first:
   --model
-  RAFIKI_DEFAULT_MODEL
-  --preset's model
-  the model last spawned for this kind (remembered per kind)
+  the named preset's model (an explicitly named preset is a request)
+  the resolved profile's model (a profile default is ambient, so it sits
+    below a named preset -- otherwise a profile default would make every
+    preset's model permanently unreachable)
+  the model last spawned for this kind (remembered per profile and kind)
   the daemon's default
 
-The remembered model makes RAFIKI_DEFAULT_MODEL optional rather than obsolete:
-the variable is something you configured and still wins, so setting it behaves
-exactly as before.
+Labels: --label flags are merged over the resolved profile's labels, with the
+flags winning on a key collision.
 
-Environment variable defaults (applied before explicit flags; lowest priority):
-  RAFIKI_DEFAULT_PRESET  preset name from <config dir>/presets.json (see 'rafiki presets')
-  RAFIKI_DEFAULT_MODEL   fallback model string
-  RAFIKI_DEFAULT_LABELS  comma-separated k=v label defaults`,
+Set these defaults on a profile, not an environment variable: see
+'rafiki profile show' and 'rafiki profile add --help'.`,
 
 		Args: cobra.MaximumNArgs(1),
 		RunE: runCreate,
@@ -66,7 +70,7 @@ Environment variable defaults (applied before explicit flags; lowest priority):
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from <config dir>/presets.json (also settable via RAFIKI_DEFAULT_PRESET)")
+	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from <config dir>/presets.json (also settable via a profile's `preset` field)")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort: silently empty list when the profile fails to resolve or
 		// its presets file is missing or malformed. A completion handler must
@@ -92,10 +96,10 @@ Environment variable defaults (applied before explicit flags; lowest priority):
 // addSpawnFlags registers the shared spawn-related flags on cmd.
 func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
-	cmd.Flags().String("kind", protocol.KindFundi, "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model) or claude (Claude Code)")
+	cmd.Flags().String("kind", "", "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model) or claude (Claude Code); also settable via a profile's `kind` field")
 	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to claude)")
-	cmd.Flags().StringP("model", "m", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via RAFIKI_DEFAULT_MODEL")
+	cmd.Flags().StringP("model", "m", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via a profile's `model` field")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
 	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")
@@ -106,7 +110,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("extra-arg", nil, "Extra pi arg (repeatable)")
 	cmd.Flags().StringSlice("skills-dir", nil, "Additional skills directory for --kind fundi (repeatable)")
 	cmd.Flags().String("mcp-config", "", "Path to .mcp.json for --kind fundi (default: <cwd>/.mcp.json, else $RAFIKI_MCP_CONFIG or <config dir>/mcp.json)")
-	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see RAFIKI_DEFAULT_LABELS")
+	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see a profile's `labels` field")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 	cmd.Flags().Bool("record-requests", false, "Record raw LLM API requests and responses for debugging")
 	cmd.Flags().String("parent", "", "Child id of the spawning parent (records rafiki/parent and rafiki/root)")
@@ -146,24 +150,62 @@ func addSpawnFlags(cmd *cobra.Command) {
 }
 
 // resolvePresetName returns the preset to apply: the --preset flag if given,
-// else $RAFIKI_DEFAULT_PRESET.
+// else the resolved profile's `preset` field.
 // Extracted so tests exercise this resolution rather than reimplementing it —
 // an inlined copy in a test passes no matter what the real command reads.
 func resolvePresetName(cmd *cobra.Command) string {
 	if name, _ := cmd.Flags().GetString("preset"); name != "" {
 		return name
 	}
-	return paths.Get(paths.DefaultPreset)
+	return mustProfile(cmd).Preset
 }
 
-// buildSpawnRequest constructs a SpawnRequest from the spawn flags, env-var
-// defaults, and positional args. Returns an error if required flags are invalid.
+// resolveKind picks the agent kind. Extracted so the precedence is testable
+// without building a whole cobra command — an inlined copy in a test passes no
+// matter what the real command reads.
+func resolveKind(flagKind, profileKind string) string {
+	if flagKind != "" {
+		return flagKind
+	}
+	if profileKind != "" {
+		return profileKind
+	}
+	return protocol.KindFundi
+}
+
+// resolveModel picks the model. See docs/plans/2026-09-04-client-profiles-plan.md
+// Task 10 before reordering anything here.
 //
-// Env-var defaults are read lazily here (not at process start) for test isolation:
-//   - RAFIKI_DEFAULT_MODEL: used when --model is not set
-//   - RAFIKI_DEFAULT_LABELS: comma-separated k=v pairs merged before --label flags
+// The named preset sits ABOVE the profile default deliberately, which is NOT
+// where RAFIKI_DEFAULT_MODEL used to sit: an explicitly named preset is a
+// request, while a profile default is ambient and will be set on every profile.
+// Leaving the profile default on top would make every preset's model
+// unreachable.
+//
+// The remembered model stays last, below both, because it is an inference from
+// what happened last time and must never override a declaration.
+func resolveModel(flagModel, presetModel, profileModel, remembered string) string {
+	for _, candidate := range []string{flagModel, presetModel, profileModel, remembered} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// buildSpawnRequest constructs a SpawnRequest from the spawn flags, the
+// resolved profile's defaults, and positional args. Returns an error if
+// required flags are invalid.
+//
+// The profile is resolved lazily here (not at process start) for test
+// isolation. It supplies the kind and labels directly; the model chain also
+// needs the preset and the remembered model, both known only in runCreate, so
+// req.Model here carries only the --model flag and is finished off there via
+// resolveModel.
 func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest, error) {
-	kind, _ := cmd.Flags().GetString("kind")
+	p := mustProfile(cmd)
+	flagKind, _ := cmd.Flags().GetString("kind")
+	kind := resolveKind(flagKind, p.Kind)
 
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd == "" {
@@ -181,7 +223,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		// rooted at exactly this cwd on THIS machine. So the client's own
 		// os.Getwd() is always the right default for fundi, local daemon or
 		// remote.
-		if kind != protocol.KindFundi && mustProfile(cmd).URL != "" {
+		if kind != protocol.KindFundi && p.URL != "" {
 			return protocol.SpawnRequest{}, errors.New("--cwd is required when the profile names a remote daemon (there is no local directory to default to on that machine)")
 		}
 		var err error
@@ -194,12 +236,9 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		return protocol.SpawnRequest{}, fmt.Errorf("--cwd must be absolute (got %q)", cwd)
 	}
 
-	// RAFIKI_DEFAULT_MODEL: fallback when --model not given. The preset and the
-	// remembered model come later, in that order -- see runCreate.
+	// The preset, the profile's default and the remembered model all come
+	// later, in that order -- see runCreate and resolveModel.
 	model, _ := cmd.Flags().GetString("model")
-	if model == "" {
-		model = paths.Get(paths.DefaultModel)
-	}
 
 	configDir, _ := cmd.Flags().GetString("config-dir")
 	appendSysPrompt, _ := cmd.Flags().GetString("append-system-prompt")
@@ -215,11 +254,9 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	skillsDirs, _ := cmd.Flags().GetStringSlice("skills-dir")
 	mcpConfig, _ := cmd.Flags().GetString("mcp-config")
 
-	// RAFIKI_DEFAULT_LABELS: parsed lazily and merged before --label flags.
-	envLabels, err := parseEnvLabels(paths.Get(paths.DefaultLabels))
-	if err != nil {
-		return protocol.SpawnRequest{}, fmt.Errorf("RAFIKI_DEFAULT_LABELS: %w", err)
-	}
+	// Profile labels are merged UNDER the --label flags, so a flag wins on a
+	// key collision — the same precedence RAFIKI_DEFAULT_LABELS had.
+	profileLabels := p.Labels
 
 	flagLabelPairs, _ := cmd.Flags().GetStringArray("label")
 	flagLabels, err := parseLabelPairs(flagLabelPairs)
@@ -227,8 +264,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		return protocol.SpawnRequest{}, fmt.Errorf("--label: %w", err)
 	}
 
-	// Merge order: env-var defaults < explicit flags.
-	labels := mergeLabels(envLabels, flagLabels)
+	// Merge order: profile defaults < explicit flags.
+	labels := mergeLabels(profileLabels, flagLabels)
 
 	name := ""
 	if len(args) > 0 {
@@ -338,10 +375,16 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	p := mustProfile(cmd)
 
-	// Apply preset (lowest priority: preset < env-var defaults < explicit flags).
-	// buildSpawnRequest has already merged env-var defaults and --label flags;
-	// preset fills in any keys/model that weren't set by higher-priority sources.
+	// Apply the named preset, then resolve the model through the full chain.
+	// buildSpawnRequest has already merged the profile's labels under --label
+	// flags; the preset's labels merge in beneath that (existing labels win).
+	//
+	// The model chain here is --model > preset's model > profile's model >
+	// remembered model, in that order — see resolveModel. Reordering it is a
+	// documented, deliberate departure from the old RAFIKI_DEFAULT_MODEL
+	// precedence; read Task 10 of the plan before changing it.
 	presetName := resolvePresetName(cmd)
+	presetModel := ""
 	if presetName != "" {
 		pf, err := loadPresets(p.Name)
 		if err != nil {
@@ -351,26 +394,12 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		if !ok {
 			return fmt.Errorf("--preset: unknown preset %q (available: %s)", presetName, availablePresets(pf))
 		}
-		// Preset model is the fallback when neither flag nor RAFIKI_DEFAULT_MODEL set it.
-		if req.Model == "" && preset.Model != "" {
-			req.Model = preset.Model
-		}
-		// Merge preset labels under existing req.Labels (existing labels win).
+		presetModel = preset.Model
 		if len(preset.Labels) > 0 {
 			req.Labels = mergeLabels(preset.Labels, req.Labels)
 		}
 	}
-
-	// The remembered model is the LAST fallback before the daemon's default,
-	// below the preset as well as the environment variable.
-	//
-	// Both of those are DECLARATIONS -- someone wrote them down -- while this
-	// is an inference from what happened last time, and an inference must
-	// never override a declaration. Applying it earlier is what broke
-	// TestPreset_MergeOrder: the preset's model stopped being reachable at all.
-	if req.Model == "" {
-		req.Model = clientstate.LastModelFor(p.Name, req.Kind)
-	}
+	req.Model = resolveModel(req.Model, presetModel, p.Model, clientstate.LastModelFor(p.Name, req.Kind))
 
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
 	detached, _ := cmd.Flags().GetBool("detached")
