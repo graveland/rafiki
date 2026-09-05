@@ -56,13 +56,21 @@ func (r Resolved) Describe() string {
 // must say so rather than guess, because guessing is how a destructive verb
 // reaches the wrong machine.
 func Resolve(sel Selection) (Resolved, error) {
+	// Compute the name supplied by the caller (flag, env, or neither).
+	// This is used both to decide whether to bootstrap and, if not,
+	// to look up the profile.
+	requestedName := sel.Flag
+	if requestedName == "" && sel.EnvSet {
+		requestedName = sel.Env // "" here means no explicit env, deliberately
+	}
+
 	set, err := Load()
 	if errors.Is(err, ErrNoManifest) {
 		// Do not bootstrap if the caller supplied an explicit selection.
-		if sel.Flag != "" || (sel.EnvSet && sel.Env != "") {
+		if requestedName != "" {
 			return Resolved{}, fmt.Errorf(
 				"profile %q requested but no profiles are configured yet; run `rafiki profile add --help`",
-				sel.Flag+sel.Env) // One of these is non-empty
+				requestedName)
 		}
 		return Bootstrap()
 	}
@@ -70,10 +78,8 @@ func Resolve(sel Selection) (Resolved, error) {
 		return Resolved{}, err
 	}
 
-	name := sel.Flag
-	if name == "" && sel.EnvSet {
-		name = sel.Env // "" here falls through to the pointer, deliberately
-	}
+	// If no explicit name from caller, try the pointer.
+	name := requestedName
 	if name == "" {
 		name = LoadPointer()
 	}
