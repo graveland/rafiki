@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -58,6 +59,41 @@ func TestWriteTokenFileOverwritesCleanly(t *testing.T) {
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, want 0600 after overwrite", fi.Mode().Perm())
+	}
+}
+
+// TestUserCreateWritesTheProfilesTokenNotAGlobalOne pins the property Task 7
+// exists to establish: `user create` writes to the resolved PROFILE's token
+// file (profile.TokenFile), not a single global one — minting a credential
+// against one daemon must not disturb another profile's credential.
+func TestUserCreateWritesTheProfilesTokenNotAGlobalOne(t *testing.T) {
+	isolateProfiles(t)
+	resetProfileCache()
+
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"work":     {Name: "work", Socket: "/tmp/work.sock"},
+		"personal": {Name: "personal", URL: "https://h", Proxy: "https://h"},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := profile.WriteToken("work", "sk-work-existing"); err != nil {
+		t.Fatalf("WriteToken: %v", err)
+	}
+	if err := profile.SavePointer("personal"); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
+
+	if err := profile.WriteToken("personal", "sk-personal-new"); err != nil {
+		t.Fatalf("WriteToken: %v", err)
+	}
+
+	// The bug this feature exists to fix: minting on one daemon must not
+	// disturb the other's credential.
+	if got := profile.ReadToken("work"); got != "sk-work-existing" {
+		t.Fatalf("work token = %q after writing personal's; it was clobbered", got)
+	}
+	if got := profile.ReadToken("personal"); got != "sk-personal-new" {
+		t.Fatalf("personal token = %q", got)
 	}
 }
 

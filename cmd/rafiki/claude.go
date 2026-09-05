@@ -19,7 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
@@ -57,13 +57,13 @@ func newClaudeCmd() *cobra.Command {
 			"  rafiki claude --model glm-5.2 -- --permission-mode plan",
 		RunE: runClaude,
 	}
-	cmd.Flags().StringP("url", "u", envOr("RAFIKI_URL", "http://localhost:8035"), "rafiki proxy base URL (or RAFIKI_URL)")
-	// No default here: resolving paths.TokenFromEnv() (which falls back to
-	// ~/.config/rafiki/token) at flag-construction time would read the file
-	// once per process and bake in whatever existed then. Left empty and
-	// resolved in runClaude instead, so a token minted after the process
-	// started still works and an explicit --token still wins.
-	cmd.Flags().String("token", "", "static bearer token for the proxy (or RAFIKI_TOKEN, else ~/.config/rafiki/token)")
+	cmd.Flags().StringP("url", "u", "", "rafiki proxy base URL (default: the profile's `proxy`)")
+	// No default here: resolving the profile's token at flag-construction time
+	// would read it once per process and bake in whatever existed then. Left
+	// empty and resolved in runClaude instead (from the profile mustProfile
+	// resolves), so a token minted after the process started still works and
+	// an explicit --token still wins.
+	cmd.Flags().String("token", "", "static bearer token for the proxy (default: the resolved profile's token)")
 	cmd.Flags().StringP("model", "m", os.Getenv("RAFIKI_MODEL"), "model id, <family>-latest alias, or OpenRouter slash id (or RAFIKI_MODEL)")
 	cmd.Flags().String("session", os.Getenv("RAFIKI_SESSION"), "X-Rafiki-Session id correlating this session's turns onto one conversation")
 	cmd.Flags().String("passthrough-auth", envOr("RAFIKI_CLAUDE_PASSTHROUGH", string(passthroughAuto)),
@@ -141,16 +141,22 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	if limits, _ := cmd.Flags().GetBool("limits"); limits {
 		return runClaudeLimits(cmd)
 	}
+	p := mustProfile(cmd)
+
 	url, _ := cmd.Flags().GetString("url")
+	if url == "" {
+		url = p.Proxy
+	}
 	token, _ := cmd.Flags().GetString("token")
 	model, _ := cmd.Flags().GetString("model")
 	session, _ := cmd.Flags().GetString("session")
 	passthroughFlag, _ := cmd.Flags().GetString("passthrough-auth")
 
 	if url == "" {
-		return errors.New("--url (or RAFIKI_URL) is required")
+		return fmt.Errorf("profile %q has no proxy URL; pass --url, or set `proxy` in %s",
+			p.Name, profile.ProfilesFile())
 	}
-	token, err := resolveClaudeToken(token)
+	token, err := resolveClaudeToken(token, p.Token)
 	if err != nil {
 		return err
 	}
@@ -258,24 +264,24 @@ func envOr(key, fallback string) string {
 }
 
 // resolveClaudeToken resolves the proxy bearer token: flagToken (the --token
-// flag's value) if it was given, else the same fallback the rest of the CLI
-// uses — RAFIKI_TOKEN, then ~/.config/rafiki/token (paths.TokenFromEnv).
-// Deliberately called at RunE time, not baked into the flag's default: a
-// cobra flag default is computed once, at command-construction time, so
-// reading the token file there would freeze in whatever token existed at
-// process start and miss one minted later in the same process's lifetime.
+// flag's value) if it was given, else profileToken — the resolved profile's
+// token (pkg/profile, from the profile's own token file, written by `rafiki
+// user create`). Deliberately called at RunE time, not baked into the flag's
+// default: a cobra flag default is computed once, at command-construction
+// time, so resolving the profile there would freeze in whatever token existed
+// at process start and miss one minted later in the same process's lifetime.
 //
 // There is no literal fallback (the old default was the string "dev", which
 // authenticates against nothing on a real daemon and turns a missing
 // credential into a confusing 401 rather than a clear error here).
-func resolveClaudeToken(flagToken string) (string, error) {
+func resolveClaudeToken(flagToken, profileToken string) (string, error) {
 	token := flagToken
 	if token == "" {
-		token = paths.TokenFromEnv()
+		token = profileToken
 	}
 	if token == "" {
-		return "", errors.New("no rafiki token: pass --token, set RAFIKI_TOKEN, or run 'rafiki user create <name>' " +
-			"to mint one (written to ~/.config/rafiki/token)")
+		return "", errors.New("no rafiki token: pass --token, or run 'rafiki user create <name>' " +
+			"to mint one for the current profile (see `rafiki profile show`)")
 	}
 	return token, nil
 }

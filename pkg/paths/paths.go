@@ -232,22 +232,3 @@ func GlobalLSPConfig() string {
 	}
 	return filepath.Join(ConfigDir(), "lsp.json")
 }
-
-// TokenFile is the client's bearer token: <ConfigDir>/token, mode 0600.
-// Written by `rafiki user create`, re-read on every dial so `user rm` +
-// `user create` rotation works without a restart.
-func TokenFile() string { return filepath.Join(ConfigDir(), "token") }
-
-// TokenFromEnv returns the client's token: RAFIKI_TOKEN, else the trimmed
-// contents of TokenFile(), else "". One credential for both surfaces — the
-// control plane's ctrl_auth frame and the face's Authorization header.
-func TokenFromEnv() string {
-	if t := os.Getenv(Token); t != "" {
-		return t
-	}
-	b, err := os.ReadFile(TokenFile())
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}

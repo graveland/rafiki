@@ -60,8 +60,13 @@ const (
 	// Token is the bearer token this process PRESENTS — to a proxy's
 	// Authorization header, and to a remote daemon's ctrl_auth frame. One
 	// name now covers what a separate, retired control-token variable used
-	// to carry. Client-side, always. See paths.TokenFromEnv, which also
-	// falls back to paths.TokenFile().
+	// to carry.
+	//
+	// Daemon-side only now: rafikid reads it from its own service environment
+	// to authenticate to an external proxy named by URL. The CLIENT takes its
+	// credential from the resolved profile's token file (pkg/profile), because
+	// one global token cannot serve two daemons — see
+	// docs/plans/2026-09-04-client-profiles-design.md.
 	Token = "RAFIKI_TOKEN"
 
 	// ProxyKinds limits which child kinds are routed, comma-separated. Default
