@@ -14,44 +14,29 @@ import (
 	"golang.org/x/term"
 
 	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/paths"
 )
 
-// remoteDialURL returns RAFIKI_URL when it names a remote control plane
-// (client.IsRemoteURL — https:// only), else "". This is the ONE gate mustDial
-// and dialDaemon both dial through: an http:// RAFIKI_URL is the local
-// loopback face, which has no control listener, and treating it as remote
-// would send every CLI command in an installation that only ever set the
-// documented proxy URL (.env.example's RAFIKI_URL=http://localhost:8035)
-// straight into a TLS dial against a plaintext port. Centralised rather than
-// duplicated at each call site so the two can never drift on which scheme
-// counts as remote.
-func remoteDialURL() string {
-	u := paths.Get(paths.URL)
-	if client.IsRemoteURL(u) {
-		return u
-	}
-	return ""
-}
-
-// mustDial connects to the daemon. An https:// RAFIKI_URL dials the remote
-// daemon's shared TLS listener; anything else (an http:// loopback face URL,
-// or none) uses the local UDS, which the --socket flag overrides. Exits with
-// code 2 on failure so connection errors stay distinguishable from
-// user-input errors (exit 1).
+// mustDial connects to the profile's daemon: its URL over TLS when it names a
+// remote, else its unix socket. Exits with code 2 on failure so connection
+// errors stay distinguishable from user-input errors (exit 1).
+//
+// There is no scheme dispatch and no flag to consult any more. The profile
+// already decided, once, and the failure this replaces was that RAFIKI_URL
+// silently outranked --socket — so an error naming TCP appeared while a socket
+// path sat in the argv.
 func mustDial(cmd *cobra.Command) *client.Client {
-	if u := remoteDialURL(); u != "" {
-		c, err := client.DialURL(cmdCtx(cmd), u, paths.TokenFromEnv())
+	p := mustProfile(cmd)
+	if p.URL != "" {
+		c, err := client.DialURL(cmdCtx(cmd), p.URL, p.Token)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: connect %s: %v\n", u, err)
+			fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
 			os.Exit(2)
 		}
 		return c
 	}
-	socket, _ := cmd.Flags().GetString("socket")
-	c, err := client.Dial(socket)
+	c, err := client.Dial(p.Socket)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: connect:", err)
+		fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
 		os.Exit(2)
 	}
 	return c

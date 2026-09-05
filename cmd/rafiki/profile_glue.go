@@ -73,3 +73,12 @@ func completeProfileNames(toComplete string) []string {
 	}
 	return out
 }
+
+// resetProfileCache clears the once-per-process resolution. Tests only: each
+// test case supplies its own manifest, and a sync.Once shared across them
+// would make the first case's profile win for the whole package.
+func resetProfileCache() {
+	profileOnce = sync.Once{}
+	profileVal = profile.Resolved{}
+	profileErr = nil
+}

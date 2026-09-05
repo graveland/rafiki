@@ -89,7 +89,7 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 	// the children it was serving.
 	executorSelector := req.ExecutorSelector
 	if executorSelector == "" && !noLocalExecutor {
-		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd)
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, mustProfile(cmd))
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}

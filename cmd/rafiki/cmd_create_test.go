@@ -10,8 +10,26 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
+
+// remoteProfileForTest seeds an isolated profile manifest naming a remote
+// daemon, and points the process at it — for tests exercising buildSpawnRequest's
+// --cwd-against-a-remote-profile check (mustProfile(cmd).URL != "").
+func remoteProfileForTest(t *testing.T, url string) {
+	t.Helper()
+	isolateProfiles(t)
+	resetProfileCache()
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"remote": {Name: "remote", URL: url},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := profile.SavePointer("remote"); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
+}
 
 // newTestCreateCmd returns a cobra.Command with spawn flags registered, suitable
 // for use in buildSpawnRequest unit tests.
@@ -37,12 +55,12 @@ func TestBuildSpawnRequest_ExplicitCwd(t *testing.T) {
 }
 
 func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
-	// When --cwd is omitted, buildSpawnRequest should use os.Getwd() — but
-	// only against the local daemon; isolate from a real RAFIKI_URL set in
-	// the ambient environment (e.g. a dev shell pointed at a remote daemon),
-	// or this test's outcome depends on who is running it.
-	t.Setenv("RAFIKI_URL", "")
-
+	// When --cwd is omitted, buildSpawnRequest should use os.Getwd(). The
+	// default kind is fundi, which defaults cwd unconditionally regardless of
+	// where the profile's daemon lives — its filesystem access goes through
+	// whichever executor gets bound, not the daemon's own process — so there
+	// is no remote-profile branch to isolate from here (unlike the claude
+	// case below).
 	wantCwd, err := os.Getwd()
 	if err != nil {
 		t.Skip("os.Getwd() failed — skipping:", err)
@@ -65,7 +83,7 @@ func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
 // machine, so defaulting it from the CLIENT's cwd against a remote daemon
 // would silently ship a path valid only here.
 func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForClaude(t *testing.T) {
-	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev")
+	remoteProfileForTest(t, "https://rafiki.example.dev")
 
 	cmd := newTestCreateCmd()
 	if err := cmd.Flags().Set("kind", protocol.KindClaude); err != nil {
@@ -101,7 +119,7 @@ func TestBuildSpawnRequest_RemoteRequiresExplicitCwdForClaude(t *testing.T) {
 // exactly this cwd. So the client's own os.Getwd() is always a valid default,
 // remote daemon or not, and this must NOT error the way the claude case does.
 func TestBuildSpawnRequest_RemoteDefaultsCwdForFundi(t *testing.T) {
-	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev")
+	remoteProfileForTest(t, "https://rafiki.example.dev")
 
 	wantCwd, err := os.Getwd()
 	if err != nil {

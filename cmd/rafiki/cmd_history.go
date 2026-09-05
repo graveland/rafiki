@@ -12,7 +12,6 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
-	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // renderHistory writes durable-tier events as plain text. It is separated from
@@ -55,23 +54,25 @@ func newHistoryCmd() *cobra.Command {
 }
 
 func runHistory(cmd *cobra.Command, args []string) error {
-	base := paths.Get(paths.URL)
+	p, err := resolveProfile(cmd)
+	if err != nil {
+		return err
+	}
+	// The Connect control plane is mounted INSIDE the proxy face's handler
+	// tree (cmd/rafikid/proxy.go), and that tree is served on the shared TLS
+	// listener too — so a remote profile's URL reaches the same handlers the
+	// local face serves, and no local/remote distinction is needed. TLS trust
+	// is the system root CA pool (net/http's default, same as
+	// pkg/client.DialURL's).
+	base := p.URL
 	if base == "" {
 		base = defaultControlURL
 	}
-	// A remote RAFIKI_URL (https://...) reaches the same handler tree the
-	// local proxy face serves — cmd/rafikid/main.go mounts it on the TLS
-	// control listener too — so no local/remote distinction is needed here.
-	// TLS trust is the system root CA pool either way (net/http's default,
-	// same as pkg/client.DialURL's — see its doc comment).
 	controlClient := rafikiv1connect.NewControlClient(http.DefaultClient, base)
 
 	req := connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: args[0]})
-	// The Connect control plane is mounted under the same auth middleware as
-	// every other HTTP face (see pkg/server/handler.go), so it accepts the
-	// one bearer credential every rafiki client already resolves this way.
-	if tok := paths.TokenFromEnv(); tok != "" {
-		req.Header().Set("Authorization", "Bearer "+tok)
+	if p.Token != "" {
+		req.Header().Set("Authorization", "Bearer "+p.Token)
 	}
 
 	resp, err := controlClient.GetHistory(cmd.Context(), req)

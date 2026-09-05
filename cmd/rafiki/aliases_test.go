@@ -139,7 +139,7 @@ func TestShortFlags(t *testing.T) {
 		// Root persistent flags: inherited by every subcommand.
 		{nil, "output", "o"},
 		{nil, "color", "c"},
-		{nil, "socket", "s"},
+		{nil, "profile", "P"},
 		// Spawn-related verbs.
 		{[]string{"create"}, "model", "m"},
 		{[]string{"create"}, "detached", "d"},
