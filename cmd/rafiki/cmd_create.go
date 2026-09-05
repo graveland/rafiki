@@ -142,9 +142,22 @@ func addSpawnFlags(cmd *cobra.Command) {
 	// the fundi child cannot resolve one of claude's provider-local ids. Offering
 	// the union produces a child that spawns and attaches and then never
 	// answers. cobra has already parsed any --kind appearing earlier on the
-	// line by the time this runs; an unset flag yields its default, "fundi".
+	// line by the time this runs, but an UNSET --kind flag does NOT mean
+	// "fundi": since Task 10, the effective default comes from the resolved
+	// profile's `kind` field (see resolveKind/buildSpawnRequest). Resolving the
+	// same way here keeps a profile with `kind = "claude"` from being offered
+	// fundi-only OpenRouter ids when --kind was never passed on the line.
 	_ = cmd.RegisterFlagCompletionFunc("model", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		kind, _ := c.Flags().GetString("kind")
+		flagKind, _ := c.Flags().GetString("kind")
+		profileKind := ""
+		// Best-effort, matching --preset's completion above: a completion
+		// handler must never exit or print, so a misconfigured profile
+		// degrades to resolveKind("", "") -- which falls back to
+		// protocol.KindFundi -- rather than failing the completion.
+		if p, err := resolveProfile(c); err == nil {
+			profileKind = p.Kind
+		}
+		kind := resolveKind(flagKind, profileKind)
 		return completeModel(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
 }

@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -273,6 +278,70 @@ func TestBuildSpawnRequest_LabelFlag(t *testing.T) {
 	}
 	if req.Labels["env"] != "prod" {
 		t.Errorf("Labels[env] = %q, want prod", req.Labels["env"])
+	}
+}
+
+// ─── --model completion respects the resolved profile's kind ──────────────────
+//
+// Pins Fix 6: since Task 10 changed --kind's default from "fundi" to "",
+// the --model completion function used to pass an unset --kind flag's raw
+// value ("") straight to completeModel, which internally maps "" to "fundi"
+// -- so a profile with kind = "claude" got fundi-only (OpenRouter) model
+// completions when --kind was never typed on the line. The completion
+// function must resolve the same way buildSpawnRequest does: via
+// resolveKind(flagKind, profileKind).
+
+// stubModelsControl records the Kind a ListModels call asked for.
+type stubModelsControl struct {
+	rafikiv1connect.UnimplementedControlHandler
+	gotKind string
+}
+
+func (s *stubModelsControl) ListModels(
+	_ context.Context,
+	req *connect.Request[rafikiv1.ListModelsRequest],
+) (*connect.Response[rafikiv1.ListModelsResponse], error) {
+	s.gotKind = req.Msg.GetKind()
+	return connect.NewResponse(&rafikiv1.ListModelsResponse{}), nil
+}
+
+func TestModelCompletionUsesTheResolvedProfilesKind(t *testing.T) {
+	isolateProfiles(t)
+	resetProfileCache()
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+
+	dir, err := os.MkdirTemp("", "h")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	controlSock := filepath.Join(dir, "controller.sock")
+	connectSock := filepath.Join(dir, "connect.sock")
+
+	stub := &stubModelsControl{}
+	routePath, handler := rafikiv1connect.NewControlHandler(stub)
+	serveConnectOnUnixSocket(t, connectSock, routePath, handler)
+
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"claudework": {Name: "claudework", Socket: controlSock, Kind: protocol.KindClaude},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := profile.SavePointer("claudework"); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
+
+	cmd := newTestCreateCmd()
+	// --kind deliberately left unset, matching the bug report exactly.
+	fn, ok := cmd.GetFlagCompletionFunc("model")
+	if !ok {
+		t.Fatal("no completion function registered for --model")
+	}
+	fn(cmd, nil, "")
+
+	if stub.gotKind != protocol.KindClaude {
+		t.Fatalf("ListModels asked for kind %q, want %q (the resolved profile's kind, not the fundi default)",
+			stub.gotKind, protocol.KindClaude)
 	}
 }
 
