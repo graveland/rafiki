@@ -172,6 +172,29 @@ func TestResolveWithAnExplicitSelectionOnABareMachineErrorsRatherThanBootstrappi
 	}
 }
 
+func TestResolveErrorMessageUsesCorrectPrecedence(t *testing.T) {
+	setXDG(t)
+	// No manifest at all; no pointer file.
+	// When both Flag and Env are set on a bare machine, the error should
+	// name the Flag value (which wins by precedence), not concatenate both.
+
+	os.Remove(ProfilesFile())
+	_, err := Resolve(Selection{Flag: "foo", Env: "bar", EnvSet: true})
+	if err == nil {
+		t.Fatal("Resolve with both Flag and Env on a bare machine = nil error")
+	}
+	if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("error %q does not name the Flag value", err)
+	}
+	// Verify it does NOT say "foobar" or "foo" + "bar" concatenated.
+	if strings.Contains(err.Error(), "foobar") {
+		t.Errorf("error %q incorrectly concatenates Flag and Env", err)
+	}
+	if strings.Contains(err.Error(), "bar") {
+		t.Errorf("error %q should not mention the Env value when Flag is set", err)
+	}
+}
+
 func TestCheckRetiredEnvNamesTheVariableAndTheFix(t *testing.T) {
 	for _, name := range []string{
 		"RAFIKI_URL", "RAFIKI_TOKEN", "RAFIKI_SOCKET",
