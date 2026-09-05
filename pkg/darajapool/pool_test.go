@@ -3,8 +3,8 @@
 package darajapool
 
 import (
+	"bufio"
 	"encoding/json"
-	"io"
 	"net"
 	"strings"
 	"testing"
@@ -50,17 +50,17 @@ func TestPoolConnectionStaysUp(t *testing.T) {
 		t.Fatalf("write hello: %v", err)
 	}
 
-	// Set a tight deadline so we read ONLY the hello response, not
-	// anything the relay goroutine pipes in afterward.
+	// Read exactly the hello response LINE. The relay driver now opens its
+	// stream immediately (Send(nil)), so real H2 preface bytes follow right
+	// behind it on the wire — a fixed-size read would capture both.
 	_ = clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	buf := make([]byte, 512)
-	n, err := io.ReadFull(clientConn, buf[:256]) // hello resp fits well under 256
-	if err != nil && n == 0 {
+	line, err := bufio.NewReader(clientConn).ReadString('\n')
+	if err != nil {
 		t.Fatalf("read hello response: %v", err)
 	}
 	var resp protocol.DarajaHelloResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("parse response: %v; raw(%d): %q", err, n, string(buf[:n]))
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("parse response: %v; raw: %q", err, line)
 	}
 	if resp.Error != "" {
 		t.Fatalf("unexpected error: %s", resp.Error)
