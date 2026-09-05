@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -41,8 +41,8 @@ func newUserCreateCmd() *cobra.Command {
 		Short: "Create a user and print its token once",
 		Long: `Create a user. The daemon mints a token, stores only its digest, and
 returns the plaintext ONCE — it cannot be shown again. The token is written to
-` + "`~/.config/rafiki/token`" + ` (mode 0600) unless --no-write is given, so creating
-a user also logs this machine in.`,
+the current profile's token file (see ` + "`rafiki profile show`" + `) (mode 0600)
+unless --no-write is given, so creating a user also logs this machine in.`,
 		Args: cobra.ExactArgs(1),
 		RunE: runUserCreate,
 	}
@@ -64,8 +64,9 @@ func runUserCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
 	}
 
+	p := mustProfile(cmd)
 	noWrite, _ := cmd.Flags().GetBool("no-write")
-	return renderUserCreate(os.Stdout, os.Stderr, resp, paths.TokenFile(), !noWrite, writeTokenFile)
+	return renderUserCreate(os.Stdout, os.Stderr, resp, profile.TokenFile(p.Name), !noWrite, writeTokenFile)
 }
 
 // decodeUserCreate decodes a ctrl_user_create payload. dispatch.go hands this
