@@ -32,10 +32,11 @@ type State struct {
 	ModelView *ModelView `json:"modelView,omitempty"`
 	// LastModel is the model most recently spawned, keyed by child KIND.
 	//
-	// It makes RAFIKI_DEFAULT_MODEL optional rather than obsolete: the
-	// variable is an explicit configuration and still outranks this, so
-	// setting it keeps working exactly as before, and unsetting it falls back
-	// to whatever you last chose instead of to the daemon's default.
+	// A remembered choice must never outrank a declared one: resolveModel
+	// (cmd/rafiki/cmd_create.go) checks --model, then the named preset's
+	// model, then the resolved profile's own `model` field, and only then
+	// this. RAFIKI_DEFAULT_MODEL is retired client-side (profile.CheckRetiredEnv
+	// rejects it); a profile's `model` field is what outranks this now.
 	LastModel map[string]string `json:"lastModel,omitempty"`
 	// Currency is the client's preferred display currency for cost figures
 	// (TUI, `rafiki list`). Costs are still tracked and billed in USD

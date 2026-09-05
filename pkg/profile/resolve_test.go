@@ -229,6 +229,34 @@ func TestCheckRetiredEnvIsQuietWhenNoneAreSet(t *testing.T) {
 	}
 }
 
+// TestCheckRetiredEnvTreatsPresentButEmptyAsUnset pins the distinction the
+// previous test does NOT exercise: os.Unsetenv makes a variable fully
+// ABSENT, but isolateProfiles (t.Setenv(v, "")) and test/integration's
+// cliCmd ("RAFIKI_URL=" in cmd.Env) both rely on a variable being PRESENT
+// with an empty value also reading as unset. Without this, either
+// hermeticity mechanism could silently stop working and nothing would catch
+// it -- every test using isolateProfiles would start failing with "these
+// variables no longer configure the rafiki client", but the assertion
+// belongs here, on the function whose contract this is.
+func TestCheckRetiredEnvTreatsPresentButEmptyAsUnset(t *testing.T) {
+	names := []string{
+		"RAFIKI_URL", "RAFIKI_TOKEN", "RAFIKI_SOCKET",
+		"RAFIKI_DEFAULT_MODEL", "RAFIKI_DEFAULT_PRESET", "RAFIKI_DEFAULT_LABELS",
+	}
+	// Every variable present-but-empty, all at once: a developer's own shell
+	// may genuinely export e.g. RAFIKI_URL (this repo's own .env, sourced by
+	// `make check`, sets several of these), and t.Setenv on just one variable
+	// would leave the others at whatever real value the ambient environment
+	// happens to have -- failing this test for a reason unrelated to the
+	// present-but-empty distinction it exists to pin.
+	for _, name := range names {
+		t.Setenv(name, "")
+	}
+	if err := CheckRetiredEnv(); err != nil {
+		t.Fatalf("CheckRetiredEnv with every retired var present-but-empty (via t.Setenv, not os.Unsetenv) = %v, want nil", err)
+	}
+}
+
 // TestResolveDerivesProxyFromURL pins Fix 5 (design spec: "For a url profile
 // it defaults to that same URL -- one TLS listener serves the control plane
 // and the proxy face"). No task implemented this, so `rafiki claude` against

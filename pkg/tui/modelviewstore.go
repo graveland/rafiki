@@ -102,7 +102,16 @@ func fromStored(p *clientstate.ModelView) modelView {
 // the default. Per-profile because a daemon's model catalog is per-profile:
 // a remembered query built against one provider set is not necessarily valid
 // against another's.
+//
+// An empty profileName falls back to the default view rather than reading
+// clientstate.Scope{} (the GLOBAL document): Scope{Profile: ""}.path() and
+// Scope{}.path() are the same file, and clientstate.LoadScoped has no way to
+// tell "no profile" from "the global scope, deliberately" apart. Matches the
+// guard clientstate.LastModelFor already has for the same reason.
 func loadModelView(profileName string) modelView {
+	if profileName == "" {
+		return defaultModelView()
+	}
 	return fromStored(clientstate.LoadScoped(clientstate.Scope{Profile: profileName}).ModelView)
 }
 
@@ -110,6 +119,15 @@ func loadModelView(profileName string) modelView {
 //
 // Through UpdateScoped, not SaveScoped: writing the whole document from here
 // would drop every section this package has never heard of.
+//
+// An empty profileName is a no-op, matching clientstate.RememberModel's own
+// guard: without it, a caller that forgot to set ProfileName would silently
+// write per-profile ModelView data into the GLOBAL document (Scope{}), which
+// Scope's own doc comment claims can never happen -- it holds only display
+// preferences no daemon should influence.
 func saveModelView(profileName string, v modelView) {
+	if profileName == "" {
+		return
+	}
 	clientstate.UpdateScoped(clientstate.Scope{Profile: profileName}, func(s *clientstate.State) { s.ModelView = toStored(v) })
 }
