@@ -1004,6 +1004,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			Message: "agent runner: " + err.Error(),
 		}
 	}
+	if req.Kind == protocol.KindClaude {
+		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
+			return control.SpawnResult{}, &control.ControllerError{
+				Code:    protocol.ErrSpawnFailed,
+				Message: "spawn plan: " + err.Error(),
+			}
+		}
+	}
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
@@ -1714,6 +1722,14 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 			Message: "agent runner: " + err.Error(),
 		}
 	}
+	if req.Kind == protocol.KindClaude {
+		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
+			return control.SpawnResult{}, &control.ControllerError{
+				Code:    protocol.ErrSpawnFailed,
+				Message: "spawn plan: " + err.Error(),
+			}
+		}
+	}
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
@@ -1830,6 +1846,14 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "agent runner: " + err.Error(),
+		}
+	}
+	if req.Kind == protocol.KindClaude {
+		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
+			return control.SpawnResult{}, &control.ControllerError{
+				Code:    protocol.ErrSpawnFailed,
+				Message: "spawn plan: " + err.Error(),
+			}
 		}
 	}
 
@@ -3344,6 +3368,22 @@ func resolveClaudeBinary(override string) (string, error) {
 	return exec.LookPath("claude")
 }
 
+// resolveClaudeBinaryIfNeeded resolves the local claude binary path, but only
+// when it will actually be used. runner is agentRunner's result: non-nil
+// means claudeRunner already built a daraja-backed Runner, and child.Spawn
+// never reads spec.PiBinary in that case (every caller clears it right after
+// this — "if runner != nil { spec.PiBinary = "" ... }"). Called AFTER
+// agentRunner, never inside resolveSpawnPlan, which runs before agentRunner
+// even decides whether this spawn routes through daraja — resolving it there
+// aborted every claude spawn on a daemon with no local claude install before
+// daraja got a chance to route it elsewhere.
+func resolveClaudeBinaryIfNeeded(req protocol.SpawnRequest, runner child.Runner) (string, error) {
+	if req.Kind != protocol.KindClaude || runner != nil {
+		return "", nil
+	}
+	return resolveClaudeBinary(req.PiBinary)
+}
+
 // buildClaudeArgv converts a SpawnRequest into the claude CLI argument list
 // (excluding the binary itself) for stream-json bidirectional driving.
 // buildClaudeArgv is a thin wrapper over claudeargv.Build — the ONE claude
@@ -3376,8 +3416,17 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 	}
 	switch kind {
 	case protocol.KindClaude:
-		bin, err = resolveClaudeBinary(req.PiBinary)
-		return bin, buildClaudeArgv(req), child.ClaudeProvider{}, err
+		// The binary path is resolved LAZILY, by resolveClaudeBinaryIfNeeded
+		// after agentRunner decides whether this spawn routes through daraja
+		// — never here. Resolving it unconditionally made every claude spawn
+		// fail outright on a daemon with no local claude install (the exact
+		// production topology daraja exists for: a remote/k8s daemon with an
+		// executor pool doing all the hosting), because this function's error
+		// aborts the spawn before agentRunner/claudeRunner ever gets a chance
+		// to route it through daraja instead — bin/argv from here are
+		// discarded anyway once a non-nil Runner is returned (see the
+		// "if runner != nil" clearing at each call site).
+		return "", buildClaudeArgv(req), child.ClaudeProvider{}, nil
 	case protocol.KindFundi:
 		// The fundi runtime is `rafikid fundi ...`: the daemon re-execs itself
 		// rather than shelling out to a separate binary. It speaks pi's rpc
