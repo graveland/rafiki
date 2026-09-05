@@ -94,9 +94,11 @@ func serveConnectOnUnixSocket(t *testing.T, path string, handlerPath string, han
 	proto := &http.Protocols{}
 	proto.SetUnencryptedHTTP2(true)
 	srv := &http.Server{Handler: mux, Protocols: proto}
-	go srv.Serve(ln)
+	go func() {
+		_ = srv.Serve(ln)
+	}()
 	t.Cleanup(func() {
-		srv.Close()
+		_ = srv.Close()
 	})
 }
 
