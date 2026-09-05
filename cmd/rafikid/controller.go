@@ -29,6 +29,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/eventlog"
@@ -2497,6 +2498,18 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	if snap.Status == protocol.StatusExited {
 		return &control.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
 	}
+
+	// A daraja-routed claude child never exits on abort: the relay stream and
+	// the Child object survive a Restart by design (see the daraja design
+	// doc's "The relay stream survives a restart"), so the local-subprocess
+	// dance below (Interrupt + wait-for-Exited + Resume) does not apply —
+	// there is nothing to wait for and nothing to re-spawn from rafikid's
+	// side. rafiki/executor is set only for a daraja-routed claude child
+	// (claudeRunner/Task 7), never for the local-subprocess fallback.
+	if snap.Labels["rafiki/executor"] != "" {
+		return c.handleDarajaClaudeAbort(childID, ch, snap)
+	}
+
 	// Resume threads --resume <snap.SessionID>. The store's SessionID is synced
 	// lazily by monitorChild on the first bus event, but claude's system/init
 	// produces no bus frame, so snap.SessionID can lag the live sniffed value
@@ -2567,6 +2580,73 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 
 	c.cm.RestoreSubscribers(childID, savedSubs)
 	return nil
+}
+
+// handleDarajaClaudeAbort aborts a daraja-routed claude child's in-flight
+// turn. Unlike handleClaudeAbort's local-subprocess path, this makes exactly
+// ONE call: Pool.Restart asks daraja to SIGINT-wait-respawn atomically on its
+// own machine (grace mirrors handleClaudeAbort's own 3s SIGINT window before
+// escalating to SIGKILL — see the design doc's "Restart" section). The Child
+// object, its relay stream, and its subscribers all survive untouched: there
+// is no exit to wait for and no Resume to re-spawn, because daraja's Restart
+// already did both halves of that in one round trip. darajapool.Runner's
+// pending-reset flag (set from the SAME RelayResponse_Restarted event this
+// call's Restart produces) makes readStdout reset the claude translator's
+// stale turnActive/model/message state before it sees the replacement
+// process's first frame — see Runner.TakeResetPending and
+// claudeProvider.ResetState.
+//
+// rafikid supplies the ChildSpec (kind, model, resume_session, permission
+// mode) explicitly rather than passing spec=nil (which would tell daraja to
+// reuse whatever ChildSpec it was ORIGINALLY launched with): the original
+// launch's ChildSpec has an empty resume_session (a fresh conversation has no
+// session yet), so reusing it would respawn claude into a brand-new
+// conversation and silently discard history. This mirrors handleClaudeAbort's
+// own comment about resolving the live sniffed session id, and matches
+// claudeRunner's own PermissionMode default exactly, so a restarted process
+// is launched the same way the original one was.
+func (c *Controller) handleDarajaClaudeAbort(childID string, ch *child.Child, snap childstore.Snapshot) error {
+	if c.darajaPool == nil {
+		return &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: "daraja pool not wired"}
+	}
+	sessionID := ch.Metadata().SessionID
+	if sessionID == "" {
+		return &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
+	}
+	if snap.SessionID != sessionID {
+		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID })
+	}
+	spec := buildDarajaAbortSpec(snap, sessionID)
+	if _, err := c.darajaPool.Restart(context.Background(), childID, spec, 3000); err != nil {
+		return fmt.Errorf("claude abort restart: %w", err)
+	}
+	return nil
+}
+
+// buildDarajaAbortSpec builds the ChildSpec a daraja-routed claude abort
+// restarts with. Pulled out of handleDarajaClaudeAbort as a pure function so
+// its one job — reconstruct an equivalent launch spec but with the FRESH
+// sniffed session id — is unit-testable with no pool, no connection, and no
+// child.Child at all. See handleDarajaClaudeAbort's doc comment for why the
+// spec cannot be nil (which would tell daraja to reuse the ORIGINAL launch's
+// spec, whose resume_session is empty).
+func buildDarajaAbortSpec(snap childstore.Snapshot, sessionID string) *darajapb.ChildSpec {
+	return &darajapb.ChildSpec{
+		Kind: darajapb.Kind_KIND_CLAUDE,
+		Claude: &darajapb.ClaudeParams{
+			Model:         snap.Model,
+			ResumeSession: sessionID,
+			// Matches claudeRunner's own default exactly (agent_runtime.go) —
+			// a daemon-managed child has no human to answer an interactive
+			// permission prompt, restarted or not.
+			PermissionMode: "bypassPermissions",
+			// Deliberately NOT populating ProxyUrl/ProxyToken/PassthroughAuth/
+			// AutoCompactWindow/RecordRequests here: those are launch-only
+			// (see the proto comment on ClaudeParams) — daraja's environment
+			// is fixed at ITS OWN process startup and a Restart never rebuilds
+			// it, only argv. The Restart RPC's spec is used purely for argv.
+		},
+	}
 }
 
 func (c *Controller) Subscribe(childID string, conn control.Connection, filter protocol.SubscribeFilter) error {

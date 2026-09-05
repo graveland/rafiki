@@ -548,6 +548,36 @@ func (c *Child) outboundEchoNative(frame []byte, ts int64) []*rafikiv1.Event {
 	return nil
 }
 
+// resetProviderIfDue checks, once per readStdout iteration, whether the
+// underlying process was silently replaced (a daraja Restart — a deliberate
+// interrupt, or daraja's own crash-respawn) and if so resets the provider's
+// per-process state before the frame about to be processed reaches it.
+//
+// This is called from readStdout, the ONLY goroutine that touches
+// c.provider's non-message fields (see claudeState's own doc comment), so
+// the reset needs no lock beyond what ResetState already takes for the
+// fields the supervise goroutine also touches. The ordering that makes this
+// safe with no additional synchronization: darajapool.Runner sets its
+// pending-reset flag from the SAME goroutine, and in the SAME switch, that
+// later writes any post-restart stdout bytes to the pipe readStdout reads —
+// so the flag is guaranteed set before this call ever sees new bytes from
+// the replacement process.
+func (c *Child) resetProviderIfDue() {
+	type pendingResetChecker interface {
+		TakeResetPending() bool
+	}
+	rc, ok := c.runner.(pendingResetChecker)
+	if !ok || !rc.TakeResetPending() {
+		return
+	}
+	type stateResettable interface {
+		ResetState()
+	}
+	if rs, ok := c.provider.(stateResettable); ok {
+		rs.ResetState()
+	}
+}
+
 // StderrSnapshot returns a copy of buffered stderr bytes. Safe to call at any
 // time: readStderr's writes and this read share errMu, because Done() being
 // closed no longer proves readStderr has finished (see abandon).
@@ -733,6 +763,7 @@ func (c *Child) readStdout() {
 		// deltas built up. Only delta timing is dropped. The bus is unaffected:
 		// BusFrames/publishBus below still see and publish every frame, so live
 		// subscribers keep getting every delta.
+		c.resetProviderIfDue()
 		if !isMessageUpdate(line) {
 			c.ring.Append(line, ts)
 		}

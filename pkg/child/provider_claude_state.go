@@ -50,6 +50,24 @@ func (p *claudeProvider) appendMessage(raw json.RawMessage) {
 	p.st.mu.Unlock()
 }
 
+// ResetState clears every accumulator back to a fresh child's state. Called
+// by readStdout when the underlying claude process has been silently
+// replaced (a daraja Restart — deliberate, via an interrupt, or daraja's own
+// crash-respawn) so the translator does not carry a stale turnActive/model/
+// message history into frames from the NEW process. Takes the same lock
+// appendMessage does: readStdout is the only caller, but messages is also
+// touched by the supervise goroutine (OutboundEcho), so clearing it needs the
+// guard even though model/provider/api/turnActive do not.
+func (p *claudeProvider) ResetState() {
+	p.st.mu.Lock()
+	defer p.st.mu.Unlock()
+	p.st.messages = nil
+	p.st.model = ""
+	p.st.provider = ""
+	p.st.api = ""
+	p.st.turnActive = false
+}
+
 // snapshotMessages returns a copy of the accumulated messages under the lock,
 // for replay in agent_end.
 func (p *claudeProvider) snapshotMessages() []json.RawMessage {
