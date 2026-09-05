@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package upgradeconn turns an HTTP/1.1 request into a raw connection, so
 // several byte-stream protocols can share one TLS listener and be routed by
 // PATH like ordinary HTTP.
