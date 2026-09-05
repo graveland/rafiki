@@ -80,6 +80,12 @@ func cliCmd(t *testing.T, d *daemon, args ...string) *exec.Cmd {
 	cmd.Env = append(os.Environ(),
 		"RAFIKI_URL=", "RAFIKI_TOKEN=", "RAFIKI_SOCKET=",
 		"RAFIKI_DEFAULT_MODEL=", "RAFIKI_DEFAULT_PRESET=", "RAFIKI_DEFAULT_LABELS=",
+		// RAFIKI_PROFILE is live, not retired, but blanking it matters just as
+		// much: an ambient RAFIKI_PROFILE naming a profile that doesn't exist
+		// in the scratch manifest above would make mustProfile fail (and, for
+		// any RunE path that calls it, os.Exit(2) — killing this whole
+		// subprocess rather than just this one command).
+		"RAFIKI_PROFILE=",
 		"XDG_STATE_HOME="+cliStateDir(),
 		"XDG_CONFIG_HOME="+configDir,
 	)

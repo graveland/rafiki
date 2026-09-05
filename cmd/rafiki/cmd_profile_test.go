@@ -17,20 +17,25 @@ import (
 // other's manifests.
 //
 // It also blanks every retired env var (paths.URL, paths.Token, etc. — the
-// exact set profile.CheckRetiredEnv rejects): any test that reaches
-// resolveProfile runs CheckRetiredEnv first, and a developer's own shell
-// legitimately exports RAFIKI_URL/RAFIKI_TOKEN for everyday use against a real
+// exact set profile.CheckRetiredEnv rejects) PLUS RAFIKI_PROFILE, which is
+// live (it names the selection, not a retired setting) but just as capable of
+// steering resolveProfile out from under a test that didn't ask for it: any
+// test that reaches resolveProfile runs CheckRetiredEnv first and then
+// consults RAFIKI_PROFILE, and a developer's own shell legitimately exports
+// RAFIKI_URL/RAFIKI_TOKEN/RAFIKI_PROFILE for everyday use against a real
 // daemon. Without this, a test's outcome would depend on who is running it —
 // green in CI, a hard os.Exit(2) (via mustProfile) on a workstation with those
-// set. Blanking here, once, is cheaper than repeating it in every test that
-// calls isolateProfiles.
+// set (RAFIKI_PROFILE=bogus fails resolution just as surely as a retired var
+// does — "unknown profile", not "retired variable", but the same silent
+// mid-binary os.Exit(2)). Blanking here, once, is cheaper than repeating it in
+// every test that calls isolateProfiles.
 func isolateProfiles(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "run"))
-	for _, v := range []string{paths.URL, paths.Token, paths.Socket, paths.DefaultModel, paths.DefaultPreset, paths.DefaultLabels} {
+	for _, v := range []string{paths.URL, paths.Token, paths.Socket, paths.DefaultModel, paths.DefaultPreset, paths.DefaultLabels, "RAFIKI_PROFILE"} {
 		t.Setenv(v, "")
 	}
 }
