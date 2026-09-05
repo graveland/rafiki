@@ -191,6 +191,44 @@ func TestRunnerTerminateCallsShutdownAndUnblocksWait(t *testing.T) {
 	}
 }
 
+// TestClosingStdinTriggersShutdownAndUnblocksWait is the regression test for
+// the bug found driving a real daemon end to end: pkg/child.Child.Shutdown
+// closes stdin FIRST and only escalates to Terminate() after waiting out the
+// full shutdownTimeout (which defaults to 180s — see Controller.Kill). A
+// no-op Close left every kill of a daraja-hosted claude child silently idle
+// for that whole window before anything actually happened.
+func TestClosingStdinTriggersShutdownAndUnblocksWait(t *testing.T) {
+	stub := newScriptedDaraja()
+	pool, childID, teardown := connectFakeDaraja(t, stub)
+	defer teardown()
+
+	r := NewRunner(pool, childID)
+	stdin, _, _, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("stdin.Close: %v", err)
+	}
+
+	waitDone := make(chan struct{})
+	var code int
+	var signal string
+	go func() {
+		code, signal = r.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Wait() did not return after closing stdin — a real kill would have sat idle for the full shutdownTimeout")
+	}
+	if code != 7 || signal != "TERM" {
+		t.Fatalf("got (%d, %q), want (7, \"TERM\") from scriptedDaraja.Shutdown's response", code, signal)
+	}
+}
+
 func TestRunnerInterruptReturnsErrInterruptNotSupported(t *testing.T) {
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)

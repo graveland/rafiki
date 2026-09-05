@@ -83,27 +83,39 @@ func NewRunner(pool *Pool, childID string) *Runner {
 	}
 }
 
-// darajaStdin adapts Pool.Send to io.WriteCloser. Close is a no-op: daraja's
-// Relay stream stays open for the child's whole life (see Send's own doc
-// comment), so there is nothing to close per-write, and closing it would
-// prevent the next Send.
+// darajaStdin adapts Pool.Send to io.WriteCloser.
+//
+// Close does NOT merely close the relay stream's write side (there is no
+// per-write handle to close — Send reuses the one shared stream for the
+// child's whole life, see Send's own doc comment). child.Child.Shutdown
+// closes stdin FIRST, before its escalation timer, on the assumption that a
+// local subprocess often exits on its own once it sees stdin EOF, and only
+// escalates to Terminate() after waiting out the full shutdownTimeout (which
+// defaults to 180s — see Controller.Kill) if that assumption doesn't pan out.
+// A daraja-hosted claude has no such EOF-triggered exit at all, so a no-op
+// Close here meant every kill silently sat idle for the full grace window
+// before Terminate ever ran. Close instead triggers the real shutdown
+// sequence immediately — the same one Terminate itself uses — which is safe
+// to invoke early since shutdown() is idempotent on the "already told to
+// stop" part (doneOnce) and a redundant later Terminate() call (if the
+// escalation timer fires before this one completes) just repeats the same
+// RPC against an already-gone connection.
 type darajaStdin struct {
-	pool    *Pool
-	childID string
+	runner *Runner
 }
 
 func (s *darajaStdin) Write(p []byte) (int, error) {
-	if err := s.pool.Send(s.childID, p); err != nil {
+	if err := s.runner.pool.Send(s.runner.childID, p); err != nil {
 		return 0, err
 	}
 	return len(p), nil
 }
 
-func (s *darajaStdin) Close() error { return nil }
+func (s *darajaStdin) Close() error { return s.runner.Terminate() }
 
 func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	go r.pump()
-	return &darajaStdin{pool: r.pool, childID: r.childID}, r.pr, io.NopCloser(bytes.NewReader(nil)), nil
+	return &darajaStdin{runner: r}, r.pr, io.NopCloser(bytes.NewReader(nil)), nil
 }
 
 // pump feeds r.pw from the child's relay events for as long as r.done is
