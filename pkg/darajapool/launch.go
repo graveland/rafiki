@@ -92,22 +92,20 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 	// which reproduced this the first time it was written with the fake
 	// executor firing OnConnect from inside its own Launch stub.
 	//
-	// KNOWN, ACCEPTED LEAK: Pool.OnConnect has no unregister — this closure
-	// stays in the pool's permanent callback list forever, doing nothing
-	// once fired. It was already the shape of the pre-1c DarajaLaunch RPC
-	// handler; Launch does not make it worse in kind, only in RATE (every
-	// claude spawn now registers one, not just a manual `rafiki daraja
-	// launch`). Bounding this needs OnConnect to support unregistration,
-	// which is a real API change touching WireDaraja's two permanent
-	// callbacks too — out of scope here; tracked as a follow-up.
+	// Unsubscribed unconditionally on return (defer, below every branch this
+	// call can exit through): this registration is one-shot for exactly this
+	// ChildID, and every claude spawn creates one, so leaving it registered
+	// after Launch returns would grow Pool.onConnect by one per spawn forever
+	// and cost every SUBSEQUENT daraja connect one dead call per prior spawn.
 	connected := make(chan struct{})
 	var fired bool
-	p.Pool.OnConnect(func(cid string) {
+	unsubscribe := p.Pool.OnConnect(func(cid string) {
 		if cid == p.ChildID && !fired {
 			fired = true
 			close(connected)
 		}
 	})
+	defer unsubscribe()
 
 	launchResp, err := adminCLI.Launch(ctx, connect.NewRequest(&adminpb.LaunchRequest{
 		ChildId:  p.ChildID,
