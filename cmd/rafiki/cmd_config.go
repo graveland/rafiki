@@ -37,11 +37,19 @@ type configKey struct {
 	name string
 	get  func(s clientstate.State) string
 	set  func(s *clientstate.State, value string) error
+
+	// global marks a key as living in the shared document rather than the
+	// resolved profile's. Per-profile is the DEFAULT and global is the
+	// exception: a key qualifies only when it is a property of the person that
+	// no daemon can influence — display and presentation. Currency clears that
+	// bar; a model-mapping table would not.
+	global bool
 }
 
 var configKeys = []configKey{
 	{
-		name: "currency.code",
+		name:   "currency.code",
+		global: true,
 		get: func(s clientstate.State) string {
 			if s.Currency == nil || s.Currency.Code == "" {
 				return ""
@@ -61,7 +69,8 @@ var configKeys = []configKey{
 		},
 	},
 	{
-		name: "currency.rate",
+		name:   "currency.rate",
+		global: true,
 		get: func(s clientstate.State) string {
 			if s.Currency == nil || s.Currency.Rate == 0 {
 				return ""
@@ -117,22 +126,40 @@ func newConfigShowCmd() *cobra.Command {
 }
 
 func runConfigShow(cmd *cobra.Command, _ []string) error {
-	s := clientstate.LoadScoped(clientstate.Scope{})
+	p := mustProfile(cmd)
+	globalState := clientstate.LoadScoped(clientstate.Scope{})
+	profState := clientstate.LoadScoped(clientstate.Scope{Profile: p.Name})
 	mode, useColor := outputOpts(cmd)
-	return renderConfig(os.Stdout, s, mode, useColor)
+	return renderConfig(os.Stdout, globalState, profState, mode, useColor)
 }
 
-func renderConfig(w io.Writer, s clientstate.State, mode outputMode, useColor bool) error {
+func renderConfig(w io.Writer, globalState, profState clientstate.State, mode outputMode, useColor bool) error {
+	stateFor := func(k configKey) clientstate.State {
+		if k.global {
+			return globalState
+		}
+		return profState
+	}
+	scopeOf := func(k configKey) string {
+		if k.global {
+			return "global"
+		}
+		return "profile"
+	}
+
 	names := make([]string, len(configKeys))
 	for i, k := range configKeys {
 		names[i] = k.name
 	}
 	sort.Strings(names)
 
+	// The JSON shape stays a flat name->value object: it is machine-readable
+	// output and adding a nested scope would break every existing consumer to
+	// carry a hint only a human needs.
 	if mode == outputJSON {
 		out := make(map[string]string, len(configKeys))
 		for _, k := range configKeys {
-			out[k.name] = k.get(s)
+			out[k.name] = k.get(stateFor(k))
 		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -145,14 +172,14 @@ func renderConfig(w io.Writer, s clientstate.State, mode outputMode, useColor bo
 	st.Color = table.ColorOptions{}
 	tw.SetStyle(st)
 
-	headerRow := table.Row{"KEY", "VALUE"}
+	headerRow := table.Row{"KEY", "SCOPE", "VALUE"}
 	if useColor {
-		headerRow = table.Row{dim("KEY"), dim("VALUE")}
+		headerRow = table.Row{dim("KEY"), dim("SCOPE"), dim("VALUE")}
 	}
 	tw.AppendHeader(headerRow)
 	for _, name := range names {
 		k, _ := findConfigKey(name)
-		tw.AppendRow(table.Row{k.name, defaultDash(k.get(s))})
+		tw.AppendRow(table.Row{k.name, scopeOf(k), defaultDash(k.get(stateFor(k)))})
 	}
 	tw.Render()
 	return nil
@@ -235,15 +262,41 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	clientstate.UpdateScoped(clientstate.Scope{}, func(s *clientstate.State) {
-		for _, p := range pairs {
-			_ = p.key.set(s, p.val) // re-validated above; cannot fail here
+	p := mustProfile(cmd)
+	var globalPairs, profilePairs []struct {
+		key configKey
+		val string
+	}
+	for _, pair := range pairs {
+		if pair.key.global {
+			globalPairs = append(globalPairs, pair)
+		} else {
+			profilePairs = append(profilePairs, pair)
 		}
-	})
+	}
+	if len(globalPairs) > 0 {
+		clientstate.UpdateScoped(clientstate.Scope{}, func(s *clientstate.State) {
+			for _, pair := range globalPairs {
+				_ = pair.key.set(s, pair.val) // validated against a scratch State above
+			}
+		})
+	}
+	if len(profilePairs) > 0 {
+		clientstate.UpdateScoped(clientstate.Scope{Profile: p.Name}, func(s *clientstate.State) {
+			for _, pair := range profilePairs {
+				_ = pair.key.set(s, pair.val)
+			}
+		})
+	}
 
-	final := clientstate.LoadScoped(clientstate.Scope{})
-	for _, p := range pairs {
-		fmt.Fprintf(os.Stdout, "%s = %s\n", p.key.name, p.key.get(final))
+	globalFinal := clientstate.LoadScoped(clientstate.Scope{})
+	profFinal := clientstate.LoadScoped(clientstate.Scope{Profile: p.Name})
+	for _, pair := range pairs {
+		final := profFinal
+		if pair.key.global {
+			final = globalFinal
+		}
+		fmt.Fprintf(os.Stdout, "%s = %s\n", pair.key.name, pair.key.get(final))
 	}
 	return nil
 }

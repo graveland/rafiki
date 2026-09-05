@@ -68,7 +68,7 @@ func TestRunConfigSet_BatchIsAtomic(t *testing.T) {
 }
 
 func TestRunConfigSet_AppliesValidBatch(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateProfiles(t)
 
 	cmd := newConfigSetCmd()
 	if err := cmd.RunE(cmd, []string{"currency.code=cad", "currency.rate=1.38"}); err != nil {
@@ -84,7 +84,7 @@ func TestRunConfigSet_AppliesValidBatch(t *testing.T) {
 func TestRenderConfig_Table(t *testing.T) {
 	var buf bytes.Buffer
 	s := clientstate.State{Currency: &clientstate.Currency{Code: "CAD", Rate: 1.38}}
-	if err := renderConfig(&buf, s, outputTable, false); err != nil {
+	if err := renderConfig(&buf, s, clientstate.State{}, outputTable, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -99,7 +99,7 @@ func TestRenderConfig_Table(t *testing.T) {
 // every other unset column in `rafiki list`.
 func TestRenderConfig_TableUnset(t *testing.T) {
 	var buf bytes.Buffer
-	if err := renderConfig(&buf, clientstate.State{}, outputTable, false); err != nil {
+	if err := renderConfig(&buf, clientstate.State{}, clientstate.State{}, outputTable, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "-") {
@@ -110,11 +110,39 @@ func TestRenderConfig_TableUnset(t *testing.T) {
 func TestRenderConfig_JSON(t *testing.T) {
 	var buf bytes.Buffer
 	s := clientstate.State{Currency: &clientstate.Currency{Code: "CAD", Rate: 1.38}}
-	if err := renderConfig(&buf, s, outputJSON, false); err != nil {
+	if err := renderConfig(&buf, s, clientstate.State{}, outputJSON, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, `"currency.code": "CAD"`) || !strings.Contains(out, `"currency.rate": "1.38"`) {
 		t.Fatalf("JSON output: %s", out)
+	}
+}
+
+// Per-profile is the default; a key is global only when it is a property
+// of the person that no daemon can influence. If you are adding a key and
+// this test makes you think, that is the point.
+func TestEveryConfigKeyDeclaresItsScopeAndDefaultsToProfile(t *testing.T) {
+	global := map[string]bool{
+		"currency.code": true,
+		"currency.rate": true,
+	}
+	for _, k := range configKeys {
+		if k.global != global[k.name] {
+			t.Errorf("configKey %q: global = %v, want %v — see the plan's Task 11 before changing this",
+				k.name, k.global, global[k.name])
+		}
+	}
+}
+
+func TestConfigShowReportsTheScope(t *testing.T) {
+	isolateProfiles(t)
+	var buf bytes.Buffer
+	if err := renderConfig(&buf, clientstate.State{}, clientstate.State{}, outputTable, false); err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "SCOPE") {
+		t.Fatalf("config show has no scope column:\n%s", out)
 	}
 }
