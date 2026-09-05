@@ -27,6 +27,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
+	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
@@ -3219,31 +3220,20 @@ func resolveClaudeBinary(override string) (string, error) {
 
 // buildClaudeArgv converts a SpawnRequest into the claude CLI argument list
 // (excluding the binary itself) for stream-json bidirectional driving.
+// buildClaudeArgv is a thin wrapper over claudeargv.Build — the ONE claude
+// argv builder shared with the executor's AdminService and daraja's own
+// Restart/respawn path (see that package's doc comment). This is the
+// local-subprocess spawn path, used only when this daemon has no executor
+// pool configured at all (see claudeRunner in agent_runtime.go); every other
+// claude child builds its argv the exact same way, through this same
+// function, so the two paths cannot drift on flags again.
 func buildClaudeArgv(req protocol.SpawnRequest) []string {
-	argv := []string{
-		"-p",
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--dangerously-skip-permissions",
-		// AskUserQuestion has no interactive renderer in headless -p mode: claude
-		// self-resolves it with an error ("Answer questions?") in the same turn,
-		// then the agent falls back to asking in prose — which round-trips fine
-		// over the prompt/steer channel. Disallow the dead tool so it never wastes
-		// a turn attempting it. Variadic flag stops at the next --option below.
-		"--disallowedTools", "AskUserQuestion",
-	}
-	if req.Model != "" {
-		argv = append(argv, "--model", req.Model)
-	}
-	if req.ResumeSession != "" {
-		argv = append(argv, "--resume", req.ResumeSession)
-	}
-	if req.AppendSystemPrompt != "" {
-		argv = append(argv, "--append-system-prompt", req.AppendSystemPrompt)
-	}
-	argv = append(argv, req.ExtraArgs...)
-	return argv
+	return claudeargv.Build(claudeargv.Params{
+		Model:              req.Model,
+		ResumeSession:      req.ResumeSession,
+		AppendSystemPrompt: req.AppendSystemPrompt,
+		ExtraArgs:          req.ExtraArgs,
+	})
 }
 
 // resolveSpawnPlan picks the binary, argv, and ProtocolProvider for a spawn
