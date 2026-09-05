@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -142,5 +143,95 @@ func TestProfileRemoveRefusesTheCurrentOneWithoutForce(t *testing.T) {
 	}
 	if _, ok := set.Get("work"); ok {
 		t.Fatal("work survived remove --force")
+	}
+}
+
+// TestProfileAddRejectsTraversalNames pins Fix 1: `rafiki profile add ..` (or
+// any other name that could escape profile.Dir when joined) must be refused
+// before anything is written or deleted. The regression this guards: without
+// ValidName, `rafiki profile add ..` succeeded, and a later
+// `rafiki profile remove .. --force` called os.RemoveAll(profile.Dir(".."))
+// -- which filepath.Join cleans down to paths.ConfigDir() itself, deleting
+// profiles.toml, current-profile and every other profile's token.
+func TestProfileAddRejectsTraversalNames(t *testing.T) {
+	for _, name := range []string{"..", "../etc", "a/b", "."} {
+		t.Run("name="+name, func(t *testing.T) {
+			isolateProfiles(t)
+
+			// A canary file inside the config dir stands in for
+			// profiles.toml/current-profile/service.env/etc: if `add` (wrongly)
+			// created a profile and a later `remove --force` (wrongly) deleted the
+			// config dir, this file would vanish with it.
+			if err := os.MkdirAll(paths.ConfigDir(), 0o700); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			canary := filepath.Join(paths.ConfigDir(), "canary")
+			if err := os.WriteFile(canary, []byte("keep me"), 0o600); err != nil {
+				t.Fatalf("write canary: %v", err)
+			}
+
+			_, err := runProfileCmd(t, "add", name, "--socket", "/tmp/x.sock")
+			if err == nil {
+				t.Fatalf("profile add %q = nil error, want a rejection", name)
+			}
+
+			// Nothing should have been written: the manifest either doesn't exist
+			// or, if it does (a prior subtest step), does not contain this name.
+			if set, loadErr := profile.Load(); loadErr == nil {
+				if _, ok := set.Get(name); ok {
+					t.Fatalf("profile add %q was rejected but the profile still exists in the manifest", name)
+				}
+			}
+
+			// The canary must still be exactly what it was -- proving no
+			// RemoveAll reached the config directory as a side effect of this
+			// (rejected) add.
+			b, err := os.ReadFile(canary)
+			if err != nil {
+				t.Fatalf("canary file gone after rejected add %q: %v", name, err)
+			}
+			if string(b) != "keep me" {
+				t.Fatalf("canary file contents changed: %q", b)
+			}
+		})
+	}
+}
+
+// TestProfileAddValidatesBeforeWriting pins Fix 2: a profile that fails
+// validation (here, an http:// url, which `profile.Validate` rejects because
+// only https is a real control listener) must not be written to
+// profiles.toml at all -- a later `rafiki profile list` must succeed and show
+// only what existed before the failed add.
+func TestProfileAddValidatesBeforeWriting(t *testing.T) {
+	isolateProfiles(t)
+
+	if _, err := runProfileCmd(t, "add", "work", "--socket", "/tmp/work.sock"); err != nil {
+		t.Fatalf("add work: %v", err)
+	}
+
+	_, err := runProfileCmd(t, "add", "bad", "--url", "http://insecure", "--token", "t")
+	if err == nil {
+		t.Fatal("profile add --url http://insecure = nil error, want a validation failure")
+	}
+
+	// The manifest must still parse and must not contain "bad" -- proving
+	// nothing was written before validation ran.
+	set, err := profile.Load()
+	if err != nil {
+		t.Fatalf("profiles.toml does not parse after a rejected add: %v", err)
+	}
+	if _, ok := set.Get("bad"); ok {
+		t.Fatal("the invalid profile was written to the manifest despite validation failing")
+	}
+
+	out, err := runProfileCmd(t, "list")
+	if err != nil {
+		t.Fatalf("profile list after a rejected add: %v", err)
+	}
+	if !strings.Contains(out, "work") {
+		t.Fatalf("profile list output missing the pre-existing profile:\n%s", out)
+	}
+	if strings.Contains(out, "bad") {
+		t.Fatalf("profile list output shows the rejected profile:\n%s", out)
 	}
 }

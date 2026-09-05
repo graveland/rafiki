@@ -206,11 +206,17 @@ func newProfileAddCmd() *cobra.Command {
 	cmd.Flags().String("model", "", "default model for `rafiki create`")
 	cmd.Flags().String("preset", "", "default preset for `rafiki create`")
 	cmd.Flags().StringArray("label", nil, "default label k=v (repeatable)")
+	cmd.ValidArgsFunction = func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 	return cmd
 }
 
 func runProfileAdd(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	if err := profile.ValidName(name); err != nil {
+		return fmt.Errorf("profile add: %w", err)
+	}
 	url, _ := cmd.Flags().GetString("url")
 	socket, _ := cmd.Flags().GetString("socket")
 	proxy, _ := cmd.Flags().GetString("proxy")
@@ -245,17 +251,19 @@ func runProfileAdd(cmd *cobra.Command, args []string) error {
 	if _, exists := set.Get(name); exists {
 		return fmt.Errorf("profile %q already exists; edit %s or remove it first", name, profile.ProfilesFile())
 	}
-	set.Profiles[name] = profile.Profile{
+	newProfile := profile.Profile{
 		Name: name, URL: url, Socket: socket, Proxy: proxy,
 		Kind: kind, Model: model, Preset: preset, Labels: labels,
 	}
-	// Save re-parses nothing, so validate by round-tripping through Load
-	// below rather than trusting the flags alone.
-	if err := profile.Save(set); err != nil {
+	// Validate BEFORE writing anything: a bad profile written to disk corrupts
+	// the manifest for every subsequent `rafiki profile *` command until it is
+	// hand-edited back to something that parses.
+	if err := profile.Validate(newProfile); err != nil {
 		return err
 	}
-	if _, err := profile.Load(); err != nil {
-		return fmt.Errorf("wrote %s but it does not parse back: %w", profile.ProfilesFile(), err)
+	set.Profiles[name] = newProfile
+	if err := profile.Save(set); err != nil {
+		return err
 	}
 	if token != "" {
 		if err := profile.WriteToken(name, token); err != nil {
