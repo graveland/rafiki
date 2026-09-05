@@ -98,11 +98,12 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := daraja.NewServer(host)
-	_ = srv // used only for its Routes() and ShutdownRequested() below — keep to preserve interface stability
+	mux := http.NewServeMux()
+	mux.Handle(srv.Routes())
 
 	opts := daraja.ConnectOptions{
 		ChildID: childID,
-		Handler: http.NewServeMux(),
+		Handler: mux,
 		PID:     os.Getpid(),
 	}
 	if connect != "" {
