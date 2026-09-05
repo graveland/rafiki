@@ -14,9 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/net/http2"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
 // connectUDSBaseURL is a sentinel. Over a unix socket the host is meaningless
@@ -76,63 +75,39 @@ type connectEndpoint struct {
 	identity string
 }
 
-// framedSocketForCmd resolves the effective FRAMED control socket for cmd, the
-// same precedence the framed verbs dial through client.Dial: the --socket
-// flag when set, else $RAFIKI_SOCKET (client.DefaultSocketPath), else the XDG
-// runtime path. Recovered from the deleted socketFromCmd, whose only caller
-// the completion rewrite removed — the precedence knowledge did not go stale
-// with it.
-func framedSocketForCmd(cmd *cobra.Command) string {
-	if cmd != nil {
-		if s, _ := cmd.Flags().GetString("socket"); s != "" {
-			return s
-		}
-	}
-	return client.DefaultSocketPath()
-}
-
-// connectSocketForCmd names the local Connect socket the command's daemon
-// serves. connect.sock sits BESIDE the framed control socket by construction
-// (pkg/paths pins them as siblings in RuntimeDir), so it moves with any
-// override of that socket: a scratch daemon started with a custom controller
-// socket serves Connect beside it. Nothing overridden means the canonical
-// paths.ConnectSocketPath(), exactly as before.
-func connectSocketForCmd(cmd *cobra.Command) string {
-	framed := framedSocketForCmd(cmd)
-	if framed == paths.SocketPath() && framed == client.DefaultSocketPath() {
-		return paths.ConnectSocketPath()
-	}
-	return filepath.Join(filepath.Dir(framed), "connect.sock")
-}
-
-// newConnectEndpoint resolves where the Connect control plane lives.
+// connectSocketFor names the Connect socket beside a profile's control socket.
 //
-// The same gate mustDial uses (remoteDialURL — https:// only), for the same
-// reason: `rafiki attach` must reach the daemon every other verb reaches. It
-// used to hardcode the unix socket, so an operator with RAFIKI_URL set got a
-// working `rafiki list` and a cockpit that dialed a socket on their laptop —
-// and, until the --socket fix, the reverse failure too: a --socket override
-// moved the framed verbs but left Connect (and completion) on the default
-// daemon.
+// connect.sock is a SIBLING of controller.sock by construction (pkg/paths pins
+// both in RuntimeDir), so a profile naming a scratch daemon's control socket
+// gets that daemon's Connect socket for free. It is deliberately not a profile
+// field: two names for one daemon is two ways to be wrong.
+func connectSocketFor(p profile.Resolved) string {
+	return filepath.Join(filepath.Dir(p.Socket), "connect.sock")
+}
+
+// newConnectEndpoint resolves where the Connect control plane lives, from the
+// profile and nothing else.
 //
 // Remote requires a token. There is no bootstrap mode on this plane — it has
 // no user-create RPC — so an absent credential can only ever produce a 401,
 // and saying so here beats saying so after a round trip.
 func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
-	u := remoteDialURL()
-	if u == "" {
-		sock := connectSocketForCmd(cmd)
+	p, err := resolveProfile(cmd)
+	if err != nil {
+		return connectEndpoint{}, err
+	}
+
+	if p.URL == "" {
+		sock := connectSocketFor(p)
 		httpClient := connectHTTPClient(sock)
-		// Attach the user's own token when one is configured, so a per-user
-		// read (GetRateLimitStatus) can resolve identity locally too — see
-		// UserTokenAuth.IdentifyOptional. Optional, unlike the remote branch
-		// below: the socket itself remains the trust boundary for every
-		// other verb, and a local setup with no token configured at all (or
-		// a stale one left over from a different daemon) must keep working
-		// exactly as it always has — the daemon-side resolver never rejects
-		// on this mount, only enriches when it can.
-		if token := paths.TokenFromEnv(); token != "" {
-			httpClient = &http.Client{Transport: &bearerTransport{base: httpClient.Transport, token: token}}
+		// Attach the profile's token when it has one, so a per-user read
+		// (GetRateLimitStatus) can resolve identity locally too — see
+		// UserTokenAuth.IdentifyOptional. Optional, unlike the remote branch:
+		// the socket itself remains the trust boundary, connect_uds.go builds
+		// its interceptor with an empty token, and a local profile with no
+		// token must keep working for every verb that never looks at identity.
+		if p.Token != "" {
+			httpClient = &http.Client{Transport: &bearerTransport{base: httpClient.Transport, token: p.Token}}
 		}
 		return connectEndpoint{
 			httpClient: httpClient,
@@ -142,11 +117,11 @@ func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 		}, nil
 	}
 
-	token := paths.TokenFromEnv()
-	if token == "" {
+	if p.Token == "" {
 		return connectEndpoint{}, fmt.Errorf(
-			"%s names a remote daemon but no control-plane token is set: "+
-				"export %s (or write %s)", paths.URL, paths.Token, paths.TokenFile())
+			"profile %q names a remote daemon but has no token: write one to %s "+
+				"(or recreate it with `rafiki profile add %s --url %s --token …`)",
+			p.Name, profile.TokenFile(p.Name), p.Name, p.URL)
 	}
 
 	// Plain net/http rather than an explicit http2.Transport: the shared TLS
@@ -158,11 +133,11 @@ func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	return connectEndpoint{
 		httpClient: &http.Client{Transport: &bearerTransport{
 			base:  http.DefaultTransport,
-			token: token,
+			token: p.Token,
 		}},
-		baseURL:  u,
-		describe: u,
-		identity: u,
+		baseURL:  p.URL,
+		describe: p.URL,
+		identity: p.URL,
 	}, nil
 }
 
@@ -194,9 +169,8 @@ func diagnoseConnectError(err error, endpoint string) error {
 			endpoint, err)
 	case connect.CodeUnauthenticated:
 		return fmt.Errorf(
-			"the rafiki daemon at %s rejected the control-plane credential — "+
-				"check %s (or %s): %w",
-			endpoint, paths.Token, paths.TokenFile(), err)
+			"the rafiki daemon at %s rejected the profile's credential — check its token file: %w",
+			endpoint, err)
 	case connect.CodeUnavailable:
 		return fmt.Errorf(
 			"cannot reach the rafiki daemon at %s — is rafikid running? (`rafiki status`): %w",

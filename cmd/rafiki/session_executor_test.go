@@ -2,15 +2,18 @@ package main
 
 import (
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
-// The connect target is derived, not configured: a remote RAFIKI_URL means the
-// executor dials that daemon's TLS listener, and no RAFIKI_URL means the local
-// daemon's unix socket. Getting this backwards points an executor at the wrong
-// machine, which then serves the wrong filesystem.
+// The connect target is derived from the resolved PROFILE, not configured: a
+// remote profile means the executor dials that daemon's TLS listener, and a
+// local (socket) profile means the local daemon's unix socket. Getting this
+// backwards points an executor at the wrong machine, which then serves the
+// wrong filesystem.
 func TestSessionExecutorConnectTarget(t *testing.T) {
-	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev:8443")
-	addr, sock, err := sessionConnectTarget()
+	remote := profile.Resolved{Profile: profile.Profile{URL: "https://rafiki.example.dev:8443"}}
+	addr, sock, err := sessionConnectTarget(remote)
 	if err != nil {
 		t.Fatalf("sessionConnectTarget: %v", err)
 	}
@@ -21,8 +24,8 @@ func TestSessionExecutorConnectTarget(t *testing.T) {
 		t.Errorf("socket = %q, want empty for a remote daemon", sock)
 	}
 
-	t.Setenv("RAFIKI_URL", "")
-	addr, sock, err = sessionConnectTarget()
+	local := profile.Resolved{Profile: profile.Profile{Socket: "/some/path"}}
+	addr, sock, err = sessionConnectTarget(local)
 	if err != nil {
 		t.Fatalf("sessionConnectTarget: %v", err)
 	}

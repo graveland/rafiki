@@ -9,16 +9,52 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
+
+// seedRemoteProfile isolates profile state for the test and seeds a single
+// remote profile pointed at url, with token as its credential (empty means
+// no token file is written at all).
+func seedRemoteProfile(t *testing.T, name, url, token string) {
+	t.Helper()
+	isolateProfiles(t)
+	resetProfileCache()
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		name: {Name: name, URL: url},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if token != "" {
+		if err := profile.WriteToken(name, token); err != nil {
+			t.Fatalf("WriteToken: %v", err)
+		}
+	}
+	if err := profile.SavePointer(name); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
+}
+
+// seedLocalProfile is seedRemoteProfile's socket-based counterpart.
+func seedLocalProfile(t *testing.T, name, socket string) {
+	t.Helper()
+	isolateProfiles(t)
+	resetProfileCache()
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		name: {Name: name, Socket: socket},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := profile.SavePointer(name); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
+}
 
 // The cache is the only part of this path testable without a live daemon: the
 // fetch itself needs a Connect server. What matters here is that a cached
 // answer is served without one, and that a drop forces a refetch.
 func TestChildCompletionServesFromCache(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("RAFIKI_URL", "https://example.invalid")
-	t.Setenv("RAFIKI_TOKEN", "t")
 
 	want := []completionChild{{ChildID: "c_1", Name: "alpha", Status: "idle"}}
 	cacheWrite("children", completionEndpointKey(nil), want)
@@ -30,9 +66,8 @@ func TestChildCompletionServesFromCache(t *testing.T) {
 }
 
 func TestDropChildCompletionCacheForcesARefetch(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("RAFIKI_URL", "https://example.invalid")
-	t.Setenv("RAFIKI_TOKEN", "t")
 
 	cacheWrite("children", completionEndpointKey(nil), []completionChild{{Name: "alpha"}})
 	dropChildCompletionCache(nil)
@@ -44,9 +79,8 @@ func TestDropChildCompletionCacheForcesARefetch(t *testing.T) {
 
 // An unreachable daemon must yield no candidates, never an error or an exit.
 func TestChildCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://127.0.0.1:1", "t")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("RAFIKI_URL", "https://127.0.0.1:1")
-	t.Setenv("RAFIKI_TOKEN", "t")
 
 	done := make(chan []completionChild, 1)
 	go func() { done <- completionChildren(nil) }()
@@ -60,42 +94,55 @@ func TestChildCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
 	}
 }
 
-// The bug this task closes: the old helpers read --socket and never consulted
-// RAFIKI_URL, so a remote operator got no candidates at all, silently.
-func TestCompletionEndpointPrefersRafikiURLOverTheSocket(t *testing.T) {
-	t.Setenv("RAFIKI_URL", "https://daemon.example")
+// The completion key follows the resolved PROFILE, not an env var: the old
+// bug this task closes was a helper reading only --socket and never
+// consulting RAFIKI_URL, so a remote operator got no candidates at all,
+// silently. Now the key is the profile's URL when it names a remote, and a
+// "unix:"-prefixed socket path when it names a local daemon.
+func TestCompletionEndpointKeyFollowsTheProfile(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://daemon.example", "t")
 	if got := completionEndpointKey(nil); got != "https://daemon.example" {
 		t.Errorf("key = %q, want the remote URL", got)
 	}
 
-	t.Setenv("RAFIKI_URL", "")
+	seedLocalProfile(t, "work", "/tmp/work-scratch/controller.sock")
 	if got := completionEndpointKey(nil); !strings.HasPrefix(got, "unix:") {
-		t.Errorf("key = %q, want a unix: key with no RAFIKI_URL set", got)
+		t.Errorf("key = %q, want a unix: key for a local (socket) profile", got)
 	}
 }
 
-// A --socket override must move the cache KEY with it — the key names the
-// endpoint the answer came from, and a command pointed at a scratch daemon
-// must not read, write or drop the default daemon's entries. The key must also
-// equal the identity the endpoint resolver answers, so reads, writes and drops
-// can never drift from what is actually dialed.
-func TestCompletionKeyFollowsTheSocketOverride(t *testing.T) {
+// A -P profile override must move the cache KEY with it — the key names the
+// endpoint the answer came from, and a command pointed at a scratch daemon's
+// profile must not read, write or drop the default profile's entries. The key
+// must also equal the identity the endpoint resolver answers, so reads,
+// writes and drops can never drift from what is actually dialed.
+func TestCompletionKeyFollowsTheProfileOverride(t *testing.T) {
+	isolateProfiles(t)
+	resetProfileCache()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("RAFIKI_URL", "")
-	t.Setenv("RAFIKI_TOKEN", "")
+
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"default": {Name: "default", Socket: "/tmp/default-scratch/controller.sock"},
+		"scratch": {Name: "scratch", Socket: "/tmp/scratch-1/rafiki/controller.sock"},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := profile.SavePointer("default"); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
 
 	cmd := &cobra.Command{}
-	cmd.Flags().String("socket", "", "")
-	if err := cmd.Flags().Set("socket", "/tmp/scratch-1/rafiki/controller.sock"); err != nil {
+	cmd.Flags().StringP("profile", "P", "", "")
+	if err := cmd.Flags().Set("profile", "scratch"); err != nil {
 		t.Fatal(err)
 	}
 
 	want := "unix:/tmp/scratch-1/rafiki/connect.sock"
 	if got := completionEndpointKey(cmd); got != want {
-		t.Errorf("key = %q, want %q — the override must move the identity off the default daemon", got, want)
+		t.Errorf("key = %q, want %q — the override must move the identity off the default profile", got, want)
 	}
-	if got := completionEndpointKey(cmd); got == "unix:"+paths.ConnectSocketPath() {
-		t.Errorf("key = %q, still the DEFAULT daemon's connect socket", got)
+	if got := completionEndpointKey(cmd); got == "unix:/tmp/default-scratch/connect.sock" {
+		t.Errorf("key = %q, still the DEFAULT profile's connect socket", got)
 	}
 
 	ep, err := newConnectEndpoint(cmd)
@@ -110,9 +157,8 @@ func TestCompletionKeyFollowsTheSocketOverride(t *testing.T) {
 // A remote endpoint with no token cannot succeed. It must be a miss, not the
 // error newConnectEndpoint returns for interactive callers.
 func TestChildCompletionWithoutATokenIsEmpty(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("RAFIKI_URL", "https://example.invalid")
-	t.Setenv("RAFIKI_TOKEN", "")
 
 	if got := completionChildren(nil); len(got) != 0 {
 		t.Errorf("got %+v, want none", got)

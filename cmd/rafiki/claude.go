@@ -95,11 +95,11 @@ type claudeInvocation struct {
 // session starts normally. `rafiki claude` must keep working with the daemon
 // down — that is the difference between "the daemon is down" and "I cannot
 // start a coding session".
-func claudeAutoCompactWindow(ctx context.Context, model string) int {
+func claudeAutoCompactWindow(ctx context.Context, cmd *cobra.Command, model string) int {
 	ctx, cancel := context.WithTimeout(ctx, claudeCatalogBudget)
 	defer cancel()
 
-	c, err := dialDaemon(ctx)
+	c, err := dialDaemon(ctx, cmd)
 	if err != nil {
 		return 0
 	}
@@ -118,20 +118,22 @@ func claudeAutoCompactWindow(ctx context.Context, model string) int {
 	return data.AutoCompactWindow
 }
 
-// dialDaemon connects to the daemon's control endpoint, mirroring mustDial but
-// returning an error instead of exiting. Used where a dead daemon is graceful
-// degradation (return 0) rather than a fatal error. mustDial is exactly wrong
-// here: it calls os.Exit(2) on a connection failure, and `rafiki claude` must
-// keep working with the daemon down.
-//
-// Shares remoteDialURL (cli_helpers.go) with mustDial rather than repeating
-// the client.IsRemoteURL gate inline — see that function's comment for why
-// the two must never independently decide what counts as remote.
-func dialDaemon(ctx context.Context) (*client.Client, error) {
-	if u := remoteDialURL(); u != "" {
-		return client.DialURL(ctx, u, paths.TokenFromEnv())
+// dialDaemon connects to the profile's daemon control endpoint, mirroring
+// mustDial but returning an error instead of exiting. Used where a dead daemon
+// is graceful degradation (return 0) rather than a fatal error. mustDial is
+// exactly wrong here: it calls os.Exit(2) on a connection failure, and
+// `rafiki claude` must keep working with the daemon down. resolveProfile
+// (rather than mustProfile) for the same reason: a misconfigured profile must
+// degrade the compaction-window lookup, not kill the launch.
+func dialDaemon(ctx context.Context, cmd *cobra.Command) (*client.Client, error) {
+	p, err := resolveProfile(cmd)
+	if err != nil {
+		return nil, err
 	}
-	return client.Dial(client.DefaultSocketPath())
+	if p.URL != "" {
+		return client.DialURL(ctx, p.URL, p.Token)
+	}
+	return client.Dial(p.Socket)
 }
 
 // runClaude runs `rafiki claude [flags] [-- claude flags...]`.
@@ -180,7 +182,7 @@ func runClaude(cmd *cobra.Command, args []string) error {
 
 	autoCompact := 0
 	if model != "" {
-		autoCompact = claudeAutoCompactWindow(context.Background(), model)
+		autoCompact = claudeAutoCompactWindow(context.Background(), cmd, model)
 	}
 
 	env, modelArgs := proxyenv.Claude(os.Environ(), proxyenv.ClaudeOptions{

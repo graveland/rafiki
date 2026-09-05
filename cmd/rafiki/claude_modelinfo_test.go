@@ -8,8 +8,25 @@ import (
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
+
+// unreachableDaemonProfile seeds an isolated profile manifest naming a socket
+// nothing is listening on, so a dial through it fails deterministically even
+// if a real daemon happens to be running.
+func unreachableDaemonProfile(t *testing.T) {
+	t.Helper()
+	isolateProfiles(t)
+	resetProfileCache()
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"scratch": {Name: "scratch", Socket: filepath.Join(t.TempDir(), "no-such.sock")},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := profile.SavePointer("scratch"); err != nil {
+		t.Fatalf("SavePointer: %v", err)
+	}
+}
 
 // The behaviour that must never regress: an unreachable daemon returns 0,
 // which leaves Claude Code's own compaction default alone and lets the session
@@ -21,12 +38,9 @@ import (
 // cmd/rafikid/controller_modelinfo_test.go, because the client no longer reads
 // the catalog itself — it asks the daemon over ctrl_model_info.
 func TestAutoCompactWindowReturnsZeroWhenDaemonDown(t *testing.T) {
-	// Point both the remote-control URL and the UDS at nothing, so the dial
-	// fails deterministically even if a real daemon happens to be running.
-	t.Setenv(paths.URL, "")
-	t.Setenv("RAFIKI_SOCKET", filepath.Join(t.TempDir(), "no-such.sock"))
+	unreachableDaemonProfile(t)
 
-	got := claudeAutoCompactWindow(context.Background(), "anthropic/claude-opus-5")
+	got := claudeAutoCompactWindow(context.Background(), nil, "anthropic/claude-opus-5")
 	if got != 0 {
 		t.Fatalf("an unreachable daemon must yield 0, got %d", got)
 	}
@@ -35,13 +49,12 @@ func TestAutoCompactWindowReturnsZeroWhenDaemonDown(t *testing.T) {
 // Bounded: a slow lookup must not delay the launch. The whole RPC is raced
 // against a budget; whatever replaces it must keep that property.
 func TestAutoCompactWindowIsBounded(t *testing.T) {
-	t.Setenv(paths.URL, "")
-	t.Setenv("RAFIKI_SOCKET", filepath.Join(t.TempDir(), "no-such.sock"))
+	unreachableDaemonProfile(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already dead
 	start := time.Now()
-	if got := claudeAutoCompactWindow(ctx, "anthropic/claude-opus-5"); got != 0 {
+	if got := claudeAutoCompactWindow(ctx, nil, "anthropic/claude-opus-5"); got != 0 {
 		t.Fatalf("got %d", got)
 	}
 	if d := time.Since(start); d > 2*time.Second {

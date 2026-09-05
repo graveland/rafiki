@@ -3,25 +3,16 @@ package integration_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// cliCmd builds a rafiki invocation with the ambient RAFIKI_URL/RAFIKI_TOKEN
-// BLANKED.
-//
-// Every call here passes --socket, which looks like enough and is not:
-// RAFIKI_URL overrides --socket outright (mustDial consults remoteDialURL
-// first and never reads the flag), so an operator with it exported ran this
-// whole suite against their real daemon. The giveaway is an error naming TCP
-// while a socket path is right there in the argv.
-//
-// Later entries win for a duplicate exec.Cmd.Env key, so appending after
-// os.Environ() overrides whatever the shell exported.
 // cliStateDir is a scratch XDG_STATE_HOME shared by every CLI invocation in
 // this package. One directory rather than one per call: the tests do not
 // assert on its contents, they only need it to not be the real one.
@@ -41,13 +32,57 @@ var (
 	cliState     string
 )
 
-func cliCmd(args ...string) *exec.Cmd {
+// writeCliProfile writes a minimal profiles.toml + current-profile pointer
+// naming a single local profile "it" at socketPath, under configDir's own
+// "rafiki" leaf — pkg/paths.ConfigDir() is $XDG_CONFIG_HOME/rafiki, not
+// $XDG_CONFIG_HOME itself, and profile.ProfilesFile()/PointerFile() resolve
+// through it. This is how these tests aim the real CLI binary at a scratch
+// daemon now that --socket is gone (client dialing is entirely profile-driven
+// — see pkg/profile and cmd/rafiki's mustDial/newConnectEndpoint).
+func writeCliProfile(t *testing.T, configDir, socketPath string) {
+	t.Helper()
+	dir := filepath.Join(configDir, "rafiki")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	manifest := fmt.Sprintf("[profile.it]\nsocket = %q\n", socketPath)
+	if err := os.WriteFile(filepath.Join(dir, "profiles.toml"), []byte(manifest), 0o600); err != nil {
+		t.Fatalf("write profiles.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "current-profile"), []byte("it\n"), 0o600); err != nil {
+		t.Fatalf("write current-profile: %v", err)
+	}
+}
+
+// cliCmd builds a rafiki invocation against d's daemon (nil for a --help-only
+// call that dials nothing), with the ambient RAFIKI_URL/RAFIKI_TOKEN/etc
+// BLANKED — those are retired variables the client now refuses outright (see
+// profile.CheckRetiredEnv) — and XDG_CONFIG_HOME pointed at a fresh scratch
+// directory holding a profile manifest for d's socket.
+//
+// The config dir is fresh PER CALL (t.TempDir()), not shared across a test's
+// several cliCmd invocations or across tests: every test here calls
+// t.Parallel(), and two daemons sharing one profiles.toml would race each
+// other's writes and occasionally dial the wrong socket.
+//
+// Later entries win for a duplicate exec.Cmd.Env key, so appending after
+// os.Environ() overrides whatever the shell exported.
+func cliCmd(t *testing.T, d *daemon, args ...string) *exec.Cmd {
+	t.Helper()
+	configDir := t.TempDir()
+	if d != nil {
+		writeCliProfile(t, configDir, d.socketPath)
+	}
 	cmd := exec.Command(cliPath, args...)
 	// XDG_STATE_HOME too: `rafiki create` records the model it spawned into
 	// the client state file, so an un-isolated run writes a remembered model
 	// into the DEVELOPER's real preferences from a test daemon's fixture.
 	cmd.Env = append(os.Environ(),
-		"RAFIKI_URL=", "RAFIKI_TOKEN=", "XDG_STATE_HOME="+cliStateDir())
+		"RAFIKI_URL=", "RAFIKI_TOKEN=", "RAFIKI_SOCKET=",
+		"RAFIKI_DEFAULT_MODEL=", "RAFIKI_DEFAULT_PRESET=", "RAFIKI_DEFAULT_LABELS=",
+		"XDG_STATE_HOME="+cliStateDir(),
+		"XDG_CONFIG_HOME="+configDir,
+	)
 	return cmd
 }
 
@@ -57,7 +92,7 @@ func TestCLI_Status(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
 
-	cmd := cliCmd("--socket", d.socketPath, "--output", "json", "status")
+	cmd := cliCmd(t, d, "--output", "json", "status")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("status failed: %v\noutput: %s", err, out)
@@ -77,8 +112,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 
 	// create --detached
 	var createStderr bytes.Buffer
-	createCmd := cliCmd(
-		"--socket", d.socketPath,
+	createCmd := cliCmd(t, d,
 		"--output", "json",
 		"create", "smoke",
 		"--cwd", "/tmp",
@@ -106,7 +140,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	}
 
 	// list — child should be present
-	listCmd := cliCmd("--socket", d.socketPath, "--output", "json", "list")
+	listCmd := cliCmd(t, d, "--output", "json", "list")
 	out, err = listCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("list failed: %v\n%s", err, out)
@@ -116,7 +150,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	}
 
 	// stop
-	stopCmd := cliCmd("--socket", d.socketPath, "stop", "smoke")
+	stopCmd := cliCmd(t, d, "stop", "smoke")
 	out, err = stopCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("stop failed: %v\n%s", err, out)
@@ -125,7 +159,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	// poll until status=exited (up to 5 seconds)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		getCmd := cliCmd("--socket", d.socketPath, "--output", "json", "get", "smoke")
+		getCmd := cliCmd(t, d, "--output", "json", "get", "smoke")
 		out, _ = getCmd.CombinedOutput()
 		if strings.Contains(string(out), `"status":"exited"`) {
 			break
@@ -135,19 +169,19 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 
 	// `rafiki stop` no longer closes: `smoke` must still be listed, exited.
 	// `get` always emits indented JSON (it ignores --output), hence the space.
-	getCmd := cliCmd("--socket", d.socketPath, "--output", "json", "get", "smoke")
+	getCmd := cliCmd(t, d, "--output", "json", "get", "smoke")
 	out, err = getCmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
 		t.Fatalf("expected smoke to still be listed as exited after stop; get output: %s (err=%v)", out, err)
 	}
 
 	// close finalizes it.
-	closeCmd := cliCmd("--socket", d.socketPath, "close", "smoke")
+	closeCmd := cliCmd(t, d, "close", "smoke")
 	out, err = closeCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("close failed: %v\n%s", err, out)
 	}
-	getCmd = cliCmd("--socket", d.socketPath, "get", "smoke")
+	getCmd = cliCmd(t, d, "get", "smoke")
 	out, _ = getCmd.CombinedOutput()
 	if !strings.Contains(string(out), "no child matches") {
 		t.Fatalf("expected child to be gone after close; get output: %s", out)
@@ -197,8 +231,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	// Capture stdout and stderr separately — rafiki may emit a best-effort warning
 	// on stderr (e.g. active-marker directory not found) that we don't want to
 	// confuse with the JSON payload on stdout.
-	createCmd := cliCmd(
-		"--socket", d.socketPath,
+	createCmd := cliCmd(t, d,
 		"create", "test-detached",
 		"--cwd", "/tmp",
 		"--no-session",
@@ -226,7 +259,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	}
 
 	// list — child should appear.
-	listCmd := cliCmd("--socket", d.socketPath, "--output", "json", "list")
+	listCmd := cliCmd(t, d, "--output", "json", "list")
 	out, err = listCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("list failed: %v\n%s", err, out)
@@ -236,7 +269,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	}
 
 	// stop
-	stopCmd := cliCmd("--socket", d.socketPath, "stop", "test-detached")
+	stopCmd := cliCmd(t, d, "stop", "test-detached")
 	out, err = stopCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("stop failed: %v\n%s", err, out)
@@ -245,7 +278,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	// poll until status=exited (up to 5 seconds).
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		getCmd := cliCmd("--socket", d.socketPath, "--output", "json", "get", "test-detached")
+		getCmd := cliCmd(t, d, "--output", "json", "get", "test-detached")
 		out, _ = getCmd.CombinedOutput()
 		if strings.Contains(string(out), `"status":"exited"`) {
 			break
@@ -255,19 +288,19 @@ func TestCLI_CreateDetached(t *testing.T) {
 
 	// `rafiki stop` no longer closes: the child must still be listed, exited.
 	// `get` always emits indented JSON (it ignores --output), hence the space.
-	getCmd := cliCmd("--socket", d.socketPath, "--output", "json", "get", "test-detached")
+	getCmd := cliCmd(t, d, "--output", "json", "get", "test-detached")
 	out, err = getCmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
 		t.Fatalf("expected test-detached to still be listed as exited after stop; get output: %s (err=%v)", out, err)
 	}
 
 	// close finalizes it.
-	closeCmd := cliCmd("--socket", d.socketPath, "close", "test-detached")
+	closeCmd := cliCmd(t, d, "close", "test-detached")
 	out, err = closeCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("close failed: %v\n%s", err, out)
 	}
-	getCmd = cliCmd("--socket", d.socketPath, "get", "test-detached")
+	getCmd = cliCmd(t, d, "get", "test-detached")
 	out, _ = getCmd.CombinedOutput()
 	if !strings.Contains(string(out), "no child matches") {
 		t.Fatalf("expected child to be gone after close; get output: %s", out)
@@ -279,7 +312,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 func TestCLI_AttachHelp(t *testing.T) {
 	t.Parallel()
 
-	cmd := cliCmd("attach", "--help")
+	cmd := cliCmd(t, nil, "attach", "--help")
 	out, err := cmd.CombinedOutput()
 	// cobra exits 0 for --help.
 	if err != nil {
@@ -295,7 +328,7 @@ func TestCLI_AttachHelp(t *testing.T) {
 func TestCLI_CreateHelp(t *testing.T) {
 	t.Parallel()
 
-	cmd := cliCmd("create", "--help")
+	cmd := cliCmd(t, nil, "create", "--help")
 	out, err := cmd.CombinedOutput()
 	// cobra exits 0 for --help.
 	if err != nil {
@@ -316,8 +349,7 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	d := bootDaemon(t)
 
 	var createStderr bytes.Buffer
-	createCmd := cliCmd(
-		"--socket", d.socketPath,
+	createCmd := cliCmd(t, d,
 		"--output", "json",
 		"create", "afk-impl",
 		"--cwd", "/tmp",
@@ -333,7 +365,7 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	}
 
 	// resolve by prefix "afk"
-	getCmd := cliCmd("--socket", d.socketPath, "--output", "json", "get", "afk")
+	getCmd := cliCmd(t, d, "--output", "json", "get", "afk")
 	out, err := getCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("get with prefix failed: %v\n%s", err, out)
@@ -343,6 +375,6 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	}
 
 	// cleanup: kill before test exits to avoid leftover processes
-	killCmd := cliCmd("--socket", d.socketPath, "kill", "afk-impl")
+	killCmd := cliCmd(t, d, "kill", "afk-impl")
 	_, _ = killCmd.CombinedOutput()
 }

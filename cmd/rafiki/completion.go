@@ -30,15 +30,24 @@ type completionChild struct {
 // completionEndpointKey names the endpoint a cached answer came from, so two
 // daemons' answers never share a file. It asks the endpoint resolver rather
 // than recomputing the answer from the environment: reads, writes and drops
-// name the same endpoint that was actually dialed, and a --socket override
-// moves the key with it. When the resolver refuses (a remote URL with no
-// token) the URL itself is still a stable key for the drop path.
+// name the same endpoint that was actually dialed, and a profile switch moves
+// the key with it. When the resolver refuses (a remote profile with no token)
+// the profile's URL/socket is still a stable key for the drop path — going
+// through resolveProfile rather than a second resolver, since a completion
+// handler must never exit or print.
 func completionEndpointKey(cmd *cobra.Command) string {
 	ep, err := newConnectEndpoint(cmd)
-	if err != nil {
-		return remoteDialURL()
+	if err == nil {
+		return ep.identity
 	}
-	return ep.identity
+	p, err := resolveProfile(cmd)
+	if err != nil {
+		return ""
+	}
+	if p.URL != "" {
+		return p.URL
+	}
+	return p.Socket
 }
 
 // completionChildrenCached returns the cached rows, or nil on any miss.

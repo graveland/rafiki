@@ -14,6 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/version"
 )
@@ -29,12 +30,12 @@ const sessionReadyTimeout = 20 * time.Second
 
 // sessionConnectTarget decides where this client's executor dials.
 //
-// Derived from RAFIKI_URL rather than configured, so it always reaches the same
-// daemon the control connection did. An executor pointed at a different daemon
-// than the spawn would serve a filesystem nobody asked for.
-func sessionConnectTarget() (addr, socket string, err error) {
-	if u := remoteDialURL(); u != "" {
-		a, err := client.DialAddr(u)
+// Derived from the resolved PROFILE rather than configured, so it always
+// reaches the same daemon the control connection did. An executor pointed at a
+// different daemon than the spawn would serve a filesystem nobody asked for.
+func sessionConnectTarget(p profile.Resolved) (addr, socket string, err error) {
+	if p.URL != "" {
+		a, err := client.DialAddr(p.URL)
 		if err != nil {
 			return "", "", err
 		}
@@ -43,14 +44,35 @@ func sessionConnectTarget() (addr, socket string, err error) {
 	return "", paths.ExecutorSocketPath(), nil
 }
 
+// executorEnvURL is remoteDialURL's surviving half, kept local to the executor
+// path on purpose.
+//
+// `rafiki executor serve` and `executor service install` run on headless boxes
+// configured by executor.env, where there may be no interactive profile at all
+// — so they are exempt from profile resolution and from
+// profile.CheckRetiredEnv, and they still derive --connect from RAFIKI_URL.
+// Do NOT "unify" this with the profile: bootstrapping a default profile
+// pointing at a local socket no daemon is listening on would be worse than
+// useless there.
+func executorEnvURL() string {
+	u := paths.Get(paths.URL)
+	if client.IsRemoteURL(u) {
+		return u
+	}
+	return ""
+}
+
 // resolveExecutorConnectFlags applies the same "derive from RAFIKI_URL"
-// default sessionConnectTarget already gives the automatic in-process
-// executor to a durable executor's explicit --connect/--connect-socket
-// flags (`rafiki executor serve`, `rafiki executor service install`) — an
-// operator who already has RAFIKI_URL set everywhere else shouldn't have to
-// separately derive and pass host:port by hand, and getting that derivation
-// wrong by hand is exactly how a durable executor ends up pointed at the
-// wrong port.
+// default sessionConnectTarget used to give the automatic in-process executor
+// to a durable executor's explicit --connect/--connect-socket flags
+// (`rafiki executor serve`, `rafiki executor service install`) — an operator
+// who already has RAFIKI_URL set everywhere else shouldn't have to separately
+// derive and pass host:port by hand, and getting that derivation wrong by hand
+// is exactly how a durable executor ends up pointed at the wrong port.
+//
+// This is the ONE place left that still reads RAFIKI_URL directly
+// (executorEnvURL): these two headless commands may run on a machine with no
+// profile configured at all, so they stay exempt from profile resolution.
 //
 // The default only applies when NEITHER flag was given: an explicit
 // --connect-socket already names the local-socket transport deliberately,
@@ -58,7 +80,7 @@ func sessionConnectTarget() (addr, socket string, err error) {
 // top of it. An explicit --connect likewise always wins verbatim.
 func resolveExecutorConnectFlags(connect, connectSocket string) (string, string, error) {
 	if connect == "" && connectSocket == "" {
-		if u := remoteDialURL(); u != "" {
+		if u := executorEnvURL(); u != "" {
 			addr, err := client.DialAddr(u)
 			if err != nil {
 				return "", "", fmt.Errorf("derive --connect from RAFIKI_URL: %w", err)
@@ -185,7 +207,7 @@ func childCwd(ctx context.Context, c *client.Client, childID string) string {
 // durable executor already covers this machine and owner, and using it is the
 // point — that executor outlives this process, so an agent keeps working after
 // the operator closes the terminal.
-func startSessionExecutor(ctx context.Context, c *client.Client, root string) (string, func(), error) {
+func startSessionExecutor(ctx context.Context, c *client.Client, root string, p profile.Resolved) (string, func(), error) {
 	noop := func() {}
 
 	resp, err := requestSessionExecutor(ctx, c, root)
@@ -198,7 +220,7 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string) (s
 		return resp.Selector, noop, nil
 	}
 
-	addr, socket, err := sessionConnectTarget()
+	addr, socket, err := sessionConnectTarget(p)
 	if err != nil {
 		return "", noop, err
 	}

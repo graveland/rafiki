@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
 // TestDecideKillOnExit_Flags covers the non-interactive paths: flag overrides
@@ -104,49 +104,30 @@ func TestParseKillAnswer(t *testing.T) {
 	}
 }
 
-// TestRemoteDialURL_HTTPIsNotRemote is M3: mustDial and dialDaemon both dial
-// through remoteDialURL, and this is the gate that keeps a documented
-// RAFIKI_URL=http://localhost:8035 (.env.example) — the LOCAL proxy face,
-// which has no control listener — from being sent into a TLS dial. Before
-// this was pinned, replacing client.IsRemoteURL(u) with a bare u != "" at
-// either call site left the whole cmd/rafiki suite green.
-func TestRemoteDialURL_HTTPIsNotRemote(t *testing.T) {
-	t.Setenv(paths.URL, "http://localhost:8035")
-	if got := remoteDialURL(); got != "" {
-		t.Errorf("remoteDialURL() = %q, want empty for an http:// URL", got)
+// TestDialDaemon_UsesTheProfilesSocket drives dialDaemon through a seeded
+// local-socket profile: it must attempt the UDS dial named by the profile (and
+// fail with a UDS-shaped error against a socket that doesn't exist), never
+// treat the absence of a URL as anything but "dial the socket". This
+// supersedes the old RAFIKI_URL-scheme gate (remoteDialURL, deleted): a
+// profile's endpoint is either a socket or an https:// URL by construction
+// (pkg/profile's validate), so there is no scheme ambiguity left to pin.
+func TestDialDaemon_UsesTheProfilesSocket(t *testing.T) {
+	isolateProfiles(t)
+	resetProfileCache()
+
+	sock := filepath.Join(t.TempDir(), "no-such.sock")
+	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+		"scratch": {Name: "scratch", Socket: sock},
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
-}
-
-func TestRemoteDialURL_HTTPSIsRemote(t *testing.T) {
-	t.Setenv(paths.URL, "https://rafiki.example.dev:443")
-	if got := remoteDialURL(); got != "https://rafiki.example.dev:443" {
-		t.Errorf("remoteDialURL() = %q, want the https URL echoed back", got)
+	if err := profile.SavePointer("scratch"); err != nil {
+		t.Fatalf("SavePointer: %v", err)
 	}
-}
 
-func TestRemoteDialURL_EmptyIsNotRemote(t *testing.T) {
-	t.Setenv(paths.URL, "")
-	if got := remoteDialURL(); got != "" {
-		t.Errorf("remoteDialURL() = %q, want empty when RAFIKI_URL is unset", got)
-	}
-}
-
-// TestDialDaemon_HTTPURLStaysOnTheLocalUDS drives the gate through the real
-// call site, not just the helper in isolation: RAFIKI_URL set to the
-// documented local proxy form must make dialDaemon attempt the UDS dial
-// (and fail with a UDS-shaped error against a socket that doesn't exist),
-// never a "scheme must be https" parseControlURL error — which is exactly
-// what it would return if the gate were replaced by a bare u != "" check.
-func TestDialDaemon_HTTPURLStaysOnTheLocalUDS(t *testing.T) {
-	t.Setenv(paths.URL, "http://127.0.0.1:8035")
-	t.Setenv(paths.Socket, filepath.Join(t.TempDir(), "no-such.sock"))
-
-	_, err := dialDaemon(context.Background())
+	_, err := dialDaemon(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected a dial error against a nonexistent socket")
-	}
-	if strings.Contains(err.Error(), "https") {
-		t.Errorf("dialDaemon treated the http:// RAFIKI_URL as remote: %v", err)
 	}
 	if !strings.Contains(err.Error(), "no-such.sock") {
 		t.Errorf("expected the UDS dial failure to name the socket path, got: %v", err)

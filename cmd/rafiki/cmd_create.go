@@ -174,8 +174,8 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		// rooted at exactly this cwd on THIS machine. So the client's own
 		// os.Getwd() is always the right default for fundi, local daemon or
 		// remote.
-		if kind != protocol.KindFundi && remoteDialURL() != "" {
-			return protocol.SpawnRequest{}, errors.New("--cwd is required when RAFIKI_URL names a remote daemon (there is no local directory to default to on that machine)")
+		if kind != protocol.KindFundi && mustProfile(cmd).URL != "" {
+			return protocol.SpawnRequest{}, errors.New("--cwd is required when the profile names a remote daemon (there is no local directory to default to on that machine)")
 		}
 		var err error
 		cwd, err = os.Getwd()
@@ -375,7 +375,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// executor as well would offer this machine to a pool for a session that
 	// is not going to use it.
 	if req.ExecutorSelector == "" && !noLocalExecutor {
-		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd)
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, mustProfile(cmd))
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}
