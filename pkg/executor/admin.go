@@ -3,9 +3,11 @@
 package executor
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -170,6 +172,20 @@ func (a *AdminServer) Launch(
 	// SIGKILLed daraja orphans it to launchd. Without Setpgid, daraja would sit
 	// in the EXECUTOR's group and a reap would signal the executor itself.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Unset Stdout/Stderr route to /dev/null, which silently swallowed daraja's
+	// own diagnostic output — including the connection-failure reason it logs
+	// on exit — leaving an operator with no way to tell why a launch failed.
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		a.mu.Lock()
+		if a.m[childID] == claim {
+			delete(a.m, childID)
+		}
+		a.mu.Unlock()
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("daraja stderr pipe: %w", err))
+	}
+
 	if err := cmd.Start(); err != nil {
 		// Release the claim: the slot must not outlive a failed start, or every
 		// later Launch of this child is refused with AlreadyExists forever.
@@ -181,6 +197,7 @@ func (a *AdminServer) Launch(
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("start daraja: %w", err))
 	}
 	pid := cmd.Process.Pid
+	go logDarajaStderr(childID, stderr)
 
 	// Swap the claim for the real entry. The entry is fully built BEFORE it
 	// enters the map and is never mutated after, so reap's read of l.pgid
@@ -306,4 +323,14 @@ func (a *AdminServer) kindFor(spec *darajapb.ChildSpec) (string, error) {
 			fmt.Errorf("this executor does not host %q; start it with --launch %s", kind, kind))
 	}
 	return kind, nil
+}
+
+// logDarajaStderr relays a launched daraja's stderr into the executor's own
+// log, line by line, so its connection-failure diagnostics reach an operator
+// instead of /dev/null. Ends when the pipe closes (the process exited).
+func logDarajaStderr(childID string, stderr io.Reader) {
+	sc := bufio.NewScanner(stderr)
+	for sc.Scan() {
+		slog.Warn("daraja stderr", "childID", childID, "line", sc.Text())
+	}
 }
