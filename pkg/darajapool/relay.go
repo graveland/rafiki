@@ -219,14 +219,6 @@ func (h *relayHolder) writeStdin(data []byte) error {
 	return nil
 }
 
-// closeWrite tells daraja we're done writing stdin.
-func (h *relayHolder) closeWrite() error {
-	if h.stream == nil {
-		return fmt.Errorf("relay stream not opened")
-	}
-	return h.stream.CloseRequest()
-}
-
 // stop tears down the holder entirely (used on client mismatch / reconnect).
 func (h *relayHolder) stop() {
 	h.shutdown()
@@ -286,22 +278,16 @@ func (p *Pool) RelayFor(childID string) (*relayHolder, error) {
 	return newHolder, nil
 }
 
-// Send writes data into the child's stdin via the holder, closes the request
-// side, and waits for the write to land. No drain goroutine needed: the
-// receiver loop (started by RelayFor) already consumes everything.
+// Send writes data into the child's stdin via the holder. The stream stays
+// open for further sends — Restart and repeated turns depend on this being
+// callable many times across the child's life; closing the request side here
+// was a leftover from an earlier one-shot design and made a second Send fail.
 func (p *Pool) Send(childID string, data []byte) error {
 	holder, err := p.RelayFor(childID)
 	if err != nil {
 		return err
 	}
-
-	if err := holder.writeStdin(data); err != nil {
-		return err
-	}
-	if err := holder.closeWrite(); err != nil {
-		return err
-	}
-	return nil
+	return holder.writeStdin(data)
 }
 
 // Watch returns a fan-out channel for the child's relay events. Multiple
