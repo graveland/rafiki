@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
 func newCreateCmd() *cobra.Command {
@@ -113,6 +114,10 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().StringArray("label", nil, "Label as k=v (repeatable); also see a profile's `labels` field")
 	cmd.Flags().Bool("forward-env", true, "Forward the caller's environment to the pi child (merged with daemon env; caller wins on duplicates)")
 	cmd.Flags().Bool("record-requests", false, "Record raw LLM API requests and responses for debugging")
+	cmd.Flags().String("passthrough-auth", envOr("RAFIKI_CLAUDE_PASSTHROUGH", ""),
+		"--kind claude only: who gets billed for a daraja-routed child: auto (default) bills your own\n"+
+			"Claude subscription when the model resolves to Anthropic, off always bills the daemon's key,\n"+
+			"on always bills the subscription (also see RAFIKI_CLAUDE_PASSTHROUGH)")
 	cmd.Flags().String("parent", "", "Child id of the spawning parent (records rafiki/parent and rafiki/root)")
 	cmd.Flags().Int("max-depth", -1, "how many further levels of agents this child may spawn (0 = none; default 1). Bounded absolutely by the daemon's RAFIKI_MAX_DEPTH")
 	maxCostHelp := "USD budget for this child's whole subtree (unset = unlimited)"
@@ -292,6 +297,12 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	}
 
 	recordRequests, _ := cmd.Flags().GetBool("record-requests")
+	passthroughAuth, _ := cmd.Flags().GetString("passthrough-auth")
+	if passthroughAuth != "" {
+		if _, err := proxyenv.ParsePassthroughMode(passthroughAuth); err != nil {
+			return protocol.SpawnRequest{}, err
+		}
+	}
 
 	parent, _ := cmd.Flags().GetString("parent")
 
@@ -317,6 +328,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		ParentChildID:      parent,
 		Env:                env,
 		RecordRequests:     recordRequests,
+		PassthroughAuth:    passthroughAuth,
 		// EnvOverride=false: daemon's env (launchd-set HOME/PATH) is the base;
 		// caller-forwarded vars win on duplicate keys.  This is what users
 		// usually want — SSH_AUTH_SOCK, *_API_KEY, GOOGLE_APPLICATION_CREDENTIALS,

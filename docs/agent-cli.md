@@ -326,6 +326,17 @@ the daemon has an executor pool configured and one of its executors declares
 back to spawning claude as a local subprocess of the daemon, unchanged from
 before this existed.
 
+A daraja-routed `--kind claude` child is proxied through the daemon (capture,
+cost accounting, routing visibility) while still billing the user's own
+Claude subscription by default. `rafiki create --passthrough-auth
+auto|on|off` (default `auto`, or `$RAFIKI_CLAUDE_PASSTHROUGH`) controls who
+gets billed — `auto` bills the subscription when `--model` resolves to an
+Anthropic id and the daemon's key otherwise, mirroring `rafiki claude
+--passthrough-auth` exactly. Only meaningful for a daraja-routed child; the
+local-subprocess fallback has no passthrough support at all (its env
+construction can only ever append to the daemon's own inherited environment,
+never unset a variable it already carries).
+
 ### `rafiki daraja launch`
 
 ```

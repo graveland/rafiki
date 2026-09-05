@@ -80,6 +80,35 @@ message ClaudeParams {
   // always pick the conversation back up.
   string resume_session = 2;
   string permission_mode = 3;
+
+  // The fields below are LAUNCH-ONLY: daraja reads them once, at its own
+  // process startup, to build the environment its whole lifetime uses (see
+  // proxyenv.Claude) — env is fixed for a daraja process, unlike argv, which
+  // Restart rebuilds per call. A Restart's ClaudeParams may leave them unset;
+  // daraja ignores them there.
+
+  // proxy_url points the child at rafiki's proxy face instead of Anthropic
+  // directly. Empty means unproxied — daraja passes the environment through
+  // unmodified, exactly as before these fields existed.
+  string proxy_url = 4;
+  // proxy_token authenticates to proxy_url. Travels here (an authenticated
+  // RPC, unlike argv) but must never reach the daraja subprocess's OWN argv —
+  // AdminService.Launch puts it in that process's environment instead, the
+  // same treatment the launch ticket already gets, for the same reason (ps
+  // is world-readable).
+  string proxy_token = 5;
+  // passthrough_auth omits ANTHROPIC_AUTH_TOKEN so Claude Code's own OAuth
+  // subscription credential is used instead of rafiki's proxy token. rafikid
+  // resolves the auto/on/off tri-state to this single bool before sending it
+  // — daraja stays dumb and carries no policy of its own.
+  bool passthrough_auth = 6;
+  // auto_compact_window overrides Claude Code's assumed context size for a
+  // proxied model it cannot otherwise verify. Zero leaves its default alone.
+  int32 auto_compact_window = 7;
+  // record_requests asks the proxy to persist this conversation's raw HTTP
+  // traffic (X-Rafiki-Record-Requests), mirroring the local-subprocess path's
+  // same request-level opt-in.
+  bool record_requests = 8;
 }
 
 // ChildSpec is everything needed to (re)build the child's command line.

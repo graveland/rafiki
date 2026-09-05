@@ -404,6 +404,18 @@ connect where the caller dialled a socket path returned by the response.
 (`RAFIKI_DARAJA_TICKET`, never argv — `ps` visibility is why). It is replaced
 by a durable credential on first successful hello.
 
+`ChildSpec.ClaudeParams` also carries Phase 2's passthrough-billing fields —
+`proxy_url`, `proxy_token`, `passthrough_auth`, `auto_compact_window`,
+`record_requests` — all LAUNCH-ONLY (daraja reads them once, at its own
+process startup, to build the environment `proxyenv.Claude` produces; a later
+`Restart`'s spec may leave them unset and daraja ignores them there, since env
+is fixed for a daraja process while only argv is rebuilt per restart). The
+executor forwards the four non-secret ones as `daraja serve` flags
+(`--proxy-url`, `--passthrough`, `--auto-compact-window`,
+`--record-requests`) and, for `proxy_token` alone, via environment
+(`RAFIKI_DARAJA_PROXY_TOKEN`) — the same ps-visibility treatment the ticket
+gets, and for the same reason.
+
 `Setpgid` makes daraja a group leader and claude joins the group (daraja spawns
 its child with `SpawnSpec.InheritProcessGroup`, opting out of the runner's
 default own-group). `pgid` is therefore the one handle that reaches the whole

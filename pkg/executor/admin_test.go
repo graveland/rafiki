@@ -314,3 +314,64 @@ func TestLaunchKeepsTheTicketOutOfArgv(t *testing.T) {
 	// structurally — the kernel-ps check above is the critical assertion.
 	_ = ticket // already verified absent from cmdline
 }
+
+// TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt proves Phase 2's
+// wiring end to end at the executor layer: the non-secret proxy fields reach
+// daraja serve's argv (so a real daraja process picks them up), while the
+// proxy token gets the SAME treatment as the ticket — present nowhere the
+// kernel's ps can see, because it authenticates this child's traffic to
+// rafiki's proxy and ps is world-readable.
+func TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt(t *testing.T) {
+	token := "proxy-token-should-not-leak"
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-proxy",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec: &darajapb.ChildSpec{
+			Kind: darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{
+				ProxyUrl:          "https://proxy.example/v1",
+				ProxyToken:        token,
+				PassthroughAuth:   true,
+				AutoCompactWindow: 128000,
+				RecordRequests:    true,
+			},
+		},
+		Ticket: "tk-irrelevant-here",
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	pid := int(resp.Msg.GetPid())
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	cmdline := string(out)
+
+	if strings.Contains(cmdline, token) {
+		t.Errorf("proxy token %q found in kernel cmdline:\n%s", token, cmdline)
+	}
+	if strings.Contains(cmdline, "RAFIKI_DARAJA_PROXY_TOKEN") {
+		t.Errorf("env var name RAFIKI_DARAJA_PROXY_TOKEN found in kernel cmdline:\n%s", cmdline)
+	}
+	for _, want := range []string{
+		"--proxy-url https://proxy.example/v1",
+		"--passthrough",
+		"--auto-compact-window 128000",
+		"--record-requests",
+	} {
+		if !strings.Contains(cmdline, want) {
+			t.Errorf("cmdline %q missing %q", cmdline, want)
+		}
+	}
+}

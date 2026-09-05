@@ -208,52 +208,23 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	return execClaude(claudeInvocation{Env: env, Args: append(modelArgs, args...)})
 }
 
-// passthroughMode is the parsed form of --passthrough-auth / RAFIKI_CLAUDE_PASSTHROUGH.
-// A tri-state rather than a bool because "unset" and "off" are genuinely
-// different requests here: unset means let --model decide, off means bill the
-// daemon's key no matter what --model is. Mirrors the RTKMode
-// (auto/on/off) convention already used for --rtk and --bash-rtk.
-type passthroughMode string
+// passthroughMode aliases proxyenv.PassthroughMode: the parsing/resolution
+// logic lives there now, shared with rafikid's daraja launch path, so the two
+// auth decisions cannot drift apart. Kept as a local alias (rather than
+// rewriting every call site to proxyenv.X) purely to avoid a mechanical
+// rename across this file and its tests.
+type passthroughMode = proxyenv.PassthroughMode
 
 const (
-	// passthroughAuto bills your own subscription when --model resolves to an
-	// Anthropic id (including no --model at all) and the daemon's key otherwise.
-	passthroughAuto passthroughMode = "auto"
-	// passthroughOn forces your subscription and rejects a non-Anthropic --model.
-	passthroughOn passthroughMode = "on"
-	// passthroughOff always bills the daemon's key.
-	passthroughOff passthroughMode = "off"
+	passthroughAuto = proxyenv.PassthroughAuto
+	passthroughOn   = proxyenv.PassthroughOn
+	passthroughOff  = proxyenv.PassthroughOff
 )
 
-// parsePassthroughMode parses --passthrough-auth / RAFIKI_CLAUDE_PASSTHROUGH.
-// true/1 and false/0 remain accepted aliases for on/off, matching the flag's
-// old boolean form. Unlike RTKMode's ParseRTKMode, an unrecognised value is a
-// hard error rather than a silent fallback to auto: this switch decides who
-// gets billed, and a typo must not decide that quietly.
-func parsePassthroughMode(s string) (passthroughMode, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "auto":
-		return passthroughAuto, nil
-	case "on", "true", "1":
-		return passthroughOn, nil
-	case "off", "false", "0", "no":
-		return passthroughOff, nil
-	default:
-		return "", fmt.Errorf("invalid --passthrough-auth %q: want auto, on, or off", s)
-	}
-}
+func parsePassthroughMode(s string) (passthroughMode, error) { return proxyenv.ParsePassthroughMode(s) }
 
-// passthroughAuthFor resolves a parsed passthroughMode against model into the
-// bool proxyenv.ClaudeOptions wants.
 func passthroughAuthFor(mode passthroughMode, model string) bool {
-	switch mode {
-	case passthroughOn:
-		return true
-	case passthroughOff:
-		return false
-	default: // passthroughAuto
-		return proxyenv.AnthropicModel(model)
-	}
+	return proxyenv.PassthroughAuthFor(mode, model)
 }
 
 func envOr(key, fallback string) string {

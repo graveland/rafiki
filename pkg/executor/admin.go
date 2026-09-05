@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -158,15 +159,32 @@ func (a *AdminServer) Launch(
 	if c.GetPermissionMode() != "" {
 		argv = append(argv, "--permission-mode", c.GetPermissionMode())
 	}
+	if c.GetProxyUrl() != "" {
+		argv = append(argv, "--proxy-url", c.GetProxyUrl())
+	}
+	if c.GetPassthroughAuth() {
+		argv = append(argv, "--passthrough")
+	}
+	if c.GetAutoCompactWindow() > 0 {
+		argv = append(argv, "--auto-compact-window", strconv.Itoa(int(c.GetAutoCompactWindow())))
+	}
+	if c.GetRecordRequests() {
+		argv = append(argv, "--record-requests")
+	}
 
 	// The ticket is one-shot auth for the daraja's reverse dial. It must not
 	// travel in argv because every process on the machine can read it via ps —
 	// set it in the child's environment instead. Replaced by a credential on
-	// first successful hello.
-	envVar := "RAFIKI_DARAJA_TICKET=" + req.Msg.GetTicket()
+	// first successful hello. The proxy token gets the SAME treatment and for
+	// the same reason: it authenticates this child's traffic to rafiki's
+	// proxy, and ps is world-readable.
+	envVars := []string{
+		"RAFIKI_DARAJA_TICKET=" + req.Msg.GetTicket(),
+		"RAFIKI_DARAJA_PROXY_TOKEN=" + c.GetProxyToken(),
+	}
 
 	cmd := exec.Command(a.opts.SelfBinary, argv...)
-	cmd.Env = append(os.Environ(), envVar)
+	cmd.Env = append(os.Environ(), envVars...)
 	// daraja LEADS a new group and its claude joins it, so this pgid is the one
 	// handle that reaches the whole child — and keeps reaching claude after a
 	// SIGKILLed daraja orphans it to launchd. Without Setpgid, daraja would sit
