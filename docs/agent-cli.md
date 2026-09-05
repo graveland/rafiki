@@ -307,6 +307,15 @@ Per-child process host for remote executor-launched children. Subcommands:
 `serve` (run the daraja binary on an executor) and `launch` (from the operator's
 machine, request a child launch through the daemon).
 
+`daraja launch` below is the manual, operator-facing entry point — useful for
+debugging the launch path directly. It is not the only caller: an ordinary
+`rafiki create --kind claude` (or `rafiki send` on an existing one) routes
+through the same `AdminService.Launch`/relay machinery automatically whenever
+the daemon has an executor pool configured and one of its executors declares
+`claude` in `--launch`. With no executor pool at all, `--kind claude` falls
+back to spawning claude as a local subprocess of the daemon, unchanged from
+before this existed.
+
 ### `rafiki daraja launch`
 
 ```
