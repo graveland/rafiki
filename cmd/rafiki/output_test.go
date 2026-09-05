@@ -55,7 +55,7 @@ func TestRenderList_CostColumns(t *testing.T) {
 // the same clientstate.Currency section `rafiki config set` writes.
 func TestRenderList_CostColumnsConvertCurrency(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	clientstate.Update(func(s *clientstate.State) {
+	clientstate.UpdateScoped(clientstate.Scope{}, func(s *clientstate.State) {
 		s.Currency = &clientstate.Currency{Code: "CAD", Rate: 1.38}
 	})
 

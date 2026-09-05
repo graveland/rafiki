@@ -105,7 +105,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("parent", "", "Child id of the spawning parent (records rafiki/parent and rafiki/root)")
 	cmd.Flags().Int("max-depth", -1, "how many further levels of agents this child may spawn (0 = none; default 1). Bounded absolutely by the daemon's RAFIKI_MAX_DEPTH")
 	maxCostHelp := "USD budget for this child's whole subtree (unset = unlimited)"
-	if cur := clientstate.Load().Currency; cur != nil && cur.Rate > 0 && cur.Code != "" {
+	if cur := clientstate.LoadScoped(clientstate.Scope{}).Currency; cur != nil && cur.Rate > 0 && cur.Code != "" {
 		maxCostHelp = fmt.Sprintf(
 			"budget for this child's whole subtree, in %s (unset = unlimited); see `rafiki config`",
 			cur.Code)
@@ -274,7 +274,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	}
 	if cmd.Flags().Changed("max-cost") {
 		v, _ := cmd.Flags().GetFloat64("max-cost")
-		usd := costfmt.ToUSD(v, clientstate.Load().Currency)
+		usd := costfmt.ToUSD(v, clientstate.LoadScoped(clientstate.Scope{}).Currency)
 		req.MaxCost = &usd
 	}
 	if cmd.Flags().Changed("max-children") {
@@ -359,8 +359,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// is an inference from what happened last time, and an inference must
 	// never override a declaration. Applying it earlier is what broke
 	// TestPreset_MergeOrder: the preset's model stopped being reachable at all.
+	p := mustProfile(cmd)
 	if req.Model == "" {
-		req.Model = clientstate.LastModelFor(req.Kind)
+		req.Model = clientstate.LastModelFor(p.Name, req.Kind)
 	}
 
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
@@ -375,7 +376,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// executor as well would offer this machine to a pool for a session that
 	// is not going to use it.
 	if req.ExecutorSelector == "" && !noLocalExecutor {
-		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, mustProfile(cmd))
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}
@@ -405,7 +406,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// Remember what actually got spawned, not what was asked for: a preset or
 	// an alias may have supplied it, and replaying the resolved choice is what
 	// makes the next bare create land on the same model.
-	clientstate.RememberModel(req.Kind, req.Model)
+	clientstate.RememberModel(p.Name, req.Kind, req.Model)
 	if err := setActive(data.ChildID); err != nil {
 		// Best effort — log to stderr but don't fail.
 		fmt.Fprintln(os.Stderr, "warning: could not update active marker:", err)

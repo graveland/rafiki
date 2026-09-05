@@ -87,9 +87,10 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 	// whole lifetime (below), matching runCreate's undetached case -- the TUI
 	// only returns when the user quits, so a deferred stop here never outlives
 	// the children it was serving.
+	p := mustProfile(cmd)
 	executorSelector := req.ExecutorSelector
 	if executorSelector == "" && !noLocalExecutor {
-		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, mustProfile(cmd))
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}
@@ -102,6 +103,7 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 		BaseURL:          ep.baseURL,
 		OpenCreate:       true,
 		ExecutorSelector: executorSelector,
+		ProfileName:      p.Name,
 		CreateDefaults: tui.SpawnDefaults{
 			Name: req.Name,
 			Kind: req.Kind,

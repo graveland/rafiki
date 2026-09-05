@@ -22,7 +22,7 @@ func RenderSearch(w io.Writer, rows []insightstypes.ConversationSummary) error {
 		return err
 	}
 
-	cur := clientstate.Load().Currency
+	cur := clientstate.LoadScoped(clientstate.Scope{}).Currency
 
 	t := table.NewWriter()
 	t.SetOutputMirror(w)

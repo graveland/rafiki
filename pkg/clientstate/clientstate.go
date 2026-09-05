@@ -20,16 +20,13 @@ import (
 	"path/filepath"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
-// State is the whole document. Every section is a POINTER so "never set" stays
-// distinguishable from "set to its zero value" — the same rule the wire types
-// follow, and it is what lets a reader tell an absent section from one somebody
-// deliberately cleared.
-//
-// Adding a section is one field here plus its own type. Nothing else changes:
-// Update's read-modify-write means a writer that knows about one section
-// preserves every section it has never heard of.
+// State is one document. Which document depends on the Scope it was loaded
+// with: Currency lives in the global one, ModelView and LastModel in a
+// profile's own. Every section is a POINTER so "never set" stays
+// distinguishable from "set to its zero value".
 type State struct {
 	// ModelView is the cockpit's remembered model filter and ordering.
 	ModelView *ModelView `json:"modelView,omitempty"`
@@ -60,13 +57,37 @@ type Currency struct {
 	Rate float64 `json:"rate,omitempty"`
 }
 
-// Load reads the document, returning a zero State on any failure.
+// Scope names which document a read or write applies to.
+//
+// Per-profile is the DEFAULT and global is the exception: a setting is global
+// only when it is a property of the person that no daemon can influence —
+// display and presentation. Everything describing how you work WITH a daemon
+// belongs to a profile, because two daemons need not share a model catalog,
+// and a remembered answer from one is a wrong answer for the other.
+//
+// The zero Scope is the global document, which is deliberate: a caller that
+// forgets to say which profile it means gets the shared file, which holds only
+// display preferences and can therefore never leak one daemon's state into
+// another's.
+type Scope struct {
+	Profile string // "" = the global document
+}
+
+// path returns the file this scope reads and writes.
+func (s Scope) path() string {
+	if s.Profile == "" {
+		return paths.ClientStateFile()
+	}
+	return profile.StateFile(s.Profile)
+}
+
+// LoadScoped reads a document, returning a zero State on any failure.
 //
 // Every failure is silent and total: a preferences file must never be able to
 // stop the client starting, so a missing, unreadable or corrupt one is simply
 // no preferences.
-func Load() State {
-	b, err := os.ReadFile(paths.ClientStateFile())
+func LoadScoped(sc Scope) State {
+	b, err := os.ReadFile(sc.path())
 	if err != nil {
 		return State{}
 	}
@@ -77,14 +98,14 @@ func Load() State {
 	return s
 }
 
-// Save writes the document. Best-effort and silent, for the same reason Load
-// is: losing a remembered preference costs one re-selection.
-func Save(s State) {
+// SaveScoped writes a document. Best-effort and silent, for the same reason
+// LoadScoped is: losing a remembered preference costs one re-selection.
+func SaveScoped(sc Scope, s State) {
 	b, err := json.Marshal(s)
 	if err != nil {
 		return
 	}
-	path := paths.ClientStateFile()
+	path := sc.path()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return
 	}
@@ -111,42 +132,39 @@ func Save(s State) {
 	}
 }
 
-// Update applies a change to one section and writes the result.
+// UpdateScoped applies a change to one document and writes the result.
 //
 // READ-MODIFY-WRITE, and that is the whole point of the helper: a caller that
-// marshalled only its own section would silently drop every other one. Two
-// clients exiting at once still resolve last-writer-wins over the whole
-// document, which is the right trade for preferences — the alternative is a
-// lock file guarding a few hundred bytes nobody is contending for.
-func Update(mutate func(*State)) {
-	s := Load()
+// marshalled only its own section would silently drop every other one.
+func UpdateScoped(sc Scope, mutate func(*State)) {
+	s := LoadScoped(sc)
 	mutate(&s)
-	Save(s)
+	SaveScoped(sc, s)
 }
 
-// LastModelFor returns the model most recently spawned for a kind, or "".
+// LastModelFor returns the model most recently spawned for a profile and kind.
 //
-// Keyed by KIND because the two kinds have different model universes: a
-// "claude" child resolves only Anthropic ids, so remembering one model across
-// both would eventually prefill a claude spawn with an OpenRouter id and
-// produce a child that spawns, attaches and never answers.
-func LastModelFor(kind string) string {
-	if kind == "" {
+// Keyed by PROFILE because a daemon's model universe depends on its
+// providers.toml — replaying the personal daemon's model onto the work daemon
+// prefills a spawn that attaches and never answers. Keyed by KIND for the same
+// reason one level down: a "claude" child resolves only Anthropic ids.
+func LastModelFor(profileName, kind string) string {
+	if profileName == "" || kind == "" {
 		return ""
 	}
-	return Load().LastModel[kind]
+	return LoadScoped(Scope{Profile: profileName}).LastModel[kind]
 }
 
 // RememberModel records the model a spawn actually used.
 //
-// Through Update, so it preserves every other section. An empty model is not
-// recorded: "the daemon's default" is not a choice worth replaying, and
-// storing it would pin whatever that default happened to be on the day.
-func RememberModel(kind, model string) {
-	if kind == "" || model == "" {
+// An empty model is not recorded: "the daemon's default" is not a choice worth
+// replaying, and storing it would pin whatever that default happened to be on
+// the day.
+func RememberModel(profileName, kind, model string) {
+	if profileName == "" || kind == "" || model == "" {
 		return
 	}
-	Update(func(s *State) {
+	UpdateScoped(Scope{Profile: profileName}, func(s *State) {
 		if s.LastModel == nil {
 			s.LastModel = map[string]string{}
 		}

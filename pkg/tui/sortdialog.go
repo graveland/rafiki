@@ -381,7 +381,7 @@ func (c *Cockpit) handleQueryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Closing the panel is the natural commit point: it is where a query
 		// stops being edited, and saving on every keystroke would write the
 		// file per arrow key for no gain.
-		saveModelView(c.modelView)
+		saveModelView(c.profileName, c.modelView)
 	case "up":
 		d.moveRow(-1, window)
 	case "down":

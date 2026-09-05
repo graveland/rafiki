@@ -61,7 +61,7 @@ func TestRunConfigSet_BatchIsAtomic(t *testing.T) {
 		t.Fatal("want an error from the invalid second pair")
 	}
 
-	got := clientstate.Load()
+	got := clientstate.LoadScoped(clientstate.Scope{})
 	if got.Currency != nil {
 		t.Errorf("Currency = %+v, want nil -- the valid first pair must not have applied", got.Currency)
 	}
@@ -75,7 +75,7 @@ func TestRunConfigSet_AppliesValidBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := clientstate.Load()
+	got := clientstate.LoadScoped(clientstate.Scope{})
 	if got.Currency == nil || got.Currency.Code != "CAD" || got.Currency.Rate != 1.38 {
 		t.Errorf("Currency = %+v, want {CAD 1.38} (code uppercased)", got.Currency)
 	}

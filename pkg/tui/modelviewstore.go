@@ -98,13 +98,18 @@ func fromStored(p *clientstate.ModelView) modelView {
 	return v
 }
 
-// loadModelView reads the remembered query, falling back to the default.
-func loadModelView() modelView { return fromStored(clientstate.Load().ModelView) }
+// loadModelView reads the remembered query for one profile, falling back to
+// the default. Per-profile because a daemon's model catalog is per-profile:
+// a remembered query built against one provider set is not necessarily valid
+// against another's.
+func loadModelView(profileName string) modelView {
+	return fromStored(clientstate.LoadScoped(clientstate.Scope{Profile: profileName}).ModelView)
+}
 
-// saveModelView persists the query.
+// saveModelView persists the query for one profile.
 //
-// Through Update, not Save: writing the whole document from here would drop
-// every section this package has never heard of.
-func saveModelView(v modelView) {
-	clientstate.Update(func(s *clientstate.State) { s.ModelView = toStored(v) })
+// Through UpdateScoped, not SaveScoped: writing the whole document from here
+// would drop every section this package has never heard of.
+func saveModelView(profileName string, v modelView) {
+	clientstate.UpdateScoped(clientstate.Scope{Profile: profileName}, func(s *clientstate.State) { s.ModelView = toStored(v) })
 }

@@ -217,6 +217,11 @@ type Options struct {
 	// keystrokes (see spawnForm's own comment on why the form stays five
 	// fields).
 	ExecutorSelector string
+	// ProfileName scopes every clientstate read/write this cockpit does for
+	// ModelView and LastModel -- two daemons need not share a model catalog,
+	// so a remembered choice from one profile is a wrong answer for another.
+	// Currency is unaffected: it stays global regardless of profile.
+	ProfileName string
 }
 
 // SpawnDefaults prefills the create form. Empty fields keep the form's own
@@ -349,6 +354,10 @@ type Cockpit struct {
 	// executorSelector rides on every spawn issued via the create form. See
 	// Options.ExecutorSelector.
 	executorSelector string
+
+	// profileName scopes ModelView/LastModel reads and writes. See
+	// Options.ProfileName.
+	profileName string
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -396,9 +405,10 @@ func NewCockpit(opts Options) *Cockpit {
 		keys:             defaultKeyMap(),
 		evCh:             make(chan *rafikiv1.Event, 256),
 		status:           "connecting…",
-		modelView:        loadModelView(),
-		currency:         clientstate.Load().Currency,
+		modelView:        loadModelView(opts.ProfileName),
+		currency:         clientstate.LoadScoped(clientstate.Scope{}).Currency,
 		executorSelector: opts.ExecutorSelector,
+		profileName:      opts.ProfileName,
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
@@ -1416,7 +1426,7 @@ func (c *Cockpit) neighbour(delta int) string {
 func (c *Cockpit) shutdown() {
 	// ^R and ^V/^T change the query without ever opening the panel, so exit is
 	// the other commit point.
-	saveModelView(c.modelView)
+	saveModelView(c.profileName, c.modelView)
 	if c.stopFocus != nil {
 		c.stopFocus()
 		c.stopFocus = nil

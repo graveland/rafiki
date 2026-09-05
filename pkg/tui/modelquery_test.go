@@ -13,7 +13,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 )
 
 func i32q(v int32) *int32     { return &v }
@@ -536,8 +536,8 @@ func TestModelViewRoundTripsThroughDisk(t *testing.T) {
 	})
 	want.visionOnly = true
 
-	saveModelView(want)
-	got := loadModelView()
+	saveModelView("test", want)
+	got := loadModelView("test")
 
 	if len(got.keys) != 2 || got.keys[0].field != colIntel || !got.keys[0].desc {
 		t.Errorf("keys = %+v, want intel↓ then in$↑", got.keys)
@@ -612,18 +612,18 @@ func TestCorruptOrMissingStateFallsBackToDefaults(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
 
-	if got := loadModelView(); !got.toolsOnly {
+	if got := loadModelView("test"); !got.toolsOnly {
 		t.Error("a missing file did not fall back to the default view")
 	}
 
-	path := paths.ClientStateFile()
+	path := profile.StateFile("test")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadModelView(); !got.toolsOnly || len(got.keys) == 0 {
+	if got := loadModelView("test"); !got.toolsOnly || len(got.keys) == 0 {
 		t.Errorf("a corrupt file did not fall back to the default view: %+v", got)
 	}
 }
@@ -637,7 +637,9 @@ func TestClosingThePanelSavesTheQuery(t *testing.T) {
 
 	c.handleKey(keyMsg("esc"))
 
-	got := loadModelView()
+	// openQuery's cockpit was built with no ProfileName, so it saved to the
+	// global document (Scope{Profile: ""}) -- match that here.
+	got := loadModelView(c.profileName)
 	var found bool
 	for _, k := range got.keys {
 		if k.field == colAgentic {
