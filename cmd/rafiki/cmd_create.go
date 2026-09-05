@@ -212,7 +212,7 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		// For --kind claude, cwd names a directory the DAEMON itself must
 		// fork a real subprocess in (cmd.Dir, pkg/child/runner.go) — defaulting
 		// to this process's cwd only makes sense against the local daemon; for
-		// a remote RAFIKI_URL that's a different machine entirely, and left
+		// a remote profile (one with a `url`) that's a different machine entirely, and left
 		// unchecked this silently ships a path that exists on the client and
 		// fails server-side with a "no such file or directory" that gives no
 		// hint the path was ever local.

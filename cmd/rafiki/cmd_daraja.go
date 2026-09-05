@@ -173,8 +173,8 @@ func mustGetString(cmd *cobra.Command, name string) string {
 
 // newDarajaLaunchCmd builds `rafiki daraja launch`. It resolves an executor,
 // calls DarajaLaunch on the daemon's Connect control plane (through
-// newConnectEndpoint so RAFIKI_URL is honoured), and waits for the daraja to
-// reverse-dial back before returning.
+// newConnectEndpoint, which honours the resolved profile for remote
+// daemons), and waits for the daraja to reverse-dial back before returning.
 func newDarajaLaunchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -184,7 +184,7 @@ func newDarajaLaunchCmd() *cobra.Command {
 			"  2. Calls AdminService.Launch on the executor with a one-shot ticket.\n" +
 			"  3. Waits for the daraja's reverse dial into the daemon's pool.\n" +
 			"  4. Returns the child id once connected.\n\n" +
-			"Through newConnectEndpoint — respects $RAFIKI_URL for remote daemons.\n" +
+			"Through newConnectEndpoint — honours the resolved profile for remote daemons.\n" +
 			"A launch that matches no executor is refused with a per-candidate diagnostic.",
 		Args: cobra.NoArgs,
 		RunE: runDarajaLaunch,

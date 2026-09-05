@@ -39,9 +39,10 @@ type cacheEntry struct {
 
 // cachePath is <cache>/completion/<kind>-<hash of endpoint>.json.
 //
-// Hashing the endpoint keeps two daemons' answers apart: with RAFIKI_URL set
-// and unset in two shells, a shared key would offer the remote daemon's
-// children to the local one. It is also why the endpoint is not used directly
+// Hashing the endpoint keeps two daemons' answers apart: with a remote
+// profile selected in one shell and a local one in another (-P, or two
+// different current-profile pointers), a shared key would offer the remote
+// daemon's children to the local one. It is also why the endpoint is not used directly
 // — a URL is not a safe filename.
 func cachePath(kind, endpoint string) string {
 	sum := sha256.Sum256([]byte(endpoint))
