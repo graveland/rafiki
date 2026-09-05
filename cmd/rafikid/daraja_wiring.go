@@ -12,13 +12,17 @@ const darajaStateLabel = "rafiki/daraja-state"
 
 // WireDaraja registers OnConnect and OnDisconnect callbacks on the given pool
 // so that a disconnected daraja marks its child unreachable in the list, and
-// a reconnect clears the label. It also records the registry so Close and Kill
-// can call Forget before the row vanishes.
-func (c *Controller) WireDaraja(pool *darajapool.Pool, reg *darajapool.Registry) {
+// a reconnect clears the label. It also records the registry (so Close and
+// Kill can call Forget before the row vanishes), the pool itself, and the
+// dial address — both needed by claudeRunner (agent_runtime.go) to launch a
+// daraja from inside Spawn/Resume the same way the DarajaLaunch RPC does.
+func (c *Controller) WireDaraja(pool *darajapool.Pool, reg *darajapool.Registry, dialAddr string) {
 	if pool == nil || reg == nil {
 		return
 	}
 	c.darajaReg = reg
+	c.darajaPool = pool
+	c.darajaDialAddr = dialAddr
 	pool.OnConnect(c.onDarajaConnect)
 	pool.OnDisconnect(c.onDarajaDisconnect)
 }

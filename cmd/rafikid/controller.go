@@ -261,6 +261,11 @@ type Controller struct {
 	// darajaReg holds the in-memory credential registry, recorded by WireDaraja
 	// so Close and Kill can revoke credentials before the row vanishes.
 	darajaReg *darajapool.Registry
+	// darajaPool and darajaDialAddr let claudeRunner (agent_runtime.go) launch
+	// a daraja and drive it the same way the DarajaLaunch RPC handler does,
+	// from inside Controller.Spawn/Resume rather than over a Connect call.
+	darajaPool     *darajapool.Pool
+	darajaDialAddr string
 }
 
 type workspaceLabels struct {

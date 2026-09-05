@@ -493,13 +493,17 @@ func runDaemon(opts runDaemonOpts) error {
 
 	// Wire the controller's reach-through callbacks on connect/disconnect.
 	if darajaPool != nil {
-		ctrl.WireDaraja(darajaPool, darajaPool.Reg())
+		dialAddr := paths.ExecutorSocketPath() // local default
+		if controlAddr != "" {
+			dialAddr = controlAddr // TCP address for remote launches
+		}
+		// The daemon's own claude spawns (agent_runtime.go's claudeRunner)
+		// need this address too, to launch a daraja exactly the way the
+		// DarajaLaunch RPC handler below does — hence passing it into
+		// WireDaraja rather than only into DarajaDependencies.
+		ctrl.WireDaraja(darajaPool, darajaPool.Reg(), dialAddr)
 		// Daraja RPCs on Connect: also wire them to the control plane.
 		if execPool != nil && face != nil && face.Control != nil {
-			dialAddr := paths.ExecutorSocketPath() // local default
-			if controlAddr != "" {
-				dialAddr = controlAddr // TCP address for remote launches
-			}
 			face.Control.SetDaraja(connectapi.DarajaDependencies{
 				ExecPool:   execPool,
 				DarajaReg:  darajaPool.Reg(),

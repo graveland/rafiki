@@ -82,22 +82,16 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("no admin client for executor %s: %w", p.ExecutorID, err)
 	}
 
-	launchResp, err := adminCLI.Launch(ctx, connect.NewRequest(&adminpb.LaunchRequest{
-		ChildId:  p.ChildID,
-		Cwd:      p.Cwd,
-		Spec:     p.Spec,
-		DialAddr: p.DialAddr,
-		Ticket:   ticket,
-	}))
-	if err != nil {
-		return LaunchResult{}, fmt.Errorf("AdminService.Launch on executor %s: %w", p.ExecutorID, err)
-	}
-
-	timeout := p.Timeout
-	if timeout <= 0 {
-		timeout = defaultLaunchTimeout
-	}
-
+	// Register BEFORE issuing AdminService.Launch, not after: the reverse
+	// dial races the RPC response's own return to this goroutine (the
+	// executor starts the daraja process and answers the RPC independently
+	// of when daraja actually dials back), so a callback registered after
+	// the call returns can lose that race on a fast local loop and wait out
+	// the full timeout despite the daraja having connected within
+	// milliseconds. See TestLaunchReturnsPidPgidOnceTheReverseDialArrives,
+	// which reproduced this the first time it was written with the fake
+	// executor firing OnConnect from inside its own Launch stub.
+	//
 	// KNOWN, ACCEPTED LEAK: Pool.OnConnect has no unregister — this closure
 	// stays in the pool's permanent callback list forever, doing nothing
 	// once fired. It was already the shape of the pre-1c DarajaLaunch RPC
@@ -114,6 +108,22 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 			close(connected)
 		}
 	})
+
+	launchResp, err := adminCLI.Launch(ctx, connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  p.ChildID,
+		Cwd:      p.Cwd,
+		Spec:     p.Spec,
+		DialAddr: p.DialAddr,
+		Ticket:   ticket,
+	}))
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("AdminService.Launch on executor %s: %w", p.ExecutorID, err)
+	}
+
+	timeout := p.Timeout
+	if timeout <= 0 {
+		timeout = defaultLaunchTimeout
+	}
 
 	select {
 	case <-connected:

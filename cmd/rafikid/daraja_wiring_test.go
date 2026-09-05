@@ -43,7 +43,7 @@ func TestDisconnectMarksTheChildUnreachable(t *testing.T) {
 	// Build a real pool + registry and wire the controller into it — exactly
 	// the main() path.
 	darajaPool := darajapool.New(darajapool.NewRegistry())
-	ctrl.WireDaraja(darajaPool, darajaPool.Reg())
+	ctrl.WireDaraja(darajaPool, darajaPool.Reg(), "/tmp/test.sock")
 
 	// Fire the connect callback first (as installLive would), then disconnect.
 	darajaPool.FireConnect(childID)
@@ -84,7 +84,7 @@ func TestReconnectClearsTheUnreachableLabel(t *testing.T) {
 	darajaPool := darajapool.New(darajapool.NewRegistry())
 	reg := darajaPool.Reg()
 	_ = reg // wire path uses it via Reg()
-	ctrl.WireDaraja(darajaPool, reg)
+	ctrl.WireDaraja(darajaPool, reg, "/tmp/test.sock")
 
 	// Disconnect → OnDisconnect sets label.
 	darajaPool.FireDisconnect(childID)
@@ -196,9 +196,9 @@ func TestWireDarajaNilSafe(t *testing.T) {
 	ctrl := &Controller{st: childstore.New()}
 
 	// Nil pool, nil registry — should be a no-op.
-	ctrl.WireDaraja(nil, nil)
-	ctrl.WireDaraja(darajapool.New(nil), nil)
-	ctrl.WireDaraja(nil, darajapool.NewRegistry())
+	ctrl.WireDaraja(nil, nil, "")
+	ctrl.WireDaraja(darajapool.New(nil), nil, "")
+	ctrl.WireDaraja(nil, darajapool.NewRegistry(), "")
 
 	// No panic above means success.
 }
@@ -286,7 +286,7 @@ func TestLabelIsIdempotent(t *testing.T) {
 	})
 
 	darajaPool := darajapool.New(darajapool.NewRegistry())
-	ctrl.WireDaraja(darajaPool, darajaPool.Reg())
+	ctrl.WireDaraja(darajaPool, darajaPool.Reg(), "/tmp/test.sock")
 
 	// Two disconnects in a row — second should be a no-op.
 	ctrl.onDarajaDisconnect(childID)
