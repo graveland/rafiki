@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,102 @@ func TestRenderPresets_Table(t *testing.T) {
 			t.Errorf("table missing column %q; output:\n%s", col, out)
 		}
 	}
+}
+
+// TestPresetsCommandAgreesWithLoadPresets pins Fix 3: `rafiki presets` and
+// `rafiki create --preset` must read the same file. Before the fix,
+// `rafiki presets` asked the DAEMON (ctrl_list_presets, which reads the
+// daemon's own paths.PresetsFile() -- the old, unscoped location) while
+// `loadPresets` (what `create --preset` uses) read the CLIENT's per-profile
+// profile.PresetsFile(name). This seeds only the per-profile file and asserts
+// the `presets` command's rendered output names the preset loadPresets sees.
+func TestPresetsCommandAgreesWithLoadPresets(t *testing.T) {
+	localProfileForTest(t, profile.Profile{})
+
+	content := map[string]any{
+		"presets": map[string]any{
+			"fast": map[string]any{
+				"model":  "anthropic/claude-haiku-4-5",
+				"labels": map[string]string{"tier": "cheap"},
+			},
+		},
+	}
+	b, err := json.Marshal(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := profile.PresetsFile("test")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// What `rafiki create --preset fast` would resolve.
+	pf, err := loadPresets("test")
+	if err != nil {
+		t.Fatalf("loadPresets: %v", err)
+	}
+	wantModel, ok := pf.Presets["fast"]
+	if !ok {
+		t.Fatalf("loadPresets did not see the seeded preset: %+v", pf.Presets)
+	}
+
+	// What `rafiki presets` renders. runPresets writes to os.Stdout directly
+	// (like the daemon-backed version it replaces did), so capture the real
+	// fd rather than cmd.SetOut.
+	out := captureStdout(t, func() {
+		cmd := newPresetsCmd()
+		cmd.SetArgs(nil)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("rafiki presets: %v", err)
+		}
+	})
+	if !strings.Contains(out, "fast") {
+		t.Fatalf("`rafiki presets` output missing the preset `loadPresets` sees:\n%s", out)
+	}
+	if !strings.Contains(out, wantModel.Model) {
+		t.Fatalf("`rafiki presets` output missing the model loadPresets resolved (%q):\n%s", wantModel.Model, out)
+	}
+}
+
+// TestPresetsCommandOnABareProfileListsNothing checks that an absent presets
+// file is zero rows, not an error -- matching the old ctrl_list_presets
+// behavior ("An absent or empty presets file returns an empty slice").
+func TestPresetsCommandOnABareProfileListsNothing(t *testing.T) {
+	localProfileForTest(t, profile.Profile{})
+
+	captureStdout(t, func() {
+		cmd := newPresetsCmd()
+		cmd.SetArgs(nil)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("rafiki presets with no presets file: %v", err)
+		}
+	})
+}
+
+// captureStdout redirects the real os.Stdout for the duration of fn and
+// returns what was written to it. Needed for commands like runPresets that
+// write to os.Stdout directly rather than through cmd.OutOrStdout().
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	rp, wp, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = wp
+	fn()
+	wp.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, rp); err != nil {
+		t.Fatal(err)
+	}
+	rp.Close()
+	return buf.String()
 }
 
 func TestRenderPresets_EmptySlice(t *testing.T) {
