@@ -137,6 +137,41 @@ func TestResolveBootstrapsWhenThereIsNoManifestAtAll(t *testing.T) {
 	}
 }
 
+func TestResolveWithAnExplicitSelectionOnABareMachineErrorsRatherThanBootstrapping(t *testing.T) {
+	setXDG(t)
+	// No manifest at all; no pointer file.
+
+	cases := []struct {
+		name string
+		sel  Selection
+	}{
+		{"explicit flag", Selection{Flag: "somename"}},
+		{"explicit env", Selection{Env: "somename", EnvSet: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Clear any leftover manifest.
+			os.Remove(ProfilesFile())
+
+			_, err := Resolve(tc.sel)
+			if err == nil {
+				t.Fatal("Resolve with explicit selection on a bare machine = nil error; it must refuse to bootstrap")
+			}
+			if !strings.Contains(err.Error(), "somename") {
+				t.Errorf("error %q does not name the requested profile", err)
+			}
+			if !strings.Contains(err.Error(), "rafiki profile add") {
+				t.Errorf("error %q does not point at the fix", err)
+			}
+
+			// Verify bootstrap did NOT run as a side effect.
+			if _, err := os.Stat(ProfilesFile()); err == nil {
+				t.Fatal("profiles.toml was created; Bootstrap() should not have run")
+			}
+		})
+	}
+}
+
 func TestCheckRetiredEnvNamesTheVariableAndTheFix(t *testing.T) {
 	for _, name := range []string{
 		"RAFIKI_URL", "RAFIKI_TOKEN", "RAFIKI_SOCKET",

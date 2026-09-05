@@ -58,6 +58,12 @@ func (r Resolved) Describe() string {
 func Resolve(sel Selection) (Resolved, error) {
 	set, err := Load()
 	if errors.Is(err, ErrNoManifest) {
+		// Do not bootstrap if the caller supplied an explicit selection.
+		if sel.Flag != "" || (sel.EnvSet && sel.Env != "") {
+			return Resolved{}, fmt.Errorf(
+				"profile %q requested but no profiles are configured yet; run `rafiki profile add --help`",
+				sel.Flag+sel.Env) // One of these is non-empty
+		}
 		return Bootstrap()
 	}
 	if err != nil {
