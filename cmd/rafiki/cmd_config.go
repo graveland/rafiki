@@ -117,7 +117,7 @@ func newConfigShowCmd() *cobra.Command {
 }
 
 func runConfigShow(cmd *cobra.Command, _ []string) error {
-	s := clientstate.Load()
+	s := clientstate.LoadScoped(clientstate.Scope{})
 	mode, useColor := outputOpts(cmd)
 	return renderConfig(os.Stdout, s, mode, useColor)
 }
@@ -235,13 +235,13 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	clientstate.Update(func(s *clientstate.State) {
+	clientstate.UpdateScoped(clientstate.Scope{}, func(s *clientstate.State) {
 		for _, p := range pairs {
 			_ = p.key.set(s, p.val) // re-validated above; cannot fail here
 		}
 	})
 
-	final := clientstate.Load()
+	final := clientstate.LoadScoped(clientstate.Scope{})
 	for _, p := range pairs {
 		fmt.Fprintf(os.Stdout, "%s = %s\n", p.key.name, p.key.get(final))
 	}

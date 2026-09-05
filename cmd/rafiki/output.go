@@ -103,7 +103,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		treeRows = flattenTree(children)
 	}
 
-	cur := clientstate.Load().Currency
+	cur := clientstate.LoadScoped(clientstate.Scope{}).Currency
 	totals := subtreeCosts(children)
 
 	for _, tr := range treeRows {

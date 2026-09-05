@@ -571,7 +571,7 @@ func (c *Cockpit) kindChanged() tea.Cmd {
 	// The two kinds have different model universes, so a model carried across
 	// a kind change is very likely one the new kind cannot resolve. Swap in
 	// that kind's own remembered model instead of leaving a stale id behind.
-	c.form.inputs[fieldModel].SetValue(clientstate.LastModelFor(kind))
+	c.form.inputs[fieldModel].SetValue(clientstate.LastModelFor(c.profileName, kind))
 	c.form.suggestCur = -1
 	c.form.refreshSuggestions(c.models[kind], c.modelView)
 	return c.fetchModelsCmd(kind)
@@ -596,7 +596,7 @@ func (c *Cockpit) applySpawned(m spawnedMsg) tea.Cmd {
 	// Remember the model, so the next bare `rafiki create` opens on it. Keyed
 	// by kind, because the two kinds resolve different id universes.
 	if c.form != nil {
-		clientstate.RememberModel(c.form.kind(), strings.TrimSpace(c.form.inputs[fieldModel].Value()))
+		clientstate.RememberModel(c.profileName, c.form.kind(), strings.TrimSpace(c.form.inputs[fieldModel].Value()))
 	}
 	c.form = nil
 	// Land on the new agent. Its rail row arrives on the event stream's

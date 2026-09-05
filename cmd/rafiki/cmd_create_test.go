@@ -551,7 +551,7 @@ func TestNoLocalExecutorIsNotASpawnField(t *testing.T) {
 func TestMaxCostConvertsThroughConfiguredCurrency(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
-	clientstate.Update(func(s *clientstate.State) {
+	clientstate.UpdateScoped(clientstate.Scope{}, func(s *clientstate.State) {
 		s.Currency = &clientstate.Currency{Code: "CAD", Rate: 1.38}
 	})
 

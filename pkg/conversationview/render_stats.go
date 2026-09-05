@@ -27,7 +27,7 @@ func RenderStats(w io.Writer, st *insightstypes.Stats) error {
 		return err
 	}
 
-	cur := clientstate.Load().Currency
+	cur := clientstate.LoadScoped(clientstate.Scope{}).Currency
 
 	ew := &errWriter{w: w}
 	ew.printf("Conversations: %s    Turns: %s    Cache hit: %s\n",
