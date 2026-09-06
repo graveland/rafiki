@@ -315,6 +315,86 @@ func TestLaunchKeepsTheTicketOutOfArgv(t *testing.T) {
 	_ = ticket // already verified absent from cmdline
 }
 
+// TestLaunchPrefersItsOwnConnectAddrOverDialAddr is the regression pin for a
+// real production bug: the daemon's dial_addr is derived from its OWN bind
+// address (RAFIKI_CONTROL_LISTEN), which behind a reverse proxy, a k8s
+// Service, or anything where the daemon's public address differs from what
+// it binds, is NOT the same as an address reachable from this executor's
+// machine — a bind spec like ":8036" sent as dial_addr makes daraja dial
+// ITS OWN machine's port 8036, not the daemon's. This executor is, at the
+// moment it handles a Launch, ALREADY connected to the daemon via its own
+// --connect/--connect-socket — a target proven reachable — so Launch must
+// prefer that over whatever the request claims, not merely accept it as one
+// valid option among several.
+func TestLaunchPrefersItsOwnConnectAddrOverDialAddr(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+		ConnectAddr: "rafiki.example.dev:443",
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c-connect",
+		Cwd:     t.TempDir(),
+		// A wrong bind-address-shaped dial_addr, exactly like a real k8s
+		// daemon bound on a bare port would send. Must be ignored.
+		DialAddr: ":8036",
+		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	pid := int(resp.Msg.GetPid())
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	cmdline := string(out)
+
+	if !strings.Contains(cmdline, "--connect rafiki.example.dev:443") {
+		t.Errorf("cmdline %q missing the executor's own --connect target", cmdline)
+	}
+	if strings.Contains(cmdline, ":8036") {
+		t.Errorf("cmdline %q used the request's wrong dial_addr instead of the executor's own", cmdline)
+	}
+}
+
+// TestLaunchFallsBackToDialAddrWithNoConnectInfo covers an executor built
+// before ConnectAddr/ConnectSocket existed: with neither set, the request's
+// dial_addr is still honoured, unchanged from before this fix.
+func TestLaunchFallsBackToDialAddrWithNoConnectInfo(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-fallback",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	pid := int(resp.Msg.GetPid())
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	if !strings.Contains(string(out), "--connect 127.0.0.1:9999") {
+		t.Errorf("cmdline %q missing the fallback dial_addr", out)
+	}
+}
+
 // TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt proves Phase 2's
 // wiring end to end at the executor layer: the non-secret proxy fields reach
 // daraja serve's argv (so a real daraja process picks them up), while the

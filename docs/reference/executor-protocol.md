@@ -400,6 +400,20 @@ RPC; both call `pkg/claudeargv` instead.
 `dialAddr` is a host:port or Unix socket path that daraja dials back to the
 rafikid that asked for it — the reverse-dial pattern replaces the 1b-i direct
 connect where the caller dialled a socket path returned by the response.
+
+**The executor does NOT simply trust `dialAddr`.** It is the daemon's own
+guess at an address reachable from the executor's machine, derived from
+whatever the daemon binds its control listener on (`RAFIKI_CONTROL_LISTEN`)
+— a BIND address, not necessarily a reachable one. Behind a reverse proxy, a
+k8s Service, or anywhere the daemon's public address differs from its bind
+spec, that guess is wrong (a daemon bound on bare `:8036` sends `:8036` as
+`dialAddr`, which resolves on the EXECUTOR's own machine, not the daemon's).
+The executor is, at the moment it handles a `Launch`, already connected to
+the daemon via its own `--connect`/`--connect-socket` — an address proven
+reachable, needing no new configuration — so it tells the daraja it spawns
+to dial THAT instead (`AdminOptions.ConnectAddr`/`ConnectSocket`), falling
+back to `dialAddr` only for an executor built before this existed.
+
 `ticket` is a one-shot credential delivered via environment variable
 (`RAFIKI_DARAJA_TICKET`, never argv — `ps` visibility is why). It is replaced
 by a durable credential on first successful hello.

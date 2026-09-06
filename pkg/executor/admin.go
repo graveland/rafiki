@@ -41,6 +41,31 @@ type AdminOptions struct {
 	LaunchKinds []string
 	// SocketDir is where daraja's unix sockets are created.
 	SocketDir string
+
+	// ConnectAddr/ConnectSocket are THIS executor's own, already-working
+	// reverse-dial target — exactly what it resolved from --connect/
+	// --connect-socket to reach the daemon currently issuing this Launch.
+	// Launch tells the daraja it spawns to dial the SAME address, in
+	// preference to the request's dial_addr field.
+	//
+	// The daemon's dial_addr is its own best guess at an address reachable
+	// FROM this machine, computed from whatever it binds its control
+	// listener on (RAFIKI_CONTROL_LISTEN) — which is a BIND address, not
+	// necessarily a reachable one. Behind a reverse proxy, a Service, or any
+	// setup where the daemon's public address differs from what it binds
+	// (the common case in k8s), that guess is wrong: a daemon bound on bare
+	// ":8036" would tell daraja to dial ":8036" too, which resolves to
+	// daraja's OWN machine, not the daemon's. This executor is, at this exact
+	// moment, successfully connected to the daemon — it has already solved
+	// the reachability problem once, correctly, with an operator-supplied or
+	// $RAFIKI_URL-derived address. Reusing it needs no new configuration and
+	// cannot be wrong in a way dial_addr can.
+	//
+	// Exactly one is non-empty, mirroring resolveExecutorConnectFlags'
+	// mutual exclusion. dial_addr remains the fallback for an executor built
+	// before this field existed.
+	ConnectAddr   string
+	ConnectSocket string
 }
 
 // launched is one daraja this executor started and is responsible for.
@@ -134,16 +159,24 @@ func (a *AdminServer) Launch(
 	argv := []string{
 		"daraja", "serve",
 	}
-	// Pass the dial address: either a host:port (--connect) or a Unix path
-	// (--connect-socket). The reverse-dialled connection replaces the old
-	// direct-connect socket handle.
-	if addr := req.Msg.GetDialAddr(); addr != "" {
-		// If it looks like a path (starts with /), use --connect-socket;
-		// otherwise treat it as host:port.
-		if len(addr) > 0 && addr[0] == '/' {
-			argv = append(argv, "--connect-socket", addr)
-		} else {
-			argv = append(argv, "--connect", addr)
+	// Prefer THIS executor's own, already-working connect target over the
+	// request's dial_addr — see AdminOptions.ConnectAddr's doc comment for
+	// why the daemon's guess can be wrong (a bind address, not necessarily a
+	// reachable one) while this executor's is proven, right now, to work.
+	switch {
+	case a.opts.ConnectSocket != "":
+		argv = append(argv, "--connect-socket", a.opts.ConnectSocket)
+	case a.opts.ConnectAddr != "":
+		argv = append(argv, "--connect", a.opts.ConnectAddr)
+	default:
+		// Fallback for an executor built before ConnectAddr/ConnectSocket
+		// existed: trust the daemon's dial_addr, path-shaped or not.
+		if addr := req.Msg.GetDialAddr(); addr != "" {
+			if len(addr) > 0 && addr[0] == '/' {
+				argv = append(argv, "--connect-socket", addr)
+			} else {
+				argv = append(argv, "--connect", addr)
+			}
 		}
 	}
 	argv = append(argv, "--child-id", childID)

@@ -223,10 +223,12 @@ Two transports, exactly one of which is used:
 				return fmt.Errorf("create daraja socket dir: %w", err)
 			}
 			admin := executor.NewAdminServer(executor.AdminOptions{
-				SelfBinary:  self,
-				ChildBinary: childBin,
-				LaunchKinds: launchKinds,
-				SocketDir:   darajaSockets,
+				SelfBinary:    self,
+				ChildBinary:   childBin,
+				LaunchKinds:   launchKinds,
+				SocketDir:     darajaSockets,
+				ConnectAddr:   resolvedConnect,
+				ConnectSocket: resolvedSocket,
 			})
 			defer admin.Close()
 			handler := executorHandler(srv, admin)
