@@ -14,6 +14,13 @@ import (
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
+// ChildOwnerLookup resolves a childID to the id of the user who spawned it.
+// ok is false when childID is unknown to the daemon (foreign, closed, never
+// existed, or empty) — resolve() treats that the same as a missing
+// X-Rafiki-Session header: fall back to the anonymous identity rather than
+// fail the request.
+type ChildOwnerLookup func(childID string) (userID string, ok bool)
+
 // DefaultAuthCacheTTL bounds how long a verified token is trusted without
 // re-checking the store. It is also exactly the revocation lag: `user rm`
 // takes effect on the face within this window.
@@ -37,6 +44,8 @@ type UserTokenAuth struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedIdentity
+
+	childOwnerLookup ChildOwnerLookup
 }
 
 type cachedIdentity struct {
@@ -56,6 +65,18 @@ func NewUserTokenAuth(store users.Store, childToken string, ttl time.Duration) *
 	}
 }
 
+// SetChildOwnerLookup wires the daemon-level lookup used to attribute a
+// child-secret-authenticated request to the user who spawned that child. Nil
+// (the zero value, before this is called) is a supported configuration:
+// resolve() then falls back to the anonymous identity for every child
+// request, exactly as before this hook existed. Mirrors the setter-injection
+// pattern MessagesProxy.SetQuotaStore already uses. Call once before serving
+// traffic — not safe to change concurrently with requests in flight, same as
+// SetQuotaStore.
+func (a *UserTokenAuth) SetChildOwnerLookup(lookup ChildOwnerLookup) {
+	a.childOwnerLookup = lookup
+}
+
 // errAuthUnavailable distinguishes "I could not check" from "invalid".
 var errAuthUnavailable = errors.New("identity store unavailable")
 
@@ -66,7 +87,7 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 			http.Error(w, "missing credentials (Authorization: Bearer, x-api-key or X-Rafiki-Token)", http.StatusUnauthorized)
 			return
 		}
-		id, err := a.resolve(r.Context(), token)
+		id, err := a.resolve(r.Context(), token, r.Header.Get("X-Rafiki-Session"))
 		if errors.Is(err, errAuthUnavailable) {
 			// 503, never 401: a 401 tells the client its credential is bad
 			// and clients respond by discarding it. A database blip must
@@ -94,7 +115,7 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 			// Never relay a rafiki credential to the upstream provider: a
 			// client that puts the same token in both headers would ship
 			// our secret to a third party and get an opaque 401 back.
-			switch _, err := a.resolve(r.Context(), strings.TrimPrefix(cred, "Bearer ")); {
+			switch _, err := a.resolve(r.Context(), strings.TrimPrefix(cred, "Bearer "), ""); {
 			case err == nil:
 				http.Error(w, "Authorization carries a rafiki token, not an upstream credential; passthrough auth needs your provider credential there", http.StatusUnauthorized)
 				return
@@ -130,7 +151,7 @@ func (a *UserTokenAuth) IdentifyOptional(ctx context.Context, r *http.Request) *
 	if token == "" {
 		return nil
 	}
-	id, err := a.resolve(ctx, token)
+	id, err := a.resolve(ctx, token, r.Header.Get("X-Rafiki-Session"))
 	if err != nil {
 		return nil
 	}
@@ -138,12 +159,17 @@ func (a *UserTokenAuth) IdentifyOptional(ctx context.Context, r *http.Request) *
 }
 
 // resolve returns the identity for token, consulting the cache first.
-func (a *UserTokenAuth) resolve(ctx context.Context, token string) (Identity, error) {
+func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID string) (Identity, error) {
 	// The child secret never reaches the store: it is a daemon-internal
 	// credential minted per boot, and it must keep working in bootstrap mode
 	// when no users exist at all. Constant-time so it is not timing-probeable.
 	if a.childToken != "" &&
 		subtle.ConstantTimeCompare([]byte(token), []byte(a.childToken)) == 1 {
+		if a.childOwnerLookup != nil && childID != "" {
+			if uid, ok := a.childOwnerLookup(childID); ok && uid != "" {
+				return Identity{UserID: uid}, nil
+			}
+		}
 		return Identity{}, nil
 	}
 

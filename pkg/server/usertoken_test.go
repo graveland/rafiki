@@ -124,6 +124,70 @@ func TestChildTokenIsAcceptedWithoutTouchingTheStore(t *testing.T) {
 
 // This is the whole reason the digest scheme replaced bcrypt: the face
 // authenticates PER REQUEST. Repeated calls must not be repeated queries.
+// The child secret plus a session header naming a child this daemon knows
+// about must resolve to that child's real owner, not the anonymous identity.
+func TestChildTokenWithKnownSessionResolvesToOwner(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+	a.SetChildOwnerLookup(func(childID string) (string, bool) {
+		if childID == "c_known" {
+			return "u_owner1", true
+		}
+		return "", false
+	})
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer childsecret")
+	req.Header.Set("X-Rafiki-Session", "c_known")
+	rec, id := serve(a, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if id == nil || id.UserID != "u_owner1" {
+		t.Fatalf("identity = %+v, want UserID u_owner1", id)
+	}
+}
+
+// An unknown/foreign child (or a missing header) must fall back to the
+// anonymous identity — never a hard failure.
+func TestChildTokenWithUnknownSessionFallsBackToAnonymous(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+	a.SetChildOwnerLookup(func(childID string) (string, bool) { return "", false })
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer childsecret")
+	req.Header.Set("X-Rafiki-Session", "c_unknown_to_this_daemon")
+	rec, id := serve(a, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if id == nil || id.UserID != "" {
+		t.Fatalf("identity = %+v, want anonymous (empty UserID)", id)
+	}
+}
+
+// With no lookup wired at all (the zero value), the child token must behave
+// exactly as before this feature existed: anonymous, no panic.
+func TestChildTokenWithNoLookupWiredStaysAnonymous(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer childsecret")
+	req.Header.Set("X-Rafiki-Session", "c_known")
+	rec, id := serve(a, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if id == nil || id.UserID != "" {
+		t.Fatalf("identity = %+v, want anonymous (empty UserID)", id)
+	}
+}
+
 func TestRepeatedRequestsHitTheStoreOnce(t *testing.T) {
 	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1", Username: "brent"}}}
 	a := NewUserTokenAuth(st, "childsecret", time.Minute)
