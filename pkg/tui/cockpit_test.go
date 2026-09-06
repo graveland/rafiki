@@ -125,6 +125,51 @@ func TestFooterOmitsProfileBadgeWhenNotToldTo(t *testing.T) {
 	}
 }
 
+// The footer shows how close a capped agent is to its budget, not just what
+// it has spent -- see costReadout's doc comment.
+func TestCostReadoutShowsCapAlongsideSpend(t *testing.T) {
+	c := newTestCockpit("c_1")
+	maxCost := 5.0
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "capped", Status: "idle", Labels: map[string]string{}, MaxCost: &maxCost},
+	})
+	c.rail.SetCost("c_1", 1.23)
+
+	got := c.costReadout()
+	if !strings.Contains(got, "1.23") || !strings.Contains(got, "5.00") {
+		t.Errorf("costReadout() = %q, want spend and cap both present", got)
+	}
+}
+
+// No spend yet means costReadout stays silent even with a cap set -- a wall
+// of $0.00/$5.00 beside every freshly spawned capped agent is noise, matching
+// the existing zero-suppression rule for spend with no cap at all.
+func TestCostReadoutOmitsCapWhenNothingSpentYet(t *testing.T) {
+	c := newTestCockpit("c_1")
+	maxCost := 5.0
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "capped", Status: "idle", Labels: map[string]string{}, MaxCost: &maxCost},
+	})
+
+	if got := c.costReadout(); got != "" {
+		t.Errorf("costReadout() = %q, want empty with zero spend", got)
+	}
+}
+
+// An uncapped agent's readout is unchanged: just the spend, no suffix.
+func TestCostReadoutOmitsCapWhenUnset(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "uncapped", Status: "idle", Labels: map[string]string{}},
+	})
+	c.rail.SetCost("c_1", 1.23)
+
+	got := c.costReadout()
+	if !strings.Contains(got, "1.23") || strings.Contains(got, "/") {
+		t.Errorf("costReadout() = %q, want spend with no cap suffix", got)
+	}
+}
+
 // The identity must clip rather than overflow -- a long cwd on a narrow
 // terminal must not push the status line past the window width.
 func TestStatusLineIdentityClipsToWidth(t *testing.T) {
@@ -451,6 +496,47 @@ func TestRendererDoesNotBleedAcrossSessions(t *testing.T) {
 	}
 }
 
+// waitForEvent must collapse a burst already sitting on the channel into one
+// eventMsg -- this is what stops a large conversation's history-fallback
+// replay from visibly scrolling past one event (one Update/View cycle) at a
+// time. It must not, however, wait around for MORE than what is already
+// queued: an isolated live event arriving alone must return immediately with
+// exactly itself, not block hoping for company.
+func TestWaitForEventDrainsWhatIsAlreadyQueued(t *testing.T) {
+	ch := make(chan *rafikiv1.Event, 8)
+	for i := int32(0); i < 5; i++ {
+		ch <- turnEndFor("c_1", i)
+	}
+
+	msg := waitForEvent(ch)()
+	em, ok := msg.(eventMsg)
+	if !ok {
+		t.Fatalf("waitForEvent() = %T, want eventMsg", msg)
+	}
+	if len(em.evs) != 5 {
+		t.Fatalf("drained %d events, want all 5 already queued", len(em.evs))
+	}
+	for i, ev := range em.evs {
+		if ev.GetOrdinal() != int32(i) {
+			t.Errorf("evs[%d] ordinal = %d, want %d -- order must survive the drain", i, ev.GetOrdinal(), i)
+		}
+	}
+}
+
+func TestWaitForEventReturnsASingleIsolatedEventImmediately(t *testing.T) {
+	ch := make(chan *rafikiv1.Event, 8)
+	ch <- turnEndFor("c_1", 0)
+
+	msg := waitForEvent(ch)()
+	em, ok := msg.(eventMsg)
+	if !ok {
+		t.Fatalf("waitForEvent() = %T, want eventMsg", msg)
+	}
+	if len(em.evs) != 1 {
+		t.Fatalf("drained %d events, want exactly the 1 queued", len(em.evs))
+	}
+}
+
 // FINDING 4. reseeding was set by applyEvent and cleared only when the RPC
 // returned, and the eventMsg case dispatched on it every time -- so each event
 // arriving during a slow ListChildren queued another concurrent one. The
@@ -463,7 +549,7 @@ func TestReseedDispatchesAtMostOneInFlight(t *testing.T) {
 
 	dispatched := 0
 	for i := int32(0); i < 5; i++ {
-		_, cmd := c.Update(eventMsg{turnEndFor("c_ghost", i)})
+		_, cmd := c.Update(eventMsg{evs: []*rafikiv1.Event{turnEndFor("c_ghost", i)}})
 		if cmd != nil {
 			// tea.Batch always returns non-nil; count the re-seed explicitly.
 			if c.reseedInFlight && !c.reseeding {

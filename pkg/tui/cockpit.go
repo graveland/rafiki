@@ -156,7 +156,11 @@ const maxSessions = 12
 
 // ── Messages ────────────────────────────────────────────────────────────────
 
-type eventMsg struct{ ev *rafikiv1.Event }
+// eventMsg carries one Update cycle's worth of events -- usually one, but
+// waitForEvent drains whatever else is already queued so a burst (a full
+// event-log replay, or any other high-volume moment) collapses into ONE
+// Update/View cycle instead of one per event. See waitForEvent's doc.
+type eventMsg struct{ evs []*rafikiv1.Event }
 type tickMsg time.Time
 
 // quotaTickMsg drives the periodic quota poll, separate from tickMsg's 250ms
@@ -622,7 +626,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case eventMsg:
-		c.applyEvent(msg.ev)
+		for _, ev := range msg.evs {
+			c.applyEvent(ev)
+		}
 		var cmd tea.Cmd
 		if c.reseeding && !c.reseedInFlight {
 			c.reseeding = false
@@ -1275,7 +1281,17 @@ func (c *Cockpit) historyCmd(childID string) tea.Cmd {
 		after = n.Latest
 	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// GetHistory is one unpaginated query over the WHOLE conversation
+		// (pkg/store/messages.go's Load has no LIMIT), converted and marshaled
+		// in one response. 30s was tight enough that a genuinely large
+		// conversation could time out here and fall through to historyMsg's
+		// err branch, which replays the entire durable event log instead --
+		// strictly more data than this query reads, and over the visibly
+		// sequential fallback path to boot. Generous rather than tight: a
+		// slow-but-alive daemon should get the chance to finish the query
+		// that is provably cheaper than the fallback it would otherwise
+		// trigger.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		resp, err := c.client.GetHistory(ctx,
 			connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: childID}))
@@ -1605,7 +1621,10 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 // costReadout is the footer's spend for the focused agent: self, then what
 // this agent's subagents spent on its behalf. Two numbers only when there is a
 // second one to show, and nothing at all while every total is zero -- a wall
-// of $0.00 beside idle agents is noise, not information.
+// of $0.00 beside idle agents is noise, not information. Self carries a
+// "/cap" suffix once spend is showing at all and the agent was spawned with a
+// MaxCost, so an operator watching the footer can see how close it is to
+// being killed by budget_sweep without opening the spawn form again.
 func (c *Cockpit) costReadout() string {
 	f := c.focused()
 	if f == "" {
@@ -1616,6 +1635,9 @@ func (c *Cockpit) costReadout() string {
 		return ""
 	}
 	self := fmtCost(n.TotalCost(), c.currency)
+	if self != "" && n.MaxCost > 0 {
+		self += "/" + fmtCost(n.MaxCost, c.currency)
+	}
 	sub := fmtCost(c.rail.SubtreeCost(f)-n.TotalCost(), c.currency)
 	switch {
 	case self != "" && sub != "":
@@ -1926,13 +1948,38 @@ func lastN(lines []string, n int) []string {
 
 // ── Plumbing ────────────────────────────────────────────────────────────────
 
+// waitForEvent blocks for the first event, then drains whatever else is
+// ALREADY queued on ch before returning -- a non-blocking loop, not a second
+// blocking wait, so it never delays a genuinely single, isolated live event.
+//
+// This is what stops a large conversation's history-fallback replay (see
+// historyMsg's err/zero-events branches) from visibly scrolling past frame by
+// frame: the server still streams the whole event log as one burst, and
+// without this, every event in that burst cost its own Update/View cycle --
+// a fast text terminal renders that as a scrollback replay from the start
+// even once a real bottleneck is gone. Draining collapses a burst into
+// ceil(N/cap(ch)) renders instead of N, with no change to WHAT gets applied
+// or the order it applies in.
 func waitForEvent(ch <-chan *rafikiv1.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
 			return tea.Quit()
 		}
-		return eventMsg{ev}
+		evs := []*rafikiv1.Event{ev}
+	drain:
+		for {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					break drain
+				}
+				evs = append(evs, ev)
+			default:
+				break drain
+			}
+		}
+		return eventMsg{evs}
 	}
 }
 
