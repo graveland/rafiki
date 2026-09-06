@@ -27,6 +27,27 @@ func TestRenderList_Table(t *testing.T) {
 	}
 }
 
+func TestRenderList_KindColumn(t *testing.T) {
+	var buf bytes.Buffer
+	children := []protocol.ChildSummary{
+		{ChildID: "c_claude1", Name: "claude-worker", Kind: "claude", Status: "idle"},
+		{ChildID: "c_fundi1", Name: "fundi-worker", Kind: "", Status: "idle"},
+	}
+	if err := renderList(&buf, children, outputTable, false, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "KIND") {
+		t.Fatalf("output missing KIND header:\n%s", out)
+	}
+	if !strings.Contains(out, "claude") {
+		t.Fatalf("output missing the claude child's kind:\n%s", out)
+	}
+	if !strings.Contains(out, "fundi") {
+		t.Fatalf("output missing the default \"fundi\" kind for an empty Kind field:\n%s", out)
+	}
+}
+
 func costPtr(v float64) *float64 { return &v }
 
 // A leaf's COST and TOTAL are the same number; a parent's TOTAL also carries

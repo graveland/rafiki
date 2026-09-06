@@ -101,7 +101,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	st.Color = table.ColorOptions{}
 	tw.SetStyle(st)
 
-	colNames := []string{"ID", "NAME", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "LABELS"}
+	colNames := []string{"ID", "NAME", "KIND", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "LABELS"}
 	headerRow := make(table.Row, len(colNames))
 	for i, name := range colNames {
 		if useColor {
@@ -141,6 +141,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		tw.AppendRow(table.Row{
 			idCell,
 			defaultDash(ch.Name),
+			kindOrDefault(ch.Kind),
 			formatStatus(ch.Status, ch.ExitCode, ch.ExitSignal, useColor),
 			defaultDash(provider),
 			defaultDash(model),
@@ -161,6 +162,16 @@ func defaultDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// kindOrDefault names a child's kind for display, defaulting an empty Kind
+// (the wire default) to "fundi" rather than the usual "-" dash — an empty
+// Kind is a real, meaningful value (the fundi runtime), not absent data.
+func kindOrDefault(kind string) string {
+	if kind == "" {
+		return "fundi"
+	}
+	return kind
 }
 
 // splitProviderModel splits a "provider/model" string into its two halves.
