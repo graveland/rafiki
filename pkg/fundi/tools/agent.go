@@ -17,7 +17,11 @@ type AgentInfo struct {
 	Name    string
 	Model   string
 	Status  string // spawning|idle|streaming|tool_running|compacting|blocked_ui|shutting_down|exited
-	Cwd     string
+	// Kind is the child protocol ("claude"); empty means the fundi runtime
+	// default. See docs/plans/2026-09-05-daraja-proxy-identity-design.md,
+	// Piece 4.
+	Kind string
+	Cwd  string
 	// Depth is the number of hops from the agent that asked, so a
 	// coordinator can tell a worker from a worker's reviewer.
 	Depth int
@@ -139,7 +143,7 @@ func RenderAgents(kids []AgentInfo) string {
 	fmt.Fprintf(&sb, "%d agent(s)\n", len(kids))
 	for _, k := range kids {
 		indent := strings.Repeat("  ", k.Depth)
-		fmt.Fprintf(&sb, "%s%s  %s  [%s]  %s", indent, k.ChildID, orDash(k.Name), k.Status, orDash(k.Model))
+		fmt.Fprintf(&sb, "%s%s  %s  [%s]  %s  %s", indent, k.ChildID, orDash(k.Name), k.Status, kindOrDefault(k.Kind), orDash(k.Model))
 		if k.Task != "" {
 			fmt.Fprintf(&sb, "  task=%s", k.Task)
 		}
@@ -156,4 +160,18 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// kindOrDefault names a child's kind for display, defaulting an empty Kind
+// (the fundi runtime default) to "fundi" rather than the usual "-" dash — an
+// empty Kind is a real, meaningful value, not absent data. This is a
+// deliberate separate copy of cmd/rafiki/output.go's identical helper: this
+// package cannot import cmd/rafiki, and the two callers' formatting contexts
+// (a table cell vs. an inline text field) are independent enough not to
+// share one.
+func kindOrDefault(kind string) string {
+	if kind == "" {
+		return "fundi"
+	}
+	return kind
 }

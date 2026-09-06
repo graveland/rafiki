@@ -82,6 +82,7 @@ func (s *controllerSpawner) infoFor(snap childstore.Snapshot) tools.AgentInfo {
 		Name:    snap.Name,
 		Model:   joinModel(snap.Provider, snap.Model),
 		Status:  string(snap.Status),
+		Kind:    snap.Kind,
 		Cwd:     snap.Cwd,
 		Depth:   s.hopsTo(snap.ChildID),
 		Task:    snap.Labels[labelTaskHandle],

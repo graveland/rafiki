@@ -332,3 +332,16 @@ func TestMalformedSelectorIsRefusedWithItsOwnMessage(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestRenderAgentsIncludesKind(t *testing.T) {
+	out := RenderAgents([]AgentInfo{
+		{ChildID: "c_claude1", Name: "reviewer", Status: "idle", Kind: "claude"},
+		{ChildID: "c_fundi1", Name: "worker", Status: "idle", Kind: ""},
+	})
+	if !strings.Contains(out, "claude") {
+		t.Fatalf("output missing the claude child's kind:\n%s", out)
+	}
+	if !strings.Contains(out, "fundi") {
+		t.Fatalf("output missing the default \"fundi\" kind for an empty Kind field:\n%s", out)
+	}
+}
