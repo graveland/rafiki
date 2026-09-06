@@ -954,7 +954,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	stop, usage, canonical, perr := routing.ParseCapturedResponse(resp.Header.Get("Content-Type"), acc.Bytes())
+	stop, usage, canonical, repaired, perr := routing.ParseCapturedResponse(resp.Header.Get("Content-Type"), acc.Bytes())
 	if perr != nil {
 		// A stream we could not parse must not be persisted as a clean
 		// completion — record it errored (the client already got the bytes).
@@ -964,6 +964,13 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
 		p.failTurn(r, cr, "capture parse failed: "+perr.Error())
 		return
+	}
+	if len(repaired) > 0 {
+		// A tool_use input block failed to reassemble cleanly (an upstream SSE
+		// glitch, not a client-visible problem — the client already got the
+		// correct bytes); usage/canonical are otherwise intact, so the turn is
+		// still recorded as a normal completion below.
+		p.logger.Warn("llm turn: tool input repaired", "conversation", cr.convID, "upstream", upstream, "model", model, "detail", repaired)
 	}
 	turnFields := []any{
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,

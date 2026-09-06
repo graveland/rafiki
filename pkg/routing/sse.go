@@ -44,20 +44,25 @@ type wireUsage struct {
 // a valid JSON Message (the same shape the in-process core stores), never raw
 // SSE. A non-SSE body is already a JSON Message and is returned unchanged.
 //
+// repaired is non-empty when a tool_use/server_tool_use block's input JSON
+// failed to reassemble cleanly (see sanitizeToolInput) but the rest of the
+// message — including usage, which the caller must not lose — is intact; the
+// caller should log it but treat the turn as a normal completion.
+//
 // The error is non-nil when the body is not a recognizable Message at all —
 // a gateway error page delivered with a success status, SDK/wire skew, or a
 // reassembly gap — in which case canonical is nil and the caller must mark the
 // turn errored: recording a zero-usage "completion" would both lie in the
 // metrics and crash the JSONB append (raw SSE is not a valid canonical).
-func ParseCapturedResponse(contentType string, body []byte) (string, CapturedUsage, []byte, error) {
+func ParseCapturedResponse(contentType string, body []byte) (string, CapturedUsage, []byte, []string, error) {
 	if strings.Contains(contentType, "text/event-stream") {
 		return parseSSE(body)
 	}
 	stop, u, err := parseJSONMessage(body)
 	if err != nil {
-		return "", CapturedUsage{}, nil, err
+		return "", CapturedUsage{}, nil, nil, err
 	}
-	return stop, u, body, nil
+	return stop, u, body, nil, nil
 }
 
 func parseJSONMessage(body []byte) (string, CapturedUsage, error) {
@@ -81,7 +86,7 @@ func parseJSONMessage(body []byte) (string, CapturedUsage, error) {
 // the same pass, accumulating the events into an anthropic.Message via the SDK
 // so the caller can persist the finished message as canonical JSON instead of
 // the raw stream.
-func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
+func parseSSE(body []byte) (string, CapturedUsage, []byte, []string, error) {
 	var stop string
 	var u CapturedUsage
 	var msg anthropic.Message
@@ -162,16 +167,42 @@ func parseSSE(body []byte) (string, CapturedUsage, []byte, error) {
 	// failed parse, not a zero-usage completion — recording it would lie in
 	// the metrics and crash the JSONB append on the raw bytes.
 	if scErr := sc.Err(); scErr != nil {
-		return stop, u, nil, scErr
+		return stop, u, nil, nil, scErr
 	}
 	if !accumulated {
-		return stop, u, nil, fmt.Errorf("response stream did not reassemble into a Message (%d bytes captured)", len(body))
+		return stop, u, nil, nil, fmt.Errorf("response stream did not reassemble into a Message (%d bytes captured)", len(body))
 	}
+	// Anthropic has been observed sending a spurious duplicate input_json_delta
+	// chunk for a tool_use block (an extra fragment repeating part of the next
+	// one), and the SDK's accumulator concatenates partial_json chunks with no
+	// validation, so one bad chunk corrupts that block's Input into invalid
+	// JSON. usage/stop above are extracted independently and are already
+	// correct — repair the block instead of discarding the whole turn over it,
+	// or a rare upstream glitch silently drops billing data for that turn.
+	repaired := sanitizeToolInput(msg.Content)
 	canonical, err := json.Marshal(msg)
 	if err != nil {
-		return stop, u, nil, fmt.Errorf("marshal reassembled message: %w", err)
+		return stop, u, nil, nil, fmt.Errorf("marshal reassembled message: %w", err)
 	}
-	return stop, u, canonical, nil
+	return stop, u, canonical, repaired, nil
+}
+
+// sanitizeToolInput repairs any tool_use/server_tool_use content block whose
+// reassembled Input is not valid JSON, replacing it with a placeholder that
+// preserves the raw bytes for forensics. Returns a description per repaired
+// block, or nil if nothing needed fixing.
+func sanitizeToolInput(content []anthropic.ContentBlockUnion) []string {
+	var repaired []string
+	for i := range content {
+		c := &content[i]
+		if len(c.Input) == 0 || json.Valid(c.Input) {
+			continue
+		}
+		raw, _ := json.Marshal(string(c.Input))
+		repaired = append(repaired, fmt.Sprintf("content[%d] %s %q: invalid input JSON replaced with placeholder (raw=%s)", i, c.Type, c.Name, raw))
+		c.Input = json.RawMessage(fmt.Sprintf(`{"_rafiki_malformed_input":%s}`, raw))
+	}
+	return repaired
 }
 
 func toCapturedUsage(w wireUsage) CapturedUsage {

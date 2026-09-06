@@ -22,7 +22,7 @@ func TestParseCapturedResponseSSE(t *testing.T) {
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}` + "\n\n" +
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
-	stop, u, canonical, err := ParseCapturedResponse("text/event-stream; charset=utf-8", []byte(sse))
+	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream; charset=utf-8", []byte(sse))
 	if err != nil {
 		t.Fatalf("unexpected scanner error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestParseCapturedResponseSSEMissingContentBlockStart(t *testing.T) {
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}` + "\n\n" +
 		"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
-	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
 	if err != nil {
 		t.Fatalf("well-formed stream must parse: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestParseCapturedResponseSSEMissingContentBlockStart(t *testing.T) {
 
 func TestParseCapturedResponseJSON(t *testing.T) {
 	body := `{"type":"message","model":"moonshotai/kimi-k3","stop_reason":"max_tokens","usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
-	stop, u, canonical, err := ParseCapturedResponse("application/json", []byte(body))
+	stop, u, canonical, _, err := ParseCapturedResponse("application/json", []byte(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestParseCapturedResponseJSON(t *testing.T) {
 }
 
 func TestParseCapturedResponseGarbageIsSafe(t *testing.T) {
-	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte("event: junk\ndata: not json\n\n"))
+	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte("event: junk\ndata: not json\n\n"))
 	if err == nil {
 		t.Error("garbage stream must be a parse error, not a zero-usage completion")
 	}
@@ -117,7 +117,7 @@ func TestParseCapturedResponseGarbageIsSafe(t *testing.T) {
 func TestParseCapturedResponseTruncatedStream(t *testing.T) {
 	sse := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}` + "\n\n"
-	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
 	// message_start accumulated, so the (content-less) Message persists; the
 	// usage extracted so far stays available to the caller.
 	if err != nil {
@@ -137,7 +137,7 @@ func TestParseCapturedResponseTruncatedStream(t *testing.T) {
 func TestParseCapturedResponseNonJSONBodyIsError(t *testing.T) {
 	// A gateway error page delivered with a success status and a non-SSE
 	// content type: not a Message, and must not be stored as a completion.
-	_, _, canonical, err := ParseCapturedResponse("text/plain", []byte("error code: 521"))
+	_, _, canonical, _, err := ParseCapturedResponse("text/plain", []byte("error code: 521"))
 	if err == nil {
 		t.Error("non-JSON body must be a parse error")
 	}
@@ -166,7 +166,7 @@ func TestParseCapturedResponsePingsDoNotBreakReassembly(t *testing.T) {
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}` + "\n\n" +
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
-	stop, u, canonical, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	stop, u, canonical, _, err := ParseCapturedResponse("text/event-stream", []byte(sse))
 	if err != nil {
 		t.Fatalf("ping-laden stream must parse: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestParseCapturedResponsePingsDoNotBreakReassembly(t *testing.T) {
 func TestParseCapturedResponseProviderJSON(t *testing.T) {
 	body := []byte(`{"type":"message","model":"deepseek/deepseek-v4-pro","stop_reason":"end_turn",` +
 		`"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":0},"provider":"CoreWeave"}`)
-	_, u, _, err := ParseCapturedResponse("application/json", body)
+	_, u, _, _, err := ParseCapturedResponse("application/json", body)
 	if err != nil {
 		t.Fatalf("ParseCapturedResponse: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestParseCapturedResponseProviderSSE(t *testing.T) {
 		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"deepseek/deepseek-v4-pro","usage":{"input_tokens":0,"output_tokens":0},"provider":"Novita"}}` + "\n\n" +
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":1,"cache_read_input_tokens":4}}` + "\n\n")
-	_, u, _, err := ParseCapturedResponse("text/event-stream", body)
+	_, u, _, _, err := ParseCapturedResponse("text/event-stream", body)
 	if err != nil {
 		t.Fatalf("ParseCapturedResponse: %v", err)
 	}
@@ -212,12 +212,73 @@ func TestParseCapturedResponseProviderSSE(t *testing.T) {
 	}
 }
 
+// TestParseCapturedResponseSSERepairsMalformedToolInput reproduces a real
+// Anthropic stream (rafikid log, 2026-09-06): a spurious duplicate
+// input_json_delta chunk (an extra ", " immediately before the next chunk,
+// which itself starts with ", ") produces a double comma, which is not valid
+// JSON. The SDK's accumulator concatenates partial_json chunks with no
+// validation, so the tool_use block's Input ends up unparseable even though
+// the turn completed normally and the client already received a correct
+// response. Losing the whole turn's usage over one corrupted tool call would
+// silently drop billing data — the block must be repaired, not the turn
+// discarded.
+func TestParseCapturedResponseSSERepairsMalformedToolInput(t *testing.T) {
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","usage":{"input_tokens":2,"cache_read_input_tokens":24607,"cache_creation_input_tokens":364,"output_tokens":20}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"Read","input":{}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\": \"/a.go\", \"offset\": 140"}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":", "}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":", \"limit\": 100"}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":118}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	stop, u, canonical, repaired, err := ParseCapturedResponse("text/event-stream", []byte(sse))
+	if err != nil {
+		t.Fatalf("a malformed tool_use input must be repaired, not fail the whole turn: %v", err)
+	}
+	if stop != "tool_use" || u.OutputTokens != 118 || u.InputTokens != 2 {
+		t.Errorf("usage lost despite independent extraction: stop=%q usage=%+v", stop, u)
+	}
+	if !json.Valid(canonical) {
+		t.Fatalf("canonical response is not valid JSON: %s", canonical)
+	}
+	if len(repaired) != 1 {
+		t.Fatalf("expected exactly one repaired block, got %v", repaired)
+	}
+	var msg struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(canonical, &msg); err != nil {
+		t.Fatalf("canonical unmarshal: %v", err)
+	}
+	if len(msg.Content) != 1 || msg.Content[0].Name != "Read" {
+		t.Fatalf("tool_use block missing from canonical: %+v", msg.Content)
+	}
+	if !json.Valid(msg.Content[0].Input) {
+		t.Errorf("sanitized input must still be valid JSON: %s", msg.Content[0].Input)
+	}
+}
+
 // TestParseCapturedResponseNoProvider proves a native Anthropic response, which
 // carries no such field, leaves Provider empty rather than inventing one.
 func TestParseCapturedResponseNoProvider(t *testing.T) {
 	body := []byte(`{"type":"message","model":"claude-opus-4-8","stop_reason":"end_turn",` +
 		`"usage":{"input_tokens":5,"output_tokens":1}}`)
-	_, u, _, err := ParseCapturedResponse("application/json", body)
+	_, u, _, _, err := ParseCapturedResponse("application/json", body)
 	if err != nil {
 		t.Fatalf("ParseCapturedResponse: %v", err)
 	}
