@@ -589,7 +589,13 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 						eligible = append(eligible, r)
 					}
 				}
-				if len(eligible) > 1 {
+				if len(eligible) == 1 {
+					// Record the unambiguous resolution in the form before
+					// building the request. This both pins the same answer the
+					// CLI would remember and still leaves the daemon's admission
+					// checks authoritative for a race after this cached snapshot.
+					f.inputs[fieldExecutor].SetValue(executorRef(eligible[0]))
+				} else if len(eligible) > 1 {
 					c.execPicker = newExecutorPicker(p.kind, eligible, true, "")
 					return c, nil
 				}

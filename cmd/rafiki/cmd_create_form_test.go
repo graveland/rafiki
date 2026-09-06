@@ -101,14 +101,16 @@ func TestWantsSessionExecutor(t *testing.T) {
 		selector, kind  string
 		noLocalExecutor bool
 		want            bool
+		executorRef     string
 	}{
-		{"fundi with nothing else is the zero-config default", "", "fundi", false, true},
-		{"claude never gets the session executor", "", "claude", false, false},
-		{"an explicit selector opts out entirely", "owner=brent,env=prod", "fundi", false, false},
-		{"--no-local-executor opts out entirely", "", "fundi", true, false},
-		{"an unknown kind gets nothing", "", "", false, false},
+		{"fundi with nothing else is the zero-config default", "", "fundi", false, true, ""},
+		{"claude never gets the session executor", "", "claude", false, false, ""},
+		{"an explicit selector opts out entirely", "owner=brent,env=prod", "fundi", false, false, ""},
+		{"an explicit executor opts out entirely", "", "fundi", false, false, "greyshift"},
+		{"--no-local-executor opts out entirely", "", "fundi", true, false, ""},
+		{"an unknown kind gets nothing", "", "", false, false, ""},
 	} {
-		if got := wantsSessionExecutor(tc.selector, tc.kind, tc.noLocalExecutor); got != tc.want {
+		if got := wantsSessionExecutor(tc.selector, tc.executorRef, tc.kind, tc.noLocalExecutor); got != tc.want {
 			t.Errorf("%s: wantsSessionExecutor(%q, %q, %v) = %v, want %v",
 				tc.name, tc.selector, tc.kind, tc.noLocalExecutor, got, tc.want)
 		}

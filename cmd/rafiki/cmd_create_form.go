@@ -69,8 +69,8 @@ func wantsCreateForm(cmd *cobra.Command, args []string, isTTY bool) bool {
 // §1 and §5). If the user cycles the kind row inside the form, the spawn's
 // executor is decided per-spawn by the cockpit (buildSpawnRequest), not by
 // what was stood up here.
-func wantsSessionExecutor(reqSelector, kind string, noLocalExecutor bool) bool {
-	if reqSelector != "" || noLocalExecutor {
+func wantsSessionExecutor(reqSelector, executorRef, kind string, noLocalExecutor bool) bool {
+	if reqSelector != "" || executorRef != "" || noLocalExecutor {
 		return false
 	}
 	return kind == protocol.KindFundi
@@ -102,7 +102,7 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 
 	p := mustProfile(cmd)
 	executorSelector := req.ExecutorSelector
-	if wantsSessionExecutor(req.ExecutorSelector, req.Kind, noLocalExecutor) {
+	if wantsSessionExecutor(req.ExecutorSelector, req.ExecutorRef, req.Kind, noLocalExecutor) {
 		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
