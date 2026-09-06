@@ -20,6 +20,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -54,6 +55,52 @@ func resolveRoot(root string) (string, error) {
 		wd = abs
 	}
 	return wd, nil
+}
+
+// executorProfileProxy resolves a reachable LLM proxy URL for daraja-hosted
+// children from this executor's OWN profile, best-effort — see
+// docs/plans/2026-09-05-daraja-proxy-identity-design.md, Piece 3.
+//
+// Unlike resolveProfile/mustProfile (profile_glue.go), this does NOT call
+// profile.CheckRetiredEnv: rafiki executor serve legitimately derives
+// --connect from RAFIKI_URL (see resolveExecutorConnectFlags), and
+// CheckRetiredEnv would treat that as a retired client variable and refuse
+// EVERY time --launch is combined with a RAFIKI_URL-derived --connect —
+// exactly the executors this feature exists for.
+//
+// It also does not let profile.Resolve's bootstrap fallback run: with no
+// profiles.toml on this machine at all, Resolve would silently CREATE one
+// pointing at a local daemon (profile.Bootstrap's default) and hand back
+// that guess as though it were a proven address — worse than the plain
+// fallback to the daemon's own proxy_url this function's caller already has.
+// So resolution is attempted only when a manifest already exists.
+//
+// Any failure (no manifest, no profile selected, unknown profile name) is
+// logged and swallowed to "" — never fatal to the executor's actual job of
+// hosting tools.
+func executorProfileProxy(cmd *cobra.Command) string {
+	flag := ""
+	if cmd != nil {
+		flag, _ = cmd.Flags().GetString("profile")
+	}
+	env, envSet := os.LookupEnv("RAFIKI_PROFILE")
+
+	explicit := flag != "" || (envSet && env != "")
+	if !explicit {
+		if _, err := profile.Load(); err != nil {
+			return ""
+		}
+	}
+
+	resolved, err := profile.Resolve(profile.Selection{Flag: flag, Env: env, EnvSet: envSet})
+	if err != nil {
+		slog.Warn("executor: could not resolve a profile for --launch; hosted children will fall back to the daemon's own proxy address", "error", err)
+		return ""
+	}
+	if resolved.Proxy == "" {
+		slog.Warn("executor: resolved profile has no usable proxy address; hosted children will fall back to the daemon's own proxy address", "profile", resolved.Name)
+	}
+	return resolved.Proxy
 }
 
 func executorHandler(srv *executor.Server, admin *executor.AdminServer) http.Handler {
@@ -213,6 +260,11 @@ Two transports, exactly one of which is used:
 			if err != nil && len(launchKinds) > 0 {
 				return fmt.Errorf("--launch claude given but claude is not on PATH: %w", err)
 			}
+
+			var proxyURL string
+			if len(launchKinds) > 0 {
+				proxyURL = executorProfileProxy(cmd)
+			}
 			// daraja's Relay carries the child's stdio both ways, so its socket
 			// must not sit in the world-readable temp dir: on a multi-user
 			// executor host any local user could connect and read the
@@ -229,6 +281,7 @@ Two transports, exactly one of which is used:
 				SocketDir:     darajaSockets,
 				ConnectAddr:   resolvedConnect,
 				ConnectSocket: resolvedSocket,
+				ProxyURL:      proxyURL,
 			})
 			defer admin.Close()
 			handler := executorHandler(srv, admin)
