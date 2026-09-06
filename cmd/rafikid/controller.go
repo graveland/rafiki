@@ -615,6 +615,20 @@ func (c *Controller) Get(childID string) (childstore.Snapshot, bool) {
 	return c.st.Get(childID)
 }
 
+// OwnerUserIDForChild implements server.ChildOwnerLookup: it lets the proxy
+// face attribute a child-secret-authenticated request to the user who
+// actually spawned that child, via the request's X-Rafiki-Session header. See
+// docs/plans/2026-09-05-daraja-proxy-identity-design.md, Piece 2. ok is false
+// for an unknown childID or one with no recorded owner (an anonymous spawn) —
+// the caller then falls back to the anonymous identity.
+func (c *Controller) OwnerUserIDForChild(childID string) (string, bool) {
+	snap, ok := c.st.Get(childID)
+	if !ok || snap.OwnerUserID == "" {
+		return "", false
+	}
+	return snap.OwnerUserID, true
+}
+
 // ConversationID satisfies connectapi.ConversationResolver: it maps a child
 // id to the fundi conversation UUID that owns its persisted message history.
 // Only fundi children have a conversation as their session id (see
@@ -1125,6 +1139,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// otherwise leave an orphan pi process with no persisted record.
 	sess := &childstore.Session{
 		ChildID:      childID,
+		OwnerUserID:  owner.UserID,
 		PID:          ch.PID(),
 		Status:       protocol.StatusSpawning,
 		Name:         req.Name,
@@ -1418,6 +1433,7 @@ func (c *Controller) activateLiveChild(
 
 	sess := &childstore.Session{
 		ChildID:            childID,
+		OwnerUserID:        snap.OwnerUserID,
 		PID:                ch.PID(),
 		Name:               snap.Name,
 		Cwd:                snap.Cwd,
