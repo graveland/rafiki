@@ -453,6 +453,9 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.SetCatalog(catalog)
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
+		if face.TokenAuth != nil {
+			face.TokenAuth.SetChildOwnerLookup(ctrl.OwnerUserIDForChild)
+		}
 		if face.Control != nil {
 			face.Control.SetChildResolver(ctrl)
 			face.Control.SetEventSource(ctrl.nativeEventSource())
