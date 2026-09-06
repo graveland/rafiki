@@ -653,3 +653,27 @@ func TestKindChangeSwapsTheRememberedExecutor(t *testing.T) {
 		t.Error("no model fetch was issued for the new kind")
 	}
 }
+
+// A declared --executor-selector is already a decision; the daemon resolves it
+// silently (documented first-match), and re-asking over it is noise.
+func TestSubmitWithFlagSelectorSkipsTheAmbiguityCheck(t *testing.T) {
+	c := formCockpit(t)
+	c.form.kindIx = 1
+	c.executorSelector = "owner=brent,env=prod"
+	c.executorSelectorFromFlag = true
+	c.executors = map[string][]*rafikiv1.ExecutorRow{
+		"claude": {
+			{Id: "exec-1", Machine: "greyshift", Eligible: true},
+			{Id: "exec-2", Machine: "otherbox", Eligible: true},
+		},
+	}
+
+	_, cmd := c.handleKey(keyMsg("enter"))
+
+	if cmd == nil {
+		t.Fatal("a declared selector did not spawn")
+	}
+	if c.execPicker != nil {
+		t.Fatal("the picker opened over a declared selector policy")
+	}
+}

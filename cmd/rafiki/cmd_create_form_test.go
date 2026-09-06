@@ -81,3 +81,36 @@ func TestEveryShapingFlagExists(t *testing.T) {
 		}
 	}
 }
+
+// --executor decides what child gets spawned and where, so it suppresses the
+// form like any other shaping flag (reachable with the form only via -i).
+func TestExecutorFlagSuppressesTheForm(t *testing.T) {
+	cmd, args := createCmdFor(t, "--executor", "greyshift")
+	if wantsCreateForm(cmd, args, true) {
+		t.Error("--executor should spawn directly, not open the form")
+	}
+}
+
+// The session executor is a fundi-only offer. A launch-required kind can never
+// be served by it (it never advertises LaunchKinds), so the form path must not
+// stand one up there -- the exact gap the executor-selection plan's Task 6
+// review called out.
+func TestWantsSessionExecutor(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		selector, kind  string
+		noLocalExecutor bool
+		want            bool
+	}{
+		{"fundi with nothing else is the zero-config default", "", "fundi", false, true},
+		{"claude never gets the session executor", "", "claude", false, false},
+		{"an explicit selector opts out entirely", "owner=brent,env=prod", "fundi", false, false},
+		{"--no-local-executor opts out entirely", "", "fundi", true, false},
+		{"an unknown kind gets nothing", "", "", false, false},
+	} {
+		if got := wantsSessionExecutor(tc.selector, tc.kind, tc.noLocalExecutor); got != tc.want {
+			t.Errorf("%s: wantsSessionExecutor(%q, %q, %v) = %v, want %v",
+				tc.name, tc.selector, tc.kind, tc.noLocalExecutor, got, tc.want)
+		}
+	}
+}

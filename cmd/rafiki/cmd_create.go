@@ -463,6 +463,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	flagExecutor, _ := cmd.Flags().GetString("executor")
 
 	if wantsCreateForm(cmd, args, isStdinTTY()) {
+		// The form resolves the executor interactively (its own field, the
+		// picker, and the daemon's auto-resolve), so the flag -- only reachable
+		// here with -i, since it suppresses the form on its own -- is what the
+		// form is PREFILLED with, not what the spawn quietly does differently.
+		req.ExecutorRef = flagExecutor
 		return runCreateForm(cmd, c, req, noLocalExecutor)
 	}
 

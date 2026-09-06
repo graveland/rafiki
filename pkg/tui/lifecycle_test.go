@@ -243,3 +243,28 @@ func TestBuildSpawnRequestFundiWithExplicitFieldSendsTheRef(t *testing.T) {
 		t.Fatalf("want no selector, got %q", req.GetExecutorSelector())
 	}
 }
+
+// A DECLARED --executor-selector is a policy for every kind: the flag branch
+// of `rafiki create` honors it for launch-required kinds, and the form path
+// must not silently drop it. It is the SESSION executor's selector that is
+// fundi-only, and executorSelectorFromFlag is what tells the two apart.
+func TestBuildSpawnRequestAppliesAFlagSelectorToALaunchKind(t *testing.T) {
+	c := &Cockpit{executorSelector: "owner=brent,env=prod", executorSelectorFromFlag: true}
+	req := c.buildSpawnRequest(spawnParams{kind: "claude", cwd: "/tmp"})
+	if req.GetExecutorSelector() != "owner=brent,env=prod" {
+		t.Fatalf("want the declared selector preserved for claude, got %q", req.GetExecutorSelector())
+	}
+	if req.GetExecutorRef() != "" {
+		t.Fatalf("want no ref, got %q", req.GetExecutorRef())
+	}
+}
+
+// The session selector must NEVER pin a launch-required kind, even though the
+// field is non-empty -- that is the bug this whole plan exists to fix.
+func TestBuildSpawnRequestSessionSelectorNeverPinsALaunchKind(t *testing.T) {
+	c := &Cockpit{executorSelector: "owner=brent,machine=silvershift", executorSelectorFromFlag: false}
+	req := c.buildSpawnRequest(spawnParams{kind: "claude", cwd: "/tmp"})
+	if req.GetExecutorSelector() != "" || req.GetExecutorRef() != "" {
+		t.Fatalf("want both empty, got selector=%q ref=%q", req.GetExecutorSelector(), req.GetExecutorRef())
+	}
+}

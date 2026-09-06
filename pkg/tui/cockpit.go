@@ -215,13 +215,24 @@ type Options struct {
 	OpenCreate     bool
 	CreateDefaults SpawnDefaults
 	// ExecutorSelector rides on every spawn this cockpit issues, for its whole
-	// lifetime -- not just the first. It carries the LOCAL SESSION EXECUTOR's
-	// selector when one was stood up for this cockpit (runCreateForm), and is
-	// applied to fundi spawns only -- see buildSpawnRequest for why a
-	// launch-required kind must never be pinned to this machine. The executor
+	// lifetime -- not just the first. It carries either the LOCAL SESSION
+	// EXECUTOR's selector (runCreateForm stands one up for fundi-only forms)
+	// or the caller's own --executor-selector declaration. Which of the two it
+	// is decides which kinds it may pin -- see
+	// Options.ExecutorSelectorFromFlag and buildSpawnRequest. The executor
 	// form field is the per-spawn explicit choice (an ExecutorRef) and is
 	// separate from this.
 	ExecutorSelector string
+	// ExecutorSelectorFromFlag marks ExecutorSelector as the caller's own
+	// --executor-selector declaration rather than the local session
+	// executor's selector. The distinction decides WHICH KINDS the selector
+	// applies to: a declared policy applies to every kind (the flag branch of
+	// `rafiki create` honors it for launch-required kinds, and the form path
+	// must not silently drop it), while a session executor's selector applies
+	// to fundi only -- it can never serve a kind that must be LAUNCHED, and
+	// pinning one to this machine would reproduce exactly the bug
+	// docs/plans/2026-09-06-executor-selection-design.md §1 exists to fix.
+	ExecutorSelectorFromFlag bool
 	// ProfileName scopes every clientstate read/write this cockpit does for
 	// ModelView and LastModel -- two daemons need not share a model catalog,
 	// so a remembered choice from one profile is a wrong answer for another.
@@ -375,8 +386,12 @@ type Cockpit struct {
 	currency *clientstate.Currency
 
 	// executorSelector rides on every spawn issued via the create form. See
-	// Options.ExecutorSelector.
+	// Options.ExecutorSelector and Options.ExecutorSelectorFromFlag.
 	executorSelector string
+	// executorSelectorFromFlag records that executorSelector is the caller's
+	// own declared policy rather than a session executor's. See
+	// Options.ExecutorSelectorFromFlag.
+	executorSelectorFromFlag bool
 
 	// profileName scopes ModelView/LastModel reads and writes. See
 	// Options.ProfileName.
@@ -421,21 +436,22 @@ func NewCockpit(opts Options) *Cockpit {
 	}
 
 	c := &Cockpit{
-		cfg:              cfg,
-		client:           rafikiv1connect.NewControlClient(httpClient, opts.BaseURL),
-		subject:          subject,
-		rail:             rail.New(),
-		sessions:         make(map[string]*session.Session),
-		panes:            map[string]*paneState{},
-		ta:               ta,
-		keys:             defaultKeyMap(),
-		evCh:             make(chan *rafikiv1.Event, 256),
-		status:           "connecting…",
-		modelView:        loadModelView(opts.ProfileName),
-		currency:         clientstate.LoadScoped(clientstate.Scope{}).Currency,
-		executorSelector: opts.ExecutorSelector,
-		profileName:      opts.ProfileName,
-		showProfileBadge: opts.ShowProfileBadge,
+		cfg:                      cfg,
+		client:                   rafikiv1connect.NewControlClient(httpClient, opts.BaseURL),
+		subject:                  subject,
+		rail:                     rail.New(),
+		sessions:                 make(map[string]*session.Session),
+		panes:                    map[string]*paneState{},
+		ta:                       ta,
+		keys:                     defaultKeyMap(),
+		evCh:                     make(chan *rafikiv1.Event, 256),
+		status:                   "connecting…",
+		modelView:                loadModelView(opts.ProfileName),
+		currency:                 clientstate.LoadScoped(clientstate.Scope{}).Currency,
+		executorSelector:         opts.ExecutorSelector,
+		executorSelectorFromFlag: opts.ExecutorSelectorFromFlag,
+		profileName:              opts.ProfileName,
+		showProfileBadge:         opts.ShowProfileBadge,
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()

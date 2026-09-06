@@ -570,14 +570,17 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			f.err = problem
 			return c, nil
 		}
-		if p.executor == "" && p.kind != "fundi" {
+		if p.executor == "" && p.kind != "fundi" && !c.executorSelectorFromFlag {
 			// A launch-required kind with nothing chosen: ask rather than let
 			// the daemon guess, exactly like the CLI's resolveLaunchExecutor.
-			// Uses whatever ListExecutors has already cached -- fetched
-			// proactively by kindChanged/Init/ctrl+e, so this never costs an
-			// extra round trip on the common (already-fetched) path. An answer
-			// that has not arrived yet is NOT "no executors": the check skips
-			// and the daemon's own spawn path decides.
+			// Skipped when the caller declared a --executor-selector policy:
+			// the daemon resolves that silently (documented first-match), and
+			// re-asking over a choice already made is noise. Uses whatever
+			// ListExecutors has already cached -- fetched proactively by
+			// kindChanged/Init/ctrl+e, so this never costs an extra round trip
+			// on the common (already-fetched) path. An answer that has not
+			// arrived yet is NOT "no executors": the check skips and the
+			// daemon's own spawn path decides.
 			rows, loaded := c.executorsFor(p.kind)
 			if loaded {
 				var eligible []*rafikiv1.ExecutorRow
