@@ -102,3 +102,60 @@ func TestChooseLaunchExecutorHonoursExecutorRefAndRequiresLaunchKind(t *testing.
 		t.Fatalf("want exec-1, got %s", exec.ID)
 	}
 }
+
+// TestExecutorReasonLaunchBranchDetectsLineageExclusion is a regression test
+// for a gap the launch branch of executorReason had: it checked e.Enabled,
+// launchable[e.ID], its own admits selector, and the child's own selector --
+// but never parentSet membership, which is where an ANCESTOR's selector
+// (evaluated during lineage narrowing in effectiveExecutorSetFor) excludes an
+// executor. "work" here passes every launch-branch check the old code ran
+// (enabled, launchable, admits, childSel.Explain all pass) and is excluded
+// ONLY by the parent's env=home selector during lineage narrowing -- exactly
+// the case the missing check let slip through as "not excluded".
+//
+// chooseLaunchExecutor's own refusal (checked first, as a sanity check) does
+// NOT exercise this bug: its actual selection decision comes from
+// Narrow(parentSet, sel) inside narrowedExecutorCandidates, which is entirely
+// independent of executorReason and already excludes "work" correctly for
+// its own reasons. executorReason itself is used only to produce the
+// human-readable exclusion text (explainNoLaunchMatch's per-row message, and
+// -- the case that actually matters -- ListExecutorRows.Eligible), so the
+// regression must be asserted directly against executorReason's return
+// value, not inferred from chooseLaunchExecutor's error/success outcome.
+func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
+	c := selectFixture(t, "env=home",
+		exWithLaunch("work", map[string]string{"env": "work"}, "", "claude"),
+	)
+	req := protocol.SpawnRequest{ParentChildID: "c_parent"}
+
+	// Sanity: the end-to-end refusal is correct (and stays correct) either way.
+	if _, err := c.chooseLaunchExecutor(req, "", "claude"); err == nil {
+		t.Fatal("want a refusal — work is excluded by the parent's lineage selector")
+	}
+
+	// The actual regression: ask executorReason directly, the same way
+	// explainNoLaunchMatch and ListExecutorRows do, whether "work" is
+	// excluded. Before the fix this returns "" (claims eligible) because the
+	// launch branch never checks parentSet membership.
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("want zero post-selector candidates (lineage already excluded work), got %v", candidates)
+	}
+	if len(parentSet) != 0 {
+		t.Fatalf("want work excluded from parentSet by the lineage narrowing, got %v", parentSet)
+	}
+	launchable := launchKindSet(c.execPool.Live(), "claude")
+	var work executors.Executor
+	for _, le := range c.execPool.Live() {
+		if le.Executor.ID == "work" {
+			work = le.Executor
+		}
+	}
+	reason := executorReason(work, req, launchable, "claude", sel, childLabels, parentSet)
+	if reason == "" {
+		t.Fatal("executorReason claims work is eligible, but it is excluded by the parent's lineage selector")
+	}
+}

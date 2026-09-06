@@ -376,17 +376,42 @@ func executorReason(
 		case !admitsSel.Matches(childLabels):
 			return fmt.Sprintf("excluded by ITS admission selector %q", e.Admits)
 		}
+		// parentSet already reflects LINEAGE narrowing (every ancestor's
+		// selector, root-first — see effectiveExecutorSetFor), which the
+		// three checks above do not: they only re-check e's OWN admits
+		// selector against childLabels, a single-level check. An executor
+		// excluded purely by an ANCESTOR's selector during lineage narrowing
+		// passes enabled/launchable/admits/childSel.Explain fine and must
+		// still be caught here, or it reads as eligible when it is not.
+		inParentSet := false
+		for _, p := range parentSet {
+			if p.ID == e.ID {
+				inParentSet = true
+				break
+			}
+		}
+		if !inParentSet {
+			// This is the ORIGINAL, unsplit fallback string (preserved
+			// verbatim) for the only case explainNoLaunchMatch's loop can
+			// ever actually reach: kept-empty means no live executor is
+			// truly eligible, so none can be genuinely in parentSet AND
+			// unexcluded by the child's own selector at the same time — see
+			// the comment on the "excluded by your PARENT's set" fallback in
+			// the non-launch branch below for the identical reasoning.
+			return "excluded by your selector or your parent's set"
+		}
 		if explain := childSel.Explain(e.Labels); explain != "" {
 			return fmt.Sprintf("excluded by your selector:   %s", explain)
 		}
-		// Enabled, launch-capable, admits this child, and the child's own
-		// selector does not exclude it: nothing here excludes e. This branch
-		// was unreachable from explainNoLaunchMatch's original call site (it
-		// only enumerates AFTER the overall attempt already failed, so no
-		// live executor could reach here with an empty explain), but
-		// ListExecutorRows calls executorReason per-executor regardless of
-		// whether the OVERALL attempt would succeed, so this path is very
-		// much reachable now and must honor the "" contract above.
+		// Enabled, launch-capable, admits this child, in the parent's
+		// (lineage-narrowed) set, and the child's own selector does not
+		// exclude it: nothing here excludes e. This branch was unreachable
+		// from explainNoLaunchMatch's original call site (it only enumerates
+		// AFTER the overall attempt already failed, so no live executor
+		// could reach here with an empty explain), but ListExecutorRows
+		// calls executorReason per-executor regardless of whether the
+		// OVERALL attempt would succeed, so this path is very much reachable
+		// now and must honor the "" contract above.
 		return ""
 	}
 
