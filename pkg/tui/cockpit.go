@@ -335,6 +335,11 @@ type Cockpit struct {
 	// rather than dismissing both, because the other fields are still half
 	// filled in.
 	picker *modelPicker
+	// execPicker mirrors picker for the executor field: the full browser
+	// opened from the form's executor row (ctrl+e), or auto-opened when a
+	// submit would leave the daemon to guess between several eligible
+	// executors. Same stacking rule: esc returns to the form.
+	execPicker *executorPicker
 	// models caches the daemon's answer per KIND, so the form's typeahead
 	// filters locally on every keystroke instead of asking per character, and
 	// so the full picker opens instantly rather than re-fetching what the
@@ -343,6 +348,12 @@ type Cockpit struct {
 	models     map[string][]*rafikiv1.ModelRow
 	modelsErr  map[string]string
 	modelsBusy map[string]bool
+	// executors caches ListExecutors' answer per kind, same reasoning as
+	// models: the typeahead-equivalent consumer here is the pre-submit
+	// ambiguity check, which must never spend a round trip on the common path.
+	executors     map[string][]*rafikiv1.ExecutorRow
+	executorsErr  map[string]string
+	executorsBusy map[string]bool
 	// query is the open filter+sort band, nil when none. It sits OVER the
 	// picker or the form rather than replacing them, so every keystroke
 	// re-sorts the rows still visible above it.
