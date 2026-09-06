@@ -549,6 +549,11 @@ type ChildSummary struct {
 	// because 0 means "spent nothing" and nil means "not known" -- with no
 	// database configured there is no rollup to read.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
+	// MaxCost is the child's spend cap, or nil when it has none. Unlike
+	// CostUSD, nil here is the SAME as "no cap" (childstore.Session.MaxCost
+	// treats its own zero value as unlimited -- see grantedCost), so this is
+	// only ever set when the underlying cap is a real positive number.
+	MaxCost *float64 `json:"max_cost,omitempty"`
 }
 
 // ListResponseData is the data payload for ctrl_list responses.

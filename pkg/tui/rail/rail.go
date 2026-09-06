@@ -110,6 +110,12 @@ type Node struct {
 	// updated there.
 	CostLive float64
 
+	// MaxCost is this child's spend cap in USD, or 0 when it has none --
+	// mirroring childstore.Session.MaxCost's own zero-means-unlimited
+	// convention rather than protocol.ChildSummary's pointer, since a rail
+	// row is a plain snapshot with nothing to distinguish nil from unset.
+	MaxCost float64
+
 	Attention int
 }
 
@@ -203,6 +209,8 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			}
 			existing.SessionID = s.GetSessionId()
 			existing.Cwd = s.GetCwd()
+			existing.Status = s.GetStatus()
+			existing.MaxCost = s.GetMaxCost()
 			continue
 		}
 		n := &Node{
@@ -212,6 +220,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			Status:    s.GetStatus(),
 			SessionID: s.GetSessionId(),
 			Cwd:       s.GetCwd(),
+			MaxCost:   s.GetMaxCost(),
 		}
 		// Seeding is a CLEAN BOARD: everything that happened before you attached
 		// counts as read. Attaching is not a claim to have read anything; it is

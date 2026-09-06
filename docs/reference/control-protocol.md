@@ -230,8 +230,8 @@ watch that row freeze.
 | `GetHistory` | unary | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
 | `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see below) |
-| `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal` and `cost_usd` per child) |
-| `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal` and `cost_usd`) |
+| `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal`, `cost_usd` and `max_cost` per child) |
+| `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal`, `cost_usd` and `max_cost`) |
 | `Spawn` | unary | Create a child with budget, executor, and label options |
 | `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
 | `Close` | unary | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped (§6.13 is the same operation on the framed protocol, whose wire spelling `ctrl_forget` stays frozen). An error for a live child — closing is never an implicit kill |
@@ -483,7 +483,8 @@ Response:
         "exitSignal":         null,
         "contextWindow":      200000,            // omitted when the daemon's
         "maxCompletionTokens":64000,              // model catalog has no entry for "model"
-        "cost_usd":           0.0234              // omitted when not known
+        "cost_usd":           0.0234,             // omitted when not known
+        "max_cost":           5.0                 // omitted when the child has no cap
       }
     ]
   }
@@ -506,6 +507,13 @@ reported as a false zero; present-and-zero means the query ran and found no
 turns yet. A client wanting the "agent + descendants" total sums `cost_usd`
 down the parent/child tree itself (via the `rafiki/parent`/`fundi/parent`
 labels) — the daemon does not compute that rollup for `ctrl_list`.
+
+`max_cost` is the child's spend cap, sourced from `childstore.Session.MaxCost`
+(daemon-stamped at spawn, enforced by `budget_sweep.go`). It is omitted
+whenever the child has no cap — including the zero value, since
+`Session.MaxCost == 0` means unlimited, not "spend nothing" (that convention
+is `SpawnRequest.max_cost`'s own, and is why this field can never legally be
+present-and-zero the way `cost_usd` can).
 
 Default sort: `startedAt` desc. Entries in the grace window (status
 `exited`) are included by default; filter on `status` to narrow.

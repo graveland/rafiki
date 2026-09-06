@@ -126,6 +126,11 @@ message ChildSummary {
   // distinguishable from "spent nothing", the same rule every Usage field
   // follows.
   optional double cost_usd = 15;
+  // max_cost is this child's spend cap, unset when it has none. Zero is a
+  // legal cap ("spend nothing"), so this must stay optional the same way
+  // SpawnRequest.max_cost is -- unset here means unlimited, matching
+  // childstore.Session.MaxCost's zero-value convention, NOT "cap of zero".
+  optional double max_cost = 16;
 }
 
 message ListChildrenRequest {

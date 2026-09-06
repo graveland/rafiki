@@ -624,7 +624,12 @@ type ChildSummary struct {
 	// and "not reported" -- no database, or an unpriced model -- must stay
 	// distinguishable from "spent nothing", the same rule every Usage field
 	// follows.
-	CostUsd       *float64 `protobuf:"fixed64,15,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
+	CostUsd *float64 `protobuf:"fixed64,15,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
+	// max_cost is this child's spend cap, unset when it has none. Zero is a
+	// legal cap ("spend nothing"), so this must stay optional the same way
+	// SpawnRequest.max_cost is -- unset here means unlimited, matching
+	// childstore.Session.MaxCost's zero-value convention, NOT "cap of zero".
+	MaxCost       *float64 `protobuf:"fixed64,16,opt,name=max_cost,json=maxCost,proto3,oneof" json:"max_cost,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -760,6 +765,13 @@ func (x *ChildSummary) GetLatestOrdinal() int32 {
 func (x *ChildSummary) GetCostUsd() float64 {
 	if x != nil && x.CostUsd != nil {
 		return *x.CostUsd
+	}
+	return 0
+}
+
+func (x *ChildSummary) GetMaxCost() float64 {
+	if x != nil && x.MaxCost != nil {
+		return *x.MaxCost
 	}
 	return 0
 }
@@ -2578,7 +2590,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x06blocks\x18\x03 \x03(\v2\x17.rafiki.v1.ContentBlockR\x06blocks\"-\n" +
 	"\fSendResponse\x12\x1d\n" +
 	"\n" +
-	"message_id\x18\x01 \x01(\tR\tmessageId\"\xce\x04\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\"\xfb\x04\n" +
 	"\fChildSummary\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -2597,7 +2609,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"session_id\x18\f \x01(\tR\tsessionId\x12%\n" +
 	"\x0econtext_window\x18\r \x01(\x05R\rcontextWindow\x12*\n" +
 	"\x0elatest_ordinal\x18\x0e \x01(\x05H\x02R\rlatestOrdinal\x88\x01\x01\x12\x1e\n" +
-	"\bcost_usd\x18\x0f \x01(\x01H\x03R\acostUsd\x88\x01\x01\x1a9\n" +
+	"\bcost_usd\x18\x0f \x01(\x01H\x03R\acostUsd\x88\x01\x01\x12\x1e\n" +
+	"\bmax_cost\x18\x10 \x01(\x01H\x04R\amaxCost\x88\x01\x01\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +
@@ -2605,7 +2618,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"_exit_codeB\x11\n" +
 	"\x0f_latest_ordinalB\v\n" +
-	"\t_cost_usd\"1\n" +
+	"\t_cost_usdB\v\n" +
+	"\t_max_cost\"1\n" +
 	"\x13ListChildrenRequest\x12\x1a\n" +
 	"\bstatuses\x18\x01 \x03(\tR\bstatuses\"K\n" +
 	"\x14ListChildrenResponse\x123\n" +

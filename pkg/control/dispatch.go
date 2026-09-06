@@ -468,6 +468,10 @@ func SnapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 			cs.MaxCompletionTokens = mc
 		}
 	}
+	if snap.MaxCost > 0 {
+		maxCost := snap.MaxCost
+		cs.MaxCost = &maxCost
+	}
 	return cs
 }
 

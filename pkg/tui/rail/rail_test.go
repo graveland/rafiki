@@ -94,6 +94,40 @@ func TestSeedPopulatesCwd(t *testing.T) {
 	}
 }
 
+func TestSeedPopulatesMaxCost(t *testing.T) {
+	cap1 := 5.0
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "capped", Status: "idle", Labels: map[string]string{}, MaxCost: &cap1},
+		{ChildId: "c_2", Name: "uncapped", Status: "idle", Labels: map[string]string{}},
+	})
+	n, ok := r.Get("c_1")
+	if !ok {
+		t.Fatal("c_1 not seeded")
+	}
+	if n.MaxCost != 5.0 {
+		t.Errorf("MaxCost = %v, want 5.0", n.MaxCost)
+	}
+	n2, ok := r.Get("c_2")
+	if !ok {
+		t.Fatal("c_2 not seeded")
+	}
+	if n2.MaxCost != 0 {
+		t.Errorf("MaxCost = %v, want 0 (no cap set)", n2.MaxCost)
+	}
+
+	// A re-seed refreshes MaxCost the same way it refreshes Cwd/SessionID --
+	// daemon-authoritative, not client reading history.
+	cap2 := 10.0
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "capped", Status: "idle", Labels: map[string]string{}, MaxCost: &cap2},
+	})
+	n, _ = r.Get("c_1")
+	if n.MaxCost != 10.0 {
+		t.Errorf("MaxCost after re-seed = %v, want 10.0", n.MaxCost)
+	}
+}
+
 func TestWorkingMatchesTheMidTurnStatuses(t *testing.T) {
 	for _, st := range []string{"streaming", "tool_running", "compacting"} {
 		if !rail.Working(st) {
