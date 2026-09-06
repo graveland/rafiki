@@ -473,8 +473,11 @@ func (c *Cockpit) Init() tea.Cmd {
 	if c.form != nil {
 		// A form opened at CONSTRUCTION never saw the `n` keypress that
 		// normally starts the catalog fetch, so its typeahead would sit empty
-		// until something else asked.
-		cmds = append(cmds, c.fetchModelsCmd(c.form.kind()))
+		// until something else asked. The executor cache warms the same way:
+		// the pre-submit ambiguity check reads ONLY what is already cached, so
+		// on the common `rafiki create` path it must have been fetched before
+		// the first Enter, not after.
+		cmds = append(cmds, c.fetchModelsCmd(c.form.kind()), c.fetchExecutorsCmd(c.form.kind()))
 	}
 	return tea.Batch(cmds...)
 }
@@ -692,6 +695,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.applyModelsLoaded(msg)
 		return c, nil
 
+	case executorsLoadedMsg:
+		c.applyExecutorsLoaded(msg)
+		return c, nil
+
 	case spawnedMsg:
 		return c, c.applySpawned(msg)
 
@@ -852,6 +859,12 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// own tab order unreachable.
 	if c.query != nil {
 		return c.handleQueryKey(msg)
+	}
+	// Both pickers stack over the form and own every key while up. The
+	// executor picker is checked first only because the two never coexist; the
+	// order between them is arbitrary.
+	if c.execPicker != nil {
+		return c.handleExecutorPickerKey(msg, max(1, c.bodyHeight()-executorPickerChrome))
 	}
 	if c.picker != nil {
 		return c.handlePickerKey(msg, max(1, c.bodyHeight()-pickerChrome))
@@ -1519,11 +1532,11 @@ func (c *Cockpit) bodyHeight() int {
 
 // railCols is the rail's current width, or 0 when it is not drawn.
 //
-// A modal takes the WHOLE panel: the create form and the model browser are
-// full-attention tasks, and a rail behind them is a list you cannot act on
-// costing width from a table that needs it.
+// A modal takes the WHOLE panel: the create form and either browser (models,
+// executors) are full-attention tasks, and a rail behind them is a list you
+// cannot act on costing width from a table that needs it.
 func (c *Cockpit) railCols() int {
-	if c.form != nil || c.picker != nil || c.railHidden || c.rail.Len() < 2 {
+	if c.form != nil || c.picker != nil || c.execPicker != nil || c.railHidden || c.rail.Len() < 2 {
 		return 0
 	}
 	return railWidthFor(c.rail.Nodes(), c.width, c.currency)
@@ -1539,7 +1552,7 @@ func (c *Cockpit) railCols() int {
 // stays hidden below two rows (renderRail), so with a single agent the rail
 // carries no name at all.
 func (c *Cockpit) agentIdentity() string {
-	if c.picker != nil || c.form != nil || c.showHelp {
+	if c.picker != nil || c.execPicker != nil || c.form != nil || c.showHelp {
 		return ""
 	}
 	f := c.focused()
@@ -1799,6 +1812,8 @@ func (c *Cockpit) View() tea.View {
 
 	var conv string
 	switch f := c.focused(); {
+	case c.execPicker != nil:
+		conv = c.execPicker.view(convWidth, bodyHeight)
 	case c.picker != nil:
 		conv = c.picker.view(convWidth, bodyHeight, c.modelView, c.query)
 	case c.form != nil:
@@ -1836,7 +1851,7 @@ func (c *Cockpit) View() tea.View {
 		// two would otherwise flicker between each other for the instant
 		// between send and the first status event confirming the turn started.
 		conv += "\n" + stylePending.Render("⏳ "+c.pending)
-	case c.picker == nil && c.form == nil && !c.showHelp && c.sessions[f] != nil:
+	case c.picker == nil && c.execPicker == nil && c.form == nil && !c.showHelp && c.sessions[f] != nil:
 		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
 			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
 		}
