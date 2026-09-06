@@ -25,10 +25,16 @@ import (
 // "claude" child resolves only Anthropic ids, and offering it an OpenRouter id
 // produces a child that spawns, attaches and then never answers.
 func completeModel(cmd *cobra.Command, kind, toComplete string) []string {
-	ids := modelIDs(cmd, kind)
+	return filterByPrefix(modelIDs(cmd, kind), toComplete)
+}
+
+// filterByPrefix returns the sorted subset of ids starting with prefix.
+// Shared by every completion function that offers ids fetched from the
+// daemon (models, executors) so they can never drift in how they filter.
+func filterByPrefix(ids []string, prefix string) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if strings.HasPrefix(id, toComplete) {
+		if strings.HasPrefix(id, prefix) {
 			out = append(out, id)
 		}
 	}

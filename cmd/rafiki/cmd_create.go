@@ -167,6 +167,15 @@ func addSpawnFlags(cmd *cobra.Command) {
 		kind := resolveKind(flagKind, profileKind)
 		return completeModel(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
+	_ = cmd.RegisterFlagCompletionFunc("executor", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		flagKind, _ := c.Flags().GetString("kind")
+		profileKind := ""
+		if p, err := resolveProfile(c); err == nil {
+			profileKind = p.Kind
+		}
+		kind := resolveKind(flagKind, profileKind)
+		return completeExecutor(c, kind, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
 }
 
 // resolvePresetName returns the preset to apply: the --preset flag if given,
@@ -451,16 +460,41 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
 	detached, _ := cmd.Flags().GetBool("detached")
+	flagExecutor, _ := cmd.Flags().GetString("executor")
 
 	if wantsCreateForm(cmd, args, isStdinTTY()) {
 		return runCreateForm(cmd, c, req, noLocalExecutor)
 	}
 
-	// Only when the caller named no executor of their own. An explicit
-	// --executor-selector means "work over there", and standing up a local
-	// executor as well would offer this machine to a pool for a session that
-	// is not going to use it.
-	if req.ExecutorSelector == "" && !noLocalExecutor {
+	// A kind that must be LAUNCHED (anything but fundi) can never be served by
+	// the local session executor below -- it never advertises any
+	// LaunchKinds, which is the bug this whole plan exists to fix. For such a
+	// kind, resolve via the daemon's live executor catalog BEFORE ever
+	// touching --executor-selector's precedence, unless the caller already
+	// gave an explicit --executor or --executor-selector of their own. See
+	// docs/plans/2026-09-06-executor-selection-design.md §1 and §5.
+	if req.Kind != protocol.KindFundi && flagExecutor == "" && req.ExecutorSelector == "" {
+		auto, err := resolveLaunchExecutor(cmdCtx(cmd), cmd, p.Name, req.Kind)
+		if err != nil {
+			return err
+		}
+		// auto == "" means zero executors support this kind; leave it blank
+		// so Spawn's own clear refusal explains why, rather than duplicating
+		// that message here.
+		flagExecutor = auto
+	}
+
+	// By this point flagExecutor is already fully resolved for a
+	// launch-required kind (resolveLaunchExecutor above vetted a remembered
+	// ref's live eligibility itself before returning it); passing "" here for
+	// `remembered` is deliberate, not an omission -- resolveExecutor's own
+	// remembered-fallback branch exists for a plain fundi spawn, where
+	// blindly trusting a remembered ref with no live check would silently
+	// skip the session-executor fallback this task must not change.
+	ref, selector := resolveExecutor(flagExecutor, req.ExecutorSelector, "", false)
+	req.ExecutorRef, req.ExecutorSelector = ref, selector
+
+	if req.ExecutorRef == "" && req.ExecutorSelector == "" && req.Kind == protocol.KindFundi && !noLocalExecutor {
 		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
@@ -492,6 +526,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// an alias may have supplied it, and replaying the resolved choice is what
 	// makes the next bare create land on the same model.
 	clientstate.RememberModel(p.Name, req.Kind, req.Model)
+	if ref := req.ExecutorRef; ref != "" {
+		clientstate.RememberExecutor(p.Name, req.Kind, ref)
+	}
 	if err := setActive(p.Name, data.ChildID); err != nil {
 		// Best effort — log to stderr but don't fail.
 		fmt.Fprintln(os.Stderr, "warning: could not update active marker:", err)
