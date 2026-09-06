@@ -175,6 +175,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		Kind:             m.GetKind(),
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
+		ExecutorRef:      m.GetExecutorRef(),
 		Labels:           m.GetLabels(),
 	}
 	if m.MaxDepth != nil {

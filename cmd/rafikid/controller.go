@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/claudeargv"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
@@ -4095,6 +4096,54 @@ func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors
 		execs = execs[:req.Limit]
 	}
 	return execs, nil
+}
+
+// ListExecutorRows enumerates the LIVE executors this owner could spawn onto,
+// with kind-scoped eligibility. It mirrors chooseExecutor/chooseLaunchExecutor
+// exactly — via the shared executorReason helper — for a HYPOTHETICAL
+// top-level spawn (no parent), which is what a human deciding "which executor
+// should I use" is actually asking.
+//
+// Deliberately live-only, not merged with persisted-but-offline rows the way
+// ExecutorList is: an offline durable executor cannot serve a fresh spawn
+// either, so this answers exactly what a spawn attempt would see. `rafiki
+// executor list` remains the place to see the full management-table view.
+func (c *Controller) ListExecutorRows(ctx context.Context, kind, ownerName string) ([]connectapi.ExecutorRow, error) {
+	if c.execPool == nil {
+		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
+	}
+	req := protocol.SpawnRequest{}
+	launchKind := kind
+	if kind == "" || kind == protocol.KindFundi {
+		launchKind = ""
+	}
+	_, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, ownerName)
+	if err != nil {
+		return nil, err
+	}
+	launchable := launchKindSet(c.execPool.Live(), launchKind)
+
+	live := c.execPool.Live()
+	out := make([]connectapi.ExecutorRow, 0, len(live))
+	for _, le := range live {
+		e := le.Executor
+		reason := executorReason(e, req, launchable, launchKind, sel, childLabels, parentSet)
+		out = append(out, connectapi.ExecutorRow{
+			ID:            e.ID,
+			Machine:       e.Labels["machine"],
+			Labels:        e.Labels,
+			Isolation:     e.Isolation,
+			WorkspaceMode: e.WorkspaceMode,
+			Roots:         e.Roots,
+			Admits:        e.Admits,
+			Enabled:       e.Enabled,
+			Connected:     true,
+			LaunchKinds:   le.Describe.GetLaunchKinds(),
+			Eligible:      reason == "",
+			Reason:        reason,
+		})
+	}
+	return out, nil
 }
 
 // ExecutorLabel sets or removes labels on an executor row.

@@ -84,6 +84,7 @@ type SpawnParams struct {
 	Kind             string
 	ParentChildID    string
 	ExecutorSelector string
+	ExecutorRef      string
 	Labels           map[string]string
 	MaxDepth         *int
 	MaxCost          *float64

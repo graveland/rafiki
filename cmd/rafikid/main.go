@@ -466,6 +466,7 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetTaskLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 			face.Control.SetModelLister(connectModels{c: ctrl})
+			face.Control.SetExecutorLister(connectExecutors{c: ctrl})
 			if face.QuotaStore != nil {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
 			}

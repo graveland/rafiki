@@ -200,6 +200,7 @@ func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (
 		Labels:           p.Labels,
 		ParentChildID:    p.ParentChildID,
 		ExecutorSelector: p.ExecutorSelector,
+		ExecutorRef:      p.ExecutorRef,
 		MaxDepth:         p.MaxDepth,
 		MaxCost:          p.MaxCost,
 		MaxChildren:      p.MaxChildren,
@@ -245,6 +246,13 @@ type connectModels struct{ c *Controller }
 
 func (m connectModels) ListModels(ctx context.Context, provider, kind string) ([]connectapi.ModelRow, error) {
 	return m.c.ListModelRows(ctx, provider, kind)
+}
+
+// connectExecutors adapts *Controller to connectapi.ExecutorLister.
+type connectExecutors struct{ c *Controller }
+
+func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]connectapi.ExecutorRow, error) {
+	return e.c.ListExecutorRows(ctx, kind, spawnOwner(ctx).Username)
 }
 
 func (l connectLifecycle) Close(_ context.Context, childID string) error {

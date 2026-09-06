@@ -379,7 +379,15 @@ func executorReason(
 		if explain := childSel.Explain(e.Labels); explain != "" {
 			return fmt.Sprintf("excluded by your selector:   %s", explain)
 		}
-		return "excluded by your selector or your parent's set"
+		// Enabled, launch-capable, admits this child, and the child's own
+		// selector does not exclude it: nothing here excludes e. This branch
+		// was unreachable from explainNoLaunchMatch's original call site (it
+		// only enumerates AFTER the overall attempt already failed, so no
+		// live executor could reach here with an empty explain), but
+		// ListExecutorRows calls executorReason per-executor regardless of
+		// whether the OVERALL attempt would succeed, so this path is very
+		// much reachable now and must honor the "" contract above.
+		return ""
 	}
 
 	if !e.Enabled {
@@ -401,7 +409,13 @@ func executorReason(
 			if explain := childSel.Explain(e.Labels); explain != "" {
 				return fmt.Sprintf("excluded by your selector:   %s", explain)
 			}
-			return "excluded by your selector"
+			// e is in the parent's set (already enabled, admitting, and
+			// workspace-mode-compatible) and the child's own selector does
+			// not exclude it either: e would be in `candidates`. See the
+			// launch branch's matching comment above for why this was dead
+			// code from explainNoMatch alone but is live from
+			// ListExecutorRows.
+			return ""
 		}
 	}
 	return "excluded by your PARENT's set"

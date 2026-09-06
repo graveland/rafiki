@@ -60,6 +60,7 @@ type Server struct {
 	lifecycle   atomic.Pointer[ChildLifecycle]
 	taskLister  atomic.Pointer[TaskLister]
 	modelLister atomic.Pointer[ModelLister]
+	execLister  atomic.Pointer[ExecutorLister]
 	quota       atomic.Pointer[QuotaReader]
 	daraja      atomic.Pointer[*darajaHandlers]
 }
@@ -179,15 +180,6 @@ func (s *Server) GetHistory(
 	return connect.NewResponse(&rafikiv1.GetHistoryResponse{
 		Events: eventconv.EventsFromMessages(childID, msgs),
 	}), nil
-}
-
-// ListExecutors is not implemented yet (wired in Task 3).
-func (s *Server) ListExecutors(
-	ctx context.Context,
-	req *connect.Request[rafikiv1.ListExecutorsRequest],
-) (*connect.Response[rafikiv1.ListExecutorsResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented,
-		errors.New("rafiki.v1.Control.ListExecutors is not implemented"))
 }
 
 // Compile-time proof that the production type satisfies the test seam.
