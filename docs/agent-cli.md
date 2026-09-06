@@ -281,6 +281,42 @@ resolution, and tailnet-routed connectivity. The CLI surface
 first proof that the seam holds: a different transport reusing every renderer
 unchanged.
 
+## `rafiki create` and executor targeting
+
+`rafiki create` spawns a child and attaches to it. Its model/kind/preset
+precedence is documented in the command's own `--help`; what concerns this
+section is WHERE the child runs — the executor targeting flags, which answer
+the question for every kind in one vocabulary:
+
+| Flag | Env default | Meaning |
+|------|-------------|---------|
+| `--executor <ref>` | `$RAFIKI_EXECUTOR` | Target ONE specific executor by its machine name (e.g. `greyshift`) or raw id. Sent as `SpawnRequest.ExecutorRef`; resolved by the daemon against the same confinement checks any candidate must pass, so a pin bypasses search, never confinement. **Mutually exclusive with `--executor-selector`** — passing both is a usage error, not a silent precedence rule |
+| `--executor-selector <sel>` | `$RAFIKI_EXECUTOR_SELECTOR` | A label selector choosing from the daemon's pool (e.g. `owner=brent,env=home`). A selector matching several executors keeps the documented silent-first-match behavior |
+| `--no-local-executor` | — | Do not offer this machine as a workspace at all |
+
+Tab-completion: `--executor` completes machine names (ids for unlabeled
+executors) from the daemon's `ListExecutors` RPC, scoped to the resolved
+`--kind` — the same kind-scoping rule `--model` completion applies. Answers
+are cached briefly, like `--model` completion's cache.
+
+The default depends on the kind:
+
+- **`fundi`** keeps its zero-config default: with nothing set, the client
+  starts a throwaway local *session executor* and points the spawn at it, so
+  the workspace tools run where your files are.
+- **A launch-required kind (anything but `fundi`)** can never be served by
+  that throwaway executor — it never advertises launch support — so it is
+  never pinned to it. With neither flag given, the client resolves via the
+  daemon's live executor catalog before spawning: the executor last used for
+  this kind is reused when it is still live and eligible, exactly one eligible
+  executor is picked, and an ambiguous answer (several candidates) is an error
+  listing them — pass `--executor` to pick one. The resolved choice is
+  remembered per (profile, kind), so this costs a decision once per machine.
+
+Passing any of these (or any other shaping flag) spawns directly; `-i` opens
+the interactive form anyway, prefilled — where the executor field, `^E`'s
+picker, and the same kind-aware default apply.
+
 ## `rafikid fundi` flags
 
 `rafikid fundi` runs a single agent child on stdio. Its flags configure the

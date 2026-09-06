@@ -298,11 +298,17 @@ None may be bidi: the remote plane is HTTP/1.1 and connect-go refuses bidi below
 
 ## Executor
 
-**By default, `rafiki create` makes your own machine the workspace.** The client asks the
+**`rafiki create` defaults to a workspace that can actually serve the kind you asked
+for.** For `fundi` (the default kind) that is your own machine: the client asks the
 daemon for an executor, starts one in-process, and points the spawn at it — so
 `read`, `write`, `bash` and the rest run where your files are, whether the daemon is on
-this machine or in a cluster. `--no-local-executor` turns it off; `--executor-selector`
-sends the child somewhere else instead.
+this machine or in a cluster. A kind that must be **launched** (currently `claude`) can
+never be served by that throwaway executor, so it is never pinned to it: with nothing
+explicit on the command line, the child is resolved across every live, admitted executor
+that declares the kind — asking you when the answer is ambiguous (the interactive form
+opens a picker; a flag-driven spawn lists the candidates and names `--executor`).
+`--no-local-executor` turns the local offer off; `--executor <machine-or-id>` targets one
+specific executor, and `--executor-selector` picks by labels instead.
 
 There are two kinds of executor:
 
