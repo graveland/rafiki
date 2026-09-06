@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // lifecycleTimeout bounds a spawn/kill/close RPC.
@@ -53,6 +54,32 @@ type closedMsg struct {
 	err     error
 }
 
+// buildSpawnRequest turns the form's params into the wire request, applying
+// the SAME kind-aware executor precedence the CLI's runCreate does (see
+// docs/plans/2026-09-06-executor-selection-design.md §5): an explicit
+// executor field always wins; otherwise a launch-required kind (anything but
+// fundi) gets NEITHER ExecutorRef nor ExecutorSelector, because the cockpit's
+// one local session executor (c.executorSelector) can never launch anything —
+// letting the daemon's chooseLaunchExecutor auto-resolve is strictly better
+// than forcing a wrong machine. fundi keeps its historical default: the
+// session executor stood up for this cockpit, when there was one.
+func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
+	req := &rafikiv1.SpawnRequest{
+		Cwd:     p.cwd,
+		Name:    p.name,
+		Kind:    p.kind,
+		Model:   p.model,
+		MaxCost: p.maxCost,
+	}
+	switch {
+	case p.executor != "":
+		req.ExecutorRef = p.executor
+	case p.kind == protocol.KindFundi:
+		req.ExecutorSelector = c.executorSelector
+	}
+	return req
+}
+
 // spawnCmd creates a child and reports the id the daemon assigned.
 //
 // cwd is REQUIRED by the server (connectapi.Spawn answers InvalidArgument
@@ -63,14 +90,7 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
 
-		resp, err := c.client.Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
-			Cwd:              p.cwd,
-			Name:             p.name,
-			Kind:             p.kind,
-			Model:            p.model,
-			ExecutorSelector: c.executorSelector,
-			MaxCost:          p.maxCost,
-		}))
+		resp, err := c.client.Spawn(ctx, connect.NewRequest(c.buildSpawnRequest(p)))
 		if err != nil {
 			return spawnedMsg{err: err}
 		}

@@ -570,6 +570,28 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 			f.err = problem
 			return c, nil
 		}
+		if p.executor == "" && p.kind != "fundi" {
+			// A launch-required kind with nothing chosen: ask rather than let
+			// the daemon guess, exactly like the CLI's resolveLaunchExecutor.
+			// Uses whatever ListExecutors has already cached -- fetched
+			// proactively by kindChanged/Init/ctrl+e, so this never costs an
+			// extra round trip on the common (already-fetched) path. An answer
+			// that has not arrived yet is NOT "no executors": the check skips
+			// and the daemon's own spawn path decides.
+			rows, loaded := c.executorsFor(p.kind)
+			if loaded {
+				var eligible []*rafikiv1.ExecutorRow
+				for _, r := range rows {
+					if r.GetEligible() {
+						eligible = append(eligible, r)
+					}
+				}
+				if len(eligible) > 1 {
+					c.execPicker = newExecutorPicker(p.kind, eligible, true, "")
+					return c, nil
+				}
+			}
+		}
 		f.busy, f.err = true, ""
 		return c, c.spawnCmd(p)
 	}
@@ -588,16 +610,22 @@ func (c *Cockpit) handleFormKey(msg tea.KeyPressMsg, window int) (tea.Model, tea
 
 // kindChanged reacts to the kind row cycling: the two kinds have different
 // model universes, so the typeahead must be rebuilt from the other catalog and
-// that catalog may not be fetched yet.
+// that catalog may not be fetched yet. The executor field swaps too -- a
+// remembered executor is remembered PER KIND for the same reason a model is:
+// a claude child cannot run on whatever served the fundi one.
 func (c *Cockpit) kindChanged() tea.Cmd {
 	kind := c.form.kind()
 	// The two kinds have different model universes, so a model carried across
 	// a kind change is very likely one the new kind cannot resolve. Swap in
 	// that kind's own remembered model instead of leaving a stale id behind.
 	c.form.inputs[fieldModel].SetValue(clientstate.LastModelFor(c.profileName, kind))
+	c.form.inputs[fieldExecutor].SetValue(clientstate.LastExecutorFor(c.profileName, kind))
 	c.form.suggestCur = -1
 	c.form.refreshSuggestions(c.models[kind], c.modelView)
-	return c.fetchModelsCmd(kind)
+	// Both caches warm here: the typeahead needs the models, and the
+	// pre-submit ambiguity check reads ONLY the already-cached executor rows,
+	// so they must be fetched proactively rather than on demand.
+	return tea.Batch(c.fetchModelsCmd(kind), c.fetchExecutorsCmd(kind))
 }
 
 // applySpawned handles the daemon's answer to a create.
@@ -616,10 +644,14 @@ func (c *Cockpit) applySpawned(m spawnedMsg) tea.Cmd {
 		}
 		return nil
 	}
-	// Remember the model, so the next bare `rafiki create` opens on it. Keyed
-	// by kind, because the two kinds resolve different id universes.
+	// Remember what actually got spawned, keyed by kind, so the next bare
+	// form opens on the same choices. The executor is remembered only when one
+	// was actually chosen -- an empty field is not a choice worth replaying.
 	if c.form != nil {
 		clientstate.RememberModel(c.profileName, c.form.kind(), strings.TrimSpace(c.form.inputs[fieldModel].Value()))
+		if ref := strings.TrimSpace(c.form.inputs[fieldExecutor].Value()); ref != "" {
+			clientstate.RememberExecutor(c.profileName, c.form.kind(), ref)
+		}
 	}
 	c.form = nil
 	// Land on the new agent. Its rail row arrives on the event stream's

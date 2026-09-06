@@ -187,3 +187,59 @@ func TestTrimRPCErrorKeepsAPrefixlessMessage(t *testing.T) {
 		t.Errorf("trimRPCError = %q, want boom", got)
 	}
 }
+
+// ── buildSpawnRequest: the form's kind-aware executor rule ───────────────────
+
+// An explicit executor field always wins, and it rides ExecutorRef alone —
+// a ref and a selector on the same request would answer two different
+// questions about where the child runs.
+func TestBuildSpawnRequestPrefersExplicitExecutorField(t *testing.T) {
+	c := &Cockpit{executorSelector: "owner=brent,machine=silvershift"}
+	req := c.buildSpawnRequest(spawnParams{kind: "claude", cwd: "/tmp", executor: "greyshift"})
+	if req.GetExecutorRef() != "greyshift" {
+		t.Fatalf("want ExecutorRef=greyshift, got %q", req.GetExecutorRef())
+	}
+	if req.GetExecutorSelector() != "" {
+		t.Fatalf("ExecutorRef and ExecutorSelector must be mutually exclusive here, got selector=%q", req.GetExecutorSelector())
+	}
+}
+
+// fundi with a blank field keeps its historical default: the session executor
+// this cockpit was built with.
+func TestBuildSpawnRequestFundiUsesTheSessionExecutorWhenFieldIsBlank(t *testing.T) {
+	c := &Cockpit{executorSelector: "owner=brent,machine=silvershift"}
+	req := c.buildSpawnRequest(spawnParams{kind: "fundi", cwd: "/tmp"})
+	if req.GetExecutorSelector() != "owner=brent,machine=silvershift" {
+		t.Fatalf("want the session executor's selector for fundi, got %q", req.GetExecutorSelector())
+	}
+	if req.GetExecutorRef() != "" {
+		t.Fatalf("want no ref, got %q", req.GetExecutorRef())
+	}
+}
+
+// A launch-required kind (anything but fundi) with a blank field sends NEITHER
+// field: the local session executor can never launch anything -- see
+// startSessionExecutor and docs/plans/2026-09-06-executor-selection-design.md
+// §1. Leaving both empty lets the daemon's chooseLaunchExecutor auto-resolve
+// across every durable executor, not just this machine's.
+func TestBuildSpawnRequestClaudeWithBlankFieldLeavesBothEmpty(t *testing.T) {
+	c := &Cockpit{executorSelector: "owner=brent,machine=silvershift"}
+	req := c.buildSpawnRequest(spawnParams{kind: "claude", cwd: "/tmp"})
+	if req.GetExecutorSelector() != "" || req.GetExecutorRef() != "" {
+		t.Fatalf("want both empty for an unspecified claude executor, got selector=%q ref=%q",
+			req.GetExecutorSelector(), req.GetExecutorRef())
+	}
+}
+
+// fundi WITH an explicit field sends the ref, not the session selector — the
+// explicit choice outranks the default the same way it does for claude.
+func TestBuildSpawnRequestFundiWithExplicitFieldSendsTheRef(t *testing.T) {
+	c := &Cockpit{executorSelector: "owner=brent,machine=silvershift"}
+	req := c.buildSpawnRequest(spawnParams{kind: "fundi", cwd: "/tmp", executor: "greyshift"})
+	if req.GetExecutorRef() != "greyshift" {
+		t.Fatalf("want ExecutorRef=greyshift, got %q", req.GetExecutorRef())
+	}
+	if req.GetExecutorSelector() != "" {
+		t.Fatalf("want no selector, got %q", req.GetExecutorSelector())
+	}
+}

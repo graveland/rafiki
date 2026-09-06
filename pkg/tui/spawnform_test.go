@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func keyMsg(s string) tea.KeyPressMsg {
@@ -532,5 +533,123 @@ func TestMaxCostFieldRejectsZero(t *testing.T) {
 	}
 	if p.maxCost != nil {
 		t.Errorf("maxCost = %v, want nil on a rejected value", *p.maxCost)
+	}
+}
+
+// Submitting a launch-required kind with nothing chosen and several eligible
+// executors must ASK, not let the daemon guess: the picker auto-opens with the
+// cached eligible rows and the form stays open, un-busy, ready to submit after
+// a pick.
+func TestSubmitWithAmbiguousExecutorOpensThePicker(t *testing.T) {
+	c := formCockpit(t)
+	c.form.kindIx = 1 // claude — see spawnKinds
+	c.executors = map[string][]*rafikiv1.ExecutorRow{
+		"claude": {
+			{Id: "exec-1", Machine: "greyshift", Eligible: true},
+			{Id: "exec-2", Machine: "otherbox", Eligible: true},
+		},
+	}
+
+	c.handleKey(keyMsg("enter"))
+
+	if c.execPicker == nil {
+		t.Fatal("want the picker to auto-open on ambiguity")
+	}
+	if len(c.execPicker.rows) != 2 {
+		t.Fatalf("want both eligible rows offered, got %d", len(c.execPicker.rows))
+	}
+	if c.form.busy {
+		t.Error("the form went busy on a submit it intercepted")
+	}
+	if c.form.err != "" {
+		t.Errorf("unexpected form error %q", c.form.err)
+	}
+}
+
+// One eligible executor is not ambiguous: no picker, straight through to the
+// spawn.
+func TestSubmitWithOneEligibleExecutorSubmitsDirectly(t *testing.T) {
+	c := formCockpit(t)
+	c.form.kindIx = 1
+	c.executors = map[string][]*rafikiv1.ExecutorRow{
+		"claude": {{Id: "exec-1", Machine: "greyshift", Eligible: true}},
+	}
+
+	_, cmd := c.handleKey(keyMsg("enter"))
+
+	if cmd == nil {
+		t.Fatal("a unambiguous submit did not spawn")
+	}
+	if c.execPicker != nil {
+		t.Fatal("the picker opened for a single eligible executor")
+	}
+	if !c.form.busy {
+		t.Error("the form is not busy on an in-flight spawn")
+	}
+}
+
+// An explicit executor choice is never second-guessed, even with several
+// eligible rows cached.
+func TestSubmitWithExplicitExecutorSkipsTheAmbiguityCheck(t *testing.T) {
+	c := formCockpit(t)
+	c.form.kindIx = 1
+	c.form.inputs[fieldExecutor].SetValue("greyshift")
+	c.executors = map[string][]*rafikiv1.ExecutorRow{
+		"claude": {
+			{Id: "exec-1", Machine: "greyshift", Eligible: true},
+			{Id: "exec-2", Machine: "otherbox", Eligible: true},
+		},
+	}
+
+	_, cmd := c.handleKey(keyMsg("enter"))
+
+	if cmd == nil {
+		t.Fatal("an explicit executor did not spawn")
+	}
+	if c.execPicker != nil {
+		t.Fatal("the picker opened over an explicit choice")
+	}
+}
+
+// fundi never gets the check: its historical default is the session executor,
+// which the daemon-side narrowing handles.
+func TestSubmitFundiSkipsTheAmbiguityCheck(t *testing.T) {
+	c := formCockpit(t)
+	c.executors = map[string][]*rafikiv1.ExecutorRow{
+		"fundi": {
+			{Id: "exec-1", Machine: "a", Eligible: true},
+			{Id: "exec-2", Machine: "b", Eligible: true},
+		},
+	}
+
+	_, cmd := c.handleKey(keyMsg("enter"))
+
+	if cmd == nil {
+		t.Fatal("a fundi submit did not spawn")
+	}
+	if c.execPicker != nil {
+		t.Fatal("the picker opened for fundi")
+	}
+}
+
+// A kind change swaps in that kind's remembered executor and warms both
+// caches -- the ambiguity check reads only cached rows, so the kind change is
+// its proactive fetch.
+func TestKindChangeSwapsTheRememberedExecutor(t *testing.T) {
+	c := formCockpit(t)
+	c.profileName = "work"
+	clientstate.RememberExecutor("work", "claude", "greyshift")
+	c.form.kindIx = 1
+
+	c.kindChanged()
+
+	if got := c.form.inputs[fieldExecutor].Value(); got != "greyshift" {
+		t.Fatalf("executor field = %q, want the remembered greyshift", got)
+	}
+	if !c.executorsBusy["claude"] {
+		t.Error("no executor fetch was issued for the new kind")
+	}
+	if !c.modelsBusy["claude"] {
+		t.Error("no model fetch was issued for the new kind")
 	}
 }
