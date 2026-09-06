@@ -289,6 +289,15 @@ type SpawnRequest struct {
 	// live pool — the path the daemon can audit.
 	ExecutorSelector string `json:"executorSelector,omitempty"`
 
+	// ExecutorRef pins a spawn to ONE specific executor by its human-readable
+	// machine label (e.g. "greyshift") or its raw id, resolved against the
+	// SAME narrowed candidate set ExecutorSelector would produce — an
+	// explicit ref bypasses SEARCH, never confinement. Mutually exclusive
+	// with ExecutorSelector at the CLI layer; the daemon does not enforce
+	// that itself, since a hand-built request naming both is simply resolved
+	// by ref first (see chooseExecutor/chooseLaunchExecutor).
+	ExecutorRef string `json:"executorRef,omitempty"`
+
 	// WorkspaceMode selects how the child's workspace is provisioned:
 	// "ephemeral" (reschedulable) or "pinned" (existing tree).
 	WorkspaceMode string `json:"workspaceMode,omitempty"`

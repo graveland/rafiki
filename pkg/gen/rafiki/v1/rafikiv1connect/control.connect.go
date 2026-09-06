@@ -53,6 +53,8 @@ const (
 	ControlListTasksProcedure = "/rafiki.v1.Control/ListTasks"
 	// ControlListModelsProcedure is the fully-qualified name of the Control's ListModels RPC.
 	ControlListModelsProcedure = "/rafiki.v1.Control/ListModels"
+	// ControlListExecutorsProcedure is the fully-qualified name of the Control's ListExecutors RPC.
+	ControlListExecutorsProcedure = "/rafiki.v1.Control/ListExecutors"
 	// ControlGetRateLimitStatusProcedure is the fully-qualified name of the Control's
 	// GetRateLimitStatus RPC.
 	ControlGetRateLimitStatusProcedure = "/rafiki.v1.Control/GetRateLimitStatus"
@@ -76,6 +78,7 @@ type ControlClient interface {
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
+	ListExecutors(context.Context, *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error)
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
@@ -153,6 +156,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("ListModels")),
 			connect.WithClientOptions(opts...),
 		),
+		listExecutors: connect.NewClient[v1.ListExecutorsRequest, v1.ListExecutorsResponse](
+			httpClient,
+			baseURL+ControlListExecutorsProcedure,
+			connect.WithSchema(controlMethods.ByName("ListExecutors")),
+			connect.WithClientOptions(opts...),
+		),
 		getRateLimitStatus: connect.NewClient[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse](
 			httpClient,
 			baseURL+ControlGetRateLimitStatusProcedure,
@@ -192,6 +201,7 @@ type controlClient struct {
 	close              *connect.Client[v1.CloseRequest, v1.CloseResponse]
 	listTasks          *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
 	listModels         *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
+	listExecutors      *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
 	getRateLimitStatus *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
 	darajaLaunch       *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
 	darajaSend         *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
@@ -248,6 +258,11 @@ func (c *controlClient) ListModels(ctx context.Context, req *connect.Request[v1.
 	return c.listModels.CallUnary(ctx, req)
 }
 
+// ListExecutors calls rafiki.v1.Control.ListExecutors.
+func (c *controlClient) ListExecutors(ctx context.Context, req *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error) {
+	return c.listExecutors.CallUnary(ctx, req)
+}
+
 // GetRateLimitStatus calls rafiki.v1.Control.GetRateLimitStatus.
 func (c *controlClient) GetRateLimitStatus(ctx context.Context, req *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error) {
 	return c.getRateLimitStatus.CallUnary(ctx, req)
@@ -280,6 +295,7 @@ type ControlHandler interface {
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
+	ListExecutors(context.Context, *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error)
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
@@ -353,6 +369,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("ListModels")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListExecutorsHandler := connect.NewUnaryHandler(
+		ControlListExecutorsProcedure,
+		svc.ListExecutors,
+		connect.WithSchema(controlMethods.ByName("ListExecutors")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlGetRateLimitStatusHandler := connect.NewUnaryHandler(
 		ControlGetRateLimitStatusProcedure,
 		svc.GetRateLimitStatus,
@@ -399,6 +421,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListTasksHandler.ServeHTTP(w, r)
 		case ControlListModelsProcedure:
 			controlListModelsHandler.ServeHTTP(w, r)
+		case ControlListExecutorsProcedure:
+			controlListExecutorsHandler.ServeHTTP(w, r)
 		case ControlGetRateLimitStatusProcedure:
 			controlGetRateLimitStatusHandler.ServeHTTP(w, r)
 		case ControlDarajaLaunchProcedure:
@@ -454,6 +478,10 @@ func (UnimplementedControlHandler) ListTasks(context.Context, *connect.Request[v
 
 func (UnimplementedControlHandler) ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListModels is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListExecutors(context.Context, *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListExecutors is not implemented"))
 }
 
 func (UnimplementedControlHandler) GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error) {

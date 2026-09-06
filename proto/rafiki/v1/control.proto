@@ -163,6 +163,10 @@ message SpawnRequest {
   string parent_child_id = 6;
   string executor_selector = 7;
 
+  // ExecutorRef pins this spawn to one specific executor by its human-readable
+  // machine label or raw id. See protocol.SpawnRequest.ExecutorRef.
+  string executor_ref = 11;
+
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
   // spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -318,6 +322,50 @@ message ListModelsResponse {
   repeated ModelRow models = 1;
 }
 
+// ExecutorRow is one executor the daemon's pool currently knows about, plus
+// whether it could serve a spawn of a given kind right now.
+//
+// Only LIVE (currently connected) executors are listed — an offline durable
+// executor cannot serve a fresh spawn either, so this mirrors exactly what a
+// spawn attempt would see, not the full management-table view `rafiki
+// executor list` shows.
+message ExecutorRow {
+  string id = 1;
+  // machine is the human-readable name an operator gave this executor
+  // (Labels["machine"]), empty when it has none (e.g. a fleet executor
+  // selected purely by other labels).
+  string machine = 2;
+  map<string, string> labels = 3;
+  string isolation = 4;
+  string workspace_mode = 5;
+  repeated string roots = 6;
+  string admits = 7;
+  bool enabled = 8;
+  bool connected = 9;
+  // launch_kinds is what this executor self-reported at connect time it will
+  // launch (e.g. "claude"). Empty means it hosts no launchable child kind.
+  repeated string launch_kinds = 10;
+  // eligible and reason are populated only when the request's kind was
+  // non-empty: eligible mirrors exactly what chooseExecutor/
+  // chooseLaunchExecutor would decide for a fresh top-level spawn of that
+  // kind by this caller, and reason names the exclusion when eligible is
+  // false. Never true FILTER these rows itself — the CLI/TUI decide what to
+  // do with an ineligible row (show it greyed out, exclude it from a count).
+  bool eligible = 11;
+  string reason = 12;
+}
+
+message ListExecutorsRequest {
+  // kind scopes eligibility: "claude" checks launch-kind support, "fundi" (or
+  // empty) checks only admission/workspace-mode, matching chooseExecutor vs
+  // chooseLaunchExecutor.
+  string kind = 1;
+}
+
+message ListExecutorsResponse {
+  repeated ExecutorRow rows = 1;
+}
+
 // ─── Daraja RPCs ─────────────────────────────────────────────────────────────
 // The three Daraja RPCs break the daraja's bidirectional Relay stream into
 // HTTP/1.1-compatible operations: unary send plus server-streaming watch.
@@ -434,6 +482,7 @@ service Control {
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  rpc ListExecutors(ListExecutorsRequest) returns (ListExecutorsResponse);
   rpc GetRateLimitStatus(GetRateLimitStatusRequest) returns (GetRateLimitStatusResponse);
   rpc DarajaLaunch(DarajaLaunchRequest) returns (DarajaLaunchResponse);
   rpc DarajaSend(DarajaSendRequest) returns (DarajaSendResponse);

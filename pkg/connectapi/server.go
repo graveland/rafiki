@@ -181,5 +181,14 @@ func (s *Server) GetHistory(
 	}), nil
 }
 
+// ListExecutors is not implemented yet (wired in Task 3).
+func (s *Server) ListExecutors(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.ListExecutorsRequest],
+) (*connect.Response[rafikiv1.ListExecutorsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented,
+		errors.New("rafiki.v1.Control.ListExecutors is not implemented"))
+}
+
 // Compile-time proof that the production type satisfies the test seam.
 var _ HistoryLoader = (*store.Messages)(nil)

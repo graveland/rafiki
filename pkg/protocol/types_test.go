@@ -495,6 +495,21 @@ func TestSpawnRequestParentChildID(t *testing.T) {
 	}
 }
 
+func TestSpawnRequestExecutorRefRoundTrips(t *testing.T) {
+	req := protocol.SpawnRequest{ExecutorRef: "greyshift"}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got protocol.SpawnRequest
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ExecutorRef != "greyshift" {
+		t.Fatalf("want ExecutorRef=greyshift, got %q", got.ExecutorRef)
+	}
+}
+
 // TestChildSummary_NullPID verifies that *int PID and ExitCode serialize as null when nil.
 func TestChildSummary_NullPID(t *testing.T) {
 	cs := protocol.ChildSummary{
