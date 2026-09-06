@@ -682,11 +682,11 @@ func TestMaxCostWithNoCurrencyIsUnconverted(t *testing.T) {
 
 func TestResolveExecutor(t *testing.T) {
 	cases := []struct {
-		name                             string
-		flagExecutor, flagSelector       string
-		remembered                       string
-		rememberedEligible               bool
-		wantRef, wantSelector            string
+		name                       string
+		flagExecutor, flagSelector string
+		remembered                 string
+		rememberedEligible         bool
+		wantRef, wantSelector      string
 	}{
 		{name: "flag wins", flagExecutor: "greyshift", flagSelector: "env=home", remembered: "silvershift", rememberedEligible: true, wantRef: "greyshift"},
 		{name: "selector wins over remembered", flagSelector: "env=home", remembered: "silvershift", rememberedEligible: true, wantSelector: "env=home"},
