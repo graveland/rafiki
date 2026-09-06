@@ -36,6 +36,9 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest, ownerName string)
 	if err != nil {
 		return executors.Executor{}, err
 	}
+	if req.ExecutorRef != "" {
+		return c.resolveRef(req, req.ExecutorRef, candidates, nil, "", sel, childLabels, parentSet)
+	}
 	if len(candidates) == 0 {
 		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels)
 	}
@@ -91,6 +94,9 @@ func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, ownerName, 
 			kept = append(kept, e)
 		}
 	}
+	if req.ExecutorRef != "" {
+		return c.resolveRef(req, req.ExecutorRef, kept, launchable, launchKind, sel, childLabels, parentSet)
+	}
 	if len(kept) == 0 {
 		return executors.Executor{}, c.explainNoLaunchMatch(req, sel, parentSet, childLabels, launchKind)
 	}
@@ -122,23 +128,7 @@ func (c *Controller) explainNoLaunchMatch(req protocol.SpawnRequest, childSel ex
 	fmt.Fprintf(&sb, "  %d live executor(s), %d in your parent's set:\n", len(c.execPool.Live()), len(parentSet))
 	for _, le := range c.execPool.Live() {
 		e := le.Executor
-		var reason string
-		switch {
-		case !e.Enabled:
-			reason = "disabled"
-		case !launchable[e.ID]:
-			reason = fmt.Sprintf("does not support launching %q children", launchKind)
-		default:
-			if admitsSel, aerr := executors.ParseSelector(e.Admits); aerr != nil {
-				reason = fmt.Sprintf("unparseable admission selector %q", e.Admits)
-			} else if !admitsSel.Matches(childLabels) {
-				reason = fmt.Sprintf("excluded by ITS admission selector %q", e.Admits)
-			} else if explain := childSel.Explain(e.Labels); explain != "" {
-				reason = fmt.Sprintf("excluded by your selector:   %s", explain)
-			} else {
-				reason = "excluded by your selector or your parent's set"
-			}
-		}
+		reason := executorReason(e, req, launchable, launchKind, childSel, childLabels, parentSet)
 		fmt.Fprintf(&sb, "    %-12s  %s\n", shortID(e.ID), reason)
 	}
 	return errors.New(sb.String())
@@ -350,6 +340,73 @@ func (c *Controller) lineageChain(childID string) ([]string, error) {
 // wedge the spawn path.
 const maxLineageWalk = 64
 
+// executorReason explains, for one live executor, why chooseExecutor (when
+// launchKind == "") or chooseLaunchExecutor (when launchKind names the
+// required kind) would exclude it from req — or "" when it would NOT be
+// excluded. This is the SAME reasoning explainNoMatch and explainNoLaunchMatch
+// built inline per call site, extracted so ListExecutorRows' eligible/reason
+// fields (Task 3) can never disagree with what a real spawn attempt would
+// decide.
+//
+// The two branches are NOT the same shape and must stay that way: the launch
+// path's admission-exclusion message carries no child-labels suffix and has
+// no separate "excluded by your PARENT's set" message (an existing,
+// preserved asymmetry — not something this refactor corrects), and the
+// non-launch path checks workspace_mode, which the launch path never has.
+func executorReason(
+	e executors.Executor,
+	req protocol.SpawnRequest,
+	launchable map[string]bool,
+	launchKind string,
+	childSel executors.Selector,
+	childLabels map[string]string,
+	parentSet []executors.Executor,
+) string {
+	if launchKind != "" {
+		switch {
+		case !e.Enabled:
+			return "disabled"
+		case !launchable[e.ID]:
+			return fmt.Sprintf("does not support launching %q children", launchKind)
+		}
+		admitsSel, aerr := executors.ParseSelector(e.Admits)
+		switch {
+		case aerr != nil:
+			return fmt.Sprintf("unparseable admission selector %q", e.Admits)
+		case !admitsSel.Matches(childLabels):
+			return fmt.Sprintf("excluded by ITS admission selector %q", e.Admits)
+		}
+		if explain := childSel.Explain(e.Labels); explain != "" {
+			return fmt.Sprintf("excluded by your selector:   %s", explain)
+		}
+		return "excluded by your selector or your parent's set"
+	}
+
+	if !e.Enabled {
+		return "disabled"
+	}
+	admitsSel, aerr := executors.ParseSelector(e.Admits)
+	if aerr != nil {
+		return fmt.Sprintf("unparseable admission selector %q", e.Admits)
+	}
+	if !admitsSel.Matches(childLabels) {
+		return fmt.Sprintf("excluded by ITS admission selector %q: this child is %v", e.Admits, childLabels)
+	}
+	if req.WorkspaceMode != "" && workspaceModeOrPinned(e.WorkspaceMode) != req.WorkspaceMode {
+		return fmt.Sprintf("offers workspace_mode=%s; you asked for %s",
+			workspaceModeOrPinned(e.WorkspaceMode), req.WorkspaceMode)
+	}
+	for _, p := range parentSet {
+		if p.ID == e.ID {
+			if explain := childSel.Explain(e.Labels); explain != "" {
+				return fmt.Sprintf("excluded by your selector:   %s", explain)
+			}
+			return "excluded by your selector"
+		}
+	}
+	return "excluded by your PARENT's set"
+}
+
 // explainNoMatch builds a refusal message naming the excluding predicate per
 // candidate, so the reason is legible to the caller.
 //
@@ -380,40 +437,64 @@ func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executor
 	// Report each live executor with the reason it was excluded.
 	for _, le := range c.execPool.Live() {
 		e := le.Executor
-		reason := ""
-		if !e.Enabled {
-			reason = "disabled"
-		} else if admitsSel, err := executors.ParseSelector(e.Admits); err != nil {
-			reason = fmt.Sprintf("unparseable admission selector %q", e.Admits)
-		} else {
-			if !admitsSel.Matches(childLabels) {
-				reason = fmt.Sprintf("excluded by ITS admission selector %q: this child is %v", e.Admits, childLabels)
-			} else if req.WorkspaceMode != "" && workspaceModeOrPinned(e.WorkspaceMode) != req.WorkspaceMode {
-				reason = fmt.Sprintf("offers workspace_mode=%s; you asked for %s",
-					workspaceModeOrPinned(e.WorkspaceMode), req.WorkspaceMode)
-			} else {
-				inParentSet := false
-				for _, p := range parentSet {
-					if p.ID == e.ID {
-						inParentSet = true
-						break
-					}
-				}
-				if !inParentSet {
-					reason = "excluded by your PARENT's set"
-				} else {
-					explain := childSel.Explain(e.Labels)
-					if explain != "" {
-						reason = fmt.Sprintf("excluded by your selector:   %s", explain)
-					} else {
-						reason = "excluded by your selector"
-					}
-				}
-			}
-		}
+		reason := executorReason(e, req, nil, "", childSel, childLabels, parentSet)
 		fmt.Fprintf(&sb, "    %-12s  %s\n", shortID(e.ID), reason)
 	}
 	return fmt.Errorf("%s", sb.String())
+}
+
+// resolveRef finds ref among the already-narrowed eligible set and, on a
+// miss, explains WHY using the same per-row reasoning explainNoMatch/
+// explainNoLaunchMatch use — distinguishing "no such executor" from "it
+// exists but is not usable for this spawn" by checking every live executor,
+// not just the eligible ones.
+func (c *Controller) resolveRef(
+	req protocol.SpawnRequest,
+	ref string,
+	eligible []executors.Executor,
+	launchable map[string]bool,
+	launchKind string,
+	sel executors.Selector,
+	childLabels map[string]string,
+	parentSet []executors.Executor,
+) (executors.Executor, error) {
+	if e, ok := matchExecutorRef(ref, eligible); ok {
+		return e, nil
+	}
+	for _, le := range c.execPool.Live() {
+		e := le.Executor
+		if e.Labels["machine"] != ref && e.ID != ref {
+			continue
+		}
+		reason := executorReason(e, req, launchable, launchKind, sel, childLabels, parentSet)
+		if reason == "" {
+			reason = "excluded for an unknown reason" // unreachable in practice: a match with no reason would already be in `eligible`
+		}
+		return executors.Executor{}, fmt.Errorf("executor %q exists but is not usable for this spawn: %s", ref, reason)
+	}
+	return executors.Executor{}, fmt.Errorf("no executor named %q (checked machine label and id)", ref)
+}
+
+// matchExecutorRef finds the executor in candidates whose machine label or ID
+// equals ref. Machine label is checked FIRST and is an exact match by
+// construction (executors_owner_machine_unique), so it can never itself be
+// ambiguous the way a raw id fragment could be — this deliberately does NOT
+// support id-suffix matching the way the management-command resolver
+// (Controller.resolveExecutorRef) does; a spawn-time ref is typed once and
+// tab-completed, so the forgiving-fragment UX that resolver exists for does
+// not apply here.
+func matchExecutorRef(ref string, candidates []executors.Executor) (executors.Executor, bool) {
+	for _, e := range candidates {
+		if e.Labels["machine"] == ref {
+			return e, true
+		}
+	}
+	for _, e := range candidates {
+		if e.ID == ref {
+			return e, true
+		}
+	}
+	return executors.Executor{}, false
 }
 
 // shortID truncates an executor id for display without panicking on short ids
