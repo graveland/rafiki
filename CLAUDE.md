@@ -1415,3 +1415,20 @@
   what `conversation.go`'s `ThinkingConfigParamOfEnabled` sends whenever
   `ThinkingBudget > 0`, and dropping thinking to send it is itself an
   all-models messages-cache invalidator.
+
+- **`heartbeatInterval` cannot be finer than the sweep ticker, and
+  `interval == tick` is the worst possible setting.** Heartbeat delivery rides
+  `startSweeper`'s ticker (`controller.go`), so the configured interval is
+  quantized to it: `RAFIKI_HEARTBEAT_INTERVAL=4m` against a 5m tick yields a
+  5m cadence, not 4m. Worse, `due()` fires only when `now.Sub(last) >=
+  interval`, so with the two equal the cadence flips between 5m and 10m on
+  ticker drift of microseconds. `due()` also seeds lazily on the first sweep
+  that observes a spell (deliberately — see its doc on clock ownership), so
+  the FIRST check-in of a spell lands one full tick later than the interval
+  implies. Any change to the heartbeat cadence must move the ticker, not just
+  the interval; the standing fix is to keep the tick strictly finer than the
+  interval. Note the tick is not free even when nothing is due —
+  `sweepBudgets` and `sweepHeartbeats` each run a `subtreeSpend` query per
+  working child — so "just make it 10s" trades one problem for a DB-load one.
+  The real answer is a deadline-scheduler (zero wakeups when nothing is due),
+  which would also serve an agent-side wait tool.

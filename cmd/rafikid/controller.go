@@ -333,7 +333,11 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 			gw = time.Duration(n * float64(time.Hour))
 		}
 	}
-	hb := 5 * time.Minute
+	// Strictly coarser than sweepTickInterval, which quantizes delivery — see
+	// that constant. At a 1m tick the lazy seed in heartbeatState.due costs one
+	// tick rather than one full interval, so the first check-in of a spell now
+	// lands around 5m instead of around 10m.
+	hb := defaultHeartbeatInterval
 	if h := paths.Get(paths.HeartbeatInterval); h != "" {
 		if d, err := time.ParseDuration(h); err == nil && d >= 0 {
 			hb = d
@@ -414,6 +418,21 @@ func eventLogStore(pool *pgxpool.Pool) eventlog.Store {
 	return eventlogdb.New(pool)
 }
 
+// sweepTickInterval is how often sweepTick runs. It bounds the resolution of
+// everything riding the tick, so it must stay strictly finer than
+// heartbeatInterval: delivery is quantized to it, and a tick EQUAL to the
+// interval is the worst case of all — due() fires on `elapsed >= interval`, so
+// with the two equal the cadence flips between one and two ticks on drift of
+// microseconds. It was 5m alongside a 5m heartbeat default, which is exactly
+// that.
+//
+// Not finer than this without more thought: the tick itself is free, but the
+// work is not — sweepBudgets and sweepHeartbeats each run a subtreeSpend query
+// per working child, so the DB load scales with 1/interval. The real fix is a
+// deadline-scheduler that wakes only when something is actually due; this
+// constant is the interim.
+const sweepTickInterval = time.Minute
+
 // startSweeper launches a background goroutine that periodically forgets
 // exited children whose age exceeds the configured grace window. It stops
 // when ctx is cancelled. Call Stop() to wait for the goroutine to exit.
@@ -421,7 +440,7 @@ func (c *Controller) startSweeper(ctx context.Context) {
 	c.sweeperWg.Add(1)
 	go func() {
 		defer c.sweeperWg.Done()
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(sweepTickInterval)
 		defer ticker.Stop()
 		for {
 			select {
