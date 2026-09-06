@@ -47,6 +47,49 @@ func formCockpit(t *testing.T) *Cockpit {
 	return c
 }
 
+// The model row moved to the END of the tab order: tabbing to set a cost cap
+// must not require passing through the model row first, and the executor row
+// (added with this test) sits beside kind because both decide where/how a
+// child runs while the model only decides what it runs.
+func TestModelIsTheLastFormField(t *testing.T) {
+	if fieldModel != spawnFieldCount-1 {
+		t.Fatalf("fieldModel must be the last field (index %d), got index %d", spawnFieldCount-1, fieldModel)
+	}
+}
+
+// The executor row feeds SpawnRequest.ExecutorRef: a machine name or id naming
+// one specific executor, blank meaning the kind-aware auto-resolve.
+func TestSpawnParamsCarriesExecutor(t *testing.T) {
+	f := newSpawnForm()
+	f.inputs[fieldExecutor].SetValue("greyshift")
+	f.inputs[fieldCwd].SetValue("/tmp")
+	p, problem := f.params(nil)
+	if problem != "" {
+		t.Fatal(problem)
+	}
+	if p.executor != "greyshift" {
+		t.Fatalf("want executor=greyshift, got %q", p.executor)
+	}
+}
+
+// A spawn's defaults carry an executor the same way they carry a model, so
+// `rafiki create -i --executor greyshift` shows what it is about to target.
+func TestOpenCreatePrefillsTheExecutor(t *testing.T) {
+	c := NewCockpit(Options{
+		BaseURL:    "http://127.0.0.1:1",
+		OpenCreate: true,
+		CreateDefaults: SpawnDefaults{
+			Name: "reviewer", Kind: "claude", Executor: "greyshift", Cwd: "/tmp/x",
+		},
+	})
+	if c.form == nil {
+		t.Fatal("OpenCreate did not open the form")
+	}
+	if got := c.form.inputs[fieldExecutor].Value(); got != "greyshift" {
+		t.Errorf("executor = %q, want greyshift", got)
+	}
+}
+
 func TestNOpensTheCreateForm(t *testing.T) {
 	formCockpit(t)
 }
@@ -278,8 +321,12 @@ func TestTypingReachesTheFocusedFormField(t *testing.T) {
 // first right yields a form where every row after the first is dead.
 func TestTypingFollowsTheFocusedField(t *testing.T) {
 	c := formCockpit(t)
-	c.handleKey(keyMsg("tab")) // kind
-	c.handleKey(keyMsg("tab")) // model
+	// Walk by the named constant, not a tab count: the tab order changed when
+	// the executor row joined (model moved last), and a count silently became
+	// the wrong row.
+	for c.form.focus != fieldModel {
+		c.handleKey(keyMsg("tab"))
+	}
 
 	for _, r := range "opus" {
 		c.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})

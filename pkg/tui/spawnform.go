@@ -29,15 +29,19 @@ var spawnKinds = []string{protocol.KindFundi, protocol.KindClaude}
 
 // spawnField indexes the form's rows. The order is the tab order, and it runs
 // most-edited to least: a name is what you always set and a cwd is what you
-// almost never do.
+// almost never do. The model row is LAST deliberately: it is the field you
+// most often leave alone, and tabbing to set a cost cap should not have to
+// pass through it. Executor sits beside kind because both decide where/how a
+// child runs; the model only decides what it runs.
 type spawnField int
 
 const (
 	fieldName spawnField = iota
 	fieldKind
-	fieldModel
+	fieldExecutor
 	fieldCwd
 	fieldMaxCost
+	fieldModel
 	spawnFieldCount
 )
 
@@ -47,12 +51,14 @@ func (f spawnField) label() string {
 		return "name"
 	case fieldKind:
 		return "kind"
-	case fieldModel:
-		return "model"
+	case fieldExecutor:
+		return "executor"
 	case fieldCwd:
 		return "cwd"
 	case fieldMaxCost:
 		return "max-cost"
+	case fieldModel:
+		return "model"
 	}
 	return "?"
 }
@@ -60,21 +66,23 @@ func (f spawnField) label() string {
 // spawnParams is what the form produces. A separate type from the wire request
 // so the form owes nothing to the generated package.
 type spawnParams struct {
-	name    string
-	kind    string
-	model   string
-	cwd     string
-	maxCost *float64
+	name     string
+	kind     string
+	model    string
+	executor string
+	cwd      string
+	maxCost  *float64
 }
 
 // spawnForm is the modal shown by `n` on the agents pane.
 //
-// It is deliberately five fields. The Connect SpawnRequest carries labels, an
-// executor selector and two other budgets (depth, children) as well, and its
-// own comment says not to grow it without a consumer for each field -- those
-// stay `rafiki create` flags, set once in a script. Cost is the one budget
-// field common enough that a person sets it per-spawn rather than once in a
-// preset, so it earns the keystroke the others don't.
+// It is deliberately six fields. The Connect SpawnRequest carries labels, and
+// two other budgets (depth, children) as well, and its own comment says not to
+// grow it without a consumer for each field -- those stay `rafiki create`
+// flags, set once in a script. Executor is the one addition: it decides where
+// a child runs, which is a per-spawn choice exactly like kind. Cost is the
+// other budget field common enough that a person sets it per-spawn rather
+// than once in a preset, so it earns the keystroke the others don't.
 type spawnForm struct {
 	inputs [spawnFieldCount]textinput.Model
 	kindIx int
@@ -111,8 +119,8 @@ type spawnForm struct {
 const fieldLabelWidth = 16
 
 // formChrome is the rows the form spends on things that are not suggestions:
-// title, blank, five field rows, blank, hints, and the detail block.
-const formChrome = 9 + detailHeight
+// title, blank, six field rows, blank, hints, and the detail block.
+const formChrome = 10 + detailHeight
 
 // suggestWindow is how many suggestion rows fit in a body pane of this height.
 //
@@ -160,6 +168,9 @@ func newSpawnForm() *spawnForm {
 		f.inputs[i] = in
 	}
 	f.inputs[fieldName].Placeholder = "(auto)"
+	// Blank executor means the kind-aware auto-resolve: fundi gets the session
+	// executor, a launch-required kind lets the daemon pick across its pool.
+	f.inputs[fieldExecutor].Placeholder = "(auto)"
 	f.inputs[fieldModel].Placeholder = "(daemon default)"
 	f.inputs[fieldMaxCost].Placeholder = "(unlimited)"
 	if wd, err := os.Getwd(); err == nil {
@@ -214,6 +225,9 @@ func (f *spawnForm) prefill(d SpawnDefaults) {
 	if d.Model != "" {
 		f.inputs[fieldModel].SetValue(d.Model)
 	}
+	if d.Executor != "" {
+		f.inputs[fieldExecutor].SetValue(d.Executor)
+	}
 	if d.Cwd != "" {
 		f.inputs[fieldCwd].SetValue(d.Cwd)
 	}
@@ -232,10 +246,11 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		return spawnParams{}, "cwd is required"
 	}
 	p := spawnParams{
-		name:  strings.TrimSpace(f.inputs[fieldName].Value()),
-		kind:  f.kind(),
-		model: strings.TrimSpace(f.inputs[fieldModel].Value()),
-		cwd:   cwd,
+		name:     strings.TrimSpace(f.inputs[fieldName].Value()),
+		kind:     f.kind(),
+		model:    strings.TrimSpace(f.inputs[fieldModel].Value()),
+		executor: strings.TrimSpace(f.inputs[fieldExecutor].Value()),
+		cwd:      cwd,
 	}
 	if raw := strings.TrimSpace(f.inputs[fieldMaxCost].Value()); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)

@@ -215,11 +215,12 @@ type Options struct {
 	OpenCreate     bool
 	CreateDefaults SpawnDefaults
 	// ExecutorSelector rides on every spawn this cockpit issues, for its whole
-	// lifetime -- not just the first. It is not a form field: like labels and
-	// the remaining budget fields (depth, children), it is a `rafiki create`
-	// flag set once, not something anyone fills in by hand between two
-	// keystrokes (see spawnForm's own comment on why the form stays five
-	// fields).
+	// lifetime -- not just the first. It carries the LOCAL SESSION EXECUTOR's
+	// selector when one was stood up for this cockpit (runCreateForm), and is
+	// applied to fundi spawns only -- see buildSpawnRequest for why a
+	// launch-required kind must never be pinned to this machine. The executor
+	// form field is the per-spawn explicit choice (an ExecutorRef) and is
+	// separate from this.
 	ExecutorSelector string
 	// ProfileName scopes every clientstate read/write this cockpit does for
 	// ModelView and LastModel -- two daemons need not share a model catalog,
@@ -237,10 +238,11 @@ type Options struct {
 // SpawnDefaults prefills the create form. Empty fields keep the form's own
 // defaults; cwd falls back to the client's working directory.
 type SpawnDefaults struct {
-	Name  string
-	Kind  string
-	Model string
-	Cwd   string
+	Name     string
+	Kind     string
+	Model    string
+	Executor string
+	Cwd      string
 }
 
 // ── Model ───────────────────────────────────────────────────────────────────
