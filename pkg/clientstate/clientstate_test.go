@@ -142,3 +142,35 @@ func TestUpdatePreservesSectionsItDoesNotKnowAbout(t *testing.T) {
 		t.Fatal("the second Update did not persist")
 	}
 }
+
+func TestRememberAndRecallExecutor(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	if got := clientstate.LastExecutorFor("work", "claude"); got != "" {
+		t.Fatalf("want empty before anything is remembered, got %q", got)
+	}
+	clientstate.RememberExecutor("work", "claude", "greyshift")
+	if got := clientstate.LastExecutorFor("work", "claude"); got != "greyshift" {
+		t.Fatalf("want greyshift, got %q", got)
+	}
+	// Different kind, different profile: neither leaks into the other.
+	if got := clientstate.LastExecutorFor("work", "fundi"); got != "" {
+		t.Fatalf("kind must not leak across kinds, got %q", got)
+	}
+	if got := clientstate.LastExecutorFor("home", "claude"); got != "" {
+		t.Fatalf("profile must not leak across profiles, got %q", got)
+	}
+}
+
+func TestRememberExecutorNoOpsOnEmptyArgs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	clientstate.RememberExecutor("", "claude", "greyshift")
+	clientstate.RememberExecutor("work", "", "greyshift")
+	clientstate.RememberExecutor("work", "claude", "")
+	if got := clientstate.LastExecutorFor("work", "claude"); got != "" {
+		t.Fatalf("no-op cases must not have written anything, got %q", got)
+	}
+}

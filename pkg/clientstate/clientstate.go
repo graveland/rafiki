@@ -38,6 +38,12 @@ type State struct {
 	// this. RAFIKI_DEFAULT_MODEL is retired client-side (profile.CheckRetiredEnv
 	// rejects it); a profile's `model` field is what outranks this now.
 	LastModel map[string]string `json:"lastModel,omitempty"`
+	// LastExecutor is the executor most recently spawned onto, keyed by child
+	// KIND — the same reasoning as LastModel: a fundi child's workspace
+	// executor and a claude child's launch executor are different questions,
+	// and replaying one onto the other's kind is a wrong answer as often as
+	// it is a right one.
+	LastExecutor map[string]string `json:"lastExecutor,omitempty"`
 	// Currency is the client's preferred display currency for cost figures
 	// (TUI, `rafiki list`). Costs are still tracked and billed in USD
 	// everywhere else -- this only converts the last-mile string a person
@@ -170,5 +176,38 @@ func RememberModel(profileName, kind, model string) {
 			s.LastModel = map[string]string{}
 		}
 		s.LastModel[kind] = model
+	})
+}
+
+// LastExecutorFor returns the executor ref (machine label, or id when
+// unlabeled) most recently used for a profile and kind.
+//
+// Keyed by PROFILE for the same reason LastModelFor is: two daemons need not
+// share an executor fleet. Keyed by KIND because a claude launch executor and
+// a fundi workspace executor answer different questions.
+func LastExecutorFor(profileName, kind string) string {
+	if profileName == "" || kind == "" {
+		return ""
+	}
+	return LoadScoped(Scope{Profile: profileName}).LastExecutor[kind]
+}
+
+// RememberExecutor records the executor ref a spawn actually resolved to,
+// whether by explicit choice or by unambiguous auto-resolution — matching
+// RememberModel's own behavior of recording every resolved spawn regardless
+// of source.
+//
+// An empty ref is not recorded: it usually means "the daemon's local session
+// executor", which is not a choice worth replaying onto a different kind or
+// profile.
+func RememberExecutor(profileName, kind, ref string) {
+	if profileName == "" || kind == "" || ref == "" {
+		return
+	}
+	UpdateScoped(Scope{Profile: profileName}, func(s *State) {
+		if s.LastExecutor == nil {
+			s.LastExecutor = map[string]string{}
+		}
+		s.LastExecutor[kind] = ref
 	})
 }
