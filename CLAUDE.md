@@ -1372,3 +1372,46 @@
   early-return branch to `streamAndCapture` above the `captureQuota` call,
   move the call or the new branch loses capture coverage silently — nothing
   will error, the row just never gets written for that response shape.
+
+- **Prompt-cache TTL is the wrong lever for a coordinator's idle gap, and it
+  is unreachable from BOTH directions by design — measured, not reasoned.**
+  The intuition is sound and the arithmetic checks out: a coordinator that
+  spawns subagents and waits is idle well past the 5-minute TTL, and a cache
+  entry's clock starts at the REQUEST, not the response, so a 4-minute
+  generation leaves ~1 minute of headroom. The tier split is real too —
+  over 6.5 weeks of `conversation_turn`, top-level agents had **4.74%** of
+  turns following a >5m gap against **0.17%** for children (28x), on 3.5x the
+  context (avg 150k vs 42k cache-read tokens). Top-level idles, children
+  churn. What kills it is the money and the reach: total cost of every cache
+  lapse across all fundi agent traffic was **~$8.00 against $341.22 of agent
+  spend** (2.3%), and **$0.00 of it was addressable by `CachePolicy`** —
+  99% of the fleet runs models that ignore cache breakpoints. The router is
+  NOT the constraint and saying so will mislead you: OpenRouter forwards
+  `cache_control` and `ttl` fine, and an Anthropic model behind it (or behind
+  Bedrock, or first-party) honours both. Whether a breakpoint does anything is
+  a property of the MODEL — deepseek, glm and gemini cache implicitly on their
+  own schedule, so the markers rafiki emits are inert and there is no TTL to
+  set. `anthropic/claude-sonnet-5`
+  was 227 of 25,420 turns and had **zero** turns with a gap over five minutes.
+  The implicit caches are real and do expire — deepseek-v4-pro misses 4.1% /
+  8.0% / 26.5% / 50.0% as the gap crosses 1m / 5m / 30m, glm-5.3-flash 2.8% /
+  5.0% / 28.8% / 100% — rafiki just has no handle on them.
+  **The plan's own shape keeps it closed.** Coordinators stay on cheap
+  implicit-caching models (running one on Anthropic is the cost the design
+  exists to avoid), and `--kind claude` goes to SUBAGENTS, which churn rather
+  than idle and whose `cache_control` Claude Code sets itself — rafiki proxies
+  those requests and never assembles them, so `pkg/llm`'s `CachePolicy` never
+  governs them at all. Measured on that path too: 0.95% of turns after a >5m
+  gap, $0.55 wasted. The lever only becomes live for a FUNDI agent pointed at
+  an Anthropic model, which is the configuration nobody wants for a
+  coordinator. Re-open it only on that evidence, and re-run the gap/miss
+  query first.
+  Two traps for whoever does re-open it. `conversations.model_pricing` has a
+  single `cache_write_usd` column, so mixing 5m and 1h TTLs silently misprices
+  every affected turn — you would break the instrument you would evaluate the
+  change with. And a `max_tokens: 0` keep-alive (the standard way to refresh a
+  TTL for a bare cache read, no output tokens, no context growth) is closed
+  here: it is rejected alongside `thinking.type: "enabled"`, which is exactly
+  what `conversation.go`'s `ThinkingConfigParamOfEnabled` sends whenever
+  `ThinkingBudget > 0`, and dropping thinking to send it is itself an
+  all-models messages-cache invalidator.

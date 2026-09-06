@@ -1,0 +1,15 @@
+-- Tombstone child rows instead of deleting them.
+--
+-- Closing a child used to DELETE its row, which is why no historical analysis
+-- can recover whether a conversation was a coordinator or a subagent: the
+-- lineage lives in child.labels ('rafiki/parent'), and conversation_turn
+-- outlives the row that explains it. Nothing references conversations.child by
+-- foreign key, so the delete cascaded nothing and lost only the context.
+--
+-- Same rule as users: history has to keep resolving. Unlike users this needs no
+-- partial unique index -- child_id is a ULID and is unique forever, so a
+-- tombstone can never collide with a live row.
+--
+-- Every reader must filter: childstoredb's List drives recovery, and a
+-- tombstone that leaks through is resumed as a live child.
+ALTER TABLE conversations.child ADD COLUMN deleted_at TIMESTAMPTZ;

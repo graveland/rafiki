@@ -67,9 +67,16 @@ ON CONFLICT (child_id) DO UPDATE SET
     max_children      = EXCLUDED.max_children,
     config            = EXCLUDED.config,
     labels            = EXCLUDED.labels,
+    deleted_at        = NULL,
     updated_at        = now()`
 
 // Upsert writes rec, creating the row or updating it in place.
+//
+// deleted_at is cleared unconditionally: an upsert is the daemon asserting this
+// child is live, and writing into a tombstoned row without clearing it would
+// leave a row that exists, updates, and is never returned by List — invisible
+// to recovery and to rafiki list, with nothing to observe. Child ids are ULIDs
+// and are never reused, so this is defensive rather than a path anything takes.
 //
 // The two COALESCEs are load-bearing. last_status is written once, by the exit
 // path, and an ordinary status write must not blank it or the recovery
@@ -107,10 +114,22 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 	return nil
 }
 
-// Delete removes a child row. Idempotent: a missing row is not an error.
+// Delete tombstones a child row. Idempotent: a missing or already-tombstoned
+// row is not an error.
+//
+// The row is kept rather than removed so history stays explainable. Lineage
+// lives in labels ("rafiki/parent"), and conversation_turn outlives the child,
+// so a hard delete left every closed conversation permanently unclassifiable —
+// coordinator or subagent, nobody can tell afterwards. Nothing references this
+// table by foreign key, so the old DELETE cascaded nothing and cost only that
+// context. Same rule as users.
+//
+// Every reader must filter tombstones out; List (below) is the one that
+// matters, because it drives recovery.
 func (s *Store) Delete(ctx context.Context, childID string) error {
 	if _, err := s.pool.Exec(ctx,
-		`DELETE FROM conversations.child WHERE child_id = $1`, childID); err != nil {
+		`UPDATE conversations.child SET deleted_at = now()
+		  WHERE child_id = $1 AND deleted_at IS NULL`, childID); err != nil {
 		return fmt.Errorf("childstoredb: delete %s: %w", childID, err)
 	}
 	return nil
@@ -126,11 +145,16 @@ SELECT child_id, COALESCE(conversation_id::text, ''), COALESCE(owner_user_id::te
        spawned_at, last_activity, exited_at, exit_code, COALESCE(exit_signal,''),
        COALESCE(executor_selector,''), COALESCE(workspace_mode,''),
        max_depth, max_cost, max_children, config, labels, updated_at
-  FROM conversations.child`
+  FROM conversations.child
+ WHERE deleted_at IS NULL`
 
-// List returns every child row.
+// List returns every live child row.
 //
-// It returns all of them rather than filtering: the caller loads every row into
+// Tombstones (Delete above) are excluded here rather than by any caller: List
+// drives recovery, and a tombstoned row that reached it would be resumed as a
+// live child — a closed agent coming back from the dead on daemon restart.
+//
+// It returns all the live ones rather than filtering further: the caller loads every row into
 // the in-memory store (so rafiki list shows the same set it always did) and
 // applies the recovery predicate itself.
 func (s *Store) List(ctx context.Context) ([]childstore.ChildRecord, error) {
