@@ -66,6 +66,17 @@ type AdminOptions struct {
 	// before this field existed.
 	ConnectAddr   string
 	ConnectSocket string
+
+	// ProxyURL is THIS executor's own resolved LLM proxy address (from its
+	// configured profile's profile.EffectiveProxy(), when --launch claude was
+	// given — see cmd/rafiki's executorProfileProxy). Launch tells the daraja
+	// it spawns to use this address in preference to the request's proxy_url
+	// field, for the same reason ConnectAddr overrides dial_addr above: the
+	// daemon's proxy_url is derived from its own bind address, which is not
+	// necessarily reachable from this executor's machine. Empty means no
+	// profile was configured (or resolution failed) — Launch then falls back
+	// to the request's value, exactly as before this field existed.
+	ProxyURL string
 }
 
 // launched is one daraja this executor started and is responsible for.
@@ -192,8 +203,17 @@ func (a *AdminServer) Launch(
 	if c.GetPermissionMode() != "" {
 		argv = append(argv, "--permission-mode", c.GetPermissionMode())
 	}
-	if c.GetProxyUrl() != "" {
-		argv = append(argv, "--proxy-url", c.GetProxyUrl())
+	// Prefer THIS executor's own resolved proxy URL over the request's
+	// proxy_url — same rationale as ConnectAddr: the daemon's proxy_url is
+	// derived from its own bind address, which is not necessarily reachable
+	// from this executor's machine. Empty means no profile was configured
+	// (or resolution failed) — then fall back to the request's value.
+	proxyURL := c.GetProxyUrl()
+	if a.opts.ProxyURL != "" {
+		proxyURL = a.opts.ProxyURL
+	}
+	if proxyURL != "" {
+		argv = append(argv, "--proxy-url", proxyURL)
 	}
 	if c.GetPassthroughAuth() {
 		argv = append(argv, "--passthrough")

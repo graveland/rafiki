@@ -395,6 +395,83 @@ func TestLaunchFallsBackToDialAddrWithNoConnectInfo(t *testing.T) {
 	}
 }
 
+// TestLaunchPrefersItsOwnProxyURLOverTheRequests: when this executor has its
+// own ProxyURL set, it overrides the request's proxy_url (which is typically
+// the daemon's loopback — unreachable from another machine).
+func TestLaunchPrefersItsOwnProxyURLOverTheRequests(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+		ProxyURL:    "https://executor-profile.example/v1",
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-proxy-override",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec: &darajapb.ChildSpec{
+			Kind: darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{
+				// The daemon's own loopback guess, must be ignored.
+				ProxyUrl: "http://127.0.0.1:8035",
+			},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	pid := int(resp.Msg.GetPid())
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	cmdline := string(out)
+
+	if !strings.Contains(cmdline, "--proxy-url https://executor-profile.example/v1") {
+		t.Errorf("cmdline %q missing the executor's own proxy URL", cmdline)
+	}
+	if strings.Contains(cmdline, "127.0.0.1:8035") {
+		t.Errorf("cmdline %q used the daemon's loopback proxy_url instead of the executor's own", cmdline)
+	}
+}
+
+// TestLaunchFallsBackToRequestsProxyURLWithNoneConfigured: with no ProxyURL
+// set, the request's proxy_url is honoured, unchanged from before this fix.
+func TestLaunchFallsBackToRequestsProxyURLWithNoneConfigured(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c-proxy-fallback",
+		Cwd:     t.TempDir(),
+		Spec: &darajapb.ChildSpec{
+			Kind:   darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{ProxyUrl: "http://127.0.0.1:8035"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	pid := int(resp.Msg.GetPid())
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	if !strings.Contains(string(out), "--proxy-url http://127.0.0.1:8035") {
+		t.Errorf("cmdline %q missing the fallback proxy_url", out)
+	}
+}
+
 // TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt proves Phase 2's
 // wiring end to end at the executor layer: the non-secret proxy fields reach
 // daraja serve's argv (so a real daraja process picks them up), while the
