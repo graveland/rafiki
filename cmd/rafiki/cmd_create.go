@@ -129,6 +129,9 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 4)")
 	cmd.Flags().String("executor-selector", paths.Get(paths.ExecutorSelector),
 		"label selector choosing an executor from the daemon's pool to run this agent's filesystem and shell tools on (e.g. owner=brent,env=home); also see RAFIKI_EXECUTOR_SELECTOR")
+	cmd.Flags().String("executor", paths.Get(paths.Executor),
+		"target one specific executor by its machine name or id (e.g. greyshift); mutually exclusive with --executor-selector; also see RAFIKI_EXECUTOR")
+	cmd.MarkFlagsMutuallyExclusive("executor", "executor-selector")
 	cmd.Flags().Bool("no-local-executor", false,
 		"do not offer this machine as a workspace; nothing here joins the daemon's executor pool for this session")
 
@@ -208,6 +211,30 @@ func resolveModel(flagModel, presetModel, profileModel, remembered string) strin
 		}
 	}
 	return ""
+}
+
+// resolveExecutor picks the executor reference and/or selector to send with a
+// spawn. Mirrors resolveModel's shape deliberately.
+//
+// --executor wins outright and is returned as a ref (ExecutorRef). Otherwise
+// an explicit --executor-selector (or its RAFIKI_EXECUTOR_SELECTOR default)
+// is returned as a selector, untouched — a label-selector policy and a
+// remembered single executor answer different questions, so the selector is
+// never compared against the remembered ref. Only when NEITHER was given does
+// the remembered executor apply, and only when the caller says it is still
+// eligible (a Task 6 concern — this function takes that as a plain bool so it
+// stays a pure precedence rule with no network round trip of its own).
+func resolveExecutor(flagExecutor, flagSelector, remembered string, rememberedEligible bool) (ref, selector string) {
+	if flagExecutor != "" {
+		return flagExecutor, ""
+	}
+	if flagSelector != "" {
+		return "", flagSelector
+	}
+	if remembered != "" && rememberedEligible {
+		return remembered, ""
+	}
+	return "", ""
 }
 
 // buildSpawnRequest constructs a SpawnRequest from the spawn flags, the

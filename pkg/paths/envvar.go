@@ -172,6 +172,11 @@ const (
 	// all.
 	ExecutorSelector = "RAFIKI_EXECUTOR_SELECTOR"
 
+	// Executor is the default executor ref (machine label or id) for `rafiki
+	// create --executor` when the flag is not given. See ExecutorSelector for
+	// why an env default exists at all; this is its single-target sibling.
+	Executor = "RAFIKI_EXECUTOR"
+
 	// ExecutorName names the machine this box's executor represents. It is the
 	// operator's own string, not a derived id: it is written into the executor
 	// row as the `machine` trust label at mint time, and read back here by an

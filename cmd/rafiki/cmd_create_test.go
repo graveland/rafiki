@@ -679,3 +679,27 @@ func TestMaxCostWithNoCurrencyIsUnconverted(t *testing.T) {
 		t.Errorf("MaxCost = %v, want 10 (no currency configured)", req.MaxCost)
 	}
 }
+
+func TestResolveExecutor(t *testing.T) {
+	cases := []struct {
+		name                             string
+		flagExecutor, flagSelector       string
+		remembered                       string
+		rememberedEligible               bool
+		wantRef, wantSelector            string
+	}{
+		{name: "flag wins", flagExecutor: "greyshift", flagSelector: "env=home", remembered: "silvershift", rememberedEligible: true, wantRef: "greyshift"},
+		{name: "selector wins over remembered", flagSelector: "env=home", remembered: "silvershift", rememberedEligible: true, wantSelector: "env=home"},
+		{name: "remembered wins when eligible", remembered: "greyshift", rememberedEligible: true, wantRef: "greyshift"},
+		{name: "remembered ignored when not eligible", remembered: "greyshift", rememberedEligible: false, wantRef: "", wantSelector: ""},
+		{name: "nothing given", wantRef: "", wantSelector: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotRef, gotSel := resolveExecutor(tc.flagExecutor, tc.flagSelector, tc.remembered, tc.rememberedEligible)
+			if gotRef != tc.wantRef || gotSel != tc.wantSelector {
+				t.Fatalf("got ref=%q selector=%q, want ref=%q selector=%q", gotRef, gotSel, tc.wantRef, tc.wantSelector)
+			}
+		})
+	}
+}
