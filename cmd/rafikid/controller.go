@@ -507,7 +507,9 @@ func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
 			ev.Ordinal = &ord
 		}
 	}
-	c.native.Publish(childID, ev)
+	if c.native != nil {
+		c.native.Publish(childID, ev)
+	}
 }
 
 // childHooks builds the per-child callbacks every SpawnSpec carries.
@@ -2914,6 +2916,23 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	// every other status-change timestamp in this function is captured.
 	now := time.Now()
 	storePrev, ok := c.st.SetStatus(childID, newStatus)
+	// Publish onto the native/rafiki-v1 event stream so the TUI rail can
+	// render a working spinner and an accurate glyph. This is the ONLY
+	// producer of agent_status in the whole daemon, and it is deliberately
+	// here rather than in a per-kind path: handleStatusChange already fires
+	// for every kind (pi/claude via ch.DrainTransitions, fundi via the same
+	// StateMachine driven by its own pi-shaped frames -- see child.Child's
+	// handleFrame), so one call site covers all of them. Before this, the
+	// rail's Status was frozen at whatever ListChildren reported when the TUI
+	// last (re)seeded -- the working spinner and glyph never moved again for
+	// the rest of the attachment, no matter which kind of child it was.
+	if ok && storePrev != newStatus {
+		c.publishEvent(childID, &rafikiv1.Event{
+			ChildId:  childID,
+			TsUnixMs: now.UnixMilli(),
+			Payload:  &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: string(newStatus)}},
+		})
+	}
 	// Release any event batches deferred while this child was mid-turn.
 	// This is rafiki's turn-end drain; it is why no busy-poller is needed.
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
