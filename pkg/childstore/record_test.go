@@ -21,6 +21,7 @@ func TestRecordRoundTrip(t *testing.T) {
 
 	orig := &Session{
 		ChildID:            "c_01ABCDEF",
+		OwnerUserID:        "u_owner1",
 		PID:                4321,
 		Name:               "worker",
 		Cwd:                "/tmp/work",

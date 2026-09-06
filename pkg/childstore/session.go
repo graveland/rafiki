@@ -25,6 +25,15 @@ type Session struct {
 	Cwd     string
 	Kind    string // "pi" (default) or "claude"; selects the child protocol
 
+	// OwnerUserID is the id of the user who spawned this child (empty for an
+	// anonymous/unauthenticated spawn, e.g. from the local unix socket).
+	// Populated at fresh spawn (Controller.Spawn) and carried across
+	// resume/recovery (SessionFromRecord). Used by the proxy face to
+	// attribute a daraja/local-subprocess child's LLM traffic to its real
+	// owner instead of an anonymous identity — see
+	// docs/plans/2026-09-05-daraja-proxy-identity-design.md, Piece 1/2.
+	OwnerUserID string
+
 	// ConfigDir, for claude children, is exported as CLAUDE_CONFIG_DIR.
 	ConfigDir string
 
@@ -151,6 +160,9 @@ type Snapshot struct {
 	Kind      string
 	ConfigDir string
 
+	// OwnerUserID mirrors Session.OwnerUserID — see its doc comment.
+	OwnerUserID string
+
 	Provider string
 	Model    string
 	Thinking string
@@ -242,7 +254,8 @@ func (s *Session) Snapshot() Snapshot {
 	return Snapshot{
 		ChildID: s.ChildID, Name: s.Name, Cwd: s.Cwd, PID: s.PID,
 		Kind: s.Kind, ConfigDir: s.ConfigDir,
-		Provider: s.Provider, Model: s.Model, Thinking: s.Thinking,
+		OwnerUserID: s.OwnerUserID,
+		Provider:    s.Provider, Model: s.Model, Thinking: s.Thinking,
 		SessionID: s.SessionID, SessionFile: s.SessionFile,
 		Status: s.Status, StartedAt: s.StartedAt, LastActivity: s.LastActivity,
 		ExitedAt: s.ExitedAt, ExitCode: exitCode, ExitSignal: s.ExitSignal,

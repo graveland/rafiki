@@ -116,12 +116,13 @@ type ChildStore interface {
 // so an ordinary status write cannot blank the column.
 func RecordFromSnapshot(snap Snapshot) ChildRecord {
 	return ChildRecord{
-		ChildID:   snap.ChildID,
-		Kind:      snap.Kind,
-		Name:      snap.Name,
-		Cwd:       snap.Cwd,
-		ConfigDir: snap.ConfigDir,
-		PID:       snap.PID,
+		ChildID:     snap.ChildID,
+		OwnerUserID: snap.OwnerUserID,
+		Kind:        snap.Kind,
+		Name:        snap.Name,
+		Cwd:         snap.Cwd,
+		ConfigDir:   snap.ConfigDir,
+		PID:         snap.PID,
 
 		Provider: snap.Provider,
 		Model:    snap.Model,
@@ -183,12 +184,13 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 // session has nil rings, which ctrl_get_recent already handles.
 func SessionFromRecord(rec ChildRecord) *Session {
 	return &Session{
-		ChildID:   rec.ChildID,
-		PID:       rec.PID,
-		Name:      rec.Name,
-		Cwd:       rec.Cwd,
-		Kind:      rec.Kind,
-		ConfigDir: rec.ConfigDir,
+		ChildID:     rec.ChildID,
+		OwnerUserID: rec.OwnerUserID,
+		PID:         rec.PID,
+		Name:        rec.Name,
+		Cwd:         rec.Cwd,
+		Kind:        rec.Kind,
+		ConfigDir:   rec.ConfigDir,
 
 		Provider: rec.Provider,
 		Model:    rec.Model,
