@@ -136,7 +136,13 @@ type DescribeResponse struct {
 	// what this executor will do. The daemon still requires the child's ordinary
 	// executor selector to match, so a wrong entry costs a failed launch rather
 	// than admitting anyone.
-	LaunchKinds   []string `protobuf:"bytes,11,rep,name=launch_kinds,json=launchKinds,proto3" json:"launch_kinds,omitempty"`
+	LaunchKinds []string `protobuf:"bytes,11,rep,name=launch_kinds,json=launchKinds,proto3" json:"launch_kinds,omitempty"`
+	// skills_sync reports that this executor accepts SyncSkills. Safe to
+	// self-report for the same reason as proxies and launch_kinds: it only ever
+	// NARROWS what this executor will do, and a wrong value costs a skipped sync
+	// rather than admitting anyone. It is NOT an access-gating fact, so it does
+	// not collide with the rule that the executor row is authoritative.
+	SkillsSync    bool `protobuf:"varint,12,opt,name=skills_sync,json=skillsSync,proto3" json:"skills_sync,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -246,6 +252,13 @@ func (x *DescribeResponse) GetLaunchKinds() []string {
 		return x.LaunchKinds
 	}
 	return nil
+}
+
+func (x *DescribeResponse) GetSkillsSync() bool {
+	if x != nil {
+		return x.SkillsSync
+	}
+	return false
 }
 
 type HealthRequest struct {
@@ -2165,12 +2178,252 @@ func (*ProxyResponse_Head) isProxyResponse_Msg() {}
 
 func (*ProxyResponse_Body) isProxyResponse_Msg() {}
 
+// SyncSkill is one skill's rendered content. The name is BARE: Claude Code
+// derives the "<namespace>:<name>" a model sees from the plugin directory,
+// so a prefix written here would be applied twice.
+type SyncSkill struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	// body has already had its frontmatter stripped; the executor re-renders a
+	// frontmatter block from name and description when it writes SKILL.md.
+	Body          string `protobuf:"bytes,3,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncSkill) Reset() {
+	*x = SyncSkill{}
+	mi := &file_executor_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncSkill) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncSkill) ProtoMessage() {}
+
+func (x *SyncSkill) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncSkill.ProtoReflect.Descriptor instead.
+func (*SyncSkill) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *SyncSkill) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SyncSkill) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *SyncSkill) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+// SkillNamespace is one plugin directory's worth of skills.
+type SkillNamespace struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name becomes the plugin name AND the directory name, so the executor
+	// validates it as a path segment before touching the filesystem.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// version is stamped into the generated .claude-plugin/plugin.json. It is
+	// informational: nothing keys behaviour on it.
+	Version       string       `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	Skills        []*SyncSkill `protobuf:"bytes,3,rep,name=skills,proto3" json:"skills,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillNamespace) Reset() {
+	*x = SkillNamespace{}
+	mi := &file_executor_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillNamespace) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillNamespace) ProtoMessage() {}
+
+func (x *SkillNamespace) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillNamespace.ProtoReflect.Descriptor instead.
+func (*SkillNamespace) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *SkillNamespace) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SkillNamespace) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *SkillNamespace) GetSkills() []*SyncSkill {
+	if x != nil {
+		return x.Skills
+	}
+	return nil
+}
+
+type SyncSkillsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// namespaces is the COMPLETE set of rafiki-managed namespaces. A namespace
+	// absent from this list has its directory removed. An empty list is
+	// therefore a full removal request and the daemon must never send one
+	// casually — see the daemon-side guard.
+	Namespaces    []*SkillNamespace `protobuf:"bytes,1,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncSkillsRequest) Reset() {
+	*x = SyncSkillsRequest{}
+	mi := &file_executor_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncSkillsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncSkillsRequest) ProtoMessage() {}
+
+func (x *SyncSkillsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncSkillsRequest.ProtoReflect.Descriptor instead.
+func (*SyncSkillsRequest) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *SyncSkillsRequest) GetNamespaces() []*SkillNamespace {
+	if x != nil {
+		return x.Namespaces
+	}
+	return nil
+}
+
+type SyncSkillsResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Written int32                  `protobuf:"varint,1,opt,name=written,proto3" json:"written,omitempty"`
+	Pruned  int32                  `protobuf:"varint,2,opt,name=pruned,proto3" json:"pruned,omitempty"`
+	// skills_dir is the directory the executor actually wrote into, so the
+	// daemon can log where the corpus landed rather than guessing.
+	SkillsDir     string `protobuf:"bytes,3,opt,name=skills_dir,json=skillsDir,proto3" json:"skills_dir,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncSkillsResponse) Reset() {
+	*x = SyncSkillsResponse{}
+	mi := &file_executor_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncSkillsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncSkillsResponse) ProtoMessage() {}
+
+func (x *SyncSkillsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncSkillsResponse.ProtoReflect.Descriptor instead.
+func (*SyncSkillsResponse) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *SyncSkillsResponse) GetWritten() int32 {
+	if x != nil {
+		return x.Written
+	}
+	return 0
+}
+
+func (x *SyncSkillsResponse) GetPruned() int32 {
+	if x != nil {
+		return x.Pruned
+	}
+	return 0
+}
+
+func (x *SyncSkillsResponse) GetSkillsDir() string {
+	if x != nil {
+		return x.SkillsDir
+	}
+	return ""
+}
+
 var File_executor_proto protoreflect.FileDescriptor
 
 const file_executor_proto_rawDesc = "" +
 	"\n" +
 	"\x0eexecutor.proto\x12\x12rafiki.executor.v1\"\x11\n" +
-	"\x0fDescribeRequest\"\xf0\x03\n" +
+	"\x0fDescribeRequest\"\x91\x04\n" +
 	"\x10DescribeResponse\x12\x1f\n" +
 	"\vexecutor_id\x18\x01 \x01(\tR\n" +
 	"executorId\x12\x1a\n" +
@@ -2184,7 +2437,9 @@ const file_executor_proto_rawDesc = "" +
 	"\x14self_reported_labels\x18\t \x03(\v2<.rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntryR\x12selfReportedLabels\x12\x18\n" +
 	"\aproxies\x18\n" +
 	" \x03(\tR\aproxies\x12!\n" +
-	"\flaunch_kinds\x18\v \x03(\tR\vlaunchKinds\x1aE\n" +
+	"\flaunch_kinds\x18\v \x03(\tR\vlaunchKinds\x12\x1f\n" +
+	"\vskills_sync\x18\f \x01(\bR\n" +
+	"skillsSync\x1aE\n" +
 	"\x17SelfReportedLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x0f\n" +
@@ -2325,7 +2580,24 @@ const file_executor_proto_rawDesc = "" +
 	"\rProxyResponse\x123\n" +
 	"\x04head\x18\x01 \x01(\v2\x1d.rafiki.executor.v1.ProxyHeadH\x00R\x04head\x12\x14\n" +
 	"\x04body\x18\x02 \x01(\fH\x00R\x04bodyB\x05\n" +
-	"\x03msg2\xb6\b\n" +
+	"\x03msg\"U\n" +
+	"\tSyncSkill\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x12\n" +
+	"\x04body\x18\x03 \x01(\tR\x04body\"u\n" +
+	"\x0eSkillNamespace\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x125\n" +
+	"\x06skills\x18\x03 \x03(\v2\x1d.rafiki.executor.v1.SyncSkillR\x06skills\"W\n" +
+	"\x11SyncSkillsRequest\x12B\n" +
+	"\n" +
+	"namespaces\x18\x01 \x03(\v2\".rafiki.executor.v1.SkillNamespaceR\n" +
+	"namespaces\"e\n" +
+	"\x12SyncSkillsResponse\x12\x18\n" +
+	"\awritten\x18\x01 \x01(\x05R\awritten\x12\x16\n" +
+	"\x06pruned\x18\x02 \x01(\x05R\x06pruned\x12\x1d\n" +
+	"\n" +
+	"skills_dir\x18\x03 \x01(\tR\tskillsDir2\x93\t\n" +
 	"\x0fExecutorService\x12U\n" +
 	"\bDescribe\x12#.rafiki.executor.v1.DescribeRequest\x1a$.rafiki.executor.v1.DescribeResponse\x12O\n" +
 	"\x06Health\x12!.rafiki.executor.v1.HealthRequest\x1a\".rafiki.executor.v1.HealthResponse\x12T\n" +
@@ -2337,7 +2609,9 @@ const file_executor_proto_rawDesc = "" +
 	"\aRelease\x12\".rafiki.executor.v1.ReleaseRequest\x1a#.rafiki.executor.v1.ReleaseResponse\x12g\n" +
 	"\x0eProjectContext\x12).rafiki.executor.v1.ProjectContextRequest\x1a*.rafiki.executor.v1.ProjectContextResponse\x12d\n" +
 	"\rProjectSkills\x12(.rafiki.executor.v1.ProjectSkillsRequest\x1a).rafiki.executor.v1.ProjectSkillsResponse\x12X\n" +
-	"\tSkillBody\x12$.rafiki.executor.v1.SkillBodyRequest\x1a%.rafiki.executor.v1.SkillBodyResponse\x12P\n" +
+	"\tSkillBody\x12$.rafiki.executor.v1.SkillBodyRequest\x1a%.rafiki.executor.v1.SkillBodyResponse\x12[\n" +
+	"\n" +
+	"SyncSkills\x12%.rafiki.executor.v1.SyncSkillsRequest\x1a&.rafiki.executor.v1.SyncSkillsResponse\x12P\n" +
 	"\x05Proxy\x12 .rafiki.executor.v1.ProxyRequest\x1a!.rafiki.executor.v1.ProxyResponse(\x010\x01B3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
 
 var (
@@ -2353,7 +2627,7 @@ func file_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
+var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
 var file_executor_proto_goTypes = []any{
 	(Failure_Code)(0),              // 0: rafiki.executor.v1.Failure.Code
 	(*DescribeRequest)(nil),        // 1: rafiki.executor.v1.DescribeRequest
@@ -2389,60 +2663,68 @@ var file_executor_proto_goTypes = []any{
 	(*ProxyRequest)(nil),           // 31: rafiki.executor.v1.ProxyRequest
 	(*ProxyHead)(nil),              // 32: rafiki.executor.v1.ProxyHead
 	(*ProxyResponse)(nil),          // 33: rafiki.executor.v1.ProxyResponse
-	nil,                            // 34: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
-	nil,                            // 35: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
-	nil,                            // 36: rafiki.executor.v1.Result.ObservedMtimeEntry
-	nil,                            // 37: rafiki.executor.v1.ProvisionRequest.EnvEntry
-	nil,                            // 38: rafiki.executor.v1.ProxyStart.HeadersEntry
-	nil,                            // 39: rafiki.executor.v1.ProxyHead.HeadersEntry
+	(*SyncSkill)(nil),              // 34: rafiki.executor.v1.SyncSkill
+	(*SkillNamespace)(nil),         // 35: rafiki.executor.v1.SkillNamespace
+	(*SyncSkillsRequest)(nil),      // 36: rafiki.executor.v1.SyncSkillsRequest
+	(*SyncSkillsResponse)(nil),     // 37: rafiki.executor.v1.SyncSkillsResponse
+	nil,                            // 38: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	nil,                            // 39: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	nil,                            // 40: rafiki.executor.v1.Result.ObservedMtimeEntry
+	nil,                            // 41: rafiki.executor.v1.ProvisionRequest.EnvEntry
+	nil,                            // 42: rafiki.executor.v1.ProxyStart.HeadersEntry
+	nil,                            // 43: rafiki.executor.v1.ProxyHead.HeadersEntry
 }
 var file_executor_proto_depIdxs = []int32{
-	34, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	38, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
 	6,  // 1: rafiki.executor.v1.ContentBlock.image:type_name -> rafiki.executor.v1.ImageBlock
-	35, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	39, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
 	9,  // 3: rafiki.executor.v1.ExecuteResponse.output:type_name -> rafiki.executor.v1.OutputChunk
 	10, // 4: rafiki.executor.v1.ExecuteResponse.result:type_name -> rafiki.executor.v1.Result
 	11, // 5: rafiki.executor.v1.ExecuteResponse.failed:type_name -> rafiki.executor.v1.Failure
 	5,  // 6: rafiki.executor.v1.Result.content:type_name -> rafiki.executor.v1.ContentBlock
-	36, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
+	40, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
 	0,  // 8: rafiki.executor.v1.Failure.code:type_name -> rafiki.executor.v1.Failure.Code
 	9,  // 9: rafiki.executor.v1.AttachResponse.output:type_name -> rafiki.executor.v1.OutputChunk
 	16, // 10: rafiki.executor.v1.ProvisionRequest.mounts:type_name -> rafiki.executor.v1.Mount
-	37, // 11: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
+	41, // 11: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
 	24, // 12: rafiki.executor.v1.ProjectSkillsResponse.skills:type_name -> rafiki.executor.v1.ProjectSkill
-	38, // 13: rafiki.executor.v1.ProxyStart.headers:type_name -> rafiki.executor.v1.ProxyStart.HeadersEntry
+	42, // 13: rafiki.executor.v1.ProxyStart.headers:type_name -> rafiki.executor.v1.ProxyStart.HeadersEntry
 	30, // 14: rafiki.executor.v1.ProxyRequest.start:type_name -> rafiki.executor.v1.ProxyStart
-	39, // 15: rafiki.executor.v1.ProxyHead.headers:type_name -> rafiki.executor.v1.ProxyHead.HeadersEntry
+	43, // 15: rafiki.executor.v1.ProxyHead.headers:type_name -> rafiki.executor.v1.ProxyHead.HeadersEntry
 	32, // 16: rafiki.executor.v1.ProxyResponse.head:type_name -> rafiki.executor.v1.ProxyHead
-	1,  // 17: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
-	3,  // 18: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
-	7,  // 19: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
-	12, // 20: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
-	14, // 21: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
-	28, // 22: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
-	17, // 23: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
-	19, // 24: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
-	21, // 25: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
-	23, // 26: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
-	26, // 27: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
-	31, // 28: rafiki.executor.v1.ExecutorService.Proxy:input_type -> rafiki.executor.v1.ProxyRequest
-	2,  // 29: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
-	4,  // 30: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
-	8,  // 31: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
-	13, // 32: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
-	15, // 33: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
-	29, // 34: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
-	18, // 35: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
-	20, // 36: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
-	22, // 37: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
-	25, // 38: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
-	27, // 39: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
-	33, // 40: rafiki.executor.v1.ExecutorService.Proxy:output_type -> rafiki.executor.v1.ProxyResponse
-	29, // [29:41] is the sub-list for method output_type
-	17, // [17:29] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	34, // 17: rafiki.executor.v1.SkillNamespace.skills:type_name -> rafiki.executor.v1.SyncSkill
+	35, // 18: rafiki.executor.v1.SyncSkillsRequest.namespaces:type_name -> rafiki.executor.v1.SkillNamespace
+	1,  // 19: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
+	3,  // 20: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
+	7,  // 21: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
+	12, // 22: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
+	14, // 23: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
+	28, // 24: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
+	17, // 25: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
+	19, // 26: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
+	21, // 27: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
+	23, // 28: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
+	26, // 29: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
+	36, // 30: rafiki.executor.v1.ExecutorService.SyncSkills:input_type -> rafiki.executor.v1.SyncSkillsRequest
+	31, // 31: rafiki.executor.v1.ExecutorService.Proxy:input_type -> rafiki.executor.v1.ProxyRequest
+	2,  // 32: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
+	4,  // 33: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
+	8,  // 34: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
+	13, // 35: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
+	15, // 36: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
+	29, // 37: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
+	18, // 38: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
+	20, // 39: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
+	22, // 40: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
+	25, // 41: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
+	27, // 42: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
+	37, // 43: rafiki.executor.v1.ExecutorService.SyncSkills:output_type -> rafiki.executor.v1.SyncSkillsResponse
+	33, // 44: rafiki.executor.v1.ExecutorService.Proxy:output_type -> rafiki.executor.v1.ProxyResponse
+	32, // [32:45] is the sub-list for method output_type
+	19, // [19:32] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_executor_proto_init() }
@@ -2478,7 +2760,7 @@ func file_executor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_executor_proto_rawDesc), len(file_executor_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   39,
+			NumMessages:   43,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -61,6 +61,9 @@ const (
 	// ExecutorServiceSkillBodyProcedure is the fully-qualified name of the ExecutorService's SkillBody
 	// RPC.
 	ExecutorServiceSkillBodyProcedure = "/rafiki.executor.v1.ExecutorService/SkillBody"
+	// ExecutorServiceSyncSkillsProcedure is the fully-qualified name of the ExecutorService's
+	// SyncSkills RPC.
+	ExecutorServiceSyncSkillsProcedure = "/rafiki.executor.v1.ExecutorService/SyncSkills"
 	// ExecutorServiceProxyProcedure is the fully-qualified name of the ExecutorService's Proxy RPC.
 	ExecutorServiceProxyProcedure = "/rafiki.executor.v1.ExecutorService/Proxy"
 )
@@ -106,6 +109,18 @@ type ExecutorServiceClient interface {
 	// workspace id: a path parameter would let anything that reaches this
 	// executor read an arbitrary file on it.
 	SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error)
+	// SyncSkills replaces this executor's rafiki-managed skill trees with the
+	// corpus the daemon sends, so a claude child launched here discovers the
+	// same skills a fundi child sees.
+	//
+	// Content flows DOWN from the daemon's authority: the executor never
+	// publishes skills upward, because the daemon's corpus must not hold content
+	// asserted by machines it confines children away from.
+	//
+	// Whole-corpus, not incremental. The executor owns one directory per
+	// namespace and rewrites it wholesale, so there is no per-path bookkeeping
+	// to drift and no partial state to reconcile after a crash.
+	SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse]
@@ -188,6 +203,12 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SkillBody")),
 			connect.WithClientOptions(opts...),
 		),
+		syncSkills: connect.NewClient[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse](
+			httpClient,
+			baseURL+ExecutorServiceSyncSkillsProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("SyncSkills")),
+			connect.WithClientOptions(opts...),
+		),
 		proxy: connect.NewClient[executorpb.ProxyRequest, executorpb.ProxyResponse](
 			httpClient,
 			baseURL+ExecutorServiceProxyProcedure,
@@ -210,6 +231,7 @@ type executorServiceClient struct {
 	projectContext *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
 	projectSkills  *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
 	skillBody      *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
+	syncSkills     *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
 	proxy          *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
@@ -268,6 +290,11 @@ func (c *executorServiceClient) SkillBody(ctx context.Context, req *connect.Requ
 	return c.skillBody.CallUnary(ctx, req)
 }
 
+// SyncSkills calls rafiki.executor.v1.ExecutorService.SyncSkills.
+func (c *executorServiceClient) SyncSkills(ctx context.Context, req *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error) {
+	return c.syncSkills.CallUnary(ctx, req)
+}
+
 // Proxy calls rafiki.executor.v1.ExecutorService.Proxy.
 func (c *executorServiceClient) Proxy(ctx context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse] {
 	return c.proxy.CallBidiStream(ctx)
@@ -314,6 +341,18 @@ type ExecutorServiceHandler interface {
 	// workspace id: a path parameter would let anything that reaches this
 	// executor read an arbitrary file on it.
 	SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error)
+	// SyncSkills replaces this executor's rafiki-managed skill trees with the
+	// corpus the daemon sends, so a claude child launched here discovers the
+	// same skills a fundi child sees.
+	//
+	// Content flows DOWN from the daemon's authority: the executor never
+	// publishes skills upward, because the daemon's corpus must not hold content
+	// asserted by machines it confines children away from.
+	//
+	// Whole-corpus, not incremental. The executor owns one directory per
+	// namespace and rewrites it wholesale, so there is no per-path bookkeeping
+	// to drift and no partial state to reconcile after a crash.
+	SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error
@@ -392,6 +431,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SkillBody")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceSyncSkillsHandler := connect.NewUnaryHandler(
+		ExecutorServiceSyncSkillsProcedure,
+		svc.SyncSkills,
+		connect.WithSchema(executorServiceMethods.ByName("SyncSkills")),
+		connect.WithHandlerOptions(opts...),
+	)
 	executorServiceProxyHandler := connect.NewBidiStreamHandler(
 		ExecutorServiceProxyProcedure,
 		svc.Proxy,
@@ -422,6 +467,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceProjectSkillsHandler.ServeHTTP(w, r)
 		case ExecutorServiceSkillBodyProcedure:
 			executorServiceSkillBodyHandler.ServeHTTP(w, r)
+		case ExecutorServiceSyncSkillsProcedure:
+			executorServiceSyncSkillsHandler.ServeHTTP(w, r)
 		case ExecutorServiceProxyProcedure:
 			executorServiceProxyHandler.ServeHTTP(w, r)
 		default:
@@ -475,6 +522,10 @@ func (UnimplementedExecutorServiceHandler) ProjectSkills(context.Context, *conne
 
 func (UnimplementedExecutorServiceHandler) SkillBody(context.Context, *connect.Request[executorpb.SkillBodyRequest]) (*connect.Response[executorpb.SkillBodyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SkillBody is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncSkills is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error {

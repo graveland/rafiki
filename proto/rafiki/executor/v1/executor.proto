@@ -46,6 +46,19 @@ service ExecutorService {
   // executor read an arbitrary file on it.
   rpc SkillBody(SkillBodyRequest) returns (SkillBodyResponse);
 
+  // SyncSkills replaces this executor's rafiki-managed skill trees with the
+  // corpus the daemon sends, so a claude child launched here discovers the
+  // same skills a fundi child sees.
+  //
+  // Content flows DOWN from the daemon's authority: the executor never
+  // publishes skills upward, because the daemon's corpus must not hold content
+  // asserted by machines it confines children away from.
+  //
+  // Whole-corpus, not incremental. The executor owns one directory per
+  // namespace and rewrites it wholesale, so there is no per-path bookkeeping
+  // to drift and no partial state to reconcile after a crash.
+  rpc SyncSkills(SyncSkillsRequest) returns (SyncSkillsResponse);
+
   // Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
   // the response back. One stream per request/response cycle.
   rpc Proxy(stream ProxyRequest) returns (stream ProxyResponse);
@@ -76,6 +89,12 @@ message DescribeResponse {
   // executor selector to match, so a wrong entry costs a failed launch rather
   // than admitting anyone.
   repeated string launch_kinds = 11;
+  // skills_sync reports that this executor accepts SyncSkills. Safe to
+  // self-report for the same reason as proxies and launch_kinds: it only ever
+  // NARROWS what this executor will do, and a wrong value costs a skipped sync
+  // rather than admitting anyone. It is NOT an access-gating fact, so it does
+  // not collide with the rule that the executor row is authoritative.
+  bool skills_sync = 12;
 }
 
 message HealthRequest {}
@@ -290,4 +309,42 @@ message ProxyResponse {
     ProxyHead head = 1;  // exactly once, first
     bytes     body = 2;  // response body chunks, flushed as they arrive
   }
+}
+
+// SyncSkill is one skill's rendered content. The name is BARE: Claude Code
+// derives the "<namespace>:<name>" a model sees from the plugin directory,
+// so a prefix written here would be applied twice.
+message SyncSkill {
+  string name = 1;
+  string description = 2;
+  // body has already had its frontmatter stripped; the executor re-renders a
+  // frontmatter block from name and description when it writes SKILL.md.
+  string body = 3;
+}
+
+// SkillNamespace is one plugin directory's worth of skills.
+message SkillNamespace {
+  // name becomes the plugin name AND the directory name, so the executor
+  // validates it as a path segment before touching the filesystem.
+  string name = 1;
+  // version is stamped into the generated .claude-plugin/plugin.json. It is
+  // informational: nothing keys behaviour on it.
+  string version = 2;
+  repeated SyncSkill skills = 3;
+}
+
+message SyncSkillsRequest {
+  // namespaces is the COMPLETE set of rafiki-managed namespaces. A namespace
+  // absent from this list has its directory removed. An empty list is
+  // therefore a full removal request and the daemon must never send one
+  // casually — see the daemon-side guard.
+  repeated SkillNamespace namespaces = 1;
+}
+
+message SyncSkillsResponse {
+  int32 written = 1;
+  int32 pruned = 2;
+  // skills_dir is the directory the executor actually wrote into, so the
+  // daemon can log where the corpus landed rather than guessing.
+  string skills_dir = 3;
 }
