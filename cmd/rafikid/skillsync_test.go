@@ -5,6 +5,9 @@ package main
 import (
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/execpool"
+	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/skills"
 )
 
@@ -51,5 +54,25 @@ func TestPushRefusesToSendAnEmptyCorpus(t *testing.T) {
 	}
 	if !shouldPush([]skills.Record{{Namespace: "rafiki", Name: "a", Body: "b"}}) {
 		t.Error("pusher refused a non-empty corpus")
+	}
+}
+
+func TestEligibleRequiresSkillsSyncAndClaude(t *testing.T) {
+	eligible := func(d *executorpb.DescribeResponse) bool {
+		return (&skillPusher{}).eligible(execpool.LiveExecutor{Executor: executors.Executor{ID: "e1"}, Describe: d})
+	}
+	if !eligible(&executorpb.DescribeResponse{SkillsSync: true, LaunchKinds: []string{"claude"}}) {
+		t.Error("an executor that accepts syncs and launches claude children must be eligible")
+	}
+	if eligible(&executorpb.DescribeResponse{SkillsSync: false, LaunchKinds: []string{"claude"}}) {
+		t.Error("an executor that did not opt into syncs must not be eligible")
+	}
+	if eligible(&executorpb.DescribeResponse{SkillsSync: true, LaunchKinds: []string{"fundi"}}) {
+		t.Error("an executor that launches no claude children must not be eligible")
+	}
+	// A nil Describe must be declined, not dereferenced — the connect hook can
+	// fire against a pool entry before its Describe has landed.
+	if eligible(nil) {
+		t.Error("a nil Describe must not be eligible (and must not panic)")
 	}
 }

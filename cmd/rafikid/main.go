@@ -516,7 +516,7 @@ func runDaemon(opts runDaemonOpts) error {
 		// push immediately rather than waiting out the tick. This callback runs
 		// on its own goroutine, outside Pool.mu.
 		execPool.SetOnConnect(func(id string) {
-			if err := pusher.pushTo(baseCtx, id); err != nil {
+			if err := pusher.pushIfEligible(baseCtx, id); err != nil {
 				slog.Warn("skill sync on connect failed", "executor", id, "error", err)
 			}
 		})

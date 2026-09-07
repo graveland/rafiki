@@ -122,6 +122,28 @@ func (sp *skillPusher) eligible(le execpool.LiveExecutor) bool {
 	return slices.Contains(le.Describe.GetLaunchKinds(), "claude")
 }
 
+// pushIfEligible pushes to one executor only after confirming it would pass
+// the tick path's own filter. The on-connect hook fires for EVERY executor
+// that joins the pool — including session executors (rafiki create/attach),
+// which build their Options without SkillsSync, host no claude children and
+// never opted into syncs — so calling pushTo from it directly sent every such
+// executor an RPC it answered permission_denied. Filtering here keeps the two
+// paths in agreement: pushAll scans Live() through eligible() on its tick, and
+// the connect path is that same check applied to one id. A miss is fine — the
+// next tick covers it — so this never blocks or retries; it just declines.
+func (sp *skillPusher) pushIfEligible(ctx context.Context, executorID string) error {
+	for _, le := range sp.pool.Live() {
+		if le.Executor.ID != executorID {
+			continue
+		}
+		if !sp.eligible(le) {
+			return nil
+		}
+		return sp.pushTo(ctx, executorID)
+	}
+	return nil
+}
+
 func (sp *skillPusher) pushTo(ctx context.Context, executorID string) error {
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
