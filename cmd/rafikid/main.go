@@ -507,6 +507,22 @@ func runDaemon(opts runDaemonOpts) error {
 		execPool.StartSweeper(ctx)
 	}
 
+	// Push the skill corpus to every claude-capable executor. Only meaningful
+	// when both a database-backed skill store and an executor pool exist; a
+	// daemon without either has nothing to read and nothing to push to.
+	if skillStore != nil && execPool != nil {
+		pusher := &skillPusher{pool: execPool, store: skillStore, version: version.String()}
+		// An executor that has just connected has an empty or stale tree, so
+		// push immediately rather than waiting out the tick. This callback runs
+		// on its own goroutine, outside Pool.mu.
+		execPool.SetOnConnect(func(id string) {
+			if err := pusher.pushTo(baseCtx, id); err != nil {
+				slog.Warn("skill sync on connect failed", "executor", id, "error", err)
+			}
+		})
+		go pusher.Run(baseCtx)
+	}
+
 	// Daraja pool: accepts per-child reverse-dialled connections.
 	var darajaPool *darajapool.Pool
 	if execStore != nil {

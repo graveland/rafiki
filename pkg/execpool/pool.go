@@ -542,6 +542,12 @@ func (p *Pool) connectClientFor(executorID string) (executorpbconnect.ExecutorSe
 	return lc.client.inner, nil
 }
 
+// ConnectClientFor returns the raw ExecutorService client for executorID, for
+// callers that need an RPC the tools.ExecutorClient facade does not carry.
+func (p *Pool) ConnectClientFor(executorID string) (executorpbconnect.ExecutorServiceClient, error) {
+	return p.connectClientFor(executorID)
+}
+
 // AdminClientFor returns an AdminServiceClient for executorID. It builds the
 // client from the same inverted-h2 http.Client that backs the executor service,
 // so calls reach the same live connection. Nil is returned when the executor
