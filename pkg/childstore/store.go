@@ -208,6 +208,15 @@ func (s *Store) SetStatus(id string, newStatus protocol.Status) (prev protocol.S
 	return prev, true
 }
 
+// SetMaxCost changes id's stored budget. 0 means unlimited, matching every
+// other MaxCost convention in this package (Session.MaxCost, and
+// grantedCost in cmd/rafikid). MaxCost is not an indexed field (unlike Name,
+// Cwd, Status), so this needs no pivot pattern the way Rename/SetStatus do —
+// Update's lock-and-mutate is sufficient.
+func (s *Store) SetMaxCost(id string, maxCost float64) error {
+	return s.Update(id, func(sess *Session) { sess.MaxCost = maxCost })
+}
+
 // SetLabels atomically applies a set/remove mutation to the session's label map.
 // Set entries are merged, then Remove entries are deleted. Returns the full
 // post-mutation labels as a defensive copy, or ErrNotFound when id is absent.

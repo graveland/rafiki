@@ -234,3 +234,33 @@ func TestStore_ListSortedByStartedAtDesc(t *testing.T) {
 		t.Fatalf("sort wrong: %v %v", got[0].ChildID, got[1].ChildID)
 	}
 }
+
+func TestStore_SetMaxCost(t *testing.T) {
+	s := childstore.New()
+	s.Insert(newSess("c_1", "a", "/x"))
+
+	if err := s.SetMaxCost("c_1", 12.5); err != nil {
+		t.Fatalf("SetMaxCost: %v", err)
+	}
+	snap, _ := s.Get("c_1")
+	if snap.MaxCost != 12.5 {
+		t.Fatalf("MaxCost = %v, want 12.5", snap.MaxCost)
+	}
+
+	// 0 means unlimited, same convention as every other MaxCost write in
+	// this codebase — confirm it round-trips, not just non-zero values.
+	if err := s.SetMaxCost("c_1", 0); err != nil {
+		t.Fatalf("SetMaxCost(0): %v", err)
+	}
+	snap, _ = s.Get("c_1")
+	if snap.MaxCost != 0 {
+		t.Fatalf("MaxCost = %v, want 0 (unlimited)", snap.MaxCost)
+	}
+}
+
+func TestStore_SetMaxCost_NotFound(t *testing.T) {
+	s := childstore.New()
+	if err := s.SetMaxCost("missing", 5.0); err != childstore.ErrNotFound {
+		t.Fatalf("SetMaxCost on missing id: got %v, want ErrNotFound", err)
+	}
+}
