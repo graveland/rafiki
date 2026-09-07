@@ -61,6 +61,7 @@ type Server struct {
 	taskLister  atomic.Pointer[TaskLister]
 	modelLister atomic.Pointer[ModelLister]
 	execLister  atomic.Pointer[ExecutorLister]
+	skills      atomic.Pointer[SkillManager]
 	quota       atomic.Pointer[QuotaReader]
 	daraja      atomic.Pointer[*darajaHandlers]
 }

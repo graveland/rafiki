@@ -482,6 +482,9 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 			face.Control.SetModelLister(connectModels{c: ctrl})
 			face.Control.SetExecutorLister(connectExecutors{c: ctrl})
+			if skillStore != nil {
+				face.Control.SetSkillManager(connectSkills{st: skillStore})
+			}
 			if face.QuotaStore != nil {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
 			}

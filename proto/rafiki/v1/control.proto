@@ -484,7 +484,64 @@ service Control {
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
   rpc ListExecutors(ListExecutorsRequest) returns (ListExecutorsResponse);
   rpc GetRateLimitStatus(GetRateLimitStatusRequest) returns (GetRateLimitStatusResponse);
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+  rpc GetSkill(GetSkillRequest) returns (GetSkillResponse);
+  rpc UpsertSkill(UpsertSkillRequest) returns (UpsertSkillResponse);
+  rpc DeleteSkill(DeleteSkillRequest) returns (DeleteSkillResponse);
+  rpc SetSkillEnabled(SetSkillEnabledRequest) returns (SetSkillEnabledResponse);
   rpc DarajaLaunch(DarajaLaunchRequest) returns (DarajaLaunchResponse);
   rpc DarajaSend(DarajaSendRequest) returns (DarajaSendResponse);
   rpc DarajaWatch(DarajaWatchRequest) returns (stream DarajaWatchResponse);
 }
+
+// SkillRow is one row of conversations.skills. body is omitted from list
+// responses: an inventory is a handful of lines and a body is a document.
+message SkillRow {
+  string namespace = 1;
+  string name = 2;
+  string description = 3;
+  string source = 4;
+  bool enabled = 5;
+  string shadowed_core_version = 6;
+  string updated_at = 7;
+  // body is populated only by GetSkill.
+  string body = 8;
+}
+
+message ListSkillsRequest {
+  // include_disabled returns rows an operator switched off as well.
+  bool include_disabled = 1;
+}
+message ListSkillsResponse { repeated SkillRow rows = 1; }
+
+message GetSkillRequest {
+  string namespace = 1;
+  string name = 2;
+}
+message GetSkillResponse { SkillRow row = 1; }
+
+message UpsertSkillRequest {
+  // namespace defaults to "rafiki" when empty.
+  string namespace = 1;
+  string name = 2;
+  string description = 3;
+  string body = 4;
+  // source defaults to "manual" when empty. "rafiki-core" is REJECTED: that
+  // provenance belongs to the daemon's own startup sync.
+  string source = 5;
+  string shadowed_core_version = 6;
+}
+message UpsertSkillResponse { SkillRow row = 1; }
+
+message DeleteSkillRequest {
+  string namespace = 1;
+  string name = 2;
+}
+message DeleteSkillResponse {}
+
+message SetSkillEnabledRequest {
+  string namespace = 1;
+  string name = 2;
+  bool enabled = 3;
+}
+message SetSkillEnabledResponse {}

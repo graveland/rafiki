@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -15,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -253,6 +255,77 @@ type connectExecutors struct{ c *Controller }
 
 func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]connectapi.ExecutorRow, error) {
 	return e.c.ListExecutorRows(ctx, kind, spawnOwner(ctx).Username)
+}
+
+// connectSkills adapts the daemon's skills.Store to connectapi.SkillManager.
+// The translation exists so pkg/connectapi — which cmd/rafiki links — never
+// imports pkg/skills' store half.
+type connectSkills struct{ st skills.Store }
+
+func skillRowFrom(r skills.Record) connectapi.SkillRow {
+	return connectapi.SkillRow{
+		Namespace:           r.Namespace,
+		Name:                r.Name,
+		Description:         r.Description,
+		Body:                r.Body,
+		Source:              r.Source,
+		ShadowedCoreVersion: r.ShadowedCoreVersion,
+		Enabled:             r.Enabled,
+		UpdatedAt:           r.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// translateSkillErr maps the store's sentinel onto connectapi's, so a missing
+// skill stays an ANSWER (NotFound) rather than becoming an internal error.
+func translateSkillErr(err error) error {
+	if errors.Is(err, skills.ErrNotFound) {
+		return connectapi.ErrSkillNotFound
+	}
+	return err
+}
+
+func (c connectSkills) ListSkills(ctx context.Context, includeDisabled bool) ([]connectapi.SkillRow, error) {
+	recs, err := c.st.List(ctx, !includeDisabled)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]connectapi.SkillRow, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, skillRowFrom(r))
+	}
+	return out, nil
+}
+
+func (c connectSkills) GetSkill(ctx context.Context, ns, name string) (connectapi.SkillRow, error) {
+	r, err := c.st.Get(ctx, ns, name)
+	if err != nil {
+		return connectapi.SkillRow{}, translateSkillErr(err)
+	}
+	return skillRowFrom(r), nil
+}
+
+func (c connectSkills) UpsertSkill(ctx context.Context, row connectapi.SkillRow) (connectapi.SkillRow, error) {
+	out, err := c.st.Upsert(ctx, skills.Record{
+		Namespace:           row.Namespace,
+		Name:                row.Name,
+		Description:         row.Description,
+		Body:                row.Body,
+		Source:              row.Source,
+		ShadowedCoreVersion: row.ShadowedCoreVersion,
+		Enabled:             row.Enabled,
+	})
+	if err != nil {
+		return connectapi.SkillRow{}, translateSkillErr(err)
+	}
+	return skillRowFrom(out), nil
+}
+
+func (c connectSkills) DeleteSkill(ctx context.Context, ns, name string) error {
+	return translateSkillErr(c.st.Delete(ctx, ns, name))
+}
+
+func (c connectSkills) SetSkillEnabled(ctx context.Context, ns, name string, enabled bool) error {
+	return translateSkillErr(c.st.SetEnabled(ctx, ns, name, enabled))
 }
 
 func (l connectLifecycle) Close(_ context.Context, childID string) error {

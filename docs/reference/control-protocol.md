@@ -239,9 +239,50 @@ watch that row freeze.
 | `ListExecutors` | unary | The executors in the daemon's pool **right now**, scoped to the caller. `kind` scopes eligibility the way ListModels' `kind` scopes sources: each row carries `id`, `machine` (the `machine` trust label), `labels`, `isolation`, `workspace_mode`, `roots`, `admits`, `enabled`, `connected`, `launch_kinds` and — when `kind` was given — `eligible` plus the `reason` it is not, computed by the SAME per-row reasoning a spawn attempt would produce (a hypothetical top-level spawn, which is what a human picking an executor is actually asking). Deliberately **live-only**: an offline durable executor cannot serve a fresh spawn either, so this answers exactly what `Spawn` would see, and is what `--executor` completion and the cockpit's executor picker read. The full management table, offline rows included, remains `ctrl_executor_list` (§15.2) |
 | `ListTasks` | unary | One conversation's task ledger, mapped from `Controller.TaskList` (the same implementation behind the `ctrl_task_list` frame verb). `conversation_id` empty means every conversation; `include_dropped` surfaces rows an agent abandoned, hidden by default. rafiki requires a database, so a ledger that cannot answer is a real failure and surfaces as `CodeInternal` rather than as an empty list; the cockpit chooses to hide the box rather than surface it. Rows are clamped to 2000, matching the `ctrl_task_list` frame verb — `tasks.ListFilter.Limit == 0` means unlimited and `conversation_id` empty means every conversation. Each `TaskRow` carries `handle` — the dotted ordinal path ("2.1"), computed on read and never persisted — plus `content`, `active_form`, `status`, `assignee` and `drop_reason` |
 | `GetRateLimitStatus` | unary | The CALLER's own latest captured Anthropic subscription rate-limit snapshot (`anthropic-ratelimit-unified-*` response headers, captured by the proxy off genuine OAuth-passthrough traffic to `api.anthropic.com` — never OpenRouter-routed traffic, and never API-token usage, which has its own separate usage endpoint). Takes no request fields; the daemon resolves identity from the authenticated connection, the same as `Spawn`'s owner attribution — there is no way to ask for another user's usage. Returns `CodeNotFound` (not an empty message) when this user has never made a passthrough call, which is the expected state for anyone who has not used `rafiki claude --passthrough-auth`. `rafiki claude --limits` and the cockpit's status-line quota readout both poll this |
+| `ListSkills` | unary | The daemon's database-backed skill corpus (§"Skill management verbs") |
+| `GetSkill` | unary | One skill's full row, body included |
+| `UpsertSkill` | unary | Create or replace a skill at `(namespace, name)` |
+| `DeleteSkill` | unary | Hard-delete every row under a skill name |
+| `SetSkillEnabled` | unary | Flip one skill name's enabled flag |
 | `DarajaLaunch` | unary | Launches a claude child via daraja on a matching executor. Selects an executor that admits the request's label selector AND declares "claude" in its `LaunchKinds`, calls `AdminService.Launch` on that executor with a one-shot ticket, then waits for the daraja's reverse dial into the pool. A match yielding zero candidates returns `explanation` with per-candidate refusal reasons. Response carries `child_id`, `pid`, `pgid`, and `connected_unix_ms`. Requires a configured executor pool and daraja connect address (**`RAFIKI_CONTROL_LISTEN` must be set**; Unix socket paths are refused because remote executors cannot reach daemon-local sockets). |
 | `DarajaSend` | unary | Writes bytes to a live child's stdin via the connected daraja. Unary rather than bidi because the HTTP/1.1 remote plane cannot carry the bidirectional Relay stream. Returns `acknowledged=true` on success; the child id must name a currently-connected daraja. |
 | `DarajaWatch` | server-streaming | Streams stdout and lifecycle markers (ProcessRestarted, ProcessExited) from a connected daraja. Server-streaming only — client sends no messages during the watch. The stream follows the child until disconnect or context cancellation. Lifecycle events let callers distinguish process-boundary resets from ordinary output. |
+
+### Skill management verbs (`ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`)
+
+These five verbs manage the database-backed skill corpus in
+`conversations.skills` — the tier a fundi child's skill tool reads at the
+start of each turn. They back the `rafiki skills` CLI group.
+
+A `SkillRow` carries `namespace`, `name`, `description`, `source`, `enabled`,
+`shadowed_core_version`, `updated_at` (RFC 3339) and `body`.
+`ListSkills` (`include_disabled` also returns rows an operator switched off)
+always omits `body` — an inventory is a handful of lines and a body is a
+document — so an inventory costs none of the corpus's weight;
+`GetSkill` populates it.
+
+`UpsertSkill` creates or replaces the row at `(namespace, name)` and returns
+the stored row. `namespace` defaults to `rafiki` and `source` defaults to
+`manual` when empty; `name` and `body` are required (`CodeInvalidArgument`
+otherwise). `source: "rafiki-core"` is **rejected** with
+`CodeInvalidArgument`: that provenance is owned by the daemon's own startup
+sync of its embedded corpus, and a client that could claim it could plant a
+row the sync would prune or fight over on every restart. An upsert never
+changes an existing row's enabled flag — re-importing content must not
+silently re-enable something an operator switched off.
+
+`DeleteSkill` hard-deletes every row under the name (in the override state
+that is two rows), and `SetSkillEnabled` flips one name's flag. Both return
+`CodeNotFound` when the name has no row in the requested state. A missing
+skill is an ANSWER (`CodeNotFound`), never an internal failure — getting that
+wrong makes a typo look like a broken daemon.
+
+Authentication is the same `UserTokenAuth` middleware as every other Connect
+verb (§2.3): any valid user token may read and write, in any namespace, until
+multi-user scoping is built. The verbs are mounted inside the proxy face via
+`server.Handler.Mount`; there is deliberately no second mount in `main.go` —
+a `mux.Handle` for `/rafiki.v1.Control/` there would shadow the face's auth
+middleware, because ServeMux prefers the longer pattern.
 
 ### `Send` and the durable inbox
 

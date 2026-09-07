@@ -58,6 +58,16 @@ const (
 	// ControlGetRateLimitStatusProcedure is the fully-qualified name of the Control's
 	// GetRateLimitStatus RPC.
 	ControlGetRateLimitStatusProcedure = "/rafiki.v1.Control/GetRateLimitStatus"
+	// ControlListSkillsProcedure is the fully-qualified name of the Control's ListSkills RPC.
+	ControlListSkillsProcedure = "/rafiki.v1.Control/ListSkills"
+	// ControlGetSkillProcedure is the fully-qualified name of the Control's GetSkill RPC.
+	ControlGetSkillProcedure = "/rafiki.v1.Control/GetSkill"
+	// ControlUpsertSkillProcedure is the fully-qualified name of the Control's UpsertSkill RPC.
+	ControlUpsertSkillProcedure = "/rafiki.v1.Control/UpsertSkill"
+	// ControlDeleteSkillProcedure is the fully-qualified name of the Control's DeleteSkill RPC.
+	ControlDeleteSkillProcedure = "/rafiki.v1.Control/DeleteSkill"
+	// ControlSetSkillEnabledProcedure is the fully-qualified name of the Control's SetSkillEnabled RPC.
+	ControlSetSkillEnabledProcedure = "/rafiki.v1.Control/SetSkillEnabled"
 	// ControlDarajaLaunchProcedure is the fully-qualified name of the Control's DarajaLaunch RPC.
 	ControlDarajaLaunchProcedure = "/rafiki.v1.Control/DarajaLaunch"
 	// ControlDarajaSendProcedure is the fully-qualified name of the Control's DarajaSend RPC.
@@ -80,6 +90,11 @@ type ControlClient interface {
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 	ListExecutors(context.Context, *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error)
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
+	ListSkills(context.Context, *connect.Request[v1.ListSkillsRequest]) (*connect.Response[v1.ListSkillsResponse], error)
+	GetSkill(context.Context, *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error)
+	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
+	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
+	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest]) (*connect.ServerStreamForClient[v1.DarajaWatchResponse], error)
@@ -168,6 +183,36 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("GetRateLimitStatus")),
 			connect.WithClientOptions(opts...),
 		),
+		listSkills: connect.NewClient[v1.ListSkillsRequest, v1.ListSkillsResponse](
+			httpClient,
+			baseURL+ControlListSkillsProcedure,
+			connect.WithSchema(controlMethods.ByName("ListSkills")),
+			connect.WithClientOptions(opts...),
+		),
+		getSkill: connect.NewClient[v1.GetSkillRequest, v1.GetSkillResponse](
+			httpClient,
+			baseURL+ControlGetSkillProcedure,
+			connect.WithSchema(controlMethods.ByName("GetSkill")),
+			connect.WithClientOptions(opts...),
+		),
+		upsertSkill: connect.NewClient[v1.UpsertSkillRequest, v1.UpsertSkillResponse](
+			httpClient,
+			baseURL+ControlUpsertSkillProcedure,
+			connect.WithSchema(controlMethods.ByName("UpsertSkill")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteSkill: connect.NewClient[v1.DeleteSkillRequest, v1.DeleteSkillResponse](
+			httpClient,
+			baseURL+ControlDeleteSkillProcedure,
+			connect.WithSchema(controlMethods.ByName("DeleteSkill")),
+			connect.WithClientOptions(opts...),
+		),
+		setSkillEnabled: connect.NewClient[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse](
+			httpClient,
+			baseURL+ControlSetSkillEnabledProcedure,
+			connect.WithSchema(controlMethods.ByName("SetSkillEnabled")),
+			connect.WithClientOptions(opts...),
+		),
 		darajaLaunch: connect.NewClient[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse](
 			httpClient,
 			baseURL+ControlDarajaLaunchProcedure,
@@ -203,6 +248,11 @@ type controlClient struct {
 	listModels         *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
 	listExecutors      *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
 	getRateLimitStatus *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
+	listSkills         *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
+	getSkill           *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
+	upsertSkill        *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
+	deleteSkill        *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
+	setSkillEnabled    *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
 	darajaLaunch       *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
 	darajaSend         *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
 	darajaWatch        *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
@@ -268,6 +318,31 @@ func (c *controlClient) GetRateLimitStatus(ctx context.Context, req *connect.Req
 	return c.getRateLimitStatus.CallUnary(ctx, req)
 }
 
+// ListSkills calls rafiki.v1.Control.ListSkills.
+func (c *controlClient) ListSkills(ctx context.Context, req *connect.Request[v1.ListSkillsRequest]) (*connect.Response[v1.ListSkillsResponse], error) {
+	return c.listSkills.CallUnary(ctx, req)
+}
+
+// GetSkill calls rafiki.v1.Control.GetSkill.
+func (c *controlClient) GetSkill(ctx context.Context, req *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error) {
+	return c.getSkill.CallUnary(ctx, req)
+}
+
+// UpsertSkill calls rafiki.v1.Control.UpsertSkill.
+func (c *controlClient) UpsertSkill(ctx context.Context, req *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error) {
+	return c.upsertSkill.CallUnary(ctx, req)
+}
+
+// DeleteSkill calls rafiki.v1.Control.DeleteSkill.
+func (c *controlClient) DeleteSkill(ctx context.Context, req *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error) {
+	return c.deleteSkill.CallUnary(ctx, req)
+}
+
+// SetSkillEnabled calls rafiki.v1.Control.SetSkillEnabled.
+func (c *controlClient) SetSkillEnabled(ctx context.Context, req *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error) {
+	return c.setSkillEnabled.CallUnary(ctx, req)
+}
+
 // DarajaLaunch calls rafiki.v1.Control.DarajaLaunch.
 func (c *controlClient) DarajaLaunch(ctx context.Context, req *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {
 	return c.darajaLaunch.CallUnary(ctx, req)
@@ -297,6 +372,11 @@ type ControlHandler interface {
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 	ListExecutors(context.Context, *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error)
 	GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error)
+	ListSkills(context.Context, *connect.Request[v1.ListSkillsRequest]) (*connect.Response[v1.ListSkillsResponse], error)
+	GetSkill(context.Context, *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error)
+	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
+	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
+	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error
@@ -381,6 +461,36 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("GetRateLimitStatus")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListSkillsHandler := connect.NewUnaryHandler(
+		ControlListSkillsProcedure,
+		svc.ListSkills,
+		connect.WithSchema(controlMethods.ByName("ListSkills")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlGetSkillHandler := connect.NewUnaryHandler(
+		ControlGetSkillProcedure,
+		svc.GetSkill,
+		connect.WithSchema(controlMethods.ByName("GetSkill")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlUpsertSkillHandler := connect.NewUnaryHandler(
+		ControlUpsertSkillProcedure,
+		svc.UpsertSkill,
+		connect.WithSchema(controlMethods.ByName("UpsertSkill")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeleteSkillHandler := connect.NewUnaryHandler(
+		ControlDeleteSkillProcedure,
+		svc.DeleteSkill,
+		connect.WithSchema(controlMethods.ByName("DeleteSkill")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSetSkillEnabledHandler := connect.NewUnaryHandler(
+		ControlSetSkillEnabledProcedure,
+		svc.SetSkillEnabled,
+		connect.WithSchema(controlMethods.ByName("SetSkillEnabled")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlDarajaLaunchHandler := connect.NewUnaryHandler(
 		ControlDarajaLaunchProcedure,
 		svc.DarajaLaunch,
@@ -425,6 +535,16 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListExecutorsHandler.ServeHTTP(w, r)
 		case ControlGetRateLimitStatusProcedure:
 			controlGetRateLimitStatusHandler.ServeHTTP(w, r)
+		case ControlListSkillsProcedure:
+			controlListSkillsHandler.ServeHTTP(w, r)
+		case ControlGetSkillProcedure:
+			controlGetSkillHandler.ServeHTTP(w, r)
+		case ControlUpsertSkillProcedure:
+			controlUpsertSkillHandler.ServeHTTP(w, r)
+		case ControlDeleteSkillProcedure:
+			controlDeleteSkillHandler.ServeHTTP(w, r)
+		case ControlSetSkillEnabledProcedure:
+			controlSetSkillEnabledHandler.ServeHTTP(w, r)
 		case ControlDarajaLaunchProcedure:
 			controlDarajaLaunchHandler.ServeHTTP(w, r)
 		case ControlDarajaSendProcedure:
@@ -486,6 +606,26 @@ func (UnimplementedControlHandler) ListExecutors(context.Context, *connect.Reque
 
 func (UnimplementedControlHandler) GetRateLimitStatus(context.Context, *connect.Request[v1.GetRateLimitStatusRequest]) (*connect.Response[v1.GetRateLimitStatusResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetRateLimitStatus is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListSkills(context.Context, *connect.Request[v1.ListSkillsRequest]) (*connect.Response[v1.ListSkillsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListSkills is not implemented"))
+}
+
+func (UnimplementedControlHandler) GetSkill(context.Context, *connect.Request[v1.GetSkillRequest]) (*connect.Response[v1.GetSkillResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetSkill is not implemented"))
+}
+
+func (UnimplementedControlHandler) UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.UpsertSkill is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteSkill is not implemented"))
+}
+
+func (UnimplementedControlHandler) SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetSkillEnabled is not implemented"))
 }
 
 func (UnimplementedControlHandler) DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {
