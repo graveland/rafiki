@@ -191,7 +191,10 @@ func (s *Server) writeNamespace(root string, ns *executorpb.SkillNamespace) (boo
 		if err != nil {
 			return false, err
 		}
-		dir := filepath.Join(staged, sk.GetName())
+		// Claude Code adopts <root>/<namespace>/ as a plugin (via the manifest
+		// above) and then looks for that plugin's skills ONLY under its skills/
+		// subdirectory; a skill dir at the plugin root is invisible to it.
+		dir := filepath.Join(staged, "skills", sk.GetName())
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return false, fmt.Errorf("mkdir %s/%s: %w", ns.GetName(), sk.GetName(), err)
 		}

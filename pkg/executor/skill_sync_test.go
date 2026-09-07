@@ -53,9 +53,12 @@ func TestSyncWritesASkillsDirPlugin(t *testing.T) {
 		t.Fatalf("plugin.json missing: %v", err)
 	}
 
-	body, err := os.ReadFile(filepath.Join(skillsDir, "rafiki", "coordinating", "SKILL.md"))
+	body, err := os.ReadFile(filepath.Join(skillsDir, "rafiki", "skills", "coordinating", "SKILL.md"))
 	if err != nil {
 		t.Fatalf("SKILL.md missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(skillsDir, "rafiki", "coordinating")); !os.IsNotExist(err) {
+		t.Errorf("bare skill dir at the plugin root; Claude Code would not discover it (err=%v)", err)
 	}
 	got := string(body)
 	if !strings.HasPrefix(got, "---\n") {
@@ -88,7 +91,7 @@ func TestSyncPrunesANamespaceThatLeftTheCorpus(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(skillsDir, "pg")); !os.IsNotExist(err) {
 		t.Errorf("pg namespace survived a sync that omitted it (err=%v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(skillsDir, "rafiki", "a", "SKILL.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(skillsDir, "rafiki", "skills", "a", "SKILL.md")); err != nil {
 		t.Errorf("rafiki namespace was collaterally damaged: %v", err)
 	}
 }
@@ -163,7 +166,7 @@ func TestResyncingIdenticalContentDoesNotRewrite(t *testing.T) {
 	}
 
 	syncOnce(t, s, req)
-	p := filepath.Join(skillsDir, "rafiki", "a", "SKILL.md")
+	p := filepath.Join(skillsDir, "rafiki", "skills", "a", "SKILL.md")
 	first, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)

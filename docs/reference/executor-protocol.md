@@ -357,9 +357,11 @@ SyncSkills(namespaces[{name, version, skills[{name, description, body}]}])
 
 Unary. Delivers the daemon's skill corpus to the executor's Claude skills
 directory. Each namespace becomes one plugin-style directory holding
-`<name>/SKILL.md` for every skill plus a generated `.claude-plugin/plugin.json`,
-so Claude Code derives the `<namespace>:<name>` qualified name from the
-directory layout — nothing on disk is prefixed. The skill `body` has already had
+`skills/<name>/SKILL.md` for every skill plus a generated
+`.claude-plugin/plugin.json` at the plugin root — Claude Code adopts the
+directory as a plugin, looks for that plugin's skills only under its `skills/`
+subdirectory, and derives the `<namespace>:<name>` qualified name from the
+directory layout; nothing on disk is prefixed. The skill `body` has already had
 its frontmatter stripped by the daemon; the executor re-renders a frontmatter
 block from `name` and `description` when it writes `SKILL.md`. The response
 counts the namespaces written and pruned, and `skillsDir` echoes the directory
