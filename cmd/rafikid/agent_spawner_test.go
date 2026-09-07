@@ -132,3 +132,38 @@ func TestRefusedSpawnAssignsNothing(t *testing.T) {
 		t.Fatalf("a refused spawn left task 1 assigned to %q", rows[0].Assignee)
 	}
 }
+
+func TestSpawnerSetBudgetAllowsADirectChild(t *testing.T) {
+	c := spawnerFixture(t)
+	sp := newControllerSpawner(c, "c_root") // c_mine is c_root's direct child
+	if err := sp.SetBudget(context.Background(), "c_mine", 25.00); err != nil {
+		t.Fatalf("SetBudget on a direct child must succeed: %v", err)
+	}
+	snap, _ := c.st.Get("c_mine")
+	if snap.MaxCost != 25.00 {
+		t.Fatalf("c_mine.MaxCost = %v, want 25.00", snap.MaxCost)
+	}
+}
+
+// IMPORTANT: spawnerFixture's tree is c_root -> c_mine -> c_grandchild, plus
+// an unrelated top-level c_stranger. Relative to c_mine, c_grandchild IS a
+// direct child (see TestSpawnerListReturnsOnlyDescendants, which already
+// asserts this) — so this test uses c_root as the caller, since
+// c_grandchild is genuinely two hops away from c_root, not one.
+func TestSpawnerSetBudgetRefusesAGrandchildAndAStrangerAndSelf(t *testing.T) {
+	c := spawnerFixture(t)
+	sp := newControllerSpawner(c, "c_root")
+	for _, target := range []string{"c_grandchild", "c_stranger", "c_root", "c_nonexistent"} {
+		if err := sp.SetBudget(context.Background(), target, 5.00); err == nil {
+			t.Errorf("SetBudget(%s) must refuse — none of these are c_root's DIRECT child", target)
+		}
+	}
+}
+
+func TestSpawnerSetBudgetRequiresAnAgentID(t *testing.T) {
+	c := spawnerFixture(t)
+	sp := newControllerSpawner(c, "c_mine")
+	if err := sp.SetBudget(context.Background(), "", 5.00); err == nil {
+		t.Fatal("an empty agent id must be refused")
+	}
+}

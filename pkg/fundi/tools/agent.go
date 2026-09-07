@@ -87,6 +87,12 @@ type AgentSpawner interface {
 	Send(ctx context.Context, childID, message string) error
 	// Kill shuts a descendant down and waits for the exit to be recorded.
 	Kill(ctx context.Context, childID string) error
+	// SetBudget changes a direct child's MaxCost, in USD — the same units
+	// SpawnSpec.MaxCost already uses. 0 means unlimited. Implementations
+	// must reject a childID that is not the caller's DIRECT child (not
+	// merely any descendant, unlike every other method on this interface),
+	// reading stored lineage rather than trusting the argument.
+	SetBudget(ctx context.Context, childID string, maxCost float64) error
 }
 
 const (

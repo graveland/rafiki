@@ -291,6 +291,21 @@ func (s *controllerSpawner) Kill(ctx context.Context, childID string) error {
 	return nil
 }
 
+// SetBudget changes childID's budget. Unlike authorize (used by
+// View/Send/Kill, which permits ANY descendant), this requires DIRECT
+// parentage — enforced entirely inside Controller.SetChildBudget, which
+// takes both the caller's and the target's id and is the single authority
+// point for this whole feature. This method is deliberately thin: it does
+// not duplicate that ownership check, only the empty-id guard every other
+// steering verb's authorize() also applies, for the same error-message
+// quality (see errNotDescendant's sibling messages).
+func (s *controllerSpawner) SetBudget(ctx context.Context, childID string, maxCost float64) error {
+	if childID == "" {
+		return errors.New("agent id is required")
+	}
+	return s.c.SetChildBudget(ctx, s.selfID, childID, maxCost)
+}
+
 // Spawn creates a descendant. ParentChildID is the caller's own id, taken
 // from the binding — never from spec — so an agent cannot spawn into another
 // subtree.
