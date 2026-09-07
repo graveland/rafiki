@@ -186,6 +186,25 @@ func SkillBody(path string) (string, error) {
 	return body, nil
 }
 
+// ParseSkillFile splits one SKILL.md's raw content into its frontmatter name
+// and description and its body. It exists beside SkillBody because a skill can
+// arrive as bytes — embedded in a binary, or fetched over a link — with no file
+// on disk to read.
+func ParseSkillFile(content string) (name, description, body string, err error) {
+	fm, body, err := splitFrontmatter(content)
+	if err != nil {
+		return "", "", "", err
+	}
+	var meta skillFrontmatter
+	if err := yaml.Unmarshal([]byte(fm), &meta); err != nil {
+		return "", "", "", fmt.Errorf("parse frontmatter: %w", err)
+	}
+	if meta.Name == "" {
+		return "", "", "", fmt.Errorf("frontmatter missing required \"name\" field")
+	}
+	return meta.Name, meta.Description, body, nil
+}
+
 // readSkillFrontmatter reads path and parses its frontmatter block into a
 // skillFrontmatter. It returns an error for anything short of a valid
 // "---\n<yaml with a name field>\n---\n" block - the caller decides whether

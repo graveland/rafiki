@@ -402,6 +402,12 @@ func runDaemon(opts runDaemonOpts) error {
 	if pool != nil {
 		skillStore = skillsdb.NewPostgresStore(pool)
 	}
+	if err := syncCoreSkills(baseCtx, skillStore, version.String()); err != nil {
+		// Not fatal: the daemon serves children from whatever the store
+		// already holds. Last-good-wins, exactly as the executor sync and
+		// sc's own reconcile behave.
+		slog.Warn("core skills sync failed; corpus left as-is", "error", err)
+	}
 
 	// Load the provider registry once at startup. A missing file is not an
 	// error — it falls back to the shipped default (anthropic + openrouter).
