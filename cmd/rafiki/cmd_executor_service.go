@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -85,6 +86,8 @@ func newExecutorServiceInstallCmd() *cobra.Command {
 	cmd.Flags().String("spill-dir", "", "where oversized results and background job output are written")
 	cmd.Flags().Int64("job-output-budget-mb", 0, "megabytes of background-job output retained per workspace")
 	cmd.Flags().StringArray("proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable) — the main reason to run an executor as a service")
+	cmd.Flags().StringArray("launch", nil, "child protocol this executor will host for the daemon, e.g. --launch claude "+
+		"(repeatable). Opt-in: with no --launch this executor hosts nothing")
 	cmd.Flags().String("binary", "", "path to the rafiki binary (default: this one)")
 	cmd.Flags().String("path-env", "", "PATH value for the service environment (default: auto-detect)")
 	return cmd
@@ -164,6 +167,18 @@ func runExecutorServiceInstall(cmd *cobra.Command, _ []string) error {
 	args, err = appendProxyArgs(args, proxyArgs)
 	if err != nil {
 		return err
+	}
+	launchKinds, _ := cmd.Flags().GetStringArray("launch")
+	if len(launchKinds) > 0 {
+		// Same check `serve` makes at construction time (cmd_executor_serve.go) —
+		// fail the install rather than a supervised unit that restarts forever
+		// against a binary that was never there.
+		if _, err := exec.LookPath("claude"); err != nil {
+			return fmt.Errorf("--launch claude given but claude is not on PATH: %w", err)
+		}
+	}
+	for _, k := range launchKinds {
+		args = append(args, "--launch", k)
 	}
 
 	pathEnv, _ := cmd.Flags().GetString("path-env")

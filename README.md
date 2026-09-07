@@ -341,12 +341,16 @@ There are two kinds of executor:
 If a durable executor already covers this machine and user, the client uses that
 instead of starting its own. That one outlives your terminal, so an agent keeps
 working after you detach.
-`executor service install` accepts `--proxy name=base_url` (repeatable), the same
-flag as `executor serve` — see "The executor relay" below — which is usually
-the main reason to run one of these as a standing service in the first place:
-a laptop's local LLM endpoint (vmlx, Ollama, …) is only reachable while
-something on that laptop is up to relay it. Proxies, like every other flag,
-are baked into the unit at install time: to change them, re-run
+`executor service install` accepts `--proxy name=base_url` (repeatable) and
+`--launch <kind>` (repeatable), the same flags as `executor serve` — see "The
+executor relay" below for `--proxy`. `--proxy` is usually the main reason to
+run one of these as a standing service in the first place: a laptop's local
+LLM endpoint (vmlx, Ollama, …) is only reachable while something on that
+laptop is up to relay it. `--launch claude` opts the machine into hosting
+`claude`-kind children for the daemon (see "Executor" above); install refuses
+up front if `claude` is not on this machine's `PATH`, rather than installing a
+unit that fails on every supervised start. Both, like every other flag, are
+baked into the unit at install time: to change them, re-run
 `executor service install` with the full set you want (the credential file is
 reused; no new token needed). Row-level facts — labels, enabled/disabled — are
 different: those live in the database and change live via `rafiki executor label`.
