@@ -124,10 +124,16 @@ func (s *pgStore) Upsert(ctx context.Context, r skills.Record) (skills.Record, e
 	return out, nil
 }
 
+// In the override state one name carries a disabled row and an enabled one,
+// so the update scopes itself to the rows it is actually flipping: enable
+// touches only disabled rows (AND NOT enabled), disable only enabled ones
+// (AND enabled) — the single `enabled <> $3` predicate is both. Flipping a
+// row already in the target state matches nothing and surfaces as
+// ErrNotFound, like an absent name.
 func (s *pgStore) SetEnabled(ctx context.Context, namespace, name string, enabled bool) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE conversations.skills SET enabled = $3, updated_at = now()
-		 WHERE namespace = $1 AND name = $2`, namespace, name, enabled)
+		 WHERE namespace = $1 AND name = $2 AND enabled <> $3`, namespace, name, enabled)
 	if err != nil {
 		return fmt.Errorf("set skill enabled: %w", err)
 	}

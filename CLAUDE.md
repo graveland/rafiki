@@ -147,9 +147,20 @@
   its content in place when the source matches (a different source is a new
   claim on the freed name and does insert) — and a sync's `DO UPDATE SET` needs
   `WHERE conversations.skills.source = EXCLUDED.source` so it cannot write over
-  an enabled override of a different source. Pinned by
-  `TestUpsertDoesNotReEnableADisabledRow` and the two
-  `TestReplaceNamespaceSourceDoesNot*` tests in `pkg/skillsdb`. (The original
+  an enabled override of a different source. The same blindness is what makes a
+  NAME multi-row in the override state, so `SetEnabled` scopes to the row it is
+  actually flipping (enable: disabled rows, disable: enabled ones; already in
+  the target state → `ErrNotFound`) and `Delete` removes the whole name family.
+  Each behavior is pinned separately in `pkg/skillsdb`: the disabled refresh by
+  `TestUpsertDoesNotReEnableADisabledRow` and
+  `TestReplaceNamespaceSourceDoesNotResurrectADisabledCoreRow`, the
+  refresh-before-insert override protection by
+  `TestReplaceNamespaceSourceDoesNotClobberAnEnabledOverride`, the sync's source
+  guard by `TestReplaceNamespaceSourceSkipsAnEnabledOverrideOfAnotherSource`, and
+  the SetEnabled/Delete family scoping by
+  `TestSetEnabledReEnablesAfterTheOverrideFlow`,
+  `TestSetEnabledDisableTouchesOnlyTheEnabledRow`, and
+  `TestDeleteRemovesTheWholeNameFamily`. (The original
   implementation got all of this wrong because it assumed the INSERT would
   error; a 30-second probe against a scratch database settles such questions
   before an upsert design is committed to.)

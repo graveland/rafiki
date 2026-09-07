@@ -59,7 +59,9 @@ type Store interface {
 	List(ctx context.Context, enabledOnly bool) ([]Record, error)
 
 	// Get returns one row by namespace and name, enabled or not.
-	// Returns ErrNotFound when there is no such row.
+	// Returns ErrNotFound when there is no such row. When an override leaves
+	// two rows under one name, which of them Get returns is arbitrary — reads
+	// on the agent path go through List(enabledOnly=true) instead.
 	Get(ctx context.Context, namespace, name string) (Record, error)
 
 	// Upsert creates or replaces the row at (namespace, name). It never
@@ -67,13 +69,19 @@ type Store interface {
 	// silently re-enable something an operator switched off.
 	Upsert(ctx context.Context, r Record) (Record, error)
 
-	// SetEnabled flips one row's enabled flag. Returns ErrNotFound when
-	// there is no such row.
+	// SetEnabled flips one name's enabled flag: enable targets the disabled
+	// row, disable the enabled one — the override state puts both under one
+	// name, and enabling a name that still carries an enabled row (an override
+	// not yet switched off) conflicts at the partial unique index and fails.
+	// Returns ErrNotFound when the name has no row to flip: it is absent, or
+	// every row is already in the requested state.
 	SetEnabled(ctx context.Context, namespace, name string, enabled bool) error
 
-	// Delete hard-deletes one row. Returns ErrNotFound when absent. Unlike
-	// users, there is no attribution history to preserve — nothing joins back
-	// to a skill row after the fact.
+	// Delete hard-deletes every row under the name — in the override state
+	// that is two rows, and the disabled one has no other management surface.
+	// Returns ErrNotFound when the name is absent. Unlike users, there is no
+	// attribution history to preserve — nothing joins back to a skill row
+	// after the fact.
 	Delete(ctx context.Context, namespace, name string) error
 
 	// ReplaceNamespaceSource makes (namespace, source) hold exactly want:

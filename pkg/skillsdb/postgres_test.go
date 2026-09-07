@@ -272,3 +272,177 @@ func TestUpsertDoesNotReEnableADisabledRow(t *testing.T) {
 		t.Errorf("body not updated: got %q, want %q", got.Body, "v2")
 	}
 }
+
+// Re-enabling after the override machinery has run must flip exactly the
+// disabled row — single row in, single enabled row out, no unique violation.
+// The flow is the one the sync and an operator produce together: a core skill
+// disabled to free its name, its content re-upserted over the disabled row
+// (staying disabled), then the operator turns it back on.
+func TestSetEnabledReEnablesAfterTheOverrideFlow(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "noisy", Body: "v1", Source: skills.CoreSource, Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := st.SetEnabled(ctx, "rafiki", "noisy", false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "noisy", Body: "v2", Source: skills.CoreSource, Enabled: true,
+	}); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	if err := st.SetEnabled(ctx, "rafiki", "noisy", true); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+
+	got, err := st.Get(ctx, "rafiki", "noisy")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Enabled || got.Body != "v2" {
+		t.Fatalf("got %+v, want the single row re-enabled with fresh content", got)
+	}
+	rows, err := st.List(ctx, false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want exactly one — the name must stay unique", len(rows))
+	}
+	// Already-enabled: nothing left to flip.
+	if err := st.SetEnabled(ctx, "rafiki", "noisy", true); !errors.Is(err, skills.ErrNotFound) {
+		t.Fatalf("re-enable of an enabled row: got %v, want ErrNotFound", err)
+	}
+}
+
+// Disabling in the override state (disabled core row + enabled override) must
+// switch off the ENABLED row only — not issue the name-wide update that
+// touches the disabled core row too.
+func TestSetEnabledDisableTouchesOnlyTheEnabledRow(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "vendor text", Source: skills.CoreSource, Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed core: %v", err)
+	}
+	if err := st.SetEnabled(ctx, "rafiki", "model-selection", false); err != nil {
+		t.Fatalf("disable core: %v", err)
+	}
+	core, err := st.Get(ctx, "rafiki", "model-selection")
+	if err != nil {
+		t.Fatalf("get core: %v", err)
+	}
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "our text", Source: "manual", Enabled: true,
+	}); err != nil {
+		t.Fatalf("upsert override: %v", err)
+	}
+
+	if err := st.SetEnabled(ctx, "rafiki", "model-selection", false); err != nil {
+		t.Fatalf("disable override: %v", err)
+	}
+
+	rows, err := st.List(ctx, false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want both the core and the override row", len(rows))
+	}
+	for _, r := range rows {
+		if r.Enabled {
+			t.Errorf("%s row still enabled", r.Source)
+		}
+		if r.Source == skills.CoreSource && !r.UpdatedAt.Equal(core.UpdatedAt) {
+			t.Errorf("disabled core row was touched by the override's disable: "+
+				"updated_at moved from %v to %v", core.UpdatedAt, r.UpdatedAt)
+		}
+	}
+	// Nothing enabled remains: a second disable has no row to flip.
+	if err := st.SetEnabled(ctx, "rafiki", "model-selection", false); !errors.Is(err, skills.ErrNotFound) {
+		t.Fatalf("disable of an all-disabled name: got %v, want ErrNotFound", err)
+	}
+}
+
+// Delete is the only management surface a disabled row has, so it removes the
+// WHOLE name family — not just the enabled row an override left behind.
+func TestDeleteRemovesTheWholeNameFamily(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "vendor text", Source: skills.CoreSource, Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed core: %v", err)
+	}
+	if err := st.SetEnabled(ctx, "rafiki", "model-selection", false); err != nil {
+		t.Fatalf("disable core: %v", err)
+	}
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "our text", Source: "manual", Enabled: true,
+	}); err != nil {
+		t.Fatalf("upsert override: %v", err)
+	}
+
+	if err := st.Delete(ctx, "rafiki", "model-selection"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := st.Get(ctx, "rafiki", "model-selection"); !errors.Is(err, skills.ErrNotFound) {
+		t.Fatalf("get after delete: got %v, want ErrNotFound", err)
+	}
+	rows, err := st.List(ctx, false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("got %+v, want no rows left under the name", rows)
+	}
+	if err := st.Delete(ctx, "rafiki", "model-selection"); !errors.Is(err, skills.ErrNotFound) {
+		t.Fatalf("delete of an absent name: got %v, want ErrNotFound", err)
+	}
+}
+
+// The sync's DO UPDATE carries a source guard: a conflicting ENABLED row of a
+// different source must be left exactly as it is, not rewritten with the
+// sync's content. Unlike the clobber test above, no same-source disabled row
+// exists here, so the INSERT (and its ON CONFLICT clause) actually runs.
+func TestReplaceNamespaceSourceSkipsAnEnabledOverrideOfAnotherSource(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Description: "my description", Body: "our text", Source: "manual", Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
+
+	if err := st.ReplaceNamespaceSource(ctx, "rafiki", skills.CoreSource, []skills.Record{
+		{Namespace: "rafiki", Name: "model-selection",
+			Description: "vendor description", Body: "vendor text v2", Enabled: true},
+	}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+
+	rows, err := st.List(ctx, false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want only the override row", len(rows))
+	}
+	got := rows[0]
+	if got.Source != "manual" || got.Body != "our text" || got.Description != "my description" || !got.Enabled {
+		t.Fatalf("got %+v, want the operator override untouched by the sync", got)
+	}
+}
