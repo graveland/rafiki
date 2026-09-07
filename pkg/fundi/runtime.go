@@ -149,6 +149,12 @@ type RuntimeOptions struct {
 	// sweepBudgets, unaffected by this field.
 	MaxCost float64
 
+	// CurrentMaxCost is handed straight to Config.CurrentMaxCost: see
+	// EngineConfig.CurrentMaxCost's doc comment (engine.go) for the full
+	// contract. Optional; nil means MaxCost above is fixed for the engine's
+	// lifetime — the behavior every existing caller keeps.
+	CurrentMaxCost func() float64
+
 	// RawTrace, when non-nil, enables raw LLM API request/response capture to
 	// the debug raw_http_request hypertable. Created at daemon startup when
 	// RAFIKI_RECORD_REQUESTS=1. Nil disables capture.
@@ -573,6 +579,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		OnTurnEnded:            opts.OnTurnEnded,
 		RawTrace:               opts.RawTrace,
 		MaxCost:                opts.MaxCost,
+		CurrentMaxCost:         opts.CurrentMaxCost,
 	}
 
 	eng, engShutdown, err := cfg.BuildEngine(ctx, fe)

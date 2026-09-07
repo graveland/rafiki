@@ -123,6 +123,15 @@ type EngineConfig struct {
 	// A coordinator's subtree-wide enforcement is cmd/rafikid's periodic
 	// sweepBudgets, unaffected by this field.
 	MaxCost float64
+
+	// CurrentMaxCost, when set, is consulted by ShouldStop on every check
+	// INSTEAD of the fixed MaxCost above, so a coordinator raising or
+	// lowering this child's budget after construction
+	// (cmd/rafikid's Controller.SetChildBudget) is observed on the very next
+	// LLM reply rather than requiring a restart. Nil means "use the fixed
+	// MaxCost above, unchanged for the engine's lifetime" — the behavior
+	// every existing caller keeps with no changes required of it.
+	CurrentMaxCost func() float64
 }
 
 // Engine is the agent runtime: it turns inbound prompt/steer/abort frames into
@@ -158,6 +167,9 @@ type Engine struct {
 	// maxCost is this child's own cost budget in USD (0 = unlimited) — see
 	// events()'s ShouldStop wiring and costGuardrail.
 	maxCost float64
+	// currentMaxCost, when non-nil, is consulted by effectiveMaxCost INSTEAD
+	// of the fixed maxCost field above. See EngineConfig.CurrentMaxCost.
+	currentMaxCost func() float64
 
 	mu       sync.Mutex
 	pending  []queued           // FIFO of queued prompts awaiting execution
@@ -235,16 +247,17 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	tools := toolSetWithConvID{ToolSet: cfg.Tools, convID: conv.ID}
 
 	e := &Engine{
-		conv:        conv,
-		client:      cfg.Client,
-		tools:       tools,
-		fe:          fe,
-		em:          NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
-		baseCtx:     baseCtx,
-		onFatal:     cfg.OnFatal,
-		onConsumed:  cfg.OnConsumed,
-		onTurnEnded: cfg.OnTurnEnded,
-		maxCost:     cfg.MaxCost,
+		conv:           conv,
+		client:         cfg.Client,
+		tools:          tools,
+		fe:             fe,
+		em:             NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
+		baseCtx:        baseCtx,
+		onFatal:        cfg.OnFatal,
+		onConsumed:     cfg.OnConsumed,
+		onTurnEnded:    cfg.OnTurnEnded,
+		maxCost:        cfg.MaxCost,
+		currentMaxCost: cfg.CurrentMaxCost,
 		state: StateData{
 			SessionID:   conv.ID,
 			SessionName: cfg.Name,
@@ -912,10 +925,22 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 		},
 		PendingUser: e.drainSteers,
 		ShouldStop: func() (bool, string) {
-			return costGuardrail(runningTotal, e.maxCost)
+			return costGuardrail(runningTotal, e.effectiveMaxCost())
 		},
 	}
 	return ev, llm.WithStreamHandler(handler)
+}
+
+// effectiveMaxCost returns the live cap when an accessor was configured,
+// falling back to the value captured at construction otherwise. The only
+// difference between a bare EngineConfig.MaxCost and a wired
+// EngineConfig.CurrentMaxCost is whether a change made after construction is
+// ever observed.
+func (e *Engine) effectiveMaxCost() float64 {
+	if e.currentMaxCost != nil {
+		return e.currentMaxCost()
+	}
+	return e.maxCost
 }
 
 // costGuardrail decides whether a turn's running cost has reached its

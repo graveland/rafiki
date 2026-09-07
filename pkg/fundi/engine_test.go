@@ -842,3 +842,44 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 		"agent_end", "agent_settled",
 	})
 }
+
+func TestEffectiveMaxCostPrefersTheLiveAccessorOverTheCapturedValue(t *testing.T) {
+	e := &Engine{maxCost: 5.0}
+	if got := e.effectiveMaxCost(); got != 5.0 {
+		t.Fatalf("with no accessor configured, want the captured value 5.0, got %v", got)
+	}
+
+	live := 500.0
+	e.currentMaxCost = func() float64 { return live }
+	if got := e.effectiveMaxCost(); got != 500.0 {
+		t.Fatalf("with an accessor configured, want the LIVE value 500.0, got %v", got)
+	}
+
+	// The whole point: a value the accessor returns AFTER construction must
+	// be visible immediately, since Controller.SetChildBudget writes to
+	// childstore between calls with nothing rebuilding the Engine.
+	live = 1000.0
+	if got := e.effectiveMaxCost(); got != 1000.0 {
+		t.Fatalf("accessor must be called fresh each time, got %v (stale)", got)
+	}
+}
+
+func TestEventsShouldStopIsWiredFromCurrentMaxCostAlone(t *testing.T) {
+	ts := fakeToolSet{}
+	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleEndTurn), func(cfg *EngineConfig) {
+		// Deliberately leave MaxCost at its zero value — only CurrentMaxCost
+		// is wired, mirroring exactly how Task 4 wires cmd/rafikid's
+		// agentRuntimeOptions. This proves the closure calls
+		// effectiveMaxCost() (which checks the accessor first), not e.maxCost
+		// directly.
+		cfg.CurrentMaxCost = func() float64 { return 5.0 }
+	})
+	ev, _ := eng.events()
+	if ev.ShouldStop == nil {
+		t.Fatal("ShouldStop is nil; a CurrentMaxCost-only config can never be enforced")
+	}
+	// No OnTurn has fired yet, so the running total is 0 — under any positive budget.
+	if stop, reason := ev.ShouldStop(); stop {
+		t.Errorf("ShouldStop fired with no usage recorded yet: stop=%v reason=%q", stop, reason)
+	}
+}

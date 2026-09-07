@@ -153,6 +153,11 @@ type Config struct {
 	// sweepBudgets, unaffected by this field.
 	MaxCost float64
 
+	// CurrentMaxCost is handed straight to EngineConfig.CurrentMaxCost: see
+	// its doc comment for the full contract. Optional; nil means MaxCost
+	// above is fixed for the engine's lifetime.
+	CurrentMaxCost func() float64
+
 	// AutoResume asks the engine to call agentloop.Resume before accepting
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
@@ -239,19 +244,20 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	}
 
 	eng, err := NewEngine(EngineConfig{
-		Client:      client,
-		ConvOpts:    convOpts,
-		Tools:       c.Tools,
-		Provider:    p.Name,
-		ModelID:     modelID,
-		Name:        c.Name,
-		BaseCtx:     ctx,
-		AutoResume:  c.AutoResume,
-		OnFatal:     c.OnFatal,
-		NativeSink:  c.NativeSink,
-		OnConsumed:  c.OnConsumed,
-		OnTurnEnded: c.OnTurnEnded,
-		MaxCost:     c.MaxCost,
+		Client:         client,
+		ConvOpts:       convOpts,
+		Tools:          c.Tools,
+		Provider:       p.Name,
+		ModelID:        modelID,
+		Name:           c.Name,
+		BaseCtx:        ctx,
+		AutoResume:     c.AutoResume,
+		OnFatal:        c.OnFatal,
+		NativeSink:     c.NativeSink,
+		OnConsumed:     c.OnConsumed,
+		OnTurnEnded:    c.OnTurnEnded,
+		MaxCost:        c.MaxCost,
+		CurrentMaxCost: c.CurrentMaxCost,
 	}, fe)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent: build engine: %w", err)
