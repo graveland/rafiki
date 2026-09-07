@@ -17,10 +17,33 @@ import (
 type SkillMeta struct {
 	Name, Description, Dir, Path string
 
+	// Namespace is the render/plugin namespace a database-backed skill
+	// belongs to ("rafiki" for core and operator content, an upstream plugin
+	// name for an imported corpus). Empty for a skill discovered from a
+	// directory, which has no plugin to belong to — such a skill renders
+	// under its bare name, exactly as Claude Code would show it.
+	Namespace string
+
+	// Inline marks a skill whose body the daemon serves from its own store
+	// rather than reading from Path or fetching over an executor link. Its
+	// Path and Dir are empty and meaningless.
+	Inline bool
+
 	// Remote marks a skill discovered on the child's EXECUTOR rather than on
 	// this machine. Its Path is empty and meaningless here; its body is
 	// fetched over the executor link when the model asks for it.
 	Remote bool
+}
+
+// QualifiedName is the name a model sees and passes back to the skill tool:
+// "<namespace>:<name>", or just "<name>" when the skill has no namespace.
+// Both renderers must agree on this string — it is what makes a fundi agent
+// and a claude agent name the same skill identically.
+func (s SkillMeta) QualifiedName() string {
+	if s.Namespace == "" {
+		return s.Name
+	}
+	return s.Namespace + ":" + s.Name
 }
 
 // skillFrontmatter is the YAML shape of a SKILL.md's frontmatter block.
@@ -143,7 +166,7 @@ func SkillsInventory(skills []SkillMeta) string {
 	}
 	lines := make([]string, 0, len(skills))
 	for _, s := range skills {
-		lines = append(lines, fmt.Sprintf("- %s: %s", s.Name, s.Description))
+		lines = append(lines, fmt.Sprintf("- %s: %s", s.QualifiedName(), s.Description))
 	}
 	return strings.Join(lines, "\n")
 }

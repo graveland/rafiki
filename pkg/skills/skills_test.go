@@ -272,3 +272,25 @@ func TestSplitFrontmatterHorizontalRuleInBody(t *testing.T) {
 		t.Fatalf("expected horizontal rule preserved in body, got %q, want %q", body, want)
 	}
 }
+
+func TestQualifiedNameUsesNamespaceWhenPresent(t *testing.T) {
+	bare := SkillMeta{Name: "deploy"}
+	if got := bare.QualifiedName(); got != "deploy" {
+		t.Errorf("bare skill: got %q, want %q", got, "deploy")
+	}
+	ns := SkillMeta{Namespace: "rafiki", Name: "deploy"}
+	if got := ns.QualifiedName(); got != "rafiki:deploy" {
+		t.Errorf("namespaced skill: got %q, want %q", got, "rafiki:deploy")
+	}
+}
+
+func TestSkillsInventoryRendersQualifiedNames(t *testing.T) {
+	got := SkillsInventory([]SkillMeta{
+		{Namespace: "rafiki", Name: "coordinating", Description: "how to run subagents"},
+		{Name: "local-only", Description: "from a directory"},
+	})
+	want := "- rafiki:coordinating: how to run subagents\n- local-only: from a directory"
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
