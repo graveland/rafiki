@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -165,42 +166,58 @@ func TestBuildRuntimeRejectsRelativeCwd(t *testing.T) {
 	}
 }
 
-// TestMergeSkillsProjectShadowsUser covers the three cases: a local-only skill
-// survives, a project-only skill appears, and a name collision resolves to the
-// project one and is marked Remote.
-func TestMergeSkillsProjectShadowsUser(t *testing.T) {
+// Later tiers shadow earlier ones, and shadowing is by QUALIFIED name — so a
+// bare directory skill named "deploy" and a database skill "rafiki:deploy" are
+// different skills that coexist, while two skills with the same qualified name
+// collapse to the later tier's.
+func TestFoldSkillsLaterTiersShadowEarlier(t *testing.T) {
+	db := []skills.SkillMeta{
+		{Namespace: "rafiki", Name: "coordinating", Description: "from db", Inline: true},
+		{Namespace: "rafiki", Name: "deploy", Description: "db deploy", Inline: true},
+	}
 	local := []skills.SkillMeta{
-		{Name: "builder", Description: "user builder", Dir: "/home/.rafiki/skills/builder"},
-		{Name: "deploy", Description: "user deploy", Dir: "/home/.rafiki/skills/deploy"},
+		{Name: "deploy", Description: "local deploy", Path: "/l/deploy/SKILL.md"},
 	}
 	project := []skills.SkillMeta{
-		{Name: "deploy", Description: "project deploy", Dir: "/work/.claude/skills/deploy", Remote: true},
-		{Name: "reviewer", Description: "project reviewer", Dir: "/work/.claude/skills/reviewer", Remote: true},
+		{Name: "deploy", Description: "project deploy", Remote: true},
 	}
 
-	merged := MergeSkills(local, project)
+	got := FoldSkills(db, local, project)
 
-	byName := make(map[string]skills.SkillMeta, len(merged))
-	for _, s := range merged {
-		byName[s.Name] = s
+	if len(got) != 3 {
+		t.Fatalf("got %d skills, want 3: %+v", len(got), got)
 	}
-
-	// Local-only survives.
-	b, ok := byName["builder"]
-	if !ok || b.Description != "user builder" {
-		t.Errorf("builder = %+v, want user builder", b)
+	byQN := map[string]skills.SkillMeta{}
+	for _, s := range got {
+		byQN[s.QualifiedName()] = s
 	}
-
-	// Project-only appears.
-	r, ok := byName["reviewer"]
-	if !ok || !r.Remote {
-		t.Errorf("reviewer = %+v, want Remote project skill", r)
+	if d := byQN["deploy"]; d.Description != "project deploy" {
+		t.Errorf("bare deploy: got %q, want the project tier to win", d.Description)
 	}
+	if d := byQN["rafiki:deploy"]; d.Description != "db deploy" {
+		t.Errorf("rafiki:deploy: got %q, want the db row untouched by a bare local skill", d.Description)
+	}
+	if _, ok := byQN["rafiki:coordinating"]; !ok {
+		t.Error("rafiki:coordinating went missing")
+	}
+}
 
-	// Name collision: project wins.
-	d, ok := byName["deploy"]
-	if !ok || d.Description != "project deploy" || !d.Remote {
-		t.Errorf("deploy = %+v, want project deploy with Remote=true", d)
+// Ordering is load-bearing: the inventory sits in the system prompt under
+// rafiki's prompt-cache breakpoint, so unstable order busts the cache prefix
+// on every turn.
+func TestFoldSkillsIsSortedByQualifiedName(t *testing.T) {
+	got := FoldSkills(
+		[]skills.SkillMeta{{Namespace: "rafiki", Name: "zebra", Inline: true}},
+		[]skills.SkillMeta{{Name: "alpha"}},
+		[]skills.SkillMeta{{Namespace: "pg", Name: "middle", Inline: true}},
+	)
+	var names []string
+	for _, s := range got {
+		names = append(names, s.QualifiedName())
+	}
+	want := []string{"alpha", "pg:middle", "rafiki:zebra"}
+	if !slices.Equal(names, want) {
+		t.Errorf("got %v, want %v", names, want)
 	}
 }
 

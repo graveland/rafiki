@@ -251,33 +251,44 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 					}
 				}
 			}
-			// MergeSkills puts project after local so project shadows user.
-			discovered = MergeSkills(discovered, filtered)
+			// FoldSkills puts project after local so project shadows user.
+			discovered = FoldSkills(discovered, filtered)
 		}
 	}
 
 	return contextFiles, discovered, nil
 }
 
-// MergeSkills combines the daemon's user and system skills with the project
-// skills discovered on the executor.
+// FoldSkills combines skill tiers into one inventory. Later tiers shadow
+// earlier ones on a QUALIFIED-name collision, which is DiscoverSkills' own
+// "later dirs win" rule carried up a level: callers pass tiers least-specific
+// first (database, then daemon-local dirs, then the workspace project).
 //
-// Project shadows user on a name collision, matching DiscoverSkills' own
-// documented rule that later directories win — a project that ships a `deploy`
-// skill means its own, not the operator's.
-func MergeSkills(local, project []skills.SkillMeta) []skills.SkillMeta {
-	byName := make(map[string]skills.SkillMeta, len(local)+len(project))
-	order := make([]string, 0, len(local)+len(project))
-	for _, s := range append(append([]skills.SkillMeta{}, local...), project...) {
-		if _, seen := byName[s.Name]; !seen {
-			order = append(order, s.Name)
+// Shadowing is by qualified name rather than bare name because a namespaced
+// database skill and a bare directory skill of the same short name are
+// different skills — "rafiki:deploy" is rafiki's and "deploy" is this
+// machine's, and collapsing them would let a local directory silently replace
+// curated content it never mentioned.
+//
+// The result is sorted by qualified name. This is load-bearing, not cosmetic:
+// the inventory feeds SkillsInventory, which sits in the system prompt under
+// rafiki's prompt-cache breakpoint, so unstable ordering busts the cache
+// prefix on every turn.
+func FoldSkills(tiers ...[]skills.SkillMeta) []skills.SkillMeta {
+	byQN := make(map[string]skills.SkillMeta)
+	for _, tier := range tiers {
+		for _, s := range tier {
+			byQN[s.QualifiedName()] = s
 		}
-		byName[s.Name] = s
 	}
-	sort.Strings(order)
-	out := make([]skills.SkillMeta, 0, len(order))
-	for _, n := range order {
-		out = append(out, byName[n])
+	names := make([]string, 0, len(byQN))
+	for qn := range byQN {
+		names = append(names, qn)
+	}
+	sort.Strings(names)
+	out := make([]skills.SkillMeta, 0, len(names))
+	for _, qn := range names {
+		out = append(out, byQN[qn])
 	}
 	return out
 }
