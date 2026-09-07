@@ -119,3 +119,72 @@ func TestSkillBlueprintDeclinesWithoutSkills(t *testing.T) {
 		})
 	}
 }
+
+// TestSkillToolServesAnInlineBody covers the database-backed arm: a skill
+// marked Inline resolves by QUALIFIED name and fetches its body through
+// ToolOpts.InlineSkillBody, passing the namespace and bare name separately.
+func TestSkillToolServesAnInlineBody(t *testing.T) {
+	var gotNS, gotName string
+	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
+		Skills: []skillspkg.SkillMeta{
+			{Namespace: "rafiki", Name: "coordinating", Description: "d", Inline: true},
+		},
+		InlineSkillBody: func(_ context.Context, ns, name string) (string, error) {
+			gotNS, gotName = ns, name
+			return "the body", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if gotNS != "rafiki" || gotName != "coordinating" {
+		t.Errorf("fetcher got (%q,%q), want (rafiki,coordinating)", gotNS, gotName)
+	}
+	if !strings.Contains(res.Text, "the body") {
+		t.Errorf("result did not carry the body: %v", res)
+	}
+}
+
+// An inline skill has no directory, so the result must NOT claim one — there
+// is nothing on disk for the model to read.
+func TestInlineSkillResultHasNoBaseDirectoryLine(t *testing.T) {
+	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
+		Skills: []skillspkg.SkillMeta{
+			{Namespace: "rafiki", Name: "coordinating", Inline: true},
+		},
+		InlineSkillBody: func(context.Context, string, string) (string, error) { return "b", nil },
+	})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if strings.Contains(res.Text, "Base directory") {
+		t.Errorf("inline result claimed a base directory: %v", res)
+	}
+}
+
+func TestUnknownSkillErrorListsQualifiedNames(t *testing.T) {
+	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
+		Skills: []skillspkg.SkillMeta{
+			{Namespace: "rafiki", Name: "coordinating", Inline: true},
+		},
+		InlineSkillBody: func(context.Context, string, string) (string, error) { return "b", nil },
+	})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	_, err = tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"coordinating"}`)))
+	if err == nil {
+		t.Fatal("bare name resolved; want an error naming the qualified form")
+	}
+	if !strings.Contains(err.Error(), "rafiki:coordinating") {
+		t.Errorf("error does not offer the qualified name: %v", err)
+	}
+}

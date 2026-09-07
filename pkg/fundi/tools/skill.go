@@ -48,11 +48,17 @@ func (SkillBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 	byName := make(map[string]skillspkg.SkillMeta, len(opts.Skills))
 	names := make([]string, 0, len(opts.Skills))
 	for _, s := range opts.Skills {
-		byName[s.Name] = s
-		names = append(names, s.Name)
+		byName[s.QualifiedName()] = s
+		names = append(names, s.QualifiedName())
 	}
 	sort.Strings(names)
-	return &skillTool{SkillBlueprint: SkillBlueprint{}, byName: byName, names: names, remoteBody: opts.RemoteSkillBody}, nil
+	return &skillTool{
+		SkillBlueprint: SkillBlueprint{},
+		byName:         byName,
+		names:          names,
+		remoteBody:     opts.RemoteSkillBody,
+		inlineBody:     opts.InlineSkillBody,
+	}, nil
 }
 
 type skillTool struct {
@@ -60,6 +66,7 @@ type skillTool struct {
 	byName     map[string]skillspkg.SkillMeta
 	names      []string
 	remoteBody func(ctx context.Context, name string) (body, dir string, err error)
+	inlineBody func(ctx context.Context, namespace, name string) (string, error)
 }
 
 func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -76,11 +83,24 @@ func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 		return ToolResult{}, fmt.Errorf("skill: unknown skill %q; available skills: %s", in.Skill, strings.Join(st.names, ", "))
 	}
 
+	if s.Inline {
+		if st.inlineBody == nil {
+			return ToolResult{}, fmt.Errorf("skill: %q is served from this daemon's store, which is unavailable", in.Skill)
+		}
+		body, err := st.inlineBody(ctx, s.Namespace, s.Name)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("skill: %w", err)
+		}
+		// No "Base directory" preamble: an inline skill has no directory and
+		// naming one would point the model at a path that does not exist.
+		return NewTextResult(body), nil
+	}
+
 	if s.Remote {
 		if st.remoteBody == nil {
 			return ToolResult{}, fmt.Errorf("skill: %q lives on this agent's executor, which is no longer reachable", in.Skill)
 		}
-		body, dir, err := st.remoteBody(ctx, in.Skill)
+		body, dir, err := st.remoteBody(ctx, s.Name)
 		if err != nil {
 			return ToolResult{}, fmt.Errorf("skill: %w", err)
 		}
@@ -91,7 +111,6 @@ func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("skill: %w", err)
 	}
-
 	return NewTextResult(fmt.Sprintf("Base directory for this skill: %s\n\n%s", s.Dir, body)), nil
 }
 

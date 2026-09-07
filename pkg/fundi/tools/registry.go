@@ -217,8 +217,12 @@ type ToolOpts struct {
 	FileTracker  *FileTracker
 	OutputPolicy OutputPolicy
 	Skills       []skillspkg.SkillMeta
-	RTK          RTKMode
-	Web          bool
+	// InlineSkillBody fetches a database-backed skill's body by namespace and
+	// name, on the turn the model asks for it. nil means no inline skill can
+	// be served — which is correct when the daemon has no skills store.
+	InlineSkillBody func(ctx context.Context, namespace, name string) (string, error)
+	RTK             RTKMode
+	Web             bool
 
 	// HTTPClient, when non-nil, is used for outbound HTTP requests.
 	// nil means the tool creates its own client with SSRF protection.
