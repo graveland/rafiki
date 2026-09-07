@@ -137,6 +137,23 @@
   not just the highest file on your branch. This has bitten once already, when
   `main` and `agent-platform` both claimed 13.
 
+- **An `ON CONFLICT (cols) WHERE pred` arbiter cannot see rows that fail
+  `pred` — the INSERT SUCCEEDS and creates a duplicate; it never errors.** The
+  partial unique index `skills_name_active ON conversations.skills (namespace,
+  name) WHERE enabled` carries only enabled rows, so an INSERT over a DISABLED
+  row finds no conflict: an "on error, update by pk" fallback is dead code, and
+  the result is two rows under one name, one of them silently enabled again.
+  Any upsert path over that table must handle the disabled row FIRST — refresh
+  its content in place when the source matches (a different source is a new
+  claim on the freed name and does insert) — and a sync's `DO UPDATE SET` needs
+  `WHERE conversations.skills.source = EXCLUDED.source` so it cannot write over
+  an enabled override of a different source. Pinned by
+  `TestUpsertDoesNotReEnableADisabledRow` and the two
+  `TestReplaceNamespaceSourceDoesNot*` tests in `pkg/skillsdb`. (The original
+  implementation got all of this wrong because it assumed the INSERT would
+  error; a 30-second probe against a scratch database settles such questions
+  before an upsert design is committed to.)
+
 - **Isolating a scratch daemon now means isolating a PROFILE, not an env var —
   `RAFIKI_URL`/`--socket` no longer exist as ways to aim the client.** The
   `RAFIKI_URL`-overrides-`--socket` footgun this entry used to describe is
