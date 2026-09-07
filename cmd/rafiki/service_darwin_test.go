@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -497,232 +498,207 @@ func TestDarwinInstall_UnconfirmedUnloadWithFailedBootstrapIsAnError(t *testing.
 }
 
 // --- Restart tests ---
+//
+// Restart no longer goes through bootout+bootstrap (see the doc comment on
+// darwinBackend.Restart) — it signals the pid directly via signalProcess and
+// waits for Status to report a new pid, so these tests fake signalProcess
+// and the "print" arm of runOSCmd rather than the launchctl verb sequence.
 
-// Happy path: the job is loaded, bootout succeeds, the poll confirms it gone,
-// bootstrap reloads it, and the post-restart verification passes.
-func TestDarwinRestart_BootoutThenBootstrap(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
+// Happy path: the process is running, it exits on its own once signalled
+// (simulating a clean SIGTERM shutdown), and launchd respawns it under a new
+// pid — which Restart must wait for and treat as success without ever
+// escalating to SIGKILL.
+func TestDarwinRestart_SignalsAndWaitsForRespawn(t *testing.T) {
 	origSleep := sleepFn
 	sleepFn = func(time.Duration) {}
 	defer func() { sleepFn = origSleep }()
 
-	orig := runOSCmd
-	defer func() { runOSCmd = orig }()
+	origSignal := signalProcess
+	defer func() { signalProcess = origSignal }()
 
-	var cmds []string
-	var sawBootstrap bool
-	runOSCmd = func(_ string, args ...string) (string, error) {
-		if len(args) == 0 {
-			return "", nil
-		}
-		cmds = append(cmds, args[0])
-		switch args[0] {
-		case "bootout":
-			return "", nil
-		case "print":
-			if !sawBootstrap {
-				return "Could not find service", errors.New("exit status 3")
+	pid := 100
+	var sigterms, sigkills int
+	signalProcess = func(p int, sig syscall.Signal) error {
+		switch sig {
+		case syscall.SIGTERM:
+			sigterms++
+			pid = 0 // simulate the process exiting promptly on SIGTERM
+			return nil
+		case syscall.SIGKILL:
+			sigkills++
+			return nil
+		case 0:
+			if pid == 0 {
+				return syscall.ESRCH
 			}
-			return "", nil
-		case "bootstrap":
-			sawBootstrap = true
-			return "", nil
+			return nil
 		}
-		return "", nil
+		return nil
 	}
-
-	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
-	if err := b.Restart(); err != nil {
-		t.Fatalf("Restart: %v", err)
-	}
-
-	if len(cmds) < 3 {
-		t.Fatalf("expected at least bootout, print, bootstrap; got %v", cmds)
-	}
-	if cmds[0] != "bootout" {
-		t.Errorf("expected bootout first, got %s", cmds[0])
-	}
-	if cmds[1] != "print" {
-		t.Errorf("expected print (poll) second, got %s", cmds[1])
-	}
-	if cmds[2] != "bootstrap" {
-		t.Errorf("expected bootstrap third, got %s", cmds[2])
-	}
-}
-
-// Fast path: the job was never loaded.  bootout returns not-found, the poll
-// is skipped, and bootstrap loads it fresh.
-func TestDarwinRestart_NotLoadedSkipsPollAndBootstraps(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	origSleep := sleepFn
-	sleepFn = func(time.Duration) {}
-	defer func() { sleepFn = origSleep }()
 
 	orig := runOSCmd
 	defer func() { runOSCmd = orig }()
-
-	var printCallsBeforeBootstrap int
-	var sawBootstrap bool
-	runOSCmd = func(_ string, args ...string) (string, error) {
-		if len(args) == 0 {
-			return "", nil
-		}
-		switch args[0] {
-		case "bootout":
-			return "Could not find service", errors.New("exit status 3")
-		case "bootstrap":
-			sawBootstrap = true
-			return "", nil
-		case "print":
-			if !sawBootstrap {
-				printCallsBeforeBootstrap++
-			}
-			return "", nil
-		}
-		return "", nil
-	}
-
-	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
-	if err := b.Restart(); err != nil {
-		t.Fatalf("Restart: %v", err)
-	}
-	if !sawBootstrap {
-		t.Fatal("Restart never called launchctl bootstrap")
-	}
-	if printCallsBeforeBootstrap != 0 {
-		t.Errorf("expected the poll to be skipped on the bootout-not-found fast path, but launchctl print was called %d time(s) before bootstrap", printCallsBeforeBootstrap)
-	}
-}
-
-// The job is running.  bootout succeeds (SIGTERM), but the job takes a few
-// poll cycles to drain.  Restart must wait for the "not found" confirmation
-// before bootstrapping the new instance.
-func TestDarwinRestart_PollsUntilUnloadedThenBootstraps(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	origSleep := sleepFn
-	var sleeps int
-	sleepFn = func(time.Duration) { sleeps++ }
-	defer func() { sleepFn = origSleep }()
-
-	orig := runOSCmd
-	defer func() { runOSCmd = orig }()
-
-	var printCalls int
-	var sawBootstrap bool
-	runOSCmd = func(_ string, args ...string) (string, error) {
-		if len(args) == 0 {
-			return "", nil
-		}
-		switch args[0] {
-		case "bootout":
-			return "", nil
-		case "bootstrap":
-			sawBootstrap = true
-			return "", nil
-		case "print":
+	printCalls := 0
+	runOSCmd = func(name string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "print" {
 			printCalls++
-			if !sawBootstrap {
-				if printCalls <= 2 {
-					return "", nil
-				}
-				return "Could not find service", errors.New("exit status 3")
+			if printCalls == 1 {
+				return "state = running\n\tpid = 100\n", nil // Restart's initial Status()
 			}
-			return "", nil
+			return "state = running\n\tpid = 200\n", nil // respawned under a new pid
 		}
 		return "", nil
 	}
 
-	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: 5 * time.Second}
 	if err := b.Restart(); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	if !sawBootstrap {
-		t.Fatal("Restart never called launchctl bootstrap")
+	if sigterms != 1 {
+		t.Errorf("expected exactly one SIGTERM, got %d", sigterms)
 	}
-	if sleeps == 0 {
-		t.Error("expected the poll to sleep between attempts")
+	if sigkills != 0 {
+		t.Errorf("expected no SIGKILL when the process exits on its own, got %d", sigkills)
 	}
 }
 
-// If the job never reports gone within the poll cap, Restart must not give
-// up: it still proceeds to bootstrap, and verification afterward still
-// passes (the job is loaded, the cap just expired before print confirmed it).
-func TestDarwinRestart_PollCapExpiryStillBootstraps(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+// The process ignores SIGTERM entirely. Restart must wait out restartGrace
+// and then escalate to SIGKILL rather than hanging forever or giving up.
+func TestDarwinRestart_EscalatesToSIGKILLWhenProcessWontDie(t *testing.T) {
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
 
-	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatal(err)
+	origSignal := signalProcess
+	defer func() { signalProcess = origSignal }()
+
+	var sigterms, sigkills int
+	signalProcess = func(_ int, sig syscall.Signal) error {
+		switch sig {
+		case syscall.SIGTERM:
+			sigterms++
+		case syscall.SIGKILL:
+			sigkills++
+		case 0:
+			return nil // always still alive until SIGKILL is "sent" above
+		}
+		return nil
 	}
 
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	printCalls := 0
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "print" {
+			printCalls++
+			if printCalls == 1 {
+				return "state = running\n\tpid = 100\n", nil
+			}
+			return "state = running\n\tpid = 200\n", nil // respawned after the SIGKILL
+		}
+		return "", nil
+	}
+
+	// restartGrace of 0 makes the very first liveness check see the deadline
+	// already passed, forcing escalation without a real sleep in the test.
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: 0}
+	if err := b.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if sigterms != 1 {
+		t.Errorf("expected one SIGTERM before escalating, got %d", sigterms)
+	}
+	if sigkills != 1 {
+		t.Errorf("expected escalation to SIGKILL when the process never exits, got %d", sigkills)
+	}
+}
+
+// If launchd never respawns the job (KeepAlive disabled, a throttle, …),
+// Restart must report a real, actionable error rather than silently
+// succeeding.
+func TestDarwinRestart_ErrorsWhenLaunchdNeverRespawns(t *testing.T) {
+	origSleep := sleepFn
+	sleepFn = func(time.Duration) {}
+	defer func() { sleepFn = origSleep }()
+
+	origSignal := signalProcess
+	defer func() { signalProcess = origSignal }()
+	signalProcess = func(_ int, sig syscall.Signal) error {
+		if sig == 0 {
+			return syscall.ESRCH // the old process is gone immediately
+		}
+		return nil
+	}
+
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	printCalls := 0
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "print" {
+			printCalls++
+			if printCalls == 1 {
+				return "state = running\n\tpid = 100\n", nil
+			}
+			return "Could not find service", errors.New("exit status 3") // never comes back
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: time.Millisecond}
+	if err := b.Restart(); err == nil {
+		t.Fatal("Restart: got nil error, want an error — launchd never respawned the job")
+	}
+}
+
+// The service is installed but not currently running (e.g. it crashed and
+// launchd is sitting out a throttle). Restart has nothing to signal, so it
+// must ask launchd to start it rather than passively waiting.
+func TestDarwinRestart_NotRunningKickstarts(t *testing.T) {
 	origSleep := sleepFn
 	sleepFn = func(time.Duration) {}
 	defer func() { sleepFn = origSleep }()
 
 	orig := runOSCmd
 	defer func() { runOSCmd = orig }()
-
-	var sawBootstrap bool
+	var sawKickstart bool
 	runOSCmd = func(_ string, args ...string) (string, error) {
 		if len(args) == 0 {
 			return "", nil
 		}
 		switch args[0] {
-		case "bootout":
-			return "", nil
-		case "bootstrap":
-			sawBootstrap = true
-			return "", nil
 		case "print":
+			return "state = not running\n", nil // installed, no pid
+		case "kickstart":
+			sawKickstart = true
 			return "", nil
 		}
 		return "", nil
 	}
 
-	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: 5 * time.Second}
 	if err := b.Restart(); err != nil {
-		t.Fatalf("Restart: %v, want the cap expiring to still fall through to bootstrap and succeed", err)
+		t.Fatalf("Restart: %v", err)
 	}
-	if !sawBootstrap {
-		t.Fatal("Restart never called launchctl bootstrap after the poll cap expired")
+	if !sawKickstart {
+		t.Fatal("Restart did not kickstart a not-currently-running service")
+	}
+}
+
+// Restart on a service that was never installed must fail rather than
+// kickstart or signal anything.
+func TestDarwinRestart_NotInstalledIsAnError(t *testing.T) {
+	orig := runOSCmd
+	defer func() { runOSCmd = orig }()
+	runOSCmd = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "print" {
+			return "Could not find service", errors.New("exit status 3")
+		}
+		return "", nil
+	}
+
+	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	if err := b.Restart(); err == nil {
+		t.Fatal("Restart: got nil error, want an error — the service was never installed")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -115,15 +116,39 @@ type darwinBackend struct {
 	// logPath is where this unit's stdout/stderr go. Held per backend so the
 	// daemon's log and the executor's do not interleave.
 	logPath string
+	// restartGrace bounds how long Restart waits after SIGTERM before
+	// escalating to SIGKILL. Per-backend rather than one shared constant: the
+	// daemon and the executor have very different graceful-shutdown budgets
+	// (see the values below), and a grace short enough for one would either
+	// truncate the other's in-flight work or make a hung restart wait far
+	// longer than it needs to.
+	restartGrace time.Duration
 }
 
+// daemonRestartGrace matches the plist's own ExitTimeOut. rafikid's internal
+// graceful-shutdown budget is 180s (cmd/rafikid/main.go's globalTimeout — pi
+// and claude children may need to finish a final LLM call, e.g. compaction,
+// before the daemon exits), and ExitTimeOut is set 20s above that. Restart
+// owns this timeout directly now instead of leaning on launchd's enforcement
+// of it, so it must match that number, not invent a smaller one that would
+// SIGKILL a live agent turn on every routine restart.
+const daemonRestartGrace = 200 * time.Second
+
+// executorRestartGrace is far shorter: the executor's own shutdown is bounded
+// by AdminServer.Close's sequential per-hosted-child reap (defaultReapGrace,
+// 3s each — see pkg/executor/admin.go) plus connection teardown, so a real
+// shutdown lands in the single-digit seconds for the common case of a
+// handful of hosted children. 30s is a generous margin over that, not an
+// attempt to match it exactly.
+const executorRestartGrace = 30 * time.Second
+
 func newServiceBackend() serviceBackend {
-	return &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
+	return &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: daemonRestartGrace}
 }
 
 // newExecutorServiceBackend manages the executor's unit rather than the daemon's.
 func newExecutorServiceBackend() serviceBackend {
-	return &darwinBackend{label: executorLaunchdLabel, logPath: paths.ExecutorServiceLogPath()}
+	return &darwinBackend{label: executorLaunchdLabel, logPath: paths.ExecutorServiceLogPath(), restartGrace: executorRestartGrace}
 }
 
 func (b *darwinBackend) plistPath() (string, error) {
@@ -341,42 +366,118 @@ func (b *darwinBackend) Stop() error {
 	return nil
 }
 
+// Restart used to go through bootout+bootstrap — unload the job, poll to
+// confirm it gone, reload it — replacing an even older `kickstart -k`, which
+// sent SIGKILL with no chance to drain. That dance is what Install/Uninstall
+// still need, because THEY change the loaded plist and must swap it. A plain
+// restart changes no config: the plist's own KeepAlive already means launchd
+// relaunches this job whenever its process ends, for any reason, so all
+// Restart has to do is end the CURRENT process.
+//
+// Doing that by unloading and reloading (the old approach) carried a real
+// bug: waitForUnload's poll cap (2s) is a confirmation timeout for Install's
+// benefit and is unrelated to — and far shorter than — how long a real
+// shutdown can take (an executor teardown was observed taking ~10s in
+// practice). Restart could give up on that poll, race a bootstrap against
+// the still-departing old job, hit "already loaded", fall back to a legacy
+// `load` that can report success (exit 0) without loading anything, and end
+// up with the job fully unregistered once the original bootout finished on
+// its own moments later — exactly what happened once in the field.
+//
+// Signalling the pid directly sidesteps that class of bug entirely: there is
+// no "was it *really* unloaded" ambiguity to race, because Restart never
+// unloads the job's registration at all. It owns its own SIGTERM-then-SIGKILL
+// grace window (b.restartGrace) instead of leaning on launchd's ExitTimeOut,
+// which governs a different actor (bootout/stop) and was never Restart's to
+// rely on in the first place.
 func (b *darwinBackend) Restart() error {
-	// Graceful restart: bootout (launchd sends the job SIGTERM and waits for it
-	// to exit, bounded by ExitTimeOut — 200s in our plist), poll to confirm it
-	// is gone, then bootstrap a fresh instance. This replaces the previous
-	// kickstart -k, which sent SIGKILL with no chance to drain.
-	plistPath, err := b.plistPath()
+	before, err := b.Status()
 	if err != nil {
 		return err
 	}
-
-	// Best-effort bootout first. It may fail if the job was never loaded; that
-	// is fine — the bootstrap below will load it regardless.
-	bootoutOut, bootoutErr := runOSCmd("launchctl", "bootout", b.serviceTarget())
-	unloadConfirmed := bootoutErr != nil && isServiceNotFoundOutput(bootoutOut) // fast path: never loaded
-	if !unloadConfirmed {
-		unloadConfirmed = b.waitForUnload()
+	if !before.Installed {
+		return fmt.Errorf("restart: %s is not installed", b.label)
 	}
+	if !before.Running || before.PID <= 0 {
+		// Nothing to signal. Ask launchd to start it rather than assuming
+		// KeepAlive already has it in flight — it may be sitting out a
+		// crash-loop throttle.
+		return b.Start()
+	}
+	if err := terminateGracefully(before.PID, b.restartGrace); err != nil {
+		return fmt.Errorf("restart: %w", err)
+	}
+	return b.waitForRespawn(before.PID)
+}
 
-	// Bootstrap the fresh instance; fall back to legacy load.
-	bootstrapOut, err := runOSCmd("launchctl", "bootstrap", b.domainTarget(), plistPath)
-	bootstrapFailed := err != nil
-	if bootstrapFailed {
-		bootstrapOut, err = runOSCmd("launchctl", "load", plistPath)
-		if err != nil {
-			return fmt.Errorf("launchctl bootstrap and legacy load both failed during restart: %s", strings.TrimSpace(bootstrapOut))
+// restartRespawnWait bounds how long Restart waits for launchd's KeepAlive to
+// relaunch the job after the old process ends. launchd notices a dead child
+// and relaunches near-instantly; the cap only matters if something is
+// actually wrong (KeepAlive disabled by hand, a crash-loop throttle, …).
+const restartRespawnWait = 10 * time.Second
+
+// waitForRespawn polls Status until a RUNNING instance with a pid different
+// from the one Restart just ended appears — proof launchd relaunched the
+// job, not just that the old process happens to linger in the process table
+// as a not-yet-reaped zombie.
+//
+// Counts attempts (like waitForUnload) rather than comparing against a
+// wall-clock deadline: a deadline check ignores sleepFn's test stub entirely,
+// so a test exercising the cap would burn a real 10 seconds spinning instead
+// of finishing instantly like every other poll loop in this file.
+func (b *darwinBackend) waitForRespawn(oldPID int) error {
+	attempts := int(restartRespawnWait / installPollInterval)
+	for i := 0; i < attempts; i++ {
+		st, err := b.Status()
+		if err == nil && st.Running && st.PID > 0 && st.PID != oldPID {
+			return nil
 		}
+		sleepFn(installPollInterval)
 	}
+	return fmt.Errorf("restart: launchd did not respawn %s within %s; check `launchctl kickstart %s`",
+		b.label, restartRespawnWait, b.serviceTarget())
+}
 
-	// Verify the service actually loaded, same post-condition Install enforces.
-	verifyOut, verifyErr := runOSCmd("launchctl", "print", b.serviceTarget())
-	if verifyErr != nil && isServiceNotFoundOutput(verifyOut) {
-		return fmt.Errorf("restart: service did not reload — launchctl print reports the job is not loaded after bootstrap/load (bootstrap output: %s)", strings.TrimSpace(bootstrapOut))
+// signalProcess sends sig to pid. A package variable — like runOSCmd — so
+// tests can fake process liveness (including sig 0, the standard
+// does-this-pid-exist probe) without actually spawning and signalling a real
+// process.
+var signalProcess = func(pid int, sig syscall.Signal) error {
+	return syscall.Kill(pid, sig)
+}
+
+// pidAlive reports whether pid still exists and is signalable by us. Signal
+// 0 sends nothing; the kernel only validates the target.
+func pidAlive(pid int) bool {
+	return signalProcess(pid, 0) == nil
+}
+
+// terminateGracefully sends SIGTERM to pid and waits up to grace for it to
+// exit, escalating to SIGKILL — printing a warning, since that means the
+// process did not drain in time — if it hasn't. This is exactly the
+// SIGTERM-then-SIGKILL policy launchd's own ExitTimeOut enforces for a
+// bootout, just owned directly by the caller instead of implied by an
+// unrelated action.
+//
+// Counts attempts rather than comparing against a wall-clock deadline, same
+// reasoning as waitForRespawn: it keeps this loop obedient to sleepFn's test
+// stub instead of spinning for the real duration of grace.
+func terminateGracefully(pid int, grace time.Duration) error {
+	if err := signalProcess(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		return fmt.Errorf("signal pid %d: %w", pid, err)
 	}
-	if !unloadConfirmed && bootstrapFailed {
-		return fmt.Errorf("restart: previous job was never confirmed unloaded within %s and bootstrap failed — the running instance may be the stale job; run `launchctl bootout %s` by hand and retry",
-			installPollCap, b.serviceTarget())
+	attempts := int(grace / installPollInterval)
+	for i := 0; i < attempts; i++ {
+		if !pidAlive(pid) {
+			return nil
+		}
+		sleepFn(installPollInterval)
+	}
+	if pidAlive(pid) {
+		fmt.Fprintf(os.Stderr, "warning: pid %d did not exit within %s of SIGTERM; sending SIGKILL\n", pid, grace)
+		if err := signalProcess(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return fmt.Errorf("force-kill pid %d: %w", pid, err)
+		}
 	}
 	return nil
 }
