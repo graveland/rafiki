@@ -410,8 +410,9 @@ on stdout; errors go to stderr.
 ## `rafiki skills`
 
 Manage the daemon's database-backed skill corpus (`conversations.skills`) —
-the tier a fundi child's skill tool serves at the start of each turn, after
-the file-based tiers. It talks to the daemon over the Connect plane
+the tier a fundi child's skill tool serves after the file-based tiers: its
+inventory is read once at child spawn, and invoking a skill fetches the body
+from the store at call time. It talks to the daemon over the Connect plane
 (`ListSkills`/`GetSkill`/`UpsertSkill`/`DeleteSkill`/`SetSkillEnabled` — see
 `docs/reference/control-protocol.md` §2.3), so it needs a reachable profile,
 never a DSN, and works against a remote daemon exactly as against a local

@@ -61,6 +61,41 @@ func testStore(t *testing.T) (skills.Store, *pgxpool.Pool) {
 	return NewPostgresStore(pool), pool
 }
 
+// The override state leaves two rows under one name: a disabled core row and
+// an enabled override. Get serves the INLINE SKILL BODY path and `skills
+// show`, so a row order that hands back the disabled core row serves content
+// an operator deliberately switched off. The enabled row must win.
+func TestGetPrefersTheEnabledRowInOverrideState(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "core text", Source: skills.CoreSource, Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed core: %v", err)
+	}
+	if err := st.SetEnabled(ctx, "rafiki", "model-selection", false); err != nil {
+		t.Fatalf("disable core: %v", err)
+	}
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "our text", Source: "manual", Enabled: true,
+	}); err != nil {
+		t.Fatalf("upsert override: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		got, err := st.Get(ctx, "rafiki", "model-selection")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Body != "our text" || !got.Enabled {
+			t.Fatalf("iteration %d: got body %q enabled=%v, want the ENABLED override row", i, got.Body, got.Enabled)
+		}
+	}
+}
+
 func TestUpsertGetList(t *testing.T) {
 	st, _ := testStore(t)
 	ctx := context.Background()
@@ -123,6 +158,94 @@ func TestDisabledNameCanBeReclaimed(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Body != "our text" {
 		t.Fatalf("got %+v, want exactly the override row", rows)
+	}
+}
+
+// An upsert refreshes content; it does not take a name away from another
+// source. Rewriting an enabled row's source would hand the name to the
+// upserter while the old provenance — and the sync that owns it — silently
+// loses its row, so a different source over an enabled row is refused, and
+// the incumbent left byte-identical. The same source stays the normal
+// replace path.
+func TestUpsertRefusesSourceChangeOnEnabledRow(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	seed := skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "v1", Source: "manual", Enabled: true,
+	}
+	if _, err := st.Upsert(ctx, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	_, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "hijacked", Source: "import:other", Enabled: true,
+	})
+	if !errors.Is(err, skills.ErrSourceConflict) {
+		t.Fatalf("cross-source upsert over enabled row: got %v, want ErrSourceConflict", err)
+	}
+
+	got, err := st.Get(ctx, "rafiki", "model-selection")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Source != "manual" || got.Body != "v1" {
+		t.Fatalf("incumbent rewritten: %+v, want source manual body v1", got)
+	}
+
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "v2", Source: "manual", Enabled: true,
+	}); err != nil {
+		t.Fatalf("same-source refresh: %v", err)
+	}
+	got, err = st.Get(ctx, "rafiki", "model-selection")
+	if err != nil {
+		t.Fatalf("get after refresh: %v", err)
+	}
+	if got.Body != "v2" || got.Source != "manual" {
+		t.Fatalf("same-source refresh: %+v, want body v2 under source manual", got)
+	}
+}
+
+// Enabling in the two-row override state hits the partial unique index: one
+// enabled row per name. That conflict is an ANSWER about the corpus (the name
+// is taken), so it must surface as the typed sentinel — a raw 23505 would
+// leave the Connect layer nothing to translate but driver text under
+// CodeInternal. The escape is Delete, then let the sync reinsert core content.
+func TestSetEnabledEnableInOverrideStateIsErrSourceConflict(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "core text", Source: skills.CoreSource, Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed core: %v", err)
+	}
+	if err := st.SetEnabled(ctx, "rafiki", "model-selection", false); err != nil {
+		t.Fatalf("disable core: %v", err)
+	}
+	if _, err := st.Upsert(ctx, skills.Record{
+		Namespace: "rafiki", Name: "model-selection",
+		Body: "our text", Source: "manual", Enabled: true,
+	}); err != nil {
+		t.Fatalf("upsert override: %v", err)
+	}
+
+	err := st.SetEnabled(ctx, "rafiki", "model-selection", true)
+	if !errors.Is(err, skills.ErrSourceConflict) {
+		t.Fatalf("enable in override state: got %v, want ErrSourceConflict", err)
+	}
+	// The corpus is unchanged: both rows survive, the override still enabled.
+	rows, err := st.List(ctx, false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want the core and override rows both intact", len(rows))
 	}
 }
 

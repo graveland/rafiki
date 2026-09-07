@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path"
 	"strings"
+	"time"
 
 	rafiki "go.graveland.dev/rafiki"
 	"go.graveland.dev/rafiki/pkg/skills"
@@ -67,6 +68,11 @@ func loadCoreSkills() ([]skills.Record, error) {
 	return out, nil
 }
 
+// coreSyncTimeout bounds the startup sync, warnStaleOverrides included. A
+// var rather than a const so a test can shrink it; a sync that misses its
+// deadline leaves last-good-wins rows in place, exactly as a failed one does.
+var coreSyncTimeout = 30 * time.Second
+
 // syncCoreSkills reconciles the embedded corpus into the store, owning exactly
 // (rafiki, rafiki-core) and nothing else.
 //
@@ -77,10 +83,14 @@ func loadCoreSkills() ([]skills.Record, error) {
 // corpus is a worse failure than a briefly inconsistent one.
 //
 // Never fatal: a daemon that cannot reach its store still serves children.
+// The timeout is part of that never-fatal contract — the sync runs on the
+// daemon's base context, which has no deadline of its own.
 func syncCoreSkills(ctx context.Context, st skills.Store, version string) error {
 	if st == nil {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, coreSyncTimeout)
+	defer cancel()
 	want, err := loadCoreSkills()
 	if err != nil {
 		return fmt.Errorf("load core skills: %w", err)

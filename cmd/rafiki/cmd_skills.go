@@ -200,7 +200,11 @@ func newSkillsImportCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ns := namespace
 			if ns == "" {
-				ns = derivePluginNamespace(args[0])
+				var err error
+				ns, err = derivePluginNamespace(args[0])
+				if err != nil {
+					return err
+				}
 			}
 			metas, err := skills.DiscoverSkills([]string{args[0]}, nil)
 			if err != nil {
@@ -238,21 +242,29 @@ func newSkillsImportCmd() *cobra.Command {
 }
 
 // derivePluginNamespace reads the upstream plugin name from a checkout's
-// .claude-plugin manifest, falling back to the directory's own name.
+// .claude-plugin manifest, falling back to the directory's own name. The
+// fallback ERRS when it cannot produce a name — `rafiki skills import .`
+// would otherwise upsert the whole corpus into a namespace literally named
+// ".", which renders as ".:skill" in inventories and deduplicates against
+// nothing. --namespace is the escape hatch.
 //
 // The name has to come from upstream's declaration rather than a guess:
 // Claude Code suppresses a skills-dir plugin whose name an installed
 // marketplace plugin already claims, and that deduplication is the whole
 // reason an imported corpus keeps its own namespace.
-func derivePluginNamespace(dir string) string {
+func derivePluginNamespace(dir string) (string, error) {
 	// Look one level up too: a plugin's skills live at <plugin>/skills/, so an
 	// operator pointing at the skills dir itself still gets the plugin's name.
 	for _, base := range []string{dir, filepath.Dir(dir)} {
 		if n := readPluginName(base); n != "" {
-			return n
+			return n, nil
 		}
 	}
-	return filepath.Base(filepath.Clean(dir))
+	fallback := filepath.Base(filepath.Clean(dir))
+	if fallback == "." || fallback == ".." {
+		return "", fmt.Errorf("cannot derive a namespace from %q; pass --namespace", dir)
+	}
+	return fallback, nil
 }
 
 // readPluginName reads a plugin name out of a checkout's .claude-plugin

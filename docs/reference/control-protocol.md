@@ -251,8 +251,9 @@ watch that row freeze.
 ### Skill management verbs (`ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`)
 
 These five verbs manage the database-backed skill corpus in
-`conversations.skills` — the tier a fundi child's skill tool reads at the
-start of each turn. They back the `rafiki skills` CLI group.
+`conversations.skills` — the tier a fundi child's skill tool reads, with the
+inventory taken at spawn and a skill's body fetched at invocation. They back
+the `rafiki skills` CLI group.
 
 A `SkillRow` carries `namespace`, `name`, `description`, `source`, `enabled`,
 `shadowed_core_version`, `updated_at` (RFC 3339) and `body`.

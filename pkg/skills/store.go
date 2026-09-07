@@ -13,6 +13,15 @@ import (
 // which must surface as an internal error, never as "no such skill".
 var ErrNotFound = errors.New("skill not found")
 
+// ErrSourceConflict means the (namespace, name) is held by an ENABLED row
+// the caller is not replacing. Two shapes reach it: an Upsert that would
+// rewrite an enabled row's source — an upsert refreshes content, it does not
+// take a name away from another source — and a SetEnabled that would create a
+// second enabled row under one name (the partial unique index fires). For
+// the enable case the escape is Delete (the startup sync reinserts core
+// content) or disabling the incumbent first.
+var ErrSourceConflict = errors.New("skill name is held by an enabled row of another source")
+
 // CoreSource is the reserved provenance value for rows owned by the daemon's
 // startup sync of its embedded corpus. Nothing else may write it, and the
 // sync must never touch a row carrying any other value.
@@ -60,21 +69,27 @@ type Store interface {
 
 	// Get returns one row by namespace and name, enabled or not.
 	// Returns ErrNotFound when there is no such row. When an override leaves
-	// two rows under one name, which of them Get returns is arbitrary — reads
-	// on the agent path go through List(enabledOnly=true) instead.
+	// two rows under one name, Get deterministically returns the enabled one
+	// (or the newest, when every row under the name is disabled) — reads on the
+	// agent path still go through List(enabledOnly=true).
 	Get(ctx context.Context, namespace, name string) (Record, error)
 
 	// Upsert creates or replaces the row at (namespace, name). It never
 	// changes an existing row's enabled flag: re-importing content must not
-	// silently re-enable something an operator switched off.
+	// silently re-enable something an operator switched off. Upserting over an
+	// ENABLED row of a different source returns ErrSourceConflict — a name
+	// belongs to its source until the row is disabled or deleted. Refreshing
+	// the SAME source over an enabled row is the normal content-replace path
+	// and succeeds.
 	Upsert(ctx context.Context, r Record) (Record, error)
 
 	// SetEnabled flips one name's enabled flag: enable targets the disabled
 	// row, disable the enabled one — the override state puts both under one
 	// name, and enabling a name that still carries an enabled row (an override
 	// not yet switched off) conflicts at the partial unique index and fails.
-	// Returns ErrNotFound when the name has no row to flip: it is absent, or
-	// every row is already in the requested state.
+	// That conflict is ErrSourceConflict, not a raw driver error. Returns
+	// ErrNotFound when the name has no row to flip: it is absent, or every row
+	// is already in the requested state.
 	SetEnabled(ctx context.Context, namespace, name string, enabled bool) error
 
 	// Delete hard-deletes every row under the name — in the override state

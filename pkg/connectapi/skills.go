@@ -5,6 +5,8 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"connectrpc.com/connect"
 
@@ -16,6 +18,13 @@ import (
 // package-local type: cmd/rafiki links this package and must not be dragged
 // into pgx's dependency graph through pkg/skills' store half.
 var ErrSkillNotFound = errors.New("skill not found")
+
+// ErrSkillSourceConflict is what a SkillManager returns when the
+// (namespace, name) is held by an enabled row the caller is not replacing —
+// an upsert that would change an enabled row's source, or an enable that
+// would leave two enabled rows under one name. Package-local for the same
+// reason as ErrSkillNotFound.
+var ErrSkillSourceConflict = errors.New("skill name is held by an enabled row of another source")
 
 // reservedCoreSource is owned by the daemon's startup sync of its embedded
 // corpus. A client that could write it could plant a row the sync would then
@@ -60,7 +69,25 @@ func skillError(err error) error {
 	if errors.Is(err, ErrSkillNotFound) {
 		return connect.NewError(connect.CodeNotFound, err)
 	}
+	// AlreadyExists, not Internal: the caller is being told the name is taken
+	// by a row it did not disable or delete first — an answer about the corpus,
+	// the same class as a missing skill being NotFound.
+	if errors.Is(err, ErrSkillSourceConflict) {
+		return connect.NewError(connect.CodeAlreadyExists, err)
+	}
 	return connect.NewError(connect.CodeInternal, err)
+}
+
+// validSkillIdent guards one half of a qualified name. Both halves render into
+// a model's skills inventory and come back through the skill tool's argument,
+// where "ns:name" is the parse — a colon inside either half breaks the inverse
+// — and a space, slash or control character would reach the paths that render
+// or store them. "." and ".." are directory-lookup sentinels, not names.
+func validSkillIdent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	return !strings.ContainsAny(s, " :/\t\r\n\x00")
 }
 
 func toProtoSkill(r SkillRow) *rafikiv1.SkillRow {
@@ -140,6 +167,14 @@ func (s *Server) UpsertSkill(
 	}
 	if row.Source == "" {
 		row.Source = "manual"
+	}
+	for _, part := range []struct{ what, val string }{
+		{"namespace", row.Namespace}, {"name", row.Name},
+	} {
+		if !validSkillIdent(part.val) {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("%s %q must be a slug: no spaces, colons, slashes, control characters, or \".\"/\"..\"", part.what, part.val))
+		}
 	}
 	out, err := m.UpsertSkill(ctx, row)
 	if err != nil {

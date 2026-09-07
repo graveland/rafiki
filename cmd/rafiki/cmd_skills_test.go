@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +26,11 @@ func TestDerivePluginNamespaceFallsBackToTheDirectoryName(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := derivePluginNamespace(dir); got != "mycorpus" {
+	got, err := derivePluginNamespace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "mycorpus" {
 		t.Errorf("got %q, want %q", got, "mycorpus")
 	}
 }
@@ -39,7 +44,46 @@ func TestDerivePluginNamespaceReadsAMarketplaceManifest(t *testing.T) {
 	if err := os.WriteFile(dir+"/.claude-plugin/marketplace.json", []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := derivePluginNamespace(dir); got != "pg" {
+	got, err := derivePluginNamespace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "pg" {
 		t.Errorf("got %q, want %q — the PLUGIN name, not the marketplace name", got, "pg")
+	}
+}
+
+// `rafiki skills import .` used to fall back to a namespace literally named
+// "." and upsert the whole corpus into it — rows that render as ".:skill",
+// deduplicate against nothing, and can only be cleaned out with rm. The
+// fallback must refuse the two spellings that cannot name a directory.
+func TestDerivePluginNamespaceRefusesDotAndDotDot(t *testing.T) {
+	isolateProfiles(t)
+	for _, dir := range []string{".", ".."} {
+		if _, err := derivePluginNamespace(dir); err == nil {
+			t.Errorf("derivePluginNamespace(%q) = nil error, want a refusal naming --namespace", dir)
+		}
+	}
+
+	// The CLI must refuse before it talks to the daemon or walks the tree.
+	cmd := newSkillsImportCmd()
+	cmd.SetArgs([]string{"."})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--namespace") {
+		t.Fatalf("skills import . = %v, want an error naming --namespace", err)
+	}
+
+	// --namespace is the documented escape hatch and still works.
+	cmd = newSkillsImportCmd()
+	cmd.SetArgs([]string{"--namespace", "corp", "."})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	// No skills under "." for a corpus-shaped import to find; the namespace
+	// error must NOT be the failure — this only pins that --namespace bypasses
+	// derivation, so the expected error is about skills, not about a namespace.
+	if err := cmd.Execute(); err == nil || strings.Contains(err.Error(), "cannot derive a namespace") {
+		t.Fatalf("--namespace . : err = %v, want derivation bypassed (any other outcome)", err)
 	}
 }

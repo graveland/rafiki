@@ -13,9 +13,10 @@ import (
 )
 
 type fakeSkills struct {
-	rows    []SkillRow
-	upserts []SkillRow
-	getErr  error
+	rows      []SkillRow
+	upserts   []SkillRow
+	getErr    error
+	upsertErr error
 	// sawIncludeDisabled captures the flag ListSkills handed the manager, so a
 	// test can pin the pass-through half of the include_disabled contract. The
 	// inversion into the store's enabledOnly belongs to the daemon's adapter
@@ -35,6 +36,9 @@ func (f *fakeSkills) GetSkill(_ context.Context, ns, name string) (SkillRow, err
 	return SkillRow{Namespace: ns, Name: name, Body: "b"}, nil
 }
 func (f *fakeSkills) UpsertSkill(_ context.Context, r SkillRow) (SkillRow, error) {
+	if f.upsertErr != nil {
+		return SkillRow{}, f.upsertErr
+	}
 	f.upserts = append(f.upserts, r)
 	return r, nil
 }
@@ -79,6 +83,67 @@ func TestUpsertSkillDefaultsNamespaceAndSource(t *testing.T) {
 	}
 	if got := f.upserts[0]; got.Namespace != "rafiki" || got.Source != "manual" {
 		t.Errorf("got namespace=%q source=%q, want rafiki/manual", got.Namespace, got.Source)
+	}
+}
+
+// A name held by an enabled row of another source is an ANSWER about the
+// corpus, like a missing skill: it must surface as AlreadyExists so a client
+// can tell the operator "disable or delete the incumbent first" instead of
+// reporting a broken daemon.
+func TestUpsertSkillMapsSourceConflictToAlreadyExists(t *testing.T) {
+	s := &Server{}
+	s.SetSkillManager(&fakeSkills{upsertErr: ErrSkillSourceConflict})
+
+	_, err := s.UpsertSkill(context.Background(), connect.NewRequest(&rafikiv1.UpsertSkillRequest{
+		Name: "x", Body: "y",
+	}))
+	if connect.CodeOf(err) != connect.CodeAlreadyExists {
+		t.Errorf("got code %v (%v), want AlreadyExists", connect.CodeOf(err), err)
+	}
+}
+
+// The two halves of a qualified name are a model-facing identifier and a
+// tool argument: a colon breaks the "ns:name" parse on the way back, and a
+// space, slash, dot or control character reaches the paths that render or
+// store them. The verb is the one gate every client goes through, so the
+// check lives here rather than in the CLI.
+func TestUpsertSkillRejectsNonSlugNamespacesAndNames(t *testing.T) {
+	// namespace "" is deliberately absent: it is the documented spelling of
+	// the default namespace, not a bad value.
+	bad := []string{"has space", "a:b", "a/b", "a\tb", ".", ".."}
+	for _, val := range bad {
+		for _, what := range []string{"name", "namespace"} {
+			req := &rafikiv1.UpsertSkillRequest{Name: "valid-name", Body: "y"}
+			if what == "name" {
+				req.Name = val
+			} else {
+				req.Namespace = val
+			}
+			s := &Server{}
+			f := &fakeSkills{}
+			s.SetSkillManager(f)
+			_, err := s.UpsertSkill(context.Background(), connect.NewRequest(req))
+			if connect.CodeOf(err) != connect.CodeInvalidArgument {
+				t.Errorf("%s=%q: got code %v (%v), want InvalidArgument", what, val, connect.CodeOf(err), err)
+			}
+			if len(f.upserts) != 0 {
+				t.Errorf("%s=%q: store was written despite the rejection", what, val)
+			}
+		}
+	}
+
+	// The control: a real slug still reaches the manager, so the guard cannot
+	// have tightened into a blanket refusal.
+	s := &Server{}
+	f := &fakeSkills{}
+	s.SetSkillManager(f)
+	if _, err := s.UpsertSkill(context.Background(), connect.NewRequest(&rafikiv1.UpsertSkillRequest{
+		Namespace: "my-plugin", Name: "design-postgres-tables", Body: "y",
+	})); err != nil {
+		t.Fatalf("valid slug rejected: %v", err)
+	}
+	if len(f.upserts) != 1 {
+		t.Fatalf("got %d upserts, want 1", len(f.upserts))
 	}
 }
 

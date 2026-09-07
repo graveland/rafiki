@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/skills"
@@ -30,6 +31,26 @@ func scanRecord(row pgx.Row) (skills.Record, error) {
 		&r.Source, &r.OwnerUserID, &r.ShadowedCoreVersion, &r.Enabled,
 		&r.CreatedAt, &r.UpdatedAt)
 	return r, err
+}
+
+// uniqueViolation and skillsNameActiveIndex match an index rejection by
+// SQLSTATE AND constraint name, the executorsdb pattern: another unique index
+// on this table later must not inherit this translation.
+const (
+	uniqueViolation       = "23505"
+	skillsNameActiveIndex = "skills_name_active"
+)
+
+// nameTaken translates the partial unique index's rejection into the typed
+// sentinel, BARE — the raw pg error's text reaches clients through the
+// Connect layer, and a driver message is not an answer a client can act on.
+func nameTaken(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation &&
+		pgErr.ConstraintName == skillsNameActiveIndex {
+		return skills.ErrSourceConflict
+	}
+	return nil
 }
 
 func (s *pgStore) List(ctx context.Context, enabledOnly bool) ([]skills.Record, error) {
@@ -55,9 +76,16 @@ func (s *pgStore) List(ctx context.Context, enabledOnly bool) ([]skills.Record, 
 }
 
 func (s *pgStore) Get(ctx context.Context, namespace, name string) (skills.Record, error) {
+	// The override state leaves a disabled row and an enabled one under the
+	// same name, and this method feeds the inline skill body path and `skills
+	// show` — a nondeterministic pick can serve the content an operator
+	// deliberately switched off. The enabled row wins; among rows that are all
+	// disabled, the newest.
 	r, err := scanRecord(s.pool.QueryRow(ctx,
 		`SELECT `+selectCols+` FROM conversations.skills
-		 WHERE namespace = $1 AND name = $2`, namespace, name))
+		 WHERE namespace = $1 AND name = $2
+		 ORDER BY enabled DESC, created_at DESC
+		 LIMIT 1`, namespace, name))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return skills.Record{}, skills.ErrNotFound
 	}
@@ -79,6 +107,13 @@ func (s *pgStore) Get(ctx context.Context, namespace, name string) (skills.Recor
 // stays disabled. A different source is a new claim on the freed name and
 // falls through to the INSERT, which is how an operator override reclaims a
 // disabled core skill.
+//
+// Over an ENABLED row the DO UPDATE's WHERE guards the source: refreshing the
+// same source replaces content, but a different source matches nothing, the
+// INSERT neither inserts nor updates, and the zero-row RETURNING is
+// translated below into ErrSourceConflict. Without the guard the DO UPDATE
+// rewrote the incumbent's source — a name takeover that silently detached the
+// row from the sync or import that owns it.
 func (s *pgStore) Upsert(ctx context.Context, r skills.Record) (skills.Record, error) {
 	if r.Namespace == "" {
 		r.Namespace = skills.DefaultNamespace
@@ -111,14 +146,20 @@ func (s *pgStore) Upsert(ctx context.Context, r skills.Record) (skills.Record, e
 		 ON CONFLICT (namespace, name) WHERE enabled DO UPDATE SET
 		   description = EXCLUDED.description,
 		   body = EXCLUDED.body,
-		   source = EXCLUDED.source,
 		   owner_user_id = EXCLUDED.owner_user_id,
 		   shadowed_core_version = EXCLUDED.shadowed_core_version,
 		   updated_at = now()
+		 WHERE conversations.skills.source = EXCLUDED.source
 		 RETURNING `+selectCols,
 		r.Namespace, r.Name, r.Description, r.Body, r.Source,
 		ownerArg, shadowArg, r.Enabled))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return skills.Record{}, skills.ErrSourceConflict
+	}
 	if err != nil {
+		if taken := nameTaken(err); taken != nil {
+			return skills.Record{}, taken
+		}
 		return skills.Record{}, fmt.Errorf("upsert skill: %w", err)
 	}
 	return out, nil
@@ -129,12 +170,17 @@ func (s *pgStore) Upsert(ctx context.Context, r skills.Record) (skills.Record, e
 // touches only disabled rows (AND NOT enabled), disable only enabled ones
 // (AND enabled) — the single `enabled <> $3` predicate is both. Flipping a
 // row already in the target state matches nothing and surfaces as
-// ErrNotFound, like an absent name.
+// ErrNotFound, like an absent name. Enabling when the name still carries an
+// enabled row is rejected by the partial unique index and translated to
+// ErrSourceConflict — the index is the accepted v1 constraint, not a bug.
 func (s *pgStore) SetEnabled(ctx context.Context, namespace, name string, enabled bool) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE conversations.skills SET enabled = $3, updated_at = now()
 		 WHERE namespace = $1 AND name = $2 AND enabled <> $3`, namespace, name, enabled)
 	if err != nil {
+		if taken := nameTaken(err); taken != nil {
+			return taken
+		}
 		return fmt.Errorf("set skill enabled: %w", err)
 	}
 	if tag.RowsAffected() == 0 {

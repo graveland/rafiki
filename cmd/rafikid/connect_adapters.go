@@ -259,8 +259,12 @@ func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]con
 
 // connectSkills adapts the daemon's skills.Store to connectapi.SkillManager.
 // The translation exists so pkg/connectapi — which cmd/rafiki links — never
-// imports pkg/skills' store half.
-type connectSkills struct{ st skills.Store }
+// imports pkg/skills' store half. version is the daemon's build version, used
+// to stamp shadowed_core_version on core overrides.
+type connectSkills struct {
+	st      skills.Store
+	version string
+}
 
 func skillRowFrom(r skills.Record) connectapi.SkillRow {
 	return connectapi.SkillRow{
@@ -275,11 +279,15 @@ func skillRowFrom(r skills.Record) connectapi.SkillRow {
 	}
 }
 
-// translateSkillErr maps the store's sentinel onto connectapi's, so a missing
-// skill stays an ANSWER (NotFound) rather than becoming an internal error.
+// translateSkillErr maps the store's sentinels onto connectapi's, so a missing
+// skill stays an ANSWER (NotFound) and a name held by an enabled row stays one
+// too (AlreadyExists) rather than both becoming internal errors.
 func translateSkillErr(err error) error {
 	if errors.Is(err, skills.ErrNotFound) {
 		return connectapi.ErrSkillNotFound
+	}
+	if errors.Is(err, skills.ErrSourceConflict) {
+		return connectapi.ErrSkillSourceConflict
 	}
 	return err
 }
@@ -305,6 +313,19 @@ func (c connectSkills) GetSkill(ctx context.Context, ns, name string) (connectap
 }
 
 func (c connectSkills) UpsertSkill(ctx context.Context, row connectapi.SkillRow) (connectapi.SkillRow, error) {
+	// Stamping shadowed_core_version is the daemon's job, never the client's:
+	// the stamp records which DAEMON build's core skill this row displaced, and
+	// warnStaleOverrides compares it against the running daemon — a client's
+	// claim about either is a self-reported fact. It is stamped only when the
+	// upsert replaces a core row (the row Get finds at the name), so an
+	// ordinary skill never carries a phantom shadow version; a re-written
+	// override carries no stamp at all, which reads as fresh rather than stale.
+	// A Get that errors is not evidence — the upsert proceeds un-stamped.
+	if c.version != "" {
+		if cur, err := c.st.Get(ctx, row.Namespace, row.Name); err == nil && cur.Source == skills.CoreSource {
+			row.ShadowedCoreVersion = c.version
+		}
+	}
 	out, err := c.st.Upsert(ctx, skills.Record{
 		Namespace:           row.Namespace,
 		Name:                row.Name,

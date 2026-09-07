@@ -3,11 +3,58 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/skills"
 )
+
+// blockOnCtxStore models a database that accepted the connection and then
+// went quiet: ReplaceNamespaceSource returns only when its context dies.
+type blockOnCtxStore struct{}
+
+func (blockOnCtxStore) List(context.Context, bool) ([]skills.Record, error) { return nil, nil }
+func (blockOnCtxStore) Get(context.Context, string, string) (skills.Record, error) {
+	return skills.Record{}, skills.ErrNotFound
+}
+func (blockOnCtxStore) Upsert(_ context.Context, r skills.Record) (skills.Record, error) {
+	return r, nil
+}
+func (blockOnCtxStore) SetEnabled(context.Context, string, string, bool) error { return nil }
+func (blockOnCtxStore) Delete(context.Context, string, string) error           { return nil }
+func (blockOnCtxStore) ReplaceNamespaceSource(ctx context.Context, _, _ string, _ []skills.Record) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// The startup sync runs on the daemon's base context, which has no deadline
+// of its own — without its own bound, a database that answers pings and then
+// stalls hangs the whole startup. The timeout is the never-fatal contract:
+// the corpus keeps last-good-wins rows and the daemon serves children.
+func TestSyncCoreSkillsIsBoundedByATimeout(t *testing.T) {
+	old := coreSyncTimeout
+	coreSyncTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { coreSyncTimeout = old })
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- syncCoreSkills(context.Background(), blockOnCtxStore{}, "v-test") }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("sync against a stuck store: got %v, want DeadlineExceeded", err)
+		}
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Fatalf("sync took %v; the deadline did not bound it", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("sync did not return; the stuck store holds startup forever")
+	}
+}
 
 func TestLoadCoreSkillsParsesTheEmbeddedCorpus(t *testing.T) {
 	recs, err := loadCoreSkills()
