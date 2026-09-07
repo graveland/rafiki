@@ -75,6 +75,7 @@ func newRootCmd() *cobra.Command {
 		newDarajaCmd(),
 		newUserCmd(),
 		newConfigCmd(),
+		newSkillsCmd(),
 		newProfileCmd(),
 	)
 

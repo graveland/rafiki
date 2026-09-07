@@ -406,3 +406,59 @@ UDS-only daemons refuse with a clear diagnostic.
 
 Output format: `child_id=<id> pid=<n> pgid=<n> connected_at=<epoch_ms>`
 on stdout; errors go to stderr.
+
+## `rafiki skills`
+
+Manage the daemon's database-backed skill corpus (`conversations.skills`) —
+the tier a fundi child's skill tool serves at the start of each turn, after
+the file-based tiers. It talks to the daemon over the Connect plane
+(`ListSkills`/`GetSkill`/`UpsertSkill`/`DeleteSkill`/`SetSkillEnabled` — see
+`docs/reference/control-protocol.md` §2.3), so it needs a reachable profile,
+never a DSN, and works against a remote daemon exactly as against a local
+one.
+
+Every skill lives in a **namespace** and is referenced as
+`<namespace>:<name>`; a bare `<name>` means the default namespace `rafiki`.
+The namespace is the name a model sees, and the fold that merges the
+database tier with file-based skills keys on the qualified name — which is
+why an imported corpus keeps its upstream plugin's name as its namespace
+(see `import` below).
+
+```
+rafiki skills list [--all]              # the corpus; --all adds disabled rows
+rafiki skills show <namespace:name>     # one skill's body, frontmatter stripped
+rafiki skills add --file <SKILL.md> [--namespace ns]
+rafiki skills rm <namespace:name>       # hard-delete (both rows, in the override state)
+rafiki skills enable <namespace:name>
+rafiki skills disable <namespace:name>
+rafiki skills import <dir> [--namespace ns]
+```
+
+- **`list`** omits bodies: an inventory is a handful of lines and a body is a
+  document, so none of the corpus rides along. `show` fetches one body.
+- **`add`** reads a local `SKILL.md` (frontmatter `name:`/`description:`,
+  body after it), parses it the same way `skills.DiscoverSkills` does, and
+  upserts it as `source: manual`. The daemon defaults the namespace to
+  `rafiki` and refuses the reserved source `rafiki-core`, which belongs to
+  the daemon's own startup sync.
+- **`disable`** flips a row off — it stops being served, and its NAME IS THEN
+  FREE for a replacement: because the database tier can hold an override
+  under an existing name only while the old row is disabled, disabling is
+  how you retire a core skill before adding your own under the same name.
+  `enable` is the inverse. A name with no row in the requested state is an
+  answer (`not found`), not a failure.
+- **`rm`** deletes every row under the name — there is no attribution
+  history to preserve.
+- **`import`** walks a corpus laid out as `<dir>/<name>/SKILL.md` (a Claude
+  Code plugin's `skills/` tree, or any checkout in that shape) and upserts
+  every skill into one namespace, `source: import:<namespace>`. The
+  namespace is derived from upstream's own `.claude-plugin/plugin.json` or
+  `marketplace.json` (the PLUGIN's name, never the marketplace's), falling
+  back to the directory's own name; `--namespace` overrides. Keeping the
+  upstream name is the point: a claude child on a machine where that plugin
+  is really installed deduplicates the two instead of seeing the same skill
+  twice.
+
+Authenticated by the same per-user bearer credential as every other Connect
+verb: any valid user token may read and write the corpus, in any namespace,
+until multi-user scoping is built.
