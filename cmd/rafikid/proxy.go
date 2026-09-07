@@ -19,9 +19,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/ejection"
@@ -213,9 +210,18 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// no-ops on a nil receiver.
 	quotaStore := quota.NewStore(pool)
 
+	// SenderForKey (not a hand-rolled anthropic.NewClient) so this client gets
+	// the same base URL, headers, and OpenRouter session-id transport as every
+	// other sender in the codebase — a second copy here previously drifted:
+	// it duplicated the three OpenRouter headers by hand and predated
+	// x-session-id entirely.
+	anthropicSender, err := llm.SenderForKey(providers.Provider{Name: "anthropic", Kind: providers.KindAnthropic}, anthropicKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build anthropic sender: %w", err)
+	}
 	llmOpts := []llm.ClientOption{
 		llm.WithProviders(providersOrDefault(opts.Providers)),
-		llm.WithProviderSender("anthropic", llm.FromSDK(anthropic.NewClient(option.WithAPIKey(anthropicKey)))),
+		llm.WithProviderSender("anthropic", anthropicSender),
 		llm.WithLogger(logger),
 	}
 	if defaultModel != "" {
@@ -228,14 +234,12 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		llmOpts = append(llmOpts, llm.WithStore(pool))
 	}
 	if openrouterKey != "" {
+		openrouterSender, err := llm.SenderForKey(providers.Provider{Name: "openrouter", Kind: providers.KindAnthropicOpenRouter}, openrouterKey, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build openrouter sender: %w", err)
+		}
 		llmOpts = append(llmOpts,
-			llm.WithProviderSender("openrouter", llm.FromSDK(anthropic.NewClient(
-				option.WithBaseURL("https://openrouter.ai/api"),
-				option.WithAPIKey(openrouterKey),
-				option.WithHeader("Referer", "https://github.com/graveland/rafiki"),
-				option.WithHeader("X-OpenRouter-Title", "rafiki"),
-				option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
-			))),
+			llm.WithProviderSender("openrouter", openrouterSender),
 			llm.WithBreaker(15*time.Minute),
 		)
 	}

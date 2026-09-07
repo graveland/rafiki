@@ -335,6 +335,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	}
 
 	ref := c.beginTurn(ctx, meta, params)
+	ctx = WithSessionID(ctx, ref.convID)
 
 	start := time.Now()
 	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params)
@@ -531,6 +532,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	}
 
 	ref := c.beginTurn(ctx, meta, params)
+	ctx = WithSessionID(ctx, ref.convID)
 	start := time.Now()
 
 	stream, serr := streamer.NewStreaming(ctx, params)

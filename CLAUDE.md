@@ -1432,3 +1432,18 @@
   working child — so "just make it 10s" trades one problem for a DB-load one.
   The real answer is a deadline-scheduler (zero wakeups when nothing is due),
   which would also serve an agent-side wait tool.
+
+- **Every OpenRouter sender must carry `x-session-id` (OpenRouter's
+  sticky-routing key), and the only correct way to get one is
+  `llm.SenderFor`/`SenderForKey` — never hand-roll an `anthropic.NewClient`
+  pointed at OpenRouter.** `SenderForKey` wraps `KindAnthropicOpenRouter`
+  senders in `sessionIDTransport`, which reads the id from ctx (set via
+  `llm.WithSessionID`, which `SendParams`/`sendStreamingAttempt` call with
+  `ref.convID` right after `beginTurn`) and sets the header — the
+  Anthropic-native path never sees it. Without this header, OpenRouter's
+  fallback routing hashes only the first system+user message pair, so a
+  conversation's static prefix stays warm on one backend while everything
+  appended after it is free to land on a cold replica — cache hit rate craters
+  as the conversation grows, and it's indistinguishable from "this model
+  doesn't cache" by the token counts alone. A hand-rolled sender silently
+  loses this (and any future transport-level behavior) with no error anywhere.

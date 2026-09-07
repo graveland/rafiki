@@ -114,6 +114,93 @@ func TestSenderForOpenRouterHeaders(t *testing.T) {
 	}
 }
 
+// WithSessionID must reach OpenRouter as x-session-id — the sticky-routing
+// header that pins a whole conversation's requests to the same backend for
+// prompt-cache locality (see pkg/server/proxy.go's identical header on the
+// passthrough face; this is the same mechanism for fundi's native path).
+func TestSenderForOpenRouterSessionID(t *testing.T) {
+	t.Setenv("TEST_OR_KEY", "sk-or-1")
+	var gotSession string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get("x-session-id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	sender, err := llm.SenderFor(providers.Provider{
+		Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
+		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
+	}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor: %v", err)
+	}
+	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
+	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+		Model: anthropic.Model("m"), MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+	})
+	if gotSession != "conv-abc-123" {
+		t.Errorf("x-session-id = %q, want conv-abc-123", gotSession)
+	}
+}
+
+// No WithSessionID on the context means no header at all — never an empty
+// x-session-id value, which OpenRouter would treat as a real (empty) session.
+func TestSenderForOpenRouterNoSessionIDWithoutContextValue(t *testing.T) {
+	t.Setenv("TEST_OR_KEY", "sk-or-1")
+	var sawHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawHeader = r.Header["X-Session-Id"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	sender, err := llm.SenderFor(providers.Provider{
+		Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
+		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
+	}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor: %v", err)
+	}
+	_, _ = sender.New(context.Background(), anthropic.MessageNewParams{
+		Model: anthropic.Model("m"), MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+	})
+	if sawHeader {
+		t.Error("x-session-id header present with no session id on the context")
+	}
+}
+
+// The Anthropic-native path must never see x-session-id, even if the caller's
+// context happens to carry one (e.g. a fallback chain sharing ctx with an
+// OpenRouter primary) — it is an OpenRouter-only concept.
+func TestSenderForAnthropicNeverSeesSessionID(t *testing.T) {
+	var sawHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawHeader = r.Header["X-Session-Id"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	sender, err := llm.SenderFor(providers.Provider{
+		Name: "anthropic", Kind: providers.KindAnthropic, BaseURL: srv.URL,
+	}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor: %v", err)
+	}
+	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
+	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+		Model: anthropic.Model("m"), MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+	})
+	if sawHeader {
+		t.Error("x-session-id header present on the Anthropic-native path")
+	}
+}
+
 // The kind is reserved, not implemented. Constructing it must fail with a
 // message that says so, not produce a sender that 400s at call time.
 func TestSenderForOpenAIKindRefused(t *testing.T) {

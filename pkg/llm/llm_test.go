@@ -28,10 +28,12 @@ type scriptedSender struct {
 	calls   int
 	scripts []func(params anthropic.MessageNewParams) (*anthropic.Message, error)
 	lastReq []anthropic.MessageNewParams
+	lastCtx []context.Context
 }
 
-func (s *scriptedSender) New(_ context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (s *scriptedSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
 	s.lastReq = append(s.lastReq, params)
+	s.lastCtx = append(s.lastCtx, ctx)
 	i := s.calls
 	if i >= len(s.scripts) {
 		i = len(s.scripts) - 1

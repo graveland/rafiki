@@ -36,6 +36,52 @@ type StreamingSender interface {
 	NewStreaming(ctx context.Context, params anthropic.MessageNewParams) (*ssestream.Stream[anthropic.MessageStreamEventUnion], error)
 }
 
+// sessionIDContextKey is the context key WithSessionID writes and
+// sessionIDTransport reads. Unexported: nothing outside this file may set or
+// read it directly, so the only way a request carries a session id is
+// through WithSessionID.
+type sessionIDContextKey struct{}
+
+// WithSessionID attaches a stable per-conversation identifier to ctx, sent as
+// OpenRouter's "x-session-id" header on every request issued with it (via
+// sessionIDTransport, wired onto anthropic-openrouter senders in
+// SenderForKey). This is the same sticky-routing header the reverse-proxy
+// face already sends for passthrough clients (pkg/server/proxy.go,
+// pkg/server/openai.go); without it, OpenRouter falls back to hashing the
+// first system+user message pair for routing, which pins only a
+// conversation's static prefix and leaves every later turn's growing tail
+// unrouted — see the ProviderGuard notes on cache locality. An empty id is a
+// no-op: ctx is returned unchanged and no header is ever sent.
+func WithSessionID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionIDContextKey{}, id)
+}
+
+// sessionIDTransport sets x-session-id from ctx (via WithSessionID) on every
+// outbound request, so OpenRouter can pin a whole conversation's requests to
+// one backend for prompt-cache locality. Only ever wrapped around an
+// anthropic-openrouter sender's transport in SenderForKey — the
+// Anthropic-native path must never see this header.
+type sessionIDTransport struct {
+	base http.RoundTripper
+}
+
+func (t sessionIDTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if id, ok := req.Context().Value(sessionIDContextKey{}).(string); ok && id != "" {
+		// Clone rather than mutate: RoundTrip must not modify the original
+		// request (net/http.RoundTripper's contract).
+		req = req.Clone(req.Context())
+		req.Header.Set("x-session-id", id)
+	}
+	return base.RoundTrip(req)
+}
+
 type sdkSender struct{ client anthropic.Client }
 
 func (s sdkSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
@@ -83,6 +129,7 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 			option.WithHeader("X-OpenRouter-Title", "rafiki"),
 			option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
 		)
+		rt = sessionIDTransport{base: rt}
 	case providers.KindOpenAI:
 		return nil, fmt.Errorf("llm: provider %q: kind %q is reserved and not implemented", p.Name, p.Kind)
 	default:

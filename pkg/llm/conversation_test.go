@@ -72,6 +72,51 @@ func testClient(t *testing.T, pool *pgxpool.Pool, sender Sender) *Client {
 	return c
 }
 
+// TestSendParamsSetsSessionIDFromConversationID proves the fundi-native path
+// (Conversation.Send -> Client.SendParams), not just the reverse-proxy face,
+// threads OpenRouter's sticky-routing session id through — and that the value
+// is rafiki's own conversation id, matching what pkg/server/proxy.go sends for
+// passthrough clients. pkg/llm/sender_provider_test.go covers the other half:
+// that a session id on the context really reaches OpenRouter as the
+// x-session-id header.
+func TestSendParamsSetsSessionIDFromConversationID(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+
+	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("ok"),
+	}}
+	c, err := NewClient(
+		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("openrouter", openrouter),
+		WithStore(pool),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv, err := c.Conversation(ctx, NewConversation("", "test"), Model("openrouter/moonshotai/kimi-k3"))
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if len(openrouter.lastCtx) != 1 {
+		t.Fatalf("openrouter sender called %d times, want 1", len(openrouter.lastCtx))
+	}
+	sid, _ := openrouter.lastCtx[0].Value(sessionIDContextKey{}).(string)
+	if sid == "" {
+		t.Fatal("no session id reached the OpenRouter sender's context")
+	}
+	if sid != conv.ID {
+		t.Errorf("session id = %q, want the conversation id %q", sid, conv.ID)
+	}
+}
+
 // TestConversationCostRollsUpCompletedTurnsPerModel locks down the fundi-side
 // "cost_total" rollup: completed turns are priced at each turn's own served
 // model, summed across the conversation. It is the llm.Client half of the same
