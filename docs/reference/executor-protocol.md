@@ -2,7 +2,7 @@
 
 The daemon dispatches filesystem and shell tool calls to an executor process
 (`rafiki executor serve`) over Connect RPC. This document describes the wire
-protocol: the ten RPCs, their message shapes, the four failure codes, the
+protocol: the executor RPCs, their message shapes, the four failure codes, the
 background-handle lifecycle, the workspace lifecycle, and the mtime contract.
 
 There are two transports for the same protocol, and they differ only in what
@@ -178,7 +178,8 @@ it must never be the store's own text for the same DSN reason.
 
 ## RPCs
 
-All ten RPCs belong to the `rafiki.executor.v1.ExecutorService` service.
+All RPCs documented below belong to the `rafiki.executor.v1.ExecutorService`
+service.
 `rafiki.admin.v1.AdminService` adds two more (`Launch`, `Reap`) on the same
 connection — see [AdminService: Launch and Reap](#adminservice-launch-and-reap).
 
@@ -346,6 +347,71 @@ empty body (which a model would read as a skill that exists and says nothing).
 
 An empty inventory is the ordinary answer for a workspace with no project skills,
 and is not an error.
+
+### SyncSkills
+
+```
+SyncSkills(namespaces[{name, version, skills[{name, description, body}]}])
+  → { written, pruned, skillsDir }
+```
+
+Unary. Delivers the daemon's skill corpus to the executor's Claude skills
+directory. Each namespace becomes one plugin-style directory holding
+`<name>/SKILL.md` for every skill plus a generated `.claude-plugin/plugin.json`,
+so Claude Code derives the `<namespace>:<name>` qualified name from the
+directory layout — nothing on disk is prefixed. The skill `body` has already had
+its frontmatter stripped by the daemon; the executor re-renders a frontmatter
+block from `name` and `description` when it writes `SKILL.md`. The response
+counts the namespaces written and pruned, and `skillsDir` echoes the directory
+the corpus actually landed in so the daemon can log it rather than guess.
+
+**The whole corpus, every time.** `namespaces` is the COMPLETE set of
+rafiki-managed namespaces, and a namespace absent from it has its directory
+removed — whole-tree replacement rather than per-path bookkeeping, so there is
+no partial state to reconcile after a crash. Each namespace tree is staged in a
+sibling directory and renamed into place, so a claude child launching mid-sync
+never observes a half-written corpus; a tree whose staged content is
+byte-identical to the live one is left alone, so file watching stays quiet
+across a converged fleet's restarts.
+
+**The executor owns one directory per namespace and marks each with
+`.rafiki-managed`.** The marker is what distinguishes "a tree we own and may
+replace" from "the operator's own skill directory" — ownership by marker rather
+than by a central manifest, because a manifest is state that can disagree with
+the filesystem and the disagreement is always discovered at the moment of an
+`rm`. An unmarked directory is never touched: replacing one is refused and
+pruning skips it. The existence check runs `Lstat`, not `Stat`, so a symlink
+planted in the skills dir is judged as itself and cannot redirect a `RemoveAll`
+anywhere.
+
+**Names are validated as path segments at BOTH the write and the delete
+site.** A namespace or skill name becomes a directory on someone's machine:
+empty, `.`/`..`, anything containing `/`, `\`, `:` or NUL, and anything over 64
+bytes is refused with `CodeInvalidArgument` before the filesystem is touched at
+all. The prune path re-validates names that came off the local filesystem — the
+delete call site does its own checking, always, because a check written once and
+far from the `RemoveAll` is the shape every directory-traversal bug in this
+class has taken.
+
+**The target is `$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`.** The
+resolution reads the executor's own process environment, which is exactly what a
+launched claude child inherits: `executor.env`/`executor-overrides.env` are
+applied to this process at startup, and `AdminService.Launch` passes the
+environment through to daraja — so pointing the corpus where this process looks
+is correct by construction rather than by agreement between components. It must
+not be a private directory: `~/.claude` is where Claude Code keeps the OAuth
+credential `--passthrough-auth` depends on.
+
+**Opt-in per machine, and `skills_sync` on `DescribeResponse` is
+self-reported** for the same narrowing reason as `proxies` and `launchKinds`:
+it only ever NARROWS what the executor will do. An executor started without
+`--skills-sync` (or with `RAFIKI_EXECUTOR_SKILLS_SYNC` unset) answers
+`CodePermissionDenied`, and a daemon reading `false` from `Describe` never
+sends a corpus to it. The flag defaults to OFF because it writes into the
+operator's home directory — not something to enable by accident. The executor
+answer remains the enforcement rather than a formality: a daemon that ignored a
+`false` here would cost an unexpected write to the operator's machine, which is
+a worse failure than the failed launch a wrong `launchKinds` entry buys.
 
 ### Cancel
 

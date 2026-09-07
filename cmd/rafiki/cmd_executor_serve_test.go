@@ -87,3 +87,45 @@ func TestExecutorProfileProxyExplicitFlagWithNoManifestStillAttemptsResolution(t
 		t.Fatal("an explicit -P on a machine with no manifest must still never bootstrap one — profile.Resolve refuses to bootstrap a requested name on its own")
 	}
 }
+
+// skillsSyncFromArgv drives the same path RunE uses — parse the flag, read it
+// back, resolve it against the environment — for the four combinations that
+// matter: flag off and env unset (the default), flag off and env set, an
+// explicit --skills-sync=false over a set env, and the bare flag.
+func skillsSyncFromArgv(t *testing.T, argv []string, env string) bool {
+	t.Helper()
+	t.Setenv("RAFIKI_EXECUTOR_SKILLS_SYNC", env)
+	cmd := newExecutorServeCmd()
+	if err := cmd.Flags().Parse(argv); err != nil {
+		t.Fatal(err)
+	}
+	on, err := cmd.Flags().GetBool("skills-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return skillsSyncEnabled(cmd, on)
+}
+
+func TestSkillsSyncDefaultsOff(t *testing.T) {
+	if skillsSyncFromArgv(t, nil, "") {
+		t.Error("skills-sync defaulted on; it writes into the operator's home directory")
+	}
+}
+
+func TestSkillsSyncEnvTurnsItOn(t *testing.T) {
+	if !skillsSyncFromArgv(t, nil, "1") {
+		t.Error("a non-empty RAFIKI_EXECUTOR_SKILLS_SYNC must enable skills sync — a service unit cannot edit argv")
+	}
+}
+
+func TestSkillsSyncExplicitFalseBeatsTheEnvironment(t *testing.T) {
+	if skillsSyncFromArgv(t, []string{"--skills-sync=false"}, "1") {
+		t.Error("an explicit --skills-sync=false must stay able to switch the feature off on a machine whose environment enables it")
+	}
+}
+
+func TestSkillsSyncFlagTurnsItOn(t *testing.T) {
+	if !skillsSyncFromArgv(t, []string{"--skills-sync"}, "") {
+		t.Error("--skills-sync must enable skills sync")
+	}
+}

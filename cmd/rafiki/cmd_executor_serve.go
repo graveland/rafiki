@@ -181,6 +181,21 @@ func loadExecutorEnv() {
 	}
 }
 
+// skillsSyncEnabled resolves the effective --skills-sync value from the flag
+// and its environment form. The environment is read HERE rather than as the
+// flag's default for two reasons: flag registration runs before
+// loadExecutorEnv has applied executor.env, so a default captured at
+// construction time would miss what the file provides; and an explicit
+// --skills-sync=false must stay able to switch the feature off on a machine
+// whose environment enables it — Flags().Changed tells the explicit spelling
+// apart from an untouched default, which the flag's value alone cannot.
+func skillsSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
+	if cmd.Flags().Changed("skills-sync") {
+		return flagOn
+	}
+	return os.Getenv("RAFIKI_EXECUTOR_SKILLS_SYNC") != ""
+}
+
 // ─── serve ─────────────────────────────────────────────────────────────────────
 
 func newExecutorServeCmd() *cobra.Command {
@@ -199,6 +214,7 @@ func newExecutorServeCmd() *cobra.Command {
 		jobBudgetMB       int64
 		lspConfig         string
 		noLSP             bool
+		skillsSync        bool
 		proxyArgs         []string
 		launchKinds       []string
 	)
@@ -247,6 +263,7 @@ Two transports, exactly one of which is used:
 				JobOutputBudget: jobBudgetMB << 20,
 				LSPConfig:       lspConfig,
 				NoLSP:           noLSP,
+				SkillsSync:      skillsSyncEnabled(cmd, skillsSync),
 				Proxies:         proxies,
 				LaunchKinds:     launchKinds,
 			})
@@ -314,6 +331,9 @@ Two transports, exactly one of which is used:
 	cmd.Flags().StringVar(&lspConfig, "lsp-config", "",
 		"path to an lsp.json describing language servers this executor may start (default: auto-detect what is on PATH)")
 	cmd.Flags().BoolVar(&noLSP, "no-lsp", false, "disable language servers on this executor entirely")
+	cmd.Flags().BoolVar(&skillsSync, "skills-sync", false,
+		"accept the daemon's skill corpus into this machine's Claude skills directory "+
+			"(RAFIKI_EXECUTOR_SKILLS_SYNC enables it from a service unit)")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
 	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
 		"child protocol this executor will host for the daemon, e.g. --launch claude "+
