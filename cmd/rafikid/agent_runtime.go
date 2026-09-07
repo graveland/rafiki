@@ -292,6 +292,17 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
 	ro.MaxCost = grantedCost(req)
+	// CurrentMaxCost lets Controller.SetChildBudget's persisted change reach
+	// this engine's own live cost guardrail without a restart — see
+	// pkg/fundi/engine.go's Engine.effectiveMaxCost. childID is closed over
+	// here, not read from any argument, matching every other per-child
+	// closure this function builds (ro.OnTurnEnded above, ro.Agents below).
+	ro.CurrentMaxCost = func() float64 {
+		if snap, ok := c.st.Get(childID); ok {
+			return snap.MaxCost
+		}
+		return ro.MaxCost
+	}
 	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)

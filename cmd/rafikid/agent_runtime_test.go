@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/execpool"
@@ -774,5 +775,41 @@ func TestAgentRunnerUnsetMaxCostIsUnlimited(t *testing.T) {
 	}
 	if ro.MaxCost != 0 {
 		t.Errorf("ro.MaxCost = %v, want 0 (unlimited)", ro.MaxCost)
+	}
+}
+
+// TestAgentRunnerCurrentMaxCostReadsLiveStoreValue proves the runtime options'
+// CurrentMaxCost accessor is a closure over the childstore row, not a snapshot
+// of grantedCost: a Controller.SetChildBudget mutation on the row reaches a
+// running child's own cost guardrail with nothing rebuilt.
+func TestAgentRunnerCurrentMaxCostReadsLiveStoreValue(t *testing.T) {
+	c := newTestController(t)
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_live_budget", Status: protocol.StatusIdle,
+		StartedAt: time.Now(), Kind: protocol.KindFundi, MaxCost: 5.00,
+	})
+	req := protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_live_budget", false, "", "")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.CurrentMaxCost == nil {
+		t.Fatal("CurrentMaxCost accessor is nil; a live budget raise can never reach the engine")
+	}
+	if got := ro.CurrentMaxCost(); got != 5.00 {
+		t.Errorf("CurrentMaxCost() = %v, want the stored 5.00", got)
+	}
+
+	// Mutate the store directly, the way Controller.SetChildBudget does —
+	// the accessor must see it immediately, with nothing rebuilt.
+	if err := c.st.SetMaxCost("c_live_budget", 500.00); err != nil {
+		t.Fatal(err)
+	}
+	if got := ro.CurrentMaxCost(); got != 500.00 {
+		t.Errorf("CurrentMaxCost() after a store update = %v, want 500.00 (live)", got)
 	}
 }
