@@ -195,7 +195,7 @@ func invertedPair(t *testing.T, handler executorpbconnect.ExecutorServiceHandler
 		if _, err := readHelloResponseLine(dialed); err != nil {
 			return
 		}
-		_ = ServeInverted(dialed, h)
+		_ = ServeInverted(t.Context(), dialed, h)
 	}()
 
 	select {

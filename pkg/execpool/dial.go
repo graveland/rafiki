@@ -137,7 +137,7 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 		slog.Info("executor: enrolled", "id", hello.ExecutorID, "credentialFile", o.CredentialFile)
 	}
 
-	return ServeInverted(readerConn{Conn: upConn, r: rd}, o.Handler)
+	return ServeInverted(ctx, readerConn{Conn: upConn, r: rd}, o.Handler)
 }
 
 // dialDaemon opens the transport under the executor link and returns it with

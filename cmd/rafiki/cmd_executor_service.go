@@ -303,7 +303,7 @@ func enrollOnce(connect, connectSocket string, cmd *cobra.Command, token, creden
 	})
 	defer func() { _ = srv.Close() }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(cmdCtx(cmd))
 	defer cancel()
 
 	connErr := make(chan error, 1)

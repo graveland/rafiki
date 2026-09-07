@@ -49,13 +49,33 @@ var ErrRedialed = errors.New("execpool: transport requested a second connection;
 // differently.
 var ALPNProtocols = []string{"http/1.1"}
 
-// ServeInverted runs an HTTP/2 server on a connection this process DIALLED.
-// Executor side.
-func ServeInverted(conn net.Conn, handler http.Handler) error {
+// ServeInverted runs an HTTP/2 server on a connection this process DIALLED,
+// until ctx is done or the connection ends on its own. Executor side.
+//
+// Passing ctx as ServeConnOpts.Context is NOT enough by itself to make a
+// canceled ctx stop this: http2's serverConnBaseContext only threads that
+// context into per-REQUEST contexts (what a handler sees via r.Context()) —
+// the connection's own frame-processing loop in (*http2.Server).ServeConn
+// never selects on it, so ServeConn blocks on conn's reads regardless of ctx.
+// The goroutine below is what actually closes the loop: cancelling ctx closes
+// conn, which unblocks the pending Read with an error and lets ServeConn's
+// internal serve() return. Passing ctx through as Context too is still worth
+// doing — it cancels any in-flight handler that checks r.Context().Done().
+func ServeInverted(ctx context.Context, conn net.Conn, handler http.Handler) error {
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-done:
+		}
+	}()
+
 	srv := &http2.Server{}
 	srv.ServeConn(conn, &http2.ServeConnOpts{
 		Handler: handler,
-		Context: context.Background(),
+		Context: ctx,
 	})
 	return nil
 }

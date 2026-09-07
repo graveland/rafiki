@@ -42,9 +42,10 @@ func mustDial(cmd *cobra.Command) *client.Client {
 	return c
 }
 
-// cmdCtx returns the cobra command's context (populated with cancellation
-// on SIGINT etc by cobra.Command.ExecuteContext). Falls back to
-// context.Background() if no context was set.
+// cmdCtx returns the cobra command's context — canceled on SIGINT/SIGTERM,
+// via the one signal.NotifyContext main() wraps around ExecuteContext. Falls
+// back to context.Background() only for a command driven directly in a test,
+// bypassing main()/Execute() entirely.
 func cmdCtx(cmd *cobra.Command) context.Context {
 	if ctx := cmd.Context(); ctx != nil {
 		return ctx

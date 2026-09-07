@@ -7,10 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
-	"syscall"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -305,7 +303,7 @@ Two transports, exactly one of which is used:
 
 			// resolveExecutorConnectFlags already guarantees exactly one of
 			// these is set, or returned an error above.
-			return serveReverseDial(resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
+			return serveReverseDial(cmdCtx(cmd), resolvedConnect, resolvedSocket, pinnedFingerprint, serverName,
 				enrollToken, credential, credentialFile, handler)
 		},
 	}
@@ -352,7 +350,7 @@ Two transports, exactly one of which is used:
 	return cmd
 }
 
-func serveReverseDial(addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile string, handler http.Handler) error {
+func serveReverseDial(ctx context.Context, addr, socketPath, pinCert, serverName, enrollToken, credential, credentialFile string, handler http.Handler) error {
 	// The default deliberately does NOT sit under --root. It used to
 	// (`<root>/.rafiki-executor-credential`), which put the executor's own
 	// credential inside the very directory tree its file tools operate on — and
@@ -364,8 +362,6 @@ func serveReverseDial(addr, socketPath, pinCert, serverName, enrollToken, creden
 	if credFile == "" && credential == "" {
 		credFile = filepath.Join(paths.DataDir(), "executor.cred")
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 	if err := execpool.Connect(ctx, execpool.ConnectOptions{
 		Addr:           addr,
 		SocketPath:     socketPath,

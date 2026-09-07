@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -10,8 +13,18 @@ import (
 )
 
 func main() {
+	// The one context.Background() for the whole process, wrapped in the one
+	// signal.NotifyContext — every command reaches it via cmdCtx(cmd), rather
+	// than a subcommand that needs cancellation building its own local
+	// signal.NotifyContext(context.Background(), …) pairing. `Execute()` (no
+	// context) used to leave cmd.Context() defaulting to a plain
+	// context.Background() with no signal wired to it at all, despite
+	// cmdCtx's doc comment claiming otherwise.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	root := newRootCmd()
-	if err := root.Execute(); err != nil {
+	if err := root.ExecuteContext(ctx); err != nil {
 		// Cobra's RunE error path: print to stderr, exit 1.
 		// Connection errors get exit 2 via direct os.Exit in subcommands.
 		fmt.Fprintln(os.Stderr, "error:", err)
