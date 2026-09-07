@@ -46,11 +46,12 @@ const (
 )
 
 type Pool struct {
-	mu     sync.RWMutex
-	store  executors.Store
-	live   map[string]*liveConn
-	parked map[string]*parkedEntry
-	onLost func(executorID string) // fired when a park expires; see SetOnLost
+	mu        sync.RWMutex
+	store     executors.Store
+	live      map[string]*liveConn
+	parked    map[string]*parkedEntry
+	onLost    func(executorID string) // fired when a park expires; see SetOnLost
+	onConnect func(executorID string) // fired after a connection is installed; see SetOnConnect
 
 	// evicted holds ids whose owning control connection closed while the
 	// executor's handleConn was still running. Between Redeem (early) and
@@ -220,6 +221,31 @@ func New(store executors.Store) *Pool {
 	}
 }
 
+// SetOnConnect registers a callback fired once per successful executor
+// connection, AFTER the connection is installed.
+//
+// The callback runs on its own goroutine and never under Pool.mu. That is not
+// a convenience: Pool.mu is a non-reentrant RWMutex, so a callback that touched
+// Live() or ClientFor() while it was held would deadlock, and one that merely
+// blocked would wedge every subsequent accept. onLost has the same rule for the
+// same reason.
+func (p *Pool) SetOnConnect(fn func(executorID string)) {
+	p.mu.Lock()
+	p.onConnect = fn
+	p.mu.Unlock()
+}
+
+// fireOnConnect reads the callback under the lock and invokes it outside.
+func (p *Pool) fireOnConnect(executorID string) {
+	p.mu.RLock()
+	fn := p.onConnect
+	p.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	go fn(executorID)
+}
+
 // UpgradeHandler is the executor endpoint as an http.Handler, for mounting on a
 // mux alongside anything else.
 //
@@ -383,6 +409,8 @@ func (p *Pool) handleConn(conn net.Conn) {
 
 	// Poll Health every 30s.
 	go p.healthLoop(ctx, e.ID, lc)
+
+	p.fireOnConnect(e.ID)
 
 	// Block until the connection is done (ServeInverted-style, but since
 	// we're the HTTP client, we detect departure when health fails).

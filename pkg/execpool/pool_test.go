@@ -247,3 +247,30 @@ func TestLiveReportsConnectedAt(t *testing.T) {
 		t.Errorf("ConnectedAt = %v, want %v", live[0].ConnectedAt, want)
 	}
 }
+
+// The callback must fire with no pool lock held. A callback that blocks while
+// holding Pool.mu wedges Live(), ClientFor() and every subsequent accept — one
+// unwell executor taking the whole executor plane down. This has shipped once.
+func TestOnConnectFiresWithoutHoldingTheLock(t *testing.T) {
+	p := New(nil)
+	done := make(chan struct{})
+	p.SetOnConnect(func(string) {
+		// If the callback ran under p.mu, this read deadlocks and the test
+		// times out rather than failing cleanly — which is the signal.
+		_ = p.Live()
+		close(done)
+	})
+
+	p.fireOnConnect("exec-1")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onConnect deadlocked: it is being called while Pool.mu is held")
+	}
+}
+
+func TestOnConnectIsOptional(t *testing.T) {
+	p := New(nil)
+	p.fireOnConnect("exec-1") // must not panic with no callback set
+}
