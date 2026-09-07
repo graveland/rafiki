@@ -65,6 +65,11 @@ type Options struct {
 	// LaunchKinds are the child protocols this executor will host, from
 	// --launch. Empty means none, deliberately: hosting is opt-in.
 	LaunchKinds []string
+
+	// SkillsSync lets the daemon push its skill corpus onto this executor's
+	// Claude config directory. Off by default: it writes into the operator's
+	// home directory, which is not something to enable by accident.
+	SkillsSync bool
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -203,6 +208,7 @@ func (s *Server) Describe(
 		SelfReportedLabels: s.labels,
 		Proxies:            s.ProxyNames(),
 		LaunchKinds:        s.LaunchKinds(),
+		SkillsSync:         s.opts.SkillsSync,
 	}), nil
 }
 
