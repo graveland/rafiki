@@ -391,9 +391,11 @@ reasoning over tools the daemon legitimately owns.
 **Project skills come from the workspace's machine.** A skill found in
 `<cwd>/.rafiki/skills` or `<cwd>/.claude/skills` is a workspace skill — and the
 workspace lives on the executor. The daemon fetches the project-tier inventory at
-spawn, merges it with the operator's own skills (project shadows user on a name
-collision), and fetches bodies on the turn the model asks for one rather than
-eagerly at spawn.
+spawn, merges it with the operator's skills (project shadows daemon-local dirs,
+which shadow the database tier on a qualified-name collision), and fetches bodies
+on the turn the model asks for one rather than eagerly at spawn. The database is
+the curated tier: it is served from the daemon's store, and the on-disk
+`<ConfigDir>/skills` default is opt-in via `RAFIKI_SKILLS_DIRS`.
 
 `rafiki create` gives you an executor automatically, so this is not something you normally
 arrange.
@@ -890,7 +892,7 @@ rafiki reads from the environment; `.env.example` documents each one in full.
 | — | `rafiki create`'s defaults for a bare invocation, in order: `--model`/`--preset`/`--label`, then the resolved profile's `model`/`preset`/`labels`, then (model only) the model you last spawned for that kind, remembered in the client state file, then the daemon's own default |
 | — | other display preferences (e.g. a currency `rafiki list`/the TUI convert cost figures into) live in that same client state file; view or change them with `rafiki config show` / `rafiki config set` |
 | `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/rafiki/instructions.md`) |
-| `RAFIKI_SKILLS_DIRS` | skill directories, path-list separated (default `~/.config/rafiki/skills`). Entries may be symlinks (e.g. into `~/.claude/skills` or a plugin cache); discovery follows them |
+| `RAFIKI_SKILLS_DIRS` | on-disk skill directories, path-list separated (OPT-IN — unset means no daemon-local dirs; skills come from the daemon's database store by default). Entries may be symlinks (e.g. into `~/.claude/skills` or a plugin cache); discovery follows them |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |

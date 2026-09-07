@@ -110,7 +110,7 @@ func TestCloseRevokesDarajaCredentials(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := dir + "/c.sock"
 	st := childstore.New()
-	ctrl := NewController(st, dir, dir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil)
+	ctrl := NewController(st, dir, dir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil, nil)
 
 	reg := darajapool.NewRegistry()
 	ctrl.darajaReg = reg
@@ -151,7 +151,7 @@ func TestKillRevokesDarajaCredentials(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := dir + "/c.sock"
 	st := childstore.New()
-	ctrl := NewController(st, dir, dir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil)
+	ctrl := NewController(st, dir, dir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil, nil)
 
 	reg := darajapool.NewRegistry()
 	ctrl.darajaReg = reg
@@ -234,7 +234,7 @@ func TestCloseCallsForgetBeforeRowDelete(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := dir + "/c.sock"
 	st := childstore.New()
-	ctrl := NewController(st, dir, dir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil)
+	ctrl := NewController(st, dir, dir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil, nil)
 
 	reg := darajapool.NewRegistry()
 	ctrl.darajaReg = reg

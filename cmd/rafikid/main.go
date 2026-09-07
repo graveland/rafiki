@@ -37,6 +37,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/skills"
+	"go.graveland.dev/rafiki/pkg/skillsdb"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -394,6 +396,13 @@ func runDaemon(opts runDaemonOpts) error {
 		userStore = usersdb.NewPostgresStore(pool)
 	}
 
+	// Database-backed skills tier. Same nil rule as userStore: no pool, no
+	// store, and children get only their on-disk skill tiers.
+	var skillStore skills.Store
+	if pool != nil {
+		skillStore = skillsdb.NewPostgresStore(pool)
+	}
+
 	// Load the provider registry once at startup. A missing file is not an
 	// error — it falls back to the shipped default (anthropic + openrouter).
 	prov, err := providers.Load(paths.ProvidersFile())
@@ -448,7 +457,7 @@ func runDaemon(opts runDaemonOpts) error {
 		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
-	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore, prov)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore, skillStore, prov)
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
 	if face != nil {

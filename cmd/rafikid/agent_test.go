@@ -162,6 +162,11 @@ func TestParseAgentFlags_MCPServersAndNoMCP(t *testing.T) {
 // forbid a per-project .claude/skills dir - a repo that already has one
 // keeps working, per the ruling in task-A4-brief.md's override. The project
 // .rafiki/skills dir comes after .claude/skills so it wins on name collision.
+//
+// Since the database became the curated tier, the daemon-local
+// <ConfigDir>/skills default is OPT-IN (assembleSkillDirs): an unset
+// RAFIKI_SKILLS_DIRS yields only the per-project directories, so this test
+// also pins that the default config dir is no longer added unconditionally.
 func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 	t.Setenv("HOME", "/home/testuser")
 	t.Setenv("RAFIKI_SKILLS_DIRS", "")
@@ -174,17 +179,14 @@ func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 			t.Errorf("skill dir must not be under the user's home Claude profile: %s", d)
 		}
 	}
-	if len(dirs) != 3 {
-		t.Fatalf("dirs = %v, want 3 entries", dirs)
+	if len(dirs) != 2 {
+		t.Fatalf("dirs = %v, want 2 entries (the <ConfigDir>/skills default is opt-in now)", dirs)
 	}
-	if dirs[0] != "/tmp/cfg/rafiki/skills" {
-		t.Errorf("dirs[0] = %q, want /tmp/cfg/rafiki/skills", dirs[0])
+	if dirs[0] != "/work/repo/.claude/skills" {
+		t.Errorf("dirs[0] = %q, want /work/repo/.claude/skills (existing per-project skills keep working)", dirs[0])
 	}
-	if dirs[1] != "/work/repo/.claude/skills" {
-		t.Errorf("dirs[1] = %q, want /work/repo/.claude/skills (existing per-project skills keep working)", dirs[1])
-	}
-	if dirs[2] != "/work/repo/.rafiki/skills" {
-		t.Errorf("dirs[2] = %q, want /work/repo/.rafiki/skills (rafiki's own per-project dir, overrides .claude)", dirs[2])
+	if dirs[1] != "/work/repo/.rafiki/skills" {
+		t.Errorf("dirs[1] = %q, want /work/repo/.rafiki/skills (rafiki's own per-project dir, overrides .claude)", dirs[1])
 	}
 }
 
@@ -587,5 +589,21 @@ func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
 					file, fn, want)
 			}
 		}
+	}
+}
+
+func TestAssembleSkillDirsOmitsTheDefaultConfigDir(t *testing.T) {
+	t.Setenv("RAFIKI_SKILLS_DIRS", "")
+	got := assembleSkillDirs("/w", nil, true)
+	if len(got) != 0 {
+		t.Errorf("got %v, want no dirs when RAFIKI_SKILLS_DIRS is unset", got)
+	}
+}
+
+func TestAssembleSkillDirsHonoursAnExplicitEnv(t *testing.T) {
+	t.Setenv("RAFIKI_SKILLS_DIRS", "/opt/skills")
+	got := assembleSkillDirs("/w", nil, true)
+	if len(got) != 1 || got[0] != "/opt/skills" {
+		t.Errorf("got %v, want [/opt/skills]", got)
 	}
 }

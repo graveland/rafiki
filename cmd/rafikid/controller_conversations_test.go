@@ -25,7 +25,7 @@ func TestIntegration_CtrlConversationStats_NoAgentDB(t *testing.T) {
 	logsDir := filepath.Join(dir, "logs")
 
 	st := childstore.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil, nil)
 
 	handler := control.NewDispatch(ctrl)
 	srv, err := control.Listen(socketPath, handler)
@@ -73,7 +73,7 @@ func TestControllerConversationIDOnlyResolvesFundiChildren(t *testing.T) {
 	dir := testSocketDir(t)
 	st := childstore.New()
 	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
-		filepath.Join(dir, "c.sock"), nil, nil, nil, t.Context(), nil, nil, nil)
+		filepath.Join(dir, "c.sock"), nil, nil, nil, t.Context(), nil, nil, nil, nil)
 
 	const conversationUUID = "1e3f4a9c-0000-4000-8000-000000000001"
 	st.Insert(&childstore.Session{

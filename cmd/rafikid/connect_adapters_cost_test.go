@@ -65,7 +65,7 @@ func TestListChildrenSeedsCostFromTheCatalogPricedCoster(t *testing.T) {
 	st := childstore.New()
 	dir := t.TempDir()
 	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
-		filepath.Join(dir, "c.sock"), nil, pool, nil, ctx, nil, nil, nil)
+		filepath.Join(dir, "c.sock"), nil, pool, nil, ctx, nil, nil, nil, nil)
 	ctrl.SetCatalog(seedPricedCatalog(t, "test/model"))
 
 	st.Insert(&childstore.Session{

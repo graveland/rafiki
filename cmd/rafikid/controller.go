@@ -49,6 +49,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routing"
+	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/tasksdb"
@@ -240,6 +241,10 @@ type Controller struct {
 	// listener is not configured (require the pool to mint tokens).
 	execStore executors.Store
 
+	// skillStore is the database-backed skills tier. nil when the daemon has
+	// no store, in which case children get only their on-disk tiers.
+	skillStore skills.Store
+
 	// users is the identity store backing ctrl_user_*. Nil when RAFIKI_DB is
 	// unset — every user verb then returns errNoUserStore rather than
 	// pretending an empty user table.
@@ -327,7 +332,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	}
 }
 
-func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store, userStore users.Store, prov *providers.Set) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store, userStore users.Store, skillStore skills.Store, prov *providers.Set) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -362,6 +367,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		evbuf:             newEventBuffer(),
 		execStore:         execStore,
 		users:             userStore,
+		skillStore:        skillStore,
 		providers:         prov,
 		heldLeases:        make(map[string]store.Lease),
 		native:            nativebus.New(),

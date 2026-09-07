@@ -64,6 +64,13 @@ type RuntimeOptions struct {
 	// RemoteSkillBody fetches a project skill's body from the child's executor.
 	// nil when the child has no executor, in which case no SkillMeta carries Remote.
 	RemoteSkillBody func(ctx context.Context, name string) (body, dir string, err error)
+	// InlineSkills is the database-backed skill tier, already fetched by the
+	// daemon. It is the BASE layer of the fold — a daemon-local directory or a
+	// workspace project skill of the same qualified name shadows it.
+	InlineSkills []skills.SkillMeta
+	// InlineSkillBody fetches one of those skills' bodies from the daemon's
+	// store, on the turn the model asks. nil when there is no store.
+	InlineSkillBody func(ctx context.Context, namespace, name string) (string, error)
 	MCPConfig       string // absolute path, or empty to skip MCP entirely
 	// MCPServers is a comma-separated allowlist of MCPConfig's mcpServers
 	// keys to actually connect; empty or "*" means all (today's behavior).
@@ -223,37 +230,30 @@ func resolveContent(opts RuntimeOptions) (contextFiles string, discovered []skil
 	// NOTE: the local is `discovered`, not `skills` — a variable named `skills`
 	// would shadow the imported package of the same name.
 	if !opts.NoSkills {
+		// nil means "all skills"; a non-nil slice restricts to those names.
+		// "*" is spelled out as the same thing so a shell glob that survived
+		// quoting does not silently select nothing.
 		var only []string
-		// "*" is an explicit caller-forced "all", distinct from "" (today's
-		// default meaning of "all") — see resolveAllowlistOption (Task 8):
-		// it's what lets a caller override a restrictive model-declared
-		// default back to everything.
 		if opts.Skills != "" && opts.Skills != "*" {
 			only = strings.Split(opts.Skills, ",")
 		}
-		discovered, err = skills.DiscoverSkills(opts.SkillsDirs, only)
+
+		local, err := skills.DiscoverSkills(opts.SkillsDirs, only)
 		if err != nil {
 			return "", nil, fmt.Errorf("runtime: discover skills: %w", err)
 		}
-		// The project tier was fetched from the executor and never went through
-		// DiscoverSkills, so the --skills filter must be applied here too.
-		if len(opts.RemoteSkills) > 0 {
-			filtered := make([]skills.SkillMeta, 0, len(opts.RemoteSkills))
-			for _, s := range opts.RemoteSkills {
-				if only == nil {
-					filtered = append(filtered, s)
-				} else {
-					for _, name := range only {
-						if s.Name == name {
-							filtered = append(filtered, s)
-							break
-						}
-					}
-				}
-			}
-			// FoldSkills puts project after local so project shadows user.
-			discovered = FoldSkills(discovered, filtered)
-		}
+
+		// Neither the inline nor the project tier went through
+		// DiscoverSkills, so the --skills filter has to be applied to both
+		// here. Filtering is by QUALIFIED name, matching what the model sees
+		// in the inventory and passes back to the skill tool.
+		inline := filterByQualifiedName(opts.InlineSkills, only)
+		project := filterByQualifiedName(opts.RemoteSkills, only)
+
+		// Least specific first: the database is the curated default, a
+		// daemon-local dir is the per-machine escape hatch, and the workspace
+		// knows its own skills best.
+		discovered = FoldSkills(inline, local, project)
 	}
 
 	return contextFiles, discovered, nil
@@ -289,6 +289,25 @@ func FoldSkills(tiers ...[]skills.SkillMeta) []skills.SkillMeta {
 	out := make([]skills.SkillMeta, 0, len(names))
 	for _, qn := range names {
 		out = append(out, byQN[qn])
+	}
+	return out
+}
+
+// filterByQualifiedName restricts in to the qualified names in only. A nil
+// only means "keep everything", matching DiscoverSkills' own convention.
+func filterByQualifiedName(in []skills.SkillMeta, only []string) []skills.SkillMeta {
+	if only == nil {
+		return in
+	}
+	keep := make(map[string]bool, len(only))
+	for _, n := range only {
+		keep[n] = true
+	}
+	out := make([]skills.SkillMeta, 0, len(in))
+	for _, s := range in {
+		if keep[s.QualifiedName()] {
+			out = append(out, s)
+		}
 	}
 	return out
 }
@@ -497,6 +516,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Executor:        opts.Executor,
 		ExecutorTools:   executorToolSet(opts.ExecutorTools),
 		RemoteSkillBody: opts.RemoteSkillBody,
+		InlineSkillBody: opts.InlineSkillBody,
 	}
 	// A process that is its own workspace satisfies the executor rule with a
 	// real in-process client rather than an exemption. Build it here, where the

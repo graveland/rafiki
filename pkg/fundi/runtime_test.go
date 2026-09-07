@@ -519,3 +519,22 @@ func TestBuildRuntimeNoMCPSkipsConnection(t *testing.T) {
 		t.Fatal("BuildRuntime returned a nil engine")
 	}
 }
+
+// The database tier is the BASE layer: a daemon-local directory or a workspace
+// project skill with the same qualified name wins over it. Bare names never
+// collide with namespaced ones, so this only bites within a namespace.
+func TestInlineSkillsAreTheLowestTier(t *testing.T) {
+	inline := []skills.SkillMeta{
+		{Namespace: "rafiki", Name: "shared", Description: "from db", Inline: true},
+	}
+	project := []skills.SkillMeta{
+		{Namespace: "rafiki", Name: "shared", Description: "from project", Remote: true},
+	}
+	got := FoldSkills(inline, nil, project)
+	if len(got) != 1 {
+		t.Fatalf("got %d, want 1: %+v", len(got), got)
+	}
+	if got[0].Description != "from project" {
+		t.Errorf("got %q, want the project tier to shadow the database tier", got[0].Description)
+	}
+}

@@ -67,7 +67,7 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 	logsDir := filepath.Join(dir, "logs")
 
 	st := childstore.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil, nil)
 
 	handler := control.NewDispatch(ctrl)
 	srv, err := control.Listen(socketPath, handler)
@@ -143,7 +143,7 @@ func TestSpawnRejectsUnknownParent(t *testing.T) {
 	logsDir := filepath.Join(dir, "logs")
 
 	st := childstore.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, t.Context(), nil, nil, nil, nil)
 
 	handler := control.NewDispatch(ctrl)
 	srv, err := control.Listen(socketPath, handler)

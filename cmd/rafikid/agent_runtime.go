@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -477,6 +478,34 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			wsInfo := workspaceInfoFromRow(row)
 			wsInfo.ExecutorName = row.Labels["machine"]
 			ro.Workspace = wsInfo
+		}
+	}
+
+	// The database skills tier, at the OUTER level: it must run whether or
+	// not the child has an executor, because an executor-less child is
+	// exactly the case this tier exists for.
+	if c.skillStore != nil {
+		// A slow or unavailable store must not fail a spawn: the child simply
+		// gets its on-disk tiers, the same as a daemon with no store at all.
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		recs, err := c.skillStore.List(sctx, true)
+		cancel()
+		if err != nil {
+			slog.Warn("database skills unavailable; child gets on-disk tiers only",
+				"child", childID, "error", err)
+		} else {
+			metas := make([]skills.SkillMeta, 0, len(recs))
+			for _, r := range recs {
+				metas = append(metas, r.Meta())
+			}
+			ro.InlineSkills = metas
+		}
+		ro.InlineSkillBody = func(ctx context.Context, namespace, name string) (string, error) {
+			rec, err := c.skillStore.Get(ctx, namespace, name)
+			if err != nil {
+				return "", err
+			}
+			return rec.Body, nil
 		}
 	}
 

@@ -77,15 +77,19 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 	return f, nil
 }
 
-// assembleSkillDirs builds the skill search path.
+// assembleSkillDirs builds the on-disk skill directories for a child, least
+// specific first.
 //
-// hasExecutor drops the two project-tier directories: cwd names a path on the
-// EXECUTOR, so resolving it here finds either nothing or, on a daemon that
-// happens to have a directory at the same path, a different project's skills
-// presented as this one's. The project tier comes over the executor link
-// instead (fetchProjectSkills).
+// The daemon-local tier is opt-in: it is included only when the operator
+// actually asked for it with RAFIKI_SKILLS_DIRS, never from paths.SkillsDirs()'
+// bare <ConfigDir>/skills default. The database is the curated tier now, and a
+// default directory that silently shadows it is a second way to curate the same
+// content — which is a second way to be surprised by which one won.
 func assembleSkillDirs(cwd string, flagDirs []string, hasExecutor bool) []string {
-	dirs := paths.SkillsDirs()
+	var dirs []string
+	if paths.Get(paths.SkillsDirsEnv) != "" {
+		dirs = append(dirs, paths.SkillsDirs()...)
+	}
 	if !hasExecutor {
 		dirs = append(dirs, filepath.Join(cwd, ".claude", "skills"))
 		dirs = append(dirs, filepath.Join(cwd, ".rafiki", "skills"))
