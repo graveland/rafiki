@@ -17,15 +17,20 @@ type fakeSpawner struct {
 	models   []ModelInfo
 	view     string
 
-	spawned  []SpawnSpec
-	sent     []struct{ ChildID, Message string }
-	killed   []string
-	nextID   string
-	spawnErr error
-	sendErr  error
-	killErr  error
-	viewErr  error
-	listErr  error
+	spawned   []SpawnSpec
+	sent      []struct{ ChildID, Message string }
+	killed    []string
+	nextID    string
+	budgetSet []struct {
+		ChildID string
+		MaxCost float64
+	}
+	spawnErr     error
+	sendErr      error
+	killErr      error
+	setBudgetErr error
+	viewErr      error
+	listErr      error
 }
 
 func (f *fakeSpawner) List(context.Context) ([]AgentInfo, error) {
@@ -73,6 +78,17 @@ func (f *fakeSpawner) Kill(_ context.Context, childID string) error {
 	return nil
 }
 
+func (f *fakeSpawner) SetBudget(_ context.Context, childID string, maxCost float64) error {
+	if f.setBudgetErr != nil {
+		return f.setBudgetErr
+	}
+	f.budgetSet = append(f.budgetSet, struct {
+		ChildID string
+		MaxCost float64
+	}{childID, maxCost})
+	return nil
+}
+
 func newAgentTools(t *testing.T, sp AgentSpawner) (*Registry, context.Context) {
 	t.Helper()
 	reg := DefaultBlueprint.MaterializeAll(ToolOpts{
@@ -89,7 +105,7 @@ func newAgentTools(t *testing.T, sp AgentSpawner) (*Registry, context.Context) {
 func TestAgentToolsDeclineWithoutSpawner(t *testing.T) {
 	reg := DefaultBlueprint.MaterializeAll(ToolOpts{Cwd: t.TempDir()})
 	for _, name := range []string{
-		"agent_spawn", "agent_list", "agent_view", "agent_send", "agent_kill", "agent_models",
+		"agent_spawn", "agent_list", "agent_view", "agent_send", "agent_kill", "agent_models", "agent_set_budget",
 	} {
 		if _, err := reg.Execute(context.Background(), name, json.RawMessage(`{}`)); err == nil {
 			t.Errorf("%s must not be registered without a spawner", name)
@@ -261,6 +277,34 @@ func TestSteeringRefusalsReachTheModel(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "c_stranger") {
 			t.Errorf("%s: want a refusal naming c_stranger, got %v", name, err)
 		}
+	}
+}
+
+func TestAgentSetBudgetPassesArgsThrough(t *testing.T) {
+	sp := &fakeSpawner{}
+	reg, ctx := newAgentTools(t, sp)
+	if _, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(
+		`{"agent":"c_a","max_cost":25.5}`)); err != nil {
+		t.Fatalf("agent_set_budget: %v", err)
+	}
+	if len(sp.budgetSet) != 1 || sp.budgetSet[0].ChildID != "c_a" || sp.budgetSet[0].MaxCost != 25.5 {
+		t.Fatalf("got %+v", sp.budgetSet)
+	}
+}
+
+func TestAgentSetBudgetRequiresAnAgentID(t *testing.T) {
+	reg, ctx := newAgentTools(t, &fakeSpawner{})
+	if _, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(`{"max_cost":5}`)); err == nil {
+		t.Fatal("agent_set_budget with no agent id must fail")
+	}
+}
+
+func TestAgentSetBudgetSurfacesRefusal(t *testing.T) {
+	sp := &fakeSpawner{setBudgetErr: errors.New("agent c_grandchild is not a child you spawned directly")}
+	reg, ctx := newAgentTools(t, sp)
+	_, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(`{"agent":"c_grandchild","max_cost":5}`))
+	if err == nil || !strings.Contains(err.Error(), "c_grandchild") {
+		t.Fatalf("want a refusal naming c_grandchild, got %v", err)
 	}
 }
 

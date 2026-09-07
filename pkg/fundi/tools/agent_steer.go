@@ -10,6 +10,7 @@ func init() {
 	DefaultBlueprint.Register(&AgentViewBlueprint{})
 	DefaultBlueprint.Register(&AgentSendBlueprint{})
 	DefaultBlueprint.Register(&AgentKillBlueprint{})
+	DefaultBlueprint.Register(&AgentSetBudgetBlueprint{})
 }
 
 const (
@@ -31,6 +32,13 @@ const (
 		"turn. Returns once the shutdown is complete and recorded. Its unfinished " +
 		"tasks are swept to `orphaned` with the assignee retained, so you can see " +
 		"what it was holding — reassign them or drop them with a reason."
+
+	agentSetBudgetDescription = "Change the USD cost budget of an agent you spawned " +
+		"DIRECTLY (not a grandchild — ask the intermediate agent to change its own " +
+		"child's budget instead). Raising it is capped by your own remaining budget " +
+		"(asking for more than you have left — including asking for unlimited under a " +
+		"budgeted parent — is refused). Lowering it is unrestricted. You cannot change " +
+		"your own budget. Pass 0 for max_cost to make the target's budget unlimited."
 )
 
 // agentIDSchema is the one property every steering verb shares.
@@ -42,8 +50,8 @@ func agentIDSchema(extra ...SchemaProperty) Schema {
 	props = append(props, extra...)
 	req := []string{"agent"}
 	for _, p := range extra {
-		if p.Name == "message" {
-			req = append(req, "message")
+		if p.Name == "message" || p.Name == "max_cost" {
+			req = append(req, p.Name)
 		}
 	}
 	return Schema{Type: "object", Properties: props, Required: req}
@@ -192,4 +200,57 @@ func (t *agentKillTool) Execute(ctx context.Context, input ToolInput) (ToolResul
 		return ToolResult{}, fmt.Errorf("agent_kill: %w", err)
 	}
 	return NewTextResult("stopped " + params.Agent + "\n"), nil
+}
+
+// --- agent_set_budget ---
+
+type AgentSetBudgetBlueprint struct{}
+
+func (AgentSetBudgetBlueprint) Name() string        { return "agent_set_budget" }
+func (AgentSetBudgetBlueprint) Description() string { return agentSetBudgetDescription }
+func (AgentSetBudgetBlueprint) InputSchema() Schema {
+	return agentIDSchema(SchemaProperty{
+		Name: "max_cost", Type: "number",
+		Description: "New USD budget for the target agent's whole subtree. 0 means unlimited.",
+	})
+}
+
+func (AgentSetBudgetBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
+	panic("blueprint: call Materialize first")
+}
+
+func (AgentSetBudgetBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	if opts.Agents == nil {
+		return nil, nil
+	}
+	return &agentSetBudgetTool{agents: opts.Agents}, nil
+}
+
+type agentSetBudgetTool struct {
+	AgentSetBudgetBlueprint
+	agents AgentSpawner
+}
+
+func (t *agentSetBudgetTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
+	var params struct {
+		Agent   string  `json:"agent"`
+		MaxCost float64 `json:"max_cost"`
+	}
+	if err := input.Unmarshal(&params); err != nil {
+		return ToolResult{}, fmt.Errorf("agent_set_budget: invalid input: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
+	}
+	if params.Agent == "" {
+		return ToolResult{}, errors.New("agent_set_budget: agent is required; use agent_list to find the id")
+	}
+	if err := t.agents.SetBudget(ctx, params.Agent, params.MaxCost); err != nil {
+		return ToolResult{}, fmt.Errorf("agent_set_budget: %w", err)
+	}
+	capStr := "unlimited"
+	if params.MaxCost > 0 {
+		capStr = fmt.Sprintf("$%.2f", params.MaxCost)
+	}
+	return NewTextResult(fmt.Sprintf("%s's budget is now %s\n", params.Agent, capStr)), nil
 }

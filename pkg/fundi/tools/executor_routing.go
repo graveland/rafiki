@@ -67,19 +67,20 @@ var tierByTool = map[string]Tier{
 	"lsp_symbols":        TierWorkspace,
 
 	// Daemon — network, database, and the agent tree.
-	"webfetch":     TierDaemon,
-	"websearch":    TierDaemon,
-	"task_add":     TierDaemon,
-	"task_update":  TierDaemon,
-	"task_drop":    TierDaemon,
-	"task_list":    TierDaemon,
-	"agent_spawn":  TierDaemon,
-	"agent_list":   TierDaemon,
-	"agent_view":   TierDaemon,
-	"agent_send":   TierDaemon,
-	"agent_kill":   TierDaemon,
-	"agent_models": TierDaemon,
-	"quota_status": TierDaemon,
+	"webfetch":         TierDaemon,
+	"websearch":        TierDaemon,
+	"task_add":         TierDaemon,
+	"task_update":      TierDaemon,
+	"task_drop":        TierDaemon,
+	"task_list":        TierDaemon,
+	"agent_spawn":      TierDaemon,
+	"agent_list":       TierDaemon,
+	"agent_view":       TierDaemon,
+	"agent_send":       TierDaemon,
+	"agent_kill":       TierDaemon,
+	"agent_models":     TierDaemon,
+	"agent_set_budget": TierDaemon,
+	"quota_status":     TierDaemon,
 
 	// Daemon — `skill` loads from paths.SkillsDirs() as well as from the
 	// project, so it survives with no executor and only loses its
