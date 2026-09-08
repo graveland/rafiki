@@ -60,3 +60,13 @@ func ToUSD(amount float64, cur *clientstate.Currency) float64 {
 	}
 	return amount
 }
+
+// ToDisplay converts a USD amount to the user's display currency -- the
+// forward direction of ToUSD, used to prefill an editable field with the
+// number a person would type back in.
+func ToDisplay(usd float64, cur *clientstate.Currency) float64 {
+	if cur != nil && cur.Rate > 0 {
+		return usd * cur.Rate
+	}
+	return usd
+}

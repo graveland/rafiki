@@ -73,6 +73,7 @@ type keyMap struct {
 	Commit     key.Binding
 	NewAgent   key.Binding
 	EndAgent   key.Binding
+	EditBudget key.Binding
 
 	// Any pane: return to input.
 	Escape key.Binding
@@ -166,6 +167,10 @@ func defaultKeyMap() keyMap {
 		// different stages: stop a live child, force one that will not stop,
 		// close one that already exited. Each is confirmed by a repeat.
 		EndAgent: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "stop/close")),
+		// Bare letter, exactly like NewAgent/EndAgent: the rail swallows
+		// every unmatched key while it has focus, so this costs the textarea
+		// nothing and needs no textareaKeys collision check.
+		EditBudget: key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "budget")),
 
 		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back to input")),
 	}

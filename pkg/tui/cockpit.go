@@ -340,7 +340,8 @@ type Cockpit struct {
 
 	// form is the open create modal, nil when none. A modal owns every key
 	// while it is up, so this is checked before the global bindings.
-	form *spawnForm
+	form       *spawnForm
+	budgetForm *budgetForm
 	// picker is the full model browser opened from the form's model row, nil
 	// when none. It stacks ON TOP of the form -- esc returns to the form
 	// rather than dismissing both, because the other fields are still half
@@ -726,6 +727,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.applyClosed(msg)
 		return c, nil
 
+	case budgetSetMsg:
+		c.applyBudgetSet(msg)
+		return c, nil
+
 	case tickMsg:
 		if c.notice != "" && time.Now().After(c.noticeUntil) {
 			c.notice = ""
@@ -888,6 +893,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if c.form != nil {
 		return c.handleFormKey(msg, c.form.suggestWindow(c.bodyHeight(), c.query))
 	}
+	if c.budgetForm != nil {
+		return c.handleBudgetFormKey(msg)
+	}
 
 	// Any keystroke that is not the repeat disarms the end confirmation, for
 	// the same reason the quit confirmation disarms: a live destructive
@@ -973,6 +981,21 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return c, tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
 		case key.Matches(msg, k.EndAgent):
 			return c, c.endSelected()
+		case key.Matches(msg, k.EditBudget):
+			id := c.selected
+			if id == "" {
+				return c, nil
+			}
+			node, ok := c.rail.Get(id)
+			if !ok {
+				return c, nil
+			}
+			name := node.Name
+			if name == "" {
+				name = id
+			}
+			c.budgetForm = newBudgetForm(id, name, node.MaxCost, c.currency)
+			return c, textinput.Blink
 		case key.Matches(msg, k.Escape):
 			return c, c.leaveRail()
 		}
@@ -1552,7 +1575,7 @@ func (c *Cockpit) bodyHeight() int {
 // executors) are full-attention tasks, and a rail behind them is a list you
 // cannot act on costing width from a table that needs it.
 func (c *Cockpit) railCols() int {
-	if c.form != nil || c.picker != nil || c.execPicker != nil || c.railHidden || c.rail.Len() < 2 {
+	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.railHidden || c.rail.Len() < 2 {
 		return 0
 	}
 	return railWidthFor(c.rail.Nodes(), c.width, c.currency)
@@ -1834,6 +1857,8 @@ func (c *Cockpit) View() tea.View {
 		conv = c.picker.view(convWidth, bodyHeight, c.modelView, c.query)
 	case c.form != nil:
 		conv = c.form.view(convWidth, bodyHeight, c.modelView, c.query, c.currency)
+	case c.budgetForm != nil:
+		conv = c.budgetForm.view(convWidth, bodyHeight, c.currency)
 	case c.showHelp:
 		conv = strings.Join(c.helpLines(convWidth), "\n")
 	case f == "" && c.rail.Len() == 0:
@@ -1867,7 +1892,7 @@ func (c *Cockpit) View() tea.View {
 		// two would otherwise flicker between each other for the instant
 		// between send and the first status event confirming the turn started.
 		conv += "\n" + stylePending.Render("⏳ "+c.pending)
-	case c.picker == nil && c.execPicker == nil && c.form == nil && !c.showHelp && c.sessions[f] != nil:
+	case c.picker == nil && c.execPicker == nil && c.form == nil && c.budgetForm == nil && !c.showHelp && c.sessions[f] != nil:
 		if n, ok := c.rail.Get(f); ok && rail.Working(n.Status) {
 			conv += "\n" + styleWorking.Render(rail.SpinnerFrame(c.frame)+" "+workingLabel(n.Status))
 		}

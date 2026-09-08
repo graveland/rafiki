@@ -54,6 +54,51 @@ type closedMsg struct {
 	err     error
 }
 
+type budgetSetMsg struct {
+	origin  *budgetForm
+	childID string
+	name    string
+	maxCost float64
+	err     error
+}
+
+// setBudgetCmd changes a child's budget with operator authority via the
+// Connect SetBudget RPC.
+func (c *Cockpit) setBudgetCmd(origin *budgetForm, childID, name string, maxCost float64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
+		defer cancel()
+
+		_, err := c.client.SetBudget(ctx, connect.NewRequest(&rafikiv1.SetBudgetRequest{
+			ChildId: childID,
+			MaxCost: maxCost,
+		}))
+		return budgetSetMsg{origin: origin, childID: childID, name: name, maxCost: maxCost, err: err}
+	}
+}
+
+// applyBudgetSet reports the outcome and, on success, updates the rail's
+// displayed cap and dismisses the originating modal.
+func (c *Cockpit) applyBudgetSet(m budgetSetMsg) {
+	if m.err != nil {
+		c.setNotice("could not set budget for " + m.name + ": " + trimRPCError(m.err))
+		if m.origin != nil {
+			m.origin.busy = false
+			m.origin.err = trimRPCError(m.err)
+		}
+		return
+	}
+	c.rail.SetMaxCost(m.childID, m.maxCost)
+	if c.budgetForm == m.origin {
+		c.budgetForm = nil
+	}
+	if m.maxCost == 0 {
+		c.setNotice("budget cleared for " + m.name)
+	} else {
+		c.setNotice("budget set for " + m.name)
+	}
+}
+
 // buildSpawnRequest turns the form's params into the wire request, applying
 // the SAME kind-aware executor precedence the CLI's runCreate does (see
 // docs/plans/2026-09-06-executor-selection-design.md §5): an explicit

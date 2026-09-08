@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -266,5 +267,248 @@ func TestBuildSpawnRequestSessionSelectorNeverPinsALaunchKind(t *testing.T) {
 	req := c.buildSpawnRequest(spawnParams{kind: "claude", cwd: "/tmp"})
 	if req.GetExecutorSelector() != "" || req.GetExecutorRef() != "" {
 		t.Fatalf("want both empty, got selector=%q ref=%q", req.GetExecutorSelector(), req.GetExecutorRef())
+	}
+}
+
+// ── budget edit modal ────────────────────────────────────────────────────────
+
+func TestEditBudgetOpensModalPrefilled(t *testing.T) {
+	c := railWith(t, "c_1", "c_2")
+	maxCost := 15.5
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "alpha", Status: "idle", Labels: map[string]string{}, MaxCost: &maxCost},
+		{ChildId: "c_2", Name: "beta", Status: "idle", Labels: map[string]string{}},
+	})
+	c.focus = focusRail
+	c.selected = "c_1"
+
+	press(c, "b")
+
+	if c.budgetForm == nil {
+		t.Fatal("budgetForm is nil after pressing 'b' on rail")
+	}
+	if c.budgetForm.childID != "c_1" {
+		t.Errorf("childID = %q, want c_1", c.budgetForm.childID)
+	}
+	if c.budgetForm.childName != "alpha" {
+		t.Errorf("childName = %q, want alpha", c.budgetForm.childName)
+	}
+	if got := c.budgetForm.input.Value(); got != "15.5" {
+		t.Errorf("prefilled value = %q, want 15.5", got)
+	}
+
+	// For child without MaxCost (0 / unlimited), the field should be blank.
+	c.selected = "c_2"
+	c.budgetForm = nil
+	press(c, "b")
+	if c.budgetForm == nil {
+		t.Fatal("budgetForm is nil for c_2")
+	}
+	if got := c.budgetForm.input.Value(); got != "" {
+		t.Errorf("prefilled value for unlimited child = %q, want empty", got)
+	}
+}
+
+func TestBudgetFormRejectsNegativeAmount(t *testing.T) {
+	c := railWith(t, "c_1")
+	c.selected = "c_1"
+	press(c, "b")
+	if c.budgetForm == nil {
+		t.Fatal("budgetForm is nil")
+	}
+
+	c.budgetForm.input.SetValue("-5.00")
+	// Press enter on the modal
+	_, cmd := c.handleKey(tea.KeyPressMsg{Code: 13, Text: "enter"})
+	if cmd != nil {
+		t.Error("cmd returned on invalid negative budget, want nil")
+	}
+	if c.budgetForm == nil {
+		t.Fatal("budgetForm dismissed on invalid input")
+	}
+	if c.budgetForm.err == "" {
+		t.Error("expected error on negative budget, got empty err")
+	}
+	if c.budgetForm.busy {
+		t.Error("busy is true on validation error")
+	}
+}
+
+func TestBudgetFormAcceptsZeroAndBlankAsUnlimited(t *testing.T) {
+	c := railWith(t, "c_1")
+	c.selected = "c_1"
+
+	// 1. Blank field
+	press(c, "b")
+	if c.budgetForm == nil {
+		t.Fatal("budgetForm is nil")
+	}
+	c.budgetForm.input.SetValue("")
+	maxCost, problem := c.budgetForm.params(c.currency)
+	if problem != "" {
+		t.Errorf("unexpected problem for blank field: %s", problem)
+	}
+	if maxCost != 0 {
+		t.Errorf("maxCost = %v, want 0 for blank", maxCost)
+	}
+	_, cmd := c.handleKey(tea.KeyPressMsg{Code: 13, Text: "enter"})
+	if cmd == nil {
+		t.Error("expected cmd returned on enter for blank field")
+	}
+	if !c.budgetForm.busy {
+		t.Error("busy should be true after submission")
+	}
+
+	// 2. Explicit "0"
+	c.budgetForm = nil
+	press(c, "b")
+	c.budgetForm.input.SetValue("0")
+	maxCost, problem = c.budgetForm.params(c.currency)
+	if problem != "" {
+		t.Errorf("unexpected problem for explicit '0': %s", problem)
+	}
+	if maxCost != 0 {
+		t.Errorf("maxCost = %v, want 0 for '0'", maxCost)
+	}
+	_, cmd = c.handleKey(tea.KeyPressMsg{Code: 13, Text: "enter"})
+	if cmd == nil {
+		t.Error("expected cmd returned on enter for '0'")
+	}
+}
+
+func TestApplyBudgetSetUpdatesRailAndDismissesModal(t *testing.T) {
+	c := railWith(t, "c_1")
+	c.selected = "c_1"
+	press(c, "b")
+	if c.budgetForm == nil {
+		t.Fatal("budgetForm is nil")
+	}
+
+	origin := c.budgetForm
+	c.applyBudgetSet(budgetSetMsg{origin: origin, childID: "c_1", name: "c_1", maxCost: 42.0, err: nil})
+	if c.budgetForm != nil {
+		t.Error("budgetForm not dismissed after successful applyBudgetSet")
+	}
+	node, ok := c.rail.Get("c_1")
+	if !ok {
+		t.Fatal("c_1 missing from rail")
+	}
+	if node.MaxCost != 42.0 {
+		t.Errorf("MaxCost = %v, want 42.0", node.MaxCost)
+	}
+	if !strings.Contains(c.notice, "budget set for c_1") {
+		t.Errorf("notice = %q, want 'budget set for c_1'", c.notice)
+	}
+
+	// Test clearing budget (maxCost == 0)
+	press(c, "b")
+	origin = c.budgetForm
+	c.applyBudgetSet(budgetSetMsg{origin: origin, childID: "c_1", name: "c_1", maxCost: 0, err: nil})
+	node, _ = c.rail.Get("c_1")
+	if node.MaxCost != 0 {
+		t.Errorf("MaxCost = %v, want 0 after clear", node.MaxCost)
+	}
+	if !strings.Contains(c.notice, "budget cleared for c_1") {
+		t.Errorf("notice = %q, want 'budget cleared for c_1'", c.notice)
+	}
+}
+
+func TestBudgetFormFailureResetsBusyAndSurfacesError(t *testing.T) {
+	c := railWith(t, "c_1")
+	c.selected = "c_1"
+	press(c, "b")
+	if c.budgetForm == nil {
+		t.Fatal("budgetForm is nil")
+	}
+	f := c.budgetForm
+	f.input.SetValue("10")
+	// Submit
+	_, cmd := c.handleKey(tea.KeyPressMsg{Code: 13, Text: "enter"})
+	if cmd == nil {
+		t.Fatal("cmd is nil on enter")
+	}
+	if !f.busy {
+		t.Fatal("f.busy should be true after submit")
+	}
+
+	// Simulate RPC failure
+	rpcErr := errors.New("rpc error: code = InvalidArgument desc = budget exceeds parent")
+	c.applyBudgetSet(budgetSetMsg{origin: f, childID: "c_1", name: "c_1", maxCost: 10, err: rpcErr})
+
+	if c.budgetForm == nil {
+		t.Fatal("modal should still be open after failure")
+	}
+	if f.busy {
+		t.Error("busy should be false after failure so user can retry")
+	}
+	if f.err != "code = InvalidArgument desc = budget exceeds parent" {
+		t.Errorf("f.err = %q, want 'code = InvalidArgument desc = budget exceeds parent'", f.err)
+	}
+	if !strings.Contains(c.notice, "code = InvalidArgument desc = budget exceeds parent") {
+		t.Errorf("notice = %q, want failure notice", c.notice)
+	}
+
+	// Enter can be pressed again to dispatch a new command
+	_, cmd2 := c.handleKey(tea.KeyPressMsg{Code: 13, Text: "enter"})
+	if cmd2 == nil {
+		t.Error("enter should dispatch new command on retry")
+	}
+	if !f.busy {
+		t.Error("busy should be true after second submit")
+	}
+}
+
+func TestBudgetFormCrossModalCorrelation(t *testing.T) {
+	c := railWith(t, "c_1", "c_2")
+	c.selected = "c_1"
+	press(c, "b")
+	formA := c.budgetForm
+	formA.input.SetValue("25")
+	_, cmdA := c.handleKey(tea.KeyPressMsg{Code: 13, Text: "enter"})
+	if cmdA == nil {
+		t.Fatal("cmdA is nil")
+	}
+
+	// Operator cancels form A (esc clears c.budgetForm) and switches to child c_2 modal while request A is in flight
+	press(c, "esc")
+	if c.budgetForm != nil {
+		t.Fatal("budgetForm should be nil after esc")
+	}
+	c.selected = "c_2"
+	press(c, "b")
+	formB := c.budgetForm
+	if formB == nil || formB == formA {
+		t.Fatal("formB should be a new form for c_2")
+	}
+
+	// Now deliver A's delayed success message
+	c.applyBudgetSet(budgetSetMsg{origin: formA, childID: "c_1", name: "c_1", maxCost: 25.0, err: nil})
+
+	// Form B should STILL be open
+	if c.budgetForm != formB {
+		t.Errorf("c.budgetForm was dismissed or replaced, want formB to stay open")
+	}
+
+	// Rail for c_1 should be updated to 25.0
+	nodeA, ok := c.rail.Get("c_1")
+	if !ok || nodeA.MaxCost != 25.0 {
+		t.Errorf("c_1 MaxCost = %v, want 25.0", nodeA.MaxCost)
+	}
+
+	// Deliver A's delayed failure to test failure path with different active modal
+	formA.busy = true
+	c.applyBudgetSet(budgetSetMsg{origin: formA, childID: "c_1", name: "c_1", maxCost: 25.0, err: errors.New("fail")})
+	// Form B must not receive form A's error
+	if formB.err != "" {
+		t.Errorf("formB received formA's error: %q", formB.err)
+	}
+}
+
+func TestBudgetFormPlaceholderRenderWidth(t *testing.T) {
+	form := newBudgetForm("c_1", "worker", 0, nil)
+	rendered := form.view(80, 24, nil)
+	stripped := ansi.Strip(rendered)
+	if !strings.Contains(stripped, "(unlimited)") {
+		t.Errorf("rendered view missing full placeholder '(unlimited)':\n%s", stripped)
 	}
 }

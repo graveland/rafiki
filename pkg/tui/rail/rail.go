@@ -365,6 +365,21 @@ func (r *Rail) SetCost(childID string, cost float64) {
 	}
 }
 
+// SetMaxCost assigns childID's displayed budget cap directly. Unlike
+// SetCost (which takes the max of existing and new, because that reseeds a
+// lossy historical rollup), this is a PLAIN assignment: it reflects an
+// authoritative operator write, and a lower must be able to actually lower
+// what is displayed.
+func (r *Rail) SetMaxCost(childID string, maxCost float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n, ok := r.nodes[childID]
+	if !ok {
+		return
+	}
+	n.MaxCost = maxCost
+}
+
 // SubtreeCost sums childID and every descendant.
 //
 // Computed here rather than fetched, because the rail already holds the tree.

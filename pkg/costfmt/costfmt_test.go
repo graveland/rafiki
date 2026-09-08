@@ -69,3 +69,17 @@ func TestToUSD_ConvertsAndRoundTripsWithFormat(t *testing.T) {
 		t.Errorf("Format(ToUSD(1.38, cur), cur) = %q, want %q", got, want)
 	}
 }
+
+func TestToDisplay(t *testing.T) {
+	if got := ToDisplay(10.0, nil); got != 10.0 {
+		t.Errorf("ToDisplay(10, nil) = %v, want 10", got)
+	}
+	cur := &clientstate.Currency{Code: "CAD", Rate: 1.38}
+	if diff := ToDisplay(10.0, cur) - 13.8; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("ToDisplay(10, cur) = %v, want ~13.8", ToDisplay(10.0, cur))
+	}
+	curZero := &clientstate.Currency{Code: "CAD", Rate: 0}
+	if got := ToDisplay(10.0, curZero); got != 10.0 {
+		t.Errorf("ToDisplay(10, curZero) = %v, want 10", got)
+	}
+}

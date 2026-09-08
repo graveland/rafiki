@@ -128,6 +128,38 @@ func TestSeedPopulatesMaxCost(t *testing.T) {
 	}
 }
 
+func TestSetMaxCostAssignsDirectly(t *testing.T) {
+	r := rail.New()
+	capVal := 10.0
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "capped", Status: "idle", Labels: map[string]string{}, MaxCost: &capVal},
+	})
+
+	// Raising MaxCost
+	r.SetMaxCost("c_1", 20.0)
+	n, ok := r.Get("c_1")
+	if !ok || n.MaxCost != 20.0 {
+		t.Fatalf("MaxCost = %v, want 20.0", n.MaxCost)
+	}
+
+	// Lowering MaxCost (must actually lower, unlike SetCost which takes max)
+	r.SetMaxCost("c_1", 5.0)
+	n, _ = r.Get("c_1")
+	if n.MaxCost != 5.0 {
+		t.Fatalf("MaxCost = %v, want 5.0 (lowered)", n.MaxCost)
+	}
+
+	// Clearing MaxCost (setting to 0)
+	r.SetMaxCost("c_1", 0)
+	n, _ = r.Get("c_1")
+	if n.MaxCost != 0 {
+		t.Fatalf("MaxCost = %v, want 0 (cleared)", n.MaxCost)
+	}
+
+	// Unknown child ID is a silent no-op
+	r.SetMaxCost("c_unknown", 100.0)
+}
+
 func TestWorkingMatchesTheMidTurnStatuses(t *testing.T) {
 	for _, st := range []string{"streaming", "tool_running", "compacting"} {
 		if !rail.Working(st) {
