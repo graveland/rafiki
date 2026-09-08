@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -316,6 +318,14 @@ func TestMCPNotifySurvivesAFailingSession(t *testing.T) {
 	reg.Add("u-2", dead.ss)
 	reg.Add("u-2", live.ss)
 
+	// The skip branch must be observable: swap in a capturing default logger
+	// at debug level, where Notify records a failed send. Package tests run
+	// sequentially, so the global swap is safe; restored via cleanup.
+	prevLog := slog.Default()
+	logs := &capturingHandler{}
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
 	// Tearing the client down breaks the transport under its server session;
 	// the next Log on it errors instead of delivering.
 	if err := dead.cs.Close(); err != nil {
@@ -325,6 +335,119 @@ func TestMCPNotifySurvivesAFailingSession(t *testing.T) {
 
 	if got := waitFor(t, live.got); !strings.Contains(got, "c_3") {
 		t.Errorf("one failing session must not stop the others; got %q", got)
+	}
+	if got := logs.String(); !strings.Contains(got, "mcp settlement notification failed") {
+		t.Errorf("the failed send must be logged at debug and skipped; log:\n%s", got)
+	}
+}
+
+// capturingHandler collects slog records so a test can assert a debug-level
+// skip actually happened. Every method is safe for concurrent use because the
+// send goroutines log concurrently.
+type capturingHandler struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.buf.WriteString(r.Message)
+	h.buf.WriteByte('\n')
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *capturingHandler) String() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.buf.String()
+}
+
+// TestMCPNotifyReturnsWhileASendIsStuck proves the fan-out's wait is real:
+// the SDK's streamable Write path takes no context, so a send to a
+// stalled-but-open client blocks indefinitely and cannot be interrupted — the
+// caller's timeout must therefore ABANDON that send rather than wait behind
+// it, and the user's other sessions must receive while the stalled one is
+// stuck (concurrent sends, not a sequential loop).
+func TestMCPNotifyReturnsWhileASendIsStuck(t *testing.T) {
+	reg := newMCPSessions()
+	srv := mcp.NewServer(&mcp.Implementation{Name: "rafiki-test", Version: "test"}, nil)
+	blockedSS, release, inFlight := newBlockedSession(t, srv)
+	reg.Add("u-slow", blockedSS)
+	live := newSettleSession(t, "info")
+	reg.Add("u-slow", live.ss)
+
+	// The same shape notifyMCPSettled gives the fan-out: a bounded wait.
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	returned := make(chan struct{})
+	go func() {
+		reg.Notify(ctx, "u-slow", "agent c_4 (worker) exited")
+		close(returned)
+	}()
+
+	// The send is provably stuck on the wire...
+	select {
+	case <-inFlight:
+	case <-time.After(mcpNotifyWait):
+		t.Fatal("the send never blocked; the fixture is broken")
+	}
+	// ...and the other session must still receive while it is.
+	if got := waitFor(t, live.got); !strings.Contains(got, "c_4") {
+		t.Errorf("the live session must receive while another send is stuck; got %q", got)
+	}
+	// The deadline returns the call even though the stuck send never ends.
+	select {
+	case <-returned:
+	case <-time.After(mcpNotifyWait):
+		t.Fatal("Notify waited behind a stalled send instead of abandoning it")
+	}
+
+	release()
+}
+
+// TestMCPNotifySkipsADescendantOfAnMCPChild pins the owner-propagation truth:
+// OwnerUserID is stamped only from the identity argument at fresh spawn, and
+// the child-bound spawner passes an empty identity, so a descendant of an
+// MCP-spawned child carries an EMPTY id — only the display-only
+// Labels["owner"] username propagates, via attestOwner — and gets no MCP
+// fan-out. Its settlement reaches the MCP caller's own child (its parent)
+// through the parent-gated inbox push instead.
+func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
+	prev := mcpSettlements
+	reg := newMCPSessions()
+	mcpSettlements = reg
+	t.Cleanup(func() { mcpSettlements = prev })
+
+	ss := newSettleSession(t, "info")
+	reg.Add("u-op", ss.ss)
+
+	c := &Controller{st: childstore.New(), cm: newChildManager()}
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_mcp_top", Name: "mcp worker", OwnerUserID: "u-op",
+		Status: protocol.StatusStreaming, StartedAt: time.Now(),
+	})
+	// The descendant exactly as controllerSpawner leaves it: parent labels
+	// set, OwnerUserID empty.
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_mcp_desc", Name: "descendant",
+		Status: protocol.StatusStreaming, StartedAt: time.Now(),
+		Labels: map[string]string{
+			childstore.LabelParent: "c_mcp_top",
+			childstore.LabelRoot:   "c_mcp_top",
+		},
+	})
+
+	c.notifySubagentSettled("c_mcp_desc", "exited")
+
+	if got := assertSilence(t, ss.got); got != "" {
+		t.Errorf("a descendant must not fan out to the caller's session; got %q", got)
 	}
 }
 

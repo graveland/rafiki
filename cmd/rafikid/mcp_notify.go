@@ -30,28 +30,17 @@ func newMCPSessions() *mcpSessions {
 
 // Add registers one live session under userID.
 //
-// REGISTRATION IS NOT WIRED (task 3.1 verdict: BLOCKED on the seam). Both
-// candidate seams sit outside this task's touches declaration, so the ruling
-// belongs to the coordinator:
+// The registration point is settlementHooksFor (cmd/rafikid/mcp_face.go): the
+// SDK's InitializedHandler fires when the client completes its handshake with
+// notifications/initialized, and the hook — which closes over the caller's
+// owner, never a bridge signature — calls Add with the session it carries.
+// A client that stops before that notification is never registered.
 //
-//   - The SDK hook route: mcp.ServerOptions carries InitializedHandler in
-//     v1.6.1 (server.go:66) and no session-closed hook at all, so Remove would
-//     ride a per-session Wait() goroutine — workable, but the hook cannot be
-//     threaded to this registry without editing pkg/mcpserver/bridge.go
-//     (mcpserver.New hardcodes nil options at its mcp.NewServer call) AND
-//     cmd/rafikid/mcp_face.go (getServer builds the server; Routes passes nil
-//     to NewStreamableHTTPHandler).
-//   - The fallback route the brief names: req.Session is reachable from any
-//     MCP tool call, but only inside pkg/mcpserver/bridge.go's handlerFor,
-//     which drops it on the floor before calling the rafiki tool. Forwarding
-//     it is an edit to that same file, plus a caller for Add — and the only
-//     per-call code this package owns lives in mcp_face.go, also outside
-//     touches. Taken alone it also means a client that never calls a tool is
-//     never registered.
-//
-// Until the ruling lands, nothing calls Add, Notify finds no sessions, and the
-// fan-out is a no-op: zero behavior change. agent_list's status field remains
-// the only settlement signal an MCP caller can rely on.
+// Removal is NOT hook-driven: v1.6.1's ServerOptions carries no session-closed
+// hook, so the same hook starts one per-session goroutine on Wait, which
+// returns when the session's connection closes (client DELETE, handler
+// timeout, teardown) and calls Remove. Add is idempotent per session: the SDK
+// refuses a duplicate notifications/initialized, so the hook fires once.
 func (m *mcpSessions) Add(userID string, ss *mcp.ServerSession) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -81,14 +70,27 @@ func (m *mcpSessions) Remove(userID string, ss *mcp.ServerSession) {
 //
 // The session set is snapshotted under the lock and the lock is RELEASED
 // before any send: Log writes to a network stream, and a stalled client inside
-// a held lock would wedge every other user's notification. A failing send is
-// logged at debug and skipped — one dead session must not abort the fan-out.
+// a held lock would wedge every other user's notification.
 //
-// Note the send is also silently dropped by the SDK when the client has never
-// issued logging/setLevel (mcp/server.go:1312 returns nil without writing
-// while ss.state.LogLevel is empty), so a delivered notification and a dropped
-// one are indistinguishable here. This push is therefore best-effort by
-// construction; agent_list's status field is the reliable answer.
+// Sends then run CONCURRENTLY, one goroutine per session, and the caller's
+// wait is bounded by ctx. The SDK's streamable Write path takes no context
+// (streamableServerConn.Write → deliverLocked), so a send to a
+// stalled-but-open client blocks indefinitely and a caller-side timeout can
+// never interrupt it — a sequential loop would wedge the settle path (this
+// runs from the child's status goroutine) while starving the user's other
+// sessions. Concurrent sends keep one stalled client from doing either: the
+// wait gives up at ctx's deadline while the blocked send is ABANDONED, not
+// cancelled — its goroutine stays on the transport write and ends when the
+// connection eventually dies, holding nothing but the session pointer. Each
+// send's result is logged at debug independently; one failing session never
+// aborts the fan-out.
+//
+// Note a send may also SILENTLY do nothing: the SDK's Log returns nil without
+// writing when the client has never issued logging/setLevel
+// (mcp/server.go:1312 reads ss.state.LogLevel, empty until then), so a
+// delivered notification and a dropped one are indistinguishable here. This
+// push is therefore best-effort by construction; agent_list's status field is
+// the reliable answer.
 func (m *mcpSessions) Notify(ctx context.Context, userID, message string) {
 	m.mu.Lock()
 	sessions := make([]*mcp.ServerSession, 0, len(m.byUID[userID]))
@@ -97,22 +99,43 @@ func (m *mcpSessions) Notify(ctx context.Context, userID, message string) {
 	}
 	m.mu.Unlock()
 
+	// WithoutCancel, not the caller's ctx: the deadline bounds the WAIT
+	// below, not the sends — a send that outlives it keeps going untouched
+	// instead of dying to a cancellation it never observes on the streamable
+	// path anyway.
+	sendCtx := context.WithoutCancel(ctx)
+	var wg sync.WaitGroup
 	for _, ss := range sessions {
-		err := ss.Log(ctx, &mcp.LoggingMessageParams{
-			Level:  "info",
-			Logger: "rafiki",
-			Data:   message,
-		})
-		if err != nil {
-			slog.Debug("mcp settlement notification failed", "sessionId", ss.ID(), "error", err)
-		}
+		wg.Add(1)
+		go func(ss *mcp.ServerSession) {
+			defer wg.Done()
+			err := ss.Log(sendCtx, &mcp.LoggingMessageParams{
+				Level:  "info",
+				Logger: "rafiki",
+				Data:   message,
+			})
+			if err != nil {
+				slog.Debug("mcp settlement notification failed", "sessionId", ss.ID(), "error", err)
+			}
+		}(ss)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 }
 
 // mcpSettlements is the daemon-wide registry of live MCP sessions, keyed by
 // user id. Package-level like mcpBlueprints, because its two touchpoints —
-// whatever registers sessions (currently unwired, see Add) and the settlement
-// source that fans out — have no shared owner. Tests swap it wholesale.
+// settlementHooksFor (cmd/rafikid/mcp_face.go), which registers sessions from
+// the SDK's InitializedHandler and removes them from a per-session Wait
+// goroutine, and the settlement source that fans out below — have no shared
+// owner. Tests swap it wholesale.
 var mcpSettlements = newMCPSessions()
 
 // notifyMCPSettled pushes the settlement fragment to every live MCP session
@@ -131,6 +154,17 @@ var mcpSettlements = newMCPSessions()
 // so no username→id resolution happens here. Empty means an anonymous spawn
 // (e.g. the local unix socket), which owns no MCP session; that case is
 // skipped.
+//
+// A DESCENDANT of an MCP-spawned child is also skipped, and that is the
+// designed shape, not a gap: OwnerUserID is stamped only from the identity
+// argument at fresh spawn (userSpawner passes the authenticated user; the
+// child-bound controllerSpawner passes users.Identity{}), and nothing
+// inherits it down the lineage — only the display-only Labels["owner"]
+// username propagates, via attestOwner. The record round-trip
+// (childstoredb record ⇄ SessionFromRecord) preserves the empty id across
+// resume. A descendant's settlement reaches the MCP caller's own child — its
+// parent — through the parent-gated inbox push instead, and the caller sees
+// the whole subtree through agent_list.
 func (c *Controller) notifyMCPSettled(childID, reason string) {
 	if mcpSettlements == nil {
 		return
@@ -144,7 +178,9 @@ func (c *Controller) notifyMCPSettled(childID, reason string) {
 	}
 	// Bounded like checkTaskResidue beside it: this rides the child's status
 	// goroutine, and one stalled client must not hold it for longer than a
-	// database hiccup would.
+	// database hiccup would. The deadline bounds the WAIT — Notify's sends
+	// run concurrently, so the wait is reliable and one user's stalled
+	// session starves neither this goroutine nor that user's other sessions.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	mcpSettlements.Notify(ctx, snap.OwnerUserID, settleFragment(childID, snap.Name, reason))
