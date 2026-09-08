@@ -328,6 +328,96 @@ func TestMCPNotifySurvivesAFailingSession(t *testing.T) {
 	}
 }
 
+// TestMCPFaceWiresSessionsIntoTheSettlementFanOut is the end-to-end
+// registration proof: a session initialized against the FACE's own
+// getServer — owner on the context the way UserTokenAuth leaves it — must
+// land in the settlement registry via the bridge's ServerOptions escape
+// hatch, receive a real settlement, and leave the registry when its
+// connection closes. The six TestMCPNotify tests cover the fan-out
+// mechanics; this covers the wiring.
+func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	prev := mcpSettlements
+	reg := newMCPSessions()
+	mcpSettlements = reg
+	t.Cleanup(func() { mcpSettlements = prev })
+
+	srv := face.getServer(mcpRequestFor("u-op"))
+	if srv == nil {
+		t.Fatal("getServer returned nil for an authenticated user")
+	}
+
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(context.Background(), st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	got := make(chan string, 8)
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "mcp-wiring-test", Version: "0"},
+		&mcp.ClientOptions{
+			LoggingMessageHandler: func(_ context.Context, r *mcp.LoggingMessageRequest) {
+				got <- fmt.Sprint(r.Params.Data)
+			},
+		})
+	cs, err := client.Connect(context.Background(), ct, nil) // fires notifications/initialized → Add
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	// Registration happens on the server's handling goroutine; await it with
+	// a bounded poll, never a bare check.
+	deadline := time.Now().Add(mcpNotifyWait)
+	for {
+		reg.mu.Lock()
+		registered := len(reg.byUID["u-op"])
+		reg.mu.Unlock()
+		if registered == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the face never registered the initialized session with the settlement registry")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: "info"}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := face.controller()
+	ctrl.st.Insert(&childstore.Session{
+		ChildID:     "c_mcp_wired",
+		Name:        "mcp worker",
+		OwnerUserID: "u-op",
+		Status:      protocol.StatusStreaming,
+		StartedAt:   time.Now(),
+	})
+	ctrl.notifySubagentSettled("c_mcp_wired", "exited")
+
+	if gotMsg := waitFor(t, got); !strings.Contains(gotMsg, "c_mcp_wired") {
+		t.Errorf("the settled fragment must reach the initialized client: %q", gotMsg)
+	}
+
+	// The Wait goroutine removes the session once its connection closes; the
+	// same bounded poll, because the removal also rides another goroutine.
+	_ = cs.Close()
+	deadline = time.Now().Add(mcpNotifyWait)
+	for {
+		reg.mu.Lock()
+		registered := len(reg.byUID["u-op"])
+		reg.mu.Unlock()
+		if registered == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a closed session was never removed from the settlement registry")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestMCPNotifyFiresForATopLevelChild is the source change itself: the
 // settlement path must reach the MCP fan-out for a child with no parent,
 // which the pre-existing parent gate skipped every time. Every MCP-spawned

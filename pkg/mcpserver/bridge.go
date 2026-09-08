@@ -33,12 +33,23 @@ type Options struct {
 	// caller as a tool error, not as a transport error.
 	ResolveConversationID func(context.Context) (string, error)
 
+	// ServerOptions, when non-nil, is passed straight through to
+	// mcp.NewServer, so the caller can attach server-side SDK hooks (e.g. an
+	// InitializedHandler) without this bridge growing a field per hook. The
+	// bridge never looks inside it: nothing here may carry a user id, a
+	// username or an *http.Request — whatever identity a hook needs is closed
+	// over by the caller that built the options, keeping this package
+	// identity-free. Only InitializedHandler is exercised today; any future
+	// hook that would give the bridge an identity-bearing signature is a
+	// design change, not an option.
+	ServerOptions *mcp.ServerOptions
+
 	Version string
 }
 
 // New builds an MCP server exposing opts.Tools.
 func New(opts Options) *mcp.Server {
-	srv := mcp.NewServer(&mcp.Implementation{Name: "rafiki", Title: "rafiki agent control", Version: opts.Version}, nil)
+	srv := mcp.NewServer(&mcp.Implementation{Name: "rafiki", Title: "rafiki agent control", Version: opts.Version}, opts.ServerOptions)
 	for _, t := range opts.Tools {
 		// A Materialize that declined returns (nil, nil); a nil-interface
 		// deref here is a panic in the daemon's request path.

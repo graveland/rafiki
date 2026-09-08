@@ -187,7 +187,8 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		ResolveConversationID: func(ctx context.Context) (string, error) {
 			return f.ledger.ConversationID(ctx, owner)
 		},
-		Version: f.version,
+		ServerOptions: settlementHooksFor(owner),
+		Version:       f.version,
 	})
 }
 
@@ -261,13 +262,15 @@ var mcpBlueprints = []tools.Tool{
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint
-// descriptions carry. Nothing delivers one on this surface yet (Task 3.1,
-// best-effort even then), so an agent told to wait for a message would wait
-// forever; every override that would otherwise promise a notification carries
-// this instead.
-const mcpNotificationNote = "On this surface there is no settlement notification yet: " +
-	"when you need to know whether an agent finished, check agent_list or task_list " +
-	"deliberately rather than waiting for a message that will not arrive."
+// descriptions carry. The push this surface delivers is best-effort by
+// construction — the SDK silently drops every notifications/message until the
+// client has sent logging/setLevel — so an agent told to wait for a message
+// could still wait forever; every override that would otherwise promise a
+// notification carries this instead.
+const mcpNotificationNote = "A settlement notification may be pushed to your client as a " +
+	"best-effort log message, and many clients drop those unless they have set a logging " +
+	"level (logging/setLevel), so never wait for one: when you need to know whether an agent " +
+	"finished, check agent_list or task_list deliberately."
 
 // mcpSpawnPrefix reframes agent_spawn for a client that has its own native
 // subagent tool.
@@ -347,6 +350,46 @@ var mcpToolDescriptions = func() map[string]string {
 		"task_list":   mcpLedgerPrefix + "\n\n" + taskList.Description(),
 	}
 }()
+
+// settlementHooksFor builds the server-side SDK options that register and
+// unregister one caller's MCP session with the settlement fan-out. The owner
+// rides the closure, never a hook signature: the bridge carries these options
+// through untouched, so no user id reaches pkg/mcpserver.
+//
+// Registration fires on notifications/initialized, which the SDK's own
+// clients send as the last step of their handshake; a client that stops
+// before that is not registered, and the session is never offered a
+// notification.
+//
+// v1.6.1 has no session-closed hook, so removal rides a per-session goroutine
+// on Wait, which returns when the session's connection closes (client DELETE,
+// handler timeout, teardown). The alternative — pruning on Notify's failure
+// path — would leave a closed session registered until the next settlement
+// happened to fire: unbounded in time, and growing with every reconnect. One
+// goroutine for one session's lifetime is the scale MCP sessions run at.
+//
+// The face's own sessions map (Mcp-Session-Id → user id, the per-request
+// identity check) and mcpSessions.byUID (user id → *ServerSession) are two
+// keyed worlds that never meet: the SDK mints its session object with an id
+// of its own and nothing links either map's key to the other. The cost of
+// that is one-directional — a DELETE unbinds the sid immediately while this
+// pointer lingers until Wait returns — and harmless: a Log to a closed
+// session fails at debug and is skipped.
+func settlementHooksFor(owner users.Identity) *mcp.ServerOptions {
+	return &mcp.ServerOptions{
+		InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
+			if req == nil || req.Session == nil {
+				return
+			}
+			ss := req.Session
+			mcpSettlements.Add(owner.UserID, ss)
+			go func() {
+				_ = ss.Wait()
+				mcpSettlements.Remove(owner.UserID, ss)
+			}()
+		},
+	}
+}
 
 // mcpQuota implements tools.QuotaReader for the MCP caller, bound to owner at
 // construction — NOT resolved from ctx, so no tool argument can read another
