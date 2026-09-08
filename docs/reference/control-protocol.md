@@ -597,7 +597,10 @@ the client sees the response, the child is fully ready for `ctrl_send`.
                                             // against. DAEMON-SET ONLY. A client setting
                                             // it is naming somebody else's ledger.
 
-  // Working directory (required, absolute)
+  // Working directory (required, absolute). Where the child's tools start:
+  // for an executor-bound child it is sent as the workspace's workdir, and
+  // the provision is REFUSED when the executor cannot see the path in its
+  // own filesystem.
   "cwd":                 "/Users/.../dev",
 
   // Model + auth (all optional; pi resolves from its own config if omitted)

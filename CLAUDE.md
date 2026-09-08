@@ -1504,3 +1504,30 @@
   as the conversation grows, and it's indistinguishable from "this model
   doesn't cache" by the token counts alone. A hand-rolled sender silently
   loses this (and any future transport-level behavior) with no error anywhere.
+
+- **`ProvisionRequest.workdir` is honored per workspace, and it is what makes
+  `agent_spawn`'s `cwd` real for executor-bound children.** The daemon sends the
+  child's cwd as `workdir` (`cmd/rafikid/workspace_wiring.go`), and the executor
+  validates it exists (and is a directory) in ITS OWN filesystem view before
+  materializing a per-workspace tool registry with `Cwd: workdir` — foreground
+  `bash`, the file tools' relative-path resolution, background jobs, the
+  workspace's LSP manager, and `ProjectContext`/`ProjectSkills` all follow it.
+  Two rules that are easy to "simplify" back into bugs: the check is
+  EXISTENCE-only, never under-root containment (a native executor has no path
+  scoping — `bash` reaches the whole machine, so an under-root check is not a
+  boundary, and sibling git worktrees beside a repo must keep working), and
+  refusal is loud (`CodeInvalidArgument`) because silently starting in the root
+  while the prompt names another directory is the split-brain that had workers
+  committing to `main`. Before this, `cwd` fed only the system-prompt env block
+  and daemon-side context files while every tool call ran in the executor's
+  `--root` — the prompt claimed a working directory `pwd` contradicted.
+
+- **`agent_spawn`'s `workspace: ephemeral|pinned` is a RESCHEDULABILITY choice,
+  never an isolation one.** The executor's `Provision` serves one root for every
+  workspace on it; the mode only narrows which executor ROWS may serve the child
+  (`narrowByWorkspaceMode` reads the row, not the executor) and what happens on
+  executor loss (ephemeral re-binds elsewhere; pinned fails in place). Any
+  description claiming a "fresh, isolated checkout" is drift — the wording has
+  to say what the flag does. Isolation is git worktrees plus `cwd` (see the
+  previous entry), which is also why ephemeral's doc points coordinators at
+  `cwd` rather than at the workspace mode.

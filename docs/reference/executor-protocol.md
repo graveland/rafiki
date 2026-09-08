@@ -269,14 +269,32 @@ Provision(childId, workspaceMode, mounts[], workdir, network, memoryBytes, cpus,
 ```
 
 Provision prepares a workspace and returns the handle later `Execute` calls
-carry. A workspace is a handle bound to the root the executor was started with;
+carry. A workspace is a handle bound to the filesystem the executor can see;
 there is nothing else it could be, because rafiki does not start containers — a
 container running the executor IS one.
 
 Everything describing a shape the executor might build is therefore dead on this
-call. `mounts`, `network`, `workdir` and `workspaceMode` are unset by the daemon
-and ignored by the executor; they remain on the wire only until the proto is
-next regenerated.
+call: `mounts`, `network` and `workspaceMode` are unset by the daemon and ignored
+by the executor. `workdir` is the exception. It is where this workspace's tools
+START, in the executor's own filesystem vocabulary, and the daemon sends the
+child's cwd. An empty workdir means the executor's root. A requested workdir must
+exist and be a directory in the executor's filesystem view; anything else is
+refused with `CodeInvalidArgument` rather than silently starting somewhere the
+child cannot write. Existence is the whole check — the workdir is NOT required
+to sit under the executor's root, because a native executor has no path
+confinement (`bash` reaches the whole machine, so an under-root check is not a
+boundary) and the git worktrees coordinators create beside a repository to
+isolate workers must keep working. For a container executor the same check is
+the proto's mount rule: a path that is not one of the container's mounts does
+not exist in the container's view, so it is refused here too.
+
+The executor materializes one tool registry per workspace, with that registry's
+cwd set to the workdir: foreground `bash` starts there, the file tools resolve
+relative paths against it, background jobs start there, and the workspace's
+language servers (if any) root there. `ProjectContext` and `ProjectSkills`
+read the same workdir. What does NOT change with it: `roots` in the response
+stay the executor's own view of what the machine exposes, and `isolation`
+stays empty.
 
 `isolation` in the response is deliberately **empty**, as it is in `Describe`.
 An executor does not know whether it is running in a container and must not

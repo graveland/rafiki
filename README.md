@@ -670,16 +670,20 @@ cross-compiles); likely wrong for a Rust/Zig/ESP toolchain.
 ### Workspace lifecycle
 
 Each child gets a workspace provisioned before it starts and released when it
-exits:
+exits. The workspace's workdir is the child's cwd: the executor starts the
+child's tools there and refuses the provision if the path does not exist in its
+filesystem view.
 
-- **ephemeral**: the executor constructs the workspace per child. It is
-  reconstructible, so the child can be rescheduled to another executor if
-  the first one is lost.
+- **ephemeral**: the operator declares these machines interchangeable and their
+  workspaces reconstructible — for containers, each child gets a fresh one. If
+  the executor is lost, the child can be rescheduled to another executor.
 - **pinned**: the executor exposes an existing tree. If the executor is lost,
   the child is parked until it returns or the timeout expires.
 
 This distinction is what the park-vs-fail decision consults when an executor
-goes away.
+goes away. It says nothing about filesystem isolation: on one executor every
+workspace serves the same root, and isolation comes from the operator's
+composition (containers) or from git worktrees passed as the child's cwd.
 
 ## Subagents
 
@@ -721,10 +725,18 @@ same residue escalates to its coordinator instead of nudging again.
 | Parameter | Meaning |
 |---|---|
 | `executor` | a label selector over machines — `env=work,os=linux` |
-| `workspace` | `ephemeral` (fresh, rebuildable, reschedulable) or `pinned` (an existing tree on one machine) |
+| `workspace` | `ephemeral` (may run only on executors declared reconstructible; rescheduled onto a matching executor if its machine is lost) or `pinned` (executors exposing an existing tree; fails where it stood) |
 
-Nothing path-shaped is model-facing. Mounts are derived by the daemon from the
-child's worktree; a coordinator choosing labels and a workspace mode cannot make
+Neither `workspace` mode creates an isolated checkout — every workspace on an
+executor shares that executor's single root, and the two modes differ only in
+which executor rows may serve the child and what happens when the executor is
+lost. Isolation is `cwd`: a coordinator that wants a worker in its own tree
+creates a git worktree and passes it, and the executor starts the worker's tools
+there (refusing the spawn if the path does not exist on the executor's
+filesystem).
+
+Nothing else path-shaped is model-facing. Mounts are derived by the daemon from
+the child's worktree; a coordinator choosing labels and a workspace mode cannot make
 the mistakes a coordinator composing path allowlists would, which is what makes
 these grants safe to author without human review.
 
