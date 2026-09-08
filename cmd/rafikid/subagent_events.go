@@ -34,19 +34,23 @@ func isWorkingStatus(s protocol.Status) bool {
 	return false
 }
 
-// notifySubagentSettled pushes one fragment about childID into its PARENT's
+// notifySubagentSettled announces that childID settled. It fans out to every
+// live MCP session of the child's user (notifyMCPSettled, before the gate —
+// an MCP caller is not a rafiki child, has no inbox, and every MCP-spawned
+// child is top-level), then pushes one fragment into the child's PARENT's
 // event buffer, keyed on childID.
 //
 // Keying is what makes this cheap: last-write-wins per key means a worker that
 // settles three times contributes one fragment, and Push's per-(child, source)
 // debounce means five workers finishing together contribute one injected frame
 // rather than five turns.
-//
-// The fragment deliberately does NOT summarise the work. That is the division
-// this phase rests on: the buffer says something happened, the ledger says what
-// it was. A digest that tried to be the ledger would be a lossy copy of it,
-// and a coordinator would learn to trust the copy.
 func (c *Controller) notifySubagentSettled(childID, reason string) {
+	// The MCP fan-out runs first, independent of lineage AND of the event
+	// buffer: the caller that spawned a top-level MCP agent must hear about its
+	// settlement even though the parent gate below returns for it every time.
+	// With no session registered it is a no-op.
+	c.notifyMCPSettled(childID, reason)
+
 	if c.evbuf == nil {
 		return
 	}
@@ -62,14 +66,22 @@ func (c *Controller) notifySubagentSettled(childID, reason string) {
 	if !ok {
 		return
 	}
-	name := snap.Name
+	c.evbuf.Push(parent, subagentEventSource, childID, settleFragment(childID, snap.Name, reason))
+}
+
+// settleFragment is the one wording both settlement consumers render — the
+// parent's event-buffer fragment and the MCP caller's notification — so a
+// coordinator agent and an MCP client read the same text. The fragment
+// deliberately does NOT summarise the work: the buffer says something
+// happened, the ledger says what it was. A digest that tried to be the ledger
+// would be a lossy copy of it, and a reader would learn to trust the copy.
+func settleFragment(childID, name, reason string) string {
 	if name == "" {
 		name = "unnamed"
 	}
-	frag := fmt.Sprintf(
+	return fmt.Sprintf(
 		"agent %s (%s) %s. Read what it did with task_list(assignee=%q); read how with agent_view(agent=%q).",
 		childID, name, reason, childID, childID)
-	c.evbuf.Push(parent, subagentEventSource, childID, frag)
 }
 
 // checkTaskResidue implements prompting.md's enforcement ladder:
