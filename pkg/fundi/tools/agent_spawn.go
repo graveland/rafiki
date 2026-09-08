@@ -42,7 +42,11 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "model", Type: "string",
 				Description: "Model id to run it on. Omit to inherit the daemon default. Use agent_models to see the options."},
 			{Name: "cwd", Type: "string",
-				Description: "Absolute working directory. Omit to use your own."},
+				Description: "Absolute working directory for the agent: where its tools start and " +
+					"relative paths resolve. For an executor-bound agent the executor must be " +
+					"able to see this path in its own filesystem — provisioning is refused if " +
+					"it cannot. Omit to use your own. This is how you point a worker at a git " +
+					"worktree you created."},
 			{Name: "task", Type: "string",
 				Description: "Handle of a task in YOUR list (e.g. \"2.1\") to assign to this agent."},
 			{Name: "kind", Type: "string",
@@ -60,11 +64,16 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"free it. You can only ever narrow: a selector naming a machine you " +
 					"cannot reach is refused, and the refusal says which machine and why."},
 			{Name: "workspace", Type: "string",
-				Description: "\"ephemeral\" gives the agent a fresh, isolated checkout that can " +
-					"be rebuilt elsewhere if its machine goes away — right for unattended " +
-					"workers. \"pinned\" puts it in an existing working tree on one specific " +
-					"machine, so it sees your uncommitted changes but cannot be moved. " +
-					"Omit to inherit yours."},
+				Description: "Which executors may serve this agent, by the workspace_mode their " +
+					"operator declared, and what happens if that executor is lost. " +
+					"\"ephemeral\": only executors marked ephemeral (operator-declared " +
+					"reconstructible, e.g. disposable containers each carrying their own " +
+					"checkout); if its executor is lost the daemon re-binds the agent onto " +
+					"another one. \"pinned\": only executors marked pinned (the default); if " +
+					"its executor is lost the agent fails where it stood. Neither mode " +
+					"creates a fresh or isolated checkout — every workspace on an executor " +
+					"serves that executor's single root. For an isolated tree, create a git " +
+					"worktree yourself and pass it as cwd. Omit to inherit yours."},
 		},
 		Required: []string{"prompt"},
 	}

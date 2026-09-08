@@ -28,7 +28,10 @@ const (
 		"reported as text in the result, not as a tool error. Defaults to a " +
 		"120s timeout; pass timeout_ms to override, up to a 600s maximum. " +
 		"Large output is clipped (head and tail kept, middle elided) with the " +
-		"full output spilled to a file whose path is named in the result."
+		"full output spilled to a file whose path is named in the result. " +
+		"Each call is a fresh shell that starts in your working directory (named " +
+		"in your environment block): a cd does NOT persist to the next call — " +
+		"chain it within one command (cd X && ...) or use absolute paths."
 )
 
 func init() { DefaultBlueprint.Register(&BashBlueprint{}) }
