@@ -450,6 +450,37 @@ real work. On a DB-less daemon the ledger degrades to an in-memory store keyed
 `user:<id>` and is lost on restart, the same degradation a pool-less agent
 already documents.
 
+**Settlement notification (`notifications/message`).** On settlement, the
+daemon fans out the same fragment a settling child's parent would receive
+(`settleFragment`, `cmd/rafikid/subagent_events.go`) as an MCP logging message
+— `notifications/message`, sent through `ServerSession.Log` with level `info`
+and logger `rafiki` — to every live MCP session owned by the settling child's
+user. The owner is read from stored state (`childstore.Snapshot.OwnerUserID`,
+the `conversations.child.owner_user_id` column, stamped at spawn by the
+user-bound spawner); an unattributed child fans out to nobody. The fan-out
+runs before the parent gate in `notifySubagentSettled`, because every
+MCP-spawned child is top-level and the gate would otherwise return before
+anything reached the caller that spawned the agent.
+
+The push is **best-effort by construction**: the SDK's `Log` returns nil
+without writing anything when the client has never issued `logging/setLevel`
+(`mcp/server.go` reads `ss.state.LogLevel`, empty until then), and rafiki's
+face is stateful, so nothing presets a level — a delivered notification and a
+dropped one are indistinguishable, and a session that fails to receive is
+logged at debug and skipped. **`agent_list`'s status field is the reliable
+answer**; the notification is an enhancement for a client that has set a
+level, never something to wait on. Sessions are in-memory and per-process:
+none survive a daemon restart, a reconnecting client re-initializes, and the
+registry (`mcpSessions`, `cmd/rafikid/mcp_notify.go`) holds each user's live
+sessions, snapping them out under a lock released before any send so one
+stalled client cannot wedge another user's fan-out. **As of this change no
+session is registered yet**: both seams that could call `Add`/`Remove` on the
+SDK's session lifecycle (the `ServerOptions` hook route and the `req.Session`
+fallback) sit in `pkg/mcpserver/bridge.go` and `cmd/rafikid/mcp_face.go`, and
+the wiring is pending a ruling on that boundary — until it lands, MCP callers
+see no server-initiated messages at all, which is exactly why the reliable
+answer stays `agent_list`.
+
 ## 3. Framing
 
 JSON Lines (`application/jsonl`).
