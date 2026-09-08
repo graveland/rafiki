@@ -215,6 +215,22 @@ message CloseResponse {
   string child_id = 1;
 }
 
+// SetBudgetRequest changes a child's MaxCost with OPERATOR authority: no
+// lineage check (any child at any depth may be targeted) and no
+// remaining-budget check against a parent's grant. max_cost is plain
+// double, not optional -- unlike ChildSummary.max_cost, 0 here is an
+// actively requested value ("make unlimited"), never an absent-field
+// sentinel.
+message SetBudgetRequest {
+  string child_id = 1;
+  double max_cost = 2;
+}
+
+message SetBudgetResponse {
+  string child_id = 1;
+  double max_cost = 2;
+}
+
 // TaskRow is one row of the task ledger. Handle is the dotted ordinal path
 // ("2.1"), computed on read and never persisted -- an agent addresses tasks by
 // handle so it never has to carry a UUID across turns.
@@ -480,6 +496,7 @@ service Control {
   rpc Spawn(SpawnRequest) returns (SpawnResponse);
   rpc Kill(KillRequest) returns (KillResponse);
   rpc Close(CloseRequest) returns (CloseResponse);
+  rpc SetBudget(SetBudgetRequest) returns (SetBudgetResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
   rpc ListExecutors(ListExecutorsRequest) returns (ListExecutorsResponse);
