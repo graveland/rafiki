@@ -384,3 +384,85 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	killCmd := cliCmd(t, d, "kill", "afk-impl")
 	_, _ = killCmd.CombinedOutput()
 }
+
+// TestCLI_BudgetSet exercises `rafiki budget set` end to end against a real
+// daemon: create a detached child, set a cap, read it back through `get`'s
+// ChildSummary.max_cost, then clear it with --unlimited (0/unlimited is an
+// accepted, intentional value on the operator path).
+func TestCLI_BudgetSet(t *testing.T) {
+	t.Parallel()
+	d := bootDaemon(t)
+
+	// create --detached — no LLM call, just a child row to budget against.
+	var createStderr bytes.Buffer
+	createCmd := cliCmd(t, d,
+		"--output", "json",
+		"create", "budget-smoke",
+		"--cwd", "/tmp",
+		"--no-session",
+		"--no-extensions",
+		"--model", "anthropic/claude-sonnet-4-5",
+		"--no-local-executor",
+		"--detached",
+	)
+	createCmd.Stderr = &createStderr
+	out, err := createCmd.Output() // stdout only
+	if err != nil {
+		t.Fatalf("create --detached failed: %v\nstderr: %s", err, createStderr.String())
+	}
+
+	var createResp struct {
+		ChildID string `json:"childId"`
+	}
+	if err := json.Unmarshal(out, &createResp); err != nil {
+		t.Fatalf("decode create response: %v\noutput: %s", err, out)
+	}
+	childID := createResp.ChildID
+	if childID == "" {
+		t.Fatalf("create --detached returned empty childId; output: %s", out)
+	}
+
+	// budget set 5.00
+	var setStderr bytes.Buffer
+	setCmd := cliCmd(t, d, "budget", "set", childID, "5.00")
+	setCmd.Stderr = &setStderr
+	setOut, err := setCmd.Output()
+	if err != nil {
+		t.Fatalf("budget set: %v (stderr: %s)", err, setStderr.String())
+	}
+	if !strings.Contains(string(setOut), "5.00") {
+		t.Fatalf("budget set output %q does not mention the new amount", setOut)
+	}
+
+	// read the cap back through get — `get` always emits indented JSON.
+	getCmd := cliCmd(t, d, "--output", "json", "get", childID)
+	getOut, err := getCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("get: %v\n%s", err, getOut)
+	}
+	var got struct {
+		MaxCost *float64 `json:"max_cost"`
+	}
+	if err := json.Unmarshal(getOut, &got); err != nil {
+		t.Fatalf("decode get output %q: %v", getOut, err)
+	}
+	if got.MaxCost == nil || *got.MaxCost != 5.00 {
+		t.Fatalf("get after budget set: max_cost = %v, want 5.00", got.MaxCost)
+	}
+
+	// budget set --unlimited clears the cap.
+	var unlimitedStderr bytes.Buffer
+	unlimitedCmd := cliCmd(t, d, "budget", "set", childID, "--unlimited")
+	unlimitedCmd.Stderr = &unlimitedStderr
+	unlimitedOut, err := unlimitedCmd.Output()
+	if err != nil {
+		t.Fatalf("budget set --unlimited: %v (stderr: %s)", err, unlimitedStderr.String())
+	}
+	if !strings.Contains(string(unlimitedOut), "unlimited") {
+		t.Fatalf("budget set --unlimited output %q does not confirm the clear", unlimitedOut)
+	}
+
+	// cleanup: kill to avoid leftover processes
+	killCmd := cliCmd(t, d, "kill", "budget-smoke")
+	_, _ = killCmd.CombinedOutput()
+}
