@@ -77,6 +77,14 @@ func (s *controllerSpawner) List(context.Context) ([]tools.AgentInfo, error) {
 }
 
 func (s *controllerSpawner) infoFor(snap childstore.Snapshot) tools.AgentInfo {
+	return snapshotInfo(snap, s.hopsTo(snap.ChildID))
+}
+
+// snapshotInfo renders one childstore row as the tool-facing AgentInfo, with
+// depth supplied by the caller: controllerSpawner passes hops from its own
+// binding, userSpawner passes the child's absolute depth in the daemon's
+// forest.
+func snapshotInfo(snap childstore.Snapshot, depth int) tools.AgentInfo {
 	return tools.AgentInfo{
 		ChildID: snap.ChildID,
 		Name:    snap.Name,
@@ -84,7 +92,7 @@ func (s *controllerSpawner) infoFor(snap childstore.Snapshot) tools.AgentInfo {
 		Status:  string(snap.Status),
 		Kind:    snap.Kind,
 		Cwd:     snap.Cwd,
-		Depth:   s.hopsTo(snap.ChildID),
+		Depth:   depth,
 		Task:    snap.Labels[labelTaskHandle],
 	}
 }
@@ -117,6 +125,11 @@ func sortAgents(a []tools.AgentInfo) {
 }
 
 // Models answers agent_models.
+func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
+	return spawnerModels(ctx, s.c, q)
+}
+
+// spawnerModels backs the Models verb for every AgentSpawner implementation.
 //
 // It reads ListModelRows, not ListModels: the row path is served from the
 // daemon's already-warm routing catalog, carries price/context/score, and
@@ -129,8 +142,8 @@ func sortAgents(a []tools.AgentInfo) {
 // picker, so both surfaces agree on the three absence rules: a bound admits a
 // row the catalog cannot answer for, an absent value sorts last in BOTH
 // directions, and unknown capability is kept rather than read as "no".
-func (s *controllerSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.ModelInfo, error) {
-	rows, err := s.c.ListModelRows(ctx, "", q.Kind)
+func spawnerModels(ctx context.Context, c *Controller, q tools.ModelQuery) ([]tools.ModelInfo, error) {
+	rows, err := c.ListModelRows(ctx, "", q.Kind)
 	if err != nil {
 		return nil, err
 	}
