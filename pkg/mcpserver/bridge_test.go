@@ -136,6 +136,36 @@ func TestBridgeSkipsNilTools(t *testing.T) {
 	}
 }
 
+func TestBridgeSkipsAToolWhoseSchemaIsNotAnObject(t *testing.T) {
+	// A schema the SDK's AddTool would panic on (no "type":"object", or an
+	// empty object after Schema's builder path) must drop the tool with a
+	// warn, never panic New — the daemon builds one server per request.
+	noType := &fakeTool{name: "no_type", desc: "missing type", schema: `{"properties":{"k":{"type":"string"}}}`}
+	empty := &fakeTool{name: "empty_type", desc: "zero-value schema", schema: ""}
+	good := &fakeTool{name: "good", desc: "an object", schema: objSchema}
+	cs := bridgeSession(t, Options{Tools: []tools.Tool{noType, empty, good}, Version: "test"})
+
+	res, err := cs.ListTools(context.Background(), &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var names []string
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+	if len(names) != 1 || names[0] != "good" {
+		t.Fatalf("listed tools %v, want [good]", names)
+	}
+
+	// The skipped names must be genuinely absent from the server, not merely
+	// unlisted: calling one is an MCP error response, not a panic.
+	for _, name := range []string{"no_type", "empty_type"} {
+		if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name}); err == nil {
+			t.Errorf("call to skipped tool %q returned no error", name)
+		}
+	}
+}
+
 func TestBridgeDescriptionOverrideWins(t *testing.T) {
 	overridden := &fakeTool{name: "task_add", desc: "blueprint description", schema: objSchema}
 	plain := &fakeTool{name: "task_list", desc: "own description", schema: objSchema}

@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -25,9 +26,11 @@ type Options struct {
 	Descriptions map[string]string
 
 	// ResolveConversationID supplies the conversation id the task_* tools
-	// scope by, resolved lazily on the first call that needs it. nil means no
-	// id is injected. An error is returned to the caller as a tool error, not
-	// as a transport error.
+	// scope by. It is called on EVERY tool call, including tools that never
+	// read the id — a generic bridge cannot see which tools need it — so a
+	// resolver with an expensive lookup must memoize. The daemon's resolver
+	// (the mcpLedger) already caches per user. An error is returned to the
+	// caller as a tool error, not as a transport error.
 	ResolveConversationID func(context.Context) (string, error)
 
 	Version string
@@ -43,6 +46,13 @@ func New(opts Options) *mcp.Server {
 			continue
 		}
 		tool := t
+		schema, ok := acceptableSchema(tool)
+		if !ok {
+			// The SDK's AddTool panics on a non-object schema; New runs in the
+			// daemon's per-request path, so skip the tool instead.
+			slog.Warn("mcpserver: skipping tool whose input schema is not a JSON object with type object", "tool", tool.Name())
+			continue
+		}
 		desc := tool.Description()
 		if o, ok := opts.Descriptions[tool.Name()]; ok {
 			desc = o
@@ -50,10 +60,28 @@ func New(opts Options) *mcp.Server {
 		srv.AddTool(&mcp.Tool{
 			Name:        tool.Name(),
 			Description: desc,
-			InputSchema: json.RawMessage(tool.InputSchema().JSON()),
+			InputSchema: schema,
 		}, handlerFor(tool, opts.ResolveConversationID))
 	}
 	return srv
+}
+
+// acceptableSchema marshals a tool's input schema and reports whether the
+// SDK's AddTool can accept it: nil/empty bytes, undecodable JSON, or a schema
+// whose "type" is not exactly "object" would panic there. The guard sits
+// ahead of the AddTool call, whose shape is mandated by the bridge contract.
+func acceptableSchema(t tools.Tool) (json.RawMessage, bool) {
+	raw := json.RawMessage(t.InputSchema().JSON())
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var shape struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &shape); err != nil || shape.Type != "object" {
+		return nil, false
+	}
+	return raw, true
 }
 
 // handlerFor wraps one rafiki tool as an MCP tool handler. A tool failure is
@@ -67,7 +95,12 @@ func handlerFor(t tools.Tool, resolve func(context.Context) (string, error)) mcp
 			if err != nil {
 				return errorResult(err), nil
 			}
-			ctx = context.WithValue(ctx, tools.ConversationIDKey{}, id)
+			// An empty id is indistinguishable from no injection downstream
+			// (ConversationIDFromContext returns "" both ways) — never inject
+			// it.
+			if id != "" {
+				ctx = context.WithValue(ctx, tools.ConversationIDKey{}, id)
+			}
 		}
 		// Several blueprints take no arguments and a client may omit
 		// `arguments` entirely, while json.Unmarshal on an empty RawMessage
