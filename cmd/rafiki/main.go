@@ -90,6 +90,7 @@ func newRootCmd() *cobra.Command {
 		newConfigCmd(),
 		newSkillsCmd(),
 		newProfileCmd(),
+		newBudgetCmd(),
 	)
 
 	return root
