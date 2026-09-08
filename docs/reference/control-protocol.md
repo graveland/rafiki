@@ -378,10 +378,17 @@ is 503, never 401, because a 401 tells clients their credential is bad and
 they respond by discarding it — a database blip answered with 401 logs
 everyone out at once. The identity reaches the face on the request context,
 never by re-reading the `Authorization` header, which would be a second
-credential path. The daemon's **per-boot child token** also authenticates (it
-is what spawned children carry), and a non-user identity gets the toolless
-server: a child process legitimately reaches this face and must not get agent
-control. Each MCP session is bound to the identity that initialized it, and a
+credential path. The daemon's **per-boot child token** also authenticates: on
+its own it resolves to a non-user identity and gets the toolless server — a
+child process must not get agent control — but a child that presents its
+`X-Rafiki-Session` header resolves through the proxy face's pre-existing
+child-owner attribution (the path that makes its LLM turns bill to its owner)
+to that OWNER's user identity, and therefore reaches the full tool surface
+**acting as its owner**, including steering verbs outside its own subtree —
+greater delegated power over `/mcp` than the in-process `agent_spawn` tool
+(subtree-scoped). Scoping child-token attribution away from control surfaces
+is an open operator decision. Each MCP session is bound
+to the identity that initialized it, and a
 later request presenting a session id owned by another caller — or an unknown
 one — is refused with 403 before dispatch. The face keeps this map itself
 because the SDK's own session-hijack guard keys on the bearer middleware

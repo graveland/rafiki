@@ -158,9 +158,16 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// A toolless server, never nil: StreamableHTTPHandler answers a nil from
 	// getServer with a bare 400 "no server available", which tells an MCP
 	// client nothing it can recover from. The daemon is still starting
-	// (no Controller yet) and a non-user credential (the per-boot child
-	// token) reaches this face legitimately and must not get agent control —
-	// both get an empty server and, once initialized, an empty tool list.
+	// (no Controller yet) → an empty server. A credential that resolves to a
+	// zero identity → an empty server too: the per-boot child token WITHOUT
+	// X-Rafiki-Session does exactly that (usertoken.go's constant-time path),
+	// and a child process must not get agent control. BEWARE the exception:
+	// a child token WITH X-Rafiki-Session resolves through childOwnerLookup to
+	// the child's OWNER user identity — pre-existing proxy-face behavior that
+	// lets a child attribute its LLM turns — and on this surface that means a
+	// spawned agent CAN reach the full tool set as its owner. Documented in
+	// docs/reference/control-protocol.md §2.4; scoping child-token attribution
+	// away from control surfaces is an escalated operator decision.
 	ctrl := f.controller()
 	if ctrl == nil || !owner.IsUser() {
 		return mcpserver.New(mcpserver.Options{Version: f.version})

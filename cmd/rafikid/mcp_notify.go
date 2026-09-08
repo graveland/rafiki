@@ -81,7 +81,9 @@ func (m *mcpSessions) Remove(userID string, ss *mcp.ServerSession) {
 // sessions. Concurrent sends keep one stalled client from doing either: the
 // wait gives up at ctx's deadline while the blocked send is ABANDONED, not
 // cancelled — its goroutine stays on the transport write and ends when the
-// connection eventually dies, holding nothing but the session pointer. Each
+// connection eventually dies, holding nothing but the session pointer. One
+// such goroutine accumulates per settle against a session stuck that long;
+// all of them are freed when the connection dies. Each
 // send's result is logged at debug independently; one failing session never
 // aborts the fan-out.
 //

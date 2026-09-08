@@ -456,7 +456,7 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 // getServer — owner on the context the way UserTokenAuth leaves it — must
 // land in the settlement registry via the bridge's ServerOptions escape
 // hatch, receive a real settlement, and leave the registry when its
-// connection closes. The six TestMCPNotify tests cover the fan-out
+// connection closes. The eight TestMCPNotify tests cover the fan-out
 // mechanics; this covers the wiring.
 func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 	face, _ := mcpFaceFixture(t)
