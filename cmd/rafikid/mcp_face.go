@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -46,14 +47,23 @@ type mcpFace struct {
 	// restart: the degradation BuildRuntime documents for a pool-less agent.
 	fallbackTasks   tasks.Store
 	fallbackTasksMu sync.Mutex
+
+	// sessions binds each Mcp-Session-Id to the user id that initialized it.
+	// The SDK's own hijack guard never fires here — see sessionOwnedBy — so
+	// this map is the per-session identity check. Entries live as long as
+	// their session (pruned on DELETE; cleared by a restart, which also
+	// clears the SDK's own session table).
+	sessionsMu sync.Mutex
+	sessions   map[string]string
 }
 
 func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *quota.Store, ver string) *mcpFace {
 	return &mcpFace{
-		logger:  logger,
-		ledger:  newMCPLedger(capture),
-		quota:   quotaStore,
-		version: ver,
+		logger:   logger,
+		ledger:   newMCPLedger(capture),
+		quota:    quotaStore,
+		version:  ver,
+		sessions: make(map[string]string),
 	}
 }
 
@@ -65,8 +75,69 @@ func (f *mcpFace) SetController(c *Controller) {
 }
 
 // Routes returns the mount path and handler for server.Handler.
+//
+// The SDK handler is wrapped, not handed over raw, because the SDK's
+// session-hijack guard is inert on this mount (see sessionOwnedBy): without
+// the wrap, any authenticated caller presenting another caller's
+// Mcp-Session-Id would execute that caller's bound tool set.
 func (f *mcpFace) Routes() (string, http.Handler) {
-	return mcpFacePath, mcp.NewStreamableHTTPHandler(f.getServer, nil)
+	sdk := mcp.NewStreamableHTTPHandler(f.getServer, nil)
+	return mcpFacePath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sid := r.Header.Get("Mcp-Session-Id")
+		if sid != "" && !f.sessionOwnedBy(sid, spawnOwner(r.Context()).UserID) {
+			http.Error(w, "mcp session belongs to another caller or is unknown", http.StatusForbidden)
+			return
+		}
+		sdk.ServeHTTP(w, r)
+		if r.Method == http.MethodDelete {
+			// The session is gone either way: closed (204) or never existed.
+			// Only requests that passed the ownership check reach here.
+			f.forgetSession(sid)
+		} else if sid == "" {
+			// A new session is named only in the initialize response
+			// (streamable.go:1263-1265) and the id does not exist when
+			// getServer runs, so the binding is recorded here, after the
+			// handler has returned. Nobody can present the id before this
+			// response reaches them.
+			if newSID := w.Header().Get("Mcp-Session-Id"); newSID != "" {
+				f.bindSession(newSID, spawnOwner(r.Context()).UserID)
+			}
+		}
+	})
+}
+
+// sessionOwnedBy reports whether userID may use sid.
+//
+// SDK evidence for why the face must check this itself (vendored v1.6.1):
+// the handler's hijack guard (mcp/streamable.go:311-315) runs only when
+// sessInfo.userID is non-empty, and that field is captured solely from
+// auth.TokenInfoFromContext at session creation (mcp/streamable.go:499-504).
+// The only SDK code that ever stores a TokenInfo in the request context is
+// its RequireBearerToken middleware (auth/auth.go:93) — a credential path
+// rafiki does not run, because UserTokenAuth is the one credential path.
+// sessInfo.userID is therefore always empty here and the guard is skipped,
+// so without this map the session id alone would route bob onto alice's
+// bound tools.
+func (f *mcpFace) sessionOwnedBy(sid, userID string) bool {
+	f.sessionsMu.Lock()
+	defer f.sessionsMu.Unlock()
+	owner, ok := f.sessions[sid]
+	// An unknown sid is refused, never dispatched unvalidated: the SDK would
+	// answer "session not found", and a miss here must not be the one path
+	// that bypasses the check.
+	return ok && owner == userID
+}
+
+func (f *mcpFace) bindSession(sid, userID string) {
+	f.sessionsMu.Lock()
+	defer f.sessionsMu.Unlock()
+	f.sessions[sid] = userID
+}
+
+func (f *mcpFace) forgetSession(sid string) {
+	f.sessionsMu.Lock()
+	defer f.sessionsMu.Unlock()
+	delete(f.sessions, sid)
 }
 
 // getServer builds an MCP server bound to ONE caller, per request.
@@ -96,16 +167,36 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	}
 
 	spawner := newUserSpawner(ctrl, owner)
+	// A nil *quota.Store must yield a nil INTERFACE value so
+	// QuotaStatusBlueprint's documented decline fires on a DB-less daemon;
+	// a non-nil mcpQuota wrapping a nil store would materialize a tool that
+	// can only ever answer "no data captured yet".
+	var quotaReader tools.QuotaReader
+	if f.quota != nil {
+		quotaReader = mcpQuota{store: f.quota, owner: owner}
+	}
 	opts := tools.ToolOpts{
 		Agents: spawner,
 		Tasks:  f.taskStoreFor(ctrl),
-		Quota:  mcpQuota{store: f.quota, owner: owner},
+		Quota:  quotaReader,
 	}
 
-	// Materialized by hand — this surface does not use tools.Registry — and
-	// nil-checked here rather than trusted to mcpserver.New's skip: a
-	// Materializer may decline with (nil, nil), and the decline is
-	// informational (no spawner, no quota source), not an error.
+	return mcpserver.New(mcpserver.Options{
+		Tools:        mcpToolset(opts, f.logger),
+		Descriptions: mcpToolDescriptions,
+		ResolveConversationID: func(ctx context.Context) (string, error) {
+			return f.ledger.ConversationID(ctx, owner)
+		},
+		Version: f.version,
+	})
+}
+
+// mcpToolset materializes the surface's blueprints for one caller's opts.
+// Materialized by hand — this surface does not use tools.Registry — and
+// nil-checked rather than trusted to mcpserver.New's skip: a Materializer may
+// decline with (nil, nil), and the decline is informational (no spawner, no
+// quota source), not an error.
+func mcpToolset(opts tools.ToolOpts, logger *slog.Logger) []tools.Tool {
 	built := make([]tools.Tool, 0, len(mcpBlueprints))
 	for _, bp := range mcpBlueprints {
 		var (
@@ -118,7 +209,7 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 			t = bp
 		}
 		if err != nil {
-			f.logger.Warn("mcp face: materialize failed", "tool", bp.Name(), "error", err)
+			logger.Warn("mcp face: materialize failed", "tool", bp.Name(), "error", err)
 			continue
 		}
 		if t == nil {
@@ -126,15 +217,7 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		}
 		built = append(built, t)
 	}
-
-	return mcpserver.New(mcpserver.Options{
-		Tools:        built,
-		Descriptions: mcpToolDescriptions,
-		ResolveConversationID: func(ctx context.Context) (string, error) {
-			return f.ledger.ConversationID(ctx, owner)
-		},
-		Version: f.version,
-	})
+	return built
 }
 
 func (f *mcpFace) controller() *Controller {
@@ -207,6 +290,19 @@ const mcpSurfacePrefix = "rafiki agents are independent daemon-managed processes
 	"subagents inside your own session — a human or another client may have spawned some, " +
 	"and this surface has no ownership filter. "
 
+// mcpSpawnNotifyStart begins the fundi-only settlement promise inside the
+// agent_spawn blueprint text: the composition cuts from here to
+// mcpSpawnKeepDoing, dropping the promise ("You will be notified when it
+// settles … nothing sooner than the notification will") so the shipped text
+// notifies conditionally exactly once, via mcpNotificationNote. If the
+// blueprint text drifts and the markers stop matching, the guard in
+// TestMCPFaceDescriptionsCarryTheBlueprintText fails loudly rather than
+// letting the promise ship silently.
+const mcpSpawnNotifyStart = "You will be notified"
+
+// mcpSpawnKeepDoing begins the sentence after the excised span.
+const mcpSpawnKeepDoing = "Keep doing your own work"
+
 // mcpToolDescriptions overrides a tool's model-facing description on this
 // surface. The blueprint texts are written for a fundi child, which has a
 // native task tool of its own and a live notification channel; an MCP client
@@ -221,8 +317,16 @@ var mcpToolDescriptions = func() map[string]string {
 	taskList := &tools.TaskListBlueprint{}
 	send := &tools.AgentSendBlueprint{}
 	kill := &tools.AgentKillBlueprint{}
+	// Prefix and the remainder of the blueprint text stay verbatim; only the
+	// two-sentence notification promise between the markers goes.
+	spawnText := spawn.Description()
+	if start := strings.Index(spawnText, mcpSpawnNotifyStart); start >= 0 {
+		if end := strings.Index(spawnText[start:], mcpSpawnKeepDoing); end >= 0 {
+			spawnText = spawnText[:start] + spawnText[start+end:]
+		}
+	}
 	return map[string]string{
-		"agent_spawn": mcpSpawnPrefix + "\n\n" + spawn.Description() + "\n\n" + mcpNotificationNote,
+		"agent_spawn": mcpSpawnPrefix + "\n\n" + spawnText + "\n\n" + mcpNotificationNote,
 		"agent_list": mcpSurfacePrefix + "Lists every agent the daemon knows, each with its " +
 			"id, name, model, current status, working directory and assigned task handle. " +
 			"Takes no arguments. Use it before agent_send or agent_kill to find the id you " +

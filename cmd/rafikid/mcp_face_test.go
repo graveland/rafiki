@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,12 +38,24 @@ func (s *mcpStubUsers) Authenticate(_ context.Context, token string) (users.Iden
 	return id, nil
 }
 
+// mcpStubQuota is a quota source for tests that need quota_status to
+// materialize: a real *quota.Store is non-nil only over a pool.
+type mcpStubQuota struct{}
+
+func (mcpStubQuota) RateLimitStatus(context.Context) (tools.QuotaStatus, bool, error) {
+	return tools.QuotaStatus{}, false, nil
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 // mcpFaceFixture builds a face bound to a hand-populated Controller — no
 // processes, no pool, no capture store — and returns the task ledger the
 // task_* tools scope by, so tests can observe execution through it.
 func mcpFaceFixture(t *testing.T) (*mcpFace, tasks.Store) {
 	t.Helper()
-	face := newMCPFace(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil, "test")
+	face := newMCPFace(discardLogger(), nil, nil, "test")
 	store := tasks.NewMemoryStore()
 	ctrl := &Controller{st: childstore.New(), cm: newChildManager(), tasks: store}
 	face.SetController(ctrl)
@@ -343,7 +356,7 @@ func mcpCallText(t *testing.T, res *mcp.CallToolResult) string {
 }
 
 func TestMCPFaceWithoutControllerServesNoTools(t *testing.T) {
-	face := newMCPFace(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, nil, "test")
+	face := newMCPFace(discardLogger(), nil, nil, "test")
 	srv := face.getServer(mcpRequestFor("u-alice"))
 	if srv == nil {
 		t.Fatal("getServer returned nil before SetController; StreamableHTTPHandler would answer 400")
@@ -354,12 +367,56 @@ func TestMCPFaceWithoutControllerServesNoTools(t *testing.T) {
 	}
 }
 
-// The exact twelve names of the surface, sorted. A blueprint that begins
-// declining under the face's ToolOpts — or a new one added to the table
-// without being materialized — shows up here as a missing name.
+// The exact names of the surface, sorted, compared against literals. A
+// blueprint that begins declining under the face's ToolOpts — or a new one
+// added to the table without being materialized — shows up here as a missing
+// name. The fixture face is DB-less (no quota store), so quota_status is
+// absent by its own blueprint's decline rule; the full set including it is
+// pinned by TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists.
 func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 	face, _ := mcpFaceFixture(t)
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
+	want := []string{
+		"agent_kill",
+		"agent_list",
+		"agent_models",
+		"agent_send",
+		"agent_set_budget",
+		"agent_spawn",
+		"agent_view",
+		"task_add",
+		"task_drop",
+		"task_list",
+		"task_update",
+	}
+	if len(names) != len(want) {
+		t.Fatalf("got %d tools %v, want %d", len(names), names, len(want))
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Fatalf("tool %d: got %q, want %q (full list %v)", i, n, want[i], names)
+		}
+	}
+	if slices.Contains(names, "quota_status") {
+		t.Fatalf("DB-less face (nil quota store) materialized quota_status; the blueprint's decline rule must fire")
+	}
+}
+
+// The complete surface — every blueprint, quota_status included — materializes
+// when a quota source exists, so the DB-less decline above cannot hide a
+// blueprint that stopped materializing for some other reason.
+func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
+	face, ledger := mcpFaceFixture(t)
+	opts := tools.ToolOpts{
+		Agents: newUserSpawner(face.controller(), users.Identity{UserID: "u-alice", Username: "alice"}),
+		Tasks:  ledger,
+		Quota:  mcpStubQuota{},
+	}
+	var names []string
+	for _, tool := range mcpToolset(opts, discardLogger()) {
+		names = append(names, tool.Name())
+	}
+	slices.Sort(names)
 	want := []string{
 		"agent_kill",
 		"agent_list",
@@ -374,22 +431,88 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 		"task_list",
 		"task_update",
 	}
-	if len(names) != len(want) {
-		t.Fatalf("got %d tools %v, want %d", len(names), names, len(want))
+	if !slices.Equal(names, want) {
+		t.Fatalf("full tool set = %v, want %v", names, want)
 	}
-	for i, n := range names {
-		if n != want[i] {
-			t.Fatalf("tool %d: got %q, want %q (full list %v)", i, n, want[i], names)
-		}
+}
+
+// TestMCPFaceRejectsASessionIDPresentedByAnotherCaller pins the per-session
+// identity binding. The SDK's own hijack guard never fires on this mount:
+// sessInfo.userID is captured only from auth.TokenInfoFromContext, which only
+// the SDK's RequireBearerToken middleware populates, and rafiki authenticates
+// with UserTokenAuth instead — so the face binds each Mcp-Session-Id to the
+// identity that initialized it and rejects mismatches before dispatch.
+func TestMCPFaceRejectsASessionIDPresentedByAnotherCaller(t *testing.T) {
+	face, ledger := mcpFaceFixture(t)
+	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{tokens: map[string]users.Identity{
+		"tok-alice": {UserID: "u-alice", Username: "alice"},
+		"tok-bob":   {UserID: "u-bob", Username: "bob"},
+	}}, "child-secret", time.Second)
+	mux := http.NewServeMux()
+	h := &server.Handler{}
+	h.MCPPath, h.MCP = face.Routes()
+	h.Mount(mux, func(next http.Handler) http.Handler {
+		return tokenAuth.Middleware(traceMiddleware(next))
+	})
+	sid := mcpHandshake(t, mux, "tok-alice")
+
+	// bob's token + alice's session id: refused before any tool runs.
+	code, _, _ := mcpPost(t, mux, sid, "tok-bob", mcpTaskAddBody)
+	if code != http.StatusForbidden {
+		t.Fatalf("bob on alice's session: got %d, want 403", code)
+	}
+	if n := mcpLedgerCount(t, ledger, "u-bob"); n != 0 {
+		t.Fatalf("bob's session ride-along executed a tool: %d rows", n)
+	}
+	if n := mcpLedgerCount(t, ledger, "u-alice"); n != 0 {
+		t.Fatalf("bob reached alice's ledger through her session: %d rows", n)
+	}
+
+	// Positive control: alice on her own session still executes.
+	code, _, msgs := mcpPost(t, mux, sid, "tok-alice", mcpTaskAddBody)
+	if code != http.StatusOK {
+		t.Fatalf("alice on her own session: got %d, want 200", code)
+	}
+	if text, isErr := mcpResultText(t, msgs, 3); isErr {
+		t.Fatalf("task_add failed for the session's owner: %s", text)
+	}
+
+	// A session id the face never bound is refused too — a map miss must
+	// never become the one path that dispatches unvalidated.
+	code, _, _ = mcpPost(t, mux, "mcp-not-a-real-session", "tok-bob", mcpListToolsBody)
+	if code != http.StatusForbidden {
+		t.Fatalf("unknown session id: got %d, want 403", code)
 	}
 }
 
 // The overrides compose the blueprints' own text with the surface framing, so
-// a wording change on the fundi side flows through here; and none of them
-// promises a settlement notification this surface does not deliver.
+// a wording change on the fundi side flows through here. agent_spawn is
+// special: its blueprint text carries a settlement promise this surface cannot
+// keep, so the composition excises it and the guard keys on the exact wording
+// that promise uses — a vacuous check here is how the contradiction shipped
+// once already.
 func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
+	spawnDesc := mcpToolDescriptions["agent_spawn"]
+	for _, phrase := range []string{
+		"You will be notified",
+		"Do not sleep, poll",
+		"you are notified when a subagent settles",
+	} {
+		if strings.Contains(spawnDesc, phrase) {
+			t.Errorf("agent_spawn: ships the fundi-only notification promise %q", phrase)
+		}
+	}
+	if !strings.Contains(spawnDesc, mcpSpawnPrefix) {
+		t.Errorf("agent_spawn: the mandated prefix no longer rides at the front")
+	}
+	if !strings.Contains(spawnDesc, mcpNotificationNote) {
+		t.Errorf("agent_spawn: the conditional note is gone; there is no notification wording left")
+	}
+	if !strings.Contains(spawnDesc, mcpSpawnKeepDoing) {
+		t.Errorf("agent_spawn: the blueprint remainder after the excision was cut too; cut only %q..%q", mcpSpawnNotifyStart, mcpSpawnKeepDoing)
+	}
+
 	pairs := map[string]tools.Tool{
-		"agent_spawn": &tools.AgentSpawnBlueprint{},
 		"agent_send":  &tools.AgentSendBlueprint{},
 		"agent_kill":  &tools.AgentKillBlueprint{},
 		"task_add":    &tools.TaskAddBlueprint{},
@@ -417,9 +540,11 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 			t.Errorf("mcpToolDescriptions[%q] names no blueprint; the override is silently dead", name)
 		}
 	}
-	for _, name := range []string{"agent_list", "agent_view", "agent_spawn"} {
-		if desc := mcpToolDescriptions[name]; strings.Contains(desc, "you are notified when a subagent settles") {
-			t.Errorf("%s: promises a settlement notification this surface does not deliver", name)
+	for name, desc := range mcpToolDescriptions {
+		for _, phrase := range []string{"You will be notified", "Do not sleep, poll", "you are notified when a subagent settles"} {
+			if strings.Contains(desc, phrase) {
+				t.Errorf("%s: promises a settlement notification this surface does not deliver", name)
+			}
 		}
 	}
 }
