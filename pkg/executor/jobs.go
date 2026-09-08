@@ -213,9 +213,13 @@ func newJobRegistry(spillDir, cwd string, budget int64) *jobRegistry {
 // workspaced job and `bash -c` for a bare one, so the same script met dash or
 // bash depending on whether the caller had provisioned.
 //
+// dir is where the job starts — the workspace's workdir, which is NOT
+// necessarily the executor's root. An empty dir means the registry's own
+// root, which keeps a caller that has no workspace to name honest.
+//
 // It returns once the process is RUNNING, so cmd.Process is non-nil for every
 // caller that sees a nil error — kill must never race a start.
-func (r *jobRegistry) start(command, handle, workspaceID string) (string, error) {
+func (r *jobRegistry) start(command, handle, workspaceID, dir string) (string, error) {
 	if handle == "" {
 		handle = randomID()
 	}
@@ -231,6 +235,9 @@ func (r *jobRegistry) start(command, handle, workspaceID string) (string, error)
 
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = r.cwd
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Stdout = out
 	cmd.Stderr = out
 	// Own process group, so kill can signal the whole tree: a background

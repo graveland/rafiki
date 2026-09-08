@@ -2,6 +2,9 @@ package executor
 
 import (
 	"sync"
+
+	"go.graveland.dev/rafiki/pkg/fundi/lsp"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 )
 
 // workspace is one provisioned place to run tools.
@@ -21,6 +24,18 @@ type workspace struct {
 	id      string
 	workdir string
 	roots   []string
+	// reg serves THIS workspace's tool calls, materialized with Cwd: workdir
+	// so bash starts there and relative paths resolve against it. Every
+	// workspace carries its own: the executor's root registry is built once
+	// for the root workdir and cannot serve a workspace that starts elsewhere.
+	// The FileTracker inside them is shared — the read-before-edit invariant
+	// is per-path, and two workspaces can legitimately touch the same file
+	// when one workdir contains the other.
+	reg *tools.Registry
+	// lsp is the language-server manager rooted at workdir, nil when this
+	// machine has none to offer. Servers start lazily per manager, so one per
+	// workspace costs a LookPath at provision, not a process.
+	lsp *lsp.Manager
 }
 
 // workspaceRegistry holds provisioned workspaces by id.

@@ -65,15 +65,27 @@ func (c *Controller) provisionWorkspace(
 		return "", nil, nil, fmt.Errorf("execpool: not a real pool")
 	}
 
-	// ChildId only.
+	// ChildId only, plus the one path-shaped field: Workdir.
 	//
-	// Mounts, network and workdir are all left unset. The executor serves the
-	// filesystem it can see, working from the --root it was started with; for a
-	// container executor that view was chosen in `docker run -v ...` by the
-	// operator, exactly as they chose the image. rafiki's grant is the label
-	// selector plus the row — nothing here composes a path, and a workdir sent
-	// from here would be a host path with no meaning inside the container.
-	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{ChildId: ""})
+	// Mounts and network stay unset — the executor serves the filesystem it can
+	// see, and for a container executor that view was composed in `docker run`
+	// by the operator, exactly as they chose the image. rafiki's grant is the
+	// label selector plus the row; nothing here composes a mount.
+	//
+	// Workdir is the child's cwd, expressed in the EXECUTOR's own filesystem
+	// vocabulary. It is what makes cwd mean anything for an executor-bound
+	// child: without it every tool call starts in the executor's root while the
+	// child's prompt names another directory — the split-brain where a
+	// coordinator pointed a worker at a git worktree and got an agent whose
+	// bash verified and committed in the main checkout. The executor validates
+	// the path exists in ITS view and refuses the provision otherwise, which is
+	// the proto's MUST ("rather than silently starting somewhere the child
+	// cannot write") and the honest answer for a cwd that lives on another
+	// machine or outside the container's mounts.
+	resp, err := pp.Provision(ctx, executorID, &executorpb.ProvisionRequest{
+		ChildId: "",
+		Workdir: req.Cwd,
+	})
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("provision on executor %s: %w", shortID(executorID), err)
 	}
@@ -99,6 +111,7 @@ func (c *Controller) provisionWorkspace(
 	slog.Info("provisioned workspace",
 		"workspaceId", resp.WorkspaceId,
 		"executorId", shortID(executorID),
+		"workdir", resp.Workdir,
 		"roots", row.Roots,
 		"isolation", row.Isolation,
 		"workspaceMode", workspaceModeOrPinned(row.WorkspaceMode),

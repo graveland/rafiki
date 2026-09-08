@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -75,14 +76,15 @@ type Options struct {
 // Server implements executorpbconnect.ExecutorServiceHandler.
 type Server struct {
 	executorpbconnect.UnimplementedExecutorServiceHandler
-	id     string
-	opts   Options
-	labels map[string]string
-	reg    *tools.Registry
-	jobs   *jobRegistry
-	sem    chan struct{} // bounds concurrent Execute calls
-	wsReg  *workspaceRegistry
-	lsp    *lsp.Manager
+	id      string
+	opts    Options
+	labels  map[string]string
+	reg     *tools.Registry
+	tracker *tools.FileTracker
+	jobs    *jobRegistry
+	sem     chan struct{} // bounds concurrent Execute calls
+	wsReg   *workspaceRegistry
+	lsp     *lsp.Manager
 }
 
 // NewServer returns a Server ready to be mounted on an HTTP mux.
@@ -99,40 +101,56 @@ func NewServer(opts Options) *Server {
 	// MaterializeOnly, not MaterializeAll: the full blueprint would give the
 	// executor the parent's credentialed tools and a nil task store.
 	tracker := tools.NewFileTracker()
-	opt := toolOptsFor(opts, tracker)
-
-	// Language servers run HERE because the files are here. A manager started
-	// in the daemon would index the daemon's filesystem and answer about files
-	// the agent is not editing — and lsp_rename would write to them.
-	lspMgr := newLSPManager(opts)
-	if lspMgr != nil {
-		opt.LSP = lspadapter.New(lspMgr, tracker)
-		opt.FileChanged = lspMgr
-	}
-
-	reg := tools.DefaultBlueprint.MaterializeOnly(opt, tools.ExecutorLocalTools())
+	reg, lspMgr := registryFor(opts, opts.Root, tracker)
 	return &Server{
 		id:   randomID(),
 		opts: opts,
 		labels: map[string]string{
 			"rafiki/executor-version": opts.Version,
 		},
-		reg:   reg,
-		jobs:  newJobRegistry(opts.SpillDir, opts.Root, opts.JobOutputBudget),
-		sem:   make(chan struct{}, opts.Concurrency),
-		wsReg: newWorkspaceRegistry(),
-		lsp:   lspMgr,
+		reg:     reg,
+		tracker: tracker,
+		jobs:    newJobRegistry(opts.SpillDir, opts.Root, opts.JobOutputBudget),
+		sem:     make(chan struct{}, opts.Concurrency),
+		wsReg:   newWorkspaceRegistry(),
+		lsp:     lspMgr,
 	}
 }
 
-// newLSPManager builds the executor's language-server manager, or returns nil
-// when there is nothing to manage.
+// registryFor materializes the workspace-tier tool registry a root serves,
+// plus the language-server manager rooted at that root (nil when this machine
+// has none to offer). NewServer builds it once for opts.Root; Provision builds
+// one per workspace so a workspace whose workdir differs from the root gets
+// tools that start THERE — bash's cmd.Dir, the file tools' relative-path
+// resolution and the LSP root all follow the workspace, not the process.
+//
+// tracker is shared across every registry this server ever builds: the
+// read-before-edit invariant is per-path, and two workspaces can touch the
+// same file when one workdir contains the other.
+func registryFor(opts Options, root string, tracker *tools.FileTracker) (*tools.Registry, *lsp.Manager) {
+	opt := toolOptsFor(opts, root)
+	opt.FileTracker = tracker
+
+	// Language servers run HERE because the files are here. A manager started
+	// in the daemon would index the daemon's filesystem and answer about files
+	// the agent is not editing — and lsp_rename would write to them.
+	lspMgr := newLSPManager(opts, root)
+	if lspMgr != nil {
+		opt.LSP = lspadapter.New(lspMgr, tracker)
+		opt.FileChanged = lspMgr
+	}
+
+	return tools.DefaultBlueprint.MaterializeOnly(opt, tools.ExecutorLocalTools()), lspMgr
+}
+
+// newLSPManager builds the executor's language-server manager rooted at root,
+// or returns nil when there is nothing to manage.
 //
 // nil is a real answer, not a failure: an executor on a machine with no
 // toolchain installed should serve no LSP tools at all rather than eight that
 // can only answer "executable file not found in $PATH", which costs the model a
 // turn to learn nothing.
-func newLSPManager(opts Options) *lsp.Manager {
+func newLSPManager(opts Options, root string) *lsp.Manager {
 	if opts.NoLSP {
 		return nil
 	}
@@ -153,7 +171,7 @@ func newLSPManager(opts Options) *lsp.Manager {
 		return nil
 	}
 
-	mgr := lsp.NewManager(cfg, opts.Root)
+	mgr := lsp.NewManager(cfg, root)
 	if !mgr.HasInstalledServer() {
 		slog.Warn("executor: no configured language server found on PATH; lsp tools disabled",
 			"config", opts.LSPConfig)
@@ -180,15 +198,15 @@ func (s *Server) Close() error {
 }
 
 // toolOptsFor maps the executor's options onto the tool options its registry is
-// built from. Extracted so the mapping is testable: every field here was once
-// simply absent, and an unset ToolOpts field does not fail — it takes a zero
-// value that may not mean what the zero value looks like. RTK is the example:
-// RTKMode("") is not RTKOff, so leaving it unset made every executor rewrite
-// commands through rtk with nobody having chosen it.
-func toolOptsFor(opts Options, tr *tools.FileTracker) tools.ToolOpts {
+// built from, rooted at root — opts.Root for the executor's own registry, the
+// workspace's workdir for a per-workspace one. Extracted so the mapping is
+// testable: every field here was once simply absent, and an unset ToolOpts
+// field does not fail — it takes a zero value that may not mean what the zero
+// value looks like. RTK is the example: RTKMode("") is not RTKOff, so leaving
+// it unset made every executor rewrite through rtk with nobody having chosen it.
+func toolOptsFor(opts Options, root string) tools.ToolOpts {
 	return tools.ToolOpts{
-		Cwd:          opts.Root,
-		FileTracker:  tr,
+		Cwd:          root,
 		RTK:          opts.RTK,
 		OutputPolicy: tools.OutputPolicy{SpillDir: opts.SpillDir},
 	}
@@ -253,17 +271,31 @@ func (s *Server) Provision(
 	_ context.Context,
 	req *connect.Request[executorpb.ProvisionRequest],
 ) (*connect.Response[executorpb.ProvisionResponse], error) {
-	// The request's mounts, network, workdir and workspace_mode are all
-	// ignored, and the response's isolation is left EMPTY on purpose. This
-	// process serves the root it was started with; what that root can reach is
-	// decided by its filesystem view — the container's mounts, chosen in
-	// `docker run`, or the host user's permissions — and described, for humans
-	// and for selectors, on the executor's row. An isolation string invented
-	// here would be the executor asserting a fact that gates it.
+	// The request's mounts, network and workspace_mode are ignored, and the
+	// response's isolation is left EMPTY on purpose. This process serves the
+	// filesystem it can see; what that view can reach is decided by its
+	// filesystem — the container's mounts, chosen in `docker run`, or the host
+	// user's permissions — and described, for humans and for selectors, on the
+	// executor's row. An isolation string invented here would be the executor
+	// asserting a fact that gates it.
+	//
+	// workdir is NOT ignored. It is where this workspace's tools start, in this
+	// filesystem's own view of paths, and it is what makes the child's cwd mean
+	// anything on an executor: without it every tool call starts in the root
+	// while the child's prompt names another directory — a coordinator that
+	// pointed a worker at a git worktree got an agent whose bash ran somewhere
+	// else entirely. An empty workdir still means the root.
+	workdir, err := resolveWorkdir(req.Msg.GetWorkdir(), s.opts.Root)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	reg, lspMgr := registryFor(s.opts, workdir, s.tracker)
 	ws := &workspace{
 		id:      randomID(),
-		workdir: s.opts.Root,
+		workdir: workdir,
 		roots:   []string{s.opts.Root},
+		reg:     reg,
+		lsp:     lspMgr,
 	}
 	s.wsReg.put(ws)
 	return connect.NewResponse(&executorpb.ProvisionResponse{
@@ -273,12 +305,44 @@ func (s *Server) Provision(
 	}), nil
 }
 
+// resolveWorkdir validates a requested workdir against the executor's own
+// filesystem view. Empty means the root. A requested path must exist and be a
+// directory HERE — this executor's view of the filesystem is the only
+// vocabulary it shares with the caller, and a path it cannot see is exactly
+// "somewhere the child cannot write", which the proto refuses rather than
+// silently starting in.
+//
+// Deliberately NOT required: that the workdir sit under the root. A native
+// executor has no path confinement — bash can reach the whole machine — so an
+// under-root check is not a boundary, and it would refuse the sibling git
+// worktrees coordinators create beside a repository to isolate workers. The
+// existence check is what does the real work for container executors: a host
+// path that is not one of the container's mounts does not exist in the
+// container's view, so it is rejected here with the same error.
+func resolveWorkdir(requested, root string) (string, error) {
+	if requested == "" {
+		return root, nil
+	}
+	cleaned := filepath.Clean(requested)
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("workdir %q must be an absolute path in the executor's filesystem", requested)
+	}
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("workdir %q does not exist in this executor's filesystem: %w", requested, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workdir %q is not a directory", requested)
+	}
+	return cleaned, nil
+}
+
 func (s *Server) Release(
 	_ context.Context,
 	req *connect.Request[executorpb.ReleaseRequest],
 ) (*connect.Response[executorpb.ReleaseResponse], error) {
 	id := req.Msg.WorkspaceId
-	if _, ok := s.wsReg.get(id); ok {
+	if ws, ok := s.wsReg.get(id); ok {
 		// End THIS workspace's background jobs before tearing it down: kill the
 		// running ones, drop the finished ones, remove their output files. A
 		// background job in a released workspace is not a job, and reporting it
@@ -289,6 +353,11 @@ func (s *Server) Release(
 		// its output, and the workspace already outlives exactly the agent that
 		// could ask.
 		s.jobs.releaseWorkspace(id)
+		if ws.lsp != nil {
+			// This workspace's language servers root at ITS workdir; no other
+			// workspace can be using them, so they die with it.
+			ws.lsp.Shutdown(context.Background())
+		}
 		s.wsReg.remove(id)
 	}
 	// Idempotent: release a non-existent workspace without error.
@@ -318,6 +387,14 @@ func (s *Server) Execute(
 				},
 			})
 		}
+	}
+
+	// Serve the call from THIS workspace's registry, materialized with the
+	// workspace's workdir — bash starts there and relative paths resolve
+	// against it. An empty workspace_id means the executor's own root.
+	reg := s.reg
+	if ws != nil && ws.reg != nil {
+		reg = ws.reg
 	}
 
 	// Background bash — start a job, return a handle immediately.
@@ -370,7 +447,7 @@ func (s *Server) Execute(
 		}
 	}
 
-	resultStr, err := s.reg.Execute(ctx, msg.Tool, json.RawMessage(msg.InputJson))
+	resultStr, err := reg.Execute(ctx, msg.Tool, json.RawMessage(msg.InputJson))
 
 	// Check the deadline before the tool's own error, and even when the
 	// tool reports success: bash specifically treats a killed-by-context
@@ -448,7 +525,14 @@ func (s *Server) startBackground(
 	// The registry builds the command. It used to be built here, which is how
 	// the background path came to run `sh -c` for a workspaced job and
 	// `bash -c` for a bare one.
-	handle, err := s.jobs.start(in.Command, msg.CallId, wsID)
+	// Background jobs start in the workspace's workdir too — a job launched
+	// from a worktree must not silently run in the executor's root, or its
+	// build outputs and git commands land in the wrong tree.
+	dir := s.opts.Root
+	if ws != nil && ws.workdir != "" {
+		dir = ws.workdir
+	}
+	handle, err := s.jobs.start(in.Command, msg.CallId, wsID, dir)
 	if err != nil {
 		return stream.Send(&executorpb.ExecuteResponse{
 			Event: &executorpb.ExecuteResponse_Failed{

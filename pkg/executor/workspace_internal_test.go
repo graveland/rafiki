@@ -37,12 +37,12 @@ func TestWorkspaceRegistryIsConcurrencySafe(t *testing.T) {
 // nobody having chosen it — and a child configured for rtk off got it anyway,
 // on a machine whose tooling it cannot see.
 func TestTheExecutorsRTKModeIsAChoiceAndNotAZeroValue(t *testing.T) {
-	if got := toolOptsFor(NewServer(Options{Root: "/x"}).opts, nil).RTK; got != tools.RTKAuto {
+	if got := toolOptsFor(NewServer(Options{Root: "/x"}).opts, "/x").RTK; got != tools.RTKAuto {
 		t.Errorf("default RTK = %q; it must resolve to an explicit mode, not %q behaving like one",
 			got, tools.RTKMode(""))
 	}
 	off := NewServer(Options{Root: "/x", RTK: tools.RTKOff}).opts
-	if got := toolOptsFor(off, nil).RTK; got != tools.RTKOff {
+	if got := toolOptsFor(off, "/x").RTK; got != tools.RTKOff {
 		t.Errorf("RTK = %q; an operator who turned rtk off must actually get it off", got)
 	}
 }
@@ -54,7 +54,7 @@ func TestTheExecutorsRTKModeIsAChoiceAndNotAZeroValue(t *testing.T) {
 func TestSpillDirIsResolvedAndShared(t *testing.T) {
 	dir := t.TempDir()
 	s := NewServer(Options{Root: "/x", SpillDir: dir})
-	if got := toolOptsFor(s.opts, nil).OutputPolicy.SpillDir; got != dir {
+	if got := toolOptsFor(s.opts, "/x").OutputPolicy.SpillDir; got != dir {
 		t.Errorf("foreground spill dir = %q, want %q", got, dir)
 	}
 	if s.jobs.spillDir != dir {
