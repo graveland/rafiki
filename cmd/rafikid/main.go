@@ -489,6 +489,9 @@ func runDaemon(opts runDaemonOpts) error {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
 			}
 		}
+		if face.MCP != nil {
+			face.MCP.SetController(ctrl)
+		}
 	}
 	// The executor pool no longer owns a listener. It is reached at a PATH on
 	// the shared TLS listener below, upgraded out of HTTP/1.1, so the control

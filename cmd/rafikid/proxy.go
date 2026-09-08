@@ -31,6 +31,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
+	"go.graveland.dev/rafiki/pkg/version"
 )
 
 // providerGuardEnabled reports whether the provider cache guard runs. Anything
@@ -103,6 +104,12 @@ type proxyFace struct {
 	// can't be a constructor argument. Nil when there is no capture pool (no
 	// Connect plane mounted at all).
 	Control *connectapi.Server
+
+	// MCP is the MCP agent-control surface, exposed for the same reason as
+	// Control: built here, before the Controller exists, and wired by main.go
+	// with SetController once it does. An MCP client reaching it before that
+	// binding gets a usable, toolless server rather than an error.
+	MCP *mcpFace
 
 	// QuotaStore is the same store instance the proxy captures into, exposed
 	// so main.go can wire Control.SetQuotaReader onto it — one store, read by
@@ -321,6 +328,8 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// Connect reports as CodeUnimplemented.
 	connectServer := connectapi.NewServer(store.NewMessages(pool))
 	h.ControlPath, h.Control = connectServer.Routes()
+	mcpFace := newMCPFace(logger, captureStore, quotaStore, version.String())
+	h.MCPPath, h.MCP = mcpFace.Routes()
 	h.Mount(mux, func(next http.Handler) http.Handler {
 		return tokenAuth.Middleware(traceMiddleware(next))
 	})
@@ -388,6 +397,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		srv:        srv,
 		Handler:    mux,
 		Control:    connectServer,
+		MCP:        mcpFace,
 		QuotaStore: quotaStore,
 		TokenAuth:  tokenAuth,
 	}
