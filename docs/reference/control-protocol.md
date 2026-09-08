@@ -473,13 +473,16 @@ level, never something to wait on. Sessions are in-memory and per-process:
 none survive a daemon restart, a reconnecting client re-initializes, and the
 registry (`mcpSessions`, `cmd/rafikid/mcp_notify.go`) holds each user's live
 sessions, snapping them out under a lock released before any send so one
-stalled client cannot wedge another user's fan-out. **As of this change no
-session is registered yet**: both seams that could call `Add`/`Remove` on the
-SDK's session lifecycle (the `ServerOptions` hook route and the `req.Session`
-fallback) sit in `pkg/mcpserver/bridge.go` and `cmd/rafikid/mcp_face.go`, and
-the wiring is pending a ruling on that boundary — until it lands, MCP callers
-see no server-initiated messages at all, which is exactly why the reliable
-answer stays `agent_list`.
+stalled client cannot wedge another user's fan-out. **A session registers
+when the client sends `notifications/initialized`**: the face wires the SDK's
+`InitializedHandler` through the bridge's `ServerOptions` escape hatch
+(`mcpserver.Options`, which stays identity-free — the owner rides the face's
+closure, never a bridge signature), and removal rides a per-session `Wait`
+goroutine because v1.6.1 has no session-closed hook. The face's
+`Mcp-Session-Id` map and this pointer registry are two keyed worlds that
+never meet; the cost is one-directional — a DELETE unbinds the sid
+immediately while the pointer lingers until Wait returns, and a Log to a
+closed session fails at debug and is skipped.
 
 ## 3. Framing
 
