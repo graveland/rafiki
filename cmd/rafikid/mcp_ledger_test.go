@@ -34,11 +34,15 @@ func seedLedgerUser(t *testing.T, pool *pgxpool.Pool) users.Identity {
 	t.Cleanup(func() {
 		// Ledger conversations FK the user row; remove them first. t.Context()
 		// is already canceled by cleanup time, hence the background context.
-		_, _ = pool.Exec(context.Background(),
+		if _, err := pool.Exec(context.Background(),
 			`DELETE FROM conversations.conversation WHERE external_ref = $1`,
-			mcpLedgerExternalRef(id))
-		_, _ = pool.Exec(context.Background(),
-			`DELETE FROM conversations.users WHERE id = $1::uuid`, id)
+			mcpLedgerExternalRef(id)); err != nil {
+			t.Errorf("cleanup ledger conversation: %v", err)
+		}
+		if _, err := pool.Exec(context.Background(),
+			`DELETE FROM conversations.users WHERE id = $1::uuid`, id); err != nil {
+			t.Errorf("cleanup user row: %v", err)
+		}
 	})
 	return users.Identity{UserID: id, Username: username}
 }
@@ -55,6 +59,24 @@ func TestMCPLedgerKeyIsStableForOneUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
+
+	// The row's persisted key values are pinned against literals here, not
+	// through mcpLedgerExternalRef or the ledger's own DrivenBy field — those
+	// share the values under test, so a drift in either would pass green while
+	// silently splitting every existing deployment's ledger into a second row.
+	var gotDrivenBy, gotExternalRef string
+	if err := pool.QueryRow(t.Context(),
+		`SELECT driven_by, external_ref FROM conversations.conversation WHERE id = $1::uuid`,
+		id1).Scan(&gotDrivenBy, &gotExternalRef); err != nil {
+		t.Fatalf("read back ledger row: %v", err)
+	}
+	if gotDrivenBy != "client" {
+		t.Errorf("persisted driven_by = %q, want the literal \"client\"", gotDrivenBy)
+	}
+	if gotExternalRef != "mcp:user:"+owner.UserID {
+		t.Errorf("persisted external_ref = %q, want the literal \"mcp:user:\" prefix + %q", gotExternalRef, owner.UserID)
+	}
+
 	id2, err := l.ConversationID(t.Context(), owner)
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)

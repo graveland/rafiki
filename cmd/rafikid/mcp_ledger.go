@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -66,7 +67,7 @@ func (l *mcpLedger) ConversationID(ctx context.Context, owner users.Identity) (s
 	id, err := l.store.EnsureConversationByExternalRef(ctx, capture.ConversationRef{
 		ExternalRef:      mcpLedgerExternalRef(owner.UserID),
 		OriginEntrypoint: mcpLedgerOriginEntrypoint,
-		DrivenBy:         "client",
+		DrivenBy:         string(store.DrivenByClient),
 		OwnerUserID:      owner.UserID,
 		Name:             "MCP task ledger",
 	})
