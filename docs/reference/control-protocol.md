@@ -338,6 +338,118 @@ already includes every earlier iteration of the same turn. Both fields are
 `optional`: absence means "not yet priced" (no catalog entry for the model),
 distinct from a reported zero (priced and genuinely free).
 
+## 2.4 MCP agent-control surface (HTTP)
+
+A third face on the proxy listener: MCP streamable-HTTP, served by
+`github.com/modelcontextprotocol/go-sdk` v1.6.1's `NewStreamableHTTPHandler` at
+**`POST /mcp`** (`mcpFacePath`, `cmd/rafikid/mcp_face.go`). It exposes rafiki's
+agent-control verbs as MCP tools, so a client whose runtime already speaks MCP
+can spawn, steer and observe daemon agents without the CLI. The JSON-Lines
+frame protocol and the Connect plane (§2.3) are unchanged and remain what
+`rafiki attach` and the existing CLI use.
+
+**Transport.** The server→client leg is SSE, which is why the handler needs an
+`http.Flusher` on its `ResponseWriter`: the SDK flushes keep-alive headers and
+event boundaries through `http.NewResponseController` and treats a failed
+flush as best-effort, so a writer that cannot flush loses the leg silently.
+The shared TLS listener advertises `http/1.1` only in ALPN
+(`execpool.ALPNProtocols`, §2.3), because net/http can hijack HTTP/1.1 and not
+HTTP/2; streamable HTTP works over it, needing neither an Upgrade nor h2 —
+only the flush.
+
+**Where it is mounted.** Inside the proxy face, via `pkg/server.Handler`'s
+`MCPPath`/`MCP` and `h.Mount` — the same tree as `/v1/messages` and the Connect
+routes, under the same `UserTokenAuth` wrap. It is deliberately NOT mounted in
+`main.go`: a `mux.Handle` there would compile, look right, and shadow the
+face's authentication, because ServeMux prefers the longer pattern — the trap
+§2.3 records for `/rafiki.v1.Control/`. `main.go` serves the whole proxy-face
+mux at `"/"` on the TLS listener and wires the Controller in afterwards
+(`face.MCP.SetController`); until that lands, the face answers with a usable
+**toolless** server rather than an error — a nil returned from `getServer`
+would earn a bare 400 from the SDK that tells an MCP client nothing it can
+recover from. Once the Controller is bound, a toolless server is still the
+answer for a non-user identity (below).
+
+**Auth.** A rafiki user token as a bearer credential (`Authorization: Bearer`,
+`x-api-key` or `X-Rafiki-Token`) — the same credential the Connect plane
+takes, resolved by the same `UserTokenAuth.Middleware`; there is no second
+credential path. An invalid credential is 401; an unreachable identity store
+is 503, never 401, because a 401 tells clients their credential is bad and
+they respond by discarding it — a database blip answered with 401 logs
+everyone out at once. The identity reaches the face on the request context,
+never by re-reading the `Authorization` header, which would be a second
+credential path. The daemon's **per-boot child token** also authenticates (it
+is what spawned children carry), and a non-user identity gets the toolless
+server: a child process legitimately reaches this face and must not get agent
+control. Each MCP session is bound to the identity that initialized it, and a
+later request presenting a session id owned by another caller — or an unknown
+one — is refused with 403 before dispatch. The face keeps this map itself
+because the SDK's own session-hijack guard keys on the bearer middleware
+rafiki does not run, so without it the session id alone would route one caller
+onto another caller's bound tools.
+
+**Scope.** Every call acts as the authenticated user with no parent — the same
+shape as `rafiki create` from the CLI: a top-level child owned by that user.
+The tools are served by a user-bound `tools.AgentSpawner`
+(`newUserSpawner`, `cmd/rafikid/user_spawner.go`) that closes over the
+identity at construction; no method on it takes a user id, a username or an
+`*http.Request` — an identity in a method parameter is one refactor away from
+being a tool argument the model can be prompt-injected into naming, the same
+rule the fundi-side binding enforces. There is **no per-user scoping of
+anything**: `agent_list` and the steering verbs (`agent_view`, `agent_send`,
+`agent_kill`) see **every child on the daemon**, not only the caller's, because
+rafiki has no per-user ownership filter and this surface does not invent one.
+That is the daemon's current single-operator posture, stated as what it is —
+not a guard. When ownership filtering arrives it lands in the user-bound
+spawner as a predicate over `childstore.Snapshot` — `owner_user_id` is already
+a column on `conversations.child` — and nowhere else.
+
+`agent_set_budget` is the one exception: **top-level children only**. Any
+parented child is refused — a parented child's budget belongs to the agent
+that spawned it, and reaching into another agent's subtree to re-budget its
+worker is a different act from operating your own fleet. The refusal names the
+fix: change the budget through that agent, or set the budget of the top-level
+agent that owns the subtree.
+
+**Tools.** Twelve, materialized per caller from the same blueprints the fundi
+registry serves (`mcpBlueprints`); descriptions are reworded on this surface
+for a caller that is not a fundi child (`mcpToolDescriptions`). A tool failure
+is `CallToolResult.IsError = true` carrying the diagnostic — never a JSON-RPC
+transport error, and never a successful result carrying the text.
+
+| Tool | Purpose |
+|---|---|
+| `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to point clients with their own native subagent tool at the difference |
+| `agent_list` | Every agent the daemon knows: id, name, model, current status, working directory, assigned task handle |
+| `agent_view` | Recent transcript of one agent — prompts, replies, tool calls with their results; a deliberate check, not a polling loop |
+| `agent_send` | Deliver a prompt to a running agent |
+| `agent_kill` | Shut an agent down and wait for the exit to be recorded |
+| `agent_set_budget` | Change a TOP-LEVEL agent's USD budget (the exception above) |
+| `agent_models` | Query the daemon's model catalog with filter/sort; a bare call returns a summary, rows come from a narrowed query |
+| `task_add` | Add a task (imperative `content`, present-continuous `active_form`; optional `parent` handle to nest); returns the full list with handles |
+| `task_update` | Change task statuses (pending, in_progress, blocked, completed, failed), touching only the named handles |
+| `task_drop` | Abandon a task with a required `reason`; drops its subtasks |
+| `task_list` | Read the ledger; filter by status, metadata or assignee; dropped rows hidden unless `include_dropped` |
+| `quota_status` | The caller's own captured Anthropic subscription rate-limit snapshot; omitted when the daemon has no quota capture (a Materializer decline) |
+
+The `task_*` descriptions are likewise reworded: the ledger is shared, durable
+and cross-agent — not the client's private per-session checklist.
+
+**The task ledger.** The `task_*` tools scope by conversation id, and that
+column is a UUID, so a per-user ledger cannot be a synthetic string. Each user
+therefore gets a real, **turn-less** conversation row keyed by
+`external_ref = "mcp:user:<user-id>"` with `origin_entrypoint = "mcp"` and
+`driven_by = "client"`, resolved by
+`CaptureStore.EnsureConversationByExternalRef` against the existing
+`(external_ref, driven_by)` partial unique index — no migration. The row's
+UUID is the ledger key the `task_*` tools scope by, and keying on the user id
+means a future multi-user rafiki inherits per-user ledgers with no further
+work. It appears in `conversations.v_conversation` and the insights surfaces
+as a conversation carrying no turns, which is correct — the tasks in it are
+real work. On a DB-less daemon the ledger degrades to an in-memory store keyed
+`user:<id>` and is lost on restart, the same degradation a pool-less agent
+already documents.
+
 ## 3. Framing
 
 JSON Lines (`application/jsonl`).
