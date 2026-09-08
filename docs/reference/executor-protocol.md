@@ -406,14 +406,18 @@ credential `--passthrough-auth` depends on.
 
 **Opt-in per machine, and `skills_sync` on `DescribeResponse` is
 self-reported** for the same narrowing reason as `proxies` and `launchKinds`:
-it only ever NARROWS what the executor will do. An executor started without
-`--skills-sync` (or with `RAFIKI_EXECUTOR_SKILLS_SYNC` unset) answers
-`CodePermissionDenied`, and a daemon reading `false` from `Describe` never
-sends a corpus to it. The flag defaults to OFF because it writes into the
-operator's home directory — not something to enable by accident. The executor
-answer remains the enforcement rather than a formality: a daemon that ignored a
-`false` here would cost an unexpected write to the operator's machine, which is
-a worse failure than the failed launch a wrong `launchKinds` entry buys.
+it only ever NARROWS what the executor will do. An executor answers
+`CodePermissionDenied` when the option is off, and a daemon reading `false`
+from `Describe` never sends a corpus to it. The option is on when the operator
+passed `--skills-sync` or set `RAFIKI_EXECUTOR_SKILLS_SYNC`, and it is also
+implied by `--launch claude`: an executor that hosts claude children needs the
+corpus, and a claude host with the sync off launches children that quietly see
+no rafiki skills — a failure the daemon cannot see and the operator reads as
+"skills are broken". `--skills-sync=false` still refuses explicitly, overriding
+the implication; the enforcement on the RPC remains regardless, because a
+daemon that ignored a `false` here would cost an unexpected write to the
+operator's machine, which is a worse failure than the failed launch a wrong
+`launchKinds` entry buys.
 
 ### Cancel
 

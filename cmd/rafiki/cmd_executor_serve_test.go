@@ -88,10 +88,11 @@ func TestExecutorProfileProxyExplicitFlagWithNoManifestStillAttemptsResolution(t
 	}
 }
 
-// skillsSyncFromArgv drives the same path RunE uses — parse the flag, read it
-// back, resolve it against the environment — for the four combinations that
+// skillsSyncFromArgv drives the same path RunE uses — parse the flags, read
+// them back, resolve them against the environment — for the combinations that
 // matter: flag off and env unset (the default), flag off and env set, an
-// explicit --skills-sync=false over a set env, and the bare flag.
+// explicit --skills-sync=false over a set env, the bare flag, and the
+// --launch claude implication with and without an explicit refusal.
 func skillsSyncFromArgv(t *testing.T, argv []string, env string) bool {
 	t.Helper()
 	t.Setenv("RAFIKI_EXECUTOR_SKILLS_SYNC", env)
@@ -103,7 +104,11 @@ func skillsSyncFromArgv(t *testing.T, argv []string, env string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return skillsSyncEnabled(cmd, on)
+	launchKinds, err := cmd.Flags().GetStringArray("launch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return skillsSyncEnabled(cmd, on, launchKinds)
 }
 
 func TestSkillsSyncDefaultsOff(t *testing.T) {
@@ -127,5 +132,24 @@ func TestSkillsSyncExplicitFalseBeatsTheEnvironment(t *testing.T) {
 func TestSkillsSyncFlagTurnsItOn(t *testing.T) {
 	if !skillsSyncFromArgv(t, []string{"--skills-sync"}, "") {
 		t.Error("--skills-sync must enable skills sync")
+	}
+}
+
+func TestSkillsSyncImpliedByLaunchClaude(t *testing.T) {
+	if !skillsSyncFromArgv(t, []string{"--launch", "claude"}, "") {
+		t.Error("--launch claude must imply skills sync — a claude host without the " +
+			"corpus launches children that silently see no rafiki skills")
+	}
+}
+
+func TestSkillsSyncExplicitFalseBeatsLaunchClaude(t *testing.T) {
+	if skillsSyncFromArgv(t, []string{"--launch", "claude", "--skills-sync=false"}, "") {
+		t.Error("an explicit --skills-sync=false must beat the --launch claude implication")
+	}
+}
+
+func TestSkillsSyncNotImpliedByOtherLaunchKinds(t *testing.T) {
+	if skillsSyncFromArgv(t, []string{"--launch", "other"}, "") {
+		t.Error("only --launch claude implies skills sync")
 	}
 }

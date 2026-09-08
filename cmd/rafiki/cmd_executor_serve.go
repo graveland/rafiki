@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -179,19 +180,30 @@ func loadExecutorEnv() {
 	}
 }
 
-// skillsSyncEnabled resolves the effective --skills-sync value from the flag
-// and its environment form. The environment is read HERE rather than as the
-// flag's default for two reasons: flag registration runs before
-// loadExecutorEnv has applied executor.env, so a default captured at
+// skillsSyncEnabled resolves the effective --skills-sync value from the flag,
+// its environment form, and the --launch list. The environment is read HERE
+// rather than as the flag's default for two reasons: flag registration runs
+// before loadExecutorEnv has applied executor.env, so a default captured at
 // construction time would miss what the file provides; and an explicit
 // --skills-sync=false must stay able to switch the feature off on a machine
 // whose environment enables it — Flags().Changed tells the explicit spelling
 // apart from an untouched default, which the flag's value alone cannot.
-func skillsSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
+//
+// --launch claude implies the sync. An executor that hosts claude children
+// needs the corpus, and the daemon's pusher keys its eligibility off this
+// same Describe — so a claude host with the sync off launches children that
+// quietly see no rafiki skills, a failure indistinguishable from "skills are
+// broken" and invisible on the daemon side. An explicit --skills-sync=false
+// still wins over the implication: refusing the corpus on a claude host is a
+// deliberate act and must be spelled as one.
+func skillsSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bool {
 	if cmd.Flags().Changed("skills-sync") {
 		return flagOn
 	}
-	return os.Getenv("RAFIKI_EXECUTOR_SKILLS_SYNC") != ""
+	if os.Getenv("RAFIKI_EXECUTOR_SKILLS_SYNC") != "" {
+		return true
+	}
+	return slices.Contains(launchKinds, "claude")
 }
 
 // ─── serve ─────────────────────────────────────────────────────────────────────
@@ -261,7 +273,7 @@ Two transports, exactly one of which is used:
 				JobOutputBudget: jobBudgetMB << 20,
 				LSPConfig:       lspConfig,
 				NoLSP:           noLSP,
-				SkillsSync:      skillsSyncEnabled(cmd, skillsSync),
+				SkillsSync:      skillsSyncEnabled(cmd, skillsSync, launchKinds),
 				Proxies:         proxies,
 				LaunchKinds:     launchKinds,
 			})
@@ -331,11 +343,13 @@ Two transports, exactly one of which is used:
 	cmd.Flags().BoolVar(&noLSP, "no-lsp", false, "disable language servers on this executor entirely")
 	cmd.Flags().BoolVar(&skillsSync, "skills-sync", false,
 		"accept the daemon's skill corpus into this machine's Claude skills directory "+
-			"(RAFIKI_EXECUTOR_SKILLS_SYNC enables it from a service unit)")
+			"(RAFIKI_EXECUTOR_SKILLS_SYNC enables it from a service unit). "+
+			"Implied by --launch claude; --skills-sync=false refuses it explicitly")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
 	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
 		"child protocol this executor will host for the daemon, e.g. --launch claude "+
-			"(repeatable). Opt-in: with no --launch this executor hosts nothing")
+			"(repeatable). Opt-in: with no --launch this executor hosts nothing. "+
+			"--launch claude also accepts the skill corpus unless --skills-sync=false")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",
