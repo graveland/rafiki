@@ -1,6 +1,6 @@
 ---
 name: subagent-driven-development
-description: Use when executing a written implementation plan by dispatching subagents - covers wave dispatch in worktrees, settle handling, ceremony by rung, merge-and-gate, and the ledgers that survive compaction.
+description: Use when executing a written implementation plan by dispatching subagents - covers wave dispatch in worktrees, settle handling, ceremony and seats by rung, merge-and-gate, and the ledgers that survive compaction.
 ---
 
 # Executing a plan with subagents
@@ -9,8 +9,8 @@ You are the coordinator. You dispatch, review, merge, and decide. You do not
 implement rung-2 or rung-3 work yourself, and you do not stop to ask permission
 between tasks.
 
-Read `coordinating-agents` for what the tools do and `model-selection` for
-which model fills a seat. This skill is the loop.
+`coordinating-agents` is what the tools do — spawn semantics, settles, model
+selection, worktree isolation, budgets. This skill is the loop.
 
 ## Rulings, not stalls
 
@@ -43,16 +43,24 @@ You run **in the main repo**. You never `cd` into a worktree.
 2. **Worktree hygiene.** `git worktree list`, prune leftovers from a killed run
    *before* creating any. A stale worktree holding a branch name this plan
    wants is the first thing that breaks a resume.
-3. **Budget check.** Sum the plan's caps against your own remaining grant. Short?
-   Say so in the ledger and to your human now, and run anyway.
-4. **Conflict scan.** Intersect every pair of `touches:` globs within each
+3. **Budget check, final review reserved first.** Subtract the whole-branch
+   final review's cap from your grant *before* summing the plan's task caps
+   against what is left. The final review is the last seat to run and therefore
+   the one a shortfall silently deletes — and it is the seat that catches what
+   every per-task review missed. If the remainder cannot cover the plan, say so
+   in the ledger and to your human now, and run anyway.
+4. **Seats.** Read the project's CLAUDE.md/AGENTS.md for declared seats,
+   provider availability and bans. Absent a declaration, resolve seats per the
+   rung table below and record what you chose. Never carry a model id in from a
+   previous plan.
+5. **Conflict scan.** Intersect every pair of `touches:` globs within each
    wave. A non-empty intersection is a plan defect — split the wave before
    anything runs. Then one read pass for what globs cannot see: does a later
    wave consume an interface no earlier wave produces? Write what you checked
    into the ledger; "the scan was clean" without the rows is not a scan.
-5. **Integration branch** off `main`, one per plan. Every wave merges into it.
+6. **Integration branch** off `main`, one per plan. Every wave merges into it.
    `main` is never touched.
-6. `task_add` every task with `metadata: {rung: "<n>", plan: "<basename>"}`.
+7. `task_add` every task with `metadata: {rung: "<n>", plan: "<basename>"}`.
    Metadata is write-once — it cannot be added later.
 
 ## Dispatching a wave
@@ -61,14 +69,21 @@ Per task, concurrently, in chunks of at most four:
 
 ```
 git worktree add -b <plan>-<task> .worktrees/<plan>-<task> <integration-head>
-sed -n '/^### Task 1.1 /,/^### Task /p' <plan> > <main-repo>/tasks/sdd/<plan-basename>/task-1.1-brief.md
+<extract the task body> > <main-repo>/tasks/sdd/<plan-basename>/task-<n>-brief.md
 agent_spawn(cwd: "<abs worktree>", model: <seat for rung>, max_cost: <plan value>,
             task: "1.1", name: "1.1", prompt: <dispatch>)
 ```
 
-The `sed` matters: **you never read the task body into your own context**, and
-the implementer never reads the whole plan. Everything you paste into a prompt
-stays resident and is re-read on every later turn.
+Extraction runs from each `^### ` heading to the next `^### ` or a `^---$`
+separator — derive the boundary from the plan in front of you rather than
+assuming a heading format, because a hardcoded pattern sends a truncated brief
+with no error anywhere. Whatever the shape, **you never read the task body into
+your own context**, and the implementer never reads the whole plan. Everything
+you paste into a prompt stays resident and is re-read on every later turn.
+
+Every dispatch carries the isolation block from `coordinating-agents` verbatim.
+`cwd:` does not enforce the worktree on its own, and the failure is split-brain
+rather than loud.
 
 Record before each spawn — `base` is not recoverable afterwards:
 
@@ -97,14 +112,26 @@ returned report. Never poll.
 - **`settled after a turn error`** — resume once on the same seat. Twice is not
   transient; escalate the seat and record it.
 
-## Ceremony by rung
+**Reap as you go.** A settled child still holds one of your four seats until it
+is killed, so a spawn refused at the cap while everything looks finished is a
+reaping problem, not a reason to wait.
 
-| Rung | Implementer | Review | Fix rounds |
+## Ceremony and seats by rung
+
+| Rung | Implementer | Reviewer | Fix rounds |
 |---|---|---|---|
-| 0 | you, inline | none | — |
-| 1 | one spawn | **you read the diff yourself** | 1, then escalate the seat |
-| 2 | one spawn | one reviewer, mid seat | 2 |
-| 3 | one spawn | reviewer on the strongest seat, fresh each round | 4 |
+| 0 | you, inline — no spawn | none | — |
+| 1 | cheapest tool-capable seat, tight `max_cost` | **you read the diff yourself** | 1, then escalate the seat |
+| 2 | mid seat | one tier above the implementer | 2 |
+| 3 | strongest seat available | strongest available, always separate, fresh each round | 4 |
+
+Two rules the table encodes. **A reviewer sits one tier above what it reviews**,
+because same-model review is correlation rather than verification — it shares
+the implementer's blind spots. At rung 3 there is no tier above, so the rule
+degrades to its weaker half: a *different* seat, fresh each round, never the
+model that wrote the code. And **err on the side of the cheaper seat**: an
+inflated seat is invisible waste, while a deflated one announces itself in
+rounds-to-accept and you can escalate on that evidence.
 
 A fix round is one fix dispatch plus one scoped re-review of the fix diff.
 Rounds 1 and 2 resume the original implementer — its context is intact. Beyond
@@ -143,9 +170,15 @@ Per task, before its branch merges:
    and the wave's remaining merges get read rather than trusted.
 3. Merge into the integration branch.
 
-Then run the wave's `gate:` on the **merged** result — with `-count=1`, and
-with `.env` sourced if the suite needs a DSN, or database-backed tests skip
-silently and green means nothing.
+Then run the wave's `gate:` on the **merged** result, with `-count=1`.
+
+**A gate outside the main checkout needs its environment carried in.** A fresh
+worktree has no `.env` — it is gitignored — so a suite needing a DSN either
+skips silently, and green means nothing, or fails every integration test with
+`daemon never accepted on …/controller.sock`. That signature reads exactly like
+a daemon regression and is not one. Source the main checkout's `.env` before
+gating (`set -a; . <main-checkout>/.env; set +a`) and check the skip count, not
+just the exit code.
 
 **If the gate fails, do not debug the merged tree.** Reset the integration
 branch to the wave's start and re-merge one branch at a time, re-running the
@@ -158,39 +191,62 @@ task by exactly one gate.
 ## Finishing
 
 1. One whole-branch review on the strongest seat, pointed at the parked minor
-   findings. One fix dispatch, one scoped re-review, adjudicate what is left.
+   findings — funded out of the reserve you set aside at Setup. One fix
+   dispatch, one scoped re-review, adjudicate what is left.
 2. `make check` green, with the evidence in the ledger. Not "should pass".
 3. **Knowledge graduates.** Anything learned that would save a future session
    time — a gotcha, an invariant, a footgun — goes into CLAUDE.md or
    `docs/reference/`, in the same commit as the code it describes.
 4. Write the verdict block: per model used, a **rung ceiling**, or
    "insufficient evidence".
-5. Append every `PROCESS` line to `tasks/lessons.md`.
+5. Append every `layer=plan` and `layer=tool` line to `tasks/lessons.md`.
+   `layer=skill` lines are already in `tasks/skill-problems.md`; do not copy
+   them again.
 6. Remove every worktree and branch. Delete the plan file.
 7. **Stop.** The integration branch is not merged to `main` without your human
    partner saying so.
 
-## The two ledgers
+## The ledgers
 
 Everything lives in `tasks/sdd/<plan-basename>/` in the **main repo**, never in
 a worktree. `ledger.md` is append-only; its first line names its plan.
 
 **Model log** — one line per dispatch, observations only. Dies with the plan;
-do not read another plan's.
+do not read another plan's, because acting on last week's small sample is how
+you refuse a model that has been fine for a month.
 
 ```
 MODEL <model-id> rung=2 task=2.3 outcome=accepted rounds=1 cap=0.40 spend=0.11 note=clean first pass
+MODEL <model-id> rung=1 task=1.2 outcome=budget   rounds=0 cap=0.10 spend=0.10 note=blew cap on a 6-line edit
 ```
+
+`outcome` is one of `accepted`, `rejected`, `blocked`, `budget`, `error`.
+`spend` is `unknown` if you cannot observe it. `note` is a few words, not a
+place for reasoning — a model narrating its impression of another model reads
+plausibly and is worthless.
+
+At Finishing this becomes a **verdict per model used**, and the recommendation
+is a **rung ceiling**: "fine at rung <=1, three budget breaches at rung 2" is
+actionable; "good" is not. **"Insufficient evidence" is a real verdict and
+often the right one** — one plan is a small sample, and a model that failed
+twice may simply have drawn the two hard tasks. A verdict needs three dispatches
+at a rung, or one strong single-shot signal; a cheap task breaching a tight cap
+is strong.
 
 **Process log** — defects in the *workflow*, and it names which layer it
 indicts, because generalising from one instance edits the wrong thing:
 
 - `layer=plan` — this plan's author erred. Fix is nothing; the plan is
-  discarded.
+  discarded. Goes to `tasks/lessons.md` at Finishing.
 - `layer=skill` — this skill is wrong, ambiguous, or silent where it should
-  rule. Fix is a commit to `skills/<name>/SKILL.md`.
+  rule. Fix is a commit to `skills/<name>/SKILL.md`, which you may not make
+  mid-plan: it is a side effect outside this plan's worktrees. So **append the
+  line to `tasks/skill-problems.md` as you observe it**, not at Finishing. That
+  file is a drainable queue against `skills/`, emptied when the skills are
+  edited; empty is its correct steady state.
 - `layer=tool` — rafiki itself: a drifted description, a missing field, a tool
   that cannot express what you needed. Fix is a design doc or a code change.
+  Goes to `tasks/lessons.md` at Finishing.
 
 ```
 PROCESS layer=tool task=1.2 cost=one-wasted-spawn obs=agent_spawn workspace:ephemeral gave the same dir as pinned

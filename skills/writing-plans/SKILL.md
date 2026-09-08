@@ -36,9 +36,17 @@ verify: go test ./pkg/fundi/tools/ -run TestAgentList -count=1
 ```
 
 `### Task <wave>.<n> — <title>` is a **machine anchor**. The coordinator
-extracts one task with `sed` and passes the file path, so the task body never
-enters the coordinator's context and the implementer never reads the whole
-plan. Keep the anchors exact.
+extracts one task and passes the file path, so the task body never enters the
+coordinator's context and the implementer never reads the whole plan. Keep the
+anchors exact, and keep them uniform: extraction runs heading-to-heading, so one
+task titled differently from its siblings arrives truncated with no error.
+
+**No worker-invocation boilerplate.** The plan is read by a coordinator that has
+already loaded its skill; a header telling an "agentic worker" which skill to use
+only preserves a prefix until it goes stale, and an agent obeying a dead prefix
+improvises. Older plans under `docs/plans/complete/` carry exactly that header
+alongside checkbox task lists this format does not use — do not copy one as a
+template.
 
 ## The six task fields
 
@@ -56,9 +64,10 @@ plan. Keep the anchors exact.
   tagged wrong.
 - **body** — the work.
 
-**Name rungs, never models.** The rung-to-model mapping lives in
-`model-selection` so that a delisting, a price move or a provider going bad
-does not invalidate a single plan.
+**Name rungs, never models.** The rung-to-seat mapping lives in
+`subagent-driven-development`, and which model fills a seat is a fact about the
+environment that belongs in the project's CLAUDE.md/AGENTS.md — so a delisting,
+a price move or a provider going bad does not invalidate a single plan.
 
 ## The rungs
 
@@ -111,9 +120,17 @@ because every task carries a spawn and possibly a review.
 
 ## Budget
 
-Every task carries `max_cost`; the header states the total including review
-seats. A coordinator cannot spend more than its own grant, so stating the
-number makes a shortfall visible before anything runs instead of at task eight.
+Every task carries `max_cost`; the header states the total. **That total is not
+the sum of the implementer caps** — it is the implementers, plus a reviewer seat
+for every rung-2 and rung-3 task, plus the fix rounds those rungs allow, plus a
+named reserve for the whole-branch final review. Stating only the implementer
+caps understates a plan by roughly half, and the seat a shortfall silently
+deletes is the final review: it runs last, and it is the one that catches what
+every per-task review missed.
+
+A coordinator cannot spend more than its own grant, so stating the number
+honestly makes a shortfall visible before anything runs instead of at task
+eight.
 
 ## Global Constraints
 
