@@ -323,11 +323,11 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 			"childId", rec.ChildID, "ownerDaemonId", rec.DaemonID)
 		return
 	}
-	if own == foreignLapsed {
-		slog.Info("adopting child from a daemon whose lease has lapsed",
-			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
+	// Adopting means the row becomes OURS on disk, not just in this scan —
+	// see adoptOwnership for the close-gate bug this fixes.
+	if own == foreignLapsed && c.children != nil {
+		c.adoptOwnership(&rec)
 	}
-
 	plan := recoveryAction(rec)
 	switch plan {
 	case planRebindUnbound:
@@ -341,6 +341,15 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 	c.st.Insert(sess)
 
 	if plan == planStayExited {
+		if own == foreignLapsed {
+			// A terminal row from a dead daemon still classifies foreignLapsed —
+			// that names who wrote the row, not what happens to it. It is loaded
+			// as exited and never runs, so it must not log at Info: a closed
+			// child's surviving row otherwise reads as "your agent restarted".
+			// The observable resume is the Info pair below.
+			slog.Debug("foreign lapsed row is terminal; loaded as exited, not resumed",
+				"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
+		}
 		if shouldAutoResume(rec) {
 			slog.Info("child not auto-resumed: pinned workspace cannot change machines",
 				"childId", rec.ChildID, "workspaceMode", rec.WorkspaceMode)
@@ -379,6 +388,10 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 	// carries. resumeWithAutoRecovery is SUPPOSED to surface the refusal when
 	// another daemon holds it, but a success return here does not by itself
 	// prove that happened — see the holdsLease check below.
+	if own == foreignLapsed {
+		slog.Info("adopting child from a daemon whose lease has lapsed",
+			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
+	}
 	slog.Info("auto-resuming fundi child", "childId", rec.ChildID)
 	go func(id string) {
 		rctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
@@ -422,4 +435,42 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 		// happened.
 		c.replayInbox(rctx, id)
 	}(rec.ChildID)
+}
+
+// adoptOwnership transfers a foreign-lapsed row to this daemon.
+//
+// Classification alone changed nothing on disk, and that was the bug: the row
+// kept its original daemon_id and rafiki/daemon label, so every later boot
+// re-adopted it — and, the part that mattered, Close's ownsChildRow gate read
+// the stale label and silently skipped every delete while still reporting
+// success. A child closed on a daemon that never re-persisted it — any exited
+// child after a redeploy — could never be closed away: close, restart, it
+// shows up in the boot scan again, forever.
+//
+// The stamp moves BOTH fields the two ownership gates read — the daemon_id
+// column (recoveryOwnership) and the rafiki/daemon label (ownsChildRow, via
+// the local placeholder set below). Moving only one would leave the gates
+// disagreeing, which is the failure this replaces. status and ns_token stay
+// untouched — see the childstoredb adoptSQL comment for why.
+//
+// Best-effort by design: a failed stamp costs a warn and the row is
+// re-adopted on the next boot. It must never block the resume that may
+// follow, and it must never fail the boot.
+func (c *Controller) adoptOwnership(rec *childstore.ChildRecord) {
+	if c.daemonID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.children.AdoptOwnership(ctx, rec.ChildID, c.daemonID); err != nil {
+		slog.Warn("adopt: stamp ownership on foreign-lapsed row",
+			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID, "error", err)
+		return
+	}
+	if rec.Labels == nil {
+		rec.Labels = make(map[string]string, 1)
+	}
+	// The local placeholder must carry the new label too: Close reads the
+	// local snapshot, not the row.
+	rec.Labels["rafiki/daemon"] = c.daemonID
 }

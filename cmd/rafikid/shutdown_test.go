@@ -169,12 +169,13 @@ func waitForExited(t *testing.T, st *childstore.Store, childID string, timeout t
 	t.Errorf("child %s: status=%v after %v, want exited", childID, snap.Status, timeout)
 }
 
-// recordingChildStore captures every Upsert so tests can assert on what the
-// controller actually wrote, in order. childstore.ChildStore's other two
-// methods are bookkeeping this fake does not need to answer.
+// recordingChildStore captures every Upsert and AdoptOwnership so tests can
+// assert on what the controller actually wrote, in order. The interface's
+// remaining methods are bookkeeping this fake does not need to answer.
 type recordingChildStore struct {
-	mu      sync.Mutex
-	upserts []childstore.ChildRecord
+	mu        sync.Mutex
+	upserts   []childstore.ChildRecord
+	adoptions [][2]string // {childID, newDaemonID} per AdoptOwnership call
 }
 
 func (r *recordingChildStore) Upsert(_ context.Context, rec childstore.ChildRecord) error {
@@ -185,6 +186,13 @@ func (r *recordingChildStore) Upsert(_ context.Context, rec childstore.ChildReco
 }
 
 func (r *recordingChildStore) Delete(_ context.Context, _ string) error { return nil }
+
+func (r *recordingChildStore) AdoptOwnership(_ context.Context, childID, daemonID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.adoptions = append(r.adoptions, [2]string{childID, daemonID})
+	return nil
+}
 
 func (r *recordingChildStore) List(_ context.Context) ([]childstore.ChildRecord, error) {
 	r.mu.Lock()

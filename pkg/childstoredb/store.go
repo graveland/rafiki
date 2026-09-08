@@ -135,6 +135,45 @@ func (s *Store) Delete(ctx context.Context, childID string) error {
 	return nil
 }
 
+// adoptSQL re-stamps ownership and nothing else.
+//
+// Three properties are load-bearing:
+//
+//   - daemon_id and the rafiki/daemon label move TOGETHER. Recovery's ownership
+//     predicate reads the column; Close's gate reads the label. A stamp that
+//     moved only one would leave the two gates disagreeing — the exact
+//     failure (uncloseable rows) this exists to fix.
+//   - status is untouched. An adopted corpse stays exited; an adopted live
+//     row stays idle/streaming and is resumed. Row content belongs to the
+//     child's own writes, never to the boot scan.
+//   - ns_token is untouched, deliberately. It is the namespace proof for the
+//     recorded PID (recoverOne's orphan signal), not an ownership column: the
+//     PID in an adopted row belongs to the previous pod's namespace, and
+//     stamping ours would license a SIGTERM at a PID that is not ours.
+//
+// updated_at IS bumped: the row was just written and the freshness gate reads
+// honestly. A sibling daemon booting inside foreignFreshGrace then classifies
+// the row foreignLive instead of adopting it too — the desired behaviour,
+// because the conversation lease, not the stamp, decides who actually runs
+// the child.
+//
+// The deleted_at guard keeps the stamp a no-op on a row closed in the race
+// between List and this write; it must never un-tombstone (only Upsert
+// asserts liveness — see its doc comment).
+const adoptSQL = `
+UPDATE conversations.child SET
+    daemon_id  = $2,
+    labels     = labels || jsonb_build_object('rafiki/daemon', $2::text),
+    updated_at = now()
+WHERE child_id = $1 AND deleted_at IS NULL`
+
+func (s *Store) AdoptOwnership(ctx context.Context, childID, daemonID string) error {
+	if _, err := s.pool.Exec(ctx, adoptSQL, childID, daemonID); err != nil {
+		return fmt.Errorf("childstoredb: adopt ownership %s: %w", childID, err)
+	}
+	return nil
+}
+
 const listSQL = `
 SELECT child_id, COALESCE(conversation_id::text, ''), COALESCE(owner_user_id::text, ''),
        kind, COALESCE(name,''), COALESCE(cwd,''), COALESCE(config_dir,''),

@@ -198,3 +198,79 @@ func insertConversation(t *testing.T, pool *pgxpool.Pool) string {
 	}
 	return id
 }
+
+// TestAdoptOwnership pins the ownership stamp's column contract: daemon_id and
+// the rafiki/daemon label move together, existing labels survive the merge,
+// status is untouched, and the row stays visible to List (deleted_at is not
+// the stamp's business).
+func TestAdoptOwnership(t *testing.T) {
+	pool := testPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	id := "c_" + time.Now().Format("20060102150405.000000")
+	t.Cleanup(func() { _ = s.Delete(ctx, id) })
+
+	rec := childstore.ChildRecord{
+		ChildID:  id,
+		Kind:     protocol.KindFundi,
+		Status:   string(protocol.StatusExited),
+		DaemonID: "daemon-a",
+		Labels:   map[string]string{"rafiki/parent": "c_root", "rafiki/daemon": "daemon-a"},
+	}
+	if err := s.Upsert(ctx, rec); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if err := s.AdoptOwnership(ctx, id, "daemon-b"); err != nil {
+		t.Fatalf("AdoptOwnership: %v", err)
+	}
+
+	got := findRecord(t, s, id)
+	if got.DaemonID != "daemon-b" {
+		t.Errorf("DaemonID = %q, want %q", got.DaemonID, "daemon-b")
+	}
+	if got.Labels["rafiki/daemon"] != "daemon-b" {
+		t.Errorf("rafiki/daemon label = %q, want %q (Close's gate reads the label)",
+			got.Labels["rafiki/daemon"], "daemon-b")
+	}
+	if got.Labels["rafiki/parent"] != "c_root" {
+		t.Errorf("labels were replaced, not merged: %v", got.Labels)
+	}
+	if got.Status != string(protocol.StatusExited) {
+		t.Errorf("Status = %q, want %q — row content belongs to the child's own writes",
+			got.Status, string(protocol.StatusExited))
+	}
+}
+
+// TestAdoptOwnershipSkipsATombstonedRow: the stamp must never un-tombstone.
+// A row closed in the race between List and the stamp stays closed.
+func TestAdoptOwnershipSkipsATombstonedRow(t *testing.T) {
+	pool := testPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	id := "c_" + time.Now().Format("20060102150405.000001")
+	t.Cleanup(func() { _ = s.Delete(ctx, id) })
+
+	rec := childstore.ChildRecord{
+		ChildID:  id,
+		Kind:     protocol.KindFundi,
+		Status:   string(protocol.StatusExited),
+		DaemonID: "daemon-a",
+	}
+	if err := s.Upsert(ctx, rec); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if err := s.AdoptOwnership(ctx, id, "daemon-b"); err != nil {
+		t.Fatalf("AdoptOwnership: %v", err)
+	}
+
+	if _, ok := lookup(t, s, id); ok {
+		t.Fatalf("adopting a tombstoned row resurrected it")
+	}
+}

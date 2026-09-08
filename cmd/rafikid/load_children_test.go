@@ -654,3 +654,84 @@ func TestRecoverOneReleasesInboxForItsOwnExitedChild(t *testing.T) {
 		t.Fatalf("this daemon's own exited child must have its unconfirmed rows reset; got %+v", pending)
 	}
 }
+
+// TestRecoverOneStampsOwnershipOnAnAdoptedRow pins the fix for the
+// uncloseable-row bug: a foreign-lapsed row must be re-stamped on disk (the
+// store's AdoptOwnership call) AND in the local placeholder (Close reads the
+// snapshot, not the row), or a child closed on a previous pod can never be
+// closed away — close reported success, restart rediscovered the row, forever.
+// The row here is a terminal one (the closed-child corpse); the stamp must
+// fire for it too, and no resume may be attempted.
+func TestRecoverOneStampsOwnershipOnAnAdoptedRow(t *testing.T) {
+	const childID = "c_adopted"
+	ctx := context.Background()
+	logs := captureLogs(t)
+
+	c := newTestController(t)
+	c.daemonID = "me"
+	store := &recordingChildStore{}
+	c.children = store
+
+	rec := childstore.ChildRecord{
+		ChildID:  childID,
+		Kind:     protocol.KindFundi,
+		DaemonID: "pod-a",
+		Status:   "exited",
+		Labels:   map[string]string{"rafiki/daemon": "pod-a", "rafiki/parent": "c_root"},
+	}
+
+	c.recoverOne(ctx, rec, nil)
+
+	if len(store.adoptions) != 1 {
+		t.Fatalf("AdoptOwnership calls = %d, want 1", len(store.adoptions))
+	}
+	if got := store.adoptions[0]; got != [2]string{childID, "me"} {
+		t.Fatalf("AdoptOwnership = %v, want [%s me]", got, childID)
+	}
+
+	snap, ok := c.st.Get(childID)
+	if !ok {
+		t.Fatalf("adopted child not loaded into the store")
+	}
+	if snap.Labels["rafiki/daemon"] != "me" {
+		t.Fatalf("placeholder rafiki/daemon = %q, want %q (Close reads the snapshot)",
+			snap.Labels["rafiki/daemon"], "me")
+	}
+	if snap.Labels["rafiki/parent"] != "c_root" {
+		t.Fatalf("existing labels lost in the stamp: %v", snap.Labels)
+	}
+	if got := logs.String(); strings.Contains(got, "auto-resuming fundi child") {
+		t.Fatalf("a terminal row must not be resumed; log:\n%s", got)
+	}
+}
+
+// TestRecoverOneDoesNotStampALiveForeignRow keeps the stamp from widening:
+// a foreignLive row belongs to a daemon that is running the child right now,
+// and its row must stay exactly as that daemon wrote it.
+func TestRecoverOneDoesNotStampALiveForeignRow(t *testing.T) {
+	const (
+		childID = "c_foreign_live"
+		conv    = "33333333-3333-3333-3333-333333333333"
+	)
+	ctx := context.Background()
+
+	c := newTestController(t)
+	c.daemonID = "me"
+	store := &recordingChildStore{}
+	c.children = store
+
+	rec := childstore.ChildRecord{
+		ChildID:        childID,
+		Kind:           protocol.KindFundi,
+		DaemonID:       "other-daemon",
+		ConversationID: conv,
+		Status:         "idle",
+		Labels:         map[string]string{"rafiki/daemon": "other-daemon"},
+	}
+
+	c.recoverOne(ctx, rec, map[string]bool{conv: true})
+
+	if len(store.adoptions) != 0 {
+		t.Fatalf("AdoptOwnership called for a foreign-live row: %v", store.adoptions)
+	}
+}

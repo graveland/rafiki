@@ -107,6 +107,12 @@ type ChildStore interface {
 	Upsert(ctx context.Context, rec ChildRecord) error
 	Delete(ctx context.Context, childID string) error
 	List(ctx context.Context) ([]ChildRecord, error)
+	// AdoptOwnership re-stamps who owns a child row without touching its
+	// contents: daemon_id, the rafiki/daemon label and updated_at move;
+	// status and ns_token do not. Used by boot recovery when it adopts a
+	// foreign-lapsed row — see Controller.adoptOwnership for why both
+	// ownership fields must move together.
+	AdoptOwnership(ctx context.Context, childID, daemonID string) error
 }
 
 // RecordFromSnapshot builds a durable record from a store snapshot.
