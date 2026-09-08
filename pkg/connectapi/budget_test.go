@@ -4,6 +4,8 @@ package connectapi_test
 
 import (
 	"context"
+	"math"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -34,6 +36,26 @@ func TestSetBudgetPassesFieldsThrough(t *testing.T) {
 	}
 }
 
+func TestSetBudgetZeroAccepted(t *testing.T) {
+	f := &fakeLifecycle{}
+	s := connectapi.NewServer(nil)
+	s.SetChildLifecycle(f)
+
+	resp, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{
+		ChildId: "c_target",
+		MaxCost: 0,
+	}))
+	if err != nil {
+		t.Fatalf("SetBudget(0): %v", err)
+	}
+	if f.budgetChildID != "c_target" || f.budgetMaxCost != 0 {
+		t.Fatalf("lifecycle got childID=%q maxCost=%v, want c_target/0", f.budgetChildID, f.budgetMaxCost)
+	}
+	if resp.Msg.GetChildId() != "c_target" || resp.Msg.GetMaxCost() != 0 {
+		t.Fatalf("response = %+v, want echoed child_id/0", resp.Msg)
+	}
+}
+
 func TestSetBudgetRequiresChildID(t *testing.T) {
 	f := &fakeLifecycle{}
 	s := connectapi.NewServer(nil)
@@ -58,9 +80,41 @@ func TestSetBudgetNegativeBecomesInvalidArgument(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
-	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: -1}))
+	for _, badCost := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: badCost}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("badCost %v: code = %v, want InvalidArgument", badCost, connect.CodeOf(err))
+		}
+	}
+}
+
+func TestSetBudgetNotFoundBecomesNotFound(t *testing.T) {
+	authoredMsg := "agent c_x is not registered"
+	f := &fakeLifecycle{budgetErr: &control.ControllerError{Code: protocol.ErrNotFound, Message: authoredMsg}}
+	s := connectapi.NewServer(nil)
+	s.SetChildLifecycle(f)
+
+	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: 5}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("code = %v, want NotFound", connect.CodeOf(err))
+	}
+	if !strings.Contains(err.Error(), authoredMsg) {
+		t.Fatalf("err.Error() = %q, want containing authored message %q", err.Error(), authoredMsg)
+	}
+}
+
+func TestSetBudgetInvalidArgumentFromLifecycleBecomesInvalidArgument(t *testing.T) {
+	authoredMsg := "limit exceeded or invalid"
+	f := &fakeLifecycle{budgetErr: &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: authoredMsg}}
+	s := connectapi.NewServer(nil)
+	s.SetChildLifecycle(f)
+
+	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: 5}))
 	if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if !strings.Contains(err.Error(), authoredMsg) {
+		t.Fatalf("err.Error() = %q, want containing authored message %q", err.Error(), authoredMsg)
 	}
 }
 

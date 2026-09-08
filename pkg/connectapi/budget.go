@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"math"
 
 	"connectrpc.com/connect"
 
@@ -46,9 +47,9 @@ func (s *Server) SetBudget(
 			errors.New("child_id is required"))
 	}
 	maxCost := req.Msg.GetMaxCost()
-	if maxCost < 0 {
+	if maxCost < 0 || math.IsNaN(maxCost) || math.IsInf(maxCost, 0) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
-			errors.New("max_cost cannot be negative"))
+			errors.New("max_cost cannot be negative, NaN, or infinite"))
 	}
 	p := s.lifecycle.Load()
 	if p == nil {

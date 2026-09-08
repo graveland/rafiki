@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestSetChildBudgetRaiseWithinRemainingSucceeds(t *testing.T) {
@@ -192,6 +196,34 @@ func TestSetChildBudgetAsOperatorNegativeIsRefused(t *testing.T) {
 	err := c.SetChildBudgetAsOperator(context.Background(), "c_d0", -5.00)
 	if err == nil || !strings.Contains(err.Error(), "negative") {
 		t.Fatalf("a negative cap must be refused and named as such: %v", err)
+	}
+}
+
+func TestSetChildBudgetAsOperatorNonFiniteIsRefused(t *testing.T) {
+	c := limitsFixture(t, 3)
+	for _, nonFinite := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		err := c.SetChildBudgetAsOperator(context.Background(), "c_d0", nonFinite)
+		if err == nil || !strings.Contains(err.Error(), "negative or non-finite") {
+			t.Fatalf("non-finite cap %v must be refused: %v", nonFinite, err)
+		}
+	}
+}
+
+func TestSetChildBudgetAsOperatorUnknownChildIsNotFound(t *testing.T) {
+	c := limitsFixture(t, 3)
+	err := c.SetChildBudgetAsOperator(context.Background(), "c_unknown", 5.00)
+	if err == nil {
+		t.Fatal("expected error on unknown child, got nil")
+	}
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *control.ControllerError, got %T: %v", err, err)
+	}
+	if ce.Code != protocol.ErrNotFound {
+		t.Fatalf("ce.Code = %v, want ErrNotFound", ce.Code)
+	}
+	if !strings.Contains(ce.Message, "c_unknown") {
+		t.Fatalf("ce.Message = %q, want c_unknown in message", ce.Message)
 	}
 }
 

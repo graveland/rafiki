@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -101,16 +102,18 @@ func (c *Controller) applyBudgetChange(childID string, newCap float64) error {
 // the Connect SetBudget RPC, which is a control-plane verb, not an
 // agent-facing tool) and no remaining-budget check (an operator is not
 // spending out of a parent's grant, so there is nothing to check the raise
-// against). Only the negative-cap rejection applies, identical to
-// SetChildBudget's.
+// against). Only the negative/non-finite cap rejection applies.
 func (c *Controller) SetChildBudgetAsOperator(ctx context.Context, childID string, newCap float64) error {
-	if newCap < 0 {
+	if newCap < 0 || math.IsNaN(newCap) || math.IsInf(newCap, 0) {
 		return limitError(
-			"set budget refused: max-cost cannot be negative (asked for $%.2f). Pass 0 to make it unlimited, or a positive amount",
+			"set budget refused: max-cost cannot be negative or non-finite (asked for %v). Pass 0 to make it unlimited, or a positive amount",
 			newCap)
 	}
 	if _, ok := c.st.Get(childID); !ok {
-		return fmt.Errorf("agent %s is not registered", childID)
+		return &control.ControllerError{
+			Code:    protocol.ErrNotFound,
+			Message: fmt.Sprintf("agent %s is not registered", childID),
+		}
 	}
 	return c.applyBudgetChange(childID, newCap)
 }
