@@ -75,6 +75,15 @@ func (c *Controller) SetChildBudget(ctx context.Context, callerChildID, childID 
 		}
 	}
 
+	return c.applyBudgetChange(childID, newCap)
+}
+
+// applyBudgetChange performs the write side of a budget mutation, shared by
+// SetChildBudget (agent-facing, lineage-gated) and SetChildBudgetAsOperator
+// (operator-facing, no lineage/remaining-budget check). Both callers have
+// already validated newCap >= 0 and resolved childID to exist by the time
+// this runs.
+func (c *Controller) applyBudgetChange(childID string, newCap float64) error {
 	wasBreached := c.budgetBreached(childID)
 	if err := c.st.SetMaxCost(childID, newCap); err != nil {
 		return fmt.Errorf("set budget: %w", err)
@@ -85,6 +94,25 @@ func (c *Controller) SetChildBudget(ctx context.Context, callerChildID, childID 
 		c.notifyBudgetRaised(childID, newCap)
 	}
 	return nil
+}
+
+// SetChildBudgetAsOperator changes childID's MaxCost with OPERATOR authority:
+// no lineage check (any child, at any depth, may be targeted — this backs
+// the Connect SetBudget RPC, which is a control-plane verb, not an
+// agent-facing tool) and no remaining-budget check (an operator is not
+// spending out of a parent's grant, so there is nothing to check the raise
+// against). Only the negative-cap rejection applies, identical to
+// SetChildBudget's.
+func (c *Controller) SetChildBudgetAsOperator(ctx context.Context, childID string, newCap float64) error {
+	if newCap < 0 {
+		return limitError(
+			"set budget refused: max-cost cannot be negative (asked for $%.2f). Pass 0 to make it unlimited, or a positive amount",
+			newCap)
+	}
+	if _, ok := c.st.Get(childID); !ok {
+		return fmt.Errorf("agent %s is not registered", childID)
+	}
+	return c.applyBudgetChange(childID, newCap)
 }
 
 // budgetRaiseDelta returns how much MORE room newCap grants over oldCap.

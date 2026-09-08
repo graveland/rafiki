@@ -155,3 +155,55 @@ func TestSetChildBudgetOnABreachedChildClearsItAndSteersResume(t *testing.T) {
 		t.Fatal("a raise on a previously breached child must steer it that it may resume")
 	}
 }
+
+func TestSetChildBudgetAsOperatorCanRaiseARootCoordinator(t *testing.T) {
+	c := limitsFixture(t, 3) // a single root child, c_d0
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 5.00 })
+
+	if err := c.SetChildBudgetAsOperator(context.Background(), "c_d0", 50.00); err != nil {
+		t.Fatalf("operator raise on a root coordinator must succeed: %v", err)
+	}
+	snap, _ := c.st.Get("c_d0")
+	if snap.MaxCost != 50.00 {
+		t.Fatalf("c_d0.MaxCost = %v, want 50.00", snap.MaxCost)
+	}
+}
+
+func TestSetChildBudgetAsOperatorCanRaiseADeepDescendantWithNoRemainingCheck(t *testing.T) {
+	c := limitsFixture(t, 3, 3, 3) // c_d0 -> c_d1 -> c_d2
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 1.00 })
+	_ = c.st.Update("c_d2", func(s *childstore.Session) { s.MaxCost = 1.00 })
+	c.coster = fakeCoster{spend: 1.00} // c_d0's whole subtree already at its $1 cap
+
+	// c_d2 is a GRANDCHILD of c_d0, and the raise is far larger than c_d0's
+	// own remaining budget ($0) -- both would refuse SetChildBudget. Neither
+	// check applies to the operator path.
+	if err := c.SetChildBudgetAsOperator(context.Background(), "c_d2", 999.00); err != nil {
+		t.Fatalf("operator raise on a deep descendant must skip lineage and remaining-budget checks: %v", err)
+	}
+	snap, _ := c.st.Get("c_d2")
+	if snap.MaxCost != 999.00 {
+		t.Fatalf("c_d2.MaxCost = %v, want 999.00", snap.MaxCost)
+	}
+}
+
+func TestSetChildBudgetAsOperatorNegativeIsRefused(t *testing.T) {
+	c := limitsFixture(t, 3)
+	err := c.SetChildBudgetAsOperator(context.Background(), "c_d0", -5.00)
+	if err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Fatalf("a negative cap must be refused and named as such: %v", err)
+	}
+}
+
+func TestSetChildBudgetAsOperatorZeroMeansUnlimitedAndIsAccepted(t *testing.T) {
+	c := limitsFixture(t, 3)
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxCost = 5.00 })
+
+	if err := c.SetChildBudgetAsOperator(context.Background(), "c_d0", 0); err != nil {
+		t.Fatalf("0 must be accepted as an explicit unlimited request: %v", err)
+	}
+	snap, _ := c.st.Get("c_d0")
+	if snap.MaxCost != 0 {
+		t.Fatalf("c_d0.MaxCost = %v, want 0 (unlimited)", snap.MaxCost)
+	}
+}
