@@ -66,11 +66,13 @@ type SpawnSpec struct {
 
 // AgentSpawner is the daemon-side capability behind the agent_* tools.
 //
-// Every method is scoped to the subtree of the ONE child this value was
-// constructed for. Implementations must reject a childID that is not a
-// descendant, reading stored lineage rather than any argument. The fundi
-// tools package cannot import cmd/rafikid, so the daemon provides the
-// implementation — the same seam as LSPClient and ExecutorClient.
+// Every method is scoped to the ONE binding this value was constructed for,
+// and takes no caller identity in any method: the child-bound implementation
+// scopes to its child's subtree, the user-bound one to the whole daemon.
+// Implementations must reject a childID outside their binding, reading
+// stored state rather than any argument. The fundi tools package cannot
+// import cmd/rafikid, so the daemon provides the implementation — the same
+// seam as LSPClient and ExecutorClient.
 type AgentSpawner interface {
 	// List returns every live and exited descendant, nearest first.
 	List(ctx context.Context) ([]AgentInfo, error)
@@ -87,11 +89,13 @@ type AgentSpawner interface {
 	Send(ctx context.Context, childID, message string) error
 	// Kill shuts a descendant down and waits for the exit to be recorded.
 	Kill(ctx context.Context, childID string) error
-	// SetBudget changes a direct child's MaxCost, in USD — the same units
-	// SpawnSpec.MaxCost already uses. 0 means unlimited. Implementations
-	// must reject a childID that is not the caller's DIRECT child (not
-	// merely any descendant, unlike every other method on this interface),
-	// reading stored lineage rather than trusting the argument.
+	// SetBudget changes a child's MaxCost, in USD — the same units
+	// SpawnSpec.MaxCost already uses. 0 means unlimited. What may be
+	// re-budgeted is a property of the binding: a child-bound spawner
+	// accepts only its DIRECT child (not merely any descendant, unlike
+	// every other method on this interface); a user-bound spawner accepts
+	// only top-level children. In both cases the answer is read from stored
+	// lineage, never trusted from the argument.
 	SetBudget(ctx context.Context, childID string, maxCost float64) error
 }
 
