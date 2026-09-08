@@ -23,6 +23,10 @@ type fakeLifecycle struct {
 	gotKill    int64
 	closedID   string
 	closeErr   error
+
+	budgetChildID string
+	budgetMaxCost float64
+	budgetErr     error
 }
 
 func (f *fakeLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (string, error) {
@@ -46,6 +50,12 @@ func (f *fakeLifecycle) Kill(_ context.Context, childID string, shutdownMs, kill
 func (f *fakeLifecycle) Close(_ context.Context, childID string) error {
 	f.closedID = childID
 	return f.closeErr
+}
+
+func (f *fakeLifecycle) SetBudget(_ context.Context, childID string, maxCost float64) error {
+	f.budgetChildID = childID
+	f.budgetMaxCost = maxCost
+	return f.budgetErr
 }
 
 func TestSpawnPassesFieldsThrough(t *testing.T) {

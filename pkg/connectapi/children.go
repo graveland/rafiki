@@ -102,6 +102,10 @@ type ChildLifecycle interface {
 	// never be resumed again. The transcript is NOT deleted. Closing a live
 	// child is an error, not an implicit kill.
 	Close(ctx context.Context, childID string) error
+	// SetBudget changes childID's MaxCost with operator authority: no
+	// lineage check, no remaining-budget check against a parent's grant.
+	// Only a negative cap is refused.
+	SetBudget(ctx context.Context, childID string, maxCost float64) error
 }
 
 // KillOutcome mirrors protocol.KillResponseData, which is what the daemon's

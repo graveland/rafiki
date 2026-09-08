@@ -240,6 +240,10 @@ func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownMs, 
 	}, nil
 }
 
+func (l connectLifecycle) SetBudget(ctx context.Context, childID string, maxCost float64) error {
+	return l.c.SetChildBudgetAsOperator(ctx, childID, maxCost)
+}
+
 // connectModels adapts *Controller to connectapi.ModelLister. A distinct type
 // for the same reason connectLifecycle is one: Controller.ListModels already
 // exists with a different signature (it answers the framed ctrl_list_models),

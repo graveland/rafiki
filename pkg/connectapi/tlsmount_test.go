@@ -70,6 +70,8 @@ func (l *identityLifecycle) Kill(context.Context, string, int64, int64) (connect
 
 func (l *identityLifecycle) Close(context.Context, string) error { return nil }
 
+func (l *identityLifecycle) SetBudget(context.Context, string, float64) error { return nil }
+
 const mountTestToken = "s3cret-user-token"
 
 // setupTLSMount reproduces cmd/rafikid's remote surface: proxy.go composes the
