@@ -82,8 +82,8 @@ func (c *Controller) SetChildBudget(ctx context.Context, callerChildID, childID 
 // applyBudgetChange performs the write side of a budget mutation, shared by
 // SetChildBudget (agent-facing, lineage-gated) and SetChildBudgetAsOperator
 // (operator-facing, no lineage/remaining-budget check). Both callers have
-// already validated newCap >= 0 and resolved childID to exist by the time
-// this runs.
+// already validated newCap as a non-negative finite value and resolved
+// childID to exist by the time this runs.
 func (c *Controller) applyBudgetChange(childID string, newCap float64) error {
 	wasBreached := c.budgetBreached(childID)
 	if err := c.st.SetMaxCost(childID, newCap); err != nil {

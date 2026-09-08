@@ -104,7 +104,8 @@ type ChildLifecycle interface {
 	Close(ctx context.Context, childID string) error
 	// SetBudget changes childID's MaxCost with operator authority: no
 	// lineage check, no remaining-budget check against a parent's grant.
-	// Only a negative cap is refused.
+	// Only a negative or non-finite cap is refused; 0 means unlimited and
+	// is an accepted, intentional value.
 	SetBudget(ctx context.Context, childID string, maxCost float64) error
 }
 
