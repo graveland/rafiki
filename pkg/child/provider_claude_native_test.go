@@ -27,6 +27,8 @@ func nativeTypeNames(evs []*rafikiv1.Event) []string {
 			out = append(out, "tool_execution_start")
 		case *rafikiv1.Event_ToolExecutionEnd:
 			out = append(out, "tool_execution_end")
+		case *rafikiv1.Event_CompactionBoundary:
+			out = append(out, "compaction_boundary")
 		default:
 			out = append(out, "unknown")
 		}
@@ -265,5 +267,64 @@ func TestClaudeUserEchoContentIsAString(t *testing.T) {
 		t.Fatalf("PiUserMessage.Content is %T, want string — OutboundEchoNative's "+
 			"type assertion now drops every prompt silently; teach it the new shape",
 			msg.Content)
+	}
+}
+
+// Claude Code's own compaction (auto or /compact) announces itself on stdout
+// with a system/compact_boundary frame. BusFramesNative is the durable event
+// path, so this frame is the only live signal rafiki gets that the context was
+// rewritten; without the branch the boundary is visible only on reattach.
+func TestBusFramesNativeEmitsCompactionBoundary(t *testing.T) {
+	p := newClaudeProvider()
+	line := []byte(`{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":182000,"post_tokens":45000}}`)
+
+	evs := p.BusFramesNative(line, 1000)
+
+	assertTypes(t, nativeTypeNames(evs), []string{"compaction_boundary"})
+	cb := evs[0].GetCompactionBoundary()
+	if cb == nil {
+		t.Fatal("event is not a CompactionBoundary")
+	}
+	if got := cb.GetTrigger(); got != "auto" {
+		t.Fatalf("trigger = %q, want %q", got, "auto")
+	}
+	// GetPreTokens/GetPostTokens return 0 on a nil pointer, so these assert
+	// both presence and value — the pointers must be set, not bare zeroes.
+	if got := cb.GetPreTokens(); got != 182000 {
+		t.Fatalf("pre_tokens = %d, want 182000", got)
+	}
+	if got := cb.GetPostTokens(); got != 45000 {
+		t.Fatalf("post_tokens = %d, want 45000", got)
+	}
+	if got := evs[0].TsUnixMs; got != 1000 {
+		t.Fatalf("TsUnixMs = %d, want 1000", got)
+	}
+}
+
+// microcompact_boundary is a different subtype string entirely: it matches
+// neither the init branch nor the compact_boundary branch and falls through to
+// the default nil. No dedicated case is added for it.
+func TestBusFramesNativeIgnoresMicrocompactBoundary(t *testing.T) {
+	p := newClaudeProvider()
+	line := []byte(`{"type":"system","subtype":"microcompact_boundary"}`)
+
+	if evs := p.BusFramesNative(line, 1000); len(evs) != 0 {
+		t.Fatalf("microcompact_boundary produced %d events, want 0", len(evs))
+	}
+}
+
+// The system/init frame carries the model into provider state and emits no
+// events. Pin both halves: the compact_boundary branch must never turn an init
+// frame into an event, and the early return must not have broken the model
+// capture.
+func TestBusFramesNativeSystemInitEmitsNothing(t *testing.T) {
+	p := newClaudeProvider()
+	line := []byte(`{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-5","cwd":"/tmp"}`)
+
+	if evs := p.BusFramesNative(line, 1000); len(evs) != 0 {
+		t.Fatalf("system/init produced %d events, want 0", len(evs))
+	}
+	if p.st.model != "claude-opus-5" {
+		t.Fatalf("st.model = %q, want %q", p.st.model, "claude-opus-5")
 	}
 }

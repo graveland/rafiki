@@ -183,6 +183,13 @@ type claudeStreamFrame struct {
 		Model   string               `json:"model,omitempty"`
 		Content []claudeContentBlock `json:"content"`
 	} `json:"message,omitempty"`
+	// CompactMetadata is present on system/compact_boundary frames (Claude
+	// Code's own compaction having just run). Absent otherwise.
+	CompactMetadata *struct {
+		Trigger    string `json:"trigger,omitempty"`
+		PreTokens  int    `json:"pre_tokens,omitempty"`
+		PostTokens int    `json:"post_tokens,omitempty"`
+	} `json:"compact_metadata,omitempty"`
 }
 
 // claudeUsage is the subset of claude's result-frame usage we surface: turn
@@ -515,6 +522,21 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 		if f.Subtype == "init" && f.Model != "" {
 			p.st.model = f.Model
 			p.st.provider, p.st.api = claudeProviderAPI(f.Model)
+			return nil
+		}
+		if f.Subtype == "compact_boundary" && f.CompactMetadata != nil {
+			pre := int32(f.CompactMetadata.PreTokens)
+			post := int32(f.CompactMetadata.PostTokens)
+			return []*rafikiv1.Event{{
+				TsUnixMs: ts,
+				Payload: &rafikiv1.Event_CompactionBoundary{
+					CompactionBoundary: &rafikiv1.CompactionBoundary{
+						Trigger:    f.CompactMetadata.Trigger,
+						PreTokens:  &pre,
+						PostTokens: &post,
+					},
+				},
+			}}
 		}
 		return nil
 
