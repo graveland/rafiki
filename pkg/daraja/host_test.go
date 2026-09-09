@@ -122,6 +122,33 @@ func TestNilProxyModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 	}
 }
 
+// TestProxyModelArgsWithoutModelLeavesPlainModelFlagAlone is the case Wave 1
+// of the MCP-injection plan introduced: ProxyModelArgs can now be non-nil
+// while carrying NO --model pair (just --mcp-config), and that must not
+// suppress the plain --model claudeargv.Build would otherwise add.
+func TestProxyModelArgsWithoutModelLeavesPlainModelFlagAlone(t *testing.T) {
+	h := NewHost(HostOptions{
+		Binary: testEchoBinary(t),
+		Spec:   ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
+		ProxyModelArgs: []string{
+			"--mcp-config={\"mcpServers\":{}}",
+		},
+	})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	argv := collectStdout(t, h, "stream-json", 5*time.Second)
+	if !strings.Contains(argv, "--model claude-sonnet-5") {
+		t.Errorf("argv %q missing the plain --model; ProxyModelArgs without a "+
+			"--model pair must not suppress it", argv)
+	}
+	if !strings.Contains(argv, "--mcp-config") {
+		t.Errorf("argv %q missing the mcp-config ProxyModelArgs carried", argv)
+	}
+}
+
 // stdin reaches the process.
 func TestHostWritesStdin(t *testing.T) {
 	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})

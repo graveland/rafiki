@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -108,9 +109,10 @@ type HostOptions struct {
 	// needs.
 	EnvOverride bool
 
-	// ProxyModelArgs, when non-nil, replaces the plain `--model X` argv()
-	// would otherwise add. Set from proxyenv.Claude's own returned args when
-	// this daraja is proxied and a model is configured: a proxied model's
+	// ProxyModelArgs, when it contains a --model pair, replaces the plain
+	// `--model X` argv() would otherwise add; the pair it carries is the one
+	// that matches its custom-model-option env vars. Set from proxyenv.Claude's
+	// own returned args whenever this daraja is proxied: a proxied model's
 	// selection travels through Claude Code's custom-model-option mechanism
 	// (ANTHROPIC_CUSTOM_MODEL_OPTION + a matching --model, both required
 	// together), which is what makes an OpenRouter slash id or any other
@@ -118,7 +120,12 @@ type HostOptions struct {
 	// allowlist at all. A second, PLAIN --model from claudeargv.Build here
 	// would risk that allowlist rejecting the model before the custom
 	// option's env vars are even consulted, so argv() is told to omit its own
-	// --model whenever this is set — see startLocked.
+	// --model whenever this carries a model pair — see startLocked.
+	//
+	// ProxyModelArgs may also carry argv unrelated to the model (e.g.
+	// --mcp-config), and with no model pair at all it still must be appended
+	// in full — only the plain --model is ever suppressed, and only when a
+	// pair is actually present.
 	ProxyModelArgs []string
 
 	// RespawnLimit and RespawnBackoff bound recovery from unexpected exits.
@@ -210,9 +217,11 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 		return nil, errors.New("daraja: already running")
 	}
 	argvSpec := spec
-	if h.opts.ProxyModelArgs != nil {
-		// Suppress claudeargv.Build's own --model: ProxyModelArgs supplies
-		// the one that matches its custom-model-option env vars instead. See
+	if slices.Contains(h.opts.ProxyModelArgs, "--model") {
+		// Suppress claudeargv.Build's own --model: ProxyModelArgs supplies the
+		// one that matches its custom-model-option env vars instead. A
+		// ProxyModelArgs without a --model pair (e.g. --mcp-config only, on a
+		// session with no model configured) suppresses nothing. See
 		// HostOptions.ProxyModelArgs's doc comment.
 		argvSpec.Model = ""
 	}
