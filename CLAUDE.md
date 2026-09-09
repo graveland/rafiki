@@ -1207,7 +1207,11 @@
   message 0 against the stored row at the conversation's horizon
   (`coalesce(resume_from_ordinal, 0)`) via Postgres JSONB equality; on a
   match, ordinals are `horizon + index` as before (inert for every
-  uncompacted conversation — horizon stays 0). On a mismatch, it records a
+  uncompacted conversation — horizon stays 0). On a mismatch it first tries
+  a positional re-anchor — the request head (messages 0 and 1) matched at
+  two consecutive stored ordinals, a rewind across a boundary — and, on a
+  hit, appends at that horizon FOR THAT REQUEST ONLY without persisting
+  `resume_from_ordinal`; only when no re-anchor matches does it record a
   NEW boundary — `resume_from_ordinal` bumped to `max(ordinal)+1`, the new
   message 0 inserted at that ordinal with `kind='compaction_summary'` — and
   all subsequent post-compact requests match positionally from there. Nothing
@@ -1215,8 +1219,10 @@
   **`store.Messages.Load` is NOT filtered by this horizon and must never be**
   — it is shared by `GetHistory` (reattach) and `dbRecentForFundi`
   (`ctrl_get_recent`), both of which need the full pre-compaction history to
-  render a divider inline with it; only a future fundi compactor's own
-  working-context loader (not yet built) should ever read the horizon.
+  render a divider inline with it, and by fundi's `loadHistory`
+  (`pkg/llm/conversation.go`), which never reads the horizon; only a future
+  fundi compactor's own working-context loader (not yet built) should ever
+  read the horizon.
 - **fundi published only HALF the native event vocabulary, and the missing
   half was the assistant's replies.** `publishNative` (`pkg/fundi/native.go`)
   carried switch arms for `AssistantMessage`, `TurnEnd` and `ContentBlockDelta`

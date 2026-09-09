@@ -327,7 +327,10 @@ frame arrives) carries both. A REATTACH-synthesized instance of this event
 `kind='compaction_summary'`, not from the live stream — carries only
 `pre_tokens` (an approximation: the previous turn's `input_tokens`, the
 size of the context the boundary replaced), because the stored row has no
-post-compaction count. A client renders the two-sided and one-sided cases
+post-compaction count. That approximation appears only when a prior turn's
+`input_tokens` is nonzero: with no prior turn, or one with 0, the stored
+`input_tokens` is NULL and the reattach event carries NEITHER token — the
+bare one-sided format. A client renders the two-sided and one-sided cases
 differently for exactly this reason — see `pkg/tui/session`'s
 `formatCompactionBoundary`.
 
