@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -380,5 +381,373 @@ func TestWriteJSONLOneCompactObjectPerLine(t *testing.T) {
 	}
 	if strings.Contains(out, "\"rows\"") || strings.Contains(out, "\"children\"") {
 		t.Errorf("output carries an envelope: %q", out)
+	}
+}
+
+// ─── Task 4.1: list-shaped verbs under the three-way contract ───────────────
+
+func childIntPtr(i int) *int { return &i }
+
+// JSONL from renderList is the ChildSummary objects themselves — one per
+// line, unwrapped, compact.
+func TestRenderListJSONLOnePerLine(t *testing.T) {
+	var buf bytes.Buffer
+	children := []protocol.ChildSummary{
+		{ChildID: "c_01", Name: "alpha", Status: "idle"},
+		{ChildID: "c_02", Name: "beta", Status: "exited", ExitCode: childIntPtr(0)},
+		{ChildID: "c_03", Name: "gamma", Status: "streaming"},
+	}
+	if err := renderList(&buf, children, outputJSONL, false, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.HasSuffix(out, "\n") {
+		t.Fatalf("missing trailing newline: %q", out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != len(children) {
+		t.Fatalf("got %d lines for %d children: %q", len(lines), len(children), out)
+	}
+	var ids []string
+	for i, line := range lines {
+		var ch protocol.ChildSummary
+		if err := json.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("line %d is not a bare ChildSummary object: %v (%q)", i+1, err, line)
+		}
+		ids = append(ids, ch.ChildID)
+		if strings.Contains(line, "\"children\"") {
+			t.Fatalf("line %d carries an envelope: %q", i+1, line)
+		}
+	}
+	want := []string{"c_01", "c_02", "c_03"}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("line order = %v, want %v", ids, want)
+		}
+	}
+}
+
+// get's default (table) mode renders the same table `list` renders, flat.
+func TestGetTextRendersListTable(t *testing.T) {
+	children := []protocol.ChildSummary{
+		{ChildID: "c_get1", Name: "worker", Status: "streaming", Model: "anthropic/claude-sonnet-4"},
+		{ChildID: "c_get2", Name: "reviewer", Status: "idle"},
+	}
+	var buf bytes.Buffer
+	if err := emitGet(&buf, []string{"worker", "reviewer"}, children, 0, outputTable, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ID", "NAME", "STATUS", "c_get1", "worker", "c_get2", "reviewer", "claude-sonnet-4"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Fatalf("table mode with color off leaked ANSI:\n%s", out)
+	}
+}
+
+// get's JSON shapes are the backward-compatibility contract: single target,
+// no failures → bare object; multiple targets or any failures → wrapped.
+func TestGetJSONShapesUnchanged(t *testing.T) {
+	one := protocol.ChildSummary{ChildID: "c_1", Name: "solo", Status: "idle"}
+	two := []protocol.ChildSummary{
+		one,
+		{ChildID: "c_2", Name: "duo", Status: "exited", ExitCode: childIntPtr(3)},
+	}
+
+	var bare bytes.Buffer
+	if err := emitGet(&bare, []string{"c_1"}, []protocol.ChildSummary{one}, 0, outputJSON, false); err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(bare.Bytes(), &obj); err != nil {
+		t.Fatalf("bare shape is not a JSON object: %v", err)
+	}
+	if _, ok := obj["childId"]; !ok {
+		t.Fatalf("single-target shape must be a bare ChildSummary, got:\n%s", bare.String())
+	}
+	if _, ok := obj["children"]; ok {
+		t.Fatalf("single-target shape must not be wrapped, got:\n%s", bare.String())
+	}
+	if !strings.Contains(bare.String(), `"childId": "c_1"`) {
+		t.Fatalf("JSON mode must stay pretty-printed:\n%s", bare.String())
+	}
+
+	var wrapped bytes.Buffer
+	if err := emitGet(&wrapped, []string{"a", "b"}, two, 0, outputJSON, false); err != nil {
+		t.Fatal(err)
+	}
+	obj = nil
+	if err := json.Unmarshal(wrapped.Bytes(), &obj); err != nil {
+		t.Fatal(err)
+	}
+	kids, ok := obj["children"].([]any)
+	if !ok || len(kids) != 2 {
+		t.Fatalf("multi-target shape must be {\"children\":[...]}, got:\n%s", wrapped.String())
+	}
+	if _, ok := obj["childId"]; ok {
+		t.Fatalf("multi-target shape must not carry a bare childId:\n%s", wrapped.String())
+	}
+
+	// A single target with a failed sibling falls to the wrapped shape.
+	var failed bytes.Buffer
+	if err := emitGet(&failed, []string{"gone"}, []protocol.ChildSummary{one}, 1, outputJSON, false); err != nil {
+		t.Fatal(err)
+	}
+	obj = nil
+	if err := json.Unmarshal(failed.Bytes(), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := obj["children"]; !ok {
+		t.Fatalf("a failed sibling must switch to the wrapped shape:\n%s", failed.String())
+	}
+}
+
+// JSONL from get is the successes only, one per line — failures have already
+// gone to stderr in runGet, before emitGet runs.
+func TestGetJSONLSuccessesOnly(t *testing.T) {
+	children := []protocol.ChildSummary{
+		{ChildID: "c_ok1", Name: "kept", Status: "idle"},
+		{ChildID: "c_ok2", Name: "also-kept", Status: "idle"},
+	}
+	var buf bytes.Buffer
+	// Three targets requested, one failed: only the two successes arrive here.
+	if err := emitGet(&buf, []string{"kept", "also-kept", "missing"}, children, 1, outputJSONL, false); err != nil {
+		t.Fatal(err)
+	}
+	out := strings.TrimSuffix(buf.String(), "\n")
+	if out == "" {
+		t.Fatal("no output")
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines for 2 successes: %q", len(lines), buf.String())
+	}
+	if strings.Contains(buf.String(), "\"children\"") {
+		t.Fatalf("JSONL rows must be unwrapped:\n%s", buf.String())
+	}
+	for i, line := range lines {
+		var ch protocol.ChildSummary
+		if err := json.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("line %d not a bare object: %v", i+1, err)
+		}
+	}
+}
+
+// status's text mode is a key/value block, one line per populated field.
+func TestStatusTextKeyValue(t *testing.T) {
+	started := time.UnixMilli(1757000000000)
+	daemon, err := json.Marshal(protocol.StatusResponseData{
+		Version:     "1.2.3",
+		StartedAt:   1757000000000,
+		Children:    protocol.ChildCounts{Live: 2, Exited: 1},
+		MemoryBytes: 16 << 20,
+		Socket:      "/tmp/d.sock",
+		LogsDir:     "/tmp/logs",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := emitStatus(&buf, daemon, outputTable, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"version: 1.2.3",
+		"started: " + started.Format("2006-01-02 15:04"),
+		"children: 2 live, 1 exited",
+		"memory: 16.0 MiB",
+		"socket: /tmp/d.sock",
+		"logs: /tmp/logs",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	// A child-shaped payload renders the same block with the child's fields.
+	child, err := json.Marshal(protocol.ChildSummary{
+		ChildID:   "c_9",
+		Name:      "worker",
+		Kind:      "claude",
+		Status:    "exited",
+		ExitCode:  childIntPtr(2),
+		Model:     "openrouter/x/y",
+		CostUSD:   costPtr(0.5),
+		Cwd:       "/repo",
+		StartedAt: 1757000000000,
+		Labels:    map[string]string{"env": "prod"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if err := emitStatus(&buf, child, outputTable, false); err != nil {
+		t.Fatal(err)
+	}
+	out = buf.String()
+	for _, want := range []string{
+		"id: c_9", "name: worker", "kind: claude", "status: exited (2)",
+		"model: openrouter/x/y", "cost: $0.50", "cwd: /repo", "labels: env=prod",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// status's JSONL mode is the whole payload as one compact line.
+func TestStatusJSONLCompactLine(t *testing.T) {
+	daemon, err := json.Marshal(protocol.StatusResponseData{
+		Version:   "1.2.3",
+		StartedAt: 1757000000000,
+		Children:  protocol.ChildCounts{Live: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := emitStatus(&buf, daemon, outputJSONL, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Count(out, "\n") != 1 || !strings.HasSuffix(out, "\n") {
+		t.Fatalf("want exactly one line, got %q", out)
+	}
+	line := strings.TrimSuffix(out, "\n")
+	if strings.Contains(line, ": ") || strings.Contains(line, ", ") {
+		t.Fatalf("JSONL line is not compact: %q", line)
+	}
+	var back map[string]any
+	if err := json.Unmarshal([]byte(line), &back); err != nil {
+		t.Fatalf("line is not JSON: %v", err)
+	}
+	if back["version"] != "1.2.3" {
+		t.Fatalf("payload changed: %q", line)
+	}
+}
+
+// tasks' text mode is a table with all six columns, always.
+func TestTasksTextTableColumns(t *testing.T) {
+	rows, err := json.Marshal([]map[string]any{
+		{
+			"ID":             "11111111-1111-1111-1111-111111111111",
+			"Handle":         "2.1",
+			"ConversationID": "conv-1",
+			"Content":        "implement the parser",
+			"Status":         "in_progress",
+			"Assignee":       "c_worker",
+		},
+		{
+			"ID":             "22222222-2222-2222-2222-222222222222",
+			"Handle":         "3",
+			"ConversationID": "conv-1",
+			"Content":        "exploratory probe",
+			"Status":         "dropped",
+			"DropReason":     "turned out unnecessary",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := emitTasks(&buf, rows, outputTable, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"ID", "CHILD", "STATUS", "SUBJECT", "ASSIGNEE", "UPDATED"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q header:\n%s", want, out)
+		}
+	}
+	for _, want := range []string{"2.1", "conv-1", "implement the parser", "c_worker", "in_progress"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "dropped (turned out unnecessary)") {
+		t.Fatalf("drop reason should ride the STATUS cell:\n%s", out)
+	}
+	if !strings.Contains(out, " - ") && !strings.Contains(out, "- ") {
+		t.Fatalf("UPDATED column should render even without data:\n%s", out)
+	}
+}
+
+// tasks' JSONL mode unwraps the response array to one row object per line.
+func TestTasksJSONLUnwrapped(t *testing.T) {
+	data := []byte(`[{"ID":"u1","Handle":"1","Content":"a","Status":"pending"},` +
+		`{"ID":"u2","Handle":"2","Content":"b","Status":"completed","Assignee":"c_1"}]`)
+	var buf bytes.Buffer
+	if err := emitTasks(&buf, data, outputJSONL, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.HasSuffix(out, "\n") {
+		t.Fatalf("missing trailing newline: %q", out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d: %q", len(lines), out)
+	}
+	for i, line := range lines {
+		if strings.Contains(line, "\"rows\"") || strings.Contains(line, "\"tasks\"") {
+			t.Fatalf("line %d carries an envelope: %q", i+1, line)
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("line %d is not a bare object: %v", i+1, err)
+		}
+		if _, ok := row["ID"]; !ok {
+			t.Fatalf("line %d lost the wire row's field names: %q", i+1, line)
+		}
+	}
+}
+
+// recent's text mode renders the events as a table mirroring the fields the
+// event rows carry; a children-list payload goes through the list renderer.
+func TestRecentTextRenders(t *testing.T) {
+	events, err := json.Marshal(protocol.GetRecentResponseData{
+		Events: []json.RawMessage{
+			json.RawMessage(`{"type":"tool_execution_end","toolName":"bash","isError":false,"result":"git status"}`),
+			json.RawMessage(`{"type":"agent_end","usage":{"input":100,"output":5,"cost":{"total":0.4095}}}`),
+			json.RawMessage(`{"type":"ctrl_child_status","childId":"c_7","status":"streaming","previous":"idle"}`),
+		},
+		TotalInBuffer: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := emitRecent(&buf, events, outputTable, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"TYPE", "CHILD", "STATUS", "COST", "DETAIL",
+		"tool_execution_end", "bash", "git status", "agent_end", "$0.41",
+		"ctrl_child_status", "c_7", "streaming"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	// A children-list payload renders list-style instead.
+	childrenPayload, err := json.Marshal(protocol.ListResponseData{
+		Children: []protocol.ChildSummary{{ChildID: "c_9", Name: "zed", Status: "idle"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if err := emitRecent(&buf, childrenPayload, outputTable, false); err != nil {
+		t.Fatal(err)
+	}
+	if out = buf.String(); !strings.Contains(out, "c_9") || !strings.Contains(out, "zed") {
+		t.Fatalf("children payload should render through renderList:\n%s", out)
+	}
+	if !strings.Contains(out, "NAME") {
+		t.Fatalf("children payload should render the list table headers:\n%s", out)
 	}
 }

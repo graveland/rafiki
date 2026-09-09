@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -30,6 +31,11 @@ func runGet(cmd *cobra.Command, args []string) error {
 	defer c.Close()
 
 	ctx := cmdCtx(cmd)
+
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 
 	var children []protocol.ChildSummary
 	var failures int
@@ -63,23 +69,40 @@ func runGet(cmd *cobra.Command, args []string) error {
 		children = append(children, child)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-
-	// Single successful target: emit plain object for backward compatibility.
-	// Multiple targets (or any failures): wrap in {"children":[...]}.
-	if len(args) == 1 && failures == 0 && len(children) == 1 {
-		if err := enc.Encode(children[0]); err != nil {
-			return err
-		}
-	} else {
-		if err := enc.Encode(map[string]any{"children": children}); err != nil {
-			return err
-		}
+	if err := emitGet(os.Stdout, args, children, failures, mode, useColor); err != nil {
+		return err
 	}
 
 	if failures > 0 {
 		return fmt.Errorf("%d target(s) failed", failures)
 	}
 	return nil
+}
+
+// emitGet writes get's output in the resolved mode. Every per-target failure
+// has already gone to stderr by the time this runs, so all three modes emit
+// the successful children only — data is never withheld because a sibling
+// target failed.
+//
+// The JSON shapes are get's backward-compatibility contract and are preserved
+// exactly: a single successful target emits a bare ChildSummary object,
+// multiple targets (or any failures) wrap in {"children":[...]}. JSONL emits
+// one compact ChildSummary per line, unwrapped. Table mode renders the same
+// table `list` renders, flat.
+func emitGet(w io.Writer, args []string, children []protocol.ChildSummary, failures int, mode outputMode, useColor bool) error {
+	switch mode {
+	case outputJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		// Single successful target: plain object for backward compatibility.
+		// Multiple targets (or any failures): wrap in {"children":[...]}.
+		if len(args) == 1 && failures == 0 && len(children) == 1 {
+			return enc.Encode(children[0])
+		}
+		return enc.Encode(map[string]any{"children": children})
+	case outputJSONL:
+		return writeJSONL(w, childRows(children))
+	default:
+		return renderList(w, children, outputTable, useColor, true)
+	}
 }

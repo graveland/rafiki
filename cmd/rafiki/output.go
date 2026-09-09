@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"slices"
@@ -92,19 +93,15 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	if mode == outputJSON {
 		return writeJSON(w, map[string]any{"children": children})
 	}
+	if mode == outputJSONL {
+		// One ChildSummary object per line, unwrapped — the objects themselves,
+		// not a {"children":[...]} envelope, so a piped consumer reads one
+		// agent per line.
+		return writeJSONL(w, childRows(children))
+	}
 
 	tb := table.New(w, table.Options{Color: useColor})
-
-	colNames := []string{"ID", "NAME", "KIND", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "LABELS"}
-	headerRow := make([]string, len(colNames))
-	for i, name := range colNames {
-		if useColor {
-			headerRow[i] = dim(name)
-		} else {
-			headerRow[i] = name
-		}
-	}
-	tb.Header(headerRow...)
+	tb.Header(dimHeader(useColor, "ID", "NAME", "KIND", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "LABELS")...)
 
 	treeRows := sortChildrenAsTree(children)
 	if flat {
@@ -155,6 +152,81 @@ func defaultDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// dimHeader renders the shared header-cell convention: names dimmed when
+// color is on, plain otherwise.
+func dimHeader(useColor bool, names ...string) []string {
+	out := make([]string, len(names))
+	for i, name := range names {
+		if useColor {
+			out[i] = dim(name)
+		} else {
+			out[i] = name
+		}
+	}
+	return out
+}
+
+// childRows adapts a ChildSummary slice to writeJSONL's []any.
+func childRows(children []protocol.ChildSummary) []any {
+	rows := make([]any, len(children))
+	for i := range children {
+		rows[i] = children[i]
+	}
+	return rows
+}
+
+// rawRows adapts already-encoded JSON objects to writeJSONL's []any, so a
+// payload's exact field names survive the round trip untouched.
+func rawRows(rows []json.RawMessage) []any {
+	out := make([]any, len(rows))
+	for i, r := range rows {
+		out[i] = r
+	}
+	return out
+}
+
+// decodeChildrenPayload reports whether data carries a children list — the
+// ctrl_list envelope {"children":[...]} or a bare array — and returns the
+// children. A pointer is used for the envelope so an object with no children
+// key (any other verb's payload) reads as absent rather than as an empty
+// list.
+func decodeChildrenPayload(data []byte) ([]protocol.ChildSummary, bool) {
+	var env struct {
+		Children *[]protocol.ChildSummary `json:"children"`
+	}
+	if err := json.Unmarshal(data, &env); err == nil && env.Children != nil {
+		return *env.Children, true
+	}
+	var arr []protocol.ChildSummary
+	if err := json.Unmarshal(data, &arr); err == nil && arr != nil {
+		return arr, true
+	}
+	return nil, false
+}
+
+// formatUnixMilli renders a wire millisecond timestamp the way the list
+// table's STARTED column does, or "-" when absent.
+func formatUnixMilli(ms int64) string {
+	if ms <= 0 {
+		return "-"
+	}
+	return time.UnixMilli(ms).Format("2006-01-02 15:04")
+}
+
+// humanBytes renders a byte count in binary units for status display.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // kindOrDefault names a child's kind for display, defaulting an empty Kind
