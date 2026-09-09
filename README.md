@@ -1125,6 +1125,21 @@ cannot verify, so it compacts at the wrong point) and strips inherited
 `ANTHROPIC_*` variables, so launching a session from inside one does not land
 its turns on the outer session's captured conversation.
 
+Every proxied session also gets rafiki's MCP agent-control surface injected:
+the launcher appends an `--mcp-config=<json>` argument pointing a server
+named `rafiki` at the proxy's `/mcp` mount, and carries the credential as a
+`RAFIKI_MCP_TOKEN` environment variable that the config references as a
+`Bearer ${RAFIKI_MCP_TOKEN}` placeholder — Claude Code expands it at connect
+time, so the token never appears in argv (which is world-readable via `ps`).
+The injection is gated on the proxy URL being set, not on `--model`, so a
+bare `rafiki claude` gets it too. `RAFIKI_MCP_TOKEN` is stripped from the
+inherited environment before being set, so a session launched from inside
+another proxied session cannot adopt the outer session's MCP bearer. The
+token `rafiki claude` holds is a real user token, so the surface serves the
+full twelve-tool agent-control set under the `mcp__rafiki__*` prefix;
+daemon-spawned `--kind claude` children carry the per-boot child secret
+instead, whose credential the same gate answers with a toolless server.
+
 Any other Anthropic-protocol client works the same way via
 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 
