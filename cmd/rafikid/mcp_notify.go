@@ -16,7 +16,8 @@ import (
 //
 // A user may have several sessions (several clients, several tabs); every one
 // gets the notification. Sessions are in-memory and are not restored across a
-// daemon restart — a client that reconnects re-subscribes by initializing.
+// daemon restart — a client that reconnects re-registers by initializing or
+// by its first tool call, whichever handshake it speaks.
 type mcpSessions struct {
 	mu sync.Mutex
 	// byUID holds one set per user id. The inner map is deleted when it
@@ -28,20 +29,25 @@ func newMCPSessions() *mcpSessions {
 	return &mcpSessions{byUID: make(map[string]map[*mcp.ServerSession]struct{})}
 }
 
-// Add registers one live session under userID.
+// Add registers one live session under userID and reports whether it was
+// newly added; false means the session was already registered and nothing
+// changed.
 //
-// The registration point is settlementHooksFor (cmd/rafikid/mcp_face.go): the
-// SDK's InitializedHandler fires when the client completes its handshake with
-// notifications/initialized, and the hook — which closes over the caller's
-// owner, never a bridge signature — calls Add with the session it carries.
-// A client that stops before that notification is never registered.
+// The registration points are settlementHooksFor and
+// settlementRegistrationFor (both cmd/rafikid/mcp_face.go): the SDK's
+// InitializedHandler fires when a legacy-handshake client completes its
+// initialize with notifications/initialized, and the bridge's tool-call hook
+// fires for every client, which is the only registration a go-sdk v1.7.0+
+// client gets — its SEP-2575 discover handshake never sends that
+// notification. A client that does neither is never registered.
 //
-// Removal is NOT hook-driven: v1.6.1's ServerOptions carries no session-closed
-// hook, so the same hook starts one per-session goroutine on Wait, which
+// Removal is NOT hook-driven: the SDK's ServerOptions carries no session-closed
+// hook, so the registering hook starts one per-session goroutine on Wait, which
 // returns when the session's connection closes (client DELETE, handler
-// timeout, teardown) and calls Remove. Add is idempotent per session: the SDK
-// refuses a duplicate notifications/initialized, so the hook fires once.
-func (m *mcpSessions) Add(userID string, ss *mcp.ServerSession) {
+// timeout, teardown) and calls Remove. Add's report is what keeps that to one
+// goroutine per session: a session reachable through both hooks spawns it
+// exactly once.
+func (m *mcpSessions) Add(userID string, ss *mcp.ServerSession) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	set, ok := m.byUID[userID]
@@ -49,7 +55,11 @@ func (m *mcpSessions) Add(userID string, ss *mcp.ServerSession) {
 		set = make(map[*mcp.ServerSession]struct{})
 		m.byUID[userID] = set
 	}
+	if _, dup := set[ss]; dup {
+		return false
+	}
 	set[ss] = struct{}{}
+	return true
 }
 
 // Remove drops one session. Removing the last one deletes the user's entry.
@@ -111,6 +121,9 @@ func (m *mcpSessions) Notify(ctx context.Context, userID, message string) {
 		wg.Add(1)
 		go func(ss *mcp.ServerSession) {
 			defer wg.Done()
+			//nolint:staticcheck // the logging push is the only server-initiated
+			// channel ServerSession offers; SEP-2577 deprecates the feature with
+			// a >=12-month window, and there is no successor to move to yet.
 			err := ss.Log(sendCtx, &mcp.LoggingMessageParams{
 				Level:  "info",
 				Logger: "rafiki",
@@ -134,10 +147,10 @@ func (m *mcpSessions) Notify(ctx context.Context, userID, message string) {
 
 // mcpSettlements is the daemon-wide registry of live MCP sessions, keyed by
 // user id. Package-level like mcpBlueprints, because its two touchpoints —
-// settlementHooksFor (cmd/rafikid/mcp_face.go), which registers sessions from
-// the SDK's InitializedHandler and removes them from a per-session Wait
-// goroutine, and the settlement source that fans out below — have no shared
-// owner. Tests swap it wholesale.
+// cmd/rafikid/mcp_face.go's registration hooks, which add sessions from the
+// SDK's InitializedHandler and the bridge's tool-call hook and remove them
+// from a per-session Wait goroutine, and the settlement source that fans out
+// below — have no shared owner. Tests swap it wholesale.
 var mcpSettlements = newMCPSessions()
 
 // notifyMCPSettled pushes the settlement fragment to every live MCP session

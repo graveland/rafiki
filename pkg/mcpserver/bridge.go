@@ -33,15 +33,26 @@ type Options struct {
 	// caller as a tool error, not as a transport error.
 	ResolveConversationID func(context.Context) (string, error)
 
+	// RegisterSession, when non-nil, is invoked with the calling session on
+	// every tool call. The go-sdk's SEP-2575 discover handshake (v1.7.0+)
+	// never sends notifications/initialized, so an InitializedHandler alone
+	// sees only legacy-handshake clients; the first tool call is the earliest
+	// hook both handshakes share, and a session that never calls a tool can
+	// never produce the events a per-session hook would serve. The callback
+	// must be idempotent per session: it fires on every call, not just the
+	// first. The argument is session identity only — no user id, username or
+	// request may cross this boundary; whatever the session means to the
+	// caller is closed over in the callback, the same rule ServerOptions
+	// documents.
+	RegisterSession func(*mcp.ServerSession)
+
 	// ServerOptions, when non-nil, is passed straight through to
 	// mcp.NewServer, so the caller can attach server-side SDK hooks (e.g. an
 	// InitializedHandler) without this bridge growing a field per hook. The
 	// bridge never looks inside it: nothing here may carry a user id, a
 	// username or an *http.Request — whatever identity a hook needs is closed
 	// over by the caller that built the options, keeping this package
-	// identity-free. Only InitializedHandler is exercised today; any future
-	// hook that would give the bridge an identity-bearing signature is a
-	// design change, not an option.
+	// identity-free.
 	ServerOptions *mcp.ServerOptions
 
 	Version string
@@ -72,7 +83,7 @@ func New(opts Options) *mcp.Server {
 			Name:        tool.Name(),
 			Description: desc,
 			InputSchema: schema,
-		}, handlerFor(tool, opts.ResolveConversationID))
+		}, handlerFor(tool, opts.ResolveConversationID, opts.RegisterSession))
 	}
 	return srv
 }
@@ -99,8 +110,11 @@ func acceptableSchema(t tools.Tool) (json.RawMessage, bool) {
 // an isError result carrying the diagnostic, with a nil Go error — never a
 // JSON-RPC transport error, and never a successful result carrying the
 // diagnostic as text.
-func handlerFor(t tools.Tool, resolve func(context.Context) (string, error)) mcp.ToolHandler {
+func handlerFor(t tools.Tool, resolve func(context.Context) (string, error), register func(*mcp.ServerSession)) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if register != nil && req != nil && req.Session != nil {
+			register(req.Session)
+		}
 		if resolve != nil {
 			id, err := resolve(ctx)
 			if err != nil {

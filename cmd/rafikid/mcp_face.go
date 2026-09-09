@@ -194,8 +194,9 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		ResolveConversationID: func(ctx context.Context) (string, error) {
 			return f.ledger.ConversationID(ctx, owner)
 		},
-		ServerOptions: settlementHooksFor(owner),
-		Version:       f.version,
+		ServerOptions:   settlementHooksFor(owner),
+		RegisterSession: settlementRegistrationFor(owner),
+		Version:         f.version,
 	})
 }
 
@@ -365,15 +366,54 @@ var mcpToolDescriptions = func() map[string]string {
 	}
 }()
 
+// registerSettlementSession adds one session to the settlement registry under
+// userID and, when the session was newly added, starts the per-session Wait
+// goroutine that removes it when the connection closes. Add reports whether
+// it inserted, so a session reachable from two registration points —
+// InitializedHandler for legacy-handshake clients, the bridge's tool-call
+// hook for SEP-2575 clients — spawns exactly one goroutine.
+func registerSettlementSession(userID string, ss *mcp.ServerSession) {
+	if ss == nil || userID == "" {
+		return
+	}
+	if !mcpSettlements.Add(userID, ss) {
+		return
+	}
+	go func() {
+		_ = ss.Wait()
+		mcpSettlements.Remove(userID, ss)
+	}()
+}
+
+// settlementRegistrationFor builds the bridge's RegisterSession hook for one
+// caller, the owner closed over exactly as settlementHooksFor closes over it.
+// It exists because a go-sdk v1.7.0+ client completes its handshake through
+// the SEP-2575 server/discover probe and never sends
+// notifications/initialized, so the face's InitializedHandler never fires for
+// it. A tool call is the earliest hook both handshakes share, and the only
+// sessions that can produce a settlement — ones that spawn agents — call
+// tools, so registration on first tool call strictly precedes any settlement
+// this session could receive.
+func settlementRegistrationFor(owner users.Identity) func(*mcp.ServerSession) {
+	return func(ss *mcp.ServerSession) {
+		registerSettlementSession(owner.UserID, ss)
+	}
+}
+
 // settlementHooksFor builds the server-side SDK options that register and
 // unregister one caller's MCP session with the settlement fan-out. The owner
 // rides the closure, never a hook signature: the bridge carries these options
 // through untouched, so no user id reaches pkg/mcpserver.
 //
-// Registration fires on notifications/initialized, which the SDK's own
-// clients send as the last step of their handshake; a client that stops
-// before that is not registered, and the session is never offered a
-// notification.
+// Registration fires on notifications/initialized, which a legacy-handshake
+// client sends as the last step of its initialize — the go-sdk did so
+// unconditionally through v1.6.1, and non-SDK clients following the base
+// spec still do. A go-sdk v1.7.0+ client negotiates through SEP-2575
+// server/discover instead and never sends that notification, so this hook
+// alone no longer covers every client: settlementRegistrationFor registers
+// those on their first tool call. A client that does neither — no
+// notifications/initialized, no tool call — is not registered, and the
+// session is never offered a notification.
 //
 // v1.6.1 has no session-closed hook, so removal rides a per-session goroutine
 // on Wait, which returns when the session's connection closes (client DELETE,
@@ -395,12 +435,7 @@ func settlementHooksFor(owner users.Identity) *mcp.ServerOptions {
 			if req == nil || req.Session == nil {
 				return
 			}
-			ss := req.Session
-			mcpSettlements.Add(owner.UserID, ss)
-			go func() {
-				_ = ss.Wait()
-				mcpSettlements.Remove(owner.UserID, ss)
-			}()
+			registerSettlementSession(owner.UserID, req.Session)
 		},
 	}
 }

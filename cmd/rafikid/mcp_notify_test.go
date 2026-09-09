@@ -18,6 +18,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 const mcpNotifyWait = 2 * time.Second
@@ -50,6 +51,8 @@ func newSettleSession(t *testing.T, level string) *settleSession {
 	client := mcp.NewClient(
 		&mcp.Implementation{Name: "mcp-test-client", Version: "test"},
 		&mcp.ClientOptions{
+			//nolint:staticcheck // mirrors the production push, which rides the
+			// deprecated logging feature for lack of any successor channel.
 			LoggingMessageHandler: func(_ context.Context, r *mcp.LoggingMessageRequest) {
 				rec.got <- fmt.Sprint(r.Params.Data)
 			},
@@ -59,6 +62,7 @@ func newSettleSession(t *testing.T, level string) *settleSession {
 		t.Fatal(err)
 	}
 	if level != "" {
+		//nolint:staticcheck // deprecated logging feature, as above.
 		if err := cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: mcp.LoggingLevel(level)}); err != nil {
 			t.Fatal(err)
 		}
@@ -454,10 +458,17 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 // TestMCPFaceWiresSessionsIntoTheSettlementFanOut is the end-to-end
 // registration proof: a session initialized against the FACE's own
 // getServer — owner on the context the way UserTokenAuth leaves it — must
-// land in the settlement registry via the bridge's ServerOptions escape
-// hatch, receive a real settlement, and leave the registry when its
-// connection closes. The eight TestMCPNotify tests cover the fan-out
-// mechanics; this covers the wiring.
+// land in the settlement registry via the bridge's escape hatches, receive a
+// real settlement, and leave the registry when its connection closes. The
+// eight TestMCPNotify tests cover the fan-out mechanics; this covers the
+// wiring.
+//
+// The go-sdk v1.7.0+ client used here negotiates through SEP-2575
+// server/discover and never sends notifications/initialized, so the face's
+// InitializedHandler never fires for it: registration must come from the
+// bridge's RegisterSession hook, driven by the first tool call below. The
+// legacy path is pinned separately by
+// TestMCPFaceInitializedHandlerRegistersALegacySession.
 func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 	face, _ := mcpFaceFixture(t)
 	prev := mcpSettlements
@@ -480,15 +491,22 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 	client := mcp.NewClient(
 		&mcp.Implementation{Name: "mcp-wiring-test", Version: "0"},
 		&mcp.ClientOptions{
+			//nolint:staticcheck // deprecated logging feature, as newSettleSession.
 			LoggingMessageHandler: func(_ context.Context, r *mcp.LoggingMessageRequest) {
 				got <- fmt.Sprint(r.Params.Data)
 			},
 		})
-	cs, err := client.Connect(context.Background(), ct, nil) // fires notifications/initialized → Add
+	cs, err := client.Connect(context.Background(), ct, nil) // discover handshake: no notifications/initialized
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
+
+	// The discover handshake registers nothing; the session joins the
+	// settlement registry on its first tool call.
+	if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "agent_list"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Registration happens on the server's handling goroutine; await it with
 	// a bounded poll, never a bare check.
@@ -506,7 +524,7 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if err := cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: "info"}); err != nil {
+	if err := cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: "info"}); err != nil { //nolint:staticcheck // deprecated logging feature, as newSettleSession.
 		t.Fatal(err)
 	}
 	ctrl := face.controller()
@@ -530,6 +548,69 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 	for {
 		reg.mu.Lock()
 		registered := len(reg.byUID["u-op"])
+		reg.mu.Unlock()
+		if registered == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a closed session was never removed from the settlement registry")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestMCPFaceInitializedHandlerRegistersALegacySession pins the other
+// registration point: a legacy-handshake client (an older go-sdk, or any
+// implementation following the base spec) ends its initialize with
+// notifications/initialized, which the go-sdk v1.7.0 test client above can no
+// longer send — its Connect negotiates through SEP-2575 server/discover and
+// the protocol version that would force the legacy path is unexported. The
+// hook the face ships in ServerOptions is therefore driven directly, with a
+// real session from srv.Connect, and must add it and remove it on close.
+func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	prev := mcpSettlements
+	reg := newMCPSessions()
+	mcpSettlements = reg
+	t.Cleanup(func() { mcpSettlements = prev })
+
+	srv := face.getServer(mcpRequestFor("u-op"))
+	if srv == nil {
+		t.Fatal("getServer returned nil for an authenticated user")
+	}
+	st, _ := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(context.Background(), st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+
+	hooks := settlementHooksFor(users.Identity{UserID: "u-op", Username: "u-op"})
+	hooks.InitializedHandler(context.Background(), &mcp.InitializedRequest{Session: ss})
+
+	reg.mu.Lock()
+	registered := len(reg.byUID["u-op"])
+	reg.mu.Unlock()
+	if registered != 1 {
+		t.Fatalf("the initialized handler must register the session; registered %d", registered)
+	}
+
+	// A second registration — the bridge's tool-call hook also fires for a
+	// legacy client — must not double-book it or spawn a second Wait
+	// goroutine. The registry's report is what dedupes; assert the set.
+	settlementRegistrationFor(users.Identity{UserID: "u-op", Username: "u-op"})(ss)
+	reg.mu.Lock()
+	registered = len(reg.byUID["u-op"])
+	reg.mu.Unlock()
+	if registered != 1 {
+		t.Fatalf("a repeat registration must be a no-op; registered %d", registered)
+	}
+
+	_ = ss.Close()
+	deadline := time.Now().Add(mcpNotifyWait)
+	for {
+		reg.mu.Lock()
+		registered = len(reg.byUID["u-op"])
 		reg.mu.Unlock()
 		if registered == 0 {
 			break

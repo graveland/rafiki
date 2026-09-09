@@ -482,12 +482,19 @@ level, never something to wait on. Sessions are in-memory and per-process:
 none survive a daemon restart, a reconnecting client re-initializes, and the
 registry (`mcpSessions`, `cmd/rafikid/mcp_notify.go`) holds each user's live
 sessions, snapping them out under a lock released before any send so one
-stalled client cannot wedge another user's fan-out. **A session registers
-when the client sends `notifications/initialized`**: the face wires the SDK's
-`InitializedHandler` through the bridge's `ServerOptions` escape hatch
-(`mcpserver.Options`, which stays identity-free — the owner rides the face's
-closure, never a bridge signature), and removal rides a per-session `Wait`
-goroutine because v1.6.1 has no session-closed hook. The face's
+stalled client cannot wedge another user's fan-out. **A session registers on
+its first tool call, and — for a legacy-handshake client — when it sends
+`notifications/initialized`**: the face wires the SDK's `InitializedHandler`
+through the bridge's `ServerOptions` escape hatch and the bridge's
+`RegisterSession` hook through `mcpserver.Options` (both stay identity-free —
+the owner rides the face's closure, never a bridge signature). The second
+registration point exists because a go-sdk v1.7.0+ client negotiates through
+the SEP-2575 `server/discover` probe and never sends
+`notifications/initialized`, so the initialized hook alone no longer covers
+every client; a tool call is the earliest hook both handshakes share, and a
+session that never calls a tool can never produce a settlement to receive. A
+client that does neither is never registered. Removal rides a per-session
+`Wait` goroutine because the SDK has no session-closed hook. The face's
 `Mcp-Session-Id` map and this pointer registry are two keyed worlds that
 never meet; the cost is one-directional — a DELETE unbinds the sid
 immediately while the pointer lingers until Wait returns, and a Log to a

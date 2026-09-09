@@ -267,7 +267,7 @@ func TestBridgeAbsentArgumentsBecomeEmptyObject(t *testing.T) {
 		got = string(input)
 		return tools.NewTextResult("ok"), nil
 	}}
-	handler := handlerFor(probe, nil)
+	handler := handlerFor(probe, nil, nil)
 	if _, err := handler(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "probe"}}); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -285,5 +285,44 @@ func TestBridgeAbsentArgumentsBecomeEmptyObject(t *testing.T) {
 	}
 	if passthrough != `{"k":"v"}` {
 		t.Fatalf("tool received %q, want the caller's arguments verbatim", passthrough)
+	}
+}
+
+// TestBridgeRegisterSessionFiresWithTheCallingSession pins the SEP-2575
+// registration seam: the go-sdk's discover handshake (v1.7.0+) never sends
+// notifications/initialized, so the caller's only server-side sight of a
+// modern session is the tool request it sends. The hook must receive that
+// session on every call — idempotency is the caller's problem, not the
+// bridge's — and a nil Options.RegisterSession must leave the handler
+// working.
+func TestBridgeRegisterSessionFiresWithTheCallingSession(t *testing.T) {
+	probe := &fakeTool{name: "probe", desc: "noop", schema: objSchema}
+
+	var registered []*mcp.ServerSession
+	opts := Options{
+		Tools: []tools.Tool{probe},
+		RegisterSession: func(ss *mcp.ServerSession) {
+			registered = append(registered, ss)
+		},
+	}
+	cs := bridgeSession(t, opts)
+	for range 2 {
+		if _, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "probe"}); err != nil {
+			t.Fatalf("call: %v", err)
+		}
+	}
+	// Both calls must have seen the SDK's own session — the same one twice,
+	// since one client session drives both calls.
+	if len(registered) != 2 {
+		t.Fatalf("RegisterSession fired %d times over two calls, want 2", len(registered))
+	}
+	if registered[0] == nil || registered[0] != registered[1] {
+		t.Fatal("RegisterSession must receive the calling session, consistently")
+	}
+
+	// Nil RegisterSession must not perturb the tool path.
+	plain := bridgeSession(t, Options{Tools: []tools.Tool{probe}})
+	if _, err := plain.CallTool(t.Context(), &mcp.CallToolParams{Name: "probe"}); err != nil {
+		t.Fatalf("call with no hook: %v", err)
 	}
 }
