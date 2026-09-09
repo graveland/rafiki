@@ -1360,6 +1360,25 @@
   range, since unknowns are admitted by design: a test wanting a zero-match case
   needs an all-priced fixture.
 
+- **The client CLI's output contract is three-way, and the pipe→JSON rule is
+  gone.** `--output auto` (the default; the legacy `table` spelling resolves
+  there too) renders a table on a TTY and a pipe ALIKE — `resolveOutputMode`
+  never probes for a terminal, so a piped consumer wanting JSON must ask for
+  it: `-o json`/`-j` pretty JSON, `-J`/`-o jsonl` one compact record per line
+  with any `{"rows": …}` envelope unwrapped (`writeJSONL`), and `-j -J`
+  together errors with exactly `cannot combine -j and -J`. Failures go to
+  stderr, successes to stdout. `rafikid agent` is NOT on this contract — its
+  `-j`/`-J` still mean indented / compact single-line JSON with the envelope
+  included, and both flags set means indented wins, not an error.
+
+- **All CLI tables render through `pkg/table` (lipgloss v2); go-pretty is
+  removed from go.mod — do not add it back.** One style everywhere:
+  single-line `NormalBorder`, dimmed headers when `Options.Color` is set,
+  `Width 0` on a pipe (every column renders, nothing dropped — callers pass
+  `Drop` if they want a width cap to sacrifice columns). `agentcli.WriteTable`
+  wraps it for `rafikid agent`'s tables; `pkg/conversationview` and
+  `cmd/rafiki`'s list-shaped verbs call `table.New` directly.
+
 - **`controllerSpawner.Models` reads `ListModelRows`, never `ListModels`.** The
   row path is served from the already-warm routing catalog, carries
   price/context/scores, and applies `filterRowsForKind` -- so a `claude` child is

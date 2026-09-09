@@ -13,15 +13,26 @@ of the human-readable table/markdown render.
 `stats`, `search`, and `export` have a socket-side twin in `rafiki
 conversations <verb>`, which needs no DB credentials of its own. The two are
 the same query — both reach `pkg/insights` through `local.Backend`, with no
-`Pricer` on either side, so `cost_usd` is 0 for both — and they now share the
-render path as well: every result goes through `agentcli.Render` into the same
-`RenderStats`/`RenderSearch`/`RenderTranscriptMD`. Only the transport differs
-(pool vs. daemon socket) and, in the JSON arm, how the mode is selected: `-j`/
-`-J` here, the global `--output` flag there. The JSON *payload* matches too —
-`ctrl_conversation_search` puts its rows in a `{"rows": [...]}` envelope on the
-wire (control-protocol.md §6.18), and the client unwraps it before printing, so
-`rafiki conversations search -o json | jq '.[]'` and `rafikid agent search -J |
-jq '.[]'` iterate the same thing. `analyze` and `findings` stay
+`Pricer` on either side, so `cost_usd` is 0 for both — and every table on
+both sides draws through the shared `pkg/table` renderer (lipgloss v2): one
+style everywhere, single-line borders, dimmed headers when color is on, and
+no width cap on a pipe, so no column is ever dropped. `rafikid agent` renders
+through `pkg/agentcli` (`agentcli.Render` into `RenderStats`/`RenderSearch`/
+`RenderTranscriptMD`); the socket twin renders through its pgx-free sibling
+`pkg/conversationview`, extracted from `agentcli` so `rafiki` links no pgx.
+
+The two differ in transport and in how the output mode is selected. Here it
+is `-j` (indented JSON) / `-J` (compact single-line JSON, envelope included);
+there it is the global `--output auto|json|jsonl` flag with `-j`/`-J`
+shorthands — **a different contract**: table on a TTY and a pipe alike (no
+TTY probe, no pipe→JSON rule), `-o json`/`-j` pretty JSON, and `-J`/`-o
+jsonl` one compact record per line with any `{"rows": …}` envelope unwrapped
+(`-j -J` together errors). The JSON *payload* still matches —
+`ctrl_conversation_search` puts its rows in a `{"rows": [...]}` envelope on
+the wire (control-protocol.md §6.18), and the client unwraps it before
+printing, so `rafiki conversations search -o json | jq '.[]'` and `rafikid
+agent search -J | jq '.[]'` iterate the same thing, as does `rafiki
+conversations search -J`. `analyze` and `findings` stay
 `rafikid`-only — they have no wire verbs, `analyze` needs an LLM client and
 writes to the DB, and `rafiki` never holds a DSN.
 
