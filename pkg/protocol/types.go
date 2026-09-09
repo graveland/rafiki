@@ -646,6 +646,10 @@ type GetStreamsResponseData struct {
 // ForgetAllExitedResponseData is the data payload for ctrl_forget_all_exited responses.
 type ForgetAllExitedResponseData struct {
 	Count int `json:"count"`
+	// Children lists the ids of the children that were closed, in close
+	// order, so a consumer can record exactly what was closed rather than
+	// inferring it. Empty when Count is zero.
+	Children []string `json:"children,omitempty"`
 }
 
 // SearchHit is one content match in a ctrl_search response (§6.15).

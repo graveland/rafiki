@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -701,5 +703,86 @@ func TestResolveExecutor(t *testing.T) {
 				t.Fatalf("got ref=%q selector=%q, want ref=%q selector=%q", gotRef, gotSel, tc.wantRef, tc.wantSelector)
 			}
 		})
+	}
+}
+
+func TestCreateTextFields(t *testing.T) {
+	data := protocol.SpawnResponseData{
+		ChildID:     "c_123",
+		SessionID:   "s_456",
+		SessionFile: "/sessions/c_123.jsonl",
+		Model:       "anthropic/claude-sonnet-4-5",
+	}
+	var buf bytes.Buffer
+	if err := renderCreateSummary(&buf, data, outputTable); err != nil {
+		t.Fatalf("renderCreateSummary: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"childId: c_123\n",
+		"sessionId: s_456\n",
+		"sessionFile: /sessions/c_123.jsonl\n",
+		"model: anthropic/claude-sonnet-4-5\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("text output missing %q; got:\n%s", want, out)
+		}
+	}
+
+	// Empty fields are skipped, and the zero-valued stalled flag is not news.
+	var empty bytes.Buffer
+	if err := renderCreateSummary(&empty, protocol.SpawnResponseData{ChildID: "c_1", Stalled: false}, outputTable); err != nil {
+		t.Fatalf("renderCreateSummary empty: %v", err)
+	}
+	if empty.String() != "childId: c_1\n" {
+		t.Errorf("empty-field output = %q, want only childId", empty.String())
+	}
+
+	// stalled is reported when it actually happened.
+	var stalled bytes.Buffer
+	if err := renderCreateSummary(&stalled, protocol.SpawnResponseData{ChildID: "c_1", Stalled: true}, outputTable); err != nil {
+		t.Fatalf("renderCreateSummary stalled: %v", err)
+	}
+	if !strings.Contains(stalled.String(), "stalled: true\n") {
+		t.Errorf("stalled output missing the flag; got:\n%s", stalled.String())
+	}
+}
+
+// The detached create JSON is unmarshalled by test/integration TODAY; its
+// shape must be byte-identical to the encoding the detached branch used
+// before the output-mode conversion.
+func TestCreateJSONShapeUnchanged(t *testing.T) {
+	data := protocol.SpawnResponseData{
+		ChildID:     "c_123",
+		SessionID:   "s_456",
+		SessionFile: "/sessions/c_123.jsonl",
+		Model:       "m",
+		Stalled:     true,
+	}
+	var buf bytes.Buffer
+	if err := renderCreateSummary(&buf, data, outputJSON); err != nil {
+		t.Fatalf("renderCreateSummary: %v", err)
+	}
+	var want bytes.Buffer
+	enc := json.NewEncoder(&want)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(data); err != nil {
+		t.Fatalf("encode reference: %v", err)
+	}
+	if buf.String() != want.String() {
+		t.Errorf("json output changed:\nold: %s\nnew: %s", want.String(), buf.String())
+	}
+}
+
+func TestCreateJSONLOneCompactLine(t *testing.T) {
+	data := protocol.SpawnResponseData{ChildID: "c_123", Model: "m"}
+	var buf bytes.Buffer
+	if err := renderCreateSummary(&buf, data, outputJSONL); err != nil {
+		t.Fatalf("renderCreateSummary: %v", err)
+	}
+	// SpawnResponseData.Stalled has no omitempty, so the record always
+	// carries "stalled":false — JSONL is the record as-is.
+	if buf.String() != `{"childId":"c_123","model":"m","stalled":false}`+"\n" {
+		t.Errorf("jsonl output = %q, want one compact line", buf.String())
 	}
 }

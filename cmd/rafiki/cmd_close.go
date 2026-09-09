@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -72,6 +73,12 @@ func runClose(cmd *cobra.Command, args []string) error {
 	allExited, _ := cmd.Flags().GetBool("all-exited")
 
 	if allExited {
+		// Resolve the mode before sending the request: -j and -J together is a
+		// user-input error and must not close anything first.
+		mode, _, err := outputOpts(cmd)
+		if err != nil {
+			return err
+		}
 		olderThan, _ := cmd.Flags().GetDuration("older-than")
 		req := protocol.ForgetAllExitedRequest{
 			Type: protocol.TypeCtrlForgetAllExited,
@@ -87,9 +94,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("ctrl_forget_all_exited: %s", client.FormatError(resp))
 		}
 		dropChildCompletionCache(cmd)
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(json.RawMessage(resp.Data))
+		return renderCloseAllExited(os.Stdout, json.RawMessage(resp.Data), mode)
 	}
 
 	st, _ := cmd.Flags().GetDuration("shutdown-timeout")
@@ -115,6 +120,41 @@ func runClose(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d target(s) failed", failures)
 	}
 	return nil
+}
+
+// renderCloseAllExited writes the ctrl_forget_all_exited result in the
+// requested mode. JSON stays the raw payload passthrough it has always been;
+// JSONL writes one closed child id per line (the response's children list);
+// text reports the count. The per-target `closed <id>` path lives in runClose
+// and is deliberately untouched here.
+func renderCloseAllExited(w io.Writer, raw json.RawMessage, mode outputMode) error {
+	switch mode {
+	case outputJSON:
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(raw)
+	case outputJSONL:
+		var data protocol.ForgetAllExitedResponseData
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return fmt.Errorf("decode close response: %w", err)
+		}
+		rows := make([]any, 0, len(data.Children))
+		for _, id := range data.Children {
+			rows = append(rows, id)
+		}
+		return writeJSONL(w, rows)
+	default:
+		var data protocol.ForgetAllExitedResponseData
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return fmt.Errorf("decode close response: %w", err)
+		}
+		if data.Count == 0 {
+			_, err := fmt.Fprintln(w, "no exited children to close")
+			return err
+		}
+		_, err := fmt.Fprintf(w, "closed %d exited children\n", data.Count)
+		return err
+	}
 }
 
 // closeChild kills childID if it is still running — ignoring the "already

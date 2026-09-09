@@ -43,7 +43,7 @@ type fakeController struct {
 	resumeFn                func(context.Context, string, string) (control.SpawnResult, error)
 	killFn                  func(context.Context, string, int64, int64) (control.KillResult, error)
 	forgetFn                func(string) error
-	forgetAllExitedFn       func(int64) (int, error)
+	forgetAllExitedFn       func(int64) ([]string, error)
 	sendFn                  func(string, json.RawMessage) error
 	userCreateFn            func(context.Context, string) (protocol.UserCreateResponseData, error)
 	countActiveFn           func(context.Context) (int, error)
@@ -177,11 +177,11 @@ func (f *fakeController) Close(childID string) error {
 	return nil
 }
 
-func (f *fakeController) CloseAllExited(olderThanMs int64) (int, error) {
+func (f *fakeController) CloseAllExited(olderThanMs int64) ([]string, error) {
 	if f.forgetAllExitedFn != nil {
 		return f.forgetAllExitedFn(olderThanMs)
 	}
-	return 0, nil
+	return nil, nil
 }
 
 func (f *fakeController) Send(childID string, frame json.RawMessage) error {
@@ -1387,11 +1387,11 @@ func TestDispatch_Forget_MissingChildID(t *testing.T) {
 
 func TestDispatch_ForgetAllExited_Success(t *testing.T) {
 	c := &fakeController{
-		forgetAllExitedFn: func(olderThanMs int64) (int, error) {
+		forgetAllExitedFn: func(olderThanMs int64) ([]string, error) {
 			if olderThanMs != 3600000 {
-				return 0, errors.New("wrong age filter")
+				return nil, errors.New("wrong age filter")
 			}
-			return 5, nil
+			return []string{"c_1", "c_2", "c_3", "c_4", "c_5"}, nil
 		},
 	}
 	d := control.NewDispatch(c)
@@ -1405,15 +1405,18 @@ func TestDispatch_ForgetAllExited_Success(t *testing.T) {
 	if data.Count != 5 {
 		t.Errorf("count: %d", data.Count)
 	}
+	if len(data.Children) != 5 || data.Children[0] != "c_1" {
+		t.Errorf("children: %v", data.Children)
+	}
 }
 
 func TestDispatch_ForgetAllExited_ZeroAge(t *testing.T) {
 	// olderThanMs=0 means forget all exited.
 	var captured int64 = -1
 	c := &fakeController{
-		forgetAllExitedFn: func(olderThanMs int64) (int, error) {
+		forgetAllExitedFn: func(olderThanMs int64) ([]string, error) {
 			captured = olderThanMs
-			return 0, nil
+			return nil, nil
 		},
 	}
 	d := control.NewDispatch(c)

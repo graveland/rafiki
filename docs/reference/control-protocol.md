@@ -1286,7 +1286,9 @@ Only valid in `exited` status. Errors: `not_found`, `not_exited`.
 ```
 
 Response includes `{ "count": N }` indicating how many entries were
-removed.
+removed, plus `{ "children": ["c_…", …] }` — the ids of the closed children
+in close order (omitted when the count is zero). `rafiki close --all-exited
+-J` writes one id per line from that list.
 
 ### 6.15 `ctrl_search`
 

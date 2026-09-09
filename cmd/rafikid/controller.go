@@ -2266,10 +2266,10 @@ func (c *Controller) deleteSpillDir(childID string) error {
 	return nil
 }
 
-func (c *Controller) CloseAllExited(olderThanMs int64) (int, error) {
+func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 	snaps := c.st.FindByStatus(protocol.StatusExited)
 	now := time.Now().UnixMilli()
-	count := 0
+	var closed []string
 	for _, s := range snaps {
 		if olderThanMs > 0 && !s.ExitedAt.IsZero() {
 			age := now - s.ExitedAt.UnixMilli()
@@ -2306,9 +2306,9 @@ func (c *Controller) CloseAllExited(olderThanMs int64) (int, error) {
 				slog.Warn("delete spill dir", "childId", s.ChildID, "error", err)
 			}
 		}
-		count++
+		closed = append(closed, s.ChildID)
 	}
-	return count, nil
+	return closed, nil
 }
 
 // SetLabels mutates labels on the named child. Rejects keys with the rafiki/

@@ -414,12 +414,12 @@ func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 		ExitedAt:     now,
 	})
 
-	n, err := ctrl.CloseAllExited(0)
+	closed, err := ctrl.CloseAllExited(0)
 	if err != nil {
 		t.Fatalf("ForgetAllExited: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("ForgetAllExited count = %d, want 1", n)
+	if len(closed) != 1 {
+		t.Fatalf("ForgetAllExited count = %d, want 1", len(closed))
 	}
 
 	if _, err := os.Stat(spillDir); !os.IsNotExist(err) {

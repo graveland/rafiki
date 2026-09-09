@@ -119,7 +119,9 @@ type Controller interface {
 	// TypeCtrlForget: this protocol is frozen and its spelling is not worth a
 	// compatibility shim to correct.
 	Close(childID string) error
-	CloseAllExited(olderThanMs int64) (int, error)
+	// CloseAllExited closes every exited child older than olderThanMs (0 =
+	// all) and returns their ids in close order; the count is len(ids).
+	CloseAllExited(olderThanMs int64) ([]string, error)
 
 	// Frame forwarding.
 	Send(childID string, frame json.RawMessage) error
@@ -790,11 +792,11 @@ func (d *dispatcher) forgetAllExited(frame []byte, id string) []byte {
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlForgetAllExited, id, protocol.ErrInvalidArgs, "malformed request")
 	}
-	count, err := d.c.CloseAllExited(req.OlderThanMs)
+	closed, err := d.c.CloseAllExited(req.OlderThanMs)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlForgetAllExited, id, err, protocol.ErrInternal)
 	}
-	return okResponse(protocol.TypeCtrlForgetAllExited, id, protocol.ForgetAllExitedResponseData{Count: count})
+	return okResponse(protocol.TypeCtrlForgetAllExited, id, protocol.ForgetAllExitedResponseData{Count: len(closed), Children: closed})
 }
 
 // ─── Enumeration handlers ────────────────────────────────────────────────────

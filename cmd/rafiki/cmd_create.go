@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -422,6 +423,13 @@ func collectCallerEnv() map[string]string {
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
+	// Resolve the mode before doing anything: -j and -J together is a
+	// user-input error and must not spawn a child first.
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+
 	c := mustDial(cmd)
 	defer c.Close()
 
@@ -540,9 +548,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	if detached {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(data)
+		return renderCreateSummary(os.Stdout, data, mode)
 	}
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
@@ -552,4 +558,46 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return attachAndDecide(cmd, ep, data.ChildID, killOnExit, keepOnExit)
+}
+
+// renderCreateSummary writes the detached spawn record in the requested mode:
+// pretty JSON (byte-identical to the pre-tables output — test/integration
+// unmarshals it), one compact JSONL line, or one `key: value` line per field
+// the record actually carries, skipping empty ones. A non-detached create
+// attaches instead of printing and is unaffected by the mode.
+func renderCreateSummary(w io.Writer, data protocol.SpawnResponseData, mode outputMode) error {
+	switch mode {
+	case outputJSONL:
+		return writeJSONL(w, []any{data})
+	case outputJSON:
+		return writeJSON(w, data)
+	default:
+		for _, line := range spawnRecordLines(data) {
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// spawnRecordLines renders the record's fields as `key: value` text lines in
+// struct order. A field the record does not carry (json omitempty) or carries
+// empty is skipped — the text view reports what got spawned, nothing else.
+// stalled appears only when true: false is the field's zero value, not news.
+func spawnRecordLines(data protocol.SpawnResponseData) []string {
+	var lines []string
+	add := func(key, value string) {
+		if value != "" {
+			lines = append(lines, key+": "+value)
+		}
+	}
+	add("childId", data.ChildID)
+	add("sessionId", data.SessionID)
+	add("sessionFile", data.SessionFile)
+	add("model", data.Model)
+	if data.Stalled {
+		lines = append(lines, "stalled: true")
+	}
+	return lines
 }
