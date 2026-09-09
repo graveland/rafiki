@@ -418,7 +418,7 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 	if err != nil {
 		return 0, false, fmt.Errorf("resolve horizon: begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var hPrime int
 	if err := tx.QueryRow(ctx,
 		`SELECT coalesce(max(ordinal),-1)+1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid`,
