@@ -652,6 +652,17 @@ func runTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID string, 
 	return next
 }
 
+// appendResponse calls AppendResponseMessage the way the proxy does post-stream
+// (proxy.go: DecomposeRequest's returned ordinal, the canonical assistant
+// message, usage, stop reason). Errors are fatal — the leniency under test lives
+// in a silent DO NOTHING drop, not in an error return.
+func appendResponse(t *testing.T, ctx context.Context, s *CaptureStore, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64) {
+	t.Helper()
+	if err := s.AppendResponseMessage(ctx, convID, turnID, createdAt, ordinal, canonical, in, out, "end_turn"); err != nil {
+		t.Fatalf("AppendResponseMessage: %v", err)
+	}
+}
+
 // requireKindRow reads one message row's kind/role/content/input_tokens.
 func requireKindRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string, ordinal int) (kind, role *string, inTok *int64, content string) {
 	t.Helper()
@@ -909,6 +920,84 @@ func TestDecomposeRequest_ReAnchorRewind(t *testing.T) {
 	if horizon != 3 {
 		t.Fatalf("resume_from_ordinal = %d, want 3 (re-anchor does not persist a new horizon)", horizon)
 	}
+}
+
+// TestDecomposeRequest_RewindResponseCollisionIsDropped pins the response-side
+// consequence of the re-anchor rewind (review finding 1, coordinator-accepted as
+// design §3's documented leniency): a rewound request re-anchors to an earlier
+// horizon, so DecomposeRequest's returned ordinal lands on an already-occupied
+// row, and AppendResponseMessage at that ordinal is silently DROPPED by
+// ON CONFLICT DO NOTHING — no error, no assistant row, occupant's first-seen
+// content wins. runTurn never calls AppendResponseMessage, which is why the
+// other horizon tests cannot see this behavior.
+func TestDecomposeRequest_RewindResponseCollisionIsDropped(t *testing.T) {
+	ctx, pool, s := horizonTestEnv(t)
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
+	if next := runTurn(t, ctx, s, convID, req1, 100, 10); next != 2 {
+		t.Fatalf("turn 1 next ordinal = %d, want 2", next)
+	}
+	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"}]}`)
+	if next := runTurn(t, ctx, s, convID, req2, 110, 11); next != 3 {
+		t.Fatalf("turn 2 next ordinal = %d, want 3", next)
+	}
+	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":"SUMMARY-A"},{"role":"user","content":"q2"}]}`)
+	if next := runTurn(t, ctx, s, convID, req3, 120, 12); next != 5 {
+		t.Fatalf("turn 3 next ordinal = %d, want 5 (boundary at 3 + two messages)", next)
+	}
+
+	// Rewind turn, run manually (not via runTurn) so the response can be
+	// appended against THIS turn's row, the way the proxy does post-stream.
+	req4 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"q1"},{"role":"assistant","content":"r1"}]}`)
+	h := routing.PrefixHash(req4)
+	turnID, createdAt, err := s.InsertTurnIntent(ctx, TurnIntent{
+		ConversationID: convID, Request: req4, PrefixHash: h, Protocol: "anthropic"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	// Re-anchors to 0: messages 0..2 match rows 0..2 positionally, and "r1" at
+	// ordinal 3 DO NOTHINGs against the stored "SUMMARY-A" boundary row. The
+	// returned ordinal 4 is ALREADY occupied by the "q2" row from turn 3.
+	next, err := s.DecomposeRequest(ctx, convID, turnID, createdAt, req4, h)
+	if err != nil {
+		t.Fatalf("DecomposeRequest: %v", err)
+	}
+	if next != 4 {
+		t.Fatalf("rewind turn next ordinal = %d, want 4 (re-anchored to 0 + four messages)", next)
+	}
+	if err := s.CompleteTurn(ctx, TurnResult{
+		TurnID: turnID, CreatedAt: createdAt, Response: []byte(`{"content":[]}`),
+		StopReason: "end_turn", Upstream: "anthropic",
+		InputTokens: 130, OutputTokens: 13,
+	}); err != nil {
+		t.Fatalf("CompleteTurn: %v", err)
+	}
+
+	// The colliding response: reports success while being dropped.
+	canonical := []byte(`{"content":[{"type":"text","text":"rewound assistant reply"}]}`)
+	appendResponse(t, ctx, s, convID, turnID, createdAt, next, canonical, 14, 2)
+
+	// The response row is ABSENT at that ordinal — no assistant row exists
+	// there at all, so the insert was dropped rather than relocated.
+	var present bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1 AND ordinal=$2 AND role='assistant')`,
+		convID, next).Scan(&present); err != nil {
+		t.Fatalf("read response row: %v", err)
+	}
+	if present {
+		t.Fatalf("assistant row present at ordinal %d, want absent (ON CONFLICT DO NOTHING drops the colliding response)", next)
+	}
+	// The pre-existing occupant's first-seen content wins, untouched.
+	_, role, _, content := requireKindRow(t, ctx, pool, convID, next)
+	if role == nil || *role != "user" {
+		t.Fatalf("ordinal %d role = %v, want user (occupant untouched by the collision)", next, role)
+	}
+	requireJSONEqual(t, content, `"q2"`)
 }
 
 // TestDecomposeRequest_BootstrapNoBoundary: a brand-new conversation's first

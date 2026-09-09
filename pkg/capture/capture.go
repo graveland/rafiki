@@ -40,6 +40,11 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 // request-decomposition path's ordinary rows (kind is set only on a
 // compaction-summary boundary row).
 //
+// An ordinal that is already occupied is not an error: both statements' ON
+// CONFLICT (conversation_id, ordinal) DO NOTHING silently drops the new row and
+// the occupant's first-seen content wins — accepted leniency for rewound and
+// short requests (design §3); capture is best-effort.
+//
 // A returned ErrLeaseLost is deliberately NOT retryable: isRetryableDB only
 // classifies DeadlineExceeded, net.OpError and SQLSTATE 40P01/40001, so retryDB
 // surfaces it on the first attempt. Do not add it to the retryable set — a lost
