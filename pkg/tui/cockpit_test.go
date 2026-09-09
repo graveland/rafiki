@@ -57,12 +57,20 @@ func statusEventFor(id, state string, ord int32) *rafikiv1.Event {
 
 // ── rail rendering ───────────────────────────────────────────────────────────
 
-func TestRailHiddenForASingleChild(t *testing.T) {
-	// Session-first: create/attach <id> shows no rail at all. The rail grows
-	// out of a normal session -- no cockpit to configure, no empty pane.
+// renderRail renders whatever it is given, one row included: the "stay
+// hidden below two rows" DEFAULT look moved to railCols, because a renderer
+// that suppresses on its own cannot be overridden — and an explicit ^R has
+// to be able to reveal the one-row rail (the peek in railCols is what makes
+// that render). railCols()==0 with one agent and no peek is pinned by
+// TestCtrlRPeeksTheOneRowRail below.
+func TestRailRendersASingleChildRow(t *testing.T) {
 	nodes := []rail.Node{{ChildID: "c_1", Name: "coordinator", Status: "idle"}}
-	if got := renderRail(nodes, "c_1", "c_1", 24, false, nil, 0); got != "" {
-		t.Errorf("renderRail with one child = %q, want empty", got)
+	got := renderRail(nodes, "c_1", "c_1", 24, false, nil, 0)
+	if got == "" {
+		t.Fatal("renderRail with one child must render the row it was given")
+	}
+	if !strings.Contains(got, "coordinator") {
+		t.Errorf("rail missing the only row:\n%s", got)
 	}
 }
 
@@ -755,6 +763,11 @@ func TestOnlyTheInputPaneHoldsTextareaFocus(t *testing.T) {
 func TestEscapeFromRailRefocusesTheTextarea(t *testing.T) {
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	// Two agents, so ⇥ really lands on the rail — with none the ring is a
+	// one-stop input-only affair and the test would pass vacuously.
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
+	})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // → rail
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if c.focus != focusInput {
@@ -1279,6 +1292,265 @@ func TestTabIsInertWhenTheRailIsHidden(t *testing.T) {
 	}
 	if !c.ta.Focused() {
 		t.Error("⇥ with the rail hidden left the textarea blurred")
+	}
+}
+
+// ── the one-agent rail: ^R peeks it ──────────────────────────────────────
+//
+// Below two rows the rail is hidden by DEFAULT (railCols), which made ^R read
+// as a dead key with exactly one agent — and the spawn form is only reachable
+// via `n` on the rail, so a single-agent cockpit could not grow a second one.
+// An explicit request now outranks the default look the same way the ⇥ peek
+// always has: ^R reveals the one-row rail focused, and esc/⏎/^R puts it back.
+
+func oneAgentCockpit(t *testing.T) *Cockpit {
+	t.Helper()
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "only", 0)})
+	return c
+}
+
+func ctrlR(c *Cockpit) {
+	c.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+}
+
+func TestCtrlRPeeksTheOneRowRail(t *testing.T) {
+	c := oneAgentCockpit(t)
+	defer c.shutdown()
+
+	// The default look first: a single-agent session is a full-width
+	// conversation, the state a fresh `create` opens in.
+	if c.railCols() != 0 {
+		t.Fatal("rail is drawn with one agent before anyone asked for it")
+	}
+
+	ctrlR(c)
+
+	if c.railCols() == 0 {
+		t.Error("^R with one agent did not reveal the rail")
+	}
+	if c.focus != focusRail {
+		t.Errorf("focus = %v after ^R, want the rail — the peek is how `n` becomes reachable", c.focus)
+	}
+	if !c.railPeek {
+		t.Error("the reveal was not recorded as a peek, so leaving the rail cannot put it back")
+	}
+	// The "▶ " focus cursor is rendered by nothing but the rail (the status
+	// line names the agent too, so the name alone would not prove the rail
+	// drew). Glyph-agnostic: the glyph sits between cursor and name.
+	if !strings.Contains(ansi.Strip(c.View().Content), "▶ ") {
+		t.Errorf("the peeked rail did not render its row under the focus cursor:\n%s", c.View().Content)
+	}
+}
+
+func TestSpawnFormOpensWhilePeeked(t *testing.T) {
+	c := oneAgentCockpit(t)
+	defer c.shutdown()
+	ctrlR(c)
+
+	// `n` is rail-local, so this is the path the peek exists to open: with one
+	// agent there is no other keyboard route to the spawn form.
+	c.Update(keyMsg("n"))
+
+	if c.form == nil {
+		t.Fatal("n on the peeked rail did not open the spawn form")
+	}
+	// A modal still takes the whole panel — the peek survives underneath and
+	// the rail comes back when the form closes.
+	if c.railCols() != 0 {
+		t.Error("the rail is drawn behind the create form")
+	}
+	c.Update(keyMsg("esc"))
+	if c.form != nil {
+		t.Error("esc did not close the form")
+	}
+	if c.railCols() == 0 {
+		t.Error("the peeked rail did not come back when the form closed")
+	}
+}
+
+func TestLeavingThePeekedRailPutsItBack(t *testing.T) {
+	for _, key := range []string{"esc", "enter"} {
+		t.Run(key, func(t *testing.T) {
+			c := oneAgentCockpit(t)
+			defer c.shutdown()
+			ctrlR(c)
+
+			c.Update(keyMsg(key))
+
+			if c.railCols() != 0 {
+				t.Errorf("%s from the peeked rail left it drawn", key)
+			}
+			if c.focus != focusInput {
+				t.Errorf("focus = %v after %s, want input", c.focus, key)
+			}
+			if !c.ta.Focused() {
+				t.Errorf("%s returned to the input pane with the textarea blurred", key)
+			}
+		})
+	}
+}
+
+func TestCtrlRWhilePeekedHidesItAgain(t *testing.T) {
+	c := oneAgentCockpit(t)
+	defer c.shutdown()
+	ctrlR(c)
+	ctrlR(c)
+
+	if c.railCols() != 0 {
+		t.Error("a second ^R did not hide the peeked rail")
+	}
+	if c.focus != focusInput {
+		t.Errorf("focus = %v after hiding, want input", c.focus)
+	}
+	if !c.ta.Focused() {
+		t.Error("hiding the rail while it holds focus left the textarea blurred")
+	}
+}
+
+// ⇥ with one agent is the same round trip the multi-agent rail already runs:
+// it peeks rather than doing nothing (or stranding focus on an invisible
+// pane, which the old ring allowed — the rail was focusable below two rows
+// even though nothing rendered), a second ⇥ returns focus to input, and
+// leaving the rail puts it back.
+func TestTabPeeksTheOneRowRail(t *testing.T) {
+	c := oneAgentCockpit(t)
+	defer c.shutdown()
+
+	c.Update(keyMsg("tab"))
+	if c.focus != focusRail {
+		t.Fatalf("first ⇥ → %v, want the rail (peeked, not skipped)", c.focus)
+	}
+	if c.railCols() == 0 {
+		t.Fatal("⇥ moved focus onto a rail that is not drawn")
+	}
+
+	c.Update(keyMsg("tab"))
+	if c.focus != focusInput {
+		t.Fatalf("second ⇥ → %v, want input; the ring is two stops", c.focus)
+	}
+
+	// Leaving the rail (esc/⏎ go through leaveRail) re-hides it. Go back onto
+	// the rail first — the peek survives a focus move, exactly like a
+	// multi-agent peek.
+	c.Update(keyMsg("tab"))
+	c.Update(keyMsg("esc"))
+	if c.railCols() != 0 {
+		t.Error("esc after the peek did not put the rail back")
+	}
+	if c.focus != focusInput {
+		t.Errorf("focus = %v after esc, want input", c.focus)
+	}
+}
+
+// A peek cannot outlive the last row: closing the peeked row out of the rail
+// must drop the column entirely rather than keep drawing an empty one beside
+// the transcript — and must not strand pane focus on the list that stopped
+// existing, the same trap the focus ring exists to close.
+func TestPeekEndsWithTheLastRow(t *testing.T) {
+	c := oneAgentCockpit(t)
+	defer c.shutdown()
+	ctrlR(c)
+	if c.railCols() == 0 {
+		t.Fatal("the peek did not reveal the rail to begin with")
+	}
+	if c.focus != focusRail {
+		t.Fatal("the peek did not focus the rail")
+	}
+
+	c.applyClosed(closedMsg{childID: "c_1", name: "c_1"})
+
+	if c.rail.Len() != 0 {
+		t.Fatalf("rail still holds %d rows after the close", c.rail.Len())
+	}
+	if c.railCols() != 0 {
+		t.Error("an empty rail column is still drawn after its only row closed")
+	}
+	if c.focus != focusInput {
+		t.Errorf("focus = %v after the last row closed, want input", c.focus)
+	}
+	if !c.ta.Focused() {
+		t.Error("the textarea is still blurred after the rail emptied under focus")
+	}
+	if c.railPeek {
+		t.Error("the peek survived its row; it would resurrect the rail for the next single agent")
+	}
+}
+
+// Zero agents: ^R stays harmless. There is nothing to peek and the empty state
+// already says to use `rafiki create`, so the key reveals nothing and never
+// parks focus on a rail with no rows.
+func TestCtrlRWithNoAgentsIsHarmless(t *testing.T) {
+	c := bareCockpit(t)
+	defer c.shutdown()
+
+	ctrlR(c)
+
+	if c.railCols() != 0 {
+		t.Error("^R revealed a rail with no agents in it")
+	}
+	if c.focus != focusInput {
+		t.Errorf("focus = %v after ^R, want input", c.focus)
+	}
+	if !c.ta.Focused() {
+		t.Error("^R with no agents left the textarea blurred")
+	}
+}
+
+// ⇥ reveals a rail the USER hid with two agents, the other half of the
+// reveal branch cyclePane now computes from railVisible rather than the bare
+// flag — hiding is about screen space, not about giving up agent switching.
+func TestTabRevealsTheHiddenRailWithTwoAgents(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
+	})
+	c.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}) // hide the rail
+	if c.railCols() != 0 {
+		t.Fatal("the rail did not hide to begin with")
+	}
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+	if c.focus != focusRail {
+		t.Fatalf("⇥ over a hidden rail → %v, want the rail revealed and focused", c.focus)
+	}
+	if c.railCols() == 0 {
+		t.Error("⇥ focused a rail that is still hidden")
+	}
+	if !c.railPeek {
+		t.Error("the ⇥ reveal was not recorded as a peek, so ⏎ cannot put it back")
+	}
+}
+
+// Two or more agents: the ^R toggle keeps its existing flip semantics — the
+// peek machinery is for the rail the DEFAULT look hides, not the one the user
+// chose to collapse.
+func TestCtrlRTogglesWithTwoAgentsAsBefore(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
+	})
+	defer c.shutdown()
+
+	if c.railCols() == 0 {
+		t.Fatal("the rail is not drawn with two agents to begin with")
+	}
+
+	ctrlR(c)
+	if c.railCols() != 0 {
+		t.Error("^R did not hide the rail with two agents")
+	}
+	if c.railPeek {
+		t.Error("hiding recorded a peek; an explicit toggle is a decision")
+	}
+
+	ctrlR(c)
+	if c.railCols() == 0 {
+		t.Error("a second ^R did not restore the rail")
 	}
 }
 

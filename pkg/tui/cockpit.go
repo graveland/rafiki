@@ -290,7 +290,8 @@ type Cockpit struct {
 	showHelp      bool
 	railHidden    bool
 	expandArgs    bool
-	// railPeek records that ⇥ revealed a hidden rail, so committing or
+	// railPeek records that an explicit request revealed a rail the default look
+	// hides — ⇥ onto a hidden rail, or ^R below two rows — so committing or
 	// cancelling puts it back. Picking an agent is a round trip, not a mode
 	// change: you wanted a different conversation, not a permanently wider
 	// piece of furniture.
@@ -992,6 +993,31 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.HopNext):
 		return c, c.hop(c.neighbour(+1))
 	case key.Matches(msg, k.ToggleRail):
+		// Below two rows the rail is hidden by DEFAULT (railCols), not by a
+		// decision, so a plain flip changes nothing on screen and ^R reads as a
+		// dead key — and the spawn form lives on the rail (`n` is rail-local),
+		// so with one agent it is unreachable too. An explicit press outranks
+		// the default look exactly the way a ⇥ peek does: reveal the one-row
+		// rail focused, and put it away again on the next press.
+		if c.rail.Len() < 2 {
+			switch {
+			case c.railPeek:
+				// Already peeked: this press hides it again.
+				c.railHidden = true
+				c.railPeek = false
+			case c.rail.Len() == 0:
+				// Nothing to reveal; the empty state already says to use
+				// `rafiki create`. Fall through to cyclePane(0) anyway — a bare
+				// attach starts with focus on the rail, and this key must not
+				// leave it there on a pane that cannot render.
+			default:
+				c.railHidden = false
+				c.railPeek = true
+				return c, c.setFocus(focusRail)
+			}
+			// Never leave focus on a pane that just became invisible.
+			return c, c.cyclePane(0)
+		}
 		c.railHidden = !c.railHidden
 		// An explicit toggle is a decision: it outranks a peek, so ⏎ afterwards
 		// must not undo what the user just asked for.
@@ -1474,7 +1500,19 @@ func (c *Cockpit) setFocus(p focusPane) tea.Cmd {
 	return c.ta.Focus()
 }
 
-// cyclePane advances focus by delta, skipping the rail when it is hidden.
+// railVisible reports whether the rail is drawn at all right now — railCols'
+// visibility rule without the modal clause (a modal owns every key before
+// handleKey ever reaches a focus change, so the clause is moot here) and
+// without the width math. The focus ring must never hold a pane this returns
+// false for: focus resting on something invisible is a cockpit that looks
+// stuck, keys going somewhere nothing on screen explains.
+func (c *Cockpit) railVisible() bool {
+	// Len() >= 1 on both sides: a peek set while the rail had a row must not
+	// keep drawing an empty column after that row closed out of the rail.
+	return !c.railHidden && (c.rail.Len() >= 2 || (c.railPeek && c.rail.Len() >= 1))
+}
+
+// cyclePane advances focus by delta, skipping the rail when it is not drawn.
 //
 // A delta of 0 re-validates the current focus without moving, which is what
 // hiding the rail needs: ctrl+b is global and can fire while the rail holds
@@ -1482,14 +1520,17 @@ func (c *Cockpit) setFocus(p focusPane) tea.Cmd {
 func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	// ⇥ REVEALS a hidden rail rather than doing nothing. Hiding it is about
 	// screen space, not about giving up the ability to switch agents, and a
-	// dead ⇥ reads as a broken key.
-	if c.railHidden && delta != 0 && c.rail.Len() > 1 {
+	// dead ⇥ reads as a broken key. "Hidden" is railVisible's question, not
+	// just the flag: below two rows the rail is hidden by DEFAULT, and the
+	// peek is what makes a one-row rail renderable at all. A reveal always
+	// lands focus ON the rail, never on a pane still invisible.
+	if delta != 0 && c.rail.Len() >= 1 && !c.railVisible() {
 		c.railHidden = false
 		c.railPeek = true
 		return c.setFocus(focusRail)
 	}
 	order := []focusPane{focusInput, focusRail}
-	if c.railHidden {
+	if !c.railVisible() {
 		order = []focusPane{focusInput}
 	}
 	idx := 0
@@ -1512,9 +1553,10 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	return c.setFocus(order[idx])
 }
 
-// leaveRail returns focus to the input, re-hiding the rail if ⇥ was what
+// leaveRail returns focus to the input, re-hiding the rail if a peek is what
 // revealed it. Both exits go through here: picking an agent and changing your
-// mind should leave the screen in the same shape you found it.
+// mind should leave the screen in the same shape you found it. The one-row
+// peek is the same round trip — ^R or ⇥ opened it, esc or ⏎ closes it.
 func (c *Cockpit) leaveRail() tea.Cmd {
 	if c.railPeek {
 		c.railHidden = true
@@ -1625,13 +1667,24 @@ func (c *Cockpit) bodyHeight() int {
 	return h
 }
 
-// railCols is the rail's current width, or 0 when it is not drawn.
+// railCols is the rail's current width, or 0 when it is not drawn. It is the
+// single visibility authority: renderRail renders whatever it is given, and
+// cyclePane's ring holds the rail only while this rule says it is drawn.
 //
 // A modal takes the WHOLE panel: the create form and either browser (models,
 // executors) are full-attention tasks, and a rail behind them is a list you
 // cannot act on costing width from a table that needs it.
+//
+// Below two rows the rail is hidden by DEFAULT rather than by a decision: the
+// rail grows out of a normal session, so a single-agent cockpit shows a
+// full-width conversation with no empty pane to look at. railPeek is the one
+// thing that outranks the default — an explicit ^R or ⇥ asked for the rail, so
+// the one-row rail renders until the peek ends. railHidden is a decision and
+// wins over both, and no peek can outlive the last row: a zero-row rail is an
+// empty column costing the transcript width for nothing.
 func (c *Cockpit) railCols() int {
-	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.railHidden || c.rail.Len() < 2 {
+	if c.form != nil || c.picker != nil || c.execPicker != nil || c.budgetForm != nil || c.railHidden ||
+		c.rail.Len() == 0 || (c.rail.Len() < 2 && !c.railPeek) {
 		return 0
 	}
 	return railWidthFor(c.rail.Nodes(), c.width, c.currency)
@@ -1643,9 +1696,9 @@ func (c *Cockpit) railCols() int {
 // is what's on screen) or nothing is focused.
 //
 // This is the client's only on-screen confirmation of which agent and
-// directory it's talking to when there's just one child: the rail itself
-// stays hidden below two rows (renderRail), so with a single agent the rail
-// carries no name at all.
+// directory it's talking to when there's just one child: the rail stays
+// hidden below two rows by default (railCols), so with a single agent the
+// status line carries the name until an explicit ^R peeks the rail.
 func (c *Cockpit) agentIdentity() string {
 	if c.picker != nil || c.execPicker != nil || c.form != nil || c.showHelp {
 		return ""

@@ -323,4 +323,17 @@ func (c *Cockpit) forgetChild(childID string) {
 		}
 		c.rail.SetFocus("")
 	}
+
+	// Closing the last row out of the rail must not strand pane focus on a
+	// list nothing draws (railVisible needs a row). The peek goes with it: a
+	// peek that outlived its row would resurrect the rail for the NEXT single
+	// agent, one nobody asked to see. The blink command is dropped, the same
+	// precedent NewCockpit set for its own focus call — and applyClosed's
+	// caller drops every cmd anyway.
+	if c.rail.Len() == 0 {
+		c.railPeek = false
+		if c.focus == focusRail {
+			_ = c.setFocus(focusInput)
+		}
+	}
 }

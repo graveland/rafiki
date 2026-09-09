@@ -34,10 +34,17 @@ func fmtCost(usd float64, cur *clientstate.Currency) string {
 
 // renderRail draws the tree.
 //
-// It returns "" for fewer than two rows on purpose: the rail GROWS OUT OF a
-// normal session, so a fresh `create` shows a full-width conversation and the
-// rail appears when the first child does. There is no cockpit to configure and
-// no empty pane to look at.
+// It renders whatever rows it is given. The "stay hidden below two rows" look
+// used to be an early return here (`len(nodes) < 2` → ""), but a renderer that
+// suppresses on its own cannot be overridden: an explicit ^R has to be able to
+// reveal a one-row rail as a peek — and with one agent the rail is also the
+// only path to the spawn form (`n` is a rail-local key), so suppressing it
+// here made both keys read as dead. The default look is railCols' decision
+// now: it hides the rail below two rows unless railPeek outranks it, so a
+// fresh `create` still shows a full-width conversation and the rail still
+// grows out of a normal session — no cockpit to configure, no empty pane to
+// look at. Only an empty node list renders nothing, because there is no such
+// thing as a zero-row rail to peek at.
 //
 // Rows are clipped BEFORE styling, so the width budget is measured on plain
 // text and lipgloss escape sequences never count against it.
@@ -80,7 +87,7 @@ func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 }
 
 func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocused bool, cur *clientstate.Currency, tick int) string {
-	if len(nodes) < 2 {
+	if len(nodes) == 0 {
 		return ""
 	}
 	var sb strings.Builder

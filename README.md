@@ -1237,7 +1237,9 @@ make build          # builds rafikid + rafiki, including the in-process cockpit
 A session follows its own delegation: start a conversation, let it spawn
 implementers, and they appear in the rail because they are in the subtree — not
 because anything resubscribed. The rail is absent until a second agent exists,
-so an ordinary single-agent session looks exactly as it did before.
+so an ordinary single-agent session looks exactly as it did before — but `^R`
+still reveals the one-row rail as a peek, and that is also how you reach the
+spawn form (`n` is a rail key) to create the second agent from the cockpit.
 
 Attaching loads the agent's whole conversation from the database (`GetHistory`)
 and then follows the live event stream, so a child that last spoke months ago
@@ -1258,7 +1260,9 @@ claims `⇧↑`/`⇧↓`, `^N`, `^P`, `^U`, `^K` and more. The input box scrolls
 transcript directly now, so the extra stop bought nothing and cost a keypress
 on every agent switch, which is the move made most often. Hiding the rail with
 `^R` does not give up switching: `⇥` reveals it, and picking an agent with `⏎`
-puts it back.
+puts it back. With exactly one agent the rail is hidden by default rather than
+by request, and the same keys peek it: `^R` or `⇥` reveals the single-row rail,
+and `⏎` or `esc` puts it back.
 
 **Global — work from any pane**
 
@@ -1269,7 +1273,7 @@ puts it back.
 | `⌥P` / `^PgUp` | Hop to the previous agent that needs you. |
 | `^↑` / `^↓` | Hop straight up and down the rail, without changing pane. |
 | `esc` / `^X` | Abort the running turn. |
-| `^R` / `^B` | Collapse or restore the agent rail. |
+| `^R` / `^B` | Collapse or restore the agent rail; with one agent, peek it. |
 | `^G` | Toggle the help overlay — every binding, grouped by pane. |
 | `^C/^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time. |
 

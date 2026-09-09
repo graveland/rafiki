@@ -92,8 +92,13 @@ func TestCyclePaneSkipsHiddenRail(t *testing.T) {
 
 // The ring is a two-stop toggle: the transcript pane is gone, because the input
 // pane scrolls directly and the third stop cost a press on every agent switch.
+//
+// Seeded with TWO agents on purpose: the rail is in the ring only while it is
+// drawn (railVisible), and below two rows that takes a peek — the old test
+// cycled onto an empty rail nobody could see, the exact trap railVisible
+// exists to close.
 func TestCyclePaneTogglesInputAndRail(t *testing.T) {
-	c := newTestCockpit("c_a")
+	c := railWith(t, "c_a", "c_b")
 	c.focus = focusInput
 
 	c.cyclePane(+1)
@@ -107,7 +112,7 @@ func TestCyclePaneTogglesInputAndRail(t *testing.T) {
 }
 
 func TestCyclePaneBackwards(t *testing.T) {
-	c := newTestCockpit("c_a")
+	c := railWith(t, "c_a", "c_b")
 	c.focus = focusInput
 
 	c.cyclePane(-1)

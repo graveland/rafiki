@@ -1024,6 +1024,21 @@
   agent puts it back: `railPeek` records that ⇥ was what revealed it, and an
   explicit `^A` outranks a peek. Note this ring was a CORRECT answer to a
   constraint a later change removed, and nothing prompted revisiting it.
+  (ToggleRail's primary binding is `^R` now, with `^B` the alias — `^A` went
+  back to the textarea's line-start; see keys.go.)
+- **Rail visibility below two rows is a LOOK, not a gate — `railCols()` is the
+  single visibility authority.** It returns 0 when a modal is up, when
+  `railHidden`, when `Len()==0`, or when `Len()<2 && !railPeek`;
+  `renderRail` renders whatever rows it is given. Before the fix, the `<2`
+  suppression ALSO lived in `renderRail` and the focus ring, so with exactly
+  one agent `^R` flipped an invisible boolean (the key read as dead) and `⇥`
+  could strand focus on a pane that rendered nothing — and the spawn form
+  (`n`, rail-pane-only) was unreachable, so a single agent could not spawn a
+  second one from the keyboard. Now `^R`/`⇥` PEEK-reveal the one-row rail and
+  leaving re-hides it. Two rules keep it sound: a peek is only renderable
+  while it has a row — `forgetChild` clears `railPeek` and releases rail-pane
+  focus when the LAST row closes, or a zero-row rail column renders — and the
+  rail enters the focus ring only when `railCols()` would draw it.
 - **Three ways the cockpit tells you where you are, because each one alone was
   missed.** The focused pane carries a reversed badge in the footer AND an
   accent edge on the pane itself (a thickened rail cursor, a heavy divider, the
