@@ -72,15 +72,18 @@ func unixOrZero(t *time.Time) int64 {
 	return t.Unix()
 }
 
-// conversationsMode maps the global --output flag onto the render mode shared
-// with `rafikid agent`. "auto" stays TTY-aware, matching every other rafiki
-// command: tables at a terminal, JSON when piped so `| jq` keeps working.
-func conversationsMode(cmd *cobra.Command) conversationview.Mode {
-	mode, _ := outputOpts(cmd)
-	if mode == outputTable {
-		return conversationview.ModeTable
+// conversationsMode maps the global --output flag (and its -j/-J shorthands)
+// onto the render mode shared with `rafikid agent`. Table is the default on
+// TTY and pipe alike; JSON (or JSONL, rendered as JSON here) only on request.
+func conversationsMode(cmd *cobra.Command) (conversationview.Mode, error) {
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return conversationview.ModeJSON, err
 	}
-	return conversationview.ModeJSON
+	if mode == outputTable {
+		return conversationview.ModeTable, nil
+	}
+	return conversationview.ModeJSON, nil
 }
 
 // renderConversationResponse decodes a ctrl_conversation_* payload into the
@@ -148,7 +151,11 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_stats: %s", client.FormatError(resp))
 	}
-	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, conversationview.RenderStats)
+	mode, err := conversationsMode(cmd)
+	if err != nil {
+		return err
+	}
+	return renderConversationResponse(os.Stdout, mode, resp, conversationview.RenderStats)
 }
 
 // ─── search ─────────────────────────────────────────────────────────────────
@@ -206,7 +213,11 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_search: %s", client.FormatError(resp))
 	}
-	return renderConversationSearch(os.Stdout, conversationsMode(cmd), resp)
+	mode, err := conversationsMode(cmd)
+	if err != nil {
+		return err
+	}
+	return renderConversationSearch(os.Stdout, mode, resp)
 }
 
 // renderConversationSearch unwraps ctrl_conversation_search's payload before
@@ -252,5 +263,9 @@ func runConversationsExport(cmd *cobra.Command, args []string) error {
 	if !resp.Success {
 		return fmt.Errorf("ctrl_conversation_export: %s", client.FormatError(resp))
 	}
-	return renderConversationResponse(os.Stdout, conversationsMode(cmd), resp, conversationview.RenderTranscriptMD)
+	mode, err := conversationsMode(cmd)
+	if err != nil {
+		return err
+	}
+	return renderConversationResponse(os.Stdout, mode, resp, conversationview.RenderTranscriptMD)
 }

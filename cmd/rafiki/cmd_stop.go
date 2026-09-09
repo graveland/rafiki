@@ -72,7 +72,10 @@ func runStop(cmd *cobra.Command, args []string) error {
 	// Children changed state even on a mixed run, so the cache is stale either way.
 	dropChildCompletionCache(cmd)
 
-	mode, useColor := outputOpts(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	if err := renderStopResults(os.Stdout, results, mode, useColor); err != nil {
 		return err
 	}

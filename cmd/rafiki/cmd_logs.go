@@ -97,7 +97,10 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	raw, _ := cmd.Flags().GetBool("raw")
 	noDeltas, _ := cmd.Flags().GetBool("no-deltas")
 	verbose, _ := cmd.Flags().GetBool("verbose")
-	mode, useColor := outputOpts(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 
 	// in/err/all → raw stream dump (snapshot; no follow).
 	if wantIn || wantErr || wantAll {

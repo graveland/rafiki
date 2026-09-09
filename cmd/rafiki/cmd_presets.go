@@ -69,7 +69,10 @@ func runPresets(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	mode, useColor := outputOpts(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	return renderPresets(os.Stdout, presetInfos(pf, labels, hasLabel), mode, useColor)
 }
 

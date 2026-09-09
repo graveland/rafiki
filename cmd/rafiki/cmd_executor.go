@@ -182,7 +182,10 @@ func runExecutorList(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	mode, useColor := outputOpts(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	if mode == outputTable {
 		return renderExecutorTable(os.Stdout, execs, useColor)
 	}
@@ -643,7 +646,10 @@ func runExecutorDelete(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	_, useColor := outputOpts(cmd)
+	_, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	if err := renderExecutorTable(os.Stdout, matches, useColor); err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,13 +54,30 @@ func cmdCtx(cmd *cobra.Command) context.Context {
 	return context.Background()
 }
 
-// outputOpts reads --output and --color from the command flags and returns
-// the resolved output mode and whether color should be emitted.
-func outputOpts(cmd *cobra.Command) (outputMode, bool) {
+// outputOpts reads --output, the -j/--json and -J/--jsonl shorthands and
+// --color from the command flags and returns the resolved output mode,
+// whether color should be emitted, and an error when the two shorthands
+// are combined. -j and -J together is a user-input error, not a preference
+// to silently resolve: they select different encodings.
+func outputOpts(cmd *cobra.Command) (outputMode, bool, error) {
 	outFlag, _ := cmd.Flags().GetString("output")
 	colorFlag, _ := cmd.Flags().GetString("color")
+	j, _ := cmd.Flags().GetBool("json")
+	jl, _ := cmd.Flags().GetBool("jsonl")
+	if j && jl {
+		return outputAuto, false, errors.New("cannot combine -j and -J")
+	}
+	var mode outputMode
+	switch {
+	case jl:
+		mode = outputJSONL
+	case j:
+		mode = outputJSON
+	default:
+		mode = resolveOutputMode(outFlag)
+	}
 	tty := isStdoutTTY()
-	return resolveOutputMode(outFlag, tty), colorEnabled(colorFlag, tty)
+	return mode, colorEnabled(colorFlag, tty), nil
 }
 
 // resolveTarget returns the resolved childID for a subcommand argument.

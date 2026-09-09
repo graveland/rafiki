@@ -229,7 +229,11 @@ func TestConversationsModeFromOutputFlag(t *testing.T) {
 
 		var got conversationview.Mode
 		stats.RunE = func(cmd *cobra.Command, _ []string) error {
-			got = conversationsMode(cmd)
+			m, err := conversationsMode(cmd)
+			if err != nil {
+				return err
+			}
+			got = m
 			return nil
 		}
 		root.SetArgs([]string{"conversations", "stats", "--output", tc.flag})

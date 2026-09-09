@@ -113,7 +113,10 @@ func runTail(cmd *cobra.Command, args []string) error {
 		exclude = append(exclude, "message_update")
 	}
 
-	mode, useColor := outputOpts(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	tailN, _ := cmd.Flags().GetInt("tail")
 	raw, _ := cmd.Flags().GetBool("raw")

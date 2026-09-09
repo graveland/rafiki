@@ -129,7 +129,10 @@ func runConfigShow(cmd *cobra.Command, _ []string) error {
 	p := mustProfile(cmd)
 	globalState := clientstate.LoadScoped(clientstate.Scope{})
 	profState := clientstate.LoadScoped(clientstate.Scope{Profile: p.Name})
-	mode, useColor := outputOpts(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	if mode == outputTable {
 		fmt.Fprint(os.Stdout, profileIndicator(p.Name))
 	}

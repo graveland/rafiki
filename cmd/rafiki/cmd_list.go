@@ -62,7 +62,10 @@ func runList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("list: %w", err)
 	}
 
-	mode, useColor := outputOpts(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	if mode == outputTable {
 		fmt.Fprint(os.Stdout, profileIndicator(mustProfile(cmd).Name))
 	}

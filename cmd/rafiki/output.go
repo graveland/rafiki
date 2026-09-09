@@ -23,21 +23,22 @@ const (
 	outputAuto  outputMode = "auto"
 	outputJSON  outputMode = "json"
 	outputTable outputMode = "table"
+	outputJSONL outputMode = "jsonl"
 )
 
-// resolveOutputMode resolves "auto" by checking if stdout is a TTY:
-// TTY → table, otherwise → json.
-func resolveOutputMode(flag string, isTTY bool) outputMode {
+// resolveOutputMode resolves the --output flag: "json" → JSON, "jsonl" →
+// JSONL, and everything else ("auto", the legacy "table", empty) → table.
+// There is no TTY probe and no pipe→JSON rule: table is the default on TTY
+// and pipe alike, so a piped consumer wanting JSON must ask for it with
+// -o json, -j or -J.
+func resolveOutputMode(flag string) outputMode {
 	switch outputMode(flag) {
 	case outputJSON:
 		return outputJSON
-	case outputTable:
-		return outputTable
+	case outputJSONL:
+		return outputJSONL
 	default:
-		if isTTY {
-			return outputTable
-		}
-		return outputJSON
+		return outputTable
 	}
 }
 
@@ -194,6 +195,22 @@ func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// writeJSONL writes one compact JSON object per row, unwrapped — no
+// envelope object, so the output can be consumed line by line (jq -s,
+// grep, tail -f). A single Encoder is reused for every row: json.Encoder
+// is compact by default and Encode appends a trailing newline after each
+// value, so each row lands on its own line for free. The first encoding
+// error is returned and stops the write.
+func writeJSONL(w io.Writer, rows []any) error {
+	enc := json.NewEncoder(w)
+	for _, row := range rows {
+		if err := enc.Encode(row); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // formatStatus renders the STATUS cell for a child row.  For exited children

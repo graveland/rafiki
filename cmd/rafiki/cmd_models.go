@@ -74,13 +74,16 @@ func runModels(cmd *cobra.Command, _ []string) error {
 	}
 	cacheWrite("models-fundi", completionEndpointKey(cmd), ids)
 
-	mode, _ := outputOpts(cmd)
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
 	return renderModelRows(os.Stdout, rows, source, mode)
 }
 
 // renderModelRows renders the daemon's model rows in the resolved output mode:
-// a table for a terminal, JSON otherwise (--output json, or auto on a pipe —
-// the same resolveOutputMode every other list-shaped verb answers to).
+// table by default, JSON only on request (-o json or -j) — the same
+// resolveOutputMode every other list-shaped verb answers to.
 // renderModels used to be lost in the Connect move, which silently turned
 // `rafiki models | jq` and `--output json` into box-drawing output.
 func renderModelRows(w io.Writer, rows []*rafikiv1.ModelRow, source string, mode outputMode) error {

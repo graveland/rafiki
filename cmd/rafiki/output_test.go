@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -267,5 +269,116 @@ func TestSortChildrenAsTreeCycleTerminates(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("sortChildrenAsTree did not terminate on a cyclic parent chain")
+	}
+}
+
+// driveOutputFlags runs a `list` subcommand of the real root command with the
+// given args and captures outputOpts from inside its RunE — the flags must be
+// parsed by cobra the way a real invocation parses them, not read by hand.
+func driveOutputFlags(t *testing.T, args ...string) (outputMode, error) {
+	t.Helper()
+	root := newRootCmd()
+	list, _, err := root.Find([]string{"list"})
+	if err != nil {
+		t.Fatalf("locate list: %v", err)
+	}
+	var (
+		gotMode outputMode
+		gotErr  error
+	)
+	list.RunE = func(cmd *cobra.Command, _ []string) error {
+		m, _, e := outputOpts(cmd)
+		gotMode, gotErr = m, e
+		return nil
+	}
+	root.SetArgs(append([]string{"list"}, args...))
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute %v: %v", args, err)
+	}
+	return gotMode, gotErr
+}
+
+func TestResolveOutputModeTableByDefault(t *testing.T) {
+	// The flip, pinned: "auto" and the legacy "table" both resolve to table
+	// with no TTY probe involved. The old pipe→JSON rule is dead — table is
+	// the default on TTY and pipe alike.
+	for _, flag := range []string{"auto", "table", ""} {
+		if got := resolveOutputMode(flag); got != outputTable {
+			t.Errorf("resolveOutputMode(%q) = %v, want table", flag, got)
+		}
+	}
+}
+
+func TestResolveOutputModeJSONOnlyOnRequest(t *testing.T) {
+	if got := resolveOutputMode("json"); got != outputJSON {
+		t.Errorf("resolveOutputMode(json) = %v, want json", got)
+	}
+	if got := resolveOutputMode("jsonl"); got != outputJSONL {
+		t.Errorf("resolveOutputMode(jsonl) = %v, want jsonl", got)
+	}
+}
+
+func TestOutputOptsJSONLShorthand(t *testing.T) {
+	mode, err := driveOutputFlags(t, "-J")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != outputJSONL {
+		t.Errorf("-J: got mode %v, want jsonl", mode)
+	}
+	mode, err = driveOutputFlags(t, "-j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != outputJSON {
+		t.Errorf("-j: got mode %v, want json", mode)
+	}
+	// The long spellings ride the same registration.
+	mode, err = driveOutputFlags(t, "--jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != outputJSONL {
+		t.Errorf("--jsonl: got mode %v, want jsonl", mode)
+	}
+}
+
+func TestOutputOptsRejectsJAndBigJ(t *testing.T) {
+	_, err := driveOutputFlags(t, "-j", "-J")
+	if err == nil {
+		t.Fatal("want an error when -j and -J are combined, got nil")
+	}
+	if err.Error() != "cannot combine -j and -J" {
+		t.Errorf("error text = %q, want exactly %q", err.Error(), "cannot combine -j and -J")
+	}
+}
+
+func TestWriteJSONLOneCompactObjectPerLine(t *testing.T) {
+	var buf bytes.Buffer
+	rows := []any{
+		map[string]any{"id": "c_01", "cost": 1.5},
+		map[string]any{"id": "c_02", "labels": []string{"a", "b"}},
+	}
+	if err := writeJSONL(&buf, rows); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.HasSuffix(out, "\n") {
+		t.Errorf("missing trailing newline: %q", out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d: %q", len(lines), out)
+	}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "{") {
+			t.Errorf("row %d is not a bare object: %q", i+1, line)
+		}
+	}
+	if strings.Contains(out, ": ") || strings.Contains(out, ", ") {
+		t.Errorf("output is not compact: %q", out)
+	}
+	if strings.Contains(out, "\"rows\"") || strings.Contains(out, "\"children\"") {
+		t.Errorf("output carries an envelope: %q", out)
 	}
 }

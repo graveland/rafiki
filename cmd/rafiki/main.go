@@ -45,12 +45,14 @@ func newRootCmd() *cobra.Command {
 	// Persistent, so every subcommand inherits them; the shorthands ride along
 	// too. -P names the daemon: --socket is gone, because a socket path with no
 	// credential beside it is exactly the split this replaced.
-	root.PersistentFlags().StringP("output", "o", "auto", "output format for list/tail/conversations: auto|json|table (other commands always emit JSON)")
+	root.PersistentFlags().StringP("output", "o", "auto", "output mode: auto (table) | json | jsonl — table is the default on TTY and pipe alike; -j/-J are shorthands")
+	root.PersistentFlags().BoolP("json", "j", false, "shorthand for --output json (pretty JSON)")
+	root.PersistentFlags().BoolP("jsonl", "J", false, "shorthand for --output jsonl (one compact record per line)")
 	root.PersistentFlags().StringP("color", "c", "auto", "color output: auto|always|never")
 	root.PersistentFlags().StringP("profile", "P", "", "profile naming the daemon to use (default: $RAFIKI_PROFILE, else the current-profile file)")
 
 	_ = root.RegisterFlagCompletionFunc("output", cobra.FixedCompletions(
-		[]string{"auto", "json", "table"},
+		[]string{"auto", "json", "jsonl", "table"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
 	_ = root.RegisterFlagCompletionFunc("color", cobra.FixedCompletions(
