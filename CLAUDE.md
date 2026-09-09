@@ -238,17 +238,26 @@
   Two traps. `MaterializeAll` (the daemon's path) omits the whole workspace tier when `opts.Executor == nil` and intersects the routed set with `opts.ExecutorTools` from the executor's `Describe` — so a tool the bound executor cannot serve never enters `tools[]`. And building the executor's registry with `MaterializeAll` instead of `MaterializeOnly` is a live panic: `ToolOpts.Tasks` is nil there and the `task_*` tools do not nil-check.
 - **`tools[]` is IMMUTABLE for a child's lifetime.** Tool definitions sit inside the prompt-cache breakpoint (the tools+system prefix), so any mutation invalidates the whole cache. An earlier design permitted the list to GROW ONCE, on first human attach, to admit a presence tier; that tier was never built and has been deleted, so the weaker "monotonic" rule is gone with it. Losing a capability never needed a `tools[]` change anyway — the tool stays declared and its calls return `is_error` — and that asymmetry is forced by the API, since a model can only emit a `tool_use` for a declared tool. If you find yourself wanting to add a tool mid-conversation, you are re-opening a decision recorded in `docs/reference/executor-protocol.md`.
 - **`tools.AgentSpawner` is bound to ONE child at construction and takes no caller identity in any method.** That is the enforcement of §1.2's rule, and it is easy to undo by "simplifying" the adapter into a single shared value with a `selfID string` first parameter. Do not: fundi children run in-process, so a self id passed as a parameter is one refactor away from being a tool argument, and a tool argument is produced by an LLM that can be prompt-injected into naming a sibling. `newControllerSpawner` is called per-child from `agentRuntimeOptions`, where the daemon-stamped `childID` is already in hand.
-- **The MCP agent-control surface (`POST /mcp`) is mounted INSIDE the proxy
+- **The MCP agent-control surface (`/mcp`: POST, plus GET for the standalone
+  SSE stream and DELETE to close the session) is mounted INSIDE the proxy
   face via `pkg/server.Handler`'s `MCPPath`/`MCP`, and its server is built
-  PER REQUEST from `server.IdentityFromContext`.** Both halves are
-  load-bearing and both are easy to undo. A `mux.Handle("/mcp", …)` in
+  PER REQUEST from `server.IdentityFromContext`.** Three halves are
+  load-bearing and all are easy to undo. A `mux.Handle("/mcp", …)` in
   main.go compiles and silently shadows the face's authentication (ServeMux
   prefers the longer pattern) — the same trap the Connect plane already
   carries. And a single MCP server built at startup and shared would put a
   user id back into an `AgentSpawner` method parameter, which is one refactor
   from being a tool argument an LLM can be prompt-injected into naming;
   `NewStreamableHTTPHandler`'s `getServer func(*http.Request) *Server` exists
-  to make the per-caller binding possible. Two consequences worth knowing
+  to make the per-caller binding possible. The third half is the
+  session-identity binding in `mcp_face.go`'s `Routes`/`sessionOwnedBy` —
+  every request presenting `Mcp-Session-Id` is checked against a
+  session→owner map filled at initialize — and it is load-bearing because
+  the SDK's own hijack guard is INERT on this mount: `sessInfo.userID` is
+  set only by the SDK's `RequireBearerToken` middleware, which rafiki never
+  runs (`UserTokenAuth` is the one credential path), so without the wrap any
+  authenticated caller presenting another caller's session id would execute
+  that caller's bound tool set. Two consequences worth knowing
   before debugging this surface: the `task_*` tools scope by a durable,
   turn-less conversation row per user keyed
   `external_ref = "mcp:user:<user-id>"` (there is no migration — it rides the

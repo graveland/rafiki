@@ -340,9 +340,11 @@ distinct from a reported zero (priced and genuinely free).
 
 ## 2.4 MCP agent-control surface (HTTP)
 
-A third face on the proxy listener: MCP streamable-HTTP, served by
-`github.com/modelcontextprotocol/go-sdk` v1.6.1's `NewStreamableHTTPHandler` at
-**`POST /mcp`** (`mcpFacePath`, `cmd/rafikid/mcp_face.go`). It exposes rafiki's
+A third face on the proxy listener: MCP streamable-HTTP at **`/mcp`**
+(`mcpFacePath`, `cmd/rafikid/mcp_face.go`) — POST for requests, plus GET for
+the standalone SSE stream and DELETE to close the session — served by
+`github.com/modelcontextprotocol/go-sdk` v1.6.1's `NewStreamableHTTPHandler`.
+It exposes rafiki's
 agent-control verbs as MCP tools, so a client whose runtime already speaks MCP
 can spawn, steer and observe daemon agents without the CLI. The JSON-Lines
 frame protocol and the Connect plane (§2.3) are unchanged and remain what

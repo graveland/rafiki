@@ -237,6 +237,13 @@ func (f *mcpFace) controller() *Controller {
 // taskStoreFor returns the Controller's ledger, falling back to a face-wide
 // in-memory store when the Controller has none. ToolOpts.Tasks is never nil:
 // the task_* tools do not nil-check it.
+//
+// Pairing assumption: the mcpLedger's DB-less fallback key "user:<id>" is only
+// ever fed to a store that accepts it — the nil-ness of ctrl.tasks and of the
+// ledger's capture store move together today. A future config with a nil
+// capture store beside a Postgres task store would feed "user:<id>" into a
+// UUID NOT NULL column (migrations/0001_baseline), so the two must stay
+// paired.
 func (f *mcpFace) taskStoreFor(ctrl *Controller) tasks.Store {
 	if ctrl.tasks != nil {
 		return ctrl.tasks
