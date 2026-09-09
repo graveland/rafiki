@@ -15,39 +15,77 @@ import (
 )
 
 func newStatusCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:     "status",
+	cmd := &cobra.Command{
+		Use:     "status [id|name]",
 		Aliases: []string{"st"},
-		Short:   "Show daemon status",
-		Args:    cobra.NoArgs,
+		Short:   "Show daemon status, or one child's with an id",
+		Args:    cobra.MaximumNArgs(1),
 		RunE:    runStatus,
 	}
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		// One optional target; past it there is nothing to offer.
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
+	return cmd
 }
 
-func runStatus(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-
-	resp, err := c.Request(cmdCtx(cmd), protocol.StatusRequest{
-		Type: protocol.TypeCtrlStatus,
-	})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_status: %s", client.FormatError(resp))
-	}
-
+func runStatus(cmd *cobra.Command, args []string) error {
+	// Resolve the mode before dialing: a malformed combination (-j -J) is a
+	// user-input error and must not cost a connection (same rule runSearch
+	// applies).
 	mode, useColor, err := outputOpts(cmd)
 	if err != nil {
 		return err
 	}
-	return emitStatus(os.Stdout, resp.Data, mode, useColor)
+
+	c := mustDial(cmd)
+	defer c.Close()
+
+	ctx := cmdCtx(cmd)
+
+	var payload []byte
+	if len(args) == 1 {
+		// An id|name target: this is the child's status, not the daemon's.
+		// Same resolve/fetch pair `get` runs, but rendered through status's
+		// key/value block instead of the list table.
+		childID, err := c.Resolve(ctx, args[0])
+		if err != nil {
+			return fmt.Errorf("resolve %q: %w", args[0], err)
+		}
+		resp, err := c.Request(ctx, protocol.GetRequest{
+			Type:    protocol.TypeCtrlGet,
+			ChildID: childID,
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Success {
+			return fmt.Errorf("ctrl_get: %s", client.FormatError(resp))
+		}
+		payload = resp.Data
+	} else {
+		resp, err := c.Request(ctx, protocol.StatusRequest{
+			Type: protocol.TypeCtrlStatus,
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.Success {
+			return fmt.Errorf("ctrl_status: %s", client.FormatError(resp))
+		}
+		payload = resp.Data
+	}
+	return emitStatus(os.Stdout, payload, mode, useColor)
 }
 
-// emitStatus writes ctrl_status's payload in the resolved mode: pretty JSON
+// emitStatus writes status's payload in the resolved mode: pretty JSON
 // passthrough in JSON mode (today's shape, unchanged), one compact line in
-// JSONL, and a key/value block in table mode.
+// JSONL, and a key/value block in table mode. The payload is ctrl_status's
+// daemon summary, or — when the command was given an id — ctrl_get's child
+// summary, which statusKeyValues renders with the same block.
 func emitStatus(w io.Writer, data []byte, mode outputMode, useColor bool) error {
 	switch mode {
 	case outputJSON:

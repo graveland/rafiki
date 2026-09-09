@@ -74,7 +74,7 @@ func newSkillsListCmd() *cobra.Command {
 }
 
 func newSkillsShowCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "show <namespace:name>",
 		Short: "Print one skill's body",
 		Args:  cobra.ExactArgs(1),
@@ -93,6 +93,8 @@ func newSkillsShowCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.ValidArgsFunction = completeSkillArgs
+	return cmd
 }
 
 func newSkillsAddCmd() *cobra.Command {
@@ -102,6 +104,7 @@ func newSkillsAddCmd() *cobra.Command {
 		Short: "Add or replace a skill from a local SKILL.md",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer dropSkillCompletionCache(cmd)
 			if file == "" {
 				return fmt.Errorf("--file is required")
 			}
@@ -138,11 +141,12 @@ func newSkillsAddCmd() *cobra.Command {
 }
 
 func newSkillsRmCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "rm <namespace:name>",
 		Short: "Delete a skill",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			defer dropSkillCompletionCache(cmd)
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {
 				return err
@@ -153,6 +157,18 @@ func newSkillsRmCmd() *cobra.Command {
 			return err
 		},
 	}
+	cmd.ValidArgsFunction = completeSkillArgs
+	return cmd
+}
+
+// completeSkillArgs completes the <namespace:name> argument shared by
+// skills show/rm/enable/disable. The verbs take exactly one ref, so past it
+// there is nothing to offer.
+func completeSkillArgs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	return completeSkills(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
 }
 
 // newSkillsEnableCmds builds BOTH enable and disable: they differ only in the
@@ -160,6 +176,7 @@ func newSkillsRmCmd() *cobra.Command {
 func newSkillsEnableCmds() []*cobra.Command {
 	run := func(enabled bool) func(*cobra.Command, []string) error {
 		return func(cmd *cobra.Command, args []string) error {
+			defer dropSkillCompletionCache(cmd)
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {
 				return err
@@ -176,11 +193,13 @@ func newSkillsEnableCmds() []*cobra.Command {
 		{
 			Use: "enable <namespace:name>", Short: "Re-enable a disabled skill",
 			Args: cobra.ExactArgs(1), RunE: run(true),
+			ValidArgsFunction: completeSkillArgs,
 		},
 		{
 			Use:   "disable <namespace:name>",
 			Short: "Disable a skill; its name is then free for a replacement",
 			Args:  cobra.ExactArgs(1), RunE: run(false),
+			ValidArgsFunction: completeSkillArgs,
 		},
 	}
 }
@@ -198,6 +217,7 @@ func newSkillsImportCmd() *cobra.Command {
 			"--namespace to override the derived name.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			defer dropSkillCompletionCache(cmd)
 			ns := namespace
 			if ns == "" {
 				var err error

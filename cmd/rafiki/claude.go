@@ -76,6 +76,20 @@ func newClaudeCmd() *cobra.Command {
 	cmd.Flags().Lookup("passthrough-auth").NoOptDefVal = string(passthroughOn)
 	cmd.Flags().Bool("limits", false,
 		"print your Anthropic subscription's current rate-limit status and exit, instead of launching a session")
+	// --model asks the DAEMON for claude-kind ids (see completeModel): an
+	// OpenRouter id on a claude child produces one that spawns, attaches and
+	// never answers.
+	_ = cmd.RegisterFlagCompletionFunc("model", func(c *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeModel(c, "claude", toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
+	// --passthrough-auth is a closed set: the file's own passthrough constants
+	// (parsePassthroughMode additionally tolerates true/1/false/0/no aliases,
+	// but those are undocumented compatibility spellings, not the values a
+	// user should be offered).
+	_ = cmd.RegisterFlagCompletionFunc("passthrough-auth", cobra.FixedCompletions(
+		[]string{string(passthroughAuto), string(passthroughOn), string(passthroughOff)},
+		cobra.ShellCompDirectiveNoFileComp,
+	))
 	return cmd
 }
 

@@ -43,12 +43,20 @@ func renderHistory(w io.Writer, evs []*rafikiv1.Event) {
 }
 
 func newHistoryCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "history <childId>",
 		Short: "Print a fundi child's conversation history over the Connect API",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runHistory,
 	}
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		// The verb takes exactly one target; past it there is nothing to offer.
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
+	return cmd
 }
 
 func runHistory(cmd *cobra.Command, args []string) error {

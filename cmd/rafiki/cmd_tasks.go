@@ -25,6 +25,15 @@ func newTasksCmd() *cobra.Command {
 	cmd.Flags().String("status", "", "Filter by status (pending, in_progress, blocked, completed, failed, orphaned, dropped)")
 	cmd.Flags().IntP("limit", "l", 0, "Maximum rows to return (0 = server default, max 2000)")
 	cmd.Flags().Bool("all", false, "Include dropped tasks")
+	_ = cmd.RegisterFlagCompletionFunc("child", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeChildren(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
+	// The statuses tasks.Task can carry (protocol.Status plus the dropped/
+	// orphaned ledger states); the flag's help text names the same set.
+	_ = cmd.RegisterFlagCompletionFunc("status", cobra.FixedCompletions(
+		[]string{"pending", "in_progress", "blocked", "completed", "failed", "orphaned", "dropped"},
+		cobra.ShellCompDirectiveNoFileComp,
+	))
 	return cmd
 }
 

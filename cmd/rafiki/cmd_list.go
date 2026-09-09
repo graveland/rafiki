@@ -28,6 +28,12 @@ func newListCmd() *cobra.Command {
 		[]string{"spawning", "idle", "streaming", "tool_running", "compacting", "blocked_ui", "shutting_down", "exited"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
+	_ = cmd.RegisterFlagCompletionFunc("label", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeLabelPairs(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("has-label", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeLabelKeys(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
 
 	return cmd
 }

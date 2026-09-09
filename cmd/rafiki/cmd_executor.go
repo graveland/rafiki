@@ -61,6 +61,25 @@ The administrative verbs output JSON.`,
 
 // ─── enroll ────────────────────────────────────────────────────────────────────
 
+// executorIsolationValues and executorWorkspaceModeValues are the closed
+// sets the enroll and create verbs' --isolation/--workspace-mode flags accept.
+// They exist so completion and the flags' help text cannot drift: a wrong
+// closed list is worse than none, so these are the values the flags
+// document, nothing inferred.
+var (
+	executorIsolationValues     = []string{"none", "container", "vm"}
+	executorWorkspaceModeValues = []string{"ephemeral", "pinned"}
+)
+
+// bindExecutorEnumCompletions registers the closed-enum completions shared by
+// enroll and create.
+func bindExecutorEnumCompletions(cmd *cobra.Command) {
+	_ = cmd.RegisterFlagCompletionFunc("isolation", cobra.FixedCompletions(
+		executorIsolationValues, cobra.ShellCompDirectiveNoFileComp))
+	_ = cmd.RegisterFlagCompletionFunc("workspace-mode", cobra.FixedCompletions(
+		executorWorkspaceModeValues, cobra.ShellCompDirectiveNoFileComp))
+}
+
 func newExecutorEnrollCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "enroll",
@@ -92,6 +111,7 @@ func newExecutorEnrollCmd() *cobra.Command {
 	cmd.Flags().String("workspace-mode", "pinned", "Workspace provisioning: ephemeral|pinned")
 	cmd.Flags().String("admits", "", "Executor-side admission selector over child labels")
 	cmd.Flags().Duration("ttl", time.Hour, "Token lifetime (default 1h)")
+	bindExecutorEnumCompletions(cmd)
 	return cmd
 }
 
@@ -392,9 +412,10 @@ func newExecutorCreateCmd() *cobra.Command {
 	cmd.Flags().String("name", "", "Name of the machine this executor runs on; becomes its 'machine' trust label and must match 'rafiki executor name' on that box")
 	cmd.Flags().StringArray("label", nil, "Label to bind to the executor (repeatable, k=v)")
 	cmd.Flags().StringArray("root", nil, "Root path the executor may access (repeatable)")
-	cmd.Flags().String("isolation", "none", "Isolation level: none|container")
+	cmd.Flags().String("isolation", "none", "Isolation level: none|container|vm")
 	cmd.Flags().String("workspace-mode", "pinned", "Workspace provisioning: ephemeral|pinned")
 	cmd.Flags().String("admits", "", "Executor-side admission selector over child labels")
+	bindExecutorEnumCompletions(cmd)
 	return cmd
 }
 

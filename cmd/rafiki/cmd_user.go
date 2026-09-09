@@ -51,6 +51,7 @@ unless --no-write is given, so creating a user also logs this machine in.`,
 }
 
 func runUserCreate(cmd *cobra.Command, args []string) error {
+	defer dropUserCompletionCache(cmd)
 	c := mustDial(cmd)
 	defer c.Close()
 
@@ -202,7 +203,7 @@ func renderUserList(w io.Writer, resp *protocol.Response) error {
 }
 
 func newUserRmCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "rm <name>",
 		Short: "Remove a user; its token stops working immediately",
 		Long: `Remove a user. The row is tombstoned rather than deleted, so every
@@ -214,9 +215,18 @@ Removing the last user returns the daemon to bootstrap mode.`,
 		Args: cobra.ExactArgs(1),
 		RunE: runUserRm,
 	}
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		// One target only; past it there is nothing to offer.
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeUsers(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
+	return cmd
 }
 
 func runUserRm(cmd *cobra.Command, args []string) error {
+	defer dropUserCompletionCache(cmd)
 	c := mustDial(cmd)
 	defer c.Close()
 

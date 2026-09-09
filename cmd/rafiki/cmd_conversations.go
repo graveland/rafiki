@@ -39,6 +39,10 @@ terminal, JSON when piped.`,
 
 // bindConversationFilterFlags registers the filter flags shared by stats and
 // search, matching rafiki agent's flag names exactly.
+//
+// --path gets a closed-set completion because its values are an enum. --persona
+// and --source deliberately get none: their value sets are whatever the
+// database happens to contain, and a wrong closed list is worse than none.
 func bindConversationFilterFlags(cmd *cobra.Command) {
 	cmd.Flags().String("since", "", "RFC3339 timestamp or duration like 24h")
 	cmd.Flags().String("until", "", "RFC3339 timestamp or duration like 24h")
@@ -47,6 +51,8 @@ func bindConversationFilterFlags(cmd *cobra.Command) {
 	cmd.Flags().String("source", "", "filter by source")
 	cmd.Flags().String("model", "", "filter by model")
 	cmd.Flags().String("path", "", `filter by path ("proxy" or "direct")`)
+	_ = cmd.RegisterFlagCompletionFunc("path", cobra.FixedCompletions(
+		[]string{"proxy", "direct"}, cobra.ShellCompDirectiveNoFileComp))
 }
 
 // conversationFilterVals reads the shared filter flags into an

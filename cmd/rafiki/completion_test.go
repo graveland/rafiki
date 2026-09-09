@@ -164,3 +164,206 @@ func TestChildCompletionWithoutATokenIsEmpty(t *testing.T) {
 		t.Errorf("got %+v, want none", got)
 	}
 }
+
+// ─── Task 5.1: the completion sweep ───────────────────────────────────────────
+
+// seedCompletionCache writes names straight into a cache entry for kind, so a
+// completer can be exercised without a live daemon (the fetch itself needs
+// one; see TestChildCompletionOnAnUnreachableDaemonIsEmpty for that path).
+func seedCompletionCache(t *testing.T, kind string, names any) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	cacheWrite(kind, completionEndpointKey(nil), names)
+}
+
+// seedChildrenCompletionCache seeds the children cache with two rows and
+// returns the completer's expected id/name universe.
+func seedChildrenCompletionCache(t *testing.T) {
+	t.Helper()
+	seedCompletionCache(t, "children", []completionChild{
+		{ChildID: "c_01HXABC", Name: "alpha", Status: "idle"},
+		{ChildID: "c_02HXDEF", Name: "beta", Status: "exited"},
+	})
+}
+
+func TestCompleteHistoryOffersChildren(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
+	seedChildrenCompletionCache(t)
+
+	cmd := newHistoryCmd()
+	if cmd.ValidArgsFunction == nil {
+		t.Fatal("ValidArgsFunction not set — `rafiki history <TAB>` completes nothing")
+	}
+	got, directive := cmd.ValidArgsFunction(cmd, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
+	}
+	for _, want := range []string{"c_01HXABC", "alpha", "beta"} {
+		if !containsCandidate(got, want) {
+			t.Errorf("candidates %v missing %q (ids and names both target history)", got, want)
+		}
+	}
+	// One target is all the verb takes; past it there is nothing to offer.
+	if got, _ := cmd.ValidArgsFunction(cmd, []string{"c_01HXABC"}, ""); len(got) != 0 {
+		t.Errorf("past the single target got %v, want none", got)
+	}
+}
+
+func TestCompleteStatusOffersChildren(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
+	seedChildrenCompletionCache(t)
+
+	cmd := newStatusCmd()
+	if cmd.ValidArgsFunction == nil {
+		t.Fatal("ValidArgsFunction not set — `rafiki status <TAB>` completes nothing")
+	}
+	got, directive := cmd.ValidArgsFunction(cmd, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
+	}
+	for _, want := range []string{"c_01HXABC", "alpha", "beta"} {
+		if !containsCandidate(got, want) {
+			t.Errorf("candidates %v missing %q", got, want)
+		}
+	}
+	if got, _ := cmd.ValidArgsFunction(cmd, []string{"alpha"}, ""); len(got) != 0 {
+		t.Errorf("past the single target got %v, want none", got)
+	}
+	// The arg signature the completion promises: one OPTIONAL target. NoArgs
+	// would make the offered candidates unusable; more than one is rejected.
+	if err := cmd.Args(cmd, nil); err != nil {
+		t.Errorf("zero args rejected: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"alpha"}); err != nil {
+		t.Errorf("one arg rejected: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"alpha", "beta"}); err == nil {
+		t.Error("two args accepted; status takes at most one target")
+	}
+}
+
+func TestCompleteSkillsNamespaced(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
+	seedCompletionCache(t, "skills", []completionSkill{
+		{Namespace: "rafiki", Name: "commit-style"},
+		{Namespace: "acme", Name: "deploy"},
+	})
+
+	if got := completeSkills(nil, ""); !containsCandidate(got, "rafiki:commit-style") || !containsCandidate(got, "acme:deploy") {
+		t.Errorf("bare TAB got %v, want every qualified ns:name ref", got)
+	}
+	// A bare prefix names the skill: the candidate is still the qualified ref,
+	// since splitQualified resolves a colonless arg against the default
+	// namespace only.
+	got := completeSkills(nil, "com")
+	if len(got) != 1 || got[0] != "rafiki:commit-style" {
+		t.Errorf("completeSkills(nil, %q) = %v, want [rafiki:commit-style]", "com", got)
+	}
+	// A colon fixes the namespace; past it only the qualified form matches.
+	got = completeSkills(nil, "rafiki:co")
+	if len(got) != 1 || got[0] != "rafiki:commit-style" {
+		t.Errorf("completeSkills(nil, %q) = %v, want [rafiki:commit-style]", "rafiki:co", got)
+	}
+	// The namespace alone is a prefix of the qualified ref.
+	got = completeSkills(nil, "acme")
+	if len(got) != 1 || got[0] != "acme:deploy" {
+		t.Errorf("completeSkills(nil, %q) = %v, want [acme:deploy]", "acme", got)
+	}
+	// A colon-prefixed query never falls back to bare names — it would offer
+	// unrelated namespaces' skills past a fixed namespace.
+	if got := completeSkills(nil, "nope:"); len(got) != 0 {
+		t.Errorf("completeSkills(nil, %q) = %v, want none", "nope:", got)
+	}
+}
+
+func TestCompleteUsers(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
+	seedCompletionCache(t, "users", []string{"brent", "alice"})
+
+	got := completeUsers(nil, "")
+	if len(got) != 2 || got[0] != "alice" || got[1] != "brent" {
+		t.Errorf("completeUsers(nil, \"\") = %v, want [alice brent]", got)
+	}
+	got = completeUsers(nil, "br")
+	if len(got) != 1 || got[0] != "brent" {
+		t.Errorf("completeUsers(nil, \"br\") = %v, want [brent]", got)
+	}
+	if got := completeUsers(nil, "z"); len(got) != 0 {
+		t.Errorf("completeUsers(nil, \"z\") = %v, want none", got)
+	}
+}
+
+func TestCompleteClaudeModel(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
+	seedCompletionCache(t, "models-claude", []string{
+		"claude-sonnet-5", "claude-opus-4-6", "glm-5.3-flash",
+	})
+
+	got := completeModel(nil, "claude", "")
+	if len(got) != 3 {
+		t.Fatalf("completeModel(nil, claude, \"\") = %v, want all three ids", got)
+	}
+	got = completeModel(nil, "claude", "clau")
+	if len(got) != 2 || got[0] != "claude-opus-4-6" || got[1] != "claude-sonnet-5" {
+		t.Errorf("completeModel(nil, claude, \"clau\") = %v, want the two claude ids", got)
+	}
+}
+
+// TestEnumCompletions pins every FixedCompletions registration Task 5.1
+// added: the offered set, and that file completion is suppressed. Driving the
+// real registered func (GetFlagCompletionFunc) rather than the local slice
+// means a registration that never lands, or lands on a renamed flag, fails
+// here instead of silently offering nothing.
+func TestEnumCompletions(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  func() *cobra.Command
+		flag string
+		want []string
+	}{
+		{"conversations stats --path", newConversationsStatsCmd, "path", []string{"proxy", "direct"}},
+		{"conversations search --path", newConversationsSearchCmd, "path", []string{"proxy", "direct"}},
+		{"tasks --status", newTasksCmd, "status",
+			[]string{"pending", "in_progress", "blocked", "completed", "failed", "orphaned", "dropped"}},
+		{"executor enroll --isolation", newExecutorEnrollCmd, "isolation",
+			[]string{"none", "container", "vm"}},
+		{"executor enroll --workspace-mode", newExecutorEnrollCmd, "workspace-mode",
+			[]string{"ephemeral", "pinned"}},
+		{"executor create --isolation", newExecutorCreateCmd, "isolation",
+			[]string{"none", "container", "vm"}},
+		{"executor create --workspace-mode", newExecutorCreateCmd, "workspace-mode",
+			[]string{"ephemeral", "pinned"}},
+		{"claude --passthrough-auth", newClaudeCmd, "passthrough-auth",
+			[]string{string(passthroughAuto), string(passthroughOn), string(passthroughOff)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := tc.cmd()
+			fn, ok := cmd.GetFlagCompletionFunc(tc.flag)
+			if !ok {
+				t.Fatalf("no completion registered for --%s", tc.flag)
+			}
+			got, directive := fn(cmd, nil, "")
+			if directive != cobra.ShellCompDirectiveNoFileComp {
+				t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for _, w := range tc.want {
+				if !containsCandidate(got, w) {
+					t.Errorf("got %v, missing %q", got, w)
+				}
+			}
+		})
+	}
+}
+
+func containsCandidate(candidates []string, want string) bool {
+	for _, c := range candidates {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}

@@ -28,6 +28,12 @@ func newSearchCmd() *cobra.Command {
 	cmd.Flags().String("name-contains", "", "Restrict to children whose name contains this")
 	cmd.Flags().StringArray("label", nil, "AND-match session label k=v (repeatable)")
 	cmd.Flags().StringArray("has-label", nil, "Restrict to sessions that have this label key (repeatable)")
+	_ = cmd.RegisterFlagCompletionFunc("label", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeLabelPairs(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
+	_ = cmd.RegisterFlagCompletionFunc("has-label", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return completeLabelKeys(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	})
 	return cmd
 }
 
