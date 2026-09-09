@@ -36,23 +36,24 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 }
 
 // appendMessage is the single guarded insert both message write sites use.
-// inTok, outTok and stopReason are nil/nil-able for the request-decomposition
-// path, which has no usage to record.
+// inTok, outTok, stopReason and kind are nil/nil-able for the
+// request-decomposition path's ordinary rows (kind is set only on a
+// compaction-summary boundary row).
 //
 // A returned ErrLeaseLost is deliberately NOT retryable: isRetryableDB only
 // classifies DeadlineExceeded, net.OpError and SQLSTATE 40P01/40001, so retryDB
 // surfaces it on the first attempt. Do not add it to the retryable set — a lost
 // lease is an answer, not a blip.
-func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason any) error {
+func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason any, kind any) error {
 	var tag pgconn.CommandTag
 	var err error
 	if s.lease.Held() {
 		tag, err = s.pool.Exec(ctx, captureAppendFencedSQL,
-			convID, ordinal, role, content, inTok, outTok, stopReason,
+			convID, ordinal, role, content, inTok, outTok, stopReason, kind,
 			s.lease.Holder, s.lease.Token)
 	} else {
 		tag, err = s.pool.Exec(ctx, captureAppendSQL,
-			convID, ordinal, role, content, inTok, outTok, stopReason)
+			convID, ordinal, role, content, inTok, outTok, stopReason, kind)
 	}
 	if err != nil {
 		return err
@@ -71,13 +72,13 @@ func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal
 
 // appendMessageForTest exposes appendMessage to this package's tests.
 func (s *CaptureStore) appendMessageForTest(ctx context.Context, convID string, ordinal int, role string, content []byte) error {
-	return s.appendMessage(ctx, convID, ordinal, role, content, nil, nil, nil)
+	return s.appendMessage(ctx, convID, ordinal, role, content, nil, nil, nil, nil)
 }
 
 const captureAppendSQL = `
 INSERT INTO conversations.conversation_message
-	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason, kind)
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (conversation_id, ordinal) DO NOTHING`
 
 // captureAppendFencedSQL is captureAppendSQL with the lease guard. The EXISTS
@@ -85,11 +86,11 @@ ON CONFLICT (conversation_id, ordinal) DO NOTHING`
 // a stalled writer that wakes after takeover write nothing.
 const captureAppendFencedSQL = `
 INSERT INTO conversations.conversation_message
-	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason)
-SELECT $1::uuid, $2, $3, $4, $5, $6, $7
+	(conversation_id, ordinal, role, content, input_tokens, output_tokens, stop_reason, kind)
+SELECT $1::uuid, $2, $3, $4, $5, $6, $7, $8
  WHERE EXISTS (
    SELECT 1 FROM conversations.conversation_lease
-    WHERE conversation_id = $1::uuid AND holder = $8 AND token = $9::uuid
+    WHERE conversation_id = $1::uuid AND holder = $9 AND token = $10::uuid
       AND expires_at > now())
 ON CONFLICT (conversation_id, ordinal) DO NOTHING`
 
@@ -286,11 +287,15 @@ func (s *CaptureStore) FailTurn(ctx context.Context, turnID string, createdAt ti
 	})
 }
 
-// DecomposeRequest parses reqBody's messages[] into conversation_message rows
-// (ordinal = index, content verbatim, ON CONFLICT (conversation_id,ordinal) DO NOTHING),
-// stores prefix_content on this turn iff prefixHash != the previous turn's, and records
-// cache-breakpoint ordinals on the turn. Best-effort: returns error for the caller to Warn,
-// never panics, never alters reqBody. Returns the count of messages seen (next assistant ordinal).
+// DecomposeRequest parses reqBody's messages[] into conversation_message rows,
+// appended at an ordinal computed from the conversation's resume horizon (see
+// resolveHorizon and docs/plans/2026-09-09-claude-compaction-design.md).
+// Content is stored verbatim, ON CONFLICT (conversation_id,ordinal) DO
+// NOTHING. Also stores prefix_content on this turn iff prefixHash != the
+// previous turn's, and records cache-breakpoint ordinals on the turn.
+// Best-effort: returns error for the caller to Warn, never panics, never
+// alters reqBody. Returns the ordinal the assistant response belongs at
+// (horizon + message count) -- NOT a bare message count.
 func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error) {
 	var req struct {
 		Messages []struct {
@@ -301,23 +306,176 @@ func (s *CaptureStore) DecomposeRequest(ctx context.Context, convID, turnID stri
 	if err := json.Unmarshal(reqBody, &req); err != nil {
 		return 0, fmt.Errorf("decompose: unmarshal request: %w", err)
 	}
+	var nextOrdinal int
 	err := retryDB(ctx, "decomposeRequest", func(ctx context.Context) error {
-		// 1. Upsert each message verbatim, ordinal = index. Lenient: DO NOTHING (no divergence check).
+		contents := make([]json.RawMessage, len(req.Messages))
+		for i, m := range req.Messages {
+			contents[i] = m.Content
+		}
+		horizon, isNewBoundary, herr := s.resolveHorizon(ctx, convID, contents)
+		if herr != nil {
+			return fmt.Errorf("decompose: resolve horizon: %w", herr)
+		}
 		for i, m := range req.Messages {
 			content := m.Content
 			if len(content) == 0 {
 				content = json.RawMessage(`null`)
 			}
-			if err := s.appendMessage(ctx, convID, i, m.Role, jsonbSafe(content), nil, nil, nil); err != nil {
+			var kind any
+			var inTok *int64
+			if i == 0 && isNewBoundary {
+				kind = "compaction_summary"
+				// The approximate size of the context this boundary replaced:
+				// the PREVIOUS turn's input_tokens. This turn's own
+				// CompleteTurn already ran earlier in streamAndCapture, so
+				// excluding it by created_at is what selects the prior turn
+				// rather than this one.
+				var prevIn int64
+				perr := s.pool.QueryRow(ctx,
+					`SELECT coalesce(input_tokens,0) FROM conversations.conversation_turn
+					  WHERE conversation_id=$1 AND created_at < $2
+					  ORDER BY created_at DESC, id DESC LIMIT 1`,
+					convID, createdAt).Scan(&prevIn)
+				if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
+					return fmt.Errorf("decompose: prior turn input_tokens: %w", perr)
+				}
+				if prevIn > 0 {
+					inTok = &prevIn
+				}
+			}
+			if err := s.appendMessage(ctx, convID, horizon+i, m.Role, jsonbSafe(content), inTok, nil, nil, kind); err != nil {
 				return fmt.Errorf("decompose: insert message %d: %w", i, err)
 			}
 		}
-		// 2. Record the turn's prefix metadata (prefix_content on-change +
-		//    cache_breakpoints). Factored out so the in-process path can reuse it
-		//    without the message inserts above.
+		nextOrdinal = horizon + len(req.Messages)
 		return s.StoreTurnPrefix(ctx, convID, turnID, createdAt, reqBody, prefixHash)
 	})
-	return len(req.Messages), err
+	return nextOrdinal, err
+}
+
+// resolveHorizon determines the ordinal offset (horizon) this request's
+// messages should be inserted at, and whether request message 0 is a NEW
+// compaction boundary that must be tagged kind='compaction_summary'. See
+// docs/plans/2026-09-09-claude-compaction-design.md §3-4.
+//
+// Comparison is Postgres JSONB equality (content = $n::jsonb), not a Go-side
+// byte or struct compare -- it is whitespace/key-order-insensitive, which a
+// re-serialized request is not guaranteed to be.
+func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messages []json.RawMessage) (horizon int, isNewBoundary bool, err error) {
+	var h int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1::uuid`,
+		convID).Scan(&h); err != nil {
+		return 0, false, fmt.Errorf("resolve horizon: read conversation: %w", err)
+	}
+	if len(messages) == 0 {
+		return h, false, nil
+	}
+	msg0 := nonEmptyJSON(messages[0])
+
+	var rowExists, matches bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2),
+		        EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2 AND content=$3::jsonb)`,
+		convID, h, jsonbSafe(msg0)).Scan(&rowExists, &matches); err != nil {
+		return 0, false, fmt.Errorf("resolve horizon: read anchor: %w", err)
+	}
+	if !rowExists || matches {
+		// Bootstrap (no anchor row yet -- the conversation's first-ever
+		// request) or stable prefix: proceed unchanged. These two cases are
+		// deliberately not distinguished; both mean "insert at h, no tag."
+		return h, false, nil
+	}
+
+	// Divergence. Try the re-anchor guard before recording a new boundary.
+	if len(messages) >= 2 {
+		reanchored, ok, rerr := s.reanchorHorizon(ctx, convID, msg0, nonEmptyJSON(messages[1]))
+		if rerr != nil {
+			return 0, false, fmt.Errorf("resolve horizon: re-anchor: %w", rerr)
+		}
+		if ok {
+			return reanchored, false, nil
+		}
+	}
+
+	// Genuine new boundary. Compute H' and bump the horizon atomically in one
+	// transaction (design §4, step 1-2). The marker row itself is inserted by
+	// the caller's normal insert loop, NOT in this transaction: if that insert
+	// fails and retryDB retries the whole DecomposeRequest call, the next
+	// attempt's anchor read finds !rowExists at the (already-bumped) H' and
+	// takes the branch above, re-running the insert loop at the correct
+	// horizon via the existing ON CONFLICT DO NOTHING idempotency -- at the
+	// cost of losing the kind='compaction_summary' tag on that one retry.
+	// That degraded outcome is acceptable; a torn write that bumped nothing
+	// while a marker row existed would not be, which is why the horizon bump
+	// itself is transactional.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve horizon: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var hPrime int
+	if err := tx.QueryRow(ctx,
+		`SELECT coalesce(max(ordinal),-1)+1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid`,
+		convID).Scan(&hPrime); err != nil {
+		return 0, false, fmt.Errorf("resolve horizon: compute H': %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE conversations.conversation SET resume_from_ordinal=$2 WHERE id=$1::uuid`,
+		convID, hPrime); err != nil {
+		return 0, false, fmt.Errorf("resolve horizon: bump horizon: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("resolve horizon: commit: %w", err)
+	}
+	return hPrime, true, nil
+}
+
+// reanchorHorizon searches for a positional re-match of the request's head
+// (message 0 then message 1 at two consecutive stored ordinals), scoped to
+// this conversation's own rows (conversation_id is indexed; no new index is
+// added -- this runs only on divergence, at most once per compaction). The
+// earliest matching ordinal wins. See design §4 "Guard against pathological
+// re-anchoring."
+func (s *CaptureStore) reanchorHorizon(ctx context.Context, convID string, msg0, msg1 json.RawMessage) (horizon int, ok bool, err error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT ordinal FROM conversations.conversation_message
+		  WHERE conversation_id=$1::uuid AND content=$2::jsonb ORDER BY ordinal`,
+		convID, jsonbSafe(msg0))
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	var candidates []int
+	for rows.Next() {
+		var o int
+		if err := rows.Scan(&o); err != nil {
+			return 0, false, err
+		}
+		candidates = append(candidates, o)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, err
+	}
+	for _, o := range candidates {
+		var matches bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1::uuid AND ordinal=$2 AND content=$3::jsonb)`,
+			convID, o+1, jsonbSafe(msg1)).Scan(&matches); err != nil {
+			return 0, false, err
+		}
+		if matches {
+			return o, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+func nonEmptyJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`null`)
+	}
+	return raw
 }
 
 // StoreTurnPrefix records a turn's cache_breakpoints (always) and its
@@ -490,10 +648,10 @@ func stripNUL(v any) any {
 // stored verbatim from canonical.content, plus token usage and stop_reason.
 // Insert is ON CONFLICT (conversation_id, ordinal) DO NOTHING — lenient,
 // best-effort, matching DecomposeRequest's message-insert semantics. Also
-// sets the turn's response_ordinal to `ordinal`. `ordinal` is expected to equal
-// the request's message count (the caller's cr.nextOrdinal from
-// countRequestMessages), so the assistant lands right after request messages
-// 0..ordinal-1.
+// sets the turn's response_ordinal to `ordinal`. `ordinal` is expected to be
+// DecomposeRequest's return value (the horizon-aware ordinal the response
+// belongs at), so the assistant lands right after the request's
+// horizon..ordinal-1 messages.
 func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
 	var msg struct {
 		Content json.RawMessage `json:"content"`
@@ -506,7 +664,7 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 		content = json.RawMessage(`null`)
 	}
 	return retryDB(ctx, "appendResponse", func(ctx context.Context) error {
-		if err := s.appendMessage(ctx, convID, ordinal, "assistant", jsonbSafe(content), &in, &out, nullify(stopReason)); err != nil {
+		if err := s.appendMessage(ctx, convID, ordinal, "assistant", jsonbSafe(content), &in, &out, nullify(stopReason), nil); err != nil {
 			return fmt.Errorf("append response: insert: %w", err)
 		}
 		if _, err := s.pool.Exec(ctx,

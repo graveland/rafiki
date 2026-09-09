@@ -426,7 +426,6 @@ type captureRef struct {
 	on             bool
 	reqBody        []byte // decomposed post-stream in streamAndCapture (see beginCapture)
 	prefixHash     string
-	nextOrdinal    int  // ordinal for the assistant response message (= request message count)
 	recordRequests bool // per-session recording opt-in (X-Rafiki-Record-Requests)
 }
 
@@ -1030,19 +1029,23 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	}
 	// Decompose the request into conversation_message rows (the DB I/O deliberately
 	// deferred from beginCapture — see its comment) before appending the response,
-	// so request messages at ordinals 0..N-1 exist before the response lands at
-	// cr.nextOrdinal (=N). CompleteTurn above already recorded the turn complete, so
-	// a capture-write failure here would otherwise leave a clean-looking completion
-	// with its response captured nowhere (append) or a response orphaned past missing
-	// request rows (decompose). Re-mark the turn errored instead, so the gap is
-	// visible rather than a silent complete-without-response.
-	if _, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash); derr != nil {
+	// so request messages at the horizon..horizon+N-1 range exist before the
+	// response lands at horizon+N. Both numbers come from DecomposeRequest's
+	// return value — it resolves the (possibly rebased) horizon itself, post-stream,
+	// where the DB read belongs — not from a precomputed field. CompleteTurn above
+	// already recorded the turn complete, so a capture-write failure here would
+	// otherwise leave a clean-looking completion with its response captured nowhere
+	// (append) or a response orphaned past missing request rows (decompose).
+	// Re-mark the turn errored instead, so the gap is visible rather than a silent
+	// complete-without-response.
+	nextOrdinal, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash)
+	if derr != nil {
 		p.logger.Warn("proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
 		p.failTurn(r, cr, "decompose request failed: "+derr.Error())
 		return
 	}
 	if aerr := p.store.AppendResponseMessage(capCtx, cr.convID, cr.turnID, cr.createdAt,
-		cr.nextOrdinal, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
+		nextOrdinal, canonical, usage.InputTokens, usage.OutputTokens, stop); aerr != nil {
 		p.logger.Warn("proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
 		p.failTurn(r, cr, "append response failed: "+aerr.Error())
 		return
@@ -1264,9 +1267,10 @@ func surfaceProviderError(body []byte) ([]byte, bool) {
 // (InsertTurnIntent — deliberately synchronous, before the upstream call).
 // Decomposing reqBody into conversation_message rows is DB I/O and is
 // deferred to streamAndCapture's post-stream block so it never gates the
-// proxied request; here we only need nextOrdinal, computed with a cheap,
-// I/O-free parse. cr.on=false (proxy still forwards) on any failure setting
-// up the turn itself.
+// proxied request; beginCapture computes NO response ordinal at all —
+// DecomposeRequest resolves the (possibly rebased) horizon itself, post-stream,
+// where the DB read belongs. cr.on=false (proxy still forwards) on any failure
+// setting up the turn itself.
 func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model string) captureRef {
 	if p.store == nil {
 		return captureRef{} // capture-less (no store configured)
@@ -1318,23 +1322,9 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 	return captureRef{
 		convID: convID, turnID: turnID, createdAt: createdAt, on: true,
-		reqBody: reqBody, prefixHash: prefixHash, nextOrdinal: countRequestMessages(reqBody),
+		reqBody: reqBody, prefixHash: prefixHash,
 		recordRequests: r.Header.Get("X-Rafiki-Record-Requests") == "1",
 	}
-}
-
-// countRequestMessages returns len(reqBody.messages) via a cheap, allocation-
-// light unmarshal (no DB I/O) — just enough to know the ordinal the assistant
-// response will land on. Decomposition itself (the actual conversation_message
-// INSERTs) happens later, off the latency-critical path; 0 on any parse error.
-func countRequestMessages(reqBody []byte) int {
-	var body struct {
-		Messages []json.RawMessage `json:"messages"`
-	}
-	if err := json.Unmarshal(reqBody, &body); err != nil {
-		return 0
-	}
-	return len(body.Messages)
 }
 
 // upstreamReqHeaders builds a JSON object of headers the proxy forwarded to the
