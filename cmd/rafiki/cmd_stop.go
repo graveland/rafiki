@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 func newStopCmd() *cobra.Command {
@@ -166,14 +166,10 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 		return writeJSON(w, map[string]any{"results": out})
 	}
 
-	tw := table.NewWriter()
-	tw.SetOutputMirror(w)
-	st := table.StyleLight
-	st.Color = table.ColorOptions{}
-	tw.SetStyle(st)
+	tb := table.New(w, table.Options{Color: useColor})
 
 	colNames := []string{"ID", "EXIT", "SIGNAL", "DURATION", "ESCALATED", "ERROR"}
-	headerRow := make(table.Row, len(colNames))
+	headerRow := make([]string, len(colNames))
 	for i, name := range colNames {
 		if useColor {
 			headerRow[i] = dim(name)
@@ -181,7 +177,7 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 			headerRow[i] = name
 		}
 	}
-	tw.AppendHeader(headerRow)
+	tb.Header(headerRow...)
 
 	for _, r := range results {
 		id := r.ChildID
@@ -199,16 +195,15 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 				errCell = red(errCell)
 			}
 		}
-		tw.AppendRow(table.Row{
+		tb.Row(
 			id,
 			exit,
 			defaultDash(r.Kill.Signal),
-			time.Duration(r.Kill.DurationMs) * time.Millisecond,
-			r.Kill.Escalated,
+			(time.Duration(r.Kill.DurationMs) * time.Millisecond).String(),
+			strconv.FormatBool(r.Kill.Escalated),
 			errCell,
-		})
+		)
 	}
 
-	tw.Render()
-	return nil
+	return tb.Render()
 }

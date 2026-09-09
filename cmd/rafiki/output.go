@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jedib0t/go-pretty/v6/table"
 	"golang.org/x/term"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 type outputMode string
@@ -92,17 +92,10 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		return writeJSON(w, map[string]any{"children": children})
 	}
 
-	tw := table.NewWriter()
-	tw.SetOutputMirror(w)
-
-	// Use StyleLight (single-line Unicode box-drawing) with go-pretty's own
-	// auto-coloring disabled so our hand-rolled ANSI codes take precedence.
-	st := table.StyleLight
-	st.Color = table.ColorOptions{}
-	tw.SetStyle(st)
+	tb := table.New(w, table.Options{Color: useColor})
 
 	colNames := []string{"ID", "NAME", "KIND", "STATUS", "PROVIDER", "MODEL", "COST", "TOTAL", "CWD", "STARTED", "LABELS"}
-	headerRow := make(table.Row, len(colNames))
+	headerRow := make([]string, len(colNames))
 	for i, name := range colNames {
 		if useColor {
 			headerRow[i] = dim(name)
@@ -110,7 +103,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 			headerRow[i] = name
 		}
 	}
-	tw.AppendHeader(headerRow)
+	tb.Header(headerRow...)
 
 	treeRows := sortChildrenAsTree(children)
 	if flat {
@@ -138,7 +131,7 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 		if t := totals[ch.ChildID]; t != nil {
 			total = *t
 		}
-		tw.AppendRow(table.Row{
+		tb.Row(
 			idCell,
 			defaultDash(ch.Name),
 			kindOrDefault(ch.Kind),
@@ -150,11 +143,10 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 			defaultDash(shortenCwd(ch.Cwd)),
 			started,
 			formatLabels(ch.Labels, 40, false),
-		})
+		)
 	}
 
-	tw.Render()
-	return nil
+	return tb.Render()
 }
 
 func defaultDash(s string) string {

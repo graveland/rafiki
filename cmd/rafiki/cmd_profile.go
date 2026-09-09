@@ -9,10 +9,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 // The profile verbs deliberately never call resolveProfile. They must work on
@@ -73,12 +73,8 @@ func newProfileListCmd() *cobra.Command {
 			}
 			current := profile.LoadPointer()
 
-			tw := table.NewWriter()
-			tw.SetOutputMirror(cmd.OutOrStdout())
-			st := table.StyleLight
-			st.Color = table.ColorOptions{}
-			tw.SetStyle(st)
-			tw.AppendHeader(table.Row{"", "NAME", "ENDPOINT", "TOKEN", "KIND", "MODEL"})
+			tb := table.New(cmd.OutOrStdout(), table.Options{})
+			tb.Header("", "NAME", "ENDPOINT", "TOKEN", "KIND", "MODEL")
 			for _, name := range set.Names() {
 				p, _ := set.Get(name)
 				marker := ""
@@ -89,13 +85,12 @@ func newProfileListCmd() *cobra.Command {
 				if profile.ReadToken(name) != "" {
 					tok = "yes"
 				}
-				tw.AppendRow(table.Row{
+				tb.Row(
 					marker, name, endpointOf(p), tok,
 					defaultDash(p.Kind), defaultDash(p.Model),
-				})
+				)
 			}
-			tw.Render()
-			return nil
+			return tb.Render()
 		},
 	}
 }

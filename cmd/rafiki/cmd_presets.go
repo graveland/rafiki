@@ -5,10 +5,10 @@ import (
 	"io"
 	"os"
 
-	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 func newPresetsCmd() *cobra.Command {
@@ -81,14 +81,10 @@ func renderPresets(w io.Writer, presets []protocol.PresetInfo, mode outputMode, 
 		return writeJSON(w, map[string]any{"presets": presets})
 	}
 
-	tw := table.NewWriter()
-	tw.SetOutputMirror(w)
-	st := table.StyleLight
-	st.Color = table.ColorOptions{}
-	tw.SetStyle(st)
+	tb := table.New(w, table.Options{Color: useColor})
 
 	colNames := []string{"NAME", "MODEL", "LABELS"}
-	headerRow := make(table.Row, len(colNames))
+	headerRow := make([]string, len(colNames))
 	for i, name := range colNames {
 		if useColor {
 			headerRow[i] = dim(name)
@@ -96,16 +92,15 @@ func renderPresets(w io.Writer, presets []protocol.PresetInfo, mode outputMode, 
 			headerRow[i] = name
 		}
 	}
-	tw.AppendHeader(headerRow)
+	tb.Header(headerRow...)
 
 	for _, p := range presets {
-		tw.AppendRow(table.Row{
+		tb.Row(
 			p.Name,
 			defaultDash(p.Model),
 			formatLabels(p.Labels, 60, true),
-		})
+		)
 	}
 
-	tw.Render()
-	return nil
+	return tb.Render()
 }

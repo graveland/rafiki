@@ -11,10 +11,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 // configKey is one setting `rafiki config` knows about. Both get and set
@@ -169,23 +169,23 @@ func renderConfig(w io.Writer, globalState, profState clientstate.State, mode ou
 		return enc.Encode(out)
 	}
 
-	tw := table.NewWriter()
-	tw.SetOutputMirror(w)
-	st := table.StyleLight
-	st.Color = table.ColorOptions{}
-	tw.SetStyle(st)
+	tb := table.New(w, table.Options{Color: useColor})
 
-	headerRow := table.Row{"KEY", "SCOPE", "VALUE"}
-	if useColor {
-		headerRow = table.Row{dim("KEY"), dim("SCOPE"), dim("VALUE")}
+	colNames := []string{"KEY", "SCOPE", "VALUE"}
+	headerRow := make([]string, len(colNames))
+	for i, name := range colNames {
+		if useColor {
+			headerRow[i] = dim(name)
+		} else {
+			headerRow[i] = name
+		}
 	}
-	tw.AppendHeader(headerRow)
+	tb.Header(headerRow...)
 	for _, name := range names {
 		k, _ := findConfigKey(name)
-		tw.AppendRow(table.Row{k.name, scopeOf(k), defaultDash(k.get(stateFor(k)))})
+		tb.Row(k.name, scopeOf(k), defaultDash(k.get(stateFor(k))))
 	}
-	tw.Render()
-	return nil
+	return tb.Render()
 }
 
 func newConfigSetCmd() *cobra.Command {
