@@ -1368,6 +1368,72 @@ func (x *ChildExited) GetSignal() string {
 	return ""
 }
 
+// CompactionBoundary marks a claude child's context having been rewritten by
+// Claude Code's own compaction (never fundi's -- fundi compaction does not
+// exist yet). pre_tokens/post_tokens are optional, not bare int32, because a
+// reattach-synthesized instance of this event (built from a stored marker
+// row, not the live stream) can only ever supply pre_tokens -- a bare zero
+// would be indistinguishable from "compaction dropped everything."
+type CompactionBoundary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Trigger       string                 `protobuf:"bytes,1,opt,name=trigger,proto3" json:"trigger,omitempty"`
+	PreTokens     *int32                 `protobuf:"varint,2,opt,name=pre_tokens,json=preTokens,proto3,oneof" json:"pre_tokens,omitempty"`
+	PostTokens    *int32                 `protobuf:"varint,3,opt,name=post_tokens,json=postTokens,proto3,oneof" json:"post_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompactionBoundary) Reset() {
+	*x = CompactionBoundary{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompactionBoundary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompactionBoundary) ProtoMessage() {}
+
+func (x *CompactionBoundary) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompactionBoundary.ProtoReflect.Descriptor instead.
+func (*CompactionBoundary) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *CompactionBoundary) GetTrigger() string {
+	if x != nil {
+		return x.Trigger
+	}
+	return ""
+}
+
+func (x *CompactionBoundary) GetPreTokens() int32 {
+	if x != nil && x.PreTokens != nil {
+		return *x.PreTokens
+	}
+	return 0
+}
+
+func (x *CompactionBoundary) GetPostTokens() int32 {
+	if x != nil && x.PostTokens != nil {
+		return *x.PostTokens
+	}
+	return 0
+}
+
 // Event is the stream envelope.
 //
 // ordinal is set on DURABLE-tier events — eleven types as of C1a-1, not the two
@@ -1406,6 +1472,7 @@ type Event struct {
 	//	*Event_Retry
 	//	*Event_ChildSpawned
 	//	*Event_ChildExited
+	//	*Event_CompactionBoundary
 	Payload       isEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1413,7 +1480,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[19]
+	mi := &file_rafiki_v1_event_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1425,7 +1492,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[19]
+	mi := &file_rafiki_v1_event_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1438,7 +1505,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{19}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Event) GetChildId() string {
@@ -1577,6 +1644,15 @@ func (x *Event) GetChildExited() *ChildExited {
 	return nil
 }
 
+func (x *Event) GetCompactionBoundary() *CompactionBoundary {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_CompactionBoundary); ok {
+			return x.CompactionBoundary
+		}
+	}
+	return nil
+}
+
 type isEvent_Payload interface {
 	isEvent_Payload()
 }
@@ -1629,6 +1705,10 @@ type Event_ChildExited struct {
 	ChildExited *ChildExited `protobuf:"bytes,21,opt,name=child_exited,json=childExited,proto3,oneof"`
 }
 
+type Event_CompactionBoundary struct {
+	CompactionBoundary *CompactionBoundary `protobuf:"bytes,22,opt,name=compaction_boundary,json=compactionBoundary,proto3,oneof"`
+}
+
 func (*Event_UserMessage) isEvent_Payload() {}
 
 func (*Event_AssistantMessage) isEvent_Payload() {}
@@ -1652,6 +1732,8 @@ func (*Event_Retry) isEvent_Payload() {}
 func (*Event_ChildSpawned) isEvent_Payload() {}
 
 func (*Event_ChildExited) isEvent_Payload() {}
+
+func (*Event_CompactionBoundary) isEvent_Payload() {}
 
 var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
@@ -1753,7 +1835,15 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\texit_code\x18\x02 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x16\n" +
 	"\x06signal\x18\x03 \x01(\tR\x06signalB\f\n" +
 	"\n" +
-	"_exit_code\"\xea\x06\n" +
+	"_exit_code\"\x97\x01\n" +
+	"\x12CompactionBoundary\x12\x18\n" +
+	"\atrigger\x18\x01 \x01(\tR\atrigger\x12\"\n" +
+	"\n" +
+	"pre_tokens\x18\x02 \x01(\x05H\x00R\tpreTokens\x88\x01\x01\x12$\n" +
+	"\vpost_tokens\x18\x03 \x01(\x05H\x01R\n" +
+	"postTokens\x88\x01\x01B\r\n" +
+	"\v_pre_tokensB\x0e\n" +
+	"\f_post_tokens\"\xbc\a\n" +
 	"\x05Event\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
 	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12\x1c\n" +
@@ -1772,7 +1862,8 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\x12tool_execution_end\x18\x12 \x01(\v2\x1b.rafiki.v1.ToolExecutionEndH\x00R\x10toolExecutionEnd\x12(\n" +
 	"\x05retry\x18\x13 \x01(\v2\x10.rafiki.v1.RetryH\x00R\x05retry\x12>\n" +
 	"\rchild_spawned\x18\x14 \x01(\v2\x17.rafiki.v1.ChildSpawnedH\x00R\fchildSpawned\x12;\n" +
-	"\fchild_exited\x18\x15 \x01(\v2\x16.rafiki.v1.ChildExitedH\x00R\vchildExitedB\t\n" +
+	"\fchild_exited\x18\x15 \x01(\v2\x16.rafiki.v1.ChildExitedH\x00R\vchildExited\x12P\n" +
+	"\x13compaction_boundary\x18\x16 \x01(\v2\x1d.rafiki.v1.CompactionBoundaryH\x00R\x12compactionBoundaryB\t\n" +
 	"\apayloadB\n" +
 	"\n" +
 	"\b_ordinal*\xc8\x01\n" +
@@ -1799,7 +1890,7 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_rafiki_v1_event_proto_goTypes = []any{
 	(StopReason)(0),            // 0: rafiki.v1.StopReason
 	(*Usage)(nil),              // 1: rafiki.v1.Usage
@@ -1821,7 +1912,8 @@ var file_rafiki_v1_event_proto_goTypes = []any{
 	(*Retry)(nil),              // 17: rafiki.v1.Retry
 	(*ChildSpawned)(nil),       // 18: rafiki.v1.ChildSpawned
 	(*ChildExited)(nil),        // 19: rafiki.v1.ChildExited
-	(*Event)(nil),              // 20: rafiki.v1.Event
+	(*CompactionBoundary)(nil), // 20: rafiki.v1.CompactionBoundary
+	(*Event)(nil),              // 21: rafiki.v1.Event
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
 	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
@@ -1847,11 +1939,12 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	17, // 20: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
 	18, // 21: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
 	19, // 22: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	20, // 23: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -1875,7 +1968,8 @@ func file_rafiki_v1_event_proto_init() {
 		(*ContentBlockDelta_InputJson)(nil),
 	}
 	file_rafiki_v1_event_proto_msgTypes[18].OneofWrappers = []any{}
-	file_rafiki_v1_event_proto_msgTypes[19].OneofWrappers = []any{
+	file_rafiki_v1_event_proto_msgTypes[19].OneofWrappers = []any{}
+	file_rafiki_v1_event_proto_msgTypes[20].OneofWrappers = []any{
 		(*Event_UserMessage)(nil),
 		(*Event_AssistantMessage)(nil),
 		(*Event_TurnStart)(nil),
@@ -1888,6 +1982,7 @@ func file_rafiki_v1_event_proto_init() {
 		(*Event_Retry)(nil),
 		(*Event_ChildSpawned)(nil),
 		(*Event_ChildExited)(nil),
+		(*Event_CompactionBoundary)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1895,7 +1990,7 @@ func file_rafiki_v1_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_event_proto_rawDesc), len(file_rafiki_v1_event_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -193,6 +193,18 @@ message ChildExited {
   string signal = 3;
 }
 
+// CompactionBoundary marks a claude child's context having been rewritten by
+// Claude Code's own compaction (never fundi's -- fundi compaction does not
+// exist yet). pre_tokens/post_tokens are optional, not bare int32, because a
+// reattach-synthesized instance of this event (built from a stored marker
+// row, not the live stream) can only ever supply pre_tokens -- a bare zero
+// would be indistinguishable from "compaction dropped everything."
+message CompactionBoundary {
+  string trigger = 1;
+  optional int32 pre_tokens = 2;
+  optional int32 post_tokens = 3;
+}
+
 // Event is the stream envelope.
 //
 // ordinal is set on DURABLE-tier events — eleven types as of C1a-1, not the two
@@ -230,5 +242,6 @@ message Event {
     Retry retry = 19;
     ChildSpawned child_spawned = 20;
     ChildExited child_exited = 21;
+    CompactionBoundary compaction_boundary = 22;
   }
 }
