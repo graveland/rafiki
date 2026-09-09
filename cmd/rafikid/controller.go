@@ -1019,7 +1019,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		}
 	}
 
-	env := c.buildEnv(req, childID, c.socketPath)
+	env, extraArgv := c.buildEnv(req, childID, c.socketPath)
 	// claudeEnv is only meaningful for the local-subprocess path — once
 	// claudeRunner returns a non-nil daraja-backed Runner, child.Spawn never
 	// reads spec.Env at all (see the "if runner != nil" branch below), so
@@ -1054,6 +1054,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			}
 		}
 	}
+
+	argv = append(argv, extraArgv...)
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
@@ -1741,7 +1743,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		}
 	}
 
-	env := c.buildEnv(req, childID, c.socketPath)
+	env, extraArgv := c.buildEnv(req, childID, c.socketPath)
 	// claudeEnv is only meaningful for the local-subprocess path — once
 	// claudeRunner returns a non-nil daraja-backed Runner, child.Spawn never
 	// reads spec.Env at all (see the "if runner != nil" branch below), so
@@ -1774,6 +1776,8 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 			}
 		}
 	}
+
+	argv = append(argv, extraArgv...)
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
@@ -1875,7 +1879,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		}
 	}
 
-	env := c.buildEnv(req, childID, c.socketPath)
+	env, extraArgv := c.buildEnv(req, childID, c.socketPath)
 	// See Resume's identical guard: claudeEnv is dead weight once
 	// claudeRunner returns a daraja-backed Runner (child.Spawn never reads
 	// spec.Env in that case).
@@ -1900,6 +1904,8 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 			}
 		}
 	}
+
+	argv = append(argv, extraArgv...)
 
 	spec := child.SpawnSpec{
 		ChildID:  childID,
@@ -3645,7 +3651,10 @@ func claudeEnv(configDir string) []string {
 // buildEnv assembles the per-process env var additions for a child process.
 // The slice is passed to SpawnSpec.Env. Whether these additions replace or
 // extend the parent environment is controlled by SpawnSpec.EnvOverride
-// (honoured in child.Spawn, not here).
+// (honoured in child.Spawn, not here). The second return value carries argv
+// additions (claude children get --mcp-config); the caller must append them
+// to the child's argv, and they take effect only on the local-subprocess
+// path (a non-nil runner discards argv entirely).
 //
 // The two reserved controller vars are always injected regardless of mode.
 //
@@ -3666,8 +3675,7 @@ func claudeEnv(configDir string) []string {
 // senderOptions): an "anthropic/" prefixed model needs ANTHROPIC_API_KEY,
 // anything else needs OPENROUTER_API_KEY - there is no separate --provider
 // concept any more.
-func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath string) []string {
-	var env []string
+func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath string) (env []string, extraArgv []string) {
 	for k, v := range req.Env {
 		env = append(env, k+"="+v)
 	}
@@ -3682,12 +3690,17 @@ func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath str
 		}
 		env = append(env, envVar+"="+req.APIKey)
 	}
-	env = append(env, c.proxyChildEnv(req, childID)...)
-	return env
+	proxyEnv, extraArgv := c.proxyChildEnv(req, childID)
+	env = append(env, proxyEnv...)
+	return env, extraArgv
 }
 
-// proxyChildEnv returns the variables that point a child at the rafiki proxy,
-// or nothing when no proxy is configured or this kind is not routed.
+// proxyChildEnv returns the environment variables and argv additions that
+// point a child at the rafiki proxy, or nothing for both when no proxy is
+// configured or this kind is not routed. The env additions are appended to
+// SpawnSpec.Env; the argv additions must be appended to the child's argv and
+// matter only on the local-subprocess path (they are discarded with the rest
+// of argv whenever a runner routes the child elsewhere).
 //
 // The agent kind is never routed: it reaches rafiki in-process through pkg/llm
 // and pkg/routing, so there is no HTTP face to point it at, and doing so would
@@ -3707,10 +3720,10 @@ func (c *Controller) proxyEndpoint() (url, token string) {
 	return url, token
 }
 
-func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []string {
+func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) (env []string, extraArgv []string) {
 	url, token := c.proxyEndpoint()
 	if url == "" || req.Kind == protocol.KindFundi || !proxyRoutesKind(req.Kind) {
-		return nil
+		return nil, nil
 	}
 
 	// childID rather than the session id: it exists before the child does, is
@@ -3744,14 +3757,22 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) []
 		// already makes proxyenv.Credentials inert here: children do inherit
 		// the daemon's ANTHROPIC_API_KEY today, and only Claude Code's own
 		// precedence (ANTHROPIC_AUTH_TOKEN outranks it) keeps that harmless.
-		additions, _ := proxyenv.Claude(nil, proxyenv.ClaudeOptions{
+		//
+		// The returned args carry --mcp-config unconditionally (Wave 1 of
+		// docs/plans/2026-09-09-claude-mcp-injection-plan.md gates it on URL,
+		// not Model) and, when req.Model != "", a --model pair identical to
+		// the one buildClaudeArgv already put in this child's argv via
+		// claudeargv.Params.Model — appending both is an inert, harmless
+		// duplicate (last-value-wins on an identical value); only
+		// --mcp-config is new information this path did not have before.
+		env, args := proxyenv.Claude(nil, proxyenv.ClaudeOptions{
 			URL: url, Token: token, Model: req.Model, Headers: headers,
 		})
-		return additions
+		return env, args
 	default:
 		// Only claude is proxied. Fundi runs in-process (no HTTP face to point
 		// it at), and anything else is not a routeable kind.
-		return nil
+		return nil, nil
 	}
 }
 

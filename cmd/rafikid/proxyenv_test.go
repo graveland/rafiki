@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,8 +24,8 @@ func TestProxyChildEnv_NothingWhenNoFaceAndNoOverride(t *testing.T) {
 	t.Setenv(paths.URL, "")
 	ctl := &Controller{} // no face started
 	for _, kind := range []string{protocol.KindClaude, protocol.KindFundi} {
-		if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1"); got != nil {
-			t.Errorf("kind %q with no proxy configured: got %v, want nothing", kind, got)
+		if got, argv := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1"); got != nil || argv != nil {
+			t.Errorf("kind %q with no proxy configured: got env %v / argv %v, want neither", kind, got, argv)
 		}
 	}
 }
@@ -33,8 +34,8 @@ func TestProxyChildEnv_NothingWhenNoFaceAndNoOverride(t *testing.T) {
 // put a network hop in front of a library call.
 func TestProxyChildEnv_NeverRoutesAgent(t *testing.T) {
 	ctl := &Controller{proxyURL: "http://127.0.0.1:1", proxyToken: "t"}
-	if got := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindFundi}, "c_1"); got != nil {
-		t.Errorf("fundi kind was routed through the proxy: %v", got)
+	if got, argv := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindFundi}, "c_1"); got != nil || argv != nil {
+		t.Errorf("fundi kind was routed through the proxy: env %v / argv %v", got, argv)
 	}
 }
 
@@ -45,29 +46,39 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 	t.Setenv(paths.URL, "")
 	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
-	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}, "c_abc"))
-	if env["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
-		t.Errorf("ANTHROPIC_BASE_URL = %q", env["ANTHROPIC_BASE_URL"])
+	env, argv := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}, "c_abc")
+	envMap := envKeys(env)
+	if envMap["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q", envMap["ANTHROPIC_BASE_URL"])
 	}
-	if env["ANTHROPIC_AUTH_TOKEN"] != "tok" {
-		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q", env["ANTHROPIC_AUTH_TOKEN"])
+	if envMap["ANTHROPIC_AUTH_TOKEN"] != "tok" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q", envMap["ANTHROPIC_AUTH_TOKEN"])
 	}
 	// The model must travel as a custom option: ANTHROPIC_MODEL is validated
 	// client-side against an Anthropic allowlist and would reject a slash id
 	// before the request ever left.
-	if env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "glm-5.2" {
-		t.Errorf("ANTHROPIC_CUSTOM_MODEL_OPTION = %q", env["ANTHROPIC_CUSTOM_MODEL_OPTION"])
+	if envMap["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "glm-5.2" {
+		t.Errorf("ANTHROPIC_CUSTOM_MODEL_OPTION = %q", envMap["ANTHROPIC_CUSTOM_MODEL_OPTION"])
 	}
-	if _, ok := env["ANTHROPIC_MODEL"]; ok {
+	if _, ok := envMap["ANTHROPIC_MODEL"]; ok {
 		t.Error("ANTHROPIC_MODEL set")
 	}
 	// Headers are newline-separated — the only separator Claude Code accepts.
-	h := env["ANTHROPIC_CUSTOM_HEADERS"]
+	h := envMap["ANTHROPIC_CUSTOM_HEADERS"]
 	if !strings.Contains(h, "X-Rafiki-Session: c_abc") || !strings.Contains(h, "X-Rafiki-Source: claude") {
 		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q", h)
 	}
 	if !strings.Contains(h, "\n") {
 		t.Error("headers not newline-separated; a comma silently collapses them into one")
+	}
+	// The argv additions must carry an --mcp-config element (one =-form token)
+	// and, with Model set, the --model pair — a duplicate of what
+	// buildClaudeArgv appends, which is expected and harmless.
+	if !slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, "--mcp-config=") }) {
+		t.Errorf("argv = %v, want an --mcp-config= element", argv)
+	}
+	if !slices.Contains(argv, "--model") {
+		t.Errorf("argv = %v, want the --model pair (duplicate of buildClaudeArgv's own is expected and harmless)", argv)
 	}
 }
 
@@ -97,12 +108,13 @@ func TestProxyChildEnv_ExplicitURLOverridesTheEmbeddedFace(t *testing.T) {
 	t.Setenv(paths.URL, "http://shared-capture:8035")
 	t.Setenv(paths.Token, "shared-token")
 
-	env := envKeys(ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_1"))
-	if env["ANTHROPIC_BASE_URL"] != "http://shared-capture:8035" {
-		t.Errorf("ANTHROPIC_BASE_URL = %q, want the override", env["ANTHROPIC_BASE_URL"])
+	env, _ := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_1")
+	envMap := envKeys(env)
+	if envMap["ANTHROPIC_BASE_URL"] != "http://shared-capture:8035" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want the override", envMap["ANTHROPIC_BASE_URL"])
 	}
-	if env["ANTHROPIC_AUTH_TOKEN"] != "shared-token" {
+	if envMap["ANTHROPIC_AUTH_TOKEN"] != "shared-token" {
 		t.Errorf("token = %q; the embedded face's per-boot token must not be sent to another host",
-			env["ANTHROPIC_AUTH_TOKEN"])
+			envMap["ANTHROPIC_AUTH_TOKEN"])
 	}
 }
