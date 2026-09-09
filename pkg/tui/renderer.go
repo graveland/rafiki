@@ -116,8 +116,40 @@ func toolArgSummary(name, input string, budget int) string {
 }
 
 // collapse folds whitespace so a multi-line argument stays on its one line.
+// It runs through sanitizeControlChars first: an argument is echoed transcript
+// content, and an escape sequence or a bare CR in a command would reach the
+// terminal (Fields splits on whitespace, which drops CR but keeps the ESC
+// bytes ansi.Strip exists to remove).
 func collapse(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return strings.Join(strings.Fields(sanitizeControlChars(s)), " ")
+}
+
+// sanitizeControlChars makes text safe to draw as transcript content.
+//
+// Tool output — and, one door over, the model's own prose quoting it — is
+// arbitrary bytes: a git rebase prints progress with bare \r, and anything
+// that once talked to a tty leaks ANSI cursor movement. The wrapper preserves
+// the sequences it skips over (wrapTo is ANSI-aware by design — it must keep
+// glamour's styling), so without this those bytes sailed into the terminal
+// and repainted the cockpit's own frame from inside the transcript. Observed
+// 2026-09-09 during a 1029-commit rebase.
+//
+// Carriage returns fold to the newlines normalizeNewlines produces, which
+// turns a \r-refreshed progress bar into the separate lines the head/tail
+// elider already knows how to cap. Everything else below 0x20 (and DEL) is
+// dropped; \n and \t survive.
+func sanitizeControlChars(s string) string {
+	s = normalizeNewlines(s)
+	s = ansi.Strip(s)
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // headlineKey reports which argument toolArgSummary already put on the call
@@ -179,7 +211,9 @@ func toolArgLines(name, input string, expanded bool, budget int) []string {
 
 	var out []string
 	for _, k := range keys {
-		raw := valueString(args[k])
+		// Sanitize before splitting: an expanded value is drawn one raw line at
+		// a time, and a CR or escape in it would reach the terminal verbatim.
+		raw := sanitizeControlChars(valueString(args[k]))
 		if !expanded {
 			out = append(out, k+": "+truncate(collapse(raw), budget)+sizeNote(raw))
 			continue
@@ -457,7 +491,12 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				// The TAIL, not the head, was the old rule -- pi's
 				// truncateToVisualLines does the same (`slice(-max)`), and it is
 				// incomplete.
-				lines := strings.Split(strings.TrimRight(tc.Result, "\n"), "\n")
+				//
+				// sanitizeControlChars runs BEFORE the split, so a \r-refreshed
+				// progress bar becomes the separate lines this window caps, and
+				// an escape sequence that once drove a tty cannot repaint the
+				// frame.
+				lines := strings.Split(strings.TrimRight(sanitizeControlChars(tc.Result), "\n"), "\n")
 				head, tail, elided := elide(lines)
 				gutter := styleToolResult.Render("    │ ")
 				text := styleToolResult
@@ -494,7 +533,10 @@ func (r *renderer) renderAssistant(b session.Block) string {
 		bar := styleAssistantBar.Render("▌ ")
 		edge := styleAssistantBar.Render("▌")
 		sb.WriteString("\n" + edge + "\n")
-		rendered, err := r.md.Render(b.Text)
+		// Prose is sanitized on the way IN — glamour's own styling is added on
+		// the way out and must survive; what must not survive is an escape
+		// sequence the model quoted out of a tool result.
+		rendered, err := r.md.Render(sanitizeControlChars(b.Text))
 		if err == nil {
 			rendered = strings.TrimSpace(rendered)
 			for _, line := range strings.Split(rendered, "\n") {

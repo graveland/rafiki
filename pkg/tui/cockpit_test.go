@@ -42,6 +42,19 @@ func textEventFor(id, text string) *rafikiv1.Event {
 		}}}
 }
 
+// userMessageEventFor is textEventFor carrying a durable ordinal, the shape
+// the focus stream actually delivers.
+func userMessageEventFor(id, text string, ord int32) *rafikiv1.Event {
+	ev := textEventFor(id, text)
+	ev.Ordinal = &ord
+	return ev
+}
+
+func statusEventFor(id, state string, ord int32) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: id, Ordinal: &ord,
+		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: state}}}
+}
+
 // ── rail rendering ───────────────────────────────────────────────────────────
 
 func TestRailHiddenForASingleChild(t *testing.T) {
@@ -925,6 +938,74 @@ func TestHopBackDoesNotRefetchHistory(t *testing.T) {
 	c.hop("c_2")
 	if cmd := c.hop("c_1"); cmd != nil {
 		t.Error("hopping back to a child whose transcript is already loaded must not re-fetch history")
+	}
+}
+
+// ── the session's single feed ──────────────────────────────────────────────
+
+// The pending echo must clear when the sent message comes back on the focus
+// stream. sendFailedMsg clears it on error and this clears it on success —
+// there is no third site, so a regression here parks a ⏳ over the input box
+// for the rest of the session.
+func TestPendingClearsWhenTheMessageComesBack(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
+	if c.pending != "hello" {
+		t.Fatalf("pending = %q, want the sent text", c.pending)
+	}
+
+	c.applyEvent(userMessageEventFor("c_1", "hello", 5))
+	if c.pending != "" {
+		t.Errorf("the message came back and pending = %q; the ⏳ never clears", c.pending)
+	}
+}
+
+// The rail and focus streams are independent feeds, and only the focus one
+// may advance the session. A rail-delivered agent_status that beats the focus
+// stream's user_message to the cockpit used to advance the ordinal cursor
+// past a message that was never applied, and Session's dedup ate it: the
+// transcript never showed the message and the ⏳ pending echo never cleared —
+// through a whole twelve-minute turn and every event after it. Observed
+// 2026-09-09: "go for it" was consumed by the daemon in 4ms, the turn ran to
+// completion, and the ⏳ sat there the entire time.
+func TestRailDeliveryAheadOfFocusDoesNotEatTheUserMessage(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "go for it", nil)
+
+	// The rail wins the race: its agent_status lands first, one ordinal AHEAD
+	// of the message.
+	c.Update(railEventMsg{evs: []*rafikiv1.Event{statusEventFor("c_1", "streaming", 148)}})
+	c.Update(eventMsg{evs: []*rafikiv1.Event{userMessageEventFor("c_1", "go for it", 147)}})
+
+	if c.pending != "" {
+		t.Errorf("pending = %q: the user_message was eaten by the rail's cursor advance and the ⏳ never cleared", c.pending)
+	}
+	s := c.sessions["c_1"]
+	if n := len(s.Blocks); n == 0 || s.Blocks[n-1].Kind != session.KindUser || s.Blocks[n-1].Text != "go for it" {
+		t.Errorf("the sent message never reached the transcript; blocks = %d", n)
+	}
+}
+
+// The cursor belongs to the focus stream alone, even while the rail is
+// delivering for the same child.
+func TestRailEventsDoNotAdvanceTheSessionCursor(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+
+	c.Update(railEventMsg{evs: []*rafikiv1.Event{statusEventFor("c_1", "streaming", 148)}})
+
+	if s := c.sessions["c_1"]; s.HasCursor {
+		t.Errorf("rail delivery advanced the session cursor to %d; the cursor belongs to the focus stream", s.Cursor)
 	}
 }
 

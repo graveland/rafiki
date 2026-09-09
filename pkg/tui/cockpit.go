@@ -161,6 +161,11 @@ const maxSessions = 12
 // event-log replay, or any other high-volume moment) collapses into ONE
 // Update/View cycle instead of one per event. See waitForEvent's doc.
 type eventMsg struct{ evs []*rafikiv1.Event }
+
+// railEventMsg is eventMsg for the RAIL stream. It updates the rail and
+// nothing else — see applyRailEvent for why the session must never be fed
+// from this side.
+type railEventMsg struct{ evs []*rafikiv1.Event }
 type tickMsg time.Time
 
 // quotaTickMsg drives the periodic quota poll, separate from tickMsg's 250ms
@@ -272,7 +277,8 @@ type Cockpit struct {
 	ta    textarea.Model
 	keys  keyMap
 
-	evCh      chan *rafikiv1.Event
+	railCh    chan *rafikiv1.Event
+	focusCh   chan *rafikiv1.Event
 	stopRail  func()
 	stopFocus func()
 
@@ -445,7 +451,8 @@ func NewCockpit(opts Options) *Cockpit {
 		panes:                    map[string]*paneState{},
 		ta:                       ta,
 		keys:                     defaultKeyMap(),
-		evCh:                     make(chan *rafikiv1.Event, 256),
+		railCh:                   make(chan *rafikiv1.Event, 256),
+		focusCh:                  make(chan *rafikiv1.Event, 256),
 		status:                   "connecting…",
 		modelView:                loadModelView(opts.ProfileName),
 		currency:                 clientstate.LoadScoped(clientstate.Scope{}).Currency,
@@ -486,7 +493,7 @@ func (c *Cockpit) setNotice(s string) {
 
 // Init seeds the rail from ListChildren and starts the event pump.
 func (c *Cockpit) Init() tea.Cmd {
-	cmds := []tea.Cmd{c.seedCmd(), waitForEvent(c.evCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick()}
+	cmds := []tea.Cmd{c.seedCmd(), waitForEvent(c.railCh), waitForEvent(c.focusCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick()}
 	if c.form != nil {
 		// A form opened at CONSTRUCTION never saw the `n` keypress that
 		// normally starts the catalog fetch, so its typeahead would sit empty
@@ -640,7 +647,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if first {
 			c.status = "connected"
 			c.stopRail = streams.StartRail(context.Background(), c.cfg, c.subject,
-				c.rail.Cursor, c.evCh)
+				c.rail.Cursor, c.railCh)
 			// openFocus, NOT hop: hop refuses a no-op move, and the initial
 			// child is already focused (NewCockpit set it so the first frame
 			// renders the right pane). Routing this through hop made the call
@@ -658,21 +665,24 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return c, nil
 
+	case railEventMsg:
+		// Rail-stream events update the rail ONLY. The session is fed by the
+		// focus stream alone; see applyRailEvent.
+		for _, ev := range msg.evs {
+			c.applyRailEvent(ev)
+		}
+		return c, tea.Batch(waitForEvent(c.railCh), c.maybeReseed(nil))
+
 	case eventMsg:
 		for _, ev := range msg.evs {
 			c.applyEvent(ev)
 		}
 		var cmd tea.Cmd
-		if c.reseeding && !c.reseedInFlight {
-			c.reseeding = false
-			c.reseedInFlight = true
-			cmd = c.seedCmd()
-		}
 		if c.taskRefresh {
 			c.taskRefresh = false
-			cmd = tea.Batch(cmd, c.fetchTasks(c.focused()))
+			cmd = c.fetchTasks(c.focused())
 		}
-		return c, tea.Batch(waitForEvent(c.evCh), cmd)
+		return c, tea.Batch(waitForEvent(c.focusCh), c.maybeReseed(cmd))
 
 	case historyMsg:
 		s := c.sessions[msg.childID]
@@ -810,7 +820,26 @@ func (c *Cockpit) fetchTasks(childID string) tea.Cmd {
 	}
 }
 
-func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
+// applyRailEvent folds one event from the RAIL stream into the rail.
+//
+// It must never reach the focused session. The rail and focus pumps are two
+// independent goroutines writing one cockpit, with no ordering between them,
+// and the session's ordinal cursor is only sound within ONE ordered feed: the
+// focus stream's. A rail-delivered agent_status landing ahead of the focus
+// stream's user_message for the same child advances the cursor past an event
+// that was never applied, and Session's dedup then eats the user_message as
+// an already-applied duplicate — the transcript never shows the message and
+// the ⏳ pending echo never clears. Observed 2026-09-09
+// (c_01M235RH46KEAJHCFK1SBTQM39): "go for it" was consumed by the daemon in
+// 4ms and ran a twelve-minute turn, and the ⏳ sat through all of it because
+// agent_status(148) beat user_message(147) to the session.
+//
+// Everything the rail needs, the rail stream delivers itself. Everything the
+// session needs arrives on the focus stream (TIER_ALL, unfiltered), so
+// nothing is lost by the split — and re-seed discovery stays here, because
+// the rail is the always-on feed that sees children this client does not
+// know.
+func (c *Cockpit) applyRailEvent(ev *rafikiv1.Event) {
 	id := ev.GetChildId()
 
 	// Self-heal. child_spawned is the only event that introduces a rail row,
@@ -825,6 +854,33 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	}
 
 	c.rail.Apply(ev)
+}
+
+// maybeReseed turns applyRailEvent's request into the actual ListChildren.
+// reseedInFlight keeps every event arriving during the RPC from queueing
+// another one — the cockpit would otherwise self-amplify against a daemon
+// that is already slow, which is the exact condition the self-heal exists
+// for.
+func (c *Cockpit) maybeReseed(cmd tea.Cmd) tea.Cmd {
+	if c.reseeding && !c.reseedInFlight {
+		c.reseeding = false
+		c.reseedInFlight = true
+		cmd = tea.Batch(cmd, c.seedCmd())
+	}
+	return cmd
+}
+
+// applyEvent routes one event from the FOCUS stream to the rail and, when it
+// is the focused child's, to its session. The focus stream is the session's
+// ONLY feed; rail-stream events go to applyRailEvent and stop there.
+func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
+	// The rail still folds focus-delivered events in: rail.Types deliberately
+	// excludes assistant_message, so CostLive and the ordinal head only advance
+	// for the focused child when this side folds into the rail too. The
+	// direction that is forbidden is rail → session; focus → rail is
+	// load-bearing.
+	c.applyRailEvent(ev)
+	id := ev.GetChildId()
 
 	// ONLY the focused child's session may be advanced. The rail subscription
 	// covers every child in the subject but carries none of their content, so
@@ -1373,7 +1429,7 @@ func (c *Cockpit) historyCmd(childID string) tea.Cmd {
 // log's Read is exclusive on afterOrdinal, so 0 would skip the first event.
 func (c *Cockpit) startFocus(childID string, after int32) {
 	c.stopFocus = streams.StartFocus(context.Background(), c.cfg, childID,
-		&rafikiv1.EventCursor{Ordinals: map[string]int32{childID: after}}, c.evCh)
+		&rafikiv1.EventCursor{Ordinals: map[string]int32{childID: after}}, c.focusCh)
 }
 
 // touch marks childID most-recently-used and evicts past maxSessions.

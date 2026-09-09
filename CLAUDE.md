@@ -1566,3 +1566,39 @@
   to say what the flag does. Isolation is git worktrees plus `cwd` (see the
   previous entry), which is also why ephemeral's doc points coordinators at
   `cwd` rather than at the workspace mode.
+
+- **The cockpit has TWO event feeds, and the focused session's ordinal cursor
+  must be fed by exactly one of them.** The rail stream (`rail.Types()`: six
+  small types) and the focus stream (TIER_ALL, unfiltered) are independent
+  goroutines writing one cockpit with no ordering between them, and they
+  overlap on the durable tier. `Session.Apply`'s dedup (`ord <= s.Cursor` →
+  already applied) is only sound within a SINGLE ordered feed — so rail events
+  go to `applyRailEvent` (re-seed discovery + `rail.Apply`) and STOP there;
+  focus events go through `applyEvent`, which also folds into the rail because
+  `rail.Types` excludes `assistant_message` and CostLive depends on that
+  direction. The forbidden direction is rail → session: a rail-delivered
+  `agent_status` one ordinal ahead of the focus stream's `user_message`
+  advanced the cursor past a message that was never applied, the dedup ate it,
+  and the user's own prompt vanished from the transcript while the ⏳ pending
+  echo (`c.pending`, cleared ONLY in `applyEvent` on an appended KindUser
+  block, plus `sendFailedMsg`) sat over the input box through a whole
+  twelve-minute turn and every event after it. Diagnosed from the DB, not the
+  code: the inbox row read `consumed` 4ms after accept and `event_log` had the
+  turn — "never sent" was a client-state story. Pinned by
+  `TestRailDeliveryAheadOfFocusDoesNotEatTheUserMessage` and
+  `TestRailEventsDoNotAdvanceTheSessionCursor`; the clear-on-echo itself has
+  `TestPendingClearsWhenTheMessageComesBack`.
+
+- **Everything drawn as transcript content goes through
+  `sanitizeControlChars` first — tool results, tool arguments, and the model's
+  prose quoting them.** The renderer's wrapping is ANSI-aware BY DESIGN (it
+  must preserve glamour's styling), which means it also preserves escape
+  sequences and bare `\r` in tool output: a 1029-commit `git rebase`'s
+  `\r`-refreshed progress and a result that once talked to a tty repainted the
+  cockpit's own frame from inside the transcript. `sanitizeControlChars`
+  (pkg/tui/renderer.go) folds CR/CRLF to the newlines the head/tail elider
+  already caps, runs `ansi.Strip`, and drops other C0 controls and DEL, keeping
+  `\n`/`\t`. When testing, do NOT assert `no \x1b in the rendered output` —
+  lipgloss's own styling legitimately carries escapes; assert the INPUT's
+  fragments (`\x1b[2K`, `\x1b[1merror`, `\r`) are gone and the stripped text
+  survived.

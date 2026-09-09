@@ -130,6 +130,75 @@ func TestLinesPreservesToolOutputLineStructure(t *testing.T) {
 	}
 }
 
+// A tool result is arbitrary bytes, and this shape actually occurred: a
+// 1029-commit git rebase prints progress with bare \r, and a result that once
+// talked to a tty carries ANSI cursor movement. The wrapper preserves the
+// sequences it skips over, so they used to sail into the terminal and repaint
+// the cockpit's own frame from inside the transcript. The renderer's own
+// lipgloss styling legitimately carries escapes — what must be gone is the
+// INPUT's: a carriage return (lipgloss never emits one) and the sequences the
+// result carried in, which can only appear immediately adjacent to the text
+// they decorated. Observed 2026-09-09.
+func TestToolResultControlCharsNeverReachTheTerminal(t *testing.T) {
+	res := "Rebasing (1/1029)\rRebasing (2/1029)\x1b[2K\x1b[1merror:\x1b[0m could not apply a1b2c3"
+	blocks := []session.Block{{
+		Kind:      session.KindAssistant,
+		Final:     true,
+		ToolCalls: []session.ToolCall{{Name: "bash", Result: res}},
+	}}
+
+	got := strings.Join(newRenderer().Lines(blocks, 1, 100), "\n")
+
+	if strings.Contains(got, "\r") {
+		t.Errorf("a carriage return reached the terminal:\n%q", got)
+	}
+	if strings.Contains(got, "\x1b[2K") || strings.Contains(got, "\x1b[1merror") || strings.Contains(got, "apply\x1b[0m") {
+		t.Errorf("the result's own escape sequences survived:\n%q", got)
+	}
+	if !strings.Contains(got, "Rebasing (2/1029)") {
+		t.Errorf("the CR-folded progress line was lost:\n%s", got)
+	}
+	if !strings.Contains(got, "error: could not apply") {
+		t.Errorf("stripped text was lost:\n%s", got)
+	}
+}
+
+// The command line is transcript content too: a command carrying an escape or
+// a CR must not reach the terminal any more than a result carrying one.
+func TestToolArgControlCharsNeverReachTheTerminal(t *testing.T) {
+	blocks := []session.Block{{
+		Kind:  session.KindAssistant,
+		Final: true,
+		ToolCalls: []session.ToolCall{{
+			Name:      "bash",
+			Input:     `{"command":"printf '\u001b[31mred\u001b[0m'\r"}`,
+			Result:    "red",
+			HasResult: true,
+		}},
+	}}
+
+	got := strings.Join(newRenderer().Lines(blocks, 1, 100), "\n")
+	if strings.Contains(got, "\r") {
+		t.Errorf("a carriage return reached the terminal from the command line:\n%q", got)
+	}
+	if strings.Contains(got, "\x1b[31mred") || strings.Contains(got, "red\x1b[0m") {
+		t.Errorf("the command's own escape sequences survived:\n%q", got)
+	}
+	if !strings.Contains(got, "printf 'red'") {
+		t.Errorf("the stripped command text was lost:\n%q", got)
+	}
+}
+
+// sanitizeControlChars is the byte-level contract the two tests above pin
+// through the renderer: CR folds (both CRLF and bare), escapes strip, other
+// C0 controls and DEL drop, tab and newline survive.
+func TestSanitizeControlChars(t *testing.T) {
+	got := sanitizeControlChars("a\r\nb\rc\x1b[2KD\x1b[0m\x07e\x7ff\tg")
+	if got != "a\nb\ncDef\tg" {
+		t.Errorf("sanitizeControlChars = %q, want %q", got, "a\nb\ncDef\tg")
+	}
+}
+
 // TestLinesReturnsLinesNotOneString: Task 7 feeds this to
 // viewport.SetContentLines, and a prepend's YOffset shift is exactly
 // len(prepended) only if a block's lines are separate elements.
